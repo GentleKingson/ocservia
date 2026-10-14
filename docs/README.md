@@ -1,6 +1,6 @@
 # ocservia documentation
 
-This documentation defines the technical specifications and operational protocols for ocservia. It provides deployment guidelines, maintenance procedures, and architectural references. We recommend consulting the installation guides for initial setup, the operational runbooks for routine maintenance, and the technical reference for system contracts.
+These guides and specifications cover ocservia deployment, day-two operations, and internal system contracts. New operators can start with the installation walkthroughs below, while routine maintenance and protocol boundaries are covered in the operational runbooks and technical reference sections.
 
 ## Start here
 
@@ -72,10 +72,8 @@ This documentation defines the technical specifications and operational protocol
 - Generated Web client: [web/src/api/generated/](../web/src/api/generated/)
 - Upstream provenance: [v4.9 post-release backport](upstream/v4.9-post1.md) and [restore semantics and Ocserv compatibility](upstream/v4.9-post2.md)
 
-The build system overwrites generated artifacts during `make generate`. Manual modifications to these files will be lost. For testing, the [validation guide](development/testing.md) indexes the specialized end-to-end, resilience, and capacity checks.
+Running `make generate` overwrites all generated artifacts, so do not edit those output directories by hand. Module-level checks along with end-to-end, resilience, and capacity test suites are indexed in the [validation guide](development/testing.md).
 
 ## Documentation scope
 
-This documentation focuses on active procedures and system contracts. We restrict each topic to a single authoritative source to prevent redundancy. Historical data, including release decisions, implementation timelines, and isolated task reports, belong in the Git version history rather than these active documents.
-
-Files within the `upstream/` directory support attribution and backport validation. They remain accessible via the technical reference section.
+Each topic in `docs/` has a single authoritative home and covers current operational procedures and runtime contracts. Historical release decisions, rollout timelines, and one-off task reports live in Git history; the records under `upstream/` are retained specifically for provenance attribution and backport verification.

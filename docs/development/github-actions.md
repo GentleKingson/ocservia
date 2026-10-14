@@ -2,17 +2,21 @@
 
 Start with [Validate a change](testing.md).
 
-One `.github/workflows/ci.yml` runs on PRs, main pushes and manual dispatch;
-manual Release Check also calls it as `full-ci` with `profile: full`.
-Automatic runs use **Quick**. Manual dispatch accepts `quick|full`, defaulting
-to **Full**. Full means **current-candidate checks on all supported units**,
-not comprehensive acceptance. Product database support has not changed.
+A single workflow file, `.github/workflows/ci.yml`, handles pull requests,
+pushes to main, and manual dispatches. Manual Release Check also invokes this
+workflow as `full-ci` with `profile: full`. Automatic triggers run the Quick
+profile, while manual dispatch accepts `quick|full` and defaults to Full. Here,
+Full runs current-candidate checks across all supported units without serving
+as comprehensive release acceptance, and it leaves the product's database
+support scope unchanged.
 
-Warm-cache goals are 3-5 minutes for Quick and 8-10 minutes for Full, excluding
-queue time. They are goals, not measured results or relaxed failure criteria.
-Record queue, cold setup, execution wall time and summed job runner-minutes
-separately. New Quick runs cancel obsolete Quick runs on the same PR/branch.
-Full has a separate concurrency group and cannot cancel Quick.
+Target warm-cache wall times (excluding runner queue time) are 3 to 5 minutes
+for Quick and 8 to 10 minutes for Full. Those numbers are operational targets,
+not measured results or grounds to relax failure criteria; when recording
+timings, track queue wait, cold setup, execution wall time, and total job
+runner-minutes separately. On a given PR or branch, a new Quick run cancels
+older Quick runs, whereas Full uses its own concurrency group and never cancels
+Quick.
 
 ## Basic checks
 
@@ -27,52 +31,59 @@ Full has a separate concurrency group and cannot cancel Quick.
 | database-recovery-full | PostgreSQL physical and MySQL logical backup/restore, including snapshot provenance, Full only |
 | Basic CI Result | Always checks routing and selected job results; required missing/skipped/failed/cancelled jobs fail |
 
-All database images retain their exact patch/digest pins. Each core job starts
-one database service and initializes one schema for `TestDatabaseCoreSmoke`.
-That flow migrates an empty database with the owner account, starts the real
-Controller CLI with the runtime account, bootstraps and logs in a local
-administrator, and reads the written workspace through the authenticated API.
-Real transactions check commit, rollback and isolation from a second pooled
-connection; a repeated migration must preserve the committed workspace.
-Runtime DDL denial is the small retained failure path: it verifies the
-Controller is not accidentally tested with owner credentials. MySQL
-retains production configuration and verified TLS in this same flow.
+Database service images stay pinned to exact patches and digests. Each core
+database job boots one engine instance and initializes a single schema for
+`TestDatabaseCoreSmoke`, which migrates an empty database under the owner
+account, starts the real Controller CLI under the runtime account, bootstraps
+and signs in a local administrator, and reads the resulting workspace over the
+authenticated API. Using a second pooled connection, the test verifies real
+transaction commit, rollback, and isolation, then confirms that re-running
+migrations leaves the committed workspace intact. It also retains a runtime DDL
+denial check so the Controller cannot pass while accidentally running with
+owner credentials. The MySQL leg runs this flow with production configuration
+and verified TLS.
 
-Both profiles verify current SQL initialization, identical retry, receipt
-integrity and forward-only continuation. Independent checks compare fresh SQL
-with the immutable v1.2.0 checkpoint upgrade for schema/security/seed equivalence
-and refuse stale artifacts. Database checkout fetches that release history; the
-active tree contains only the two SQL artifacts per engine. PostgreSQL also
-checks its actual volume layout and legacy-layout rejection. Full selects the
-existing full database suites, including migration failures and recovery; it
-does not add another backend or a Controller-version admission window. Explicit
-required test inventories reject skipped lifecycle cases. Smoke uses fresh
-`-count=1` results; dedicated lifecycle checks retain race detection.
+Both Quick and Full validate current SQL initialization, idempotent retry,
+receipt integrity, and forward-only continuation. Separate snapshot checks fetch
+the release history, verify that the active tree carries only the two SQL
+artifacts per engine, reject stale artifacts, and compare fresh SQL against an
+upgrade from the immutable v1.2.0 checkpoint for schema, security, and seed
+equivalence. On PostgreSQL, the job also checks the live volume layout and
+confirms that legacy layouts are rejected. Selecting Full switches to the full
+database suites (including migration failures and backup recovery) without
+introducing another database backend or a Controller-version admission window.
+Smoke runs use fresh `-count=1` execution, dedicated lifecycle tests keep race
+detection enabled, and explicit test inventories fail if any required lifecycle
+case is skipped.
 
-`required-go-tests.sh --smoke <package> <test>` checks only the explicit
-top-level test's run/final-pass events. A missing or skipped entry fails.
-Basic CI has no per-subtest inventory, cumulative JSONL or matrix success
-outputs. The old manifest/checker remains only for independent manual deep
-acceptance callers; its redundant ordinary-unit inventory has been removed.
+When invoked as `required-go-tests.sh --smoke <package> <test>`, the runner
+checks only that the named top-level test ran and passed; a missing or skipped
+test fails the step. Basic CI does not emit per-subtest inventories, cumulative
+JSONL logs, or matrix success summaries. The older manifest checker stays in
+the repository only for standalone manual deep-acceptance scripts, and its
+redundant unit-test inventory has been removed.
 
-Quick MySQL runs only `TestDatabaseCoreSmoke`, `TestDatabaseInitializationSmoke`,
-the enrollment restart check and the separate `database-mysql-snapshot.sh check`
-checkpoint equivalence step. The 14 `mysql-snapshot` crash/rejection cases run
-only in Full (`backend-mysql-full`, `mysql-cutover` shard); PRs changing MySQL
-`schema.sql`, `upgrade.sql` or the migration runner should run a candidate Full
-before merge. Quick PostgreSQL still runs `postgres-snapshot`.
+In Quick mode, the MySQL leg runs `TestDatabaseCoreSmoke`,
+`TestDatabaseInitializationSmoke`, the enrollment restart check, and the
+standalone `database-mysql-snapshot.sh check` equivalence step. The 14
+`mysql-snapshot` crash and rejection cases run only under Full
+(`backend-mysql-full` in the `mysql-cutover` shard), so pull requests that
+touch MySQL `schema.sql`, `upgrade.sql`, or the migration runner should run a
+candidate Full workflow before merging. Quick PostgreSQL continues to run the
+full `postgres-snapshot` inventory.
 
-CI router/wrapper/bootstrap self-tests (`guards`: `test-ci-relevance.sh`,
-`test-required-go-tests.sh`, `test-bootstrap-profiles.sh`) run only for their
-implementation or shared CI/toolchain changes. The `release` suite (release,
-Controller manifest/smoke/image-security, Stage-0 installer, build-cache and
-secret-scan-config self-tests, selected by `ci-tools-check.sh`) runs only for
-release or cache-contract paths. Installer self-tests run only for installer
-changes. Unknown and shared-contract paths enable all of them. Manual dispatch
-does not add these unrelated self-tests.
-No role lifecycle matrix, restart, outbox/fencing/disconnect, exhaustive
-authentication/API/policy suite, checksum/drift/invalid-configuration matrix,
-or deep historical repair suite is moved from Quick into Full.
+Path routing also governs the repository's self-test suites. The CI guard tests
+(`guards`: `test-ci-relevance.sh`, `test-required-go-tests.sh`, and
+`test-bootstrap-profiles.sh`) run only when their own scripts or shared CI and
+toolchain files change. The `release` suite (selected by `ci-tools-check.sh` to
+cover release workflows, Controller manifest/smoke/image-security, the Stage-0
+installer, build-cache contracts, and secret-scan configuration) triggers only
+on release or cache-contract paths, and installer self-tests trigger only on
+installer changes. Unknown paths and shared-contract changes enable all of
+these suites, whereas manual workflow dispatches omit them. Moving from Quick
+to Full does not pull in retired role-lifecycle matrices, restart suites,
+outbox/fencing/disconnect harnesses, exhaustive auth/API/policy matrices,
+checksum/drift/invalid-config matrices, or historical repair suites.
 
 ## Retained workflows
 
@@ -89,32 +100,39 @@ or deep historical repair suite is moved from Quick into Full.
 
 ## Independent security checks
 
-`security.yml` runs weekly on Monday at 03:23 UTC, on manual dispatch, and
-from manual Release Check on main. It reuses pinned
-bootstrap profiles to run the full-history `scripts/security-check.sh`
-(including its Gitleaks rule regression check), `govulncheck ./...` run from
-each Go module (`control-plane` and `signer`), `cargo audit` for `rust/Cargo.lock` and
-`deploy/production/relay.Cargo.lock` plus `cargo deny check advisories` for the
-Rust workspace, and `npm audit --package-lock-only` for the single
-`web/package-lock.json`, including development dependencies.
-The four scan jobs are read-only and need no production secrets. A failure
-fails Security and so the Release Check result; `release.yml` neither calls nor
-checks Security, so tag publication is gated only by the operator confirming a
-passing Release Check. Security does not expand Basic CI or enable live security
-acceptance. A successful scan covers these tools and their current databases,
-not every possible vulnerability or the state of a deployed service.
+`security.yml` runs on Mondays at 03:23 UTC, on manual dispatch, and as part of
+manual Release Check on main. Using pinned bootstrap profiles, its four
+read-only scan jobs run without production secrets:
+
+- full-history `scripts/security-check.sh`, including its Gitleaks rule
+  regression check
+- `govulncheck ./...` inside both Go modules (`control-plane` and `signer`)
+- `cargo audit` against `rust/Cargo.lock` and
+  `deploy/production/relay.Cargo.lock`, paired with
+  `cargo deny check advisories` across the Rust workspace
+- `npm audit --package-lock-only` against `web/package-lock.json`, including
+  development dependencies
+
+Any scan failure fails the Security workflow and, when called from Release
+Check, blocks the Release Check result. Because `release.yml` neither invokes
+nor queries `security.yml`, tag publication relies on the operator verifying a
+passing Release Check beforehand. This workflow does not widen Basic CI or run
+live security acceptance, and a passing run reflects only what those scanners
+and their current advisory databases can detect in the repository tree, not the
+security posture of a deployed environment.
 
 ## Path routing
 
-`scripts/ci-relevance.sh` uses first-match path rules, not function dependency
-analysis; the script and `scripts/test-ci-relevance.sh` are authoritative and
-this table is a summary. Specific executable and configuration rules precede
-the generic Markdown rule, so Markdown under `web/`, `rust/` and the `deploy/`
-trees (compose, database-e2e, test-fixtures, production, managed-node, package,
-systemd, bootstrap), or under `proto/` and `openapi/`, is claimed by those
-rules and can run web, Rust, database, installer or all suites instead of
-`docs`. Markdown elsewhere (including under `control-plane/` and `docs/`)
-selects `docs` only.
+`scripts/ci-relevance.sh` evaluates changed paths using ordered first-match
+patterns instead of package or call-graph analysis; see the script itself and
+`scripts/test-ci-relevance.sh` for the exact rule order summarized below. Rules
+for executable code and deployment configuration sit ahead of the generic
+Markdown fallback. As a result, Markdown files under `web/`, `rust/`, `proto/`,
+`openapi/`, or the `deploy/` subdirectories (compose, database-e2e,
+test-fixtures, production, managed-node, package, systemd, and bootstrap) match
+their respective subsystem rules and can trigger web, Rust, database,
+installer, or full Quick suites. Markdown elsewhere in the repository,
+including `control-plane/` and `docs/`, selects `docs` alone.
 
 | Paths (first match wins) | Quick checks |
 | --- | --- |
@@ -130,30 +148,37 @@ selects `docs` only.
 | `proto/*`, `openapi/*`, `control-plane/gen/*`, `scripts/bootstrap.sh`, `env.sh`, `checksums.txt`, `toolchains.lock` | all Basic flags and both CI suites at Quick scope |
 | Any other path (for example non-Go `signer/` files, `.dockerignore`) | all Basic flags and both CI suites at Quick scope |
 
-Mixed changes take the union. PRs use `base...head`; pushes use `before..head`.
-Deletions/renames retain both affected paths. Invalid, empty, unresolvable or
-unsupported-event diffs and unknown paths fail closed by enabling every Basic
-flag, but the profile stays Quick (smoke database scope); routing never
-upgrades Quick to Full. Manual dispatch ignores paths: docs, go, rust, web,
-web-browser and database always run, with no CI-suite, installer or
-Controller-cache flags.
-Manual Full selects four database matrix legs (PostgreSQL plus three MySQL
-shards) and the Full-only `database-recovery-full` job; manual Quick selects
-only two (PostgreSQL and one MySQL leg). Controller cache refresh runs on main
-pushes only, when `run_controller_cache` is set.
+When a change touches multiple areas, the router takes the union of their
+flags. Pull requests diff `base...head`, push events diff `before..head`, and
+file renames or deletions evaluate both old and new paths. If a diff is empty,
+invalid, unresolvable, from an unsupported event, or contains an unrecognized
+path, the router fails closed by enabling every Basic flag and both CI tool
+suites while keeping the Quick profile (smoke database scope); path routing
+never escalates a Quick run to Full.
+
+Manual workflow dispatches bypass path routing altogether: docs, go, rust, web,
+web-browser, and database jobs always run, while the CI-tool suites, installer
+self-tests, and Controller cache refresh stay off. A manual Full run expands
+the database matrix to four legs (PostgreSQL plus the three MySQL shards) and
+adds `database-recovery-full`, whereas a manual Quick run uses two database
+legs (PostgreSQL and a single MySQL smoke leg). Controller cache refresh runs
+only on pushes to main when routing sets `run_controller_cache`.
 
 ## Go caches
 
-Keep the existing module/build caches and locked bootstrap downloads.
-The database smoke key uses ordinary (non-race) objects and can fall back to
-the existing unit build cache. Only successful main pushes save: Go writes
-module/unit caches and one MySQL unit writes smoke build objects. PR/manual
-runs restore only. No history job remains to need its own cache.
-Cache hits never bypass real database tests.
+Go jobs retain the existing module and build caches alongside locked bootstrap
+downloads. The database smoke cache key targets ordinary (non-race) build
+objects and falls back to the unit-test build cache when needed; no separate
+history job or history cache exists. Only passing pushes on main write new
+cache entries (Go jobs save module and unit build caches, and one MySQL leg
+saves smoke build objects), while pull requests and manual runs only restore
+them. Restoring a build cache never skips executing the real database tests.
 
 ## Manual deep checks
 
-The original independent entrypoints remain available, but are **not Full CI**:
+You can still run the standalone deep-validation scripts directly in an
+authorized, isolated environment that has their required dependencies, though
+these entrypoints are distinct from Full CI:
 
 ```bash
 # In an authorized isolated environment with the required dependencies; expensive opt-in checks:
@@ -163,62 +188,68 @@ scripts/go-check.sh race
 scripts/web-check.sh full
 ```
 
-The database scripts default to current-candidate `full` when invoked without a
-scope. Historical database upgrade matrices and the MySQL history shard have
-been removed; current initialization, content integrity and interrupted-SQL
-recovery remain in the full suite. `regression` remains manual-only. Normal CI
-passes `smoke` for Quick and `full` for Full.
-Browser checks require Playwright Chromium installed separately; the
-`firefox`/`webkit` projects need those engines too. Disaster
-recovery, complex races and fault injection remain in their existing manual
-deep scripts; no scheduled workflow was added.
+Invoking the database scripts without a scope defaults to current-candidate
+`full` (whereas CI passes `smoke` for Quick and `full` for Full). Historical
+upgrade matrices and the old MySQL history shard have been removed, leaving
+current schema initialization, artifact integrity, and interrupted-SQL recovery
+in the full suite; `regression` remains manual. Running browser checks locally
+requires a separate installation of Playwright Chromium, plus the
+`firefox`/`webkit` engines when exercising those projects. Disaster recovery,
+complex race conditions, and fault-injection suites remain manual script
+entrypoints with no scheduled Actions workflow.
 
 ## Required check
 
-`basic-ci-result` publishes `Basic CI Result`: routing and every selected job
-must succeed; every unselected job must be skipped. Missing, failed, cancelled
-or unexpectedly skipped results fail. Administrators must configure GitHub
-rulesets to require this context and remove retired contexts; workflow YAML
-does not change branch protection.
+`basic-ci-result` publishes the `Basic CI Result` status context. It
+passes only when path routing succeeds, every selected job passes, and every
+unselected job is skipped; any missing, failed, cancelled, or unexpectedly
+skipped job fails the check. Repository administrators must configure GitHub
+rulesets to require this context and remove retired status contexts, since
+editing workflow YAML does not update branch protection settings.
 
 ## Separate acceptance
 
-Selected single-node recovery runs in Business Smoke or Integration with
-`run-resilience=true`; Release Check runs it in Smoke with the production
-Signer, on one Controller, one database and one dedicated Relay. The old G6 workflows and evidence framework are retired.
-Runtime/security/capacity acceptance and cross-VM enrollment retain their
-existing manual entry points.
+Single-node recovery runs inside Business Smoke or Integration when invoked
+with `run-resilience=true`; Release Check runs this Smoke recovery suite
+against one Controller, one database, one dedicated Relay, and the production
+Signer. The older G6 workflows and evidence framework have been retired, while
+runtime, security, and capacity acceptance scripts and cross-VM enrollment keep
+their manual entrypoints.
 
-Basic CI does not claim production readiness, capacity, native package,
-cross-VM, browser E2E, security, or license acceptance. Those scripts
-and manual entry points remain available; `make verify` is a broader local
-command, not an alias for Basic CI.
+Passing Basic CI does not certify production readiness, capacity, native
+packaging, cross-VM enrollment, full browser E2E, security acceptance, or
+license compliance. Those checks have separate workflows or manual scripts, and
+`make verify` is a broader local verification target that does not mirror Basic
+CI.
 
 ### Script-level manual acceptance
 
-These environment-dependent checks are not part of Basic CI: capacity runs
-need substantial resources, native security checks need systemd/privd/PKI
-fixtures, and cross-VM enrollment needs two distinct Linux VMs and Internet
-relay connectivity. Run them manually on suitable local or dedicated servers:
+Several environment-heavy checks stay outside Basic CI because capacity runs
+demand dedicated host resources, native security acceptance requires
+systemd/privd/PKI fixtures, and cross-VM enrollment requires two separate Linux
+VMs with outbound Internet relay access. Run them manually on appropriate local
+or dedicated Linux hosts:
 
-- `make p1-smoke` and `make p1-full` call `scripts/p1-resilience-capacity.sh`.
+- `make p1-smoke` and `make p1-full` invoke `scripts/p1-resilience-capacity.sh`.
 - `scripts/security-acceptance-f1.sh`, `scripts/security-acceptance-f2.sh`, and
-  `scripts/security-acceptance-f3.sh` retain the live security acceptance phases.
+  `scripts/security-acceptance-f3.sh` run the live security acceptance phases.
 - `scripts/real-e2e-controller.sh`, `scripts/real-e2e-node.sh`,
-  `scripts/real-e2e-artifact.sh`, and `deploy/real-e2e` remain available; see
-  [Cross-VM enrollment validation](cross-vm-enrollment-validation.md) for manual execution.
+  `scripts/real-e2e-artifact.sh`, and `deploy/real-e2e` support manual
+  two-machine enrollment; see
+  [Cross-VM enrollment validation](cross-vm-enrollment-validation.md).
 
-`make real-e2e-check` only checks the three real-E2E scripts' Bash syntax. It
-does not read workflow files or run live acceptance, and Basic CI does not call it.
+Running `make real-e2e-check` only checks Bash syntax across the three real-E2E
+scripts; Basic CI does not call it, and it does not inspect workflow files or
+execute live enrollment.
 
 ## Reproduction
 
-Run against the same candidate source in an authorized isolated environment
-with the dependencies described in [testing](testing.md). These commands
-reproduce only the Go, Quick database smoke and MySQL recovery steps (the last
-is a Full-only job); they omit docs, Rust, Web, the SQL artifact-window and
-snapshot-check steps, the PostgreSQL volume-layout check and the Full database
-scope:
+To reproduce the Go unit checks, Quick database smoke, and the Full-only MySQL
+backup/restore smoke locally, run the following commands against the candidate
+commit inside an authorized, isolated environment prepared according to
+[testing](testing.md). Note that this sequence omits docs, Rust, Web, the SQL
+artifact-window and snapshot-equivalence steps, the PostgreSQL volume-layout
+check, and the full database suites:
 
 ```bash
 scripts/bootstrap.sh go-test
@@ -228,43 +259,47 @@ DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integrat
 RUN_ID=local-mysql ARTIFACT_DIR="$PWD/.cache/recovery-mysql" ENGINE=mysql bash scripts/i18-mysql-backup-restore-smoke.sh
 ```
 
-With push/remote-run authorization, select the candidate branch in Actions or
-run `gh workflow run ci.yml --ref <candidate-branch> -f profile=full`.
-Use `profile=quick` for the other profile. Record the actual candidate SHA,
-cache state and job/step timings. Local validation results are not GitHub CI
-acceptance.
+When you have authorization to push or trigger remote workflows, run the
+candidate branch on GitHub Actions from the UI or with
+`gh workflow run ci.yml --ref <candidate-branch> -f profile=full` (or
+`profile=quick`), and record the candidate SHA, cache state, and per-job and
+per-step timings. Local runs do not substitute for GitHub CI results on the PR
+commit.
 
 ## Release workflow
 
-[Release policy](release-checks.md) owns qualification, coverage and manual
-diagnostics. Only the tag-triggered `publish` job has `contents: write`,
-`packages: write` and the `release-publishing` environment. Reruns use ordinary
-`gh release upload --clobber`.
+Qualification rules, coverage ownership, and manual diagnostic commands live in
+[Release policy](release-checks.md). Within the release workflow, only the
+tag-triggered `publish` job receives `contents: write`, `packages: write`, and
+access to the `release-publishing` environment, which acts as an approval and
+protection boundary without creating GitHub Deployment records. Rerunning a tag
+release overwrites assets using `gh release upload --clobber`.
 
-`release-publishing` is an approval/protection boundary; the publish job does not
-create GitHub Deployment records.
-
-Release Controller jobs cache image-security tools by OS, architecture and
-tool/bootstrap identity, but never cache the vulnerability database. Each
-invocation updates it and fails on unavailable/invalid data. Scans check the
-exact archives after build and before smoke/upload; Business has no image scan.
+Release Controller jobs cache their image-security scanner binaries by OS,
+architecture, and tool/bootstrap identity, but they never cache the
+vulnerability database itself: each run fetches fresh advisory data and fails
+if the feed is unavailable or invalid. Image scans inspect the built image
+archives before smoke tests and registry uploads, whereas Business diagnostic
+runs do not perform container image vulnerability scans.
 
 ## Optional build caches
 
-Basic CI caches pinned bootstrap downloads and `.tools` per profile, OS,
-architecture and tool/bootstrap identity. Dependency lockfiles invalidate the
-relevant profiles; ordinary source revisions do not invalidate tool caches.
-Security uses the same pattern per scan profile. Web and npm Security cache
-`.cache/npm` (the directory selected by `scripts/env.sh`), never `node_modules`;
-Web still runs `npm ci` on every invocation.
+Basic CI and Security cache pinned bootstrap downloads and `.tools` directories
+keyed by profile, OS, architecture, and tool/bootstrap identity, so ordinary
+source edits reuse cached tools until a dependency lockfile or bootstrap script
+changes. Web CI and the npm Security scan cache `.cache/npm` (configured by
+`scripts/env.sh`) instead of `node_modules`, and Web jobs still run `npm ci` on
+every execution.
 
-Rust clippy/test reuse `rust/target/debug`. Their cache identity includes the
-Rust toolchain, Cargo lock/manifests, build flags, patched dependencies and check
-script; a source-revision suffix saves new objects while a matching identity
-prefix reuses dependency compilation across source revisions.
+Rust Clippy and test jobs share `rust/target/debug` under a cache key built
+from the Rust toolchain, Cargo manifests and lockfile, build flags, patched
+dependencies, and the check script, appending the source revision so new runs
+can restore compiled dependencies via prefix match and save updated build
+artifacts.
 
-Business tools are separate from the Agent compilation cache. Business and
-Release use the same `rust/target/agent-<arch>-<builder-hash>` directory and
-cache identity, always rebuilding and validating the requested version.
-No runtime state or credentials are cached. Existing per-image/per-architecture
-BuildKit GHA caches, `mode=max` and bounded cold fallback remain unchanged.
+Business and Release workflows keep their tool caches separate from the Agent
+compilation cache, while sharing the `rust/target/agent-<arch>-<builder-hash>`
+directory and cache identity to rebuild and verify the requested Agent version
+on each run. None of the workflows cache runtime state or credentials, and the
+per-image, per-architecture BuildKit GitHub Actions caches (`mode=max` with
+bounded cold fallback) remain unchanged.

@@ -1,32 +1,34 @@
 # Enroll a node
 
-Enrollment binds a managed node's persistent EndpointID to a Controller node
-record. It does not activate the node; an operator must approve it afterward.
+Enrolling a managed node binds its persistent EndpointID to a node record on
+the Controller in a pending state. Enrollment does not activate the node; an
+operator must complete the separate approval workflow afterward.
 
-A Bootstrap Token authorizes one narrowly scoped enrollment transaction: it
-may create only a pending node bound to the presenting EndpointID. It does not
-grant `node.approve`, select approved capabilities, activate the node, or start
-services. Approval is a separate content-bound decision by a different
-authorized principal.
+A Bootstrap Token authorizes a single narrowly scoped enrollment transaction
+that creates a pending node bound to the presenting EndpointID. Possessing the
+token does not grant `node.approve`, select approved capabilities, activate the
+node, or start local services; approval requires a separate content-bound
+decision by a second authorized principal.
 
 ## Before you begin
 
 - The Agent package is installed on the node.
-- You know the Controller EndpointID and the target workspace UUIDv7.
-- For the installer path, the installer generates any missing sealing keys. For
-  the advanced path, two distinct sealing private keys are provisioned on the
-  node, and you have their key IDs and public-key SHA-256 descriptors.
-- For production, the dedicated relay drop-in and launcher are installed,
-  `RELAY_URL_A` is exported, `RELAY_URL_B` is omitted or empty (the installer
-  rejects a non-empty value; only one dedicated Relay is supported), and
-  the relay access token is provisioned at
-  `/etc/ocservia-agent/relay-access-token` (the installer installs it from
-  `RELAY_ACCESS_TOKEN_SOURCE`).
+- You have the Controller EndpointID and the target workspace UUIDv7.
+- Sealing keys are ready for your chosen workflow: the standard installer
+  generates any missing sealing keys automatically, whereas the advanced manual
+  path requires two distinct sealing private keys already provisioned on the
+  node along with their key IDs and public-key SHA-256 descriptors.
+- For production deployments, the dedicated relay drop-in and launcher are
+  installed, `RELAY_URL_A` is exported, and `RELAY_URL_B` is omitted or empty
+  (only one dedicated Relay is supported, and the installer rejects any
+  non-empty `RELAY_URL_B`). Ensure the relay access token is provisioned at
+  `/etc/ocservia-agent/relay-access-token`, or set `RELAY_ACCESS_TOKEN_SOURCE`
+  so the installer can install it.
 - You have an authenticated requester API client with permission to create a
   node bootstrap token and request node approval (SecurityAdmin or
   PlatformAdmin).
-- A different authorized principal is available to independently approve the
-  node approval request.
+- A second authorized principal is available to review and approve the node
+  approval request independently.
 
 ## Steps
 
@@ -45,37 +47,41 @@ authorized principal.
    }
    ```
 
-   `workspace_id` must be a workspace the caller is authorized for; the header
-   may be omitted only when the caller has exactly one. The plaintext `obt1_`
-   token is returned once and expires within 15 minutes (`ttl_seconds` may only
-   shorten this). An optional `expected_endpoint_id` pre-binds the token; the
-   Controller then rejects any other endpoint before consuming it. Place the
-   token in a protected file; do not put it in a URL, command argument, log, or
-   shared shell history.
+   Specify a `workspace_id` that the caller is authorized to access; the
+   `X-Workspace-ID` header may be omitted only when the caller belongs to
+   exactly one workspace. The API returns the plaintext `obt1_` token once, and
+   it expires within 15 minutes (`ttl_seconds` may only shorten that window).
+   Including an optional `expected_endpoint_id` pre-binds the token so the
+   Controller rejects any other presenting endpoint before consuming it. Write
+   the token to a protected file, and never expose it in a URL, command-line
+   argument, log, or shared shell history.
 
-2. Give Stage-1 the protected source path and run the pinned installer. It
-   prepares the identity, enrolls immediately, deletes the plaintext source
-   after success, writes `agent.env` atomically, and stops at
-   `ENROLLED_LOCAL` without enabling or starting a service.
+2. Point `BOOTSTRAP_TOKEN_SOURCE` at the protected token file and run the
+   version-pinned Stage-1 installer. The installer prepares the local identity,
+   enrolls immediately with the Controller, deletes the plaintext token source
+   after enrollment succeeds, writes `agent.env` atomically, and stops at
+   `ENROLLED_LOCAL` without enabling or starting any service.
 
    ```bash
    export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
    ./install.sh --version vX.Y.Z
    ```
 
-   The source must be a non-empty, non-symlink regular file without group or
-   other access. The installer also needs the Controller, Relay and command-key
-   inputs listed in [Install a managed node](../getting-started/managed-node.md).
+   The token source must be a non-empty regular file (never a symlink) with no
+   group or world permissions, and you must also supply the Controller, Relay,
+   and command-key inputs listed in
+   [Install a managed node](../getting-started/managed-node.md).
 
-   Record the printed UUIDv7 node ID and continue at [Approve the
-   node](#approve-the-node).
+   Record the printed UUIDv7 node ID and continue at
+   [Approve the node](#approve-the-node).
 
 ### Advanced endpoint-bound enrollment
 
-The existing two-run flow remains available when no bootstrap token source is
-provided.
+When no bootstrap token source is provided, you can use the two-step
+endpoint-bound enrollment flow.
 
-1. On the node, prepare its persistent identity. Keep the printed EndpointID.
+1. On the node, prepare its persistent identity and record the printed
+   EndpointID:
 
    ```bash
    sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
@@ -84,12 +90,12 @@ provided.
      --prepare-enrollment
    ```
 
-   This is offline preparation. It does not contact the Controller or start a
-   session. Reusing the same identity directory preserves the EndpointID.
+   Identity preparation runs offline without contacting the Controller or
+   opening a transport session, and reusing the same identity directory
+   preserves the EndpointID across runs.
 
-2. Create a short-lived endpoint-bound token. Replace the
-   placeholders with the target workspace and the exact EndpointID from step
-   1.
+2. Issue a short-lived endpoint-bound enrollment token, replacing the
+   placeholders with the target workspace and the exact EndpointID from step 1:
 
    ```http
    POST /api/v1/enrollment-tokens
@@ -105,9 +111,9 @@ provided.
    }
    ```
 
-   The plaintext token is returned once and expires within 15 minutes. Do not
-   put it in a URL, log, or shared shell history. The same workspace rule as
-   step 1 applies.
+   The plaintext token is returned once and expires within 15 minutes. Follow
+   the same workspace rule as step 1 of the bootstrap flow, and never place the
+   token in a URL, log, or shared shell history.
 
 3. Copy the token to a root-owned file readable by the Agent group:
 
@@ -116,7 +122,7 @@ provided.
      /protected/enrollment-token /etc/ocservia-agent/enrollment-token
    ```
 
-4. Run enrollment with the same identity directory:
+4. Run enrollment against the same identity directory:
 
    ```bash
    sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
@@ -133,18 +139,19 @@ provided.
      --relay-token-file /etc/ocservia-agent/relay-access-token
    ```
 
-   Enrollment signs and persists both public-key descriptors. Record the UUIDv7
-   node ID printed by the command, then remove the token file. The descriptors
-   are enrollment inputs; the returned value that belongs in `agent.env` is
-   the new `NODE_ID`, alongside the `AGENT_ENDPOINT_ID` binding recorded from
-   the identity preparation.
+   During enrollment, the Agent signs and persists both sealing public-key
+   descriptors. Record the UUIDv7 node ID printed by the command and remove
+   `/etc/ocservia-agent/enrollment-token`. The key descriptors are enrollment
+   inputs; in `agent.env`, record the returned `NODE_ID` alongside the
+   `AGENT_ENDPOINT_ID` binding from step 1.
 
-   Before approval, return to [Finish enrollment](../getting-started/managed-node.md#3-finish-enrollment).
+   Before proceeding to approval, complete the remaining host configuration in
+   [Finish enrollment](../getting-started/managed-node.md#3-finish-enrollment).
 
 ## Approve the node
 
-5. As the requester, create a content-bound `node.approve` approval request
-   only after the Agent configuration and production relay path are complete:
+5. Once the Agent configuration and production relay path are in place, use the
+   requester account to create a content-bound `node.approve` request:
 
    ```http
    POST /api/v1/approval-requests
@@ -165,15 +172,13 @@ provided.
    }
    ```
 
-   Record the returned UUIDv7 `id` as `APPROVAL_ID` and its
-   `request_hash` as `APPROVAL_REQUEST_HASH`. The approval request's labels,
-   policy, and capabilities are the exact activation content that the
-   independent approver must review. Keep the activation reason consistent for
-   audit clarity.
+   Record the returned UUIDv7 `id` as `APPROVAL_ID` and its `request_hash` as
+   `APPROVAL_REQUEST_HASH`. Because the independent approver reviews the exact
+   `labels`, `policy`, and `capabilities` in this payload, request only the
+   capabilities required by the node's policy.
 
-6. Have a different authorized principal approve that request. The approver
-   must verify the request content before approving it and must bind the
-   decision to the returned request hash:
+6. Have a second authorized principal review the request content and approve it
+   by binding the decision to the returned `request_hash`:
 
    ```http
    POST /api/v1/approval-requests/<approval-uuidv7>:approve
@@ -185,7 +190,8 @@ provided.
    }
    ```
 
-7. As the requester, activate the pending node with the approved request ID:
+7. Using the requester account, activate the pending node with the approved
+   request ID:
 
    ```http
    POST /api/v1/nodes/<node-uuidv7>/approval
@@ -200,33 +206,35 @@ provided.
    }
    ```
 
-   The `labels`, `policy`, and `capabilities` in this activation request must
-   exactly match the values in the `node.approve` request above. Keep the
-   activation reason consistent for audit clarity.
-   Node activation always requires a valid approved UUIDv7 in
-   `X-Approval-ID`; independent approval is not policy-optional. Use the
-   capabilities required by the node's policy, not a broader set by default.
+   The `labels`, `policy`, and `capabilities` in this activation payload must
+   match the approved `node.approve` request exactly, and keeping the same
+   `reason` string makes the audit trail easier to follow. Node activation
+   always requires a valid approved request UUIDv7 in `X-Approval-ID`;
+   independent approval cannot be bypassed by policy.
 
 ## Verify
 
-The API response should report `status: active`. A `503` "Trust update pending"
-response means the database approval committed but transport synchronization
-has not completed; repeat the identical request with the same `X-Approval-ID`
-(it is idempotent once activated) or wait for convergence, and do not create a
-second approval. The node should then appear
-online with a fresh observation in the Controller inventory after its Agent
-service starts — enable both services as in step 4 of [Install a managed
-node](../getting-started/managed-node.md#4-approve-and-start-services); the
-bootstrap and this enrollment never start or enable a service themselves.
+A completed activation returns `status: active`. If the API responds with `503`
+("Trust update pending"), the approval has already been committed in the
+database while transport trust synchronization is still catching up; either
+wait for background convergence or repeat the identical request with the same
+`X-Approval-ID` (which is idempotent once activated) without creating a second
+approval request. Because neither the bootstrap installer nor manual enrollment
+enables or starts systemd units, enable and start both services as shown in
+step 4 of
+[Install a managed node](../getting-started/managed-node.md#4-approve-and-start-services),
+then confirm that the node appears online with a fresh observation in the
+Controller inventory.
 
 ## Revoke a node
 
-Revocation needs the same independent approval as activation and works from any
-non-revoked state, including a pending node. Rebind uses it for an available
-source Controller.
+Node revocation follows the same two-person approval pattern as activation and
+works from any non-revoked state, including a pending node. You also use this
+flow on a reachable source Controller when rebinding a node to another
+Controller.
 
-1. As the requester (a principal holding `node.revoke`, such as SecurityAdmin or
-   PlatformAdmin), create a content-bound request:
+1. As the requester (a principal holding `node.revoke`, such as SecurityAdmin
+   or PlatformAdmin), create a content-bound revocation request:
 
    ```http
    POST /api/v1/approval-requests
@@ -242,8 +250,8 @@ source Controller.
    }
    ```
 
-2. Have a different SecurityAdmin or PlatformAdmin approve the returned
-   request hash, as in step 6 above.
+2. Have a different SecurityAdmin or PlatformAdmin verify and approve the
+   returned request hash, just as in step 6 above.
 3. As the requester, submit the revocation with the approved request ID:
 
    ```http
@@ -254,24 +262,27 @@ source Controller.
    {"reason": "Revoke managed node"}
    ```
 
-   The response reports `status: revoked`. A `503` "Revocation committed"
-   response means the node is revoked in the database and transport
-   disconnect synchronization is still pending; the trust convergence worker
-   retries it.
+   The response reports `status: revoked`. If you receive a `503` ("Revocation
+   committed") response, the revocation is already committed in the database
+   and the trust convergence worker will finish synchronizing the transport
+   disconnect in the background.
 
 ## Troubleshooting
 
-- A token is one-time and short-lived. For a confirmed rejection or expiry,
-  create a new token; a lost response needs the replay procedure below first.
-- If the Controller committed bootstrap enrollment but the response was lost,
-  retry with the same token and the same persistent EndpointID. That exact
-  replay returns the same pending node while the node is still pending; a
-  different EndpointID, or a replay after approval, is rejected. A Controller
-  also refuses any bootstrap enrollment for an EndpointID it already stores.
+- Enrollment and bootstrap tokens are single-use and short-lived. Issue a new
+  token only after confirming that the previous token was rejected or expired;
+  if the response was lost, follow the replay procedure below first.
+- When the Controller commits a bootstrap enrollment and the response is lost,
+  retrying with the same bootstrap token and persistent EndpointID returns that
+  same pending node for as long as the node remains pending. The Controller
+  rejects the replay if the presenting EndpointID differs or if the node has
+  already been approved, and it refuses any bootstrap enrollment for an
+  EndpointID already present in its database.
 - The expected EndpointID, Controller EndpointID, and identity directory must
-  match. A changed controller pin or replaced identity directory is a new
-  trust decision.
-- A pending node is not mutation-capable until it is approved.
+  stay aligned. Changing the Controller pin or replacing the identity directory
+  represents a new trust decision.
+- A pending node cannot execute privileged mutations until it has been
+  approved and activated.
 
 ## See also
 
@@ -280,34 +291,41 @@ source Controller.
 
 ## Recover an uncertain enrollment response
 
-Keep the original EndpointID, identity directory and protected token material when
-an enrollment response is lost or SSH is interrupted. For a bootstrap token,
-rerun the same installer with the original bootstrap binding; the existing
-same-endpoint recovery can return an enrollment that the Controller already
-committed. Do not create a new identity or authorization merely because the
-client did not receive a response.
+If an enrollment response is lost or your SSH session drops mid-run, keep the
+original EndpointID, identity directory, and protected token material intact.
+When using a bootstrap token, rerun the same installer with the original
+bootstrap binding so the Controller's same-endpoint recovery path can return
+the enrollment record it already committed. Never generate a new identity or
+issue a new token simply because the client did not receive a response.
 
-Legacy endpoint-bound enrollment tokens do not have that bootstrap replay
-contract. An administrator must first find the node by its original EndpointID
-in the Controller inventory before deciding whether a new token is required.
-Approval expiry requires a fresh approval request bound to the current content
-and an independent approver; it does not imply a new node identity.
+Legacy endpoint-bound enrollment tokens do not support that bootstrap replay
+contract. Before deciding whether a new token is needed after an interrupted
+endpoint-bound run, an administrator must look up the node by its original
+EndpointID in the Controller inventory. Similarly, if an approval request
+expires before activation, create a fresh approval request bound to the current
+content and have an independent approver review it; an expired approval never
+requires a new node identity.
 
-`ENROLLED_LOCAL` confirms the persisted local Node ID; `SERVICES_ACTIVE` confirms
-only both local units are enabled and active. The installer has no administrator
-session and marks Controller trust, connection and freshness as `NOT_OBSERVED`.
-On the Controller host, read `GET /api/v1/nodes/{node_id}` with the authorized
-workspace/session and inspect `trust_status`, `connection_state` and `freshness`.
-The approval/activation response's `status` describes a different transition.
-Do not transfer that administrator session to the Node.
+Local installer states track only host-side progress: `ENROLLED_LOCAL` confirms
+that the local Node ID has been persisted to disk, and `SERVICES_ACTIVE`
+confirms only that both local systemd units are enabled and active. Because the
+installer has no administrator API session, it reports Controller trust,
+connection state, and telemetry freshness as `NOT_OBSERVED`. To check those
+fields, query `GET /api/v1/nodes/{node_id}` from an authorized workspace
+session on the Controller and inspect `trust_status`, `connection_state`, and
+`freshness` (the `status` field returned by the approval/activation POST tracks
+a different state transition). Never copy that administrator session onto the
+managed node.
 
-After confirmed local enrollment, the installer removes only its fixed protected
-enrollment-token copy. A rerun finishes this cleanup after validating the existing
-identity and binding, including after interruption between configuration commit
-and cleanup. Unsafe metadata fails closed. The bootstrap source is removed only
-by the successful enrollment invocation that used it; a rerun does not delete an
-arbitrary newly configured source. Failed or uncertain enrollment retains recovery
-material. Long-term identity, Relay token, public trust and sealing private keys
-are retained. Power loss or SIGKILL can interrupt cleanup; rerun and inspect the
-local summary. Enrollment copies remain root:ocserv-agent `0640`, so the Node can
-read them; they are not converted to root-only files.
+Once local enrollment is confirmed, the installer deletes only its fixed
+internal copy of the enrollment token (which stays `root:ocserv-agent` with
+mode `0640` so the Agent can read it, instead of being converted to a root-only
+file). If power loss, `SIGKILL`, or another interruption stops the process
+between configuration commit and cleanup, rerunning the installer validates the
+existing identity and binding (failing closed on unsafe file metadata),
+completes any pending token cleanup, and prints the local summary. The external
+bootstrap token source file is deleted only by the enrollment invocation that
+actually consumed it, so a later rerun will not delete an arbitrary newly
+configured source path. Whenever enrollment fails or remains uncertain, the
+installer retains recovery material along with the long-term identity, Relay
+token, public trust files, and sealing private keys.

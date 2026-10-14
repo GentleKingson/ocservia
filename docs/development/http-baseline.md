@@ -1,77 +1,30 @@
 # HTTP contracts
 
-`internal/api` owns HTTP assembly, middleware and resource authorization.
-`nodehttp`, `configplanhttp` and `useroperationshttp` own their handlers and
-consumer interfaces. Package boundaries do not replace runtime authorization
-or split domain transactions.
+`internal/api` owns HTTP server assembly, middleware wiring, and resource authorization, while `nodehttp`, `configplanhttp`, and `useroperationshttp` implement their respective handlers and narrow consumer interfaces. Splitting handlers across packages organizes the codebase without replacing runtime authorization checks or breaking up domain transactions.
 
 ## Assembly and lifecycle
 
-`api.NewServer(HTTPConfig, backend, build, logger, Modules, Authorization)`
-constructs the server from validated inputs. Deployment uses `newHTTPServer`,
-which builds those inputs and, after `NewServer` and before listening, calls the
-`Enable*` setters (operations, release catalog, user state, privd attestation,
-enrollment, owner fencing, local slice) and `SetLocalSimulatorEnabled` for
-features that are not `Modules` fields. `NewBackend` is a compatibility
-constructor with default SSE settings and disabled optional modules, not a
-server completed through those setters.
-Non-API roles return before authentication or HTTP construction.
+`api.NewServer(HTTPConfig, backend, build, logger, Modules, Authorization)` builds the HTTP server from validated inputs. In production and full-stack deployments, `newHTTPServer` constructs those inputs, calls `NewServer`, and then invokes the `Enable*` setters (operations, release catalog, user state, privd attestation, enrollment, owner fencing, and local slice) along with `SetLocalSimulatorEnabled` before opening the listener for capabilities that live outside `Modules`. By contrast, `NewBackend` is a narrow compatibility constructor that initializes default SSE settings and leaves optional modules disabled without running those post-construction setters. Processes started in non-API roles exit before authentication or HTTP server construction begins.
 
-Assembly configures shared domain services, authentication, RBAC, approvals,
-audit, Certificates and Plan lookup before constructing modules and routes.
-`Modules.ConfigPlans` supplies both business and parent lookup capabilities from
-one instance; `Authorization.RBAC` supplies both parent and batch guards.
-Known concrete typed nils become disabled capabilities, not replacement services.
-Modules retain neither assembly inputs, stores, Transport nor a parent Server.
+During assembly, the application configures shared domain services, authentication, RBAC, approvals, audit, Certificates, and Plan lookup before instantiating HTTP modules or registering routes. A single `Modules.ConfigPlans` instance satisfies both the business handler and parent approval lookup interfaces, and `Authorization.RBAC` provides both parent and batch authorization guards. When assembly passes a known concrete typed nil, the server treats that capability as disabled instead of substituting a fallback service. Submodules hold only their narrow consumer interfaces and never retain assembly inputs, raw database stores, Transport handles, or a back-reference to the parent Server.
 
-SSE requires explicit valid configuration. Invalid or partial settings fail
-construction; allocated resources are closed on failure. Platform and operation
-hubs share admission and watcher budgets, start polling on subscription, and
-have no runtime reconfiguration or request-time constructor.
+SSE requires explicit, valid configuration at startup; invalid or incomplete settings fail server construction and close any already-allocated resources. Platform and operation hubs share global admission and watcher budgets, start database polling lazily when the first subscriber connects, and do not support runtime reconfiguration or per-request hub construction.
 
-Middleware order is `otelhttp -> requestContext -> limitBody -> timeout ->
-trackRequests -> routeErrors -> ServeMux -> route wrapper -> handler`.
-Ordinary requests use `http.TimeoutHandler`; SSE bypasses timeout but stays
-tracked. Lifecycle takes Shutdown ownership before listening. Shutdown closes
-admission/hubs, shuts down HTTP, closes connections on deadline and drains inner
-handlers. Closed hubs remain installed. HTTP does not own the shared database
-or domain services.
+Requests pass through the middleware chain in fixed order: `otelhttp -> requestContext -> limitBody -> timeout -> trackRequests -> routeErrors -> ServeMux -> route wrapper -> handler`. Standard HTTP endpoints run under `http.TimeoutHandler`, whereas SSE streams bypass the request timeout while still remaining tracked for graceful teardown. The server lifecycle claims Shutdown ownership before listening. On shutdown, it closes SSE admission and hubs, initiates HTTP server shutdown, closes active connections once the deadline expires, and waits for in-flight inner handlers to drain. Closed hubs stay mounted on the server, and the HTTP layer never takes ownership of closing the shared database pool or domain services.
 
 ## Methods and dispatch
 
-Ordinary `HandleFunc` declarations are the production method source.
-The construction-only `methodRegistrar` forwards each registration once to the
-root ServeMux before publishing methods. Failed registration publishes no
-metadata. Duplicate methods, unsupported/overlapping shapes and mux conflicts
-panic. Completed rules are read-only and isolated per Server.
+Production method metadata comes directly from ordinary `HandleFunc` registrations. During server construction, `methodRegistrar` forwards each registration once to the underlying root ServeMux before recording the allowed methods; if registration fails, no metadata is published. Duplicate method declarations, unsupported or overlapping route patterns, and mux conflicts panic at startup. Once construction finishes, the routing rules are read-only and isolated per Server.
 
-Patterns require explicit methods, hostless paths, literal segments and
-whole-segment `{name}` parameters. Subtrees, remainder wildcards, `{$}`, embedded
-parameters, escaped literals and dot segments are rejected, as are equivalent
-shapes with different parameter names. Identical paths can merge methods while
-retaining distinct guards.
+Route patterns must declare an explicit HTTP method, a hostless path, literal path segments, and full-segment `{name}` wildcards. The registrar rejects subtree patterns, remainder wildcards, `{$}`, partially embedded parameters, percent-escaped literals, dot segments, and structurally equivalent routes that differ only by parameter name. Routes sharing an identical path shape may register different HTTP methods while keeping separate authorization guards per method.
 
-Derived lookup precedes `compatibilityRouteMethod`, including method denials.
-Compatibility rules retain action-dependent Local-user, session, IP-ban, user,
-certificate, SecretRef and approval paths, plus the operation-detail prefix
-rule. They cannot override derived `summary` or `queue-metrics` denials.
+Derived route lookup runs ahead of `compatibilityRouteMethod`, including method denials. The compatibility table retains action-dependent paths for Local-user, session, IP-ban, user, certificate, SecretRef, and approval routes, plus the operation-detail prefix rule, but it cannot override method denials derived for `summary` or `queue-metrics`.
 
-Static paths compare full strings; parameter paths retain Trim/Split semantics
-over `URL.Path`, without further decoding or normalization. ServeMux receives
-the original request and parameter names. GET does not imply HEAD. Unknown
-paths produce Problem 404; some trailing-slash paths reach plain-text 404 and
-doubled leading slashes can redirect with 307. Preserve error/authentication
-order and these path differences. The independent inventory in
-`control-plane/internal/api/routes_baseline_test.go` checks routes, wrappers,
-methods and permissions; historical route counts are not a contract.
+Static routes match the full path string directly, whereas parameterized routes use Trim/Split matching over `URL.Path` without extra URL decoding or path normalization, passing the original request and parameter names straight through to ServeMux. Registering GET never implicitly enables HEAD. Unknown paths normally return a Problem 404, though certain trailing-slash URLs hit plain-text 404 and doubled leading slashes can return a 307 redirect. Any routing change must preserve authentication and error ordering along with those path-handling differences. `control-plane/internal/api/routes_baseline_test.go` verifies the live route inventory, wrappers, allowed methods, and required permissions directly; historical route counts are not part of the contract.
 
 ## Module authorization
 
-Required explicit guards authenticate, check browser mutations, resolve the
-actual resource/workspace, authorize the action and supply trusted context.
-Modules never derive workspace authority from an unverified client header.
-Other routes retain central action inference, resource checks and SSE
-revalidation. Original contexts carry cancellation and deadlines into services.
+Every modular route sits behind an explicit guard that authenticates the caller, enforces browser mutation protections, resolves the target resource and owning workspace, authorizes the specific action, and injects trusted request context. Handlers never trust a client-supplied workspace header on its own to establish authority. Routes that remain on the parent server continue to use central action inference, resource resolution, and periodic SSE revalidation. Request contexts propagate caller cancellation and deadlines all the way into domain services.
 
 | Module | Routes and actions | Consumer capability |
 | --- | --- | --- |
@@ -79,95 +32,39 @@ revalidation. Original contexts carry cancellation and deadlines into services.
 | `configplanhttp` | Create: `config.plan`; Get: `config.review`; Apply: `config.apply` | `Plans.Create/Get/Apply`, authenticated request values, Secret-use check |
 | `useroperationshttp` | Policy GET: `node.read`; policy PUT and batch POST: `user.manage`; batch GET and metrics: `operation.read` | `Operations.GetPolicy/SetPolicy/CreateBatch/GetBatch/Metrics`, `Authorizer.Node/Authorize` |
 
-`httpx` owns JSON/Problem encoding, pagination, UUIDv7, strict JSON and
-idempotency parsing without auth/business dependencies. Strict JSON retains
-media-type, UTF-8, unknown-field, single-value and shared body-size checks.
-Node session reads use `[]telemetryread.Session`, not ingestion models.
+The `httpx` package provides JSON and Problem response encoding, pagination cursors, UUIDv7 parsing, strict JSON request decoding, and idempotency key extraction without pulling in authentication or domain dependencies. Strict JSON decoding enforces media-type, UTF-8, unknown-field rejection, single-value bodies, and the shared request body size limit. Node session endpoints return `[]telemetryread.Session` read models instead of telemetry ingestion types.
 
 <a id="configplan-http-module-r2-02"></a>
 ## ConfigPlan requests
 
-Create and Apply use `httpx.RequireIdempotencyKey` to trim the header and
-return the shared missing-key Problem.
+Both Create and Apply call `httpx.RequireIdempotencyKey` to trim the header and return the standard missing-key Problem when the header is blank.
 
-Create checks availability before node ID; Apply checks ID, trimmed idempotency
-key, JSON and approval ID before its business call. Disabled services fail at
-their existing validation point, after outer authentication, Origin and resource
-guards. Create returns a Plan; Apply returns an Operation with its own Location
-and replay headers. A 202 proves committed intent, not Agent execution.
+Validation order differs slightly by action: Create checks service availability before parsing the node ID, whereas Apply validates the plan ID, trimmed idempotency key, JSON body, and approval ID before invoking the domain service. If the backing service is disabled, the request fails at that existing validation step after passing outer authentication, Origin verification, and resource authorization. Create responds with a Plan, and Apply responds with an Operation along with its Location and replay headers. A 202 response confirms that the Controller committed the intent to its database; Agent execution on the node remains asynchronous.
 
-Secret checks resolve each reference's workspace and permission on every request,
-retaining the `s.devAuth` exception. No references need no Certificates service.
-Missing dependencies return 503 when used; lookup/workspace/permission failures
-return 403 before Create. The transaction still checks stored state/version
-and node ownership.
+When a candidate configuration references secrets, the handler resolves each secret's workspace and caller permission on every request while preserving the `s.devAuth` bypass in development mode. Plans without secret references do not require the Certificates service to be enabled. Referencing a secret when the Certificates dependency is unconfigured returns 503, and any secret lookup, workspace mismatch, or permission failure returns 403 before Create runs. Inside the domain transaction, the service still revalidates stored configuration state, expected version, and node ownership.
 
-Node `config_revision` comes from `node_config_state.revision`, independently
-of `nodes.version` and `desired_revision`. Missing state means zero; failed reads
-remain errors. OpenAPI permits absence for older servers. Web captures a known,
-nonnegative JavaScript-safe revision with node/workspace generation and neither
-rebases nor automatically retries stale requests.
+A node's `config_revision` is read from `node_config_state.revision`, which tracks configuration state independently of `nodes.version` and `desired_revision`. If no row exists yet, the revision is reported as zero, while database read errors fail the request. The OpenAPI schema leaves the field optional so clients can tolerate older servers. The Web console records a known, nonnegative JavaScript-safe revision alongside the active node and workspace generation and never rebases or automatically retries a stale submission.
 
-Same-Plan, same-workspace-key Apply replay reuses the committed desired revision
-and original command's `expected_version`; new keys use live state. Complete
-intent comparison, revision locking and approval consumption stay transactional.
+Replaying an Apply request for the same Plan and workspace idempotency key reuses the already-committed desired revision and the original command's `expected_version`, whereas a new idempotency key evaluates against live node state. Full intent comparison, revision locking, and approval consumption all occur inside the domain transaction.
 
-The parent receives `ApprovalBinding/Resource` from the same ConfigPlan instance.
-The domain interprets validity/expiry and returns the candidate hash and safe
-summary. Missing service/wrong resource type returns `400 invalid-request`;
-read or invalid/expired Plan returns `409 config-plan-not-ready` before
-foreign-workspace `400 invalid-request` and node-RBAC `403 forbidden`.
-`config_plan_summary` retains `plan_id`, `node_id`, `expected_revision`,
-`candidate_hash`, `materialized_hash`, `current_hash`, `diff_redacted` and
-`expires_at`. Detail/decision checks cover
-all saved authority resources before legacy fallback.
+Parent approval endpoints obtain `ApprovalBinding/Resource` from the shared ConfigPlan service instance, which evaluates plan validity and expiry and supplies the candidate hash and redacted summary. An unconfigured service or mismatched resource type returns `400 invalid-request`. Unreadable, invalid, or expired plans return `409 config-plan-not-ready` ahead of foreign-workspace `400 invalid-request` and node RBAC `403 forbidden` checks. The `config_plan_summary` payload preserves `plan_id`, `node_id`, `expected_revision`, `candidate_hash`, `materialized_hash`, `current_hash`, `diff_redacted`, and `expires_at`. Approval detail and decision handlers verify all saved authority resources before falling back to the legacy single-resource check.
 
 ## User policy and batches
 
-Policy writes check key before JSON, require RFC3339 with trailing Z and domain
-validation of fractional seconds, retain body `expected_version`, trim reason,
-and return 200 with revision ETag/replay headers. Replay reads current policy.
-Batch creation returns 202 and Location. Input order and duplicates are
-preserved; strict JSON rejects client-supplied `authorized`.
+User policy writes validate the idempotency key before decoding JSON, require RFC3339 timestamps with trailing Z and domain validation of fractional seconds, preserve `expected_version` from the request body, trim the reason string, and return 200 with revision ETag and replay headers. Idempotent replays read and return the current policy record. Batch creation returns 202 and Location, preserves caller item order and duplicate entries, and relies on strict JSON decoding to reject any client-supplied `authorized` field.
 
-A missing or foreign node rejects the entire batch. An unauthorized
-same-workspace item persists as forbidden; an authorized missing user persists
-as failed/not_found. The development per-item exception depends on Principal
-issuer, not Server devAuth. Missing, malformed or non-v7 `X-Approval-ID`
-becomes nil, never approval authority. Item binding/order/versions and approval
-consumption belong to the domain transaction.
+If a batch references a missing or foreign-workspace node, the entire request is rejected up front. Within the caller's workspace, an item that fails node authorization is recorded on the persisted batch as forbidden, and an authorized item targeting a nonexistent user is recorded as failed/not_found. Development-mode per-item authorization bypass keys off the Principal issuer instead of Server devAuth. A missing, malformed, or non-v7 `X-Approval-ID` header is normalized to nil and never grants approval authority. Item binding, ordering, version checks, and approval consumption execute atomically inside the domain transaction.
 
-Batch reads perform lookup/workspace 404 before the additional read check.
-Creators skip only that additional workspace-wide check, never the outer guard;
-other readers require workspace `operation.read`. Node managers do not gain
-workspace metrics. Missing capabilities fail closed after the public guard.
+Batch reads run existence and workspace-membership checks (returning 404 on mismatch) before evaluating the secondary read permission. The principal who created the batch skips only that secondary workspace-wide check after passing the outer route guard, whereas all other callers must hold `operation.read` in the workspace. Holding node-scoped user management permissions does not grant access to workspace-wide user-operation metrics. Unconfigured service capabilities fail closed after the outer authentication and route guard.
 
 ## Upgrade requests
 
-Operations owns trusted target preparation. Unknown architecture maps to
-`release-not-trusted` for execution and `node-not-ready` for approval.
-Node read/workspace failures remain `404 not-found` versus `409 node-not-ready`.
-Invalid syntax precedes node read, architecture, catalog lookup and the
-newer-version check. Approval need not target a newer observed version.
-Single-node execution may queue offline work, unlike rollout admission.
+The Operations service owns trusted upgrade target preparation. An unknown node architecture maps to `release-not-trusted` during upgrade execution and `node-not-ready` during approval creation, while node lookup or workspace mismatches return `404 not-found` versus `409 node-not-ready`. Request syntax validation runs ahead of node lookup, architecture resolution, release catalog lookup, and the newer-version check. Creating an approval request does not require the target release to be newer than the node's currently observed version, and single-node upgrade execution may queue work for an offline node, unlike rollout admission.
 
-Replay still prepares the target: node-version drift does not change its original
-intent identity, but an Agent already at the target returns `target-not-newer`.
-Missing Operations disables approval preparation. Transactional versions,
-capabilities, approvals and active-upgrade guards remain domain responsibilities.
+Idempotent replay of an upgrade request still runs target preparation: if the node's observed version drifted in the meantime, the original intent identity stays the same, but an Agent that has already reached the target version causes the call to return `target-not-newer`. When the Operations service is unconfigured, upgrade approval preparation is disabled. Inside the transaction, version checks, node capabilities, approval consumption, and active-upgrade guards remain with the domain service.
 
 ## Verification
 
-Select checks through [validation guidance](testing.md). Ordinary Go tests cover
-construction, boundaries, method inventory/path equivalence, failure atomicity,
-per-server isolation, SSE budgets and shutdown. Module tests exercise the mux
-with narrow handwritten capabilities; full-chain tests cover cancellation,
-timeouts and inner-work draining.
+Select test suites according to [validation guidance](testing.md). Standard Go unit tests cover server construction, package boundaries, method inventories and path equivalence, failure atomicity, per-server state isolation, SSE admission budgets, and graceful shutdown. Module-level tests exercise the mux against narrow handwritten capability stubs, while full-chain HTTP tests verify request cancellation, timeouts, and in-flight handler draining.
 
-Existing `regression-auth`, `backend-policy-api` and startup groups exercise
-real Local sessions and restricted runtime connections: Plan Apply/replay,
-approval/error order, Secret denial, policy/batch ownership, signed child intent,
-upgrade binding and first-request assembly. Owner access is limited to setup
-and fault injection. PostgreSQL-only tests are not four-backend evidence;
-skipped database tests are not acceptance. HTTP intent tests do not establish
-Agent execution, package installation or release readiness.
+For integrated verification, the `regression-auth`, `backend-policy-api`, and startup test groups run against real Local sessions and restricted runtime database roles to cover Plan Apply and replay, approval and error ordering, Secret access denials, user policy and batch ownership, signed child command intents, upgrade approval bindings, and first-request server assembly. Database owner credentials are used only for test setup and fault injection. Passing on PostgreSQL alone does not prove four-backend compatibility, skipped database tests do not count as acceptance, and HTTP intent tests do not substitute for verifying Agent command execution, package installation, or release readiness.

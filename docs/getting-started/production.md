@@ -1,54 +1,33 @@
 # Deploy the Controller
 
-Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
-(positive N without leading zeros). RCs are not recommended stable releases.
+Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag (with a positive `N` and no leading zeros), though release candidates are not recommended for stable production use.
 
-This guide is the short production path for a manual installation of the ocservia Controller: you prepare `install.env` and the protected material. For a new single-host Integrated Controller that generates them, see [Quick mode](#quick-mode-on-main) instead. It focuses on what an operator needs to prepare and run. Exact file modes, lifecycle state, rollback behavior, and recovery details remain in the [Production deployment reference](../operations/production-deployment.md).
+This guide covers a manual production installation of the ocservia Controller, where you prepare `install.env` and the required secret files beforehand. If you are provisioning a fresh single-host Integrated Controller and want the installer to generate those files automatically, see [Quick mode](#quick-mode-on-main). File permission matrices, runtime state layouts, rollback procedures, and disaster recovery details are documented in the [Production deployment reference](../operations/production-deployment.md).
 
-Use an exact published release, after Release Check has passed. This is a fresh
-installation path, not an automatic historical-deployment conversion. The
-v1.1.0 policy removes software-version admission but does not guarantee safe
-cross-version operation. See the [support policy](../reference/support-policy.md).
+Deploy an exact published release that has passed Release Check. The manual installer sets up a fresh deployment and does not convert historical layouts automatically; while the v1.1.0 policy removed software-version admission gates, cross-version operation is not guaranteed. See the [support policy](../reference/support-policy.md) for version boundaries.
 
 ## What the Controller does
 
-The Controller is the central Web/API service. It stores state in a supported
-database, connects to managed nodes through dedicated relays, records audit
-events, and runs install, upgrade, rollback, and uninstall workflows for the
-Controller side.
+The Controller serves the administrative Web console and HTTPS API, persists cluster state and audit records in a supported relational database, communicates with managed nodes through the dedicated Relay, and coordinates Controller-side install, upgrade, rollback, and uninstall lifecycles.
 
 ## Requirements
 
-- A supported `amd64` or `arm64` Linux host: Ubuntu 20.04/22.04/24.04/26.04 or Debian 11/12/13.
-- Git, curl, and Docker Engine with the Compose v2 plugin. The installer can bootstrap Docker on most supported hosts, but Ubuntu 20.04 needs a compatible Docker install prepared beforehand.
-- A DNS name and HTTPS certificate for the Controller. Integrated needs a
-  second, distinct DNS name for its Relay; with Integrated ACME the
-  certificates are obtained automatically instead.
-- A selected login mode: Local only, OIDC only, or Local + OIDC. An OIDC provider and client are required only for SSO.
-- Standalone only: a certificate signing endpoint and one dedicated HTTPS
-  Relay. Integrated runs both on the Controller host.
-- Protected directories for secrets and backups.
+- A supported `amd64` or `arm64` Linux host running Ubuntu 20.04/22.04/24.04/26.04 or Debian 11/12/13.
+- Git, `curl`, and Docker Engine with the Compose v2 plugin. While the installer can bootstrap Docker on most supported distributions, Ubuntu 20.04 hosts require a compatible Docker installation before you run the script.
+- A DNS name and HTTPS certificate for the Controller. Integrated mode requires a second, distinct DNS name for its co-located Relay, and can obtain both certificate pairs automatically when Integrated ACME is enabled.
+- An authentication mode: Local only, OIDC only, or Local + OIDC (an OIDC identity provider and client credentials are required only when SSO is enabled).
+- In Standalone mode, an external certificate Signer endpoint and one dedicated HTTPS Relay. In Integrated mode, both run on the Controller host.
+- Protected host directories for secrets and database backups.
 
-For this manual installation the installer does not generate production passwords, private keys, certificates, relay tokens, or signing keys. Prepare them before installation. Only [Quick mode](#quick-mode-on-main) generates material.
+In a manual installation, the installer never generates production passwords, private keys, certificates, relay tokens, or signing keys; only [Quick mode](#quick-mode-on-main) generates initial material for a new host.
 
 ### Choose the deployment mode
 
-`standalone` is the default and uses separately operated Relay and Signer
-endpoints. `integrated` runs the existing Edge, Relay and production Signer
-on the Controller host through the same installer and lifecycle commands.
-It requires a v2 platform manifest, Compose >= 2.24.4, explicit
-`--root-lifecycle`, two distinct DNS names/certificates, and the
-[Integrated Secret and state configuration](../../deploy/production/integrated/README.md#lifecycle-configuration).
-Only Edge TCP443 and Relay UDP7842 are public; Signer remains internal.
-This single-host mode is not HA. By default (`OCSERV_TLS_MODE=manual`) you
-provision both certificate pairs; on main, `OCSERV_TLS_MODE=acme` (Integrated
-only) obtains them instead, see
-[ACME certificates](../../deploy/production/integrated/README.md#acme-certificates).
-The manual lifecycle never generates CAs or Signer material.
+By default, `standalone` mode connects to separately hosted Relay and Signer services. Setting `integrated` runs the SNI-routing Edge, the Relay, and the production Signer on the Controller host through the same installer and lifecycle commands. Integrated mode requires a v2 platform manifest, Docker Compose `>= 2.24.4`, explicit `--root-lifecycle`, two distinct DNS names and certificate pairs, and the settings described in [Integrated Secret and state configuration](../../deploy/production/integrated/README.md#lifecycle-configuration). Only Edge `TCP/443` and Relay `UDP/7842` are exposed publicly, while the Signer stays on an internal network. Co-locating these services on a single host does not provide high availability. Under the default `OCSERV_TLS_MODE=manual`, you supply both TLS certificate pairs yourself; in Integrated mode, setting `OCSERV_TLS_MODE=acme` obtains and renews them automatically (see [ACME certificates](../../deploy/production/integrated/README.md#acme-certificates)). Even with ACME enabled, the manual lifecycle never generates internal CA or Signer keys.
 
 ## 1. Prepare the configuration directory
 
-Use an exact release tag and keep local configuration outside the release checkout:
+Check out the pinned release tag and create a configuration directory outside the repository tree:
 
 ```bash
 git clone --branch vX.Y.Z --single-branch --depth 1 \
@@ -58,66 +37,54 @@ cp ../ocservia-vX.Y.Z/install.env.example install.env
 editor install.env
 ```
 
-Edit only the Controller section in `install.env`. Delete or leave commented the managed-node section. The file is read from the current directory when you run the installer.
+Populate the Controller section of `install.env` and leave the managed-node section commented out or deleted. The installer reads `./install.env` from the current working directory.
 
 ## 2. Fill in the Controller settings
 
-The exact variable names are in `install.env.example`. At a minimum, configure:
+See `install.env.example` for the complete variable list. At a minimum, configure:
 
 | Setting group | Examples |
 | --- | --- |
 | Public address | `OCSERV_PUBLIC_HOST`, `OCSERV_CONTROLLER_PUBLIC_URL`, `OCSERV_HTTPS_ADDRESS` |
-| Login | `OCSERV_LOCAL_AUTH_ENABLED`, `OCSERV_PUBLIC_ORIGIN`, `OCSERV_SESSION_TTL`; OIDC settings only for SSO |
+| Login | `OCSERV_LOCAL_AUTH_ENABLED`, `OCSERV_PUBLIC_ORIGIN`, `OCSERV_SESSION_TTL`; add OIDC settings when SSO is enabled |
 | External services | `OCSERV_CERTIFICATE_SIGNER_URL` |
-| Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID`, required `OCSERV_RELAY_URL_A`; `OCSERV_RELAY_URL_B` must be unset or empty (only one dedicated Relay is supported, nonempty B is rejected) |
-| Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, optional Controller state root |
-| Database | bundled/external PostgreSQL 18.x or external MySQL 8.4 LTS |
+| Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID` and required `OCSERV_RELAY_URL_A`; leave `OCSERV_RELAY_URL_B` unset or empty (only one dedicated Relay is supported, and a non-empty B value is rejected) |
+| Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, and optional Controller state root |
+| Database | Bundled or external PostgreSQL 18.x, or external MySQL 8.4 LTS |
 
-Keep `install.env` private and out of Git. Variables exported in the shell override values from the file.
+Keep `install.env` restricted to the operator account and out of version control. Variables exported in the calling shell override entries in the file.
 
-`install.env` is strict allowlisted data, not a shell script; do not `source`
-it. For Integrated, set `OCSERV_DEPLOYMENT_MODE=integrated` and the documented
-Relay/Signer directories and public Relay name. Omit external Signer and Relay
-URL settings: the installer derives those internal connections. Standalone
-continues to use the external-service settings above.
-
-Choose one of the complete [authentication mode examples](../operations/authentication.md#choose-a-mode).
+`install.env` is parsed as a strict key-value allowlist and is not a shell script, so do not `source` it directly. For Integrated deployments, set `OCSERV_DEPLOYMENT_MODE=integrated` along with the documented Relay/Signer state directories and public Relay hostname, and omit the external Signer and Relay URL variables (which the installer derives internally). Select one of the complete [authentication mode examples](../operations/authentication.md#choose-a-mode) to match your login configuration.
 
 ## 3. Prepare secrets and trust files
 
-Put production material in the protected directories referenced by `install.env`. Typical required material includes:
+Place the required secret files inside the protected directories referenced by `install.env`:
 
-- HTTPS certificate and key.
-- Database owner, runtime, and backup credentials for the selected supported backend.
-- For external MySQL, `database-ca.pem`, separate owner/runtime DSN
-  files, and the backend-specific `database-backup.cnf`.
-- Session key and audit keys; OIDC client secret only when SSO is enabled.
-- Controller command signing key.
-- Certificate signer token.
+- HTTPS server certificate and private key.
+- Database owner, runtime, and backup credentials for your chosen database backend.
+- When using external MySQL: `database-ca.pem`, separate owner and runtime DSN files, and `database-backup.cnf`.
+- Session key and audit keys, plus the OIDC client secret when SSO is enabled.
+- Controller command-signing private key.
+- Certificate Signer bearer token.
 - Relay access token.
-- Controller identity key.
+- Controller Iroh identity key.
 
-Use the exact filenames and permission requirements from the [Production deployment reference](../operations/production-deployment.md) before running the installer.
+Verify the exact filenames, ownership, and file modes against the [Production deployment reference](../operations/production-deployment.md) before launching the installer.
 
 ### Optional observability
 
-OTEL is disabled when `OCSERV_OTEL_BACKEND_ENDPOINT` is unset or empty. No
-Collector or monitoring TLS files are required in that case. To enable it, set
-the endpoint in `install.env` and provision `otel-client.crt`, `otel-client.key`,
-and `otel-ca.crt` in `OCSERV_SECRET_DIR`, owned by the launcher with mode `0444`.
-The launcher automatically enables the Collector; missing or incorrectly
-permissioned TLS files prevent startup. No separate enable flag is needed.
+OpenTelemetry export stays disabled whenever `OCSERV_OTEL_BACKEND_ENDPOINT` is unset or empty, and no Collector container or monitoring TLS files are needed in that state. Setting `OCSERV_OTEL_BACKEND_ENDPOINT` in `install.env` enables the Collector automatically; before starting the stack, place `otel-client.crt`, `otel-client.key`, and `otel-ca.crt` in `OCSERV_SECRET_DIR` owned by the launcher user with mode `0444`, as missing or mispermissioned TLS files will block startup.
 
 ## 4. Install the pinned release
 
-Run the versioned bootstrap from the release checkout while your current directory is the configuration directory:
+From the directory containing `./install.env`, run the versioned bootstrap script out of the release checkout:
 
 ```bash
 ../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh \
   --version vX.Y.Z
 ```
 
-For a deliberate whole-lifecycle-as-root install, add `--root-lifecycle`:
+To run the full installation lifecycle as `root`, append `--root-lifecycle`:
 
 ```bash
 ../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh \
@@ -125,31 +92,17 @@ For a deliberate whole-lifecycle-as-root install, add `--root-lifecycle`:
   --root-lifecycle
 ```
 
-The bootstrap reads `./install.env`, prepares a clean release checkout under the Controller source root, and hands off to the production installer. The installer downloads and validates the deployment configuration, activates the Controller, and runs readiness checks.
-
-Do not replace this flow with a manual `docker compose up -d`; that bypasses the release and lifecycle checks.
-
-This bootstrap requires an existing stable or RC Release and an exact version tag.
+The bootstrap script validates `./install.env`, prepares a verified release checkout under the Controller source root, and invokes the production installer to validate the configuration, start the containers, and confirm service readiness. Do not run `docker compose up -d` directly in place of this workflow, as doing so skips release digest verification and lifecycle checks. An existing stable or RC release tag is required.
 
 <a id="quick-mode-on-main"></a>
 
 ### Quick mode
 
-`controller-bootstrap.sh --quick` is a preset over the same installer, not a
-second installer, and only for a new host: Integrated, bundled PostgreSQL,
-ACME and Local authentication, root lifecycle. It ignores `./install.env`,
-generates the configuration in `/etc/ocservia/install.env` and the protected
-material described above, and creates the two Local administrators
-`initial-admin` and `initial-approver`. Other combinations (Standalone,
-external or MySQL databases, OIDC, manual TLS) use the manual path above.
-Choose a stable or RC Release that ships `deploy/production/quick-install.sh`.
-Releases up to v1.2.0 do not contain it, and their bootstrap refuses `--quick`.
-Prerequisites, preflight and rerun rules are in
-[Quick mode](../operations/bootstrap-hosting.md#quick-mode).
+Passing `--quick` to `controller-bootstrap.sh` applies a single-host preset over the standard production installer for a brand-new host: Integrated mode, bundled PostgreSQL, ACME TLS, Local authentication, and the root lifecycle. Instead of reading `./install.env`, Quick mode writes a generated configuration to `/etc/ocservia/install.env`, creates the required cryptographic and secret files, and provisions two initial Local accounts (`initial-admin` and `initial-approver`). Deployments that use Standalone topology, external or MySQL databases, OIDC authentication, or manual TLS certificates must use the manual workflow above. Quick mode is available only on stable or RC releases after v1.2.0 that include `deploy/production/quick-install.sh` (releases up to v1.2.0 reject `--quick`); host prerequisites, preflight checks, and rerun rules are detailed in [Quick mode](../operations/bootstrap-hosting.md#quick-mode).
 
 ## 5. Verify the deployment
 
-The install command must finish successfully. Then check the public readiness and version endpoints:
+Once the bootstrap command completes, query the public readiness and version endpoints:
 
 ```bash
 curl --fail --silent --show-error \
@@ -158,21 +111,16 @@ curl --fail --silent --show-error \
   "https://${OCSERV_PUBLIC_HOST}/api/v1/version"
 ```
 
-For manual Local-only or dual-auth first deployments, follow the
-[one-shot Local admin bootstrap](../operations/authentication.md#bootstrap-the-first-local-admin)
-before verifying login. There is no default admin password, and normal restart
-does not reset credentials. For OIDC-only, use existing identity/RBAC provisioning. Quick
-already created its two Local administrators; their initial passwords are in
-root-only files under `/root/ocservia-initial-credentials`.
+On a manual deployment with Local login enabled, run the [one-shot Local admin bootstrap](../operations/authentication.md#bootstrap-the-first-local-admin) before testing login, as fresh manual installs have no default administrator password and normal restarts never reset credentials. OIDC-only deployments authenticate through their configured identity provider and RBAC mappings, whereas Quick mode writes the generated passwords for its two initial Local administrators to root-readable files under `/root/ocservia-initial-credentials`.
 
-Also verify that login works, a managed node can connect through the configured Relay, and the newest backup exists. When observability is enabled, verify that the backend receives traces. A healthy transport container only proves its local socket exists, not that a relay is reachable.
+Finally, confirm that operator login succeeds, a managed node can connect through the dedicated Relay, the initial backup artifact is present, and (when observability is enabled) traces reach your OpenTelemetry backend. Note that a healthy `transportd` container status only confirms that its local Unix socket is up, not that the external Relay is reachable.
 
 ## 6. After installation
 
-- Install and enroll the first managed node.
-- Use the Controller lifecycle commands for later upgrades, rollback, and uninstall.
-- Do not rerun an unpinned or `latest` installer as an implicit upgrade.
-- Use the optional static bootstrap endpoint only after you have deployed and verified it yourself; do not use a bare `curl | bash` pipeline.
+- Install and enroll your first managed node.
+- Run subsequent upgrades, rollbacks, and uninstalls through the Controller lifecycle scripts.
+- Never rerun an unpinned or `latest` installer as an implicit upgrade path.
+- If you use the optional static bootstrap hosting endpoint, deploy and verify it under your own infrastructure first; never pipe an unverified script into a shell.
 
 ## Next steps
 

@@ -1,12 +1,13 @@
 # Single dedicated Relay validation
 
-Run checks only in a task-owned checkout and disposable Linux environment.
-Native installation, systemd and network faults belong to the existing
-Business runner or a dedicated disposable test container.
+Run these checks inside a task-owned repository checkout on a disposable Linux
+environment. Any step that installs native packages, modifies systemd units, or
+injects network faults belongs on the disposable Business runner or inside a
+dedicated test container.
 
 ## Lightweight Checks
 
-With the existing Rust toolchain in an isolated environment, run:
+Inside an isolated environment with the repository's Rust toolchain, run:
 
 ```sh
 cd rust
@@ -15,17 +16,19 @@ cargo test --locked -p ocservia-agent fenced_agent_supervisor_redials_over_hot_s
 cargo fmt --all -- --check
 ```
 
-The Relay filter covers URL parsing, normalized duplicates, forbidden URLs,
-token files and the unchanged default/disabled behavior in the transport library.
-Its multi-member tests and the fenced supervisor test exercise retained generic
-library behavior; supported installation and launch entrypoints admit one Relay.
-These tests do not certify a multiple-Relay deployment or failover. Checks over
-public Relay discovery, such as [cross-VM enrollment](cross-vm-enrollment-validation.md),
-are not evidence for an authenticated dedicated deployment.
+The Relay test filter exercises URL parsing, normalized duplicate detection,
+forbidden URL rejection, token-file loading, and the default/disabled behavior
+of the transport library. Although the transport crate keeps generic
+multi-member and fenced-supervisor tests, production installers and launch
+entrypoints admit only one Relay, so passing these unit tests does not certify
+multi-Relay deployments or failover. Likewise, tests that rely on public Relay
+discovery, such as [cross-VM enrollment](cross-vm-enrollment-validation.md), do
+not validate an authenticated dedicated Relay deployment.
 
-Use a disposable Linux container with Bash, Node, sudo, jq and Python for the
-installer contracts. Run installers as a non-root account with passwordless
-sudo to exercise controlled elevation, not just the root path:
+To check the installer contracts, use a disposable Linux container equipped
+with Bash, Node, sudo, jq, and Python. Run the installer scripts as an
+unprivileged user with passwordless sudo so that the run exercises controlled
+privilege elevation alongside the root execution paths:
 
 ```sh
 bash scripts/test-managed-node-install.sh
@@ -36,16 +39,19 @@ docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
   python3 /source/scripts/test-relay-launchers.py
 ```
 
-`test-relay-launchers.py` replaces the fixed binary paths with argv recorders
-inside that disposable container only. `test-relay-systemd.sh` must run as root
-inside a separate disposable systemd container. It verifies actual unit argv,
-service UID/GID, signal delivery and exit status for unset, empty and present B.
-Do not run either fixture on an installed node. Basic CI runs the installer and
-launcher scripts above (not `test-relay-systemd.sh`, which has no CI entry) only
-when its installer flag is set, by installer paths or an unknown path; see [GitHub Actions validation](github-actions.md#path-routing).
+Within that disposable container, `test-relay-launchers.py` swaps the fixed
+binary paths for argv recorders. The systemd unit check,
+`test-relay-systemd.sh`, requires root inside a separate disposable systemd
+container, where it checks the rendered unit argv, service UID and GID,
+signal delivery, and exit codes when Relay B is unset, empty, or populated.
+Never run either fixture on an installed host. In Basic CI, the installer and
+launcher self-tests above run only when path routing sets the installer flag
+(on installer changes or unrecognized paths; see
+[GitHub Actions validation](github-actions.md#path-routing)), while
+`test-relay-systemd.sh` remains manual-only with no CI job.
 
-For Compose, set unique `RUN_ID`, `ARTIFACT_DIR` and a private, owner-controlled
-`RUNNER_TEMP`, then run:
+To validate the Compose configuration, export a unique `RUN_ID`,
+`ARTIFACT_DIR`, and a private, owner-controlled `RUNNER_TEMP`, then run:
 
 ```sh
 bash scripts/i18-production-relays.sh --compose-only
@@ -54,17 +60,20 @@ bash scripts/test-production-auth-config.sh
 bash scripts/docs-check.sh
 ```
 
-The focused Compose mode certifies the Relay arguments and merged network
-boundary, not reachability. It does not certify the untouched database overlay's
-`nofile` limits: the existing full I18 assertion expects limits that the baseline
-Postgres and backup services do not declare. The full and `--contract-only` I18
-checks retain that assertion and need separate validation.
-The database support matrix remains unchanged.
+The focused Compose mode checks the rendered Relay arguments and merged network
+boundaries without testing live network reachability, and it leaves the database
+support matrix unchanged. Because the baseline Postgres and backup service
+definitions do not declare `nofile` limits, this mode does not satisfy
+the full I18 `nofile` assertion on the untouched database overlay; the full and
+`--contract-only` I18 modes still enforce that check and must be run
+separately when needed.
 
 ## Network Probe
 
-Build the current transportd runtime image including its Relay launcher, and use
-the real authenticated iroh-relay image built by `deploy/production/relay.Dockerfile`. On the disposable test host:
+After building the current transportd runtime image (with its Relay launcher)
+and the authenticated iroh-relay image from
+`deploy/production/relay.Dockerfile`, run the network smoke probe on the
+disposable test host:
 
 ```sh
 python3 scripts/single-relay-network-smoke.py \
@@ -73,54 +82,62 @@ python3 scripts/single-relay-network-smoke.py \
   --artifacts "$NETWORK_EVIDENCE" --cold-start
 ```
 
-The probe derives transportd's network memberships, UID and hardening from the
-merged production configuration. The Relay is on a separate bridge, reached
-through a host-bridge TCP publication, never on an application/internal network.
-It checks external DNS, strict CA-validated TLS, authenticated iroh connection
-events and Pong, cold-start recovery and outage recovery without restarting
-transportd. Its 90-second bound is fixed before injection, based on iroh's
-10-second connection timeout and retry backoff. It does not start a Controller
-backend or authorize an Agent; it is not a command-workflow test.
+Reading the merged production Compose JSON, the probe configures transportd
+with the production network memberships, UID, and container hardening while
+placing the Relay on a separate bridge network reached over a host-bridge TCP
+port (never on the internal application network). Without starting a Controller
+backend, authorizing an Agent, or running command workflows, it verifies
+external DNS resolution, strict CA-validated TLS, authenticated iroh connection
+events and Pong frames, cold-start connection establishment, and recovery from a
+Relay outage without restarting transportd. Its 90-second recovery window is
+fixed prior to fault injection to match iroh's 10-second connection timeout and
+retry backoff.
 
-To reproduce the original isolated topology, remove only `relay-egress` from
-the rendered JSON's transportd memberships and networks, and run with
-`--expect-isolated` instead of `--cold-start`. Preserve that JSON as evidence.
-Do not change live production networks to reproduce this failure.
+If you need to reproduce the earlier isolated-network failure mode, strip only
+`relay-egress` from transportd's network memberships and top-level networks in
+the rendered JSON, invoke the probe with `--expect-isolated` in place of
+`--cold-start`, and keep the modified JSON with the test artifacts. Never alter
+live production networks to reproduce that failure.
 
 ## Real Agent Chain
 
-The Business Smoke / Integration environment owns real single-node
-recovery. Use the existing Release Diagnostics workflow with
-`run-resilience=true`; see [Resilience](resilience.md) and
+End-to-end single-node recovery runs inside the Business Smoke and Integration
+environment via the Release Diagnostics workflow with `run-resilience=true`;
+see [Resilience](resilience.md) and
 [Business validation](real-business-validation.md).
 
-Smoke's sole-Relay recovery (R4) stops and restarts that Relay, then requires a
-fresh Agent session, an authorized reload and VPN traffic. The manual
-integration profile adds the offline-queue scenario: it proves dependency on that
-Relay, waits until the old
-owner lease is invalid, and verifies that the approved offline command has no
-published outbox entry, sent attempt, Agent journal entry or root effect.
-Restoring the same Relay must complete the same operation with one journal
-entry, a verified root receipt and exactly one additional real reload.
-Replaying its API idempotency key returns the same operation and command with
-no additional effect. A failed queued command cannot become expected Unknown.
+In Smoke, the sole-Relay recovery scenario (R4) stops and restarts the Relay
+and requires the node to establish a fresh Agent session, complete an
+authorized reload, and pass VPN traffic. The manual integration profile extends
+this with the offline-queue scenario: while the Relay is stopped, it confirms
+that the node depends on that Relay, waits for the prior owner lease to expire,
+and verifies that an approved offline command produces no published outbox
+record, transmission attempt, Agent journal entry, or root side effect. Once
+the same Relay restarts, the queued operation must finish with a single Agent
+journal entry, a verified root receipt, and one additional native reload, and
+replaying the API idempotency key must return the existing operation and
+command without triggering another reload. A queued command that fails in this
+flow cannot be accepted as expected Unknown.
 
 ## Package Lifecycle And Cleanup
 
-Reuse `i18-agent-package-smoke.sh` and `release-native-package-smoke.sh` for
-current packages in disposable systemd/packaging containers; follow
-[package validation](release-checks.md).
-For native tests that launch sibling Docker containers,
-`RUNNER_TEMP` must be mounted at the same absolute path on the disposable test host and in
-the parent container. Match the actual architecture for native DEB/RPM checks;
-do not report an unexecuted architecture as passing.
+For current DEB and RPM packages, run `i18-agent-package-smoke.sh` and
+`release-native-package-smoke.sh` inside disposable systemd and packaging
+containers as described in [package validation](release-checks.md). When a
+native test container spawns sibling Docker containers via the host socket,
+mount `RUNNER_TEMP` at the exact same absolute path on the disposable host and
+inside the parent container. Always run native DEB and RPM checks on matching
+host and binary architectures, and never report an unexecuted architecture as
+passing.
 
-Retain logs, rendered topology, timings, checksums and non-secret JSON results.
-Do not publish generated enrollment tokens, session cookies, credentials,
-private CA or signing keys, or fixture secret directories. Integration scripts
-remove only their named containers, volumes and networks in exit traps. After
-exporting evidence, remove the task-owned systemd container, test image tags,
-test packages and private temporary directories. Never use global Docker prune.
+Preserve the test logs, rendered Compose topology, stage timings, checksums,
+and non-secret JSON summaries as evidence, while keeping generated enrollment
+tokens, session cookies, credentials, private CA or signing keys, and fixture
+secret directories out of published artifacts. Each integration script cleans up
+its own named containers, volumes, and networks via exit traps; once you have
+exported the run evidence, remove the task-owned systemd container, temporary
+image tags, built test packages, and private working directories without running
+a global Docker prune.
 
 ## Design References
 
@@ -130,6 +147,8 @@ test packages and private temporary directories. Never use global Docker prune.
 - [systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
 - [systemd.exec](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)
 
-The pinned iroh 1.2.0 vendor retains the local lifecycle patch. Multi-Relay persistent
-connections still require at least two distinct configured Relays; single-Relay
-reconnection reuses the existing Endpoint and supervision, not a new manager.
+The vendored iroh 1.2.0 tree retains the local connection-lifecycle patch:
+keeping persistent connections across multiple Relays still requires at least
+two distinct Relays in configuration, while single-Relay reconnection reuses
+the existing Endpoint and supervisor loop without introducing a separate
+connection manager.

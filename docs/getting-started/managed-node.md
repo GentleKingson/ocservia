@@ -1,35 +1,30 @@
 # Install a managed node
 
-Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
-(positive N without leading zeros). RCs are not recommended stable releases.
+Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag (with a positive `N` and no leading zeros), though release candidates are not recommended for stable production use.
 
-A managed node is an existing ocserv server with the ocservia node services installed beside it. The node still runs ocserv for VPN traffic. ocservia adds controlled management, health reporting, enrollment, and lifecycle operations from the Controller.
+A managed node is an existing ocserv server with the ocservia node daemons installed alongside it. The local ocserv instance continues to terminate VPN tunnels and forward traffic, while the ocservia services handle enrollment, health telemetry, and signed administrative commands from the Controller.
 
-This guide covers the normal package-first installation path. Detailed package verification, manual archive installation, rollback, and uninstall behavior remain in the [Agent package lifecycle reference](../operations/agent-lifecycle.md).
+This guide walks through the standard package-first installation. Package verification details, manual archive installation, rollback, and uninstallation are covered in the [Agent package lifecycle reference](../operations/agent-lifecycle.md).
 
-Select matched published Controller and node artifacts for a fresh installation.
-The v1.1.0 policy removes source-version windows but does not guarantee safe
-cross-version operation or provide historical deployment/key conversion. Do not
-reset an existing node's identity to make installation succeed. See the
-[support policy](../reference/support-policy.md).
+Always pair matched, published Controller and node artifacts when installing a fresh node. While the v1.1.0 policy removed software-version admission checks, it does not guarantee cross-version compatibility or provide automatic conversion for historical deployments and keys. Never reset an existing node's identity to force an installation through; see the [support policy](../reference/support-policy.md).
 
 ## Requirements
 
-- The Controller is deployed and reachable through the production relays.
-- The Controller EndpointID is available.
-- The node is a Linux host with systemd, root access, and ocserv installed or ready to be managed.
-- Supported managed-node platforms are:
+- A deployed Controller reachable through the production Relay.
+- The Controller's `EndpointID`.
+- A Linux host running systemd with root access and `ocserv` installed (or ready to be managed).
+- One of the supported managed-node platforms:
   - Ubuntu 22.04/24.04/26.04 or Debian 12/13 on `x86_64` or `aarch64` using native `.deb` packages.
   - Rocky Linux 9 on `x86_64` or `aarch64` using native `.rpm` packages.
-- Relay access token and Controller command verification key files are available on the node through protected paths.
-- A bootstrap token is available if you want the installer to enroll the node in the same run.
-- The installer is run as a non-root launcher user with `sudo`; it elevates one command at a time, so do not run it under a whole-script `sudo` (use `--root-lifecycle` for a deliberate root run). The host needs `curl`, `openssl`, `sha256sum`, `awk`, `git` (for the release-checkout path used below) and outbound HTTPS to GitHub Releases.
+- Protected local files containing the Relay access token and the Controller command verification key.
+- An optional bootstrap token file if you want the installer to complete local enrollment in the same run.
+- A non-root launcher account with `sudo` privileges (the installer elevates individual commands via `sudo`; pass `--root-lifecycle` only when intentionally running the entire script as root), plus `curl`, `openssl`, `sha256sum`, `awk`, `git`, and outbound HTTPS access to GitHub Releases.
 
-Ubuntu 20.04 and Debian 11 are not supported for managed nodes because they are outside the verified native runtime baseline.
+Ubuntu 20.04 and Debian 11 fall outside the verified native runtime baseline and are not supported for managed nodes.
 
 ## 1. Prepare the node configuration
 
-Use an exact release tag and keep node configuration outside the release checkout:
+Check out the exact release tag and create a working directory for node configuration outside the repository tree:
 
 ```bash
 git clone --branch vX.Y.Z --single-branch --depth 1 \
@@ -39,90 +34,80 @@ cp ../ocservia-vX.Y.Z/install.env.example install.env
 editor install.env
 ```
 
-Edit only the managed-node section in `install.env`. Delete or leave commented the Controller section.
+Fill in the managed-node section of `install.env` and leave the Controller section commented out or removed.
 
-Configure at least:
+At a minimum, set the following parameters:
 
 | Setting | Purpose |
 | --- | --- |
-| `CONTROLLER_ENDPOINT_ID` | Binds this node to the expected Controller identity. |
-| `RELAY_URL_A`, `RELAY_URL_B` | Required literal HTTPS A (no credentials, query or fragment); omit B or leave it empty. Only one dedicated Relay is supported, and a nonempty B is rejected (also when an existing `relays.env` already names a B). |
-| `RELAY_ACCESS_TOKEN_SOURCE` | Protected source file for the relay token. |
-| `CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE` | Protected source file for the Controller command verification key. |
-| `BOOTSTRAP_TOKEN_SOURCE` | Optional protected source file for one-run enrollment. |
+| `CONTROLLER_ENDPOINT_ID` | Binds the node to the expected Controller identity. |
+| `RELAY_URL_A`, `RELAY_URL_B` | Required literal HTTPS URL for Relay A (without credentials, query string, or fragment); omit `RELAY_URL_B` or leave it empty. Production supports only one dedicated Relay, and any non-empty B value (in `install.env` or an existing `relays.env`) is rejected. |
+| `RELAY_ACCESS_TOKEN_SOURCE` | Protected file path containing the relay access token. |
+| `CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE` | Protected file path containing the Controller command verification public key. |
+| `BOOTSTRAP_TOKEN_SOURCE` | Optional protected file path containing a bootstrap token for single-run enrollment. |
 
-The installer reads `./install.env` from the current directory. Shell variables override values from the file.
+The installer reads `./install.env` from the current working directory, with exported shell variables taking precedence over file entries.
 
-For a private Relay CA, provision its public PEM certificate bundle separately
-at `/etc/ocservia-agent/relay-ca.pem` before enrollment. It must be a nonempty,
-single-link regular file owned by `root:root`, mode `0444`, under root-owned
-real directories without group/world write permission. The installer and
-shipped service launcher use the same additional trust file; neither downloads
-nor replaces it. An absent file retains public-root trust. An unsafe present
-file fails closed; malformed PEM is rejected rather than disabling TLS.
-This adds trusted roots, not a certificate pin. CA rotation/removal is a
-deliberate operator action, separate from package or installer reruns.
+When the Relay uses a private CA, install its public PEM certificate bundle beforehand at `/etc/ocservia-agent/relay-ca.pem` as a non-empty, single-link regular file owned by `root:root` with mode `0444`, placed under root-owned real directories without group or world write permissions. Both the installer and the installed service launcher read this file without downloading or overwriting it. If the file is absent, standard public-root trust applies; if the file exists with unsafe ownership/permissions or malformed PEM data, the process fails closed while keeping TLS verification active. This bundle adds trusted root CAs and does not act as a certificate pin. Rotating or removing the CA bundle is a separate operator action outside package or installer reruns.
 
 ## 2. Run the installer
 
-Run the managed-node installer from the exact release checkout:
+Invoke the managed-node installer from the pinned release checkout:
 
 ```bash
 ../ocservia-vX.Y.Z/deploy/managed-node/install.sh
 ```
 
-For a deliberate whole-lifecycle-as-root run, add `--root-lifecycle`:
+To run the entire installation lifecycle directly as `root`, pass `--root-lifecycle`:
 
 ```bash
 ../ocservia-vX.Y.Z/deploy/managed-node/install.sh --root-lifecycle
 ```
 
-The installer detects the platform, downloads the matching `.deb` or `.rpm` over HTTPS, freezes it in root-owned staging, installs the package, runs the privd host preflight, generates the two password-sealing keys if absent (it never overwrites existing ones), writes relay configuration, and prepares the persistent node identity. Enrollment and the installed service use the same sole Relay URL. Any nonempty B is rejected before installation or execution.
+During execution, the script detects the host distribution, downloads the matching `.deb` or `.rpm` over HTTPS into a root-owned staging directory, installs the package, runs the `privd` host preflight checks, generates the two password-sealing keys if they do not already exist (existing keys are preserved), writes the relay configuration, and initializes the persistent node identity. Both enrollment and normal service runtime use the single configured Relay URL, rejecting any non-empty `RELAY_URL_B` before installation or startup.
 
-It does not approve the node and does not enable or start the Agent or privd services. The package does enable and start the separate history-retention timer (`ocservia-agent-retention.timer`). If an `ocservia-agent` package of a different version is already installed, the installer stops: it neither upgrades nor downgrades.
+The installer enables and starts the history-retention timer (`ocservia-agent-retention.timer`), while leaving the node unapproved and the `Agent` and `privd` services stopped. If a different version of `ocservia-agent` is already installed on the host, the installer exits without upgrading or downgrading the package.
 
 ## 3. Finish enrollment
 
-The next step depends on whether `BOOTSTRAP_TOKEN_SOURCE` was configured.
+What happens next depends on whether `BOOTSTRAP_TOKEN_SOURCE` was supplied:
 
 | Installer result | What to do next |
 | --- | --- |
-| `ENROLLED_LOCAL` | Local enrollment is complete. Check the node's approval and connection state in the Controller; the installer does not observe them. |
-| `ENROLLMENT_READY` | No token was staged. Create an endpoint-bound enrollment token (`expected_endpoint_id` = the printed EndpointID), place it at `/etc/ocservia-agent/enrollment-token` as `root:ocserv-agent` with mode `0640`, and rerun the same installer. Alternatively set `BOOTSTRAP_TOKEN_SOURCE` to a protected node bootstrap token file and rerun. |
+| `ENROLLED_LOCAL` | Local enrollment succeeded. Check the node's approval and connection status in the Controller UI, as the local installer does not query Controller state. |
+| `ENROLLMENT_READY` | No token was provided. Issue an endpoint-bound enrollment token (`expected_endpoint_id` set to the printed EndpointID), write it to `/etc/ocservia-agent/enrollment-token` owned by `root:ocserv-agent` with mode `0640` (or point `BOOTSTRAP_TOKEN_SOURCE` at a protected bootstrap token file), and rerun the installer. |
 
-If enrollment fails or its response is unknown, stop. Keep the original EndpointID, identity directory and token material. With `BOOTSTRAP_TOKEN_SOURCE`, rerun with the same source file to recover the committed result; with an endpoint-bound token there is no replay recovery, so query the Controller for that EndpointID before creating any new token (see [Enroll a node](../how-to/enroll-node.md)). The installer deletes the one-time token file and `BOOTSTRAP_TOKEN_SOURCE` only after enrollment succeeds.
+If enrollment fails or returns an ambiguous result, stop and keep the existing EndpointID, identity directory, and token files intact. When using `BOOTSTRAP_TOKEN_SOURCE`, rerun the installer with the same token file to recover the committed response; when using an endpoint-bound token, replay recovery is unavailable, so check the Controller inventory for that EndpointID before issuing a replacement token (see [Enroll a node](../how-to/enroll-node.md)). One-time token files and `BOOTSTRAP_TOKEN_SOURCE` are deleted only after enrollment succeeds.
 
-Installed, enrolled and running are different states. `ENROLLED_LOCAL` and `SERVICES_ACTIVE` are local observations only (the installer prints `NOT_OBSERVED` for Controller trust, connection and freshness). A node is manageable only after the Controller shows it approved, connected and reporting fresh data.
-
-Use [Enroll a node](../how-to/enroll-node.md) for the Controller-side token and approval steps.
+Package installation, local enrollment, and active fleet management are distinct stages: `ENROLLED_LOCAL` and `SERVICES_ACTIVE` reflect local host state only (the installer reports `NOT_OBSERVED` for Controller trust, session connectivity, and telemetry freshness). A node is under active management only once the Controller shows it approved, connected, and reporting fresh telemetry. Controller-side token creation and approval workflows are detailed in [Enroll a node](../how-to/enroll-node.md).
 
 ## 4. Approve and start services
 
-After the installer reports `ENROLLED_LOCAL`, check the node in the Controller and approve it if pending (a different authorized principal must approve it). Starting the services does not itself approve the node. Then start the node services deliberately; this makes the node visible to the Controller and begins accepting authorized commands:
+Once the installer outputs `ENROLLED_LOCAL`, review the pending node in the Controller and approve it using a second authorized principal. Starting the local daemons does not auto-approve the node. After approval, enable and start both services so the node connects to the Controller and begins accepting signed commands:
 
 ```bash
 sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
 systemctl status ocservia-privd.service ocservia-agent.service
 ```
 
-Confirm that both services are active and that the node appears online in the Controller inventory with fresh health data.
+Verify that both systemd units are active and that the node appears online with current health data in the Controller inventory.
 
 ## 5. Verify reruns
 
-After approval and service activation, rerun the same installer (same release, same `install.env` and source files) as a validation-only convergence check:
+After the node is approved and its services are running, you can rerun the same release installer with the original `install.env` and source paths as an idempotent convergence check:
 
 ```bash
 ../ocservia-vX.Y.Z/deploy/managed-node/install.sh
 ```
 
-An already-active node should report `SERVICES_ACTIVE` without reinstalling the package, replacing identity, key, relay or `agent.env` material, approving the node, or starting services again. It does re-run the host preflight, re-validate the enrolled identity and trust files (failing closed on any mismatch), and remove a stale enrollment-token copy. This confirms that both local services are enabled and active; verify approval, connectivity, and fresh telemetry separately in the Controller. After the Agent has been upgraded or rolled back to another version, do not rerun an older release's installer: it stops on the version mismatch.
+On an active node, the script outputs `SERVICES_ACTIVE` without reinstalling the package, overwriting the identity, keys, relay config, or `agent.env`, re-approving the node, or restarting the services. Instead, it re-executes the host preflight, verifies the enrolled identity and trust files (failing closed on any discrepancy), and cleans up any leftover enrollment token file. Controller-side approval, connection state, and telemetry freshness must still be checked in the Controller UI. Once the Agent has been upgraded or rolled back to a different version, do not run an older release's installer against the host, as it will halt on the version mismatch.
 
 ## Lifecycle after installation
 
-- Upgrade with the next native package or the Controller-driven Agent upgrade workflow.
-- Roll back with the matched package snapshot through `ocservia-agent-rollback`.
-- Uninstall through `dpkg` or `rpm`. Removal stops and disables the Agent, privd and retention timer (the node goes offline in the Controller) and removes the installed binaries and units; package scripts preserve identity, state, and configuration, and package-manager removal never purges them.
-- Do not rerun a `latest` convenience installer as an implicit upgrade.
+- Upgrade nodes through the next native package release or the Controller-managed Agent upgrade workflow.
+- Roll back to the matched package snapshot using `ocservia-agent-rollback`.
+- Uninstall via `dpkg` or `rpm`, which stops and disables `Agent`, `privd`, and the retention timer (marking the node offline in the Controller) and removes the binaries and unit files while leaving node identity, local state, and configuration files intact on disk.
+- Never rerun an unpinned or `latest` installer script as a shortcut for upgrading.
 
 ## Next steps
 

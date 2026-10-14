@@ -1,132 +1,165 @@
 # Business Smoke and Integration
 
-Business Smoke exercises the real Controller, native systemd Agent/privd/ocserv,
-Local requester/approver browser login, Workspace selection, user creation,
-approval/reload and approved ConfigPlan apply and OpenConnect VPN on one
-disposable amd64 runner with one Controller and one dedicated Relay. Production
-Signer sealing and internal TLS are exercised when `production_signer=true`
-(the Release Check and `release-upgrade.yml` default); `false` selects the
-standalone topology without them.
-Manual integration adds OIDC, PKI/P12/revoke (including browser checks), rollback
-and deep recovery. Smoke retains a separate API-created VPN user; with
-`production_signer=true`, it also verifies production Signer password sealing.
-Its configuration is applied once through
-the browser and checked against the operation receipts and native file hash
-before VPN and recovery checks. Both profiles require `real_browser_subset`;
-missing browser checkpoints fail acceptance. The browser subset also collects
-Content Security Policy violations in the page (the gateway policy is
-enforced and has no report endpoint) and writes them to `browser-csp.json`
-without URL queries. Any violation or console CSP report outside the final
-deliberate control fails acceptance, as does a control that the collector
-misses or that is reported but not enforced.
-No production binary, service, Relay or VPN is mocked. Use
-[Release policy](release-checks.md) for dispatch commands, topology selection,
-coverage ownership and publication gates; Business alone establishes neither
-native package acceptance nor HA.
+Business Smoke runs the real Controller, native systemd Agent/privd/ocserv
+services, Local requester and approver browser sign-in, Workspace selection,
+VPN user creation, approval and reload, approved ConfigPlan apply, and an
+OpenConnect VPN session on a single disposable amd64 runner with one
+Controller and one dedicated Relay. Every production binary, service, Relay,
+and VPN path runs without mocks. Setting `production_signer=true` (the default
+in Release Check and `release-upgrade.yml`) enables production Signer sealing
+and internal TLS, whereas `false` switches to the standalone topology without
+them. Smoke also provisions a separate API-created VPN user and, when
+`production_signer=true`, verifies that the production Signer seals that user's
+password.
+
+The manual integration profile expands on Smoke by exercising OIDC, PKI/P12
+issuance and revocation (including browser flows), rollback, and deeper fault
+recovery. Before running the VPN and recovery stages, the harness applies the
+node configuration once through the browser and checks the resulting native
+file hash against the operation receipts. Both Smoke and Integration require
+`real_browser_subset`, and any missing browser checkpoint fails the run. While
+driving the UI, the browser runner captures Content Security Policy violations
+directly from the page (the gateway enforces CSP without a report endpoint) and
+writes query-stripped entries to `browser-csp.json`. Acceptance fails if any
+page violation or console CSP error appears outside the final positive control,
+if the collector misses that control, or if the control is only reported
+without being enforced.
+
+Dispatch commands, topology selection, coverage ownership, and release
+publication gates are documented in [Release policy](release-checks.md). On its
+own, passing Business validation does not certify native package distribution
+or high availability.
 
 ## Evidence and boundaries
 
-The Business driver builds its own native packages and images, uses a loopback
-test registry, and runs `controller.sh install --release-file` with ordinary
-JSON configuration. In the extended profile with the production Signer, Integrated configuration
-upgrade/rollback exercises digest and version-tag references to the same locally
-built images; it does not test historical binary compatibility. Native scriptlets verify the embedded archive
-checksum in root-owned staging. Managed-node preparation and final
-`SERVICES_ACTIVE` convergence use the shipped installer.
-After the approved positive ConfigPlan apply, each profile establishes
-an OpenConnect tunnel and passes real ICMP traffic. Manual integration then applies a reviewed
-revision whose reload is deliberately rejected, verifies automatic exact-byte
-rollback, and establishes a new OpenConnect tunnel with ICMP traffic. This is
-an **automatic rollback of a failed apply**, not an operator-initiated rollback
-of the successful revision. As its final stage, manual integration builds the next
-patch version of the Agent package, places it in the node's root-owned upgrade
-spool, and recreates only the Controller with a diagnostics-only Compose override
-that mounts a release catalog (the shipped launcher mounts none). The browser
-then starts and approves a one-node canary rollout to that version; acceptance
-requires the rollout to succeed, the approval to be consumed, the installed
-binaries and the observed Agent to report the target, and no CSP violation.
-`timings.json` records per-stage wall-clock seconds;
-sanitized diagnostics retain the actual environment and execution outcome. No
-runtime target is currently a release contract.
+Instead of pulling from external release endpoints, the Business driver builds
+native packages and container images from the candidate tree, pushes images to
+a loopback test registry, and runs `controller.sh install --release-file` with
+standard JSON configuration. In the extended profile with the production
+Signer, Integrated configuration upgrades and rollbacks test both digest and
+version-tag references against those locally built images, without testing
+compatibility across historical binary releases. Native package scriptlets
+validate the embedded archive checksum inside root-owned staging, and
+managed-node preparation through final `SERVICES_ACTIVE` convergence runs
+through the shipped installer.
 
-`result.json` records scope, diagnostic version, outcome, timings and passed
-checkpoints. GitHub job status is the authoritative workflow result.
+Once the approved positive ConfigPlan apply finishes, both profiles bring up an
+OpenConnect tunnel and verify end-to-end ICMP traffic. Manual integration then
+submits a reviewed configuration revision engineered to fail during ocserv
+reload, confirms that the node automatically restores the previous files byte
+for byte, and establishes a fresh OpenConnect tunnel with working ICMP traffic.
+Note that this stage tests automatic rollback when an apply fails on the node,
+as opposed to an operator-initiated rollback of an already active revision.
 
-The following limitations are deliberately retained, not scored as PASS:
+In its final stage, manual integration builds the next patch version of the
+Agent package, drops it into the node's root-owned upgrade spool, and recreates
+the Controller container with a diagnostics-only Compose override that mounts a
+release catalog (a mount absent from the shipped launcher). Through the
+browser, the harness initiates and approves a one-node canary rollout to that
+patch version. For the stage to pass, the rollout must complete, consume the
+approval, leave both the installed binaries and the live Agent reporting the
+target version, and record zero unexpected CSP violations. Stage wall-clock
+durations are written to `timings.json`, and sanitized diagnostic bundles preserve
+the execution environment and outcome, though no runtime duration target acts as
+a release gate.
 
-- Local builds do not test the public GitHub Release download endpoint. Stage-0
-  download/failure fixtures and Release build-only smoke have separate owners.
-  Business runs the actual native lifecycle and managed-node convergence;
-  it does not create a fabricated published version.
-- The private Relay CA is provisioned through the documented protected public
-  CA files. The shipped Compose overlay and native launcher use the existing
-  strict-TLS binary option without descriptor/launcher edits. Enrollment and
-  its final node configuration are produced by the managed-node installer;
-  preparation, PENDING_APPROVAL and SERVICES_ACTIVE checkpoints remain separate.
-  This does not turn the locally installed package into a published Release
-  download test.
-- Local requester and approver authenticate normally as different principals
-  with separate credentials and isolated sessions; no database-inserted sessions
-  or devAuth are used. Verify RBAC, workspace authorization, self-approval 403,
-  approval content binding and replay limits, not merely different identity IDs.
-  This does not prove independent custody by two people. Database writes are limited
-  to documented initial workspace provisioning before normal Local bootstrap.
-- In the extended profile, the dedicated HTTPS OIDC fixture exercises discovery, PKCE, callback and
-  issuer/signature/nonce/code/state rejection in mixed mode, plus OIDC-only
-  login, workspace authorization and restart/logout behavior. The signer uses
-  actual OpenSSL CSR verification, signing, public-key sealing and revocation
-  acknowledgement over authenticated TLS. These are task-controlled external
-  service fixtures, not production IdP/CA/HSM certification or independent
-  operator custody. The Controller container trust store is provisioned with
-  the task CA; TLS verification stays enabled.
-- Extended certificate/P12 checks include node restarts and one-use download.
-  In both profiles, the real browser uses the built gateway and Controller API
-  without route mocks, simulator or TLS exceptions. Missing phase checkpoints remain NOT RUN;
-  source implementation is not proof of runtime success. The reviewed complete
-  node-local TLS profile is exercised through browser plan/approval/apply and
-  native exact-byte rollback/restart checks; only their checkpoints prove that
-  a particular candidate passed.
-- Smoke recovery checks readiness, fresh Controller/Agent sessions, unchanged node
-  identity and successful business after reconnect. Manual integration retains
-  outage queue semantics and durable receipt checks. Selected single-instance
-  recovery provides no HA, Relay redundancy or
-  production RTO/RPO guarantee. The client namespace protects host routes; it is not
-  another host. The probe checks test VPN traffic, never real user traffic.
+Workflow pass/fail authority rests with the GitHub Actions job status, while
+`result.json` records the selected scope, diagnostic schema version, overall
+outcome, stage timings, and completed checkpoints.
 
-`result.json` reports `scope=business-smoke` or `scope=integration`, never full
-release acceptance. Both record `operator_mode=simulated_two_principals` and
-human custody `NOT_VERIFIED`. Independently authenticated principals must pass
-RBAC, binding, self-approval and replay checks. Two-person custody is excluded
-and needs separate evidence under the
-[approval boundary](../reference/stable-contracts.md#approval-principal-boundary).
-Write checkpoints only after assertions pass. Missing checkpoints are NOT RUN;
-retain failures, original run/attempt and exact SHA across retries.
+Keep the following scope boundaries in mind when interpreting results; the
+harness records them as explicit limitations and never scores them as PASS:
 
-The manual integration offline Relay queue scenario proves the command was never sent, then
-requires the original operation to succeed with exactly one additional native
-reload after restoring the same Relay. No EXPECTED-UNKNOWN exception can turn
-its failure into acceptance. Other uncertain outcomes retain read-only
-reconciliation and the existing explicit safe retry after proven effect absence.
+- Building and installing from local artifacts leaves the public GitHub Release
+  download endpoint untested; Stage-0 download/failure fixtures and Release
+  build-only smoke tests cover that path separately. Business exercises the
+  native package lifecycle and managed-node convergence without fabricating a
+  published release version.
+- The harness provisions the private Relay CA through the documented protected
+  public CA files, and the shipped Compose overlay and native launcher enable
+  the existing strict-TLS binary flag without patching descriptors or launcher
+  scripts. The managed-node installer drives enrollment and writes the final
+  node configuration while keeping preparation, PENDING_APPROVAL, and
+  SERVICES_ACTIVE as distinct checkpoints.
+- For Local authentication, the requester and approver log in as separate
+  principals with distinct credentials and isolated browser sessions, without
+  relying on devAuth or sessions injected directly into the database (direct
+  database writes are limited to initial workspace provisioning before Local
+  bootstrap). The suite checks RBAC, workspace authorization, 403 responses on
+  self-approval, approval content binding, and replay rejection across those
+  two principals, though automated execution by one runner cannot prove
+  independent physical custody by two human operators.
+- In the extended profile, a dedicated HTTPS OIDC fixture tests discovery,
+  PKCE, callback handling, and rejection of invalid issuers, signatures,
+  nonces, authorization codes, and state parameters in mixed mode, followed by
+  OIDC-only sign-in, workspace authorization, and restart/logout behavior. The
+  Signer exercises real OpenSSL CSR verification, certificate signing,
+  public-key sealing, and revocation acknowledgements over authenticated TLS,
+  with the Controller container trusting the task CA while keeping TLS
+  verification enabled. Because the OIDC provider and Signer CA run as
+  task-controlled fixtures, they do not certify third-party production
+  IdP/CA/HSM integrations or multi-operator key custody.
+- Extended certificate and P12 checks cover node restarts and single-use bundle
+  downloads. Across both profiles, a real browser drives the built gateway and
+  Controller API without route mocks, transport simulators, or TLS verification
+  bypasses. Any unexecuted phase remains NOT RUN, and only recorded runtime
+  checkpoints (including browser plan, approval, and apply plus native
+  exact-byte rollback and restart for the node-local TLS profile) count as
+  evidence for a candidate commit.
+- Smoke recovery verifies service readiness, fresh Controller and Agent
+  sessions, preserved node identity, and working business operations after
+  reconnection, while manual integration adds outage queue semantics and
+  durable receipt checks. These single-instance recovery checks do not provide
+  high availability, Relay redundancy, or production RTO/RPO guarantees. The
+  OpenConnect client runs inside an isolated network namespace on the same
+  runner to protect host routing tables, exercising synthetic test traffic on
+  one machine without a separate client host or live user traffic.
 
-`result.json` records `resilience_requested`, `resilience_result` and actual
-scenario checkpoints. A selected recovery run requires exactly one PASS for
-Controller stack (in Smoke, including transport), Agent/privd stack, bundled
-PostgreSQL and Relay; there is no MySQL recovery scenario. Missing fields/checkpoints, cancellation, failure and unexpected
-skip block acceptance. Unselected recovery is explicitly SKIPPED.
+In `result.json`, the harness writes `scope=business-smoke` or
+`scope=integration` (never full release acceptance), along with
+`operator_mode=simulated_two_principals` and human custody `NOT_VERIFIED`.
+Both principals must still pass all RBAC, content-binding, self-approval, and
+replay assertions; two-person human custody requires separate evidence under
+the [approval boundary](../reference/stable-contracts.md#approval-principal-boundary).
+Checkpoints are written only after their assertions succeed, leaving unreached
+phases as NOT RUN. Across retries, retain any failed runs, the original run
+and attempt numbers, and the exact candidate SHA.
 
-Sanitized diagnostics retain environment inventory, timings and exit status
-for seven days on success and failure. Manual integration also retains
-API/DB/journal/root receipt observations. Logs are private until redacted. Never upload the workspace
-secret directory, cookies, raw database or password file. Cleanup removes only
-task containers, network namespace, builder and private directory; the native
-installation lives only on the disposable hosted runner. Do not generalize this
-cleanup to a shared host.
+In the manual integration offline-Relay scenario, the harness first proves that
+the queued command was never transmitted while the Relay was down, and then
+requires the original operation to finish with exactly one additional native
+ocserv reload once the same Relay comes back online. An EXPECTED-UNKNOWN
+classification cannot convert a failure in this scenario into a pass. For other
+interrupted operations whose side effects are genuinely uncertain, the system
+relies on read-only reconciliation followed by an explicit safe retry once
+absence of effect is confirmed.
 
-Positive ConfigPlan apply requires native acceptance of the
-[complete contract](configuration.md#complete-profile-contract), not just contract review or
-unit tests. Preserve the [matched-release recovery boundary](../reference/stable-contracts.md#matched-release-recovery-boundary).
-Rerun failed owners with complete checks and shared fault timelines together;
-earlier candidates cannot supply missing acceptance or cross-version safety.
+Recovery reporting in `result.json` includes `resilience_requested`,
+`resilience_result`, and individual scenario checkpoints. When recovery is
+enabled, acceptance requires a single PASS for each of the four scenarios: the
+Controller stack (which in Smoke includes transport), the Agent/privd stack,
+bundled PostgreSQL, and the sole Relay; there is no Business-level MySQL
+recovery scenario. Missing fields or checkpoints, job cancellation, test
+failures, or unexpected skips block acceptance, while runs invoked without
+recovery record SKIPPED.
 
-Existing [single-Relay](single-relay-validation.md) and
-[cross-VM enrollment](cross-vm-enrollment-validation.md) profiles retain their original scope.
+Sanitized diagnostic artifacts keep the environment inventory, stage timings,
+and exit status for seven days on both passing and failing runs, and manual
+integration adds observations from the API, database, Agent journal, and root
+receipts. Keep logs private until redaction completes, and never upload the
+workspace secret directory, session cookies, raw database dumps, or password
+files. At the end of a run, cleanup removes only task-created containers, the
+client network namespace, builder state, and the private working directory;
+because the native package installation mutates the disposable hosted runner
+itself, never apply this cleanup procedure to a shared machine.
+
+Finally, passing positive ConfigPlan apply requires native execution of the
+[complete contract](configuration.md#complete-profile-contract) beyond schema review or
+unit tests, and recovery validation must respect the
+[matched-release recovery boundary](../reference/stable-contracts.md#matched-release-recovery-boundary).
+When a check fails, rerun the owning suite with its complete check set and
+shared fault timeline on the current candidate commit, as results from earlier
+candidates cannot fill in missing acceptance or establish cross-version safety.
+The standalone [single-Relay](single-relay-validation.md) and
+[cross-VM enrollment](cross-vm-enrollment-validation.md) procedures retain their
+existing scope.

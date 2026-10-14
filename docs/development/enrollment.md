@@ -1,31 +1,35 @@
 # Node enrollment development
 
-Operator steps: [Enroll a node](../how-to/enroll-node.md).
+For the step-by-step operator workflow, see [Enroll a node](../how-to/enroll-node.md).
 
-Enrollment is explicit and does not activate a node. The normal bootstrap path
-uses a node bootstrap token created with `POST /api/v1/node-bootstrap-tokens`.
-It has an `obt1_` prefix, is stored only as a SHA-256 digest, and is not bound
-to an EndpointID until a valid endpoint possession proof reaches the
-Controller. If the request sets the optional `expected_endpoint_id`, the
-Controller rejects any other endpoint before consuming the token. The binding,
-pending node, sealing keys, capabilities, token consumption and audit event
-commit in one transaction. A Controller refuses an EndpointID it already stores
-in any state, so a bootstrap token cannot enroll an endpoint that this
-Controller has bound, revoked or not. A consumed token can only be replayed by
-that same EndpointID, while its node is still `PENDING_APPROVAL`, and returns
-the same pending node ID even after the token's expiry; another endpoint, or a
-replay after approval, is rejected. Bootstrap tokens never approve or activate
-a node.
+Node enrollment registers an Agent identity without activating the node. The
+standard bootstrap flow uses a token created via
+`POST /api/v1/node-bootstrap-tokens`, which carries an `obt1_` prefix, is
+persisted solely as a SHA-256 digest, and remains unbound to any `EndpointID`
+until a valid endpoint possession proof arrives at the Controller. When the
+token creation request specifies the optional `expected_endpoint_id`, the
+Controller rejects any other endpoint before consuming the token. In a single
+database transaction, enrollment commits the endpoint binding, `PENDING_APPROVAL`
+node row, sealing keys, advertised capabilities, token consumption, and audit
+event. Because the Controller rejects any `EndpointID` already present in its
+database regardless of node state, a bootstrap token can never re-enroll an
+endpoint that has already been bound or revoked. Once consumed, a bootstrap
+token may be replayed only by that same `EndpointID` while the node remains in
+`PENDING_APPROVAL`, returning the original pending node ID even if the token's
+initial validity window has elapsed; replays from any other endpoint or after
+node approval fail.
 
-Bootstrap possession authorizes only creation or recovery of the bound
-`PENDING_APPROVAL` record. `node.approve` requires an authenticated requester,
-a content-bound approval request, a different authorized approver, and a later
-activation request carrying that approval in `X-Approval-ID`. Service enablement remains a
-separate host action after Controller approval; successful bootstrap enrollment
-alone grants neither active capabilities nor a mutation-capable Agent session.
+Proving possession of a bootstrap token authorizes only creating or recovering
+that bound `PENDING_APPROVAL` record. Activating the node requires an
+authenticated requester to submit a content-bound `node.approve` request, a
+separate authorized principal to approve it, and a subsequent activation call
+carrying that approval ID in `X-Approval-ID`. Enabling the host service remains
+a separate node-side step after Controller approval, so completing bootstrap
+enrollment by itself neither activates capabilities nor opens a
+mutation-capable Agent session.
 
-The advanced manual path prepares the long-lived endpoint identity before
-requesting a legacy endpoint-bound token:
+An alternative manual workflow pre-generates the long-lived endpoint identity
+on the host before requesting a legacy endpoint-bound token:
 
 ```bash
 sudo -u ocserv-agent ocservia-agent \
@@ -34,37 +38,40 @@ sudo -u ocserv-agent ocservia-agent \
   --prepare-enrollment
 ```
 
-This offline preparation mode creates or reads only the protected identity and
-controller pin, then prints the Agent's 64-character lowercase hexadecimal
-EndpointID. It does not read an enrollment token, contact the Controller, or
-start an Agent session. Repeating the command with the same controller pin
-prints the same EndpointID; a substituted controller pin is rejected.
+Running `--prepare-enrollment` works offline: it creates or loads the protected
+node identity and pinned Controller endpoint ID, then prints the Agent's
+64-character lowercase hexadecimal `EndpointID` without reading an enrollment
+token, contacting the Controller, or starting an Agent session. Re-running the
+command with the same `--controller` value prints the same `EndpointID`, whereas
+passing a different Controller pin fails.
 
-An authenticated operator then creates a token with
-`POST /api/v1/enrollment-tokens`, passing that value as
-`expected_endpoint_id`. Every legacy token must name the expected 32-byte
-EndpointID; a missing or malformed value is rejected. The response is marked
-`Cache-Control: no-store` and returns the plaintext token once; only its
-SHA-256 digest is stored. Tokens expire after at most 15 minutes.
+With that `EndpointID` in hand, an authenticated operator requests a legacy
+token via `POST /api/v1/enrollment-tokens` by setting `expected_endpoint_id` to
+the exact 32-byte hex identifier (requests with a missing or malformed value
+are rejected). The API returns the plaintext token once with
+`Cache-Control: no-store` and persists only its SHA-256 digest, subject to a
+maximum lifetime of 15 minutes.
 
-The Agent keeps its endpoint key in an owner-only local directory and pins the
-controller EndpointID. Reusing the directory preserves the Agent EndpointID;
-attempting to provision it with a different controller pin is rejected. The
-enrollment ALPN submits the token and public Agent metadata and returns a
-pending node ID. The request carries an Ed25519 proof made by that Endpoint
-SecretKey over a versioned, domain-separated canonical request. It binds the
-token hash, EndpointID, protocol version, Agent metadata, environment, nonce,
-timestamp, and sorted advertised capabilities. The Controller verifies this
-proof independently; the EndpointID reported by transportd is only an
-additional channel binding. The legacy token is strictly one-time: a concurrent or
-later replay is rejected even if the first response was lost. Operators recover
-the pending node ID through the authenticated Controller inventory rather than
-reusing root enrollment authority. Pending nodes cannot use the agent ALPN. The
-pending endpoint binding and advertised supported capabilities are retained for
+On the node, the Agent stores its endpoint private key inside an owner-only
+local directory alongside the pinned Controller `EndpointID`. Through the
+enrollment ALPN, the Agent submits the token and public Agent metadata together
+with an Ed25519 signature produced by its Endpoint `SecretKey` over a
+versioned, domain-separated canonical transcript that binds the token digest,
+`EndpointID`, protocol version, Agent metadata, environment, nonce, timestamp,
+and sorted capability list. The Controller verifies this signature
+independently, treating the `EndpointID` reported by `transportd` as an
+additional channel binding. Legacy tokens are strictly single-use: any
+concurrent or subsequent replay is rejected even if the initial network
+response was dropped, in which case operators look up the pending node ID in
+the authenticated Controller inventory without rerunning the enrollment
+command. While in `PENDING_APPROVAL`, the node cannot open the agent ALPN, and
+its endpoint binding and advertised capabilities wait in the database for
 approval.
 
-Place the returned token in the protected token file, then run enrollment with
-the same identity directory used during preparation:
+To run enrollment with a legacy token, write the token into a protected regular
+file (an absolute non-symlink path readable only by the Agent user, or owned by
+root and group-readable by the Agent group) and invoke the Agent against the
+same identity directory prepared earlier:
 
 ```bash
 sudo -u ocserv-agent ocservia-agent \
@@ -74,75 +81,83 @@ sudo -u ocserv-agent ocservia-agent \
   --enrollment-environment production
 ```
 
-The token file must be an absolute, non-symlink regular file readable only by
-the Agent, or a root-owned group-readable file for the Agent group. Enrollment
-prints the pending UUIDv7 node ID. It does not create a mutation-capable Agent
-session.
+The command outputs the pending UUIDv7 node ID and exits without opening a
+mutation-capable Agent session.
 
-Approve the node with `POST /api/v1/nodes/{node_id}/approval` and an
-`X-Approval-ID` naming an approved `node.approve` request. The request hash
-covers the node ID, EndpointID, node version, policy, labels and capability
-set, so the body must repeat exactly that content with a non-empty reason. The
-capability set must be non-empty and a subset of what the Agent advertised at
-enrollment. Only a pending node is activated; repeating the exact request on an
-already activated node validates the consumed approval and changes nothing.
-Revoke a node with `POST /api/v1/nodes/{node_id}/revocation`, an
-`X-Approval-ID` naming an approved `node.revoke` request, and a reason; this is
-allowed from any non-revoked state, including `PENDING_APPROVAL`. Revocation is
-retained in the database, rejects later handshakes, and asks the transport to
-close the current connection. The database transaction also creates durable
-convergence work, so a `503` from the approval or revocation endpoint after the
-database commit means transport synchronization is pending, not that the change
-was rolled back.
-The worker retries an exact revision until transportd reports `applied` with
-the same retained state and revision; a stale or rejected result remains
-pending. Revocation closes the connection only after that exact tombstone was
-applied. Controller ingress independently verifies the event's node and
-EndpointID against active database trust, so an event from a lingering revoked
-session is rejected during convergence.
+To activate a pending node, call `POST /api/v1/nodes/{node_id}/approval` with
+an `X-Approval-ID` header referencing an approved `node.approve` request.
+Because the approval hash binds the node ID, `EndpointID`, node version,
+policy, labels, and capability set, the activation request body must supply
+those exact fields along with a non-empty reason, and the requested capabilities
+must be a non-empty subset of those advertised during enrollment. Only a
+`PENDING_APPROVAL` node transitions to active; repeating the identical request
+against an already activated node verifies the consumed approval and returns
+idempotently.
 
-Trust claims measure their deadline with a fresh database wall clock after the
-claim lock, and the retained attempt counter fences late calls even when the
-same worker reclaims the same revision; equal or older revisions cannot reset
-newer intent. The worker holds a ten-second lease, renewed before each external
-mutation and every third of the lease while transport is in flight. Lost
-renewal cancels transport, and renewal finishes before completion bookkeeping,
-so a late result cannot overwrite superseding intent; a failed close retries
-without replaying an acknowledged trust update.
+To revoke a node from any non-revoked state (including `PENDING_APPROVAL`),
+call `POST /api/v1/nodes/{node_id}/revocation` with an `X-Approval-ID` header
+referencing an approved `node.revoke` request and a non-empty reason.
+Revocation is recorded durably in the database, blocks future handshakes, and
+instructs `transportd` to close any active connection. Because the database
+transaction also queues a durable trust-convergence task, receiving a `503`
+from the approval or revocation endpoint after commit indicates only that
+`transportd` synchronization is still pending, while the database state change
+itself remains committed. The background worker retries the exact trust
+revision until `transportd` replies `applied` with that retained state and
+revision, keeping stale or rejected responses pending and closing a revoked
+node's connection only after its exact tombstone is applied. Meanwhile,
+Controller event ingress checks every incoming event's node ID and `EndpointID`
+against active database trust, rejecting events from any lingering revoked
+session before convergence finishes.
 
-The Agent handshake advertises supported capabilities. The Controller computes
-the sorted intersection with the approved database set and returns only that
-negotiated subset. Supporting extra capabilities does not prevent enrollment or
-connection. Handshake protocol `1.1` signs the negotiated subset, EndpointID,
-node ID, authorization revision, and expiry in `SessionGrantV1`; protocol `1.0`
-is limited to approved read-only capabilities.
+When claiming trust-convergence work, the worker computes lease deadlines from
+a fresh database wall-clock read after acquiring the claim lock, and uses the
+retained attempt counter to fence late RPC responses even if the same worker
+reclaims the same revision, preventing equal or older revisions from
+overwriting newer intent. Each claim holds a 10-second lease that the worker
+renews before every external call and at one-third lease intervals while a
+transport RPC is in flight. Losing lease renewal cancels the in-flight RPC, and
+the worker completes a final renewal check before writing completion
+bookkeeping so a delayed response cannot clobber a superseding update; if
+closing a revoked connection fails, the worker retries the close without
+re-sending the already acknowledged trust update.
 
-Setting `OCSERV_CONTROLLER_ENDPOINT_ID` enables the enrollment endpoints (they
-answer `404` otherwise) and, on worker or all roles, the trust service on
-`OCSERV_TRUST_SOCKET`, which defaults to the value below. Production rejects a
-missing EndpointID except for one-shot database commands:
+During the regular Agent handshake, the Agent advertises its supported
+capabilities and the Controller returns the sorted intersection with the node's
+approved database capability set, so advertising newer unapproved capabilities
+never blocks enrollment or connection. Under handshake protocol `1.1`, the
+Controller signs that negotiated subset, the `EndpointID`, node ID,
+authorization revision, and expiration time into `SessionGrantV1`, whereas
+protocol `1.0` sessions are restricted to approved read-only capabilities.
+
+Configuring `OCSERV_CONTROLLER_ENDPOINT_ID` enables the HTTP enrollment routes
+(which otherwise return `404`) and starts the trust service on
+`OCSERV_TRUST_SOCKET` for `worker` and `all` roles. Aside from one-shot
+database maintenance commands, production startup fails if the endpoint ID is
+omitted:
 
 ```text
 OCSERV_CONTROLLER_ENDPOINT_ID=<64 lowercase hex characters>
 OCSERV_TRUST_SOCKET=/run/ocserv-trust/control-plane.sock
 ```
 
-Set `OCSERV_TRANSPORT_UID` and `OCSERV_TRANSPORT_GID` to transportd's exact
-numeric identity. Production rejects a missing transport identity or a
-transport UID equal to the Controller UID. The trust-socket directory must be
-owned by the control-plane process and must not be group- or world-writable.
-Keep it separate from the transport socket directory so a compromised
-transport process cannot replace the trust service.
+Configure `OCSERV_TRANSPORT_UID` and `OCSERV_TRANSPORT_GID` with the exact
+numeric UID and GID of `ocservia-transportd`; production startup refuses a
+missing transport identity or a transport UID that matches the Controller UID.
+The directory housing `OCSERV_TRUST_SOCKET` must already exist, be owned by the
+control-plane user without group or world write permissions, and remain
+separate from the transport socket directory so a compromised transport process
+cannot replace the trust socket. The configured `OCSERV_CONTROLLER_ENDPOINT_ID`
+must match the public key derived from `ocservia-transportd`'s controller key.
+When connecting over the Unix domain socket, both peers verify the remote
+process UID, the socket file's UID, GID, and mode, its non-writable directory
+ancestry, and its stable device and inode numbers, and graceful shutdown
+unlinks only the specific socket inode created by that server instance.
 
-The endpoint value must match the public identity derived from the controller
-key used by `ocservia-transportd`. The trust socket's parent directory must
-already exist and be restricted to the service users. Both UDS peers verify the
-other process's exact UID, socket UID/GID/mode, trusted non-writable ancestry,
-and stable device/inode identity. Shutdown removes only the socket instance the
-server created.
-
-Before recovery, stop new enrollment and reconcile pending trust transitions.
-Preserve token consumption, endpoint bindings, approvals and revocation history.
-Static transport bindings permit observation only, not privileged commands.
-The tree provides no down migrations; use a forward fix or a planned
+Before running database recovery, stop new node enrollments and allow pending
+trust transitions to converge, preserving all consumed token records, endpoint
+bindings, approvals, and revocation history. Static transport bindings support
+read-only observation only and cannot authorize privileged commands. Because
+the repository provides no database down migrations, recover via a forward fix
+or a planned
 [isolated restore](../operations/incident-recovery.md#database-recovery).

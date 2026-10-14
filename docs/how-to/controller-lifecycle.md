@@ -1,119 +1,140 @@
 # Controller lifecycle
 
-Use the protected lifecycle for explicit upgrade, rollback and uninstall.
-Keep the selected backend/authentication environment, secrets and clean release
-source available. Direct Compose or image replacement bypasses these checks.
+Run all explicit Controller upgrades, rollbacks, and uninstallations through
+the protected lifecycle script, keeping the configured database backend,
+authentication environment, secrets, and clean release source available on the
+host. Replacing images or invoking Docker Compose directly bypasses these
+checks.
 
-The v1.1.0 lifecycle has no source-version window, version-order or
-descriptor-equality admission gate. Cross-version execution can fail or damage
-state. Historical deployment conversion is not provided; installed old scripts
-retain their behavior. See [support policy](../reference/support-policy.md).
+In v1.1.0, the lifecycle removes admission gates for source-version windows,
+version ordering, and descriptor equality, so running it across incompatible
+versions can fail or damage state. The tooling does not convert historical
+deployments, and older scripts already installed on a host retain their
+original behavior; see [support policy](../reference/support-policy.md).
 
 ## Upgrade
 
-Before upgrading, confirm current health, a fresh restorable backup, target
+Before starting an upgrade, verify current service health, confirm that you
+have a fresh backup you can restore, and review the target release's
 persistent-state requirements and the
 [backend recovery procedure](../operations/incident-recovery.md#database-recovery).
-The lifecycle itself only checks that the database backup service (and, for
-bundled PostgreSQL, PostgreSQL) is running and healthy; it does not check that
-a recent backup exists or can be restored, so verify that yourself first.
-Use a clean checkout (no staged, unstaged or untracked changes) from a Git
-clone, and a protected release bundle matching the Docker daemon architecture.
-If the checkout is not already at the target `source_commit`, the lifecycle
-needs that commit to be present locally and keeps a separate clean clone of it
-under the protected state root.
+Because the lifecycle script checks only that the database backup service (along
+with PostgreSQL in bundled deployments) is running and healthy, you must verify
+on your own that a recent backup file exists and is restorable. Run the upgrade
+from a clean Git clone with no staged, unstaged, or untracked changes, using a
+protected release bundle that matches the Docker daemon architecture. When the
+working tree is not already checked out at the target `source_commit`, that
+commit must exist in the local repository so the lifecycle can maintain a
+separate clean clone under the protected state root.
 
 ```bash
 deploy/production/controller.sh upgrade \
   --release-file /protected/release/controller-release-<arch>.json
 ```
 
-The current release remains running during target validation and pending-state
-recording. Use the manifest's images, not caller-selected tags. Re-running with
-a release file identical to the current one is a no-op. Once image pull and
-activation begin, containers may be partly replaced even if the command then
-fails: the confirmed release state stays unchanged, but the running services
-are not guaranteed to match it (see [Verify and recover](#verify-and-recover)).
+While the script validates the target manifest and records the pending state,
+the current release stays running. Always deploy the exact images declared in
+the release manifest instead of substituting caller-selected tags. Running
+`upgrade` with a release file identical to the active release is a no-op. Once
+image pulling and container activation start, a failure can leave the host with
+partially replaced containers: the confirmed release state on disk stays
+unchanged, even though the running services are no longer guaranteed to match
+it (see [Verify and recover](#verify-and-recover)).
 
 ### Runtime database grants
 
-Upgrade runs the target's one-shot `migrate` service with `--migrate-only`,
-mounted owner credentials and `OCSERV_RUNTIME_DATABASE_ROLE` before Controller
-startup. It reapplies runtime grants even when no new migration is needed.
-Keep authentication, session/audit keys, database TLS and backend/role settings
-intact. Long-running Controllers retain runtime credentials only.
+Before starting the Controller, the upgrade workflow runs the target release's
+one-shot `migrate` service with `--migrate-only`, mounted database owner
+credentials, and `OCSERV_RUNTIME_DATABASE_ROLE`. That step reapplies runtime
+grants even when no new schema migration is needed, while the long-running
+Controller containers retain only runtime credentials. Keep your
+authentication configuration, session and audit keys, database TLS files, and
+backend/role settings intact across upgrades.
 
-A new, proven-empty database is initialized from the backend's current
-`schema.sql`. Existing databases are validated and advanced only through
-unapplied forward migrations/revisions. An updated snapshot file is never a
-reason to overwrite an existing schema. Missing or inconsistent provenance and
-interrupted MySQL initialization stop ordinary startup; do not erase metadata
-or change checksums to make it proceed.
+Only a new, verifiably empty database is initialized from the backend's current
+`schema.sql`. Existing databases are validated and advanced strictly through
+unapplied forward migrations and revisions; an updated snapshot file in a new
+release is never a reason to overwrite an existing schema. If schema provenance
+is missing or inconsistent, or if an earlier MySQL initialization was
+interrupted, normal startup stops. Do not erase metadata tables or alter
+checksums to force startup past those checks.
 
-Policy cleanup needs DELETE on `user_policy_enforcements`: PostgreSQL uses its
-configured role; MySQL uses explicit `user@host`. Store predicates, not
-this table-level grant, restrict which unfinished records can be removed.
-Other table/DDL privileges do not change. A binary replacement alone cannot
-repair missing grants.
+Policy cleanup requires `DELETE` privilege on `user_policy_enforcements`,
+granted to the configured role on PostgreSQL or to the explicit `user@host`
+account on MySQL. Although the grant itself is at the table level, store
+predicates restrict deletion to eligible unfinished records, and other table or
+DDL privileges remain unchanged. Replacing binaries without running the
+migration step will not repair missing grants.
 
-Confirm successful migration and maintenance without
-`user_operations.cleanup_failed`. That error stops the remaining maintenance
-steps; the process stays alive and retries at its normal tick. Repair persistent
-permission/storage failures. This does not promise historical full-table cleanup.
+After the upgrade completes, confirm that migrations and background maintenance
+run without logging `user_operations.cleanup_failed`. When that error occurs,
+the maintenance worker halts the remaining steps for that pass while the
+Controller process stays alive and retries on its normal tick. Fix any
+persistent permission or storage failures, noting that this maintenance pass
+does not perform a full historical cleanup of the table.
 
 ## Rollback
 
-This rolls back the Controller package (images and Compose project) only. It is
-not a database restore and never downgrades the schema: after an upgrade that
-applied forward migrations, the previous images run against the already-migrated
-database and may not work with it. Restoring data is the separate
-[database restore](../operations/incident-recovery.md#database-recovery).
+Rolling back reverts only the Controller application package (container images
+and the Compose project). Because rollback never restores database contents or
+downgrades the schema, reverting after an upgrade that applied forward
+migrations leaves the older images running against the already-migrated
+database, which may not be compatible. Reverting database state requires the
+separate [database restore](../operations/incident-recovery.md#database-recovery)
+procedure.
 
-Stop new writes as the incident requires and reconcile every Unknown operation.
-Assess current/previous database, configuration and backup risks. The protected
-`previous-release.json` and its exact source commit must be available; a fresh
-install has no previous release, and rollback refuses to run without one. The
-same database and backup health check as upgrade applies first.
+Before rolling back, stop new writes if the incident requires it, reconcile
+every Unknown operation, and evaluate the risks across the current and previous
+database state, configuration, and backups. The host must have the protected
+`previous-release.json` and its exact source commit available; a fresh
+installation has no previous release record, and rollback refuses to run
+without one. Like `upgrade`, `rollback` first runs the database and backup
+service health check.
 
 ```bash
 deploy/production/controller.sh rollback
 ```
 
-Rollback selects only the protected previous release, not an operator manifest.
-It uses that target's exact source for Compose and smoke. A different source is
-retained in a clean checkout under the protected state root so bind-mounted
-files remain available. Missing source, dirty checkout, invalid platform and
-actual configuration/runtime failures remain errors.
+The `rollback` command always targets the protected `previous-release.json` on
+disk and never takes an operator-supplied manifest. It uses that target
+release's exact source commit for Docker Compose and smoke checks, maintaining
+a separate clean checkout under the protected state root whenever needed so
+bind-mounted files remain available. Missing source commits, dirty checkouts,
+invalid platforms, and configuration or runtime failures remain hard errors.
 
-A successful rollback makes the old release current and the replaced release
-`previous`, so running it again returns to the newer release. An identical
-target is a no-op; matching version strings alone do not establish
-artifact identity. The target Compose graph runs forward initialization where
-required. It never reverses migrations, restores a database, resets Signer
-identity or converts legacy networks.
+When a rollback succeeds, the restored release becomes current and the replaced
+release becomes `previous`, so running `rollback` a second time returns to the
+newer release. If the target release is identical to the active one, the
+command exits as a no-op (matching version strings alone do not establish
+artifact identity). During startup, the target Compose graph runs forward
+initialization where required, and it never reverses migrations, restores a
+database, resets Signer identity, or converts legacy Docker networks.
 
 ## Verify and recover
 
-After upgrade or rollback, require the lifecycle smoke check to pass. Check
-`/api/v1/readyz`, expected version/source at `/api/v1/version`, authenticated
-application reads and the node inventory.
+After every upgrade or rollback, require the built-in lifecycle smoke check to
+pass, then verify `/api/v1/readyz`, the expected version and source metadata at
+`/api/v1/version`, authenticated application reads, and the node inventory.
 
-Failure preserves confirmed state and `pending-release.json` evidence. After a
-failed activation, treat the running containers as unconfirmed (possibly a mix
-of old and new images) until a retry or recovery passes the smoke check.
-Correct the cause and retry the identical target; do not use `install` on an
-existing deployment, delete pending state or force old images into it.
+If activation fails, the script preserves the confirmed release state and
+leaves `pending-release.json` on disk as evidence. Until a retry or recovery
+pass completes the smoke check, treat the running containers as unconfirmed, as
+they may be a mix of old and new images. Fix the underlying cause and retry the
+exact same target release; do not run `install` on an existing deployment,
+delete the pending state files, or manually force old images into the stack.
 
-If same-target recovery is impossible, use a forward fix or an isolated
-[database restore](../operations/incident-recovery.md#database-recovery).
-Fence old writers, verify schema/runtime permissions and the audit chain with
-real keys, and reconcile pending/Unknown work before traffic or commands resume.
-A verified backup alone does not authorize reopening production.
+When recovering to the same target is impossible, apply a forward fix or run an
+isolated [database restore](../operations/incident-recovery.md#database-recovery).
+Before reopening production traffic or issuing commands, fence off old database
+writers, verify schema and runtime permissions and the audit chain with the
+real keys, and reconcile all pending or Unknown work. A verified backup on its
+own does not authorize reopening production.
 
 ## Uninstall
 
-Require no pending install, upgrade or rollback transaction. Retain necessary
-backups and incident evidence, current release and production secrets.
+Before uninstalling, make sure no install, upgrade, or rollback transaction is
+pending, and retain all required backups, incident evidence, current release
+files, and production secrets.
 
 ### Retain data
 
@@ -121,11 +142,11 @@ backups and incident evidence, current release and production secrets.
 deploy/production/controller.sh uninstall
 ```
 
-This removes containers and project networks, retaining bundled database,
-transport/trust volumes, external databases, lifecycle state, backups and secrets.
-The Controller is offline, and nodes lose their Controller connection, until
-`start`.
-Restart the same confirmed release with:
+Running `uninstall` removes the containers and project networks while keeping
+the bundled database, transport and trust volumes, external databases,
+lifecycle state files, backups, and secrets intact. The Controller remains
+offline and managed nodes lose their Controller connection until you run
+`start`. Restart the same confirmed release with:
 
 ```bash
 deploy/production/controller.sh start
@@ -133,24 +154,29 @@ deploy/production/controller.sh start
 
 ### Purge local data
 
-Only when local deletion is intentional:
+Pass `--purge-data` only when you intend to delete local deployment data:
 
 ```bash
 deploy/production/controller.sh uninstall --purge-data
 ```
 
-This removes production project volumes (including bundled database data,
-which cannot be recovered afterwards unless an off-host backup exists) and the
-lifecycle state files (`current-release.json`, `previous-release.json`,
-`pending-release.json` and the deployment profile), not external
-databases, protected secrets, off-host backups, source (including retained
-source clones under the state root) or unrelated volumes. If volume removal
-fails, the purge is partial and the lifecycle state is kept; if only the state
-cleanup fails, the command reports the residual paths and exits non-zero.
-It is neither secure erase nor restore. Integrated mode refuses this operation;
-Signer/identity disposal requires separate reconciliation.
+In addition to removing containers and networks, `--purge-data` deletes the
+production project volumes (including bundled database data, which cannot be
+recovered afterwards without an off-host backup) and the lifecycle state files
+(`current-release.json`, `previous-release.json`, `pending-release.json`, and
+the deployment profile). External databases, protected secrets, off-host
+backups, source checkouts (including retained source clones under the state
+root), and unrelated Docker volumes are left untouched. If Docker fails to
+remove a volume, the purge remains partial and the lifecycle state files are
+kept; if volume removal succeeds and only state-file cleanup fails, the script
+reports the leftover paths and exits non-zero. Note that `--purge-data` does
+not perform a cryptographic secure erase or a restore, and Integrated mode
+refuses the operation because disposing of Signer and identity material
+requires separate reconciliation.
 
-Require command success. For retained data, check containers are removed and
-`start` restores the confirmed release. For purge, verify off-host recovery
-material remains. See [production deployment](../operations/production-deployment.md)
-for filesystem, state and failure contracts.
+Verify that the uninstall command exits zero. After a data-retaining uninstall,
+confirm that the project containers are gone and that `start` restores the
+confirmed release; after a purge, verify that your off-host recovery material
+remains available. See
+[production deployment](../operations/production-deployment.md) for the full
+filesystem, state, and failure contracts.

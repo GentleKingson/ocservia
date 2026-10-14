@@ -1,15 +1,16 @@
 # Production authentication
 
-Production supports **Local only**, **OIDC only**, and **Local + OIDC**. OIDC is
-not mandatory when Local authentication is enabled. Use the normal
-[Controller installation](../getting-started/production.md) and
-[production secret permissions](production-deployment.md#production-secrets)
-for all three modes; these examples replace only the authentication section of
-`install.env`, not the database, TLS, relay, signer, backup or release settings.
-They apply to a manual installation, in Standalone or Integrated and with any
-supported database. Quick (`controller-bootstrap.sh --quick`) always configures
-**Local only** and ignores `./install.env`; it also creates the first two Local
-administrators itself, so use a manual installation for OIDC.
+Production deployments support three authentication modes: Local only, OIDC
+only, and Local + OIDC (OIDC is optional when Local authentication is enabled).
+Follow the standard [Controller installation](../getting-started/production.md)
+and [production secret permissions](production-deployment.md#production-secrets)
+for all three modes. The snippets below replace only the authentication section
+of `install.env`, leaving the database, TLS, relay, signer, backup, and release
+settings as configured for your manual Standalone or Integrated deployment on
+any supported database. Because Quick mode (`controller-bootstrap.sh --quick`)
+always configures Local-only authentication, ignores `./install.env`, and
+creates the first two Local administrators automatically, use a manual
+installation whenever you need OIDC.
 
 ## Choose a mode
 
@@ -21,11 +22,12 @@ OCSERV_PUBLIC_ORIGIN=https://controller.example.com
 OCSERV_SESSION_TTL=8h
 ```
 
-Leave `OCSERV_OIDC_ISSUER`, `OCSERV_OIDC_CLIENT_ID` and
-`OCSERV_OIDC_REDIRECT_URL` unset or empty, including in the invoking shell.
-No OIDC client secret file is needed or mounted. The login page shows username
-and password. In a manual installation, create the first Local admin using the
-one-shot procedure below.
+Leave `OCSERV_OIDC_ISSUER`, `OCSERV_OIDC_CLIENT_ID`, and
+`OCSERV_OIDC_REDIRECT_URL` unset or empty in both `install.env` and the
+invoking shell. No OIDC client secret file is required or mounted, and the
+login page renders only the username and password form. In a manual
+installation, create the initial Local administrator using the one-shot
+bootstrap procedure below.
 
 ### OIDC only
 
@@ -38,10 +40,12 @@ OCSERV_OIDC_CLIENT_ID=ocservia
 OCSERV_OIDC_REDIRECT_URL=https://controller.example.com/api/v1/auth/callback
 ```
 
-Provision `oidc-client-secret` in `OCSERV_SECRET_DIR`. The login page automatically
-redirects to SSO, without a Local password form. Local bootstrap is not used.
-OIDC authentication does not itself grant administrative RBAC roles; retain the
-existing identity/role provisioning and independent approval procedure.
+Provision `oidc-client-secret` in `OCSERV_SECRET_DIR`. With Local
+authentication disabled, the login page redirects straight to SSO without
+showing a password form, and Local bootstrap is unused. Because OIDC login
+authenticates identity without granting administrative RBAC roles on its own,
+continue to use the standard identity and role provisioning workflow with
+independent approval.
 
 ### Local + OIDC
 
@@ -54,64 +58,72 @@ OCSERV_OIDC_CLIENT_ID=ocservia
 OCSERV_OIDC_REDIRECT_URL=https://controller.example.com/api/v1/auth/callback
 ```
 
-Provision `oidc-client-secret` and bootstrap the first Local admin (manual
-installation). The same
-login page offers both the username/password form and **Sign in with SSO**.
+Provision `oidc-client-secret` and, on a manual installation, bootstrap the
+first Local administrator. The login page then presents both the username and
+password form and the Sign in with SSO button.
 
 ## Configuration and secrets
 
-Use `OCSERV_PUBLIC_HOST=controller.example.com` with the examples above. The
-public origin must be HTTPS and must match the browser-facing gateway. The
-template defaults origin to `https://OCSERV_PUBLIC_HOST` and session TTL to `8h`;
-the supported TTL range is `1m` through `24h`. Local auth defaults to `false`,
-preserving existing OIDC installations. Neither authentication method enabled
-is rejected. Partial OIDC configuration is rejected even when Local is enabled.
+Pair the examples above with `OCSERV_PUBLIC_HOST=controller.example.com`. The
+configured `OCSERV_PUBLIC_ORIGIN` must use HTTPS and match the browser-facing
+gateway; the template defaults it to `https://OCSERV_PUBLIC_HOST` and defaults
+`OCSERV_SESSION_TTL` to `8h` (accepted range `1m` through `24h`).
+`OCSERV_LOCAL_AUTH_ENABLED` defaults to `false` so existing OIDC installations
+keep their behavior unless changed. Validation rejects configurations where
+both authentication methods are disabled, and rejects incomplete OIDC settings
+even when Local authentication is enabled.
 
-The production templates set these **container** settings, not plaintext values
-in `install.env`:
+The production Compose templates mount secrets from the host into fixed
+container paths instead of reading plaintext values from `install.env`:
 
 | Modes | Container setting | Protected host source |
 | --- | --- | --- |
 | All three | `OCSERV_SESSION_KEY_FILE=/run/secrets/session_key` | `OCSERV_SECRET_DIR/session-key` |
 | OIDC only / dual-auth | `OCSERV_OIDC_CLIENT_SECRET_FILE=/run/secrets/oidc_client_secret` | `OCSERV_SECRET_DIR/oidc-client-secret` |
 
-`session-key` contains an independently provisioned 32-byte key encoded as 64
-lowercase hexadecimal characters. Both files follow the existing launcher-owned
-`0444` file / private `0700` parent-directory contract. Never put production
-passwords or secret values in Compose YAML, `install.env`, shell arguments or Git.
-The `*_FILE` paths above are fixed by Compose; do not add them to `install.env`.
+`session-key` holds an independently generated 32-byte key encoded as 64
+lowercase hexadecimal characters. Both secret files follow the launcher-owned
+`0444` file mode inside a private `0700` parent directory. Never place
+production passwords or secret values in Compose YAML, `install.env`, shell
+arguments, or Git, and do not add the fixed `*_FILE` variables above to
+`install.env`.
 
-The installer and versioned Controller bootstrap accept and forward the mode,
-origin, TTL and OIDC redirect settings, including across `--root-lifecycle`.
-Explicit exported values override `install.env`, even if empty. Later lifecycle
-and `compose.sh` commands require the same effective exported configuration;
-they do not load `install.env` themselves. Keep the selected image
-settings from the validated deployment configuration for direct `compose.sh` commands.
+Both the production installer and the versioned Controller bootstrap accept and
+forward the authentication mode, origin, session TTL, and OIDC redirect
+variables, including across `--root-lifecycle`. Explicitly exported shell
+variables override `install.env`, even when exported as empty strings. Because
+subsequent lifecycle commands and direct `compose.sh` invocations do not read
+`install.env`, export the same effective configuration (along with the image
+settings from the validated deployment configuration) whenever running them.
 
-`compose.sh` automatically adds `compose.oidc.yaml` when `OCSERV_OIDC_ISSUER`,
-`OCSERV_OIDC_CLIENT_ID` or `OCSERV_OIDC_REDIRECT_URL` is nonempty, checks the
-OIDC secret permissions only in that case, and passes the
-same authentication settings to migrations and the Controller. Use this launcher
-rather than starting the base YAML alone. PostgreSQL credential rotation also
-retains the OIDC overlay when recreating the Controller. Rollback resolves the
-target's deployment files and must satisfy its actual
-authentication settings and secret mounts; descriptor equality is not a gate.
+When any of `OCSERV_OIDC_ISSUER`, `OCSERV_OIDC_CLIENT_ID`, or
+`OCSERV_OIDC_REDIRECT_URL` is nonempty, `compose.sh` automatically includes
+`compose.oidc.yaml`, checks the permissions on `oidc-client-secret`, and passes
+the authentication settings to both the migration job and the Controller.
+Always invoke `compose.sh` so these overlays and checks take effect. PostgreSQL
+credential rotation likewise preserves the OIDC overlay when recreating the
+Controller. During a rollback, the lifecycle resolves the target release's
+deployment files and verifies that its authentication settings and secret
+mounts are satisfied, without requiring the target descriptor to match the
+prior release.
 
 ## Local login from a terminal and 401 diagnosis
 
-The Web login form and terminal client use the same Local endpoint:
-`POST /api/v1/auth/login`, JSON fields `username` and `password`, and
-`Content-Type: application/json`. Supply the exact configured HTTPS
-`OCSERV_PUBLIC_ORIGIN` as `Origin`; a missing or different origin is rejected.
-OIDC login instead starts with `GET /api/v1/auth/login`. Local login does not
-accept an OIDC token or workspace field in its JSON body.
+Both the Web login form and terminal clients authenticate against
+`POST /api/v1/auth/login` with `Content-Type: application/json` and JSON fields
+`username` and `password` (whereas OIDC login starts with
+`GET /api/v1/auth/login`). Every Local login request must send the exact
+configured HTTPS `OCSERV_PUBLIC_ORIGIN` in the `Origin` header; missing or
+mismatched origins are rejected, and the JSON body does not accept an OIDC
+token or workspace field.
 
-Run this on the administrator's workstation or Controller host, with an existing
-Local account. The password is prompted without echo and never appears in shell
-history, arguments or diagnostic output. The private request, response headers
-and cookie jar are removed on exit. Do not use `curl -v`, tracing, or `set -x`;
-headers can contain session cookies. Do not transfer the administrator cookie jar
-to a managed Node.
+Run the diagnostic snippet below from an administrator workstation or the
+Controller host using an existing Local account. It prompts for the password
+without terminal echo so the credential never enters shell history, process
+arguments, or diagnostic output, and it deletes the temporary request payload,
+response headers, and cookie jar on exit. Avoid `curl -v`, request tracing, or
+`set -x` because response headers carry session cookies, and never copy an
+administrator cookie jar onto a managed node.
 
 ```sh
 (
@@ -162,11 +174,13 @@ PYTHON
 )
 ```
 
-A `204` login response establishes the session; the following authenticated GET
-checks that the client retained it. Use an authorized returned workspace ID in
-`X-Workspace-ID` for workspace-scoped APIs. Keep `Origin` on later browser-session
-mutations; login success does not grant a role or permission in every workspace.
-Do not keep retrying bad requests while an account/source cooldown is active.
+An HTTP `204` response from `/api/v1/auth/login` establishes the session, and
+the follow-up `GET /api/v1/workspaces` confirms that the client stored the
+session cookie. Pass one of the returned workspace IDs in `X-Workspace-ID` when
+calling workspace-scoped APIs, and continue sending `Origin` on subsequent
+browser-session mutations. Authenticating a session does not grant permissions
+in every workspace. If an account or source IP cooldown is active, wait for it
+to expire before retrying.
 
 | Failure stage | Check and correlate |
 | --- | --- |
@@ -177,104 +191,115 @@ Do not keep retrying bad requests while an account/source cooldown is active.
 | Login 204, protected API 401 | That API's Request-ID, cookie retention, HTTPS host/path, session expiry/revocation; this is a separate request from login |
 | Protected API 403 | Principal role, selected workspace and resource scope; authentication success alone is insufficient |
 
-The server returns `X-Request-ID`; use it to correlate the fixed, redacted
-`auth.result.reason_code` fields in [Authentication security logs](#authentication-security-logs-r6).
-Sampling can suppress individual events; inspect `auth.summary` counts too.
-Public errors deliberately do not disclose whether an account exists. Never send
-passwords, cookie values, request bodies or raw response headers in an incident
-report. Record the stage, status, request ID and relevant non-secret request
-shape; a status code alone does not identify the cause.
+Use the `X-Request-ID` response header to look up the corresponding redacted
+`auth.result.reason_code` entry in
+[Authentication security logs](#authentication-security-logs-r6), and check
+`auth.summary` counters as well in case sampling suppressed individual log
+lines. Because public error responses intentionally omit whether an account
+exists, a bare HTTP status code cannot distinguish every failure cause. When
+filing an incident report, record the failure stage, HTTP status, request ID,
+and non-secret request attributes, and never include passwords, cookie values,
+request bodies, or raw response headers.
 
 ## OIDC provider setup
 
-Retain Authorization Code flow with **PKCE S256**. Register the exact callback
-`https://controller.example.com/api/v1/auth/callback` at the provider, configure
-the HTTPS issuer and client ID, and deliver the client secret through its file.
-If redirect is omitted, the production overlay defaults it to that callback on
-`OCSERV_PUBLIC_HOST`.
+Configure the OIDC provider for the Authorization Code flow with PKCE S256,
+register the exact callback URL
+`https://controller.example.com/api/v1/auth/callback`, set the HTTPS issuer and
+client ID, and supply the client secret via its secret file. When
+`OCSERV_OIDC_REDIRECT_URL` is omitted, the production overlay defaults to that
+callback path on `OCSERV_PUBLIC_HOST`.
 
-Set `OCSERV_OIDC_ISSUER` to the provider's exact issuer, including any trailing
-slash, port and path. It is an identity identifier, not a URL to normalize.
-Discovery metadata and ID Token `iss` must match it; the OIDC library constructs
-the Discovery request URL without changing the identity identifier. Do not use
-email or username to link accounts or disable issuer verification to fix a mismatch.
+Set `OCSERV_OIDC_ISSUER` to the provider's exact issuer string, preserving any
+trailing slash, port, and path. The Controller treats this value as a literal
+identity identifier without URL normalization: both the Discovery metadata and
+the ID Token `iss` claim must match it byte-for-byte, and the OIDC client builds
+the Discovery URL without altering the configured identifier. Never link
+accounts by email or username, and do not disable issuer verification to work
+around a mismatch.
 
-The origin (scheme, host and effective port) of `OCSERV_OIDC_REDIRECT_URL` must
-equal `OCSERV_PUBLIC_ORIGIN`. A mismatch fails production startup. In dual-auth,
-Local does not make an invalid OIDC configuration acceptable. During an IdP
-outage, existing sessions remain usable, new SSO logins fail closed, and Local
-login remains available when enabled. The browser receives Secure, HttpOnly,
-SameSite cookies, not OIDC tokens in browser storage.
+The origin (scheme, host, and effective port) of `OCSERV_OIDC_REDIRECT_URL`
+must match `OCSERV_PUBLIC_ORIGIN`, or production startup fails. In dual-auth
+mode (`Local + OIDC`), enabling Local authentication does not relax OIDC
+validation. If the identity provider becomes unreachable, existing sessions
+continue working, new SSO logins fail closed, and Local login remains available
+when enabled. Browser sessions use `Secure`, `HttpOnly`, `SameSite` cookies
+without storing OIDC tokens in browser storage.
 
 ### Correcting a historical issuer configuration
 
-Use the provider's authoritative issuer exactly, including its trailing slash.
-Before changing an existing installation, inspect stored `(issuer, subject)`
-values: failed Discovery/token validation created no identity, and configuration
-alone does not prove historical rows exist. Working identities need no migration.
-The application never merges slash/no-slash accounts. If stored identities must
-change, follow [OIDC issuer recovery](incident-recovery.md#oidc-issuer-correction)
-with independent subject-ownership evidence and explicit migration approval.
+Always configure the provider's authoritative issuer string, including its
+trailing slash if present. Before modifying an existing deployment, query the
+database for stored `(issuer, subject)` rows: failed Discovery or token
+validation never creates an identity row, so a misconfigured `install.env`
+alone does not mean historical rows exist, and working identities need no
+migration. Because the application never merges accounts across slash and
+no-slash issuer strings, any change to stored identities must follow
+[OIDC issuer recovery](incident-recovery.md#oidc-issuer-correction) with
+independent subject-ownership evidence and explicit migration approval.
 
 ## Bootstrap the first Local admin
 
-There is **no default administrator password**. In a manual installation,
-bootstrap is a separate, operator-invoked **one-shot**, not part of normal
-install or restart. A Quick installation runs the equivalent steps itself
-(`quick-install.sh`): it provisions the management workspace with the owner
-one-shot below, generates two random passwords, and creates `initial-admin`
-(PlatformAdmin) and `initial-approver` (SecurityAdmin) with
-`--bootstrap-local-admin`. Their passwords exist only in root-only files under
-`/root/ocservia-initial-credentials`; give the accounts to different responsible
-people and change both passwords after first login (nothing forces it). A rerun
-accepts an already-initialized state. Do not repeat the procedure below on a
-Quick host.
+Ocservia ships with no default administrator password. On a manual
+installation, operators initialize the first Local accounts through a separate
+one-shot command outside the normal install and restart path. By contrast, a
+Quick installation (`quick-install.sh`) runs the equivalent initialization
+automatically: it provisions the management workspace using the owner one-shot
+below, generates two random passwords, and runs `--bootstrap-local-admin` to
+create `initial-admin` (`PlatformAdmin`) and `initial-approver`
+(`SecurityAdmin`), storing their credentials in root-only files under
+`/root/ocservia-initial-credentials`. Assign those two accounts to different
+responsible individuals and change both passwords after first login (the system
+does not force a change on first use). Because Quick reruns accept an
+already-initialized database, do not run the manual procedure below on a Quick
+host.
 
-1. Complete the pinned Controller installation with Local enabled and a
+1. Complete the pinned Controller installation with Local authentication
+   enabled and a
    [supported database deployment](production-deployment.md#database-support).
-   Run the installed release's one-shot owner migration (`--migrate-only`),
-   which initializes an empty database from `schema.sql` or applies bounded
-   forward upgrades from `upgrade.sql` against `schema_revisions` (accepting
-   only current-epoch receipts or the fixed `v1.2.0` checkpoint at epoch 1 /
-   revision 0; arbitrary historical databases cannot upgrade directly and must
-   reach `v1.2.0` first). Stop incompatible older Controllers before migration.
-   Confirm the guarded installation's migration process exited successfully
-   (`database migrations complete`) and the Controller is ready.
-   Use the installed release checkout and its effective exported production
-   settings and verified image digests for the commands below. In Integrated
-   mode `compose.sh` must run as root, with the same Integrated settings.
-2. Select an existing management workspace UUIDv7. Bootstrap does not create a
-   workspace. On a completely empty database, an authorized database operator
-   must first provision one through the protected administrative connection.
-   The owner one-shot does this for either backend:
+   Stop any incompatible older Controllers, then run the installed release's
+   one-shot owner migration (`--migrate-only`). That command initializes an
+   empty database from `schema.sql` or applies bounded forward upgrades from
+   `upgrade.sql` against `schema_revisions` (accepting only current-epoch
+   receipts or the fixed `v1.2.0` checkpoint at epoch 1 / revision 0; older
+   databases must upgrade to `v1.2.0` first). Confirm that the migration
+   process logged `database migrations complete` and exited cleanly, and that
+   the Controller is ready. Run the remaining commands from the installed
+   release checkout with the same effective exported production settings and
+   verified image digests; in Integrated mode, run `compose.sh` as root with
+   the Integrated environment exported.
+2. Obtain the UUIDv7 of the management workspace. Because `--bootstrap-local-admin`
+   requires an existing workspace, an authorized database operator must
+   provision one first when starting from an empty database. The owner one-shot
+   handles both PostgreSQL and MySQL:
 
    ```bash
    deploy/production/compose.sh run --rm --no-deps migrate --provision-management-workspace
    ```
 
-   It creates the `Administration` workspace (slug `administration`) with a
-   fresh UUIDv7 only when no workspace exists, returns the same workspace on
-   a rerun, and refuses when other workspaces exist without it. Its
-   `management workspace ready` log line carries `workspace_id`. Alternatively,
-   follow the matching [database preparation](#database-preparation) below;
-   the PostgreSQL SQL is not portable to MySQL.
-   Record that UUID: the Local identity management workspace is fixed at
-   bootstrap, not selected later by an API header.
-3. Establish **independently controlled requester and approver principals**:
-   distinct identities, credentials and authenticated sessions, with separate
-   RBAC authorization. Never share a credential or substitute a second identity
-   ID for authentication. Baseline 1.0 requires this principal separation, not
-   organizational custody by two people. Deployments requiring a two-person
-   rule must additionally assign the credentials to different responsible
-   people and validate custody under their production-hardening or enterprise
-   security profile; automated two-principal tests do not prove that property.
-   Deliver two different passwords separately through the secret manager, in
-   `OCSERV_SECRET_DIR/local-bootstrap-password` and
-   `OCSERV_SECRET_DIR/local-bootstrap-approver-password`. Both files must be
-   owned by the one-shot process UID, mode `0400` or `0600`, within a private
-   `0700` directory. Final-path symlinks, hard links and group/world-readable files are
-   rejected. Never put password contents in environment variables, command
-   arguments, shell tracing or logs. Mount both read-only only for this command:
+   When no workspaces exist, this command creates the `Administration`
+   workspace (slug `administration`) with a fresh UUIDv7 and prints
+   `workspace_id` in the `management workspace ready` log line; rerunning it
+   returns the same workspace, whereas running it when other workspaces already
+   exist without `administration` fails closed. You can also insert the row
+   manually by following [database preparation](#database-preparation) below
+   (note that the PostgreSQL SQL is not portable to MySQL). Record the
+   resulting UUID, as bootstrap permanently binds Local identity management to
+   that workspace regardless of later API headers.
+3. Prepare separate requester and approver principals with distinct identities,
+   credentials, authenticated sessions, and RBAC roles; never share a
+   credential between them or substitute a second identity ID during
+   authentication. Baseline 1.0 enforces this technical separation of
+   principals in the system, while deployments subject to a two-person custody
+   rule must also assign the credentials to two different people under their
+   enterprise security procedures (automated two-principal tests verify only
+   the technical separation). Provision two distinct passwords from your secret
+   manager into `OCSERV_SECRET_DIR/local-bootstrap-password` and
+   `OCSERV_SECRET_DIR/local-bootstrap-approver-password`. Each file must be a
+   regular file (no final-path symlinks or hard links) owned by the one-shot
+   process UID with mode `0400` or `0600` inside a private `0700` directory,
+   and must never be passed via environment variables, CLI flags, shell
+   tracing, or logs. Mount both files read-only for the bootstrap invocation:
 
    ```bash
    # The repository's production control image runs as 65534:65532.
@@ -295,40 +320,41 @@ Quick host.
      control-plane --bootstrap-local-admin
    ```
 
-   The password must satisfy the Local new-password policy below. The existing
-   secret-file format removes one trailing LF and then CR; other spaces and the
-   password's case are preserved. Use a password from your secret manager.
-   The command uses
-   the application's database role, grants existing workspace-scoped
-   `PlatformAdmin` to the administrator and only existing `SecurityAdmin` to the
-   approver in that same workspace. Both identities, credentials, role bindings,
-   completion marker and audit events commit atomically. The command
-   exits without starting listeners/workers or contacting the IdP.
-4. After success, `--rm` removes the one-shot container and its secret mount.
-   Delete both temporary host bootstrap files through your secret-management
-   procedure and remove any temporary bootstrap settings or mounts. Verify
-   both Local logins and their management workspace roles. Keep their durable
-   credentials separately controlled. The approver cannot create/reset Local
-   users or grant PlatformAdmin alone; it can independently approve the
-   administrator's content-bound role grants and password resets.
+   Both passwords must meet the Local new-password policy below; the secret
+   reader strips at most one trailing LF (and preceding CR) while preserving
+   all other whitespace and letter case. Connecting under the application's
+   database role, the command grants workspace-scoped `PlatformAdmin` to the
+   administrator and workspace-scoped `SecurityAdmin` to the approver in the
+   management workspace, committing both identities, credentials, role
+   bindings, the completion marker, and audit events in a single transaction
+   before exiting without starting network listeners, background workers, or
+   IdP connections.
+4. Once the command succeeds (`--rm` removes the container and its mounts),
+   delete both temporary host password files according to your
+   secret-management procedure and verify that both accounts can log in with
+   their expected management workspace roles. Keep their ongoing credentials
+   under separate custody: the approver cannot create or reset Local users or
+   grant `PlatformAdmin` on its own, and instead provides independent approval
+   for the administrator's content-bound role grants and password resets.
 
-Concurrent or subsequent bootstrap attempts are rejected. An existing Local
-SecurityAdmin/PlatformAdmin also blocks initialization. Controller restart does
-not read the bootstrap file or reset/synchronize passwords. Disabling the first
-admin or resetting its password does not re-enable bootstrap. Preserve the
-initialization marker in backups; do not delete it or roll back its migration
-to recover an account.
+Any concurrent or subsequent bootstrap attempt is rejected, as is bootstrapping
+when a Local `SecurityAdmin` or `PlatformAdmin` already exists. Restarting the
+Controller never reads bootstrap password files or resets existing passwords,
+and disabling the initial administrator or resetting its password does not
+re-enable bootstrap. Always retain the initialization marker in backups, and
+never delete the marker or roll back its migration to recover an account.
 
 ### Database preparation
 
-Use an authorized, protected administrative connection to the installed
-database, with verified TLS for an external server and credentials from the
-secret manager, never command-line passwords. The owner connection is for
-provisioning/migration, not for the running Controller or bootstrap command.
-Do not create another workspace when the intended management workspace exists.
-For an empty database, allocate a fresh UUIDv7 outside these SQL examples and
-replace `<management-workspace-uuidv7>` consistently; do not use a server UUID
-function that generates a different UUID version.
+When preparing the database manually, connect with the administrative owner
+role over a protected connection (using verified TLS for external databases and
+credentials retrieved from your secret manager, never passed on the command
+line). Reserve the owner connection for schema migration and workspace
+provisioning; the running Controller and `--bootstrap-local-admin` use the
+application runtime role. If the intended management workspace already exists,
+reuse it. On an empty database, generate a fresh UUIDv7 outside these SQL
+snippets and substitute it for `<management-workspace-uuidv7>` (do not call a
+database UUID function that produces another UUID version).
 
 #### PostgreSQL
 
@@ -339,14 +365,15 @@ SELECT epoch, revision, encode(checksum, 'hex') AS checksum, state, step
 FROM schema_revisions ORDER BY epoch, revision;
 ```
 
-Owner initialization validates the supported epoch/revision, exact artifact
-receipts and actual schema before applying forward SQL. Unknown or altered
-history is refused; do not rewrite the journal. The previous-checkpoint window
-is fixed to v1.2.0, epoch 1 / revision 0. Readiness checks current reads and
-permissions; it does not use a legacy migration filename counter.
+Before applying forward SQL, owner initialization validates the supported epoch
+and revision, exact artifact receipts, and live schema structure, refusing
+unknown or modified history (never edit the journal manually). The
+previous-checkpoint window is pinned to `v1.2.0` at epoch 1 / revision 0, and
+Controller readiness checks live read queries and permissions directly without
+consulting legacy migration filename counters.
 
-PostgreSQL stores the workspace ID as native `uuid` and the times as
-`timestamptz`. On an empty database, provision the workspace:
+PostgreSQL stores workspace IDs as `uuid` and timestamps as `timestamptz`. On
+an empty database, create the management workspace:
 
 ```sql
 INSERT INTO workspaces (id, name, slug, created_at, updated_at)
@@ -362,20 +389,21 @@ SELECT epoch, revision, checksum, state, step
 FROM schema_revisions ORDER BY epoch, revision;
 ```
 
-Every required row must be `verified` and match the installed SQL artifacts.
-Fresh epoch-2 initialization records revision 1; a checkpoint upgrade verifies
-revision 0 before journaled cleanup revision 1. A `running` row requires exact
-artifact repair rather than manual editing. Owner migration verifies actual
-schema and runtime privileges. Runtime startup checks current telemetry
-structures and permissions; readiness checks core reads and stream health.
-Epoch/revision values are backend artifact identities, not PostgreSQL legacy
-migration numbers or a Controller compatibility range.
+Every required row must be in the `verified` state and match the installed SQL
+artifacts. A fresh epoch-2 initialization records revision 1, while a
+checkpoint upgrade verifies revision 0 before applying the journaled cleanup at
+revision 1. Any row left in `running` requires exact artifact repair and must
+not be edited manually. Owner migration verifies both the live schema and
+runtime privileges; runtime startup checks telemetry structures and
+permissions; and readiness checks core read queries and stream health. The
+`epoch` and `revision` columns identify backend SQL artifacts and do not map to
+PostgreSQL legacy migration numbers or a Controller compatibility range.
 
-At the current migrated schema, workspace IDs are `VARBINARY(16)` with an exact
-16-byte length constraint, using unswapped RFC UUID byte order.
-Workspace times are signed `BIGINT` microseconds since
-`2000-01-01 00:00:00 UTC`, not Unix seconds or SQL date/time strings.
-Use the same UUIDv7 text later in `OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID`:
+In the current migrated MySQL schema, workspace IDs use `VARBINARY(16)` with an
+exact 16-byte length constraint in unswapped RFC UUID byte order, and workspace
+timestamps are signed `BIGINT` microseconds since `2000-01-01 00:00:00 UTC` (do
+not pass Unix seconds or SQL date/time strings). Pass the same UUIDv7 string to
+`OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID` in step 3:
 
 ```sql
 SET @workspace_id = UNHEX(REPLACE('<management-workspace-uuidv7>', '-', ''));
@@ -384,64 +412,71 @@ INSERT INTO workspaces (id, name, slug, created_at, updated_at)
 VALUES (@workspace_id, 'Administration', 'administration', @created_at, @created_at);
 ```
 
-Do not use swapped UUID bytes, `now()` directly in BIGINT columns, or this
-current-schema example on an unmigrated or pre-checkpoint database.
-After either branch, return to step 3 of the shared bootstrap procedure.
+Never insert swapped UUID bytes or call `now()` directly into `BIGINT`
+timestamp columns, and do not run this current-schema statement against an
+unmigrated or pre-checkpoint database. After completing either database branch,
+return to step 3 of the bootstrap procedure above.
 
 ### Upgrading a single-administrator installation
 
-Before the `v1.2.0` checkpoint, historical PostgreSQL migration `000034`
-recorded `completion_pending=true` only for the original active
-Local bootstrap PlatformAdmin, with a matching bootstrap audit event and no
-other historical SecurityAdmin/PlatformAdmin binding in the fixed workspace.
-Disabled bindings also closed eligibility, and all other existing deployments
-were marked closed without changing identities, credentials or roles. Current
-releases upgrade only from the `v1.2.0` checkpoint or current-epoch
-`schema_revisions` and do not replay removed pre-checkpoint migrations. No
-marker or no verifiable original admin means no automatic recovery exception.
-MySQL never ran that pre-checkpoint PostgreSQL migration; its initialized schema
-includes the two-principal contract. Use the stored eligibility marker, not a
-backend revision number, to decide whether completion is allowed.
-
-Inspect the marker using the protected administrative database connection:
+Prior to the `v1.2.0` checkpoint, PostgreSQL migration `000034` set
+`completion_pending=true` only when the original Local bootstrap
+`PlatformAdmin` remained active, had a matching bootstrap audit event, and
+shared the fixed management workspace with no other historical `SecurityAdmin`
+or `PlatformAdmin` binding. Any disabled binding or additional elevated binding
+marked the deployment closed without altering identities, credentials, or
+roles. Current releases upgrade only from the `v1.2.0` checkpoint or
+current-epoch `schema_revisions` and do not replay removed pre-checkpoint
+migrations, so a deployment without that marker or without a verifiable
+original administrator has no automatic completion path. MySQL deployments
+never ran that pre-checkpoint PostgreSQL migration because their initial schema
+already enforced the two-principal contract. Always inspect the stored
+eligibility marker in `local_auth_bootstrap` (and not the backend revision
+number) to determine whether bootstrap completion is permitted:
 
 ```sql
 SELECT identity_id, workspace_id, completion_pending, completed_at,
        approver_identity_id FROM local_auth_bootstrap;
 ```
 
-For an eligible deployment, run the **same one-shot command and two mounts
-above**, replacing `--bootstrap-local-admin` with `--complete-local-bootstrap`.
-Set the original administrator username and fixed workspace. The administrator
-Secret file must contain its **current** password, not a replacement; the other
-file contains the new, separately delivered approver password. The command
-verifies the original credential under Local attempt protection and rechecks
-the frozen state while holding the initialization lock. It creates only a new
-SecurityAdmin identity, never modifies an existing password, and consumes the
-completion opportunity atomically with role and audit. Repeated/concurrent
-completion fails closed. Later elevated grants close pending completion too.
+When `completion_pending` is true, run the same one-shot container command and
+two read-only secret mounts from step 3 above, substituting
+`--complete-local-bootstrap` for `--bootstrap-local-admin`. Supply the original
+administrator username and fixed workspace ID, place the administrator's
+current password in `local-bootstrap-password` (this command verifies the
+existing password and does not replace it), and place the new, separately
+delivered approver password in `local-bootstrap-approver-password`. Holding the
+initialization lock, the command verifies the administrator's current
+credential under Local attempt protection, rechecks the frozen bootstrap state,
+creates the new `SecurityAdmin` identity, and records the role binding,
+completion timestamp, and audit event in a single transaction. Concurrent or
+repeated completion attempts fail closed, and any subsequent elevated role
+grant also closes pending completion.
 
-An installation with existing independent authority needs **no** completion
-command. Losing that authority later does not reopen initialization. Normal
-Controller startup and login never create a workspace, an account or a grant.
+Deployments that already have independent approval authority do not need this
+command, and losing that authority later never reopens initialization. Normal
+Controller startup and login paths never create workspaces, accounts, or role
+grants.
 
 ### Approval and password operations
 
-Use the authenticated API client over HTTPS with the exact trusted `Origin`.
-`POST /api/v1/local-users` creates a Local identity with no roles. To elevate it,
-the administrator submits `POST /api/v1/approval-requests` with
-`action=role_binding.elevate`, `resource_type=role_binding`, the new identity as
-`resource_id`, and `role_binding={identity_id,role,resource_type:"workspace"}`.
-Use the fixed `X-Workspace-ID`, a reason and `ttl_seconds` (60..86400). The
-separate approver reviews the returned content and submits
-`POST /api/v1/approval-requests/{id}:approve` with `reason` and
-`expected_request_hash`. The administrator then submits `POST /api/v1/role-bindings`
-with the same identity/role/scope, `workspace_id`, `reason` and `approval_id`.
-Requester self-approval remains forbidden, including after bootstrap.
+Perform Local user administration over HTTPS using an authenticated API client
+that sends the exact configured `Origin`. Calling `POST /api/v1/local-users`
+creates a Local identity without roles. To grant it an elevated role, the
+administrator first submits `POST /api/v1/approval-requests` with
+`action=role_binding.elevate`, `resource_type=role_binding`, the new identity
+ID as `resource_id`, `role_binding={identity_id,role,resource_type:"workspace"}`,
+the fixed management workspace in `X-Workspace-ID`, a `reason`, and
+`ttl_seconds` (between 60 and 86400). The independent approver reviews the
+request payload and calls `POST /api/v1/approval-requests/{id}:approve` with a
+`reason` and `expected_request_hash`. Once approved, the administrator calls
+`POST /api/v1/role-bindings` with the matching identity, role, scope,
+`workspace_id`, `reason`, and `approval_id`. Requesters cannot approve their
+own requests at any stage.
 
-For self-service, provision a private JSON request file through your secret
-manager containing only `current_password` and `new_password`. With a private
-cookie jar from Local login, execute:
+For self-service password changes, write a private JSON file containing only
+`current_password` and `new_password` (omitting any identity ID or workspace
+field) and submit it using a cookie jar from an active Local session:
 
 ```sh
 curl --fail-with-body --silent --show-error \
@@ -452,104 +487,124 @@ curl --fail-with-body --silent --show-error \
   "${OCSERV_PUBLIC_ORIGIN}/api/v1/auth/change-password"
 ```
 
-Success is **204 and mandatory re-login**: every old session is revoked, not
-just the current cookie. Do not submit an identity ID or workspace. Incorrect
-current passwords share the login account's backoff; OIDC and Break-glass
-sessions cannot use this endpoint. Policy rejection is 400; invalid/stale Local
-credentials or a blocked attempt is 401. Remove the temporary request file.
-Administrator `:reset-password` still requires the independent, one-use
-`local_user.reset-password` approval and `X-Approval-ID`; reset does not enable
-a disabled account.
+Delete the temporary JSON file immediately after the request completes. An HTTP
+`204` response confirms the password change and revokes every active session
+for that identity (including the current cookie), requiring the user to log in
+again. Failed current-password checks share the account's login failure
+backoff, returning `401` on invalid or stale credentials or an active cooldown
+and `400` on password-policy violations; OIDC and Break-glass sessions cannot
+call this endpoint. An administrator-initiated `:reset-password` call requires
+an independent, single-use `local_user.reset-password` approval passed via
+`X-Approval-ID` and leaves disabled accounts disabled.
 
 ### Management protection and recovery
 
-Disable returns 409 rather than removing the last active Local workspace
-PlatformAdmin or reducing Local workspace approval authority below two distinct
-active identities. Only matching Local credentials, non-disabled identities and
-workspace-wide bindings in the fixed management workspace count. Other
-workspaces, narrower/historical bindings, OIDC and Break-glass do not substitute
-for these durable Local recovery anchors. Checks and disable serialize in one
-transaction; two administrators cannot bypass this by disabling each other.
-The current application has no role-binding deletion or identity deletion API.
-Direct database administration remains a trusted, externally controlled boundary.
+The Controller refuses to disable an account (`409 Conflict`) if doing so would
+remove the last active Local `PlatformAdmin` or leave fewer than two distinct
+active Local identities holding workspace-wide approval authority in the fixed
+management workspace. Only active Local identities with valid Local credentials
+and workspace-wide bindings in that management workspace satisfy this invariant;
+bindings in other workspaces, narrower or historical bindings, OIDC accounts,
+and Break-glass credentials do not count toward Local recovery authority.
+Because the invariant check and the disable update execute in a single
+serialized transaction, two administrators cannot concurrently disable one
+another. The API exposes no endpoint to delete role bindings or identities, and
+direct database administration remains an externally governed boundary.
 
-Before disabling a protected account, create a replacement through the normal
-Local API, obtain an independent elevated-role approval, verify its login under
-the new responsible person's control, then retry disable. If one password is
-lost, use the surviving administrator and an independent approver to perform
-the approved reset. A separately governed, already enabled Break-glass session
-can request/execute a reset with a surviving SecurityAdmin's approval; it cannot
-self-approve and must follow the existing rotation/incident policy.
+To retire a protected Local account, first create its replacement via the Local
+API, complete an independent elevated-role approval, and verify that the new
+responsible operator can log in before disabling the old account. If one
+administrator loses a password, the surviving administrator and an independent
+approver can execute an approved password reset. An already-enabled, separately
+governed Break-glass session can also request and execute a password reset
+once approved by a surviving `SecurityAdmin`, subject to the standard
+Break-glass rotation and incident rules (it cannot self-approve).
 
-If no usable administrator/independent approver pair remains, stop writes,
-preserve incident evidence and follow [Local authority recovery](incident-recovery.md#lost-local-administration-authority).
-Preserve initialization markers and audit history; never delete or edit the
-bootstrap marker to reinitialize. Recovery includes revoking restored sessions
-before access reopens.
+If no working administrator and independent approver pair remains, halt write
+operations, preserve incident evidence, and follow
+[Local authority recovery](incident-recovery.md#lost-local-administration-authority).
+Retain all initialization markers and audit records, never delete or alter the
+bootstrap marker to force reinitialization, and revoke any restored sessions
+before reopening access.
 
 ## Local new-password policy
 
-Bootstrap, managed user creation, self-service password changes and administrator
-resets share the same new-password policy:
+Bootstrap, managed user creation, self-service password changes, and
+administrator password resets all enforce the same new-password policy:
 
-- At least 15 Unicode code points, at most 1024 UTF-8 bytes; invalid UTF-8 is rejected.
-- Long passwords, spaces and valid Unicode are supported. No uppercase, digit
-  or symbol composition rules, and no periodic forced changes are added.
-- Complete candidates are checked offline against an embedded common/breached
-  list and service-related supplement. No substring dictionary rejection or
-  online password checks are used. See the
+- Passwords must contain at least 15 Unicode code points and at most 1024 UTF-8
+  bytes; invalid UTF-8 sequences are rejected.
+- Long passphrases, spaces, and arbitrary valid Unicode characters are accepted
+  without uppercase, digit, or symbol composition rules or periodic expiration.
+- Each candidate password is checked offline against an embedded list of common
+  and breached passwords plus a service-specific supplement, without substring
+  dictionary rules or external network queries; see the
   [list provenance, license and maintenance procedure](../../control-plane/internal/auth/password_blocklist/README.md).
-- Password bytes are not trimmed, truncated, case-changed or Unicode-normalized
-  by the policy or hashing functions. Only blocklist lookup is case-insensitive.
-- Policy failures return a safe explanation (HTTP 400 for management endpoints),
-  before database writes: no identity, credential, role, audit mutation, session
-  revocation or reset-approval consumption occurs. Passwords/hashes are not logged.
+- Neither policy validation nor hashing trims, truncates, alters case, or
+  Unicode-normalizes the password bytes (only the blocklist comparison is
+  case-insensitive).
+- When a candidate fails policy checks, the endpoint returns a safe error
+  explanation (`400 Bad Request` on management endpoints) before touching the
+  database, leaving identities, credentials, roles, audit logs, active
+  sessions, and reset approvals unchanged. Plaintext passwords and hashes are
+  never logged.
 
-Existing hashes still verify the original password bytes, including historical
-short or now-blocklisted passwords. Login does not apply this new-setting policy
-and continues returning uniform credential errors. A later reset must meet the
-new policy. Argon2id, random salts, PHC parameters/limits and dummy verification
-remain unchanged. The length and blocklist rules follow
-[NIST SP 800-63B-4, section 3.1.1.2](https://pages.nist.gov/800-63-4/sp800-63b.html#passwordver).
-Unicode normalization is deliberately deferred to preserve historical hashes.
+Existing stored hashes continue to verify against their original password
+bytes, even if a historical password is shorter than 15 code points or appears
+on a newer blocklist. The login endpoint does not run new-password policy
+checks and returns uniform credential-rejection errors, whereas any subsequent
+password change or reset must satisfy the current policy. Hashing continues to
+use Argon2id with random salts, fixed PHC parameters and resource limits, and
+dummy verification for unknown users. Length and blocklist checks follow
+[NIST SP 800-63B-4, section 3.1.1.2](https://pages.nist.gov/800-63-4/sp800-63b.html#passwordver),
+while Unicode normalization remains intentionally omitted so existing hashes
+continue to validate.
 
 ## Authentication request budgets and proxy trust
 
-OIDC login and callback each allow 30 requests per source per minute, 120 total
-requests per minute, and 8 in-flight requests per API process. Their budgets
-are independent, so starting logins cannot consume callback capacity. Excess
-requests receive `429` with `Retry-After`; no account is persistently locked.
-Each source table holds at most 4096 addresses and retains live windows rather
-than evicting them to give an attacker fresh capacity. These are fixed one-minute
-windows, not rolling quotas. Multiple API replicas multiply the limits; keep
-edge protection for distributed floods.
+OIDC login initiation and OIDC callback each enforce separate fixed one-minute
+budgets of 30 requests per source IP, 120 total requests across all sources,
+and 8 concurrent in-flight requests per API process. Because the two budgets
+are independent, a flood of login starts cannot starve callbacks. Requests
+exceeding these limits receive `429` with a `Retry-After` header without
+locking any account. Each source table tracks up to 4096 addresses and keeps
+live one-minute windows in place until they expire so an attacker cannot gain
+fresh quota by forcing table evictions. Running multiple API replicas scales
+these per-process limits linearly; maintain edge rate limiting for distributed
+floods.
 
-Local login separately allows 5 requests per source per minute, 120 total
-requests per minute and 4 concurrent requests per API process. These limits
-apply even to correct passwords; account backoff below is a separate boundary.
+Local login enforces its own per-process budget of 5 requests per source IP per
+minute, 120 total requests per minute, and 4 concurrent in-flight requests.
+These rate limits apply before and independently of password verification,
+while the cross-Controller account failure backoff described below provides a
+second, account-keyed layer.
 
-The shipped Caddy overwrites `X-Ocservia-Client-IP` with the client address it
-sees: its direct TCP peer in Standalone, or in Integrated the client address in
-the PROXY metadata that Edge sends (accepted only from Edge's dedicated address;
-see the [Integrated contract](../development/integrated-deployment-contract.md#network-and-trust)).
-The API accepts this single IP only from configured trusted peers; it ignores
-client-supplied `X-Forwarded-For`. Do not trust the entire shared application
-network or publish the Controller's port.
+In production Compose deployments, the shipped Caddy gateway overwrites
+`X-Ocservia-Client-IP` with the client IP it observes: the direct TCP peer in
+Standalone mode, or the client address extracted from Edge's PROXY header in
+Integrated mode (accepted exclusively from Edge's dedicated address; see the
+[Integrated contract](../development/integrated-deployment-contract.md#network-and-trust)).
+The Controller API trusts `X-Ocservia-Client-IP` only when the connection comes
+from a configured trusted proxy peer and always ignores client-supplied
+`X-Forwarded-For` headers. Never mark the entire shared application network as
+trusted or publish the Controller container port directly.
 
-Outside production Compose, the API still defaults to trusting no proxy.
-Requests then share the directly connected peer's budget, including all users
-behind an unconfigured gateway. If another proxy is placed in
-front of Caddy, its clients share that proxy's budget; enforce client-level
-limits there rather than trusting arbitrary forwarded addresses.
+Outside production Compose, the API trusts no proxy by default, so all requests
+arriving through an unconfigured gateway share that gateway peer's per-source
+budget. Similarly, if you place an external reverse proxy or load balancer in
+front of Caddy, all clients behind that proxy share its source IP budget at
+Caddy; enforce per-client rate limits at the outer proxy and do not configure
+the Controller to trust arbitrary forwarded headers.
 
-Break-glass has its own 4-request in-flight budget and permits 5 invalid token
-attempts per source per minute. A matching enabled emergency credential bypasses
-the failed-request rate/table limits, but never bypasses origin validation,
-rotation enforcement, auditing, or session creation checks. OIDC outages or
-exhausted OIDC budgets therefore do not consume emergency capacity. Keep the
-offline credential available and alert on authentication `429` responses through
-the existing HTTP telemetry. Rate limiting does not replace an external DDoS
-control or make a stolen emergency credential safe.
+Break-glass authentication uses a dedicated budget of 4 concurrent in-flight
+requests and allows at most 5 invalid token attempts per source IP per minute.
+Presenting a valid, enabled emergency credential bypasses the failed-request
+rate and source-table limits while still enforcing `Origin` validation,
+rotation checks, audit logging, and session creation rules, so OIDC outages or
+exhausted OIDC/Local rate limits cannot block emergency access. Keep the
+offline Break-glass credential accessible and alert on authentication `429`
+responses via HTTP telemetry. Application rate limiting complements external
+DDoS mitigation and does not protect a compromised emergency credential.
 
 For gateway addresses and subnet overrides, see
 [deployment networking](production-deployment.md#authentication-request-budgets).
@@ -557,12 +612,14 @@ For gateway addresses and subnet overrides, see
 <a id="local-account-failure-backoff-r2"></a>
 ## Local account failure backoff
 
-Account backoff is shared across Controllers and is independent of the
+Account failure backoff is coordinated across Controllers in the database and
+operates independently of the
 [per-process request budgets](#authentication-request-budgets-and-proxy-trust).
 
-Account admission uses the selected backend's `local_auth_attempts`, keyed by the exact
-Local username normalization (trim, lowercase, existing ASCII/input rules).
-Known and unknown usernames follow the same policy:
+Admission tracks attempts in the backend's `local_auth_attempts` table, keyed
+by the normalized Local username (trimmed, lowercased, and validated under the
+existing ASCII and input rules). Known and unknown usernames follow identical
+rules:
 
 | Parameter | Policy |
 | --- | --- |
@@ -575,39 +632,49 @@ Known and unknown usernames follow the same policy:
 | Capacity | At most 16,384 live username rows per database |
 | Database admission/completion timeout | 2 seconds each |
 
-Cooldown and occupied-lease refusals do not change the deadline or count. They
-return the same 401 problem as invalid credentials, without `Retry-After` or
-account-existence details. Ordinary unknown-user verification still executes
-dummy Argon2id; account-refused requests do not execute KDF. Existing IP/global
-resource refusals continue to use 429 and `Retry-After`. A valid concurrent login
-can therefore receive 401 while another request holds that account's lease.
+Refusals caused by an active cooldown or an occupied verification lease leave
+the failure counter and window deadline unchanged and return the same generic
+`401` response as an invalid password (omitting `Retry-After` and any
+indication of whether the account exists). While normal unknown-user attempts
+run a dummy Argon2id verification, requests refused at the account-admission
+step skip KDF execution altogether; IP and global rate-limit refusals continue
+to return `429` with `Retry-After`. Because only one 30-second verification
+lease is permitted per username at a time, a legitimate login submitted
+concurrently with another attempt for the same username will also receive `401`.
 
-Database or corrupt-hash failures are not incorrect passwords. A correct password
-for a disabled identity still cannot create a session. At username capacity,
-new keys receive generic 503 while tracked keys retain protection; live state is
-never evicted to admit new names. Infrastructure errors also fail closed with 503.
-Abandoned verification leases expire after at most 30 seconds. Reset and disable
-clear account state transactionally. Stop affected Local login instances before
-replacement, preserve backoff state and verify authentication before resuming service. Binary rollback does not undo it.
-See [attempt completion and expiry](../development/identity-authorization-audit.md#attempt-completion-and-expiry)
-for cancellation, lease fencing and database-clock behavior.
+Database errors or corrupt password hashes do not increment the incorrect-password
+counter, and a valid password for a disabled identity still cannot establish a
+session. When `local_auth_attempts` reaches its 16,384-row capacity, requests
+for untracked usernames fail closed with a generic `503` while already-tracked
+usernames retain their backoff state (live rows are never evicted to admit new
+keys); database or infrastructure failures likewise return `503`. Abandoned
+verification leases expire after at most 30 seconds, and administrative
+password resets or account disables clear the account's backoff row within the
+same transaction. Before replacing Local login instances, stop the affected
+instances, preserve the database backoff state, and verify authentication
+before returning to service (binary rollback does not clear database backoff
+rows). See
+[attempt completion and expiry](../development/identity-authorization-audit.md#attempt-completion-and-expiry)
+for request cancellation, lease fencing, and database-clock details.
 
-This is bounded account protection, not a solution to targeted denial of login:
-an attacker can still cause temporary account cooldown, and a saturated table
-temporarily denies new keys. It intentionally retains IP protection alongside
-account protection, as discussed in the OWASP
+This mechanism bounds password-guessing throughput per account while keeping
+per-IP throttling active; a targeted attacker can still trigger temporary
+five-minute cooldowns on a known username or saturate the 16,384-row table to
+block untracked usernames temporarily. This dual-layer design follows the OWASP
 [Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html#login-throttling)
-and [Credential Stuffing Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Credential_Stuffing_Prevention_Cheat_Sheet.html).
+and
+[Credential Stuffing Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Credential_Stuffing_Prevention_Cheat_Sheet.html).
 
 <a id="authentication-security-logs-r6"></a>
 ## Authentication security logs
 
-Local login and OIDC start/callback reuse the Controller's structured `slog`
-output. These routes replace the duplicate `http request` entry with one
-`auth.result` per outcome (subject to sampling below). `started` means an OIDC
-redirect was prepared, not that a session exists. `succeeded` is emitted only
-after successful session creation. No production logging configuration changes
-or external logging service are required.
+Local login and OIDC start and callback routes write to the Controller's
+standard structured `slog` stream, replacing the generic `http request` log
+line on those paths with one `auth.result` record per outcome (subject to the
+sampling rules below). An outcome of `started` means an OIDC redirect was
+prepared prior to session creation, whereas `succeeded` is emitted only after a
+session is established. These events require no extra logging configuration or
+external log collector.
 
 | Field | Contract |
 | --- | --- |
@@ -631,79 +698,97 @@ or external logging service are required.
 | OIDC callback | `disabled`, `state_rejected`, `callback_rejected`, `session_created`; post-validation session/DB failure: `infrastructure_failure` (`unavailable`) |
 | Both methods' resource admission | `source_limited`, `global_limited`, `concurrency_limited`, `source_capacity` |
 
-Unknown users, wrong passwords and disabled accounts retain the same credential
-response; account cooldown still returns that same 401 without Retry-After.
-OIDC callback errors remain generic. Raw upstream errors are never logged: they
-can contain response bodies, tokens or URLs. No request bodies, passwords/hashes,
-session values/Cookies, OIDC codes/tokens, client secrets, connection strings or
-callback URLs enter these events. Request-derived output is length-bounded,
-control/non-ASCII bytes are replaced, and the existing JSON handler encodes it.
+Unknown usernames, wrong passwords, and disabled accounts all return the same
+external credential error, and account cooldown returns that same `401` without
+`Retry-After`; OIDC callback failures likewise return generic errors to the
+caller. The logger never records raw upstream IdP errors (which can contain
+response bodies, tokens, or URLs), request bodies, passwords, password hashes,
+session cookies, OIDC authorization codes or tokens, client secrets, database
+connection strings, or callback URLs. All request-derived fields are bounded in
+length, have control and non-ASCII bytes replaced, and pass through the
+standard JSON log encoder.
 
-`account_ref` is a pseudonym, **not anonymous data** or a bare username hash.
-HMAC-SHA-256 derives a log-only key from the session key with domain
-`ocservia/auth-log/account-key/v1\0`; account HMAC uses the separate domain
-`ocservia/auth-log/local-account/v1\0` and the credential normalizer. References
-correlate across Controllers sharing that key and change on key rotation. Treat
-references and source addresses as restricted security data; knowing the key
-allows username enumeration. Do not expose logs or keys to login clients.
+The `account_ref` field is a keyed pseudonym (not anonymous data and not a
+plain username hash). Using HMAC-SHA-256, the Controller derives a dedicated
+logging key from the session key under the domain
+`ocservia/auth-log/account-key/v1\0`, and then computes the account HMAC over
+the normalized username under the domain
+`ocservia/auth-log/local-account/v1\0`. Values correlate across Controllers
+that share the same session key and rotate whenever the session key rotates.
+Because anyone holding the session key can enumerate usernames against
+`account_ref`, protect both the logs and the session key as restricted security
+material and never expose them to clients.
 
-Each Controller samples the first **10 results per fixed category per 60-second
-window**, including successes, with a saturating suppressed counter. There are
-23 fixed categories: at most 230 result entries plus 23 summaries per window,
-constant memory, no per-account/IP log map, queue or timer. The next authentication
-event after expiry flushes summaries; idle periods delay them, and process exit
-loses pending counts. Summaries carry no individual request/account attribution.
-Success/start uses Info; refusals, failures and summaries use Warn, not Debug.
-This bounds application authentication output, not gateway or unrelated access
-logs. Keep existing host/container rotation, retention and access protections;
-this change does not alter them. Logging errors/panics are best effort and do not
-change authentication or authorization; a blocked output sink can still delay
-requests. Sampling does not bypass the independent authentication/KDF budgets.
+To bound log volume in constant memory without per-account or per-IP maps,
+queues, or background timers, each Controller logs the first 10 `auth.result`
+entries per fixed category in each 60-second window (including successes) and
+counts any additional occurrences in a saturating suppressed counter. Across
+the 23 fixed categories, a Controller emits at most 230 `auth.result` records
+and 23 `auth.summary` records per window. Summary records carry no individual
+request or account identifiers and are flushed by the first authentication
+event after a window expires (so idle periods delay summary emission and
+process exit drops unflushed counters). Successful logins and OIDC starts log
+at `Info` level, while refusals, failures, and summaries log at `Warn` level.
+This sampling applies only to application authentication events, leaving
+gateway access logs and host or container log-rotation and retention policies
+unchanged. Logging errors or panics are handled best-effort without altering
+authentication or authorization decisions, though a blocked stdout sink can
+still slow request handling, and log sampling never bypasses the authentication
+rate or KDF budgets.
 
-These events are separate from `audit_events` and `security_alerts`. Wrong
-passwords do not enter workspace audit transactions. Password changes, account
-administration, approvals and Break-glass retain their existing transactional
-audit/alert requirements. The exclusions and bounded logging follow the
+Structured `auth.result` and `auth.summary` logs are separate from the
+database `audit_events` and `security_alerts` tables: failed password attempts
+do not write workspace audit rows, whereas password changes, account
+administration, approvals, and Break-glass sessions continue to record their
+transactional audit events and security alerts. These redaction and rate-bounding
+rules follow the
 [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html).
 
 ## Local identity and sessions
 
-Local passwords are stored as **Argon2id** hashes. Local identities use
-`issuer=local`; Local and OIDC identities never automatically merge, even when
-usernames or email addresses match. These are platform login accounts, not VPN
-accounts on managed nodes. There is no self-registration or automatic linking.
+Local passwords are stored as Argon2id hashes under identities with
+`issuer=local`. Local and OIDC identities never merge automatically, even when
+their usernames or email addresses match, and neither self-registration nor
+automatic account linking is supported. These identities govern platform
+console and API access and are completely separate from VPN user accounts on
+managed nodes.
 
-Local user administration uses existing RBAC (`local_user.manage`) in the fixed
-management workspace, not a new role system. Creating a user does not grant roles.
-Password reset needs the existing independent approval flow. See
+Administrators manage Local users through the existing `local_user.manage` RBAC
+permission within the fixed management workspace. Creating a Local user grants
+no roles, and resetting a user's password requires the standard independent
+approval workflow; see
 [identity administration](../development/identity-authorization-audit.md#local-initialization-and-lifecycle-r4)
-for endpoints and permission details.
+for endpoint and permission specifications.
 
-Disabling a user or resetting its password revokes **all sessions for that
-identity** in the same transaction. Disabled users cannot authenticate; password
-reset does not re-enable them. A concurrent login cannot issue a usable stale
-session after the change commits. Already-authorized in-flight requests are not
-retroactively cancelled.
+Disabling a Local user or resetting its password revokes all active sessions
+for that identity in the same database transaction. A disabled user cannot
+authenticate, and resetting a password does not re-enable a disabled account.
+Once the transaction commits, any concurrent login attempt in flight cannot
+issue a usable stale session, although already-authorized requests that are
+currently executing are not retroactively aborted.
 
 ## Break-glass and deployment checks
 
-Local authentication is **not a replacement for Break-glass**. Break-glass remains
-an independent emergency offline-credential access mechanism, with mandatory
-credential **rotation**, critical **alert**, **audit** event and a **15-minute
-short session**. Keep its offline credential and response procedure separate
-from Local administrator passwords. See the existing
+Local authentication complements Break-glass and does not replace it.
+Break-glass remains a separate offline emergency access path with mandatory
+credential rotation, a critical security alert, a transactional audit event,
+and a 15-minute session lifetime. Store the Break-glass credential and its
+incident runbook separately from Local administrator passwords; see the
 [Break-glass contract](../development/identity-authorization-audit.md#break-glass).
 
-Before activation, with the effective configuration exported, run:
+Before activating a deployment, export the effective configuration and validate
+the rendered Compose specification and secret file metadata:
 
 ```bash
 deploy/production/compose.sh config --quiet
 ```
 
-This validates Compose and secret metadata, not secret contents or IdP reachability.
-Controller startup performs full authentication configuration validation. Verify
-the intended login options over HTTPS, successful login and logout, RBAC and
-session revocation after installation. Do not print secret contents for diagnosis.
-For documentation and implementation changes, use the appropriate checks in
-[Validate a change](../development/testing.md) in an authorized isolated environment.
-The focused deployment configuration check is `scripts/test-production-auth-config.sh`.
+Because `compose.sh config --quiet` checks only Compose syntax and host file
+permissions without inspecting secret contents or contacting the IdP, full
+authentication validation runs at Controller startup. After installation,
+verify the login page options over HTTPS along with login, logout, RBAC
+enforcement, and session revocation, without printing secret contents during
+troubleshooting. When validating documentation or code changes in an isolated
+test environment, follow [Validate a change](../development/testing.md) and run
+the focused configuration regression script
+`scripts/test-production-auth-config.sh`.

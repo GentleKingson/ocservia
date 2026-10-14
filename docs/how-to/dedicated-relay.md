@@ -1,29 +1,34 @@
 # Configure a dedicated Relay
 
-Each supported deployment uses one dedicated HTTPS Relay with custom mode,
-authenticated token files and the existing identity/command security checks.
-This page covers the Standalone Relay host. Integrated runs the Relay on the
-Controller host and derives its URL from `OCSERV_RELAY_PUBLIC_HOST`; see the
-[Integrated lifecycle configuration](../../deploy/production/integrated/README.md#lifecycle-configuration).
-Public/default relays are never a production fallback. Normal direct
-connectivity remains available; a recovery test must prove dependence on the Relay.
+Every supported deployment uses a single dedicated HTTPS Relay running in
+custom mode with authenticated token files and the standard identity and
+command verification checks. The instructions below cover a Standalone Relay on
+its own host; in an Integrated deployment, the Relay runs on the Controller
+host and derives its URL from `OCSERV_RELAY_PUBLIC_HOST` (see the
+[Integrated lifecycle configuration](../../deploy/production/integrated/README.md#lifecycle-configuration)).
+Public or default relays are never used as a production fallback. Because
+normal direct connectivity remains active alongside the Relay, any Relay
+recovery test must prove that traffic actually depends on the Relay path.
 
 ## Before you begin
 
-- One independent Relay host with a DNS name and certificate.
-- The same high-entropy relay access token provisioned to the Relay, the
-  Controller transport service, and enrolled Agents.
-- A prebuilt relay image with an explicit `vX.Y.Z` tag or SHA256 reference.
+- One independent Relay host with a DNS name and matching TLS certificate.
+- A single high-entropy relay access token provisioned to the Relay, the
+  Controller transport service, and all enrolled Agents.
+- A prebuilt relay container image referenced by an explicit `vX.Y.Z` tag or
+  SHA256 digest.
 
 ## Steps
 
-1. On the Relay host, provision `OCSERV_RELAY_SECRET_DIR` as a launcher-owned
-   mode-`0700` directory containing `tls.crt`, `tls.key`, and
-   `relay-access-token`. TLS files are launcher-owned mode `0444`; the token
-   is UID/GID 65532 mode `0400`. Set an explicit version-tagged or SHA-256
-   `OCSERV_RELAY_IMAGE`. The standalone Relay publishes TCP 80/443 and UDP 7842.
-   Assign a DNS name to the host and provision its matching certificate and
-   key; use the checked-in `deploy/production/relay/relay.toml` configuration.
+1. On the Relay host, create `OCSERV_RELAY_SECRET_DIR` as a launcher-owned
+   directory with mode `0700` containing `tls.crt`, `tls.key`, and
+   `relay-access-token`. Both TLS files must be owned by the launcher user with
+   mode `0444`, while `relay-access-token` must be owned by UID/GID 65532 with
+   mode `0400`. Export `OCSERV_RELAY_IMAGE` with an explicit version tag or
+   SHA-256 reference, assign a DNS name to the host with its matching
+   certificate and key, and use the checked-in
+   `deploy/production/relay/relay.toml` configuration. The standalone Relay
+   publishes TCP 80/443 and UDP 7842.
 2. On the Relay host, validate and start the relay:
 
    ```bash
@@ -31,7 +36,7 @@ connectivity remains available; a recovery test must prove dependence on the Rel
    deploy/production/relay/compose.sh up -d
    ```
 
-3. Set Controller relay URLs before starting or restarting the
+3. Configure the Controller relay URLs before starting or restarting the
    Controller:
 
    ```bash
@@ -39,62 +44,70 @@ connectivity remains available; a recovery test must prove dependence on the Rel
    export OCSERV_RELAY_URL_B=
    ```
 
-   These entries also work in the Controller's protected `install.env`.
-   A is required. B must be absent or empty; nonempty B fails before side effects.
-   An explicitly empty shell B overrides a B in `install.env`.
+   You can also define these variables in the Controller's protected
+   `install.env`. `OCSERV_RELAY_URL_A` is required, whereas
+   `OCSERV_RELAY_URL_B` must be absent or empty (a non-empty B value causes
+   validation to fail before any side effects occur). Exporting an explicitly
+   empty `OCSERV_RELAY_URL_B` in the shell overrides any B entry present in
+   `install.env`.
 
-4. Configure each Agent with the production relay drop-in and launcher,
-   the matching URLs, and the
-   same token file before enabling its services. See [Agent lifecycle
-   reference](../operations/agent-lifecycle.md) for the verified package path
-   and exact file contract.
+4. Before enabling services on each managed node, configure the Agent with the
+   production relay drop-in and launcher, the matching URLs, and the same token
+   file; see the [Agent lifecycle reference](../operations/agent-lifecycle.md)
+   for the verified package path and file contract.
 
    ```dotenv
    RELAY_URL_A=https://relay.example.com
    RELAY_URL_B=
    ```
 
-   These values belong in the managed node's `install.env` for installation,
-   or `/etc/ocservia-agent/relays.env` for an explicit operator topology change.
-   Do not edit the released Compose file or put token contents in either file.
+   Place these values in the managed node's `install.env` during initial
+   installation, or in `/etc/ocservia-agent/relays.env` when making an explicit
+   operator topology change. Never edit the released Compose file or place raw
+   token contents in either environment file.
 
 ## Verify
 
-Verify Controller and Agent use the same sole Relay URL. Its outage can interrupt
-Relay-dependent traffic. Restore the same address, certificate and credentials,
-then check reconnection, fresh heartbeats and command results. Preserve pending
-command state and reconcile Unknown outcomes before any explicit safe retry.
+Confirm that the Controller and every Agent use the same single Relay URL.
+Because an outage on that Relay interrupts Relay-dependent traffic, recovery
+requires restoring the Relay with the same address, certificate, and
+credentials, then verifying reconnection, fresh heartbeats, and command
+results. Preserve pending command state and reconcile any Unknown outcomes
+before performing an explicit safe retry.
 
 ## Migrate an existing A/B deployment
 
-During a planned interruption, deliberately clear B in both Controller and
-Agent configurations before running the new installers or starting the new
-launchers. Keep A and identity, enrollment, token and journal material intact.
-Restart the affected services and verify A-only traffic before retiring B.
-An enrolled installer rerun verifies existing configuration and refuses a
-persisted nonempty B; it does not rewrite topology or replace tokens.
-There is no Relay-list hot reload. Check the actual old release requirements
-before rollback; see [Agent rollback](agent-lifecycle.md#rollback) and
+During a planned maintenance window, clear the B entry in both the Controller
+and Agent configurations before running the new installers or starting the new
+launchers, while keeping A and all identity, enrollment, token, and journal
+material intact. Because services do not hot-reload the Relay list, restart the
+affected services and verify A-only traffic before retiring B. Rerunning the
+installer on an already-enrolled node validates the existing configuration and
+refuses any persisted non-empty B entry without rewriting topology or replacing
+tokens. If you later need to roll back, check the previous release's actual
+requirements first; see [Agent rollback](agent-lifecycle.md#rollback) and
 [Controller rollback](controller-lifecycle.md#rollback).
 
-The Standalone Relay is an independent service, not embedded in the
-Controller. Placing a Standalone Relay and Controller on one host is not
-validated: both default deployments claim TCP 443 on all addresses, so
-installing both unchanged on one IP is not a supported recipe. Use Integrated
-for a single host.
+The Standalone Relay runs as an independent service outside the Controller
+stack. Running a Standalone Relay and a Controller on the same host is not
+validated because both default deployments bind TCP 443 across all addresses,
+making an unmodified co-hosted setup on a single IP unsupported. For a
+single-host deployment, use Integrated mode instead.
 
 ## Troubleshooting
 
-Do not rotate endpoint identity keys because one relay is unavailable. Do not
-switch to public relays. Single-relay maintenance and token rotation can
-interrupt communication; schedule a recovery window rather than applying a
-two-path no-interruption procedure. Preserve identity, enrollment and pending
-command journals, and verify authenticated traffic after restoring service.
+If the Relay becomes unavailable, do not rotate endpoint identity keys or switch
+to public relays. Because operating a single Relay means maintenance and token
+rotation can briefly interrupt communication, schedule a recovery window
+instead of attempting a two-path zero-interruption rotation. Preserve identity,
+enrollment, and pending command journals, and verify authenticated traffic once
+service is restored.
 
 ## Trust and capacity
 
-The shared Relay token is not an Agent identity or a Controller capacity guard.
-Keep transportd's five trust classes and reserved known-Agent capacity enabled.
-Direct and Relay paths enforce the same snapshot, revocation, authorization,
-registration-recheck and enrollment-token rules. IP/NAT identity must never
-refill an EndpointID budget.
+Sharing the Relay access token only authenticates access to the relay
+transport; it does not act as an Agent identity or a Controller capacity guard.
+Keep all five trust classes and the reserved known-Agent capacity enabled in
+transportd. Direct and Relay paths enforce the same snapshot, revocation,
+authorization, registration-recheck, and enrollment-token rules, and IP or NAT
+identity must never be used to refill an EndpointID budget.

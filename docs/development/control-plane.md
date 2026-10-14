@@ -1,9 +1,6 @@
 # Control-plane development
 
-The control plane is a modular Go binary backed by PostgreSQL by default. The development
-stack includes a Rust gRPC stub over a `0660` Unix domain socket and a bounded,
-multi-node agent simulator. It does not use Iroh, Ocserv, TCP transport
-fallbacks, privileged execution, or any remote side effect.
+The control plane is a modular Go binary backed by PostgreSQL by default. For local work, the development stack pairs it with a Rust gRPC stub over a `0660` Unix domain socket and a bounded, multi-node agent simulator. This environment avoids Iroh, Ocserv, TCP transport fallbacks, privileged execution, and any remote side effects.
 
 Start the public development stack:
 
@@ -11,160 +8,44 @@ Start the public development stack:
 deploy/compose/compose.sh up --build
 ```
 
-Set `OCSERV_DATABASE_BACKEND=mysql` to select the corresponding
-pinned development database. An unsupported value is rejected rather than
-falling back to PostgreSQL.
-This development selection does not define production admission; use the
-[production support matrix](../operations/production-deployment.md#database-support).
+Set `OCSERV_DATABASE_BACKEND=mysql` to run against the pinned MySQL development database. Unsupported backend values fail startup immediately without falling back to PostgreSQL. Because this setting only selects the local container profile, consult the [production support matrix](../operations/production-deployment.md#database-support) for production database admission rules.
 
-The Web shell is available at `http://127.0.0.1:4173`. The control-plane live,
-readiness, and version endpoints are `http://127.0.0.1:8080/livez`, `/readyz`,
-and `/version`.
+The Web shell listens at `http://127.0.0.1:4173`, while the control plane serves its liveness, readiness, and version endpoints at `http://127.0.0.1:8080/livez`, `/readyz`, and `/version`.
 
-The production Overview page displays real operational state from the current
-readiness, fleet, operations, and events APIs: fleet health and connectivity,
-Agent version classification, recent operations, recent events, and notable
-offline or stale nodes. The simulator is not part of the production Overview.
-It is exposed only through the development-only `/dev` page, which can run
-normal, duplicate-event, error, and disconnect probe scenarios. The production
-runtime does not register the `/dev` route. Each development probe is durably
-queued before the worker sends it over the UDS. Events are idempotently stored,
-exposed by `GET /api/v1/events`, and streamed by `GET /api/v1/events/stream`.
-SSE resumes with `Last-Event-ID`; the REST collection remains the complete
-rebuild source.
+The production Overview page renders live operational state from the readiness, fleet, operations, and events APIs, covering fleet health and connectivity, Agent version classification, recent operations and events, and notable offline or stale nodes. The simulator is excluded from the production Overview and is reachable only through the development `/dev` page, a route that the production runtime never registers. From `/dev`, you can trigger normal, duplicate-event, error, and disconnect probe scenarios. Each development probe is durably queued in the database before the worker dispatches it over the UDS. Resulting events are stored idempotently, listed at `GET /api/v1/events`, and streamed over `GET /api/v1/events/stream`. SSE clients resume with `Last-Event-ID`, while the REST collection remains the authoritative source for full state rebuilds.
 
-Both platform and operation streams use one shared admission manager. The safe
-production defaults are 128 global, 8 per identity, 4 per session, 32 per
-workspace, and 16 per resource, with at most 64 active database watchers and a
-128-event subscriber queue. Admission happens before SSE headers; scoped
-excess returns 429, global/watcher overload returns 503, and both include
-`Retry-After`. Empty scope counters are deleted, so the admission maps stay
-bounded by the global stream count.
+Platform and operation streams share a single admission manager. Safe production defaults cap concurrency at 128 streams globally, 8 per identity, 4 per session, 32 per workspace, and 16 per resource, backed by at most 64 active database watchers and a 128-event queue per subscriber. Admission runs before SSE headers are written: exceeding a per-scope limit returns 429, exhausting global stream or watcher capacity returns 503, and both responses include `Retry-After`. The manager deletes empty scope counters so the admission maps stay bounded by the global stream count.
 
-Subscribers do not own database polling tickers. One ref-counted watcher per active
-workspace or operation polls the durable event tables and fans out through
-bounded queues. A 1, 10, or 100 subscriber burst therefore produces one
-steady-state query stream for that scope. Database errors use jittered
-exponential backoff up to 10 seconds; a slow queue is disconnected and resumes
-with its cursor rather than blocking peers. Watchers stop after the final
-subscriber. Streams reauthenticate and reauthorize every 30 seconds, close no
-later than session expiry or the 30-minute maximum, and operation streams drain
-the terminal event before closing. Shutdown cancels every watcher. All limits
-and intervals use validated `OCSERV_SSE_*` settings; invalid values fail startup.
-Runtime metrics expose active and unhealthy watcher counts, query volume, and
-backoff. Readiness fails while any active watcher is recovering from a durable
-event-table query failure, then returns healthy after cursor catch-up succeeds.
-The bounded series are `sse_active_streams`,
-`sse_rejected_streams`, `sse_watchers`, `sse_unhealthy_watchers`,
-`sse_sql_queries`, `sse_slow_consumer_disconnects`, and
-`sse_database_backoff_seconds`; identity, session, workspace, and operation
-values never become metric keys or labels.
+Individual subscribers never run their own database polling tickers. Instead, a single reference-counted watcher per active workspace or operation polls the durable event tables and fans events out through bounded subscriber queues, so a burst of 1, 10, or 100 subscribers still generates only one steady-state query stream for that scope. On database errors, watchers back off exponentially with jitter up to 10 seconds. If a subscriber's queue fills up, the server disconnects that client so it can reconnect from its cursor without stalling peers. Watchers shut down once their last subscriber leaves, and server shutdown cancels all active watchers. Active streams reauthenticate and reauthorize every 30 seconds and close at session expiry or the 30-minute hard limit, whichever comes first; operation streams drain their terminal event before closing. All limits and intervals come from validated `OCSERV_SSE_*` settings, and invalid values abort startup.
 
-The simulator is disabled unless `OCSERV_LOCAL_SIMULATOR=true`, is rejected in
-production, and only accepts the typed `SimulationProbe` payload. Configure its
-absolute socket path with `OCSERV_TRANSPORT_SOCKET`, the RPC deadline with
-`OCSERV_TRANSPORT_TIMEOUT`, and the bounded consumer queue with
-`OCSERV_TRANSPORT_QUEUE_CAPACITY` (1 through 4096).
-The stub retains accepted idempotency keys for its process lifetime. Once that
-bounded set is full, it rejects new keys rather than evicting keys that a
-durable dispatch retry may still need; restart the development stack to clear
-simulator-only state.
+Runtime metrics track active and unhealthy watcher counts, query volume, and backoff duration across the bounded series `sse_active_streams`, `sse_rejected_streams`, `sse_watchers`, `sse_unhealthy_watchers`, `sse_sql_queries`, `sse_slow_consumer_disconnects`, and `sse_database_backoff_seconds`. High-cardinality identifiers such as identity, session, workspace, and operation IDs are never used as metric keys or labels. Readiness fails while any active watcher is recovering from a durable event-table query error and returns to healthy once cursor catch-up succeeds.
 
-The binary accepts `--role=api`, `--role=worker`, `--role=scheduler`, or
-`--role=all`. `OCSERV_DATABASE_URL` is required; production may instead use
-`OCSERV_DATABASE_URL_FILE`. The OIDC client secret, certificate-signer token,
-session key, audit checkpoint key, and break-glass hash support the same
-exclusive `_FILE` form for mounted secrets. Audit event authentication uses
-`OCSERV_AUDIT_EVENT_KEY_ID` plus the strict `OCSERV_AUDIT_EVENT_KEY_FILE`; raw
-event key environment values are not accepted outside the repository's
-development and test fixtures and are rejected in production.
-Development authentication is
-disabled by default and can only be enabled with `OCSERV_DEV_AUTH=true` when
-the environment is `development` and the HTTP listener is loopback-only. A
-non-loopback development stack must instead set an explicit bearer credential
-of at least 32 characters in `OCSERV_DEV_AUTH_TOKEN`; the browser development
-server receives the same value as `VITE_DEV_AUTH_TOKEN`. Both modes are
-forbidden in production.
+The simulator remains off unless `OCSERV_LOCAL_SIMULATOR=true`, is rejected in production builds, and accepts only the typed `SimulationProbe` payload. Its absolute socket path, RPC deadline, and bounded consumer queue (1 through 4096) are configured through `OCSERV_TRANSPORT_SOCKET`, `OCSERV_TRANSPORT_TIMEOUT`, and `OCSERV_TRANSPORT_QUEUE_CAPACITY`. The stub keeps accepted idempotency keys in memory for the lifetime of the process. When that bounded set fills up, the stub rejects new keys so it never evicts entries that a durable dispatch retry might still need; restart the development stack to clear simulator state.
 
-Development bearer authentication has no persisted user identity or session.
-It can exercise ordinary development reads and simulations, but it cannot
-create or approve independent approval requests or perform approval-backed node
-approval, revocation, or service reload operations. Use the test OIDC provider
-when developing those identity-bound high-risk workflows.
+The control-plane binary runs with `--role=api`, `--role=worker`, `--role=scheduler`, or `--role=all`. `OCSERV_DATABASE_URL` is required, though production deployments may supply `OCSERV_DATABASE_URL_FILE` instead. The OIDC client secret, certificate-signer token, session key, audit checkpoint key, and break-glass hash all support the same mutually exclusive `_FILE` convention for mounted secrets. Audit event authentication requires `OCSERV_AUDIT_EVENT_KEY_ID` together with the strict `OCSERV_AUDIT_EVENT_KEY_FILE`; raw event key environment values are rejected in production and permitted only inside the repository's development and test fixtures.
 
-Database migrations run as a separate one-shot process using `--migrate-only`,
-an owner connection in `OCSERV_DATABASE_URL`, and the unprivileged role named
-by `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives
-only the runtime role credentials. The one-shot run migrates, verifies audit
-event authentication, then grants the runtime role ordinary data access;
-that order is why a failed migration never reaches the grant step. Migration
-execution serializes schema changes and validates known applied content. Runtime
-access to audit events is read/append, plus authenticated aged detail
-compaction through dedicated routines. Both engines grant `SELECT`/`INSERT` and a
-column-level `UPDATE(event_hash)`, which locking reads require; immutable
-triggers reject actual updates. PostgreSQL uses an advisory lock and transactional
-SQL migrations. MySQL uses a dedicated connection's `GET_LOCK` and durable,
-verified step progress because DDL can implicitly commit. Both engines refuse
-unknown epochs, revisions, checksums, schema drift and nonempty databases
-without supported provenance before mutating schema. Interrupted MySQL execution
-requires explicit repair with the exact original artifact; the Controller's own
-migration run never passes a repair checksum, and neither engine automatically
-force-cleans or downgrades. Uncertain lock release discards the connection.
+Development authentication is off by default. Loopback-only development listeners (`environment=development`) can enable `OCSERV_DEV_AUTH=true`. Non-loopback development stacks must configure an explicit bearer credential of at least 32 characters in `OCSERV_DEV_AUTH_TOKEN` and pass the same value to the browser development server as `VITE_DEV_AUTH_TOKEN`. Production rejects both modes. Because development bearer authentication carries no persisted user identity or session, it can run ordinary development reads and simulations but cannot create or approve independent approval requests or execute approval-backed node approval, revocation, or service reload operations. Use the test OIDC provider when working on those identity-bound workflows.
+
+Database migrations run in a separate one-shot process invoked with `--migrate-only`, using an owner connection in `OCSERV_DATABASE_URL` and naming the unprivileged runtime account in `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives only the runtime role credentials. During the one-shot run, the migrator applies schema changes, verifies audit event authentication, and only then grants ordinary data access to the runtime role, so a failed migration never reaches the grant step. Migration execution serializes schema changes and validates previously applied content. At runtime, the service has read and append access to audit events, plus authenticated compaction of aged detail through dedicated database routines. Both engines grant `SELECT`, `INSERT`, and a column-level `UPDATE(event_hash)` needed by locking reads, while immutable triggers block any actual row modification.
+
+PostgreSQL coordinates migrations with an advisory lock and transactional SQL execution. Because MySQL DDL can commit implicitly, the MySQL migrator acquires `GET_LOCK` on a dedicated connection and records durable, verified progress after each step; if lock release is uncertain, it discards the connection. Before touching the schema, both engines reject unknown epochs, revisions, checksums, schema drift, and nonempty databases that lack supported provenance. An interrupted MySQL migration must be repaired explicitly with the exact original artifact. The Controller's own migration command never supplies a repair checksum, and neither engine performs automatic force-cleans or downgrades.
 
 ### Current SQL artifacts and bounded upgrades
 
-Each engine has exactly two active SQL files: `schema.sql` and `upgrade.sql`;
-their [artifact format](../../control-plane/internal/database/schemaartifact/README.md)
-defines markers, receipts and checksums.
-PostgreSQL stores them in `control-plane/migrations/`; MySQL in
-`control-plane/internal/database/mysql/mysql/`. `schema_revisions` is the only
-migration journal. There are no numbered SQL/JSON migrations or snapshot
-descriptors. Schema identity is the epoch, revision and raw artifact checksums,
-not an old migration filename counter or Controller compatibility range.
-The [support policy](../reference/support-policy.md) removed software-version
-admission; it did not remove this schema-source admission, which still rejects
-unknown epochs, revisions and checksums.
+Each database engine maintains two active SQL files: `schema.sql` and `upgrade.sql`. Their [artifact format](../../control-plane/internal/database/schemaartifact/README.md) specifies step markers, receipts, and checksums. PostgreSQL artifacts live in `control-plane/migrations/`, and MySQL artifacts live in `control-plane/internal/database/mysql/mysql/`. Migration state is tracked exclusively in `schema_revisions`, with no numbered SQL or JSON migration files and no snapshot descriptors. Schema identity is determined by the epoch, revision, and raw artifact checksums, independent of legacy filename counters or Controller compatibility ranges. While the [support policy](../reference/support-policy.md) removed software-version admission gates, schema-source admission remains mandatory and continues to reject unknown epochs, revisions, and checksums.
 
-Only a genuinely empty database executes `schema.sql`; initialization is never
-a way to overwrite, adopt or clean an existing database. Existing databases must
-match the current epoch's known receipt history or the sole previous checkpoint:
-`v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 / revision 0.
-That immutable release remains the anchor when main advances. Earlier databases
-must first upgrade with v1.2.0; a major candidate cannot replay removed history.
+`schema.sql` runs only against a genuinely empty database; initialization never overwrites, adopts, or cleans an existing database. Nonempty databases must match either the current epoch's known receipt history or the single supported prior checkpoint: `v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 / revision 0. That immutable release is the upgrade anchor as main advances. Databases older than v1.2.0 must upgrade with v1.2.0 first, because a major candidate cannot replay removed historical transitions.
 
 | Engine | v1.2.0 checkpoint schema receipt | Current fresh schema |
 | --- | --- | --- |
 | PostgreSQL 18.x | `d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172` | Epoch 2 / revision 0 |
 | MySQL 8.4 LTS | `3dc39a92ff4b54bff922872fae296843cea8dea1f2d1b36b42d86c9069dcb450` | Epoch 2 / revision 1 |
 
-Fresh and checkpoint-upgraded databases must have equivalent business schema,
-mandatory seeds and runtime ACLs; equivalence is not identical receipts. Their
-execution receipts differ by engine and path. MySQL fresh initialization records
-one epoch-2 / revision-1 receipt from the actual `schema.sql` steps, while a
-MySQL checkpoint upgrade retains the epoch-1 receipt and adds the epoch-2
-transition plus eight cleanup steps as revision 1. PostgreSQL's cleanup removes
-the epoch-1 receipt in the same transaction, so a PostgreSQL upgrade ends with a
-single epoch-2 / revision-0 receipt (the baseline checksum), the same shape a
-fresh install records. Do not rewrite either history to make receipts match.
+Fresh installations and checkpoint-upgraded databases must converge on the same business schema, mandatory seeds, and runtime ACLs, even though their execution receipts differ by engine and path. A fresh MySQL install writes a single epoch-2 / revision-1 receipt derived from `schema.sql`, whereas a MySQL checkpoint upgrade keeps the epoch-1 receipt and appends the epoch-2 transition plus eight cleanup steps as revision 1. On PostgreSQL, the upgrade cleanup deletes the epoch-1 receipt within the same transaction, leaving a single epoch-2 / revision-0 baseline receipt that matches a fresh install. Never rewrite receipt history to force those tables to look identical.
 
-PostgreSQL installs or transitions in one transaction; each later forward
-revision commits in its own. Its transition first checks the old schema against the
-pinned checkpoint fingerprint, verifies the new schema, writes the verified epoch-2
-baseline, executes legacy metadata cleanup from `upgrade.sql` (dropping
-`schema_migrations` and `schema_snapshot_origin` and deleting the epoch-1
-receipt; the `controller_schema_compatibility` table is left in place and no
-non-test Go code reads it), then validates the full result before committing. A
-failure rolls that transaction back. MySQL verifies its epoch-2 transition
-before running eight cleanup DROP steps as revision 1, with no transaction
-spanning them. Each DDL step records same-row progress and validates the actual
-before/after object definition; data work and progress commit together. Recovery
-requires the matching SQL checksum and refuses foreign or partial definitions.
+PostgreSQL runs initial installation or the checkpoint transition inside a single transaction, and commits each subsequent forward revision in its own transaction. During the checkpoint transition, PostgreSQL verifies the existing schema against the pinned checkpoint fingerprint, validates the target schema, writes the verified epoch-2 baseline, runs the legacy metadata cleanup from `upgrade.sql` (dropping `schema_migrations` and `schema_snapshot_origin` and removing the epoch-1 receipt, while leaving `controller_schema_compatibility` untouched and unread by non-test Go code), and validates the final state before committing. Any failure rolls the entire transaction back. MySQL verifies its epoch-2 transition first and then executes the eight cleanup DROP steps as revision 1 without a cross-step transaction. Each MySQL DDL step writes same-row progress and checks the actual before and after object definitions, committing data changes and step progress together. Recovery requires the matching SQL checksum and refuses foreign or partial definitions.
 
-Within an epoch, append forward revisions to `upgrade.sql`, preserving published
-block bytes. Update `schema.sql` to the equivalent fresh result and its bound
-history checksum. Repeated owner maintenance can reapply grants and provision
-calendar-dependent telemetry objects; it does not replay fresh SQL. Check both
-fresh/current revision paths and the fixed release transition:
+When adding changes within the current epoch, append forward revisions to `upgrade.sql` without altering already published block bytes, and update `schema.sql` to produce the equivalent fresh schema along with its bound history checksum. Repeated owner maintenance runs may reapply grants and provision calendar-dependent telemetry objects, but they never replay fresh SQL. Verify both the fresh/current revision paths and the fixed release transition with:
 
 ```bash
 bash scripts/database-artifact-policy.sh all
@@ -172,89 +53,28 @@ bash scripts/database-postgres-snapshot.sh check
 bash scripts/database-mysql-snapshot.sh check
 ```
 
-These checks leave tracked artifacts unchanged. PostgreSQL's existing author
-command can regenerate current SQL from the fixed checkpoint transition; MySQL
-checks its executable SQL directly. Each backend compares actual schema, ACL and
-mandatory seed semantics between the immutable checkpoint upgrade and fresh
-initialization. Historical fixtures come from that Git release, not an archived
-active migration tree. Initialization timestamps are generated on installation;
-deterministic seed values are compared exactly. See
-[SQL artifact acceptance](testing.md#sql-artifact-acceptance) for required
-failure, repair and backup/restore coverage.
+These commands verify the artifacts without modifying tracked files. PostgreSQL's author command can regenerate current SQL from the fixed checkpoint transition, whereas MySQL validates its executable SQL directly. Both backends compare the resulting schema, ACLs, and mandatory seeds between a fresh initialization and an upgrade from the immutable checkpoint, pulling historical fixtures from that Git release tag instead of an archived migration directory. Installation timestamps are generated at runtime, while deterministic seed values must match byte for byte. See [SQL artifact acceptance](testing.md#sql-artifact-acceptance) for required failure, repair, and backup/restore test coverage.
 
-Readiness runs a zero-row read of core tables (workspaces, nodes, operations) and
-checks event-stream health; it does not read `schema_revisions`. Normal
-Controller startup (without `--migrate-only`) verifies audit authenticity and
-validates the telemetry objects and runtime privileges it needs, but does not
-re-check receipts, checksums or schema drift. A passing `/readyz` is therefore
-not evidence of schema identity; that admission happens only in the owner
-migration run (or the test/development-only `ocserv-db-foundation` tool).
+The `/readyz` endpoint executes a zero-row read against core tables (workspaces, nodes, operations) and checks event-stream health, without reading `schema_revisions`. Normal Controller startup (without `--migrate-only`) verifies audit authenticity and checks required telemetry objects and runtime privileges, skipping receipt, checksum, and schema-drift validation. A passing `/readyz` response therefore indicates runtime connectivity, while schema identity admission happens exclusively during the owner migration run (or via the test/development-only `ocserv-db-foundation` tool).
 
-Business stores share transaction ownership, atomic audit/business writes,
-bounded cleanup and fencing semantics through `internal/database`. PostgreSQL
-transaction advisory locks and MySQL `business_locks` row locks are
-backend implementations of those semantics. Migration `GET_LOCK` is not the
-MySQL business-transaction lock. A commit acknowledgement error can mean an
-unknown outcome; do not blindly replay writes.
+Business stores coordinate transaction ownership, atomic audit and domain writes, bounded cleanup, and fencing through `internal/database`. Under the hood, PostgreSQL implements business locks with transaction advisory locks and MySQL uses `business_locks` row locks; MySQL's migration-only `GET_LOCK` is never used for business transactions. Because a commit acknowledgement error leaves the transaction outcome unknown, callers must not blindly replay writes.
 
-Bind every domain Store participating in one business operation to the same
-`database.Tx` inside `database.Within`; never construct a store from a pool
-inside that callback, and do not split one transaction into multiple callbacks.
-`database.Within` never retries. `database.WithinRetry` is the separate opt-in
-form for database-only claim, completion, reaping and lease work: at most three
-attempts, retrying only a deadlock victim or a serialization error after an
-acknowledged rollback, while connection loss, lock timeout, ordinary constraint
-errors and unknown commits are returned rather than replayed. Its callback must
-not perform transport or other external mutations. Failures cross the Store
-boundary as neutral categories such as `database.ErrDeadlock` and
-`database.ErrSerialization`; business code does not inspect driver types or
-SQLSTATE values.
+Within a single business operation, bind every participating domain Store to the same `database.Tx` inside `database.Within`. Never construct a store from the connection pool inside that callback or split a logical transaction across multiple callbacks. `database.Within` does not retry. For database-only claim, completion, reaping, and lease work, use the opt-in `database.WithinRetry` helper, which makes at most three attempts and retries only when the transaction was a deadlock victim or hit a serialization failure with an acknowledged rollback. Connection loss, lock timeouts, ordinary constraint errors, and unknown commit outcomes return immediately without retry, and callbacks passed to `database.WithinRetry` must never perform transport calls or other external mutations. Store methods translate driver errors into backend-neutral categories such as `database.ErrDeadlock` and `database.ErrSerialization`, keeping driver types and SQLSTATE codes out of business packages.
 
-Lease and fence checks read a fresh database wall clock after acquiring their
-locks, so waiting for a lock cannot revive an expired term; transaction-stable
-timestamps remain available for logical timestamps. Takeovers increment the
-retained epoch instead of deleting and recreating authority records, and old
-terms keep failing their exact owner/incarnation/connection/epoch predicates.
-MySQL sessions accept only the driver DSN with the `tls` parameter and
-set UTC, `READ COMMITTED`, strict SQL modes and `utf8mb4` with the backend's
-binary no-pad collation, truncating Go time values to microseconds. Their
-natural-key uniqueness uses owner-maintained exact-key side tables with guard
-rows, not prefix or digest indexes: natural-key upserts go through the domain
-Store's `LockExactKey`/`UpsertIdentity` sequence, never
-`ON DUPLICATE KEY UPDATE`, because a trigger conflict is not a native-index
-conflict.
+Lease and fence checks read a fresh database wall-clock timestamp after acquiring their locks so time spent waiting on a lock cannot revive an expired term; transaction-stable timestamps remain available for logical ordering. Authority takeovers increment the retained epoch in place instead of deleting and recreating records, so stale holders continue to fail their exact owner, incarnation, connection, and epoch predicates.
 
-UUIDs and logical times cross the boundary through typed values. PostgreSQL
-uses native UUID/timestamp types; migrated MySQL domain tables use
-`VARBINARY(16)` UUIDs with exact 16-byte length constraints and unswapped RFC
-UUID byte order, and signed BIGINT microseconds relative to
-`2000-01-01 UTC`, with explicit infinity handling where the contract permits it.
-Migration bookkeeping has its own storage types. Do not copy backend SQL or
-infer storage representation from a similarly named column; consult its store
-and appended migration. See [database preparation](../operations/authentication.md#database-preparation)
-for a current workspace example.
+MySQL sessions accept only the driver DSN with the `tls` parameter, enforce UTC, `READ COMMITTED`, strict SQL modes, and `utf8mb4` with the backend's binary no-pad collation, and truncate Go time values to microseconds. Natural-key uniqueness on MySQL relies on owner-maintained exact-key side tables with guard rows instead of prefix or digest indexes. Domain stores execute natural-key upserts through the `LockExactKey`/`UpsertIdentity` sequence and avoid `ON DUPLICATE KEY UPDATE`, since trigger-enforced conflicts do not behave like native index conflicts.
 
-An additive migration is not a cross-version safety guarantee. Do not rewrite
-published migration SQL or discard data to make a target start. Execution
-receipts are not a backup, and a backup file is not a verified restore. Use
-[backend-specific recovery](../operations/incident-recovery.md#database-recovery):
-PostgreSQL verified backup and isolated restore or MySQL logical restore, not
-equivalent HA/PITR guarantees. See
-[schema provenance after restore](../operations/database-backup-restore.md#schema-provenance-after-restore).
+UUIDs and logical timestamps cross the store boundary as typed Go values. PostgreSQL stores native UUID and timestamp columns, whereas migrated MySQL domain tables use `VARBINARY(16)` UUIDs with exact 16-byte constraints in unswapped RFC UUID byte order and signed BIGINT microsecond offsets from `2000-01-01 UTC` (with explicit infinity encoding where the contract allows). Migration bookkeeping tables use their own column types. Always check the owning store and appended migration instead of copying SQL across backends or guessing a column's representation from its name. For a concrete workspace preparation example, see [database preparation](../operations/authentication.md#database-preparation).
 
-`make e2e` runs manual browser-to-simulator validation outside Basic CI.
-It retains Playwright reports/traces/screenshots/videos, test results and
-Compose diagnostics locally, with no workflow upload. Containers, networks and
-volumes are scoped to `COMPOSE_PROJECT` and removed on success, failure or interruption.
+Additive schema changes do not by themselves guarantee cross-version compatibility, and operators must never edit published migration SQL or discard data to force a binary to start. Likewise, migration receipts are not backups, and an untested backup file is not a verified restore. Follow the [backend-specific recovery](../operations/incident-recovery.md#database-recovery) procedures (PostgreSQL verified backup with isolated restore, or MySQL logical restore), which do not claim HA or PITR equivalence, and review [schema provenance after restore](../operations/database-backup-restore.md#schema-provenance-after-restore).
 
-For a disposable development stack with no data to preserve, recreate the
-database from the current schema with (set the same `OCSERV_DATABASE_BACKEND`
-you started with, because it selects the Compose file):
+Outside Basic CI, `make e2e` runs manual browser-to-simulator validation, keeping Playwright reports, traces, screenshots, videos, test results, and Compose diagnostics on disk without uploading them from workflows. All containers, networks, and volumes are scoped to `COMPOSE_PROJECT` and torn down on success, failure, or interruption.
+
+On a disposable development stack with no data worth keeping, reset and recreate the database from the current schema by passing the same `OCSERV_DATABASE_BACKEND` value used at startup (which selects the matching Compose file):
 
 ```bash
 deploy/compose/compose.sh down --volumes
 ```
 
-For persisted data, use a forward fix or
-[database recovery](../operations/incident-recovery.md#database-recovery), never
-the disposable reset above. The tree provides no down SQL.
+When working with persisted data, apply a forward fix or follow [database recovery](../operations/incident-recovery.md#database-recovery); the repository provides no down-migration SQL, and the disposable reset above is strictly for local scratch state.

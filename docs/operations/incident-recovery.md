@@ -2,35 +2,35 @@
 
 ## Authentication outage
 
-Follow the configured [authentication mode](authentication.md#choose-a-mode):
+Incident handling depends on the configured [authentication mode](authentication.md#choose-a-mode):
 
-- Local-only requires no OIDC configuration, client secret or available IdP.
-- Local + OIDC can use Local accounts that were enabled and initialized before
-  the incident. Local authentication still requires normal password, account,
-  session and authorization checks; it is not a bypass or automatic fallback.
-- OIDC-only must not automatically enable Local authentication or bypass issuer,
-  signature or callback verification during an outage.
+- Local-only deployments run without OIDC configuration, client secrets, or an external IdP.
+- Local + OIDC deployments can continue signing in with Local accounts that were already enabled and initialized before the outage. Those logins still go through the full password, account-state, session, and authorization checks; Local login does not act as a verification bypass or an automatic fallback for failed OIDC requests.
+- OIDC-only deployments must never fall back to Local login during an outage, nor may they skip issuer, signature, or callback checks.
 
-Reject new SSO logins that cannot complete verification. Existing valid sessions
-retain normal expiry, revocation and account checks; never extend them to work
-around the outage. Restore issuer connectivity and verify discovery,
-signing-key refresh and callback behavior before closing an OIDC incident.
+When an IdP is unreachable or failing validation, reject any new SSO login that
+cannot complete full verification. Already established sessions continue under
+their normal expiration, revocation, and account-state rules; do not extend
+session lifetimes to mask the outage. Before closing an OIDC incident, restore
+connectivity to the issuer and confirm that discovery, signing-key refresh, and
+login callbacks succeed.
 
 ## Lost Local administration authority
 
-If no usable administrator/independent approver pair remains, stop writes,
-preserve incident evidence and follow the authorized
-[backend-specific recovery procedure](incident-recovery.md#database-recovery) to a verified state
-with independently controlled credentials. Keep all initialization markers and
-audit history. Before reopening access, revoke restored sessions using the
-protected administrative connection. For PostgreSQL:
+When a deployment loses its last working administrator and independent approver
+pair, halt application writes and preserve the incident evidence. Recover to a
+verified state that has independently controlled credentials by following the
+authorized [backend-specific recovery procedure](incident-recovery.md#database-recovery),
+leaving all initialization markers and audit history intact. Before reopening
+traffic, use the protected administrative database connection to revoke all
+active restored sessions. On PostgreSQL, run:
 
 ```sql
 UPDATE auth_sessions SET revoked_at=now() WHERE revoked_at IS NULL;
 ```
 
-For the current MySQL schema, session times use the same BIGINT
-microsecond epoch since 2000-01-01 UTC:
+The current MySQL schema stores session timestamps as a BIGINT microsecond epoch
+counted from 2000-01-01 UTC:
 
 ```sql
 UPDATE auth_sessions
@@ -38,61 +38,100 @@ SET revoked_at=TIMESTAMPDIFF(MICROSECOND, '2000-01-01 00:00:00', UTC_TIMESTAMP(6
 WHERE revoked_at IS NULL;
 ```
 
-Record this offline recovery in the incident/change record, verify both logins
-and approval separation, and rotate any exposed credentials through the normal
-flows. No generic account-unlock CLI or anonymous HTTP recovery endpoint is
-introduced. **Never delete/edit the Bootstrap marker to reinitialize.**
+Log the offline recovery in the incident and change record, confirm that both
+administrative logins work with intact approval separation, and rotate any
+exposed credentials through standard rotation flows. Ocservia provides no
+generic account-unlock CLI or unauthenticated HTTP recovery endpoint, and
+operators must never delete or edit the Bootstrap marker to force
+reinitialization.
 
 ## OIDC issuer correction
 
-Confirm the provider's authoritative issuer and inspect historical identities
-before changing configuration. Matching email or username does not prove subject
-ownership. Failed Discovery/token validation creates no identity to migrate.
+Before editing OIDC settings, confirm the provider's authoritative issuer string
+and inspect existing records in `identities`. Failed Discovery or token
+validation never creates an identity row, so there is nothing to migrate from
+failed login attempts alone. Because each identity is keyed by `(issuer, subject)`,
+changing the issuer string alters that unique key; an issuer with a trailing
+slash and one without it represent distinct accounts that the application never
+merges or migrates during login.
 
-Changing an existing row's issuer changes the unique `(issuer, subject)` key.
-The slash and no-slash values are distinct accounts; the application neither
-merges nor migrates them. If a separately approved migration is genuinely needed:
+When an existing deployment requires a separately approved issuer migration:
 
-1. In a maintenance window, stop login/session writes for the affected deployment.
-   Record a change ticket, operator, approver, exact old/new issuers and an explicit
-   list of identity IDs and subjects. Obtain independent IdP evidence that each
-   subject still identifies the same person; matching email/name is insufficient.
-2. Take a restorable database backup and export the selected identity rows,
-   role bindings (including workspace/resource scope), active sessions and other
-   identity-ID references. Keep the original configuration and a before/after
-   manifest in the restricted change record, not tokens or client secrets.
-3. Read both issuer populations and check target-key conflicts, including disabled
-   identities. For each approved subject, query `identities` for both exact issuer
-   values. Review `role_bindings` by identity ID with the security owner. Any
-   existing target `(issuer, subject)` is a stop condition, not permission to merge,
-   delete the target, or transfer roles.
-4. Rehearse on a restored isolated database. In an explicit transaction, lock
-   `identities` against concurrent writes, repeat the conflict/ownership checks,
-   and update only approved IDs whose old issuer and subject still match the
-   manifest. Require exactly the approved row count. Preserve IDs, subjects,
-   disabled state and roles; revoke affected active sessions and require fresh
-   login. Roll back on any discrepancy. Record the committed before/after mapping
-   through the approved operational audit process; do not rewrite historical audit
-   events. Apply the exact new issuer configuration through normal change control.
-5. Verify fresh Discovery/token validation, unchanged role ownership, and no
-   duplicate identities before reopening login. For rollback, stop writes again,
-   verify the manifest and absence of old-key conflicts, then transactionally
-   restore only the mapped issuers and original configuration. Revoke sessions
-   issued during the migration window; never reactivate revoked sessions. Stop for
-   manual review if identities/roles have since changed, rather than overwriting
-   newer data. Retain rollback evidence with the same change ticket.
-
-These steps require a separately approved migration; login never performs them.
+1. Open a maintenance window and stop login and session writes on the affected
+   deployment. Record the change ticket, operator, approver, exact old and new
+   issuer strings, and the explicit list of identity IDs and subjects in scope.
+   Gather independent IdP evidence proving that each subject still belongs to
+   the same person; a matching email address or display name is not sufficient
+   proof of subject ownership.
+2. Take a restorable database backup and export the targeted `identities` rows,
+   `role_bindings` (including workspace and resource scopes), active sessions,
+   and any other tables referencing those identity IDs. Store the prior
+   configuration and the before-and-after identity manifest in the restricted
+   change record, omitting raw tokens and client secrets.
+3. Query `identities` across both exact issuer strings, including disabled
+   accounts, to check for target-key collisions on any approved subject, and
+   review `role_bindings` by identity ID with the security owner. If a target
+   `(issuer, subject)` pair already exists, halt the migration; a collision
+   never authorizes merging accounts, deleting the target row, or moving roles.
+4. Rehearse the change on an isolated database restore first. During execution,
+   open an explicit transaction, lock `identities` against concurrent writes,
+   re-run the collision and ownership checks, and update only the approved IDs
+   whose current issuer and subject still match the manifest. Assert that the
+   affected row count equals the approved manifest count, and roll back on any
+   mismatch. Leave identity IDs, subjects, disabled flags, and role bindings
+   unchanged, revoke active sessions for the migrated users so they must sign in
+   again, and log the committed before-and-after mapping through the operational
+   audit process without altering historical audit rows. Roll out the new issuer
+   setting through normal change control.
+5. Before reopening login traffic, confirm fresh Discovery and token validation,
+   unchanged role ownership, and the absence of duplicate identities. If a
+   rollback is required, stop writes again, check the manifest for old-key
+   conflicts, and transactionally restore only the mapped issuer values and
+   prior configuration. Revoke any sessions created during the migration window
+   without reactivating previously revoked sessions. If identities or role
+   bindings were modified after the cutover, stop for manual review instead of
+   overwriting the newer records, and attach all rollback evidence to the
+   original change ticket.
 
 ## Transport and credentials
 
-Only one dedicated Relay is supported (a nonempty `RELAY_URL_B`/`OCSERV_RELAY_URL_B` is rejected), so there is no second Relay to fail over to. For a Relay outage, restore that Relay at the same address with the same certificate and credentials, then verify fresh Agent heartbeats and reconciled command results. This restores the original path, not standby failover; until then nodes behind it cannot be managed. Do not switch production to public relays, reset identities, or re-enroll nodes. Direct connectivity can mask an outage in a relay test.
+Production deployments support only a single dedicated Relay and reject any
+nonempty `RELAY_URL_B` or `OCSERV_RELAY_URL_B`, so no standby Relay exists for
+failover. Recovering from a Relay outage requires bringing that same Relay back
+online at its original address with the existing TLS certificate and
+credentials, then confirming fresh Agent heartbeats and reconciled command
+outcomes. Nodes that depend on the Relay remain unreachable for management
+until the original path returns. Do not point production traffic at public
+relays, reset node identities, or re-enroll nodes to work around a Relay outage,
+and keep in mind during testing that direct peer connectivity can mask a broken
+Relay path.
 
-For Controller endpoint-key recovery, restore the encrypted offline backup to the configured secret path (`controller-iroh.key` in `OCSERV_SECRET_DIR`) as `65532:65532` with mode `0400`, then derive and compare the Controller EndpointID before starting transportd. Never silently generate a replacement key. If the backup or its identity check fails, keep transport offline, revoke trust in the old EndpointID, generate a new protected key, and re-enroll every node through the normal approval path. Record both EndpointIDs and the trust transition in the incident record.
+To recover a lost Controller endpoint key, restore the encrypted offline backup
+to `controller-iroh.key` inside `OCSERV_SECRET_DIR` with owner `65532:65532` and
+mode `0400`, then derive and verify the Controller EndpointID before starting
+transportd. Never generate a replacement key silently. If the key backup is
+unavailable or fails the EndpointID check, leave transport offline, revoke trust
+in the old EndpointID, generate a new protected key, and re-enroll every node
+through the standard approval workflow. Record both the old and new EndpointIDs
+along with the trust transition in the incident record.
 
 ### PostgreSQL credential rotation
 
-This applies to the bundled PostgreSQL deployment only; external PostgreSQL and MySQL credentials are rotated at their own database. Replacing `postgres-app-password`, `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` by itself does **not** rotate the password verifier already stored by PostgreSQL. The script runs `docker compose` directly against `deploy/production/compose.yaml` (or the file named by `OCSERV_ROTATION_COMPOSE_FILE`), not through `compose.sh`, and expects that file to define the `postgres` and backup services. Rehearse it on a non-production copy first, and stop, preserving its output, if it reports an unknown or missing service or fails its first credential verification; do not retry blindly. To rotate both runtime roles, prepare two single-link, launcher-owned mode-`0400` or `0600` password files in a launcher-owned mode-`0700` directory outside `OCSERV_SECRET_DIR`, then run:
+The rotation script below applies only to bundled PostgreSQL deployments;
+external PostgreSQL and MySQL credentials must be rotated through their own
+database administration workflows. Editing `postgres-app-password`,
+`postgres-backup-password`, `database-app-url`, or `postgres.pgpass` on disk
+does not update the password verifier stored inside PostgreSQL. Against
+`deploy/production/compose.yaml` (or the file named by
+`OCSERV_ROTATION_COMPOSE_FILE`), the script invokes `docker compose` directly
+instead of calling `compose.sh`, and requires that file to define the `postgres`
+and backup services. Test the procedure on a non-production copy first. If the
+script reports a missing or unknown service, or fails its initial credential
+check, stop immediately and preserve its output without retrying blindly.
+
+To rotate both runtime roles, create two single-link, launcher-owned password
+files (mode `0400` or `0600`) inside a launcher-owned mode-`0700` directory
+outside `OCSERV_SECRET_DIR`, and run:
 
 ```bash
 export OCSERV_NEW_POSTGRES_APP_PASSWORD_FILE=/protected/new-app-password
@@ -101,45 +140,63 @@ export OCSERV_TERMINATE_OLD_POSTGRES_SESSIONS=true # incident rotations only
 deploy/production/rotate-postgres-credentials.sh
 ```
 
-The workflow holds an exclusive mode-`0600` lock in the private secret directory for the complete rotation lifecycle, then verifies the current credentials, executes real `ALTER ROLE` statements through the local administrative connection, verifies both new credentials and rejects both old credentials for new connections, atomically updates the four Compose secret sources, recreates the Control Plane and backup clients, and verifies their new connections. A waiting rotation reads its baseline only after the preceding rotation releases that lock. Recovery restores the previous verifiers and files only when the database and files still match either the baseline or values written by that invocation; unexpected later state is never overwritten. Keep any reported recovery snapshot protected and services stopped until recovery completes. The script never accepts passwords as command-line arguments and does not print them.
+For the duration of the rotation, the script holds an exclusive mode-`0600` lock
+inside the private secret directory; any concurrent invocation waits for that
+lock before reading its baseline state. Once locked, the workflow checks the
+existing credentials, runs `ALTER ROLE` over the local administrative
+connection, verifies that new connections succeed with the new passwords and
+fail with the old ones, atomically updates all four Compose secret files, and
+recreates the Control Plane and backup containers to verify their fresh
+connections. If an error triggers rollback, the script restores the prior
+verifiers and secret files only if the database and on-disk files still match
+either the initial baseline or the values written during that run, never
+overwriting unexpected concurrent changes. Keep any reported recovery snapshot
+protected and leave services stopped until recovery finishes. Passwords are read
+strictly from files and are never accepted on the command line or printed to logs.
 
 ## Deployment rollback
 
-Stop new writes and reconcile every Unknown operation. Use the guarded
-[Controller rollback](../how-to/controller-lifecycle.md#rollback) or
-[Agent rollback](../how-to/agent-lifecycle.md#rollback), respecting the selected artifact's
-actual protocol, configuration and persistent-state requirements. Version order,
-schema ranges and descriptor equality are not admission gates in v1.1.0 and do
-not provide a safety guarantee. Controller rollback
-changes only the installed package (images and Compose project): it does not
-run a down migration or restore a database. Agent rollback likewise restores
-only Agent-side files and does not touch the Controller. Neither is a substitute
-for the other or for database recovery. If same-target upgrade
-recovery and explicit rollback cannot restore service, use database recovery below.
-Record the exact release, source SHA, migration, backup and audit checkpoint.
+Before rolling back, stop new writes and reconcile any operation in the Unknown
+state. Run the guarded [Controller rollback](../how-to/controller-lifecycle.md#rollback)
+or [Agent rollback](../how-to/agent-lifecycle.md#rollback) while satisfying the
+target release's protocol, configuration, and persistent-state requirements. In
+v1.1.0, version ordering, schema ranges, and descriptor equality are not
+enforced as admission gates and do not guarantee cross-version safety. Rolling
+back the Controller swaps only the installed images and Compose project without
+running down migrations or restoring database state; rolling back an Agent
+similarly restores only local node files without modifying the Controller.
+Neither action substitutes for the other or for a database restore. When
+same-target upgrade recovery and package rollback cannot bring the deployment
+back, proceed to database recovery below, and record the exact release tag,
+source SHA, migration state, backup identifier, and audit checkpoint.
 
 ## Database recovery
 
-First identify `OCSERV_DATABASE_BACKEND` and `OCSERV_DATABASE_DEPLOYMENT` from
-the effective configuration and check the
-[production support matrix](production-deployment.md#database-support).
+Start by checking `OCSERV_DATABASE_BACKEND` and `OCSERV_DATABASE_DEPLOYMENT` in
+the active configuration against the
+[production support matrix](production-deployment.md#database-support):
 
-- PostgreSQL: restart the same instance for a transient outage, or use
-  [verified backup and isolated restore](database-backup-restore.md#postgresql) for data loss.
-  Database clusters, automatic failover and PITR readiness are outside the
+- PostgreSQL: for a transient outage, restart the existing instance; after data
+  loss, follow [verified backup and isolated restore](database-backup-restore.md#postgresql).
+  Clustered databases, automatic failover, and PITR readiness fall outside the
   supported single-instance deployment.
-- MySQL: use the matching backend's
-  [logical backup and isolated restore](database-backup-restore.md#mysql). It does not supply
-  PITR, failover, storage snapshots or cross-engine migration. Do not run
-  PostgreSQL recovery or credential-rotation scripts against these backends.
+- MySQL: follow the [logical backup and isolated restore](database-backup-restore.md#mysql)
+  procedure for external MySQL. This workflow does not provide PITR, failover,
+  storage snapshots, or cross-engine migration, and PostgreSQL recovery or
+  credential-rotation scripts must never be run against MySQL backends.
 
-Restore into an isolated target, not over the only existing copy. Fence old
-writers and keep restored command authority blocked. A successful checksum or
-restore verifier is not permission to return to production: verify the schema,
-runtime permissions and audit chain with the real audit keys using an isolated
-Controller, inspect restored scheduler/owner state, and reconcile unfinished
-operations and commands, including Unknown outcomes. Redirect traffic and
-enable command execution only when those checks pass and the authority source
-is unambiguous. Preserve the original evidence and initialization markers.
+Always restore into a separate, isolated target instance without overwriting the
+remaining copy of the damaged database. Fence old writers immediately and keep
+command execution blocked on the restored instance. Passing a backup checksum or
+restore verifier check is only the first step: bring up an isolated Controller
+with the production audit keys to validate the schema, runtime database grants,
+and audit chain, then inspect the restored scheduler and owner state and
+reconcile all in-flight operations and commands, including any Unknown outcomes.
+Repoint client traffic and re-enable command dispatch only after every check
+succeeds and a single authoritative instance is established. Keep all original
+incident evidence and initialization markers intact.
 
-Never guess an Unknown remote-write outcome. Preserve logs and scoped diagnostics, rotate exposed credentials, and involve the external OIDC, PKI/HSM, relay, or telemetry owner when the failing trust boundary is outside Ocservia.
+Never guess the result of an Unknown remote write. Retain logs and scoped
+diagnostics, rotate any credentials that may have been exposed, and coordinate
+with the external OIDC, PKI/HSM, relay, or telemetry operators whenever a failure
+crosses an external trust boundary.
