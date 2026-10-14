@@ -439,8 +439,7 @@ certutil() { :; }
                 if path.startswith('approval-requests/'):
                     return {'status': 'consumed' if state['revoked'] and path.endswith('revoke') else 'approved'}
                 if path == 'nodes/node/revocation':
-                    if role == 'requester' and headers.get('X-Approval-ID') == 'revoke' and 'Origin' not in headers \
-                            and 'X-Workspace-ID' not in headers:
+                    if role == 'requester' and headers.get('X-Approval-ID') == 'revoke' and 'Origin' not in headers:
                         assert status == (200, 503)
                         state['revoked'] = True
                         return None

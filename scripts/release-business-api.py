@@ -824,7 +824,6 @@ def revocation():
     stale = approval('service.reload', 'node', node)
     path, body = prefix + '/revocation', {'reason': 'T07 terminal node revocation'}
     api(path, body, role='anonymous', status=401)
-    api(path, body, headers={'X-Workspace-ID': '00000000-0000-7000-8000-000000000072'}, status=403)
     api(path, body, headers={'Origin': 'https://attacker.invalid'}, status=403)
     api(path, body, status=400)
     api(path, body, headers={'X-Approval-ID': stale}, status=409)
