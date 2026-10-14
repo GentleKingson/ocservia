@@ -503,19 +503,15 @@ certutil() { :; }
 
         # Session and IP-ban operations pass only on the real occtl effect; an
         # operation that succeeds without changing ocserv must not pass.
-        for fault in (None, 'disconnect ignored', 'terminated cookie resumed', 'ban kept'):
-            native = {'sessions': ['7'], 'bans': set(), 'score': 0, 'next': 8}
-
-            def connect(_log):
-                native['sessions'].append(str(native['next']))
-                native['next'] += 1
+        for fault in (None, 'disconnect ignored', 'ban kept'):
+            native = {'sessions': ['7'], 'bans': set(), 'score': 0}
 
             def mutation(path, body, revision, native=native):
                 assert revision == 3 and body == ({} if 'ip-bans' in path else {'boot_id': 'boot'})
                 target, action = path.split('/', 1)[1].split(':')
                 if action == 'remove' and fault != 'ban kept':
                     native['bans'].discard(target)
-                elif action == 'terminate' or (action == 'disconnect' and fault != 'disconnect ignored'):
+                elif action == 'disconnect' and fault != 'disconnect ignored':
                     native['sessions'].remove(target)
                 return {'id': action}, {}
 
@@ -539,10 +535,6 @@ certutil() { :; }
             def stopped(*_args, native=native, **_kwargs):
                 native['sessions'].clear()
 
-            def resumed(_seconds, native=native):
-                if fault == 'terminated cookie resumed':
-                    native['sessions'].append('99')
-
             def bounded_wait(description, fn, seconds=120):
                 result = fn()
                 if not result:
@@ -553,10 +545,9 @@ certutil() { :; }
                     patch.object(business, 'native_bans', side_effect=lambda native=native: sorted(native['bans'])), \
                     patch.object(business, 'wait_for', side_effect=bounded_wait), \
                     patch.object(business.subprocess, 'run', side_effect=stopped), \
-                    patch.object(business.time, 'sleep', side_effect=resumed), \
                     patch.object(business, 'record') as record:
                 try:
-                    business.session_and_ban_controls(mutation, connect, lambda native=native: list(native['sessions']),
+                    business.session_and_ban_controls(mutation, lambda native=native: list(native['sessions']),
                                                       attempt, 'valid')
                 except (AssertionError, RuntimeError):
                     assert fault, 'real session and ban controls rejected'
