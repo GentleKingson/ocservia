@@ -4,10 +4,12 @@ Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
 (positive N without leading zeros). RCs are not recommended stable releases.
 
 The P1 network prototype was developed against source baseline
-`e861b72130d4d409883f68d01805566f26cbafbc`. P3 connects it and the production
-Signer to the existing lifecycle. P4 added native build checks; P5 checks
-the real deployment rather than inferring acceptance from configuration tests.
-Historical prototype results below retain their original scope. Read the
+[`e861b72130d4d409883f68d01805566f26cbafbc`](https://github.com/GentleKingson/ocservia/commit/e861b72130d4d409883f68d01805566f26cbafbc),
+and initial P1/P3–P5 rollout and main acceptance records
+([`368906c65d23bc7abff088dc4bbbdbf160012b32`](https://github.com/GentleKingson/ocservia/commit/368906c65d23bc7abff088dc4bbbdbf160012b32))
+are archived at
+[`af40cd3684269f7e31a3c8d6981775411a8172ec`](https://github.com/GentleKingson/ocservia/blob/af40cd3684269f7e31a3c8d6981775411a8172ec/deploy/production/integrated/README.md).
+Read the
 [Integrated deployment contract](../../../docs/development/integrated-deployment-contract.md).
 Do not bypass the deployment-configuration checks in `controller.sh` for deployment.
 
@@ -132,6 +134,11 @@ install/image smoke on amd64 and arm64, and ordinary
 Release/GHCR publication using version tags. Manual Release dispatch builds
 both architectures without publishing.
 
+Image scans retain the three explicitly approved Oracle FIPS-channel false
+positive entries for the `mysql_backup` image in [the existing exemption file](../image-scan-exemptions.json),
+each with review deadline `2026-10-26` (an expired entry fails the gate again);
+other findings remain gated.
+
 ## Network contract
 
 ```text
@@ -167,10 +174,12 @@ docker compose -f deploy/production/compose.yaml \
 ```
 
 Both lowercase DNS names must be distinct; Edge validates labels before
-restricted environment substitution. Gateway allows the Controller Host with
-no port or `:443`, rejects mismatches before routing, preserves API/static
-fallback/security headers and enables only HTTP/1.1 and HTTP/2, not HTTP/3.
-Gateway accepts PROXY metadata only from Edge's dedicated `/32`
+restricted environment substitution. Caddy's pinned standard build includes
+`caddy.listeners.proxy_protocol` without a custom module: Gateway allows the
+Controller Host with no port or `:443`, executes an explicit `route` block to
+reject authority mismatches before any API or static handler, preserves
+API/static fallback/security headers and enables only HTTP/1.1 and HTTP/2, not
+HTTP/3. Gateway accepts PROXY metadata only from Edge's dedicated `/32`
 (`OCSERV_EDGE_GATEWAY_IP`, default `172.30.241.2`). Reserve that address outside
 the dynamic allocation range; the subnet/range overrides must remain disjoint
 from other networks. Controller still trusts its existing Gateway application
@@ -179,14 +188,18 @@ address, not the new Edge or an entire subnet.
 Gateway/Relay names resolve through Docker DNS every five seconds for new
 connections. Recreation is disruptive: existing streams can break and clients
 must reconnect. Edge defaults to one worker, 2048 worker connections, 8192
-file descriptors, 64 MiB and 35-minute stream inactivity timeout. A relayed
-connection consumes multiple descriptors/hops. The 32-stream fixture is a
-bounded sample, not a 2048-client, latency or HA promise.
+file descriptors, 64 MiB and 35-minute stream inactivity timeout. Periodic SSE
+heartbeats keep active streams open and do not test a 35-minute completely idle
+Edge timeout. A relayed connection consumes multiple descriptors/hops. The
+32-stream fixture is a bounded sample, not a 2048-client, latency or HA promise.
 
 The Relay service reuses its production image, entrypoint, configuration and
 health check. Its TLS files come from `OCSERV_RELAY_SECRET_DIR`; the shared
 Relay access token uses the existing Controller `relay_access_token` Secret,
 also mounted by transportd. No token or TLS key is mounted into Edge.
+Relay requires exact SNI at Edge and protocol-level token authentication (the
+locked Relay client returns `ServerDeniedAuth` with `not authorized` on a wrong
+token rather than relying on HTTP Host admission on `/healthz`).
 Relay has a separate network from Gateway. Relay TCP peer logs see Edge, not
 the original IP. The locked Relay's receive limiter wraps individual client
 streams; this is not proof of original-IP abuse controls behind Edge.
@@ -263,170 +276,6 @@ Business Smoke / Integration environment. Use its optional `run-resilience`
 input; see [resilience coverage](../../../docs/development/resilience.md).
 The former G6 engineering real-node entrypoint and its public-endpoint mode
 are retired.
-
-## Historical P1 results and gates
-
-ARM64 development verification on 2026-09-24 passed the merged port
-set and mount paths, both TLS branches, two bridge client-IP propagation and
-spoof rejection, Controller Host/SNI negatives, static routing/no HTTP3,
-32 concurrent short SSE streams, changed-IP Gateway/Relay recreation and Edge
-restart/new-connection recovery. Caddy's pinned standard build includes
-`caddy.listeners.proxy_protocol`; no custom module was required.
-
-The script was corrected during development for interpolated Compose ports,
-a probe image without Python, Relay HTTPS `/healthz` versus HTTP-only
-`/generate_204`, and ephemeral host-port reassignment after Docker restart.
-The Host-port negative also exposed Caddy directive ordering; an explicit
-`route` now runs authority rejection before any API/static handler.
-The first Actions attempt rejected the fixture's static address reservation
-on a Docker-managed subnet; the fixture now declares its Relay subnet
-explicitly. This changes only the test topology, not production networking.
-These failed attempts were not P1 passes. Check the final artifact for the
-exact candidate, image identities and added negative-case results.
-
-Public validation on 2026-09-25 (Hong Kong time) additionally exercised two
-GitHub-hosted sources against one public test endpoint. The real-node run
-`p1public2f9sbng` used a signed test Agent package, one custom Relay URL, and
-namespace rules rejecting non-loopback IPv4 UDP and all IPv6 UDP on the Agent.
-The connection probe reported `Relay(https://relay.p1.test/)`; independently
-approved real ocserv reload operation `01a0d451-e760-75da-94a6-31dda8c0ad17`
-reached `succeeded`. The locked Relay client accepted the correct token and
-returned `ServerDeniedAuth` with `not authorized` for the wrong token. This is
-a protocol-level denial, not necessarily an HTTP 401/403 response.
-
-The initial combined run failed: public UDP7842 QAD timed out.
-The same binary, Relay, CA and token passed QAD through the private host-bridge
-address (reported address `172.18.0.1:48712`). A bounded packet capture saw
-UDP7842 requests leave the host's physical interface for its public IP, with
-no matching inbound UDP response. The cloud UDP rules/public NAT return path
-were not independently inspected, so that capture alone did not identify which
-cloud component dropped the traffic. After the operator confirmed opening the
-cloud ports, a focused same-host public retest at 2026-09-25 01:01 Hong Kong time
-passed: QAD returned a public mapped endpoint, with a measured latency of
-2.215397 ms.
-Authenticated TCP and explicit wrong-token rejection passed again in that run.
-The original failed artifacts remain failures; the later public retest supplies
-the missing evidence. No private-route workaround was counted as a public pass.
-All task containers and added host firewall rules were removed after each run;
-operator-managed cloud rules were not changed by the harness.
-
-| Gate | Status / next evidence |
-| --- | --- |
-| Public two-name TLS and two external client sources | PASS with explicit public IP and private test CA in [Actions run 36026179708](https://github.com/GentleKingson/ocservia/actions/runs/36026179708): observed sources `52.234.44.112` and `135.232.215.240`, one shared endpoint, both TLS branches and spoof rejection. Public DNS/ACME remain untested. |
-| Exact published port set | PASS in rendered overlay; the authorized public fixture bound TCP443 and UDP7842. The real-node engineering harness also has its existing loopback-only backend publications, not a production deployment. |
-| Same-host return path | TCP and public IPv4 QUIC PASS after the operator's cloud-port change. Authenticated TCP and real Agent commands traversed the public IP; the subsequent public UDP7842 QAD retest returned the actual public address with HTTPS probe fallback disabled. IPv6 was not validated. |
-| Authenticated Relay-only command / wrong token / no public fallback | PASS for real approved ocserv reload with direct Agent UDP excluded and exactly one custom Relay URL in both process argv. Wrong token was explicitly rejected by the Relay protocol. Outage/recovery remains a separate unrun public-path scenario. |
-| Relay Host / SNI boundary | Contract amendment approved 2026-09-25: strict Relay SNI and normal Token authentication, not HTTP Host rejection. The locked Relay returned `HTTP/1.1 200 OK` for `/healthz` with wrong Host and valid SNI. Gateway keeps strict Host checks; the independent real Token check now passes. |
-| Idle and business reconnect | Short synthetic SSE and new TLS connections checked; 35-minute idle boundary, OIDC callback, real SSE authorization and established Agent reconnection remain NOT_RUN. |
-| Registry production artifacts | NOT_RUN; P4/P5 responsibility. Local image IDs are not published pull references. |
-
-These are the original P1 gates, not current Integrated candidate results.
-P3 reused this network/Secret/permission contract; P4 reused the Edge build
-and locked Relay/Gateway versions. The later real Controller/Agent acceptance
-must be read with its own exact source and Registry identities. Prototype
-rollback meant removal of task-owned fixtures; it is not the production
-lifecycle rollback procedure below.
-
-## Integrated acceptance history
-
-P3 [PR #272](https://github.com/GentleKingson/ocservia/pull/272) merged as
-`81a5ea348c1c1b5af13b611b65263b261d419206`; P4
-[PR #273](https://github.com/GentleKingson/ocservia/pull/273) merged as
-`7f0cc4f72a6861296db50ef2b742ef0d375a049e`; P5
-[PR #274](https://github.com/GentleKingson/ocservia/pull/274) merged as
-`368906c65d23bc7abff088dc4bbbdbf160012b32`. Each required Basic CI passed before
-squash merge. Squash identities are not the tested branch identities below.
-
-| Candidate source | Run / attempt | Result and boundary |
-| --- | --- | --- |
-| `b4fca50177c0f41eabdc6d693531a79d39968d50` | [36205708022 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36205708022) | P4 version 1.0.2: native build/scan/publication, full AMD64 business and ARM64 installation PASS; private network. |
-| `6136dcc0f96a017209b8ce51fa7d59e8faa56fee` | [36208295345 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36208295345) | Both architecture scopes PASS; short SSE/private network only. |
-| `092c34d408cab3e6426bc2dcf8b615fca5db0494` | [36209897298 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36209897298) | Private acceptance PASS. Separate public attempts FAILED on disposable Docker vfs disk use, incomplete artifact transfer (correctly rejected), then backup health wait. No public pass. |
-| `733d0716f9e8e7ccd8d95e8959759295aff50cd4` | [36212450801 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36212450801) | Build/scan/publication and ARM64 smoke PASS; AMD64 enrollment FAIL from structured logs on UUID stdout. Public attempt FAIL from fixture CA missing strict keyUsage. |
-| `82e9964118664633c5748de6bc72595627ad56f8` | [36213389600 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36213389600) | stderr logging fix and both private architecture scopes PASS; no new public run. |
-| `0c341e7cc3ac02bd5ff62973ac36adce275d63a4` | [36214198954 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36214198954) | Strict fixture CA and both private architecture scopes PASS; public configuration rollback FAIL because its test executable was on noexec `/run`. |
-| `144c1b71bfa92ef7eef9f7d94deda8120648d497` | [36216389171 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36216389171) | Fixed executable location; native builds/scans, AMD64 full private business and ARM64 smoke PASS. Separate ARM64 complete public acceptance PASS, 2026-09-26 05:19:30 UTC. |
-
-The last branch candidate used the signed 1.0.2 baseline above, actual
-first install/upgrade, tampered-signature rejection before stop, a real TCP443
-activation conflict with preserved current/pending state, retry, rollback and
-re-upgrade. It preserved issuer CA, node keys, revocation and minimum revision.
-Container recreation retained the established Agent process and a newly
-approved operation had one journal execution and one privd receipt.
-
-[Public client run 36218732086 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36218732086)
-used two external sources, `172.214.44.1` and `4.246.151.208`, against the same
-public test endpoint. Controller audit correlation proved
-their original IPs and rejected spoofed forwarding headers. The locked Relay
-probe passed authenticated TCP, explicit wrong-token denial and same-host
-public UDP7842 QAD with HTTPS fallback disabled. Authorized SSE ran 2160 seconds
-with 216 heartbeats, one 1800-second application lifetime and a successful
-reconnect; anonymous SSE returned 401. Heartbeats prevent Edge inactivity, so
-this is **not** a 35-minute completely idle Edge timeout test.
-
-Failures above remain failures. Fixes created new source-bound candidates;
-none was repaired by replacing a binary or rewriting its manifest SHA.
-
-## Historical main acceptance
-
-[Run 36220524783, attempt 1](https://github.com/GentleKingson/ocservia/actions/runs/36220524783)
-validated source `368906c65d23bc7abff088dc4bbbdbf160012b32` on main.
-The runtime observations below retain their original scope; historical build
-attachments and their expired identities are not current publication criteria.
-
-### Measured support and maintenance
-
-Run 36220524783 completed successfully on main. A fresh isolated
-ARM64 Docker/systemd deployment consumed only its Registry digests and signed
-native package, finishing at **2026-09-26 07:00:41 UTC**. It repeated the full
-public business and lifecycle checks above; no compilation, image build,
-replacement Signer or edited Compose file was used in consumption. The
-prebuilt locked Relay network probe was independently SHA-256 pinned.
-
-| Path | Result / tested scope |
-| --- | --- |
-| AMD64, Ubuntu 24.04 native Runner | PASS: build, smoke, scan, signed Registry pull, P3 installation, full Controller/Agent/privd, Local/OIDC, two-purpose sealing, P12/CRL, browser/config/VPN, offline queue and single-Relay recovery, recreation and short authorized SSE. Private network. |
-| ARM64, Ubuntu 24.04 native Runner | PASS: build, smoke, scan, clean signed Registry pull/install/start, entry/internal TLS, non-purging uninstall/start and identity preservation. |
-| ARM64, disposable Debian 13/systemd | PASS: public full chain, same-host TCP/UDP, baseline install/upgrade/failure recovery/rollback/re-upgrade, established Agent reconnect, authorized SSE and documented maintenance below. |
-| External public clients | [36225418379 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36225418379) PASS: distinct sources `20.97.199.51` and `57.151.137.34`; both independently matched Controller auth audit source IP after maintenance, with spoofed forwarding headers ignored. |
-| Database/auth deployment adaptation | P3 focused rendering/preflight matrix PASS for bundled/external PostgreSQL, external MySQL/MariaDB and Local/OIDC/dual modes. This candidate's full real business used bundled PostgreSQL and Local + OIDC; it is not a new full MySQL/MariaDB business matrix. |
-
-The main public SSE sample ran 2161 seconds, with 215 heartbeats, two
-connections and a first application lifetime of 1800.000068 seconds. The
-same-host QAD result reported a public mapped endpoint, not a private bridge
-address. No direct Agent UDP path was counted as Relay business.
-
-The maintenance commands below were rehearsed in that clean deployment after
-the SSE check, before the two new external requests. `controller.sh uninstall`
-stopped the deployment; the actual digest-pinned Signer backed up and inspected
-state version 1/revision 12. Restore with floor 13 was rejected without creating
-a destination. Restore with independently captured floor 12 retained issuer,
-policy and revision, activated with UID/GID 65532 and mode 0600, then normal
-`controller.sh start` restored login and node connectivity. A newly approved
-reload produced exactly one journal execution and one privd receipt.
-CA and private node identity hashes stayed unchanged. The full maintenance
-stop includes the configured backup startup health wait; it is not zero downtime.
-
-CRL refresh advanced to 13, and the native ocserv verifier again rejected the
-revoked P12 while accepting the unrevoked control. Controller retirement was
-independently approved, the node became revoked/offline, and offline Signer
-`disable` advanced revision to 14. Both sealing purposes then returned 403.
-The private snapshot and keys stayed in the disposable deployment and were
-removed with its normal fixture cleanup; only sanitized results were retained.
-
-NOT_RUN / not claimed: stable tag/Release publication and download/bootstrap,
-an online production target, public IPv6 or public CA/ACME issuance, 35-minute
-completely idle Edge timeout, HA, long-duration load, automatic CRL delivery,
-or forced disconnection of existing VPN sessions. Distinct requester/approver
-principals were real, but do not prove two independently responsible humans.
-Integrated ACME (`OCSERV_TLS_MODE=acme`) and Quick postdate this run and were
-not part of it; Release Check now exercises Quick against a Pebble test ACME
-directory, which is not public CA issuance.
-Image scans retain the three explicitly approved Oracle FIPS-channel false
-positive entries for the `mysql_backup` image in [the existing exemption file](../image-scan-exemptions.json),
-each with review deadline `2026-10-26` (an expired entry fails the gate again);
-other findings remain gated.
-Subsequent documentation-only changes do not retest or relabel this source.
 
 ## Operator lifecycle and maintenance
 
