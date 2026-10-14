@@ -1,47 +1,39 @@
 # Command semantic hash v1
 
-This document is the single source of truth for the **Canonical Semantic Payload
-Hash v1**: the versioned identity that binds a command's side-effecting
-semantics across the Go Controller, the Rust Agent, and every test vector. It is
-read by both production implementations and by the shared golden fixture.
+Canonical Semantic Payload Hash v1 is the versioned digest that binds a
+command's side-effecting semantics across the Go Controller, the Rust Agent,
+and the shared golden test vectors.
 
 ## Why a dedicated semantic hash
 
-Protobuf binary serialization is **not** canonical across languages, runtimes,
-or schema versions. Field ordering and unknown-field retention are not stable.
-A language's "deterministic" marshal only guarantees stability within one binary
-build; it does not guarantee equality across Go and Rust, and it breaks the
-moment the schema evolves. Hashing re-serialized Protobuf bytes therefore cannot
-serve as a durable command identity.
+Protobuf binary serialization is not canonical across languages, runtimes, or
+schema revisions: field ordering and unknown-field retention can vary, and a
+runtime's "deterministic" marshal option only stabilizes output within a single
+binary build. Because re-serializing Protobuf messages can produce different
+byte sequences between Go and Rust or after a schema extension, hashing wire
+bytes cannot provide a durable command identity.
 
-The semantic payload hash solves this by hashing a **hand-specified canonical
-byte layout** instead of Protobuf wire bytes. Two commands with the same
-side-effecting semantics always produce the same hash, regardless of wire
-encoding. Two commands with different side-effecting semantics always produce
-different hashes.
-
-The hash never depends on `proto.Marshal`, `encode_to_vec`, deterministic
-marshal, original field order, or whether a runtime happens to retain an
-unknown field.
+Instead, the semantic payload hash operates over a fixed, hand-specified
+canonical byte layout. Commands with identical side-effecting semantics always
+hash to the same digest regardless of wire encoding, while commands with
+different side-effecting semantics always produce distinct digests. The digest
+never depends on `proto.Marshal`, `encode_to_vec`, deterministic marshal modes,
+wire field order, or whether a runtime retains unknown fields.
 
 ## Security invariants
 
-1. **Semantic identity is separated from wire encoding.** Equal semantics must
-   yield equal hashes even if Protobuf wire field order differs. Different
-   semantics must yield different hashes.
-
-2. **Unknown fields are not silently ignored.** Any unknown field in a command
-   envelope or payload that causes side effects is rejected before a journal
-   record is created and before any effect runs. Unknown-field rejection is
-   enforced by strict wire-schema validation, not by this hash.
-
-3. **Both sides compute and verify independently.** The Controller-computed
-   expected hash, the Agent-recomputed hash, and the hash carried on the Agent
-   result must all agree. Any mismatch fails closed.
-
-4. **The hash algorithm is versioned.** The version is persisted alongside the
-   digest. When the algorithm or semantics change, a new version (for example v2)
-   is introduced; the definition of an existing version is never edited.
+1. Equal command semantics must produce identical hashes even when Protobuf
+   wire field ordering differs, and distinct semantics must produce distinct
+   hashes.
+2. Any unknown field in a side-effecting command envelope or payload is
+   rejected by strict wire-schema validation before the Agent creates a journal
+   record or executes an effect.
+3. The Controller's expected hash, the hash recomputed by the Agent and privd,
+   and the hash reported on the Agent result must all match; any discrepancy
+   fails closed.
+4. The hash algorithm is explicitly versioned and stored alongside the digest.
+   When hashing rules or command semantics evolve, a new version (such as v2)
+   is introduced without modifying the definition of an existing version.
 
 ## Byte layout
 
@@ -65,20 +57,19 @@ SHA-256(
 
 ### Domain separator
 
-The literal ASCII string `ocservia.command.semantic-hash.v1` followed by one
-`0x00` terminator. As hex:
+The domain separator is the literal ASCII string
+`ocservia.command.semantic-hash.v1` terminated by a single `0x00` NUL byte
+(which is included in the hashed preimage):
 
 ```
 6f637365727669612e636f6d6d616e642e73656d616e7469632d686173682e763100
 ```
 
-The trailing NUL is part of the hashed bytes.
-
 ### `payload_kind`
 
-`payload_kind` reuses the existing Protobuf oneof field number of the command
-payload. The payloads specified in this document, which are also the only ones
-in the shared v1 fixture, are:
+`payload_kind` reuses the Protobuf `oneof` field number of the command payload.
+The initial v1 payload set, covered by the shared v1 fixture, uses these field
+numbers:
 
 | Payload | Field number |
 |---|---:|
@@ -90,18 +81,18 @@ in the shared v1 fixture, are:
 | `SessionTerminate` | 112 |
 | `IpBanRemove` | 113 |
 
-The schema has further side-effecting payloads (`UserCreate` 101, `UserDisable`
-102, `ConfigApply` 104, `UserPasswordRotate` 114, `GroupApply` 115, `UserEnable`
-116, `CertificateCsr` 117, `CertificateP12` 118, `CertificateRevoke` 119 and
-`AgentUpgrade` 128). Their canonical encodings are defined by the Go
-`semanticpayload` package and the Rust `command-authorization` crate, not by
-this document. `CompleteConfigPlan` 129 and `CompleteConfigApply` 130 exist
-only under v2. `SimulationProbe` 106 is not hashable.
+Additional side-effecting payloads (`UserCreate` 101, `UserDisable` 102,
+`ConfigApply` 104, `UserPasswordRotate` 114, `GroupApply` 115, `UserEnable`
+116, `CertificateCsr` 117, `CertificateP12` 118, `CertificateRevoke` 119, and
+`AgentUpgrade` 128) define their canonical encodings in the Go
+`semanticpayload` package and the Rust `command-authorization` crate.
+`CompleteConfigPlan` 129 and `CompleteConfigApply` 130 exist only under v2, and
+`SimulationProbe` 106 is not hashable.
 
-These field numbers are reserved forever. When a payload type is removed, its
-field number stays reserved so old wire data is never reinterpreted as a new
-field. Adding a new side-effecting payload adds a new oneof member and its field
-number becomes a new `payload_kind`.
+Once assigned, payload field numbers remain reserved permanently so retired
+payload types can never be reinterpreted as new fields on the wire. Introducing
+a new side-effecting command adds a new `oneof` member whose field number
+becomes its `payload_kind`.
 
 ## Payload encoding
 
@@ -121,7 +112,8 @@ canonical_payload =
     || message_utf8
 ```
 
-The length is the UTF-8 **byte** count, not the Unicode scalar count.
+The length prefix measures the raw UTF-8 byte count, as distinct from the
+Unicode scalar count.
 
 ### SessionDisconnect and SessionTerminate
 
@@ -146,13 +138,13 @@ payload_kind = uint32_be(103)
 canonical_payload = candidate_hash
 ```
 
-`candidate_hash` is exactly 32 bytes and is independently verified against the
-bounded candidate before validation. The candidate is immutable for that hash;
-delivery metadata and the temporary fixed staging filename are excluded.
-V1 does not include the ConfigPlan expected desired-state revision. The
-Controller now signs every command with semantic hash v2 instead; v1 remains
-frozen, and the Agent, privd and Controller result path still accept it for
-existing durable command history and older commands.
+`candidate_hash` is a 32-byte digest verified independently against the bounded
+configuration candidate prior to validation. Because the candidate content is
+immutable for a given digest, delivery metadata and the temporary staging
+filename are omitted from the hash. Version 1 does not bind the `ConfigPlan`
+expected desired-state revision; the Controller now signs all newly issued
+commands with semantic hash v2, while keeping v1 frozen and accepted by the
+Agent, privd, and Controller result path for historical command records.
 
 ### IpBanRemove
 
@@ -161,19 +153,19 @@ payload_kind = uint32_be(113)
 canonical_payload = uint32_be(len(ip_utf8)) || ip_utf8
 ```
 
-The IP string must already be in canonical form before hashing.
+The IP address string must already be formatted in canonical representation
+before hashing.
 
-**No Unicode normalization is performed.** A precomposed character and its
-decomposed equivalent are different byte sequences and therefore produce
-different hashes. For example, `é` (`U+00E9`, UTF-8 `c3 a9`) and `e` plus
-combining acute accent (`U+0301`, UTF-8 `65 cc 81`) hash to different digests.
-This keeps the hash a pure function of bytes and avoids cross-runtime
-normalization differences.
+Strings never undergo Unicode normalization: a precomposed character and its
+decomposed sequence have different UTF-8 bytes and therefore hash to different
+digests (for example, `é` at `U+00E9` encodes as `c3 a9`, whereas `e` followed
+by `U+0301` encodes as `65 cc 81`). Hashing raw bytes directly avoids
+cross-runtime differences in Unicode normalization tables.
 
 ## Excluded fields
 
-The following fields do not change side-effecting semantics, so they are
-explicitly excluded from the hash:
+Fields that carry transport, tracing, or envelope metadata without altering the
+command's target side effect are excluded from the semantic payload hash:
 
 ```
 protocol_version
@@ -199,35 +191,34 @@ connection_fence
 fence_binding
 ```
 
-- `CommandAuthorizationV1` independently signs the command and operation
-  identities, actor, action, required capability, approval binding, delivery
-  mode, timestamps, revision, payload kind, and semantic digest.
-- The journal also enforces independent command and idempotency uniqueness.
-- Tracing and human-readable reason metadata remain outside both semantic
-  payload identity and authorization.
+- `CommandAuthorizationV1` separately signs the command and operation IDs,
+  actor, action, required capability, approval binding, delivery mode,
+  timestamps, authorization revision, payload kind, and semantic digest.
+- The Agent journal enforces independent uniqueness on `command_id` and
+  `idempotency_key`.
+- Tracing headers and human-readable reason strings remain outside both the
+  semantic payload hash and the authorization signature.
 
-Changing any excluded field while leaving the included fields identical must not
-change the hash.
+Varying any of these excluded fields while holding the included fields constant
+leaves the semantic digest unchanged.
 
 ## Version freezing
 
-Once released, **no field may be added to or removed from the v1 canonical
-rule**. Any future change that affects the side effect of `SyntheticEcho` (or any
-other payload) must be expressed either as a **new semantic hash version** (v2)
-or as a **new payload oneof type**, never by editing the v1 hash input.
+The v1 canonical encoding rules are permanently frozen: no field may be added
+to or removed from v1. Any change that alters the side-effecting inputs of an
+existing payload such as `SyntheticEcho` must be introduced either under a new
+semantic hash version (such as v2) or as a new payload `oneof` variant.
 
 ## Shared golden fixture
 
-The reference vectors live in a single shared file that both Rust and Go read:
+Both the Rust and Go test suites verify their implementations against a single
+shared vector file instead of maintaining language-specific digest tables:
 
 ```
 testdata/semantic-payload-hash-v1.json
 ```
 
-Each vector records the input fields, the exact `canonical_preimage_hex` bytes
-that are hashed, and the resulting `expected_sha256`. Reviewers can verify any
-vector directly: decode `canonical_preimage_hex`, compute `SHA-256` of those
-bytes, and compare with `expected_sha256`.
-
-Rust and Go **must read the same fixture**. Neither language is permitted to
-maintain its own hardcoded digest table for this algorithm.
+Each entry specifies the structured input fields, the exact
+`canonical_preimage_hex` byte sequence, and the resulting `expected_sha256`
+digest, allowing any vector to be checked directly by hex-decoding
+`canonical_preimage_hex` and taking its `SHA-256` digest.

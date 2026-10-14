@@ -1,61 +1,70 @@
 # Telemetry and read-only fleet views
 
-The unprivileged Agent sends read-only observations to the Controller. It emits
-a bounded telemetry batch every 30 seconds on a dedicated Iroh unidirectional
-stream; the Web application reads the stored result through the HTTP API. A node
-is shown offline after its latest heartbeat is more than 90 seconds old, or has
-never sent one. The API derives this freshness (`fresh`, `stale`, `never`) at
-read time; scheduler maintenance separately persists the offline transition.
+The unprivileged Agent streams read-only node observations to the Controller by
+emitting a bounded telemetry batch every 30 seconds over a dedicated
+unidirectional Iroh stream, and the Web UI queries the persisted data through
+the HTTP API. A node appears offline once its most recent heartbeat is older
+than 90 seconds or if it has never reported one; the API computes freshness
+(`fresh`, `stale`, `never`) at read time while background scheduler maintenance
+persists the offline state transition separately.
 
 ## Data classes and limits
 
-- Security observations, current health, aggregate metrics, and raw history
-  have separate priorities.
-- The Agent persists at most 64 MiB. Buffered telemetry is eligible for offline
-  recovery for at most five minutes. It evicts oldest raw history before
-  aggregate, health, and security data and reports drop counts.
-- A wire batch is limited to 512 KiB. Session, username, and client IP fields
-  are stored in the node session read model and must not be metric labels.
-- PostgreSQL stores raw samples in monthly partitions; MySQL uses
-  owner-managed monthly shard tables and a durable shard catalog. Runtime
-  writers do not create or drop these objects. Scheduler maintenance builds
-  5-minute and 1-hour rollups and applies the 14-day, 90-day, and 13-month
-  retention periods idempotently. Rollups recompute the full accepted 14-day
-  lateness window starting at each resolution's complete UTC bucket, and each
-  retention invocation deletes at most 1,000 expired rows per rollup table and
-  retires at most one expired month. Retention cutoffs are checked against
-  server time and cannot move into the future; the oldest retirement candidate
-  is aggregated before its raw data becomes unavailable.
-- The Controller accepts snapshot, metric, and security-observation timestamps
-  from the preceding 14 days through five minutes in the future. Events outside
-  that window are rejected before backend partition/shard selection.
+- Telemetry separates security observations, current health snapshots,
+  aggregate metrics, and raw history into distinct priority tiers.
+- The local Agent buffer is capped at 64 MiB, and buffered telemetry is
+  eligible for offline recovery for at most five minutes. When the buffer fills,
+  the Agent evicts the oldest raw history before dropping aggregate, health, or
+  security records, and reports the resulting drop counts.
+- Each wire batch is bounded to 512 KiB. High-cardinality session, username,
+  and client IP attributes belong only to the node session read model and are
+  never attached as metric labels.
+- In PostgreSQL, raw telemetry samples land in monthly table partitions, whereas
+  MySQL uses owner-managed monthly shard tables tracked in a durable shard
+  catalog that runtime writers never create or drop directly. Background
+  scheduler maintenance computes 5-minute and 1-hour rollups and enforces the
+  14-day, 90-day, and 13-month retention windows idempotently. Each rollup pass
+  recomputes the full 14-day lateness window starting from the resolution's
+  complete UTC bucket, and each retention pass deletes up to 1,000 expired rows
+  per rollup table and retires at most one expired month. Retention cutoffs are
+  evaluated against server time, cannot advance into the future, and always
+  aggregate the oldest retirement candidate before its raw partition or shard
+  is retired.
+- On ingress, the Controller accepts snapshot, metric, and
+  security-observation timestamps ranging from 14 days in the past up to five
+  minutes in the future, rejecting out-of-window events before selecting a
+  backend partition or shard.
 
 ## Transport ingestion recovery
 
-The Controller classifies authenticated transport ingestion failures before it
-updates the retained event cursor. Transaction or database failures retain the
-previous cursor and use the bounded reconnect backoff. Permanently invalid
-business payloads are rolled back, recorded as bounded metadata without their
-raw payload, and advance the durable cursor in the same transaction. A high
-severity security alert identifies each newly quarantined event so one node
-cannot silently block later events from other nodes.
+Before advancing its durable event cursor, the Controller classifies any
+authenticated transport ingestion failure. Transient database or transaction
+errors leave the cursor at its previous position and trigger bounded reconnect
+backoff. When an event carries a permanently invalid business payload, the
+Controller rolls back the payload write, records bounded quarantine metadata
+without the raw payload, and advances the durable cursor within the same
+transaction, raising a high-severity security alert for each quarantined event
+so a malformed payload from one node cannot stall ingestion for the rest of the
+fleet.
 
-Current state is available from `GET /api/v1/nodes`,
-`GET /api/v1/nodes/{node_id}`, and the node `sessions` resource. Bounded
-history queries use the node `telemetry` resource with a required metric, a
-`raw`, `5m` (default) or `1h` resolution, and an optional RFC 3339 `since`
-(default 24 hours ago); at most 2,000 points, oldest first from `since`, are returned. SSE is only an
-invalidation signal: clients rebuild authoritative state through REST after
-connecting or reconnecting, and a reconnect may pass the last event ID as a
-cursor that must still be visible in the authorized scope (otherwise 400
-`invalid-cursor`).
+Clients read current fleet and node state from `GET /api/v1/nodes`,
+`GET /api/v1/nodes/{node_id}`, and the node `sessions` resource. Historical
+series are queried from the node `telemetry` resource with a required metric
+name, a resolution of `raw`, `5m` (default), or `1h`, and an optional RFC 3339
+`since` timestamp (defaulting to 24 hours ago), returning up to 2,000 data
+points ordered from oldest to newest starting at `since`. Because the SSE
+stream acts solely as an invalidation signal, clients fetch authoritative state
+via REST after connecting or reconnecting; a reconnecting client may supply its
+last seen event ID as a cursor, which returns `400` (`invalid-cursor`) if that
+event is no longer visible within the caller's authorized scope.
 
 ## Upgrade and rollback
 
-Run the target's owner-only initialization; backend migration numbers are not
-interchangeable. [Binary rollback](../how-to/controller-lifecycle.md#rollback) supplies
-neither down migrations nor cross-version acceptance. For
+Schema setup and upgrades must run through the target backend's owner-only
+initialization path, as migration numbers are not interchangeable across
+database engines, and [Binary rollback](../how-to/controller-lifecycle.md#rollback)
+provides neither down migrations nor cross-version schema compatibility. During
 [recovery](../operations/incident-recovery.md#database-recovery), stop affected
-writers and preserve telemetry history, quarantine, cursors and node trust.
-Resolve the incident before resuming ingestion; never reset evidence to make
-an older binary start.
+writers and preserve telemetry history, quarantine records, ingestion cursors,
+and node trust state, resolving the underlying fault before resuming ingestion
+without ever wiping stored evidence to make an older binary start.

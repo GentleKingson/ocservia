@@ -2,91 +2,27 @@
 
 ## v1.1.0 policy reset
 
-This policy took effect with the published
-[`v1.1.0` release](https://github.com/GentleKingson/ocservia/releases/tag/v1.1.0).
-Its release notes link the exact-source acceptance and publication runs; later
-candidates require their own validation. The archived 1.0 policy
-records the published line; its version windows, deprecation timetable and additive-only
-`1.x` promise do not govern this explicitly breaking policy reset. Existing
-published tags, artifacts and release history are unchanged.
+This policy took effect with the [`v1.1.0` release](https://github.com/GentleKingson/ocservia/releases/tag/v1.1.0). The `v1.1.0` release notes link the acceptance and publication runs for that tag, while every subsequent candidate requires its own validation run. This policy reset explicitly supersedes the version windows, deprecation schedule, and additive-only `1.x` compatibility promises of the archived 1.0 policy, while leaving previously published git tags, release artifacts, and historical records intact.
 
-`v1.1.0` removes software upgrade, downgrade and rollback compatibility
-admission, historical migration compatibility probes, legacy deployment
-auto-conversion, and historical release compatibility matrices and gates.
-This includes the public `--schema-compatibility-check` CLI and the readiness
-response's `schema_version` field. Readiness checks zero-row reads of current
-core tables and event-stream health, not migration history or a Controller
-schema range. There is no
-minimum source or rollback version, fixed upgrade source, version allowlist,
-force/skip switch, or replacement capability/schema-number version fence.
-Install, upgrade and rollback remain explicit operations on verified targets;
-version format and version display remain, but version ordering is not authority
-to accept or reject an operation.
+Starting in `v1.1.0`, the codebase removes software upgrade, downgrade, and rollback version admission gates, historical migration compatibility probes, automatic conversion of legacy deployments, and multi-release compatibility matrices. The public `--schema-compatibility-check` CLI flag and the `/readyz` response's `schema_version` field have also been removed; readiness probes now check zero-row reads against current core tables alongside event-stream health without inspecting migration history ranges. Install, upgrade, and rollback remain explicit lifecycle commands targeting verified release artifacts, and while version strings are still validated and displayed, numeric version ordering is not used to admit or reject an operation.
 
-Keep runtime command signatures and trusted keys, Controller-authorized
-upgrade package digests and architecture; real command capabilities;
-authorization and approvals; idempotency,
-replay protection and ownership fences; Signer identity and monotonic revision;
-transactions, atomic state commits and real failure propagation. Database
-initialization, applied records, known migration content integrity and actual
-service/database readiness remain required. Removing historical deployment
-conversion must also remove its automatic network/configuration/data changes,
-not leave destructive actions behind without their former guards.
+Removing software-version admission does not relax runtime security or state invariants. Command signatures, trusted keys, Controller-authorized upgrade digests and target architectures, negotiated command capabilities, RBAC and independent two-principal approvals, idempotency, replay protection, owner fences, Signer identity and monotonic revisions, and atomic database transactions all remain mandatory. Likewise, removing legacy deployment auto-conversion means removing the automatic network, configuration, and data mutations that accompanied it.
 
-This reset removed software-version admission only. It did not remove database
-schema-source admission: the owner migration run still refuses unknown schema
-epochs, revisions and checksums, schema drift, and a nonempty database without
-a trusted receipt. The sole previous database checkpoint is the fixed v1.2.0
-release, defined in the
-[database migration contract](../development/control-plane.md#current-sql-artifacts-and-bounded-upgrades);
-it is an immutable schema source, not a minimum Controller or Agent version, and
-it does not move when main advances. Empty-database initialization is not a way
-to overwrite an existing database, and fresh and checkpoint-upgraded databases
-must be schema-equivalent without having identical receipts.
+Database schema-source admission also remains strictly enforced: the owner migration runner rejects unknown schema epochs, revisions, or checksums, schema drift, and non-empty databases that lack a valid migration receipt. The only supported prior database checkpoint is the fixed `v1.2.0` schema defined in the [database migration contract](../development/control-plane.md#current-sql-artifacts-and-bounded-upgrades), which serves as an immutable schema baseline and does not define a minimum Controller or Agent runtime version. Freshly initialized databases and databases upgraded from the `v1.2.0` checkpoint must converge to the exact same schema while retaining their respective execution receipts, and empty-database initialization never overwrites an existing database.
 
-Acceptance covers the current candidate on the supported architectures,
-deployment modes and database products, with security, integration and resilience
-checks. It does not certify historical upgrade/downgrade/migration paths beyond
-the one bounded v1.2.0 database transition that the migration contract defines.
-Cross-version operations may fail or damage state; absence of a compatibility
-rejection is not a safety guarantee. Never automatically reverse database
-migrations, reset identities or overwrite persistent state. Existing installed
-old scripts retain their original behavior. Operators needing a different
-deployment layout must explicitly redeploy rather than expect legacy conversion.
-Release notes must identify removed public entrypoints and these risks, and must
-not describe `v1.1.0` as a fully backward-compatible SemVer minor.
+Release acceptance validates the current candidate across the supported architectures, deployment modes, and database engines through security, integration, and resilience suites. Beyond the single bounded `v1.2.0` database schema transition, historical upgrade, downgrade, and migration paths are not tested. Running mismatched component versions can fail or corrupt state even without a version-admission gate; operators must never reverse database migrations, reset node or Signer identities, or overwrite persistent state to force a rollout, and changing deployment topologies requires a clean redeployment. Release notes must list removed public entrypoints and state explicitly that `v1.1.0` is a policy-breaking release despite its minor version number.
 
 ## Published history and version format
 
-The [published 1.0 policy](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/docs/reference/support-policy.md)
-records the original additive-only promise, fixed upgrade source, deprecation
-schedule and finite release matrix. Those software-version promises do not
-govern the v1.1.0 reset; historical release facts remain unchanged.
-This document does not turn an unreleased candidate or an unrun check into a
-production recommendation.
+The [published 1.0 policy](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/docs/reference/support-policy.md) remains in git history as the record of the original 1.0 line, without governing `v1.1.0` or later releases. Nothing in this policy certifies an unreleased commit or an unexecuted validation suite for production use.
 
-Release identities are stable `X.Y.Z` or candidate `X.Y.Z-rc.N` (positive N,
-without leading zeros). RCs are candidates, not recommended stable versions.
-RC and stable share the same Release Check. Final is a separate tag and Release;
-RC tags and Releases remain in the history. Version ordering is not
-execution authority. The explicitly chosen v1.1.0 release removes public
-surfaces and compatibility guarantees despite its minor-version label; it must
-not be described as fully backward compatible. Release builds use the
-explicitly selected version tag.
+Release tags follow `X.Y.Z` for stable releases and `X.Y.Z-rc.N` (with a positive integer `N` and no leading zeros) for release candidates. Both RC and stable builds run the same [Release Check](../development/release-checks.md) workflow, where `workflow_dispatch` runs act as non-publishing dry runs and tag-triggered runs build, scan, and smoke-test artifacts before publishing through the protected release environment. Promoting an RC to a final release creates a separate `X.Y.Z` tag and GitHub Release while retaining the RC tags in history.
 
-[Release Check](../development/release-checks.md) validates current products.
-Dispatch remains a non-publishing dry-run; tag-triggered publication builds
-and smoke-tests products before publishing through the protected environment.
-Explicit software lifecycle
-operations use verified targets, not a minimum source version or a bridge
-release; this does not apply to database schema admission, which is described
-above. Package-manager behavior is not overridden. Unknown outcomes require
-[incident recovery](../operations/incident-recovery.md), not blind replay.
+Lifecycle commands operate on explicitly pinned release artifacts without relying on bridge releases or overriding OS package-manager rules, while database schema admission continues to follow the migration contract above. Commands that settle in an `Unknown` state must be handled through [incident recovery](../operations/incident-recovery.md) without blind replay.
 
 ## Supported platforms
 
-Each row is owned by its authoritative document; this section is an index, not
-a second support matrix.
+Each row below summarizes the current validated baseline and links to the document that owns its detailed requirements:
 
 | Surface | Supported scope | Authority |
 | --- | --- | --- |
@@ -98,74 +34,20 @@ a second support matrix.
 | Authentication | Local only, OIDC only, or Local + OIDC | [Authentication](../operations/authentication.md) |
 | Web console browsers | Chrome 111+, Safari 16.4+, Firefox 128+, Chromium 111+ derivatives; Quick checks Chromium, Full adds Playwright Firefox and WebKit | [Supported browsers](../development/web.md#supported-browsers) |
 
-Managed-ocserv note: the node adapter admits exactly `1.2.x`, `1.3.x`, `1.4.x`,
-and `1.5.0` from real ocserv version output. `1.5.0` is the release-validated
-version, with native adapter validation and real-VPN business acceptance
-evidence; the older admitted lines run the same adapter paths without a
-per-line acceptance guarantee. Recognition of a version string is not a
-support claim for future ocserv releases.
-
-Support rows state what ocservia has actually validated. Upstream releases
-(database point releases, new ocserv lines, new distro versions) are adopted
-only after compatibility and artifact review, never automatically.
+On managed nodes, the ocserv adapter accepts version strings matching `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` from live `ocserv` output. Full release acceptance (native adapter integration plus real-VPN business validation) runs against `1.5.0`, whereas the `1.2.x`, `1.3.x`, and `1.4.x` lines share the same adapter code paths and parser regression fixtures without separate per-line release certification. Future `ocserv` versions require explicit adapter and compatibility review before admission, and new database patch releases or OS distributions are adopted only after artifact and migration verification.
 
 ## Deployment capability distinctions
 
-Each supported deployment uses one Controller, one database instance and one
-dedicated Relay. The database choices and supported versions above, integrated
-/ standalone deployments, bundled / external database modes and multi-Agent
-management remain unchanged. Components may run on separate hosts. Controller
-HA, multiple Relay failover, database replication clusters, PostgreSQL automatic failover
-and PITR readiness are outside the supported scope. Rebind uses two independent
-Controller deployments; it is not HA. See the
-[resilience coverage and migration decision](../development/resilience.md).
+Every supported production deployment runs a single Controller instance, one relational database, and one dedicated Relay (either on separate hosts in Standalone mode or co-located in Integrated mode, with bundled PostgreSQL or external PostgreSQL/MySQL), managing one or more node Agents. Controller high availability, multi-relay failover, database replication clusters, automatic PostgreSQL failover, and point-in-time recovery (PITR) are outside the supported scope, and Controller rebind moves nodes between two independent single-Controller deployments without providing active-passive HA; see [resilience coverage and migration decision](../development/resilience.md).
 
-Three pairs are deliberately not conflated:
+In addition, operational readiness distinguishes between three pairs of states that are often conflated:
 
-1. **Single-relay recovery vs redundancy.** One dedicated Relay is supported.
-   Its outage may interrupt management connections; recovery uses the original
-   Relay, identity and command. Multiple Relay failover is outside support.
-   See [dedicated Relay](../how-to/dedicated-relay.md).
-2. **Package installed vs really managed online.** A node with packages
-   installed and services stopped is not fleet-managed. Online management
-   requires enrollment, Controller approval, a started matched node, and an
-   authorized active session; fleet lifecycle evidence covers that full path.
-   See [enroll a node](../how-to/enroll-node.md) and
-   [agent lifecycle](../operations/agent-lifecycle.md).
-3. **Backup created vs backup restorable.** Producing a backup artifact
-   (PostgreSQL base backup, MySQL logical dump) is a scheduled
-   operation; **restore is a separate, separately validated procedure**.
-   A backup file existing, or a backup job succeeding, is not a verified
-   restore, and a restore verifier passing is not schema admission (the owner
-   migration run does that). PostgreSQL backups retain their required WAL and verification; isolated
-   restore is separate from HA/PITR readiness. MySQL restore uses a new isolated
-   server with the restore verifier, and redirecting a live Controller is a
-   guarded manual cutover. See
-   [PostgreSQL backup](../operations/database-backup-restore.md#postgresql),
-   [MySQL backup](../operations/database-backup-restore.md#mysql).
+1. Single-relay recovery versus multi-relay redundancy: production supports a single dedicated Relay. If that Relay goes offline, relay-routed control connections pause until the same Relay host and identity recover and pending commands are reconciled; automatic failover to a second Relay is not supported (see [dedicated Relay](../how-to/dedicated-relay.md)).
+2. Package installation versus active online management: installing the node package and leaving its services stopped does not put a host under fleet management. A node is actively managed only after completing enrollment, receiving Controller approval, starting the matched `Agent` and `privd` daemons, and establishing an authorized transport session (see [enroll a node](../how-to/enroll-node.md) and [agent lifecycle](../operations/agent-lifecycle.md)).
+3. Backup creation versus verified restoration: scheduled backups produce PostgreSQL base backups or MySQL logical dumps, whereas restoration is a separate procedure that must be validated in an isolated environment. Neither a completed backup job nor a passing restore-verifier check substitutes for owner-role schema migration admission, and redirecting a live Controller to a restored MySQL instance requires a manual cutover (see [PostgreSQL backup](../operations/database-backup-restore.md#postgresql) and [MySQL backup](../operations/database-backup-restore.md#mysql)).
 
 ## Security review posture
 
-- Dependency advisories (Go `govulncheck`, Rust `cargo audit`/`cargo deny`
-  including the relay lockfile, npm audit) and repository secret scanning run
-  through the scheduled Security Checks workflow and must be green on the
-  release candidate. See [SECURITY.md](../../SECURITY.md) for reporting and
-  supported-version policy.
-- **Image scanning:** Release `build-controller-images` scans every exact
-  Controller release archive on both native architectures (amd64 and arm64),
-  before image smoke and artifact upload, with pinned Syft and Grype tools and an updated
-  vulnerability database. Temporary OS scan data is removed after the gate;
-  it is not published as Release assets. A High or Critical OS finding with
-  an available fix fails CI unless a reviewed entry in
-  `deploy/production/image-scan-exemptions.json` matches the exact image,
-  package, installed version, vulnerability id, actual digest-pinned base,
-  reason and unexpired review date. A new CVE, changed package/base or expired
-  review fails again. Findings without a fix remain visible in CI logs.
-  Compiled first-party dependencies remain covered by the source advisory
-  scans above. Formal Release builds, scans and smoke-tests after the manual CI
-  gate; either architecture failing blocks publication. Business Smoke owns
-  runtime acceptance and does not scan images.
-- New database patch sets need migration, permission, artifact and backup/restore
-  review plus candidate-specific evidence under
-  [stable contracts](stable-contracts.md#database-and-recovery-matrix).
-  Existing validated pins remain authoritative until adoption.
+- Source dependency advisories (`govulncheck` for Go, `cargo audit` and `cargo deny` for Rust including the relay lockfile, and `npm audit` for Web) along with repository secret scanning run in the scheduled Security Checks workflow and must pass on the release candidate; vulnerability reporting and supported versions are covered in [SECURITY.md](../../SECURITY.md).
+- During release builds, `build-controller-images` scans every built Controller image archive on both native architectures (`amd64` and `arm64`) using pinned Syft and Grype versions against a freshly updated vulnerability database before running image smoke tests or uploading release assets (temporary scan databases are discarded after the job). Any High or Critical OS vulnerability with an upstream fix fails the build unless a non-expired entry in `deploy/production/image-scan-exemptions.json` matches the exact image, package name, installed version, CVE ID, digest-pinned base image, and documented rationale; unfixed findings remain visible in the CI logs, and a failure on either architecture blocks release publication.
+- Updating pinned database images or patch levels requires migration, role-permission, SQL-artifact, and backup/restore verification under [stable contracts](stable-contracts.md#database-and-recovery-matrix) before replacing the existing pins.

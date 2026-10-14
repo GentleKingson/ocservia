@@ -1,193 +1,68 @@
 # Controller rebind and retention contract
 
-Use the [local rebind procedure](../how-to/rebind-controller.md) for the manual
-lifecycle. Retention runs independently under the safety conditions below.
+For the manual operator workflow, follow the [local rebind procedure](../how-to/rebind-controller.md). Data retention runs independently on its own schedule under the safety rules below.
 
-The identity crate provides `Identity::stage_rebind`: it verifies the
-expected source EndpointID and Controller pin, copies the existing endpoint
-key into a separate owner-only identity directory pinned to the target
-Controller, and publishes that directory with a durable no-replace rename. It never changes the source pin. A partial
-staging directory is evidence of an incomplete preparation and is refused on
-retry. This primitive is not an activation API; the privileged binding lifecycle
-and operational CLI must still enforce the complete transition below.
+At the filesystem level, the identity crate's `Identity::stage_rebind` helper verifies the expected source EndpointID and Controller pin, copies the existing endpoint key into a separate owner-only identity directory pinned to the target Controller, and publishes that directory through a durable no-replace rename while leaving the source pin untouched. If a partial staging directory is already present from an interrupted attempt, retry refuses to proceed. Because `Identity::stage_rebind` only prepares the directory, the privileged binding lifecycle and operational CLI remain responsible for driving the full activation transition.
 
-The runtime selector is `/etc/ocservia-agent/active-binding`, a root-owned,
-single-link regular file with mode `0640` (or `0440`) under root-controlled
-ancestry. It contains the version, new UUIDv7 NodeID, Controller EndpointID,
-preserved Agent EndpointID, independently provisioned Ed25519 command key and
-mutation quarantine state. Both services load this complete record; only
-absence selects the original installation configuration. Invalid records fail
-startup. The record selects separate Agent, privd and upgrader directories
-under each service's `bindings/<node-id>` state hierarchy. Business resources
-and sealing keys stay in their existing locations. A namespaced Agent journal
-also pins its Controller/NodeID and refuses adoption of unbound recovery state.
+Runtime authority selection is governed by `/etc/ocservia-agent/active-binding`, a root-owned, single-link regular file with mode `0640` (or `0440`) beneath root-controlled parent directories. That record stores the schema version, the new UUIDv7 NodeID, the target Controller EndpointID, the preserved Agent EndpointID, an independently provisioned Ed25519 command key, and the mutation quarantine flag. Both services load the complete record at startup and fail closed if the file is malformed; only the absence of `/etc/ocservia-agent/active-binding` selects the original installation configuration. When present, the selector directs the Agent, privd, and the upgrader to isolated state directories under each service's `bindings/<node-id>` hierarchy, while business resources and sealing keys remain in place. Each namespaced Agent journal also pins its Controller and NodeID pair and refuses to adopt unbound recovery state.
 
-All services and upgrade runners must be stopped before publishing the selector.
-Publication alone is not a supported administrator procedure: use the local
-lifecycle's preflight, enrollment, recovery and audit steps. Upgrade
-and rollback preflight require binding-aware binaries once the selector exists;
-they must not install a binary which ignores this authority boundary.
+All node services and upgrade runners must stop before `/etc/ocservia-agent/active-binding` is published. Writing the selector file by hand is not a supported administrative shortcut; operators must run the local lifecycle CLI so preflight checks, enrollment, recovery classification, and audit recording all execute in order. Once an active binding selector exists on disk, upgrade and rollback preflight checks require binding-aware binaries and refuse to install any package version that ignores this authority boundary.
 
 ## Authority and identity
 
-Rebind is an explicit privileged operation on the managed node. It transfers
-the node's sole Controller authority without rotating its endpoint private key
-or resetting ocserv users, configuration, certificates, or sealing keys. It
-does not migrate Controller databases, users, telemetry or approvals, so the
-target Controller sees a new pending node with no history from the source. It
-is not high availability: it does not discover, fail over to, or implicitly
-trust another Controller. Ordinary identity provisioning continues to reject
-Controller endpoint substitution.
+Rebinding is an explicit privileged operation executed on the managed node. The transfer reassigns the node's sole Controller authority while keeping its endpoint private key, ocserv users, configuration, certificates, and sealing keys intact. Because the process does not copy Controller databases, users, telemetry, or approvals, the target Controller registers the host as a brand-new pending node with no prior history from the source. Rebinding is a deliberate administrative migration, with no automatic discovery, failover, or implicit trust between Controllers, and ordinary identity provisioning still rejects any attempt to substitute a Controller endpoint.
 
-A binding identifies the Controller EndpointID, independently provisioned
-command verification keyring, Controller-side NodeID, and its durable command
-and effect namespace. These values change together. A new Controller must
-allocate a different NodeID. Session grants, authorization revisions, connection
-owner floors, idempotency identities and resource revision floors belong to
-that binding. The Agent and privd independently enforce the active authority.
-The former keyring never remains an alternative mutation authority.
+Each binding groups together the Controller EndpointID, an independently provisioned command verification keyring, the Controller-assigned NodeID, and a dedicated durable namespace for commands and effects. All of those attributes switch atomically, and the new Controller must allocate a fresh NodeID. Session grants, authorization revisions, connection owner floors, idempotency identities, and resource revision floors are all scoped to the active binding. Both the Agent and privd enforce the active authority independently, and the retired keyring loses all mutation authority immediately.
 
 ## Durable transition
 
-The operation has one durable identity and records its expected source binding
-and explicitly pinned target. Concurrent rebind, upgrade and rollback operations
-must be excluded. The stages are:
+A rebind operation carries a single durable identity that records both its expected source binding and its explicitly pinned target, excluding concurrent rebind, upgrade, or rollback work. Execution proceeds through five ordered stages:
 
-1. Preflight identity, independently provisioned target trust, file ownership
-   and service configuration, including the single dedicated Relay: a non-empty
-   `RELAY_URL_B` in `relays.env` is rejected before enrollment, operation
-   creation or service shutdown. The CLI does not check free storage. Outstanding
-   privileged work does not block the transfer; commit classifies it and, when
-   any is unresolved, publishes the binding with mutations quarantined.
-2. Stage the target without changing the active binding. Enroll using the same
-   Agent endpoint private key and existing possession-proof protocol.
-3. Verify the response's Controller endpoint, pending result and new NodeID.
-   Keep enrollment distinct from independent approval and activation.
-4. Quiesce both services and any privileged upgrade runner; commit one durable
-   binding selector covering all authority and state paths. A crash must load
-   either a complete source or a complete target, never a mixture.
-5. Start privd then Agent, verify an authenticated target session, and mark the
-   source binding sealed in the operation record (source files are not changed).
-   Record completion durably.
+1. Run preflight validation over node identity, independently provisioned target trust, file ownership, and service configuration, including the single dedicated Relay invariant (a non-empty `RELAY_URL_B` in `relays.env` is rejected before enrollment, operation creation, or service shutdown). Free disk space is not checked by the CLI. In-flight or unresolved privileged work does not block the transfer; commit inspects existing evidence and publishes the new binding with mutations quarantined if any prior work remains unresolved.
+2. Stage the target identity directory without altering the active binding, then enroll against the target Controller using the existing Agent endpoint private key and possession-proof protocol.
+3. Verify the target Controller endpoint, pending enrollment status, and newly assigned NodeID in the enrollment response. Enrollment remains separate from independent approval and node activation.
+4. Quiesce both node services and any privileged upgrade runner, then atomically commit the durable binding selector across all authority and state paths so a crash at any point recovers either the complete source binding or the complete target binding, never a split state.
+5. Start privd followed by the Agent, confirm an authenticated session with the target Controller, mark the source binding as sealed in the operation record without mutating source files, and durably record completion.
 
-Network failure, rejected token or target pin, invalid command key, response
-loss or staging failure must leave the source binding intact. A committed
-target whose restart or session verification fails remains recoverable and
-fails closed; recovery must not silently reactivate the source Controller.
-After target commands can have executed, returning to the source is another
-explicit transfer, not filesystem rollback. The CLI refuses a target Controller
-or command key equal to the current one, and a Controller refuses bootstrap
-enrollment of an EndpointID it already stores in any state, so a Controller
-that has held this endpoint cannot currently be a rebind target. Preserve the
-failed transition's evidence and expose the next recovery action.
+Any failure before selector commit, whether from a network error, a rejected token or target pin, an invalid command key, a lost response, or a staging error, leaves the source binding active and untouched. Once the target selector is committed, a failed service restart or session check fails closed in a recoverable state and never falls back to the source Controller silently. If target commands may already have run, moving back to the original Controller requires a new explicit rebind operation instead of a filesystem rollback. The CLI rejects any target Controller or command key that matches the current binding, and a Controller rejects bootstrap enrollment for any EndpointID already present in its database regardless of state, which prevents rebinding back to a Controller that previously held the same endpoint. Failed transitions keep their diagnostic evidence on disk and report the next recovery step.
 
-The rebind CLI accepts only an `obt1_` bootstrap token, whose retry is
-recoverable: the Controller binds a consumed token to its endpoint and returns
-that same pending node on a valid retry while the node is still pending. Persist the target and token identity before the first request; an
-unknown response never authorizes issuing another token or creating another
-node. Legacy endpoint-bound enrollment tokens remain single-use; response loss
-requires authenticated inventory recovery. Neither flow grants approval.
+The rebind CLI accepts only `obt1_` bootstrap tokens, which support idempotent retry: the Controller binds a consumed token to the requesting endpoint and returns the same pending node record if a retry arrives while the node is still pending. The CLI persists the target identity and token reference before sending the first request, and an ambiguous or lost response never authorizes minting a second token or creating a duplicate node. Legacy endpoint-bound enrollment tokens remain strictly single-use and require authenticated inventory recovery if the response is lost. Neither enrollment path grants node approval.
 
-When source administration is available, use the normal approved node
-revocation operation and its existing trust convergence. Source availability
-is not required for the local transfer, and the CLI records the declared source
-disposition (`revoked` or `unreachable`) without verifying it. An unreachable source cannot be
-updated; its history remains there. Once switched, local enforcement rejects
-source sessions and signed commands even if that Controller returns.
+When the source Controller is still reachable by administrators, revoke the node there through the standard approved revocation workflow so trust state converges cleanly. Local rebind does not depend on source reachability; the CLI records the operator-declared source disposition (`revoked` or `unreachable`) without contacting the source. If the source is unreachable, its historical records stay frozen on that Controller, and local enforcement on the node rejects any future sessions or signed commands from the old Controller even if connectivity returns later.
 
 ## Recovery evidence
 
-Rebind never deletes historical data. Retire the source journal, effect store,
-receipts and upgrade intents together with their authority identity. New
-commands cannot look up, resume or inherit an old command or its result by an
-accidental ID match. Old revision/fence floors remain evidence and do not
-become target authority.
+Rebinding never deletes historical state on the node. Instead, the transition retires the source journal, effect store, receipts, and upgrade intents alongside their old authority identity. Commands issued by the new Controller cannot look up, resume, or inherit prior commands or results even if an ID happens to collide, and old revision or fence floors remain read-only historical evidence without conferring target authority.
 
-Namespace isolation alone is insufficient for uncertain external effects:
-an old Unknown or prepared privileged effect can refer to the same ocserv
-resource. Preserve the evidence and fail closed until explicit reconciliation
-establishes the outcome: when the commit-time check finds unresolved source
-evidence (including a missing or unreadable Agent journal or an unreadable
-privileged-effect store), the binding is published with mutations quarantined
-and privd refuses to prepare new authorized privileged effects under it. The CLI
-provides no command that clears this flag, and read-only operation remains
-available. Do not relabel old evidence
-as a new Controller's command or infer completion from service health.
+Because an older Unknown command or prepared privileged effect could still reference a shared local ocserv resource, namespace separation by itself is not enough to guarantee safety. Whenever commit-time inspection detects unresolved source evidence, including a missing or unreadable Agent journal or an unreadable privileged-effect store, the new binding is published with mutations quarantined, and privd refuses to prepare any new authorized privileged effects until explicit reconciliation resolves the state. The CLI offers no flag to bypass or clear this quarantine, though read-only telemetry and status reporting continue to work. Never relabel source evidence as a target Controller command or assume an uncertain effect finished just because the local service is healthy.
 
 ## Independent retention
 
-Use a periodic worker with bounded indexed batches and short transactions,
-durable progress where required, and idempotent retry. No per-node timers and
-no cleanup inside rebind. Existing telemetry maintenance retains its own
-14-day raw, 90-day five-minute and 13-calendar-month hourly windows.
+Historical compaction runs in periodic background passes that process bounded, indexed batches inside short transactions with durable progress tracking and idempotent retry, avoiding per-node timers or inline cleanup during rebind. Existing telemetry retention keeps its established 14-day raw, 90-day five-minute, and 13-calendar-month hourly windows.
 
-The scheduler currently compacts terminal command payloads and retired-node
-ordinary snapshots independently of rebind. Each transaction takes at most 32
-commands or nodes (at most 32 session rows per selected node), and checks the
-scheduler leadership fence before commit. Marked command rows are skipped on
-retry. `OCSERV_COMMAND_DETAIL_RETENTION_DAYS` and
-`OCSERV_RETIRED_NODE_RETENTION_DAYS` configure these cutoffs.
+On the Controller, the scheduler compacts terminal command payloads and retired-node snapshots independently of rebind operations. Each database transaction processes at most 32 commands or nodes (and at most 32 session rows per selected node) and verifies the scheduler leadership fence before committing. Command rows already marked as compacted are skipped on retry. The cutoff ages are controlled by `OCSERV_COMMAND_DETAIL_RETENTION_DAYS` and `OCSERV_RETIRED_NODE_RETENTION_DAYS`.
 
-Command compaction requires both command and operation terminal state, an expired
-signed envelope and database expiry, completed outbox publication, no lease,
-no sending/Unknown attempt or Unknown result, and no unresolved associated
-configuration, artifact or upgrade projection. It replaces command/outbox payloads
-with a non-dispatchable evidence header and records the original envelope digest.
-Identities, request/idempotency hashes, terminal outcome, authorization signatures,
-semantic hashes, revision/fence claims and privileged result proofs remain.
-Configuration-plan payloads/results remain because later approval and recovery
-read them. Late results cannot mutate a compacted command; late dispatch bookkeeping
-cannot restore its full payload.
+Before a command row can be compacted, both the command and its parent operation must be in a terminal state, the signed envelope and database TTL must have expired, outbox publication must be complete, no active lease or sending/Unknown attempt or Unknown result may exist, and no linked configuration, artifact, or upgrade projection may remain unresolved. Compaction replaces the command and outbox payloads with a non-dispatchable evidence header containing the original envelope digest, while preserving identities, request and idempotency hashes, terminal outcomes, authorization signatures, semantic hashes, revision and fence claims, and privileged result proofs. Configuration-plan payloads and results are kept intact because subsequent approvals and recovery workflows read them directly. Once a command is compacted, late results cannot mutate it and late dispatch bookkeeping cannot restore the full payload.
 
-Retired-node cleanup requires a revoked endpoint and no unresolved command or
-projection. It removes bounded session snapshots and clears ordinary health/path
-JSON, retaining the node and endpoint revocation records. Audit/security detail uses `OCSERV_AUDIT_RETENTION_DAYS` (365, range 90–2555).
-Each pass verifies at most 32 original audit records before removing reason and
-before/after summaries, preserving an independently authenticated compact record
-and every original chain/checkpoint link. Corrupt or unknown-key evidence stops
-the entire batch. Database routines enforce a 90-day minimum and deny ordinary
-runtime mutation. At most 32 old security-event detail objects are replaced by
-a digest and retained identity/severity/timestamps. Raw telemetry and rollups are
-not touched.
+Retired-node cleanup applies only to revoked endpoints that have no unresolved commands or projections. Each pass deletes bounded session snapshots and clears ordinary health and path JSON while preserving the core node row and endpoint revocation records. Audit and security-event compaction follows `OCSERV_AUDIT_RETENTION_DAYS` (default 365, configurable from 90 to 2555 days). In each pass, the worker verifies at most 32 original audit rows before stripping reason strings and before/after summaries, leaving an independently authenticated compact record with every original hash-chain and checkpoint link intact. Any corrupt row or unknown signing key halts the entire batch. Database routines enforce a hard 90-day minimum age and block ordinary runtime table mutations. Up to 32 aged security-event detail payloads per pass are similarly replaced with a digest while retaining identity, severity, and timestamps. Raw telemetry and rollups are untouched by this pass.
 
-The host-wide `ocservia-agent-retention.timer` runs hourly with randomized delay.
-It scans at most 32 operation records per pass using a durable cursor and the
-shared binding lifecycle lock. Only verified, inactive, unquarantined bindings
-older than the configured cutoff qualify. Missing/corrupt privileged evidence,
-unresolved commands/effects/artifacts or upgrades block cleanup. Each retired
-Agent journal transaction compacts at most 32 nonprivileged result details into
-hashes, retaining command identities, terminal outcomes and all revision/fence
-floors. Privileged results and root-authenticated effect evidence remain intact.
-Journal writes run as the Agent account; root only coordinates protected state.
-A retired marker prevents reopening that journal for execution. Endpoint key
-copies and original legacy paths remain available for package compatibility.
-After the separate rebind-history cutoff, verified completed operations lose
-their bootstrap token and ordinary detail fields; the binding transition,
-source disposition and protected tombstone remain.
+On managed nodes, the host-wide `ocservia-agent-retention.timer` triggers hourly with a randomized delay. Each run acquires the shared binding lifecycle lock and scans up to 32 operation records from a durable cursor. Only verified, inactive, unquarantined bindings older than the cutoff are eligible; missing or corrupt privileged evidence, or any unresolved command, effect, artifact, or upgrade, blocks cleanup for that binding. Within each retired Agent journal transaction, the worker compacts up to 32 nonprivileged result payloads into hashes while keeping command identities, terminal outcomes, and all revision and fence floors. Privileged results and root-authenticated effect evidence are never compacted. Journal compaction runs under the unprivileged Agent account while root coordinates protected lifecycle state, and a retired marker on the journal prevents the Agent from ever reopening it for command execution. Endpoint key copies and legacy filesystem paths stay in place for package compatibility. Once the separate rebind-history retention window passes, verified completed rebind records drop their bootstrap token and routine detail fields, keeping only the binding transition summary, declared source disposition, and protected tombstone.
 
 | Data | Default | Configuration range | Safety boundary |
 | --- | --- | --- | --- |
-| Retired node ordinary history | 90 days | 30–730 days | Retain node identity, revocation and required references |
-| Terminal command detail | 90 days | 30–365 days | Compact; retain command/idempotency identity and recovery proof |
-| Audit/security detail | 365 days | 90–2555 days | Preserve authenticated chain continuity and verification |
-| Rebind detail | 365 days | 90–2555 days | Retain compact binding/revocation tombstone |
-| Agent retired binding detail | 30 days | 7–180 days | Only after all unresolved work is reconciled |
+| Retired node ordinary history | 90 days | 30 to 730 days | Retain node identity, revocation and required references |
+| Terminal command detail | 90 days | 30 to 365 days | Compact; retain command/idempotency identity and recovery proof |
+| Audit/security detail | 365 days | 90 to 2555 days | Preserve authenticated chain continuity and verification |
+| Rebind detail | 365 days | 90 to 2555 days | Retain compact binding/revocation tombstone |
+| Agent retired binding detail | 30 days | 7 to 180 days | Only after all unresolved work is reconciled |
 
-Configuration is validated at startup; negative, zero and out-of-range values
-are errors. No setting disables replay, fence or Unknown protection. Cleanup
-is eligibility-based: pending, accepted, running, unknown, unresolved effects
-and unresolved reconciliation never expire by age. Retired binding cleanup
-requires all these blockers to be absent and must retain a compact tombstone.
+Startup validation rejects negative, zero, or out-of-range retention values. No configuration knob can disable replay protection, authority fencing, or Unknown-effect quarantine. Because retention is strictly eligibility-driven, records in pending, accepted, running, or unknown states, as well as unresolved effects and unreconciled state, never age out by wall-clock time alone. Cleaning up a retired binding requires every blocker to be clear and always leaves a compact tombstone behind.
 
-Readers must distinguish compacted terminal records from missing evidence.
-A repeated request must neither execute again nor invent an empty successful
-result. Audit cleanup must preserve authenticated chain verification.
+Callers reading historical state must distinguish compacted terminal records from missing evidence. Replaying a request against a compacted command must neither re-execute the mutation nor synthesize a fake empty success, and audit compaction must keep the full authenticated hash chain verifiable.
 
 ## Acceptance evidence
 
-Use focused tests for each implementation boundary. Acceptance must exercise
-the real enrollment, session and privileged-effect paths with two Controllers,
-including these cases:
+Implementation boundaries require focused unit and integration tests, and end-to-end acceptance must exercise real enrollment, session establishment, and privileged-effect execution across two Controllers for the following scenarios:
 
 | Case | Required outcome |
 | --- | --- |
@@ -201,29 +76,15 @@ including these cases:
 | Retention cutoff and repeated worker run | Bounded, resumable, idempotent compaction; safety records retained |
 | Telemetry maintenance | Existing 14d / 90d / 13 calendar months unchanged |
 
-Wire transcript, semantic hash, protobuf field numbers and existing REST
-behavior remain stable. Reuse enrollment, approval, revocation, trust convergence
-and database transaction abstractions; no federation or automatic failover.
+Wire transcripts, semantic hashes, protobuf field numbers, and existing REST contracts remain unchanged. The implementation reuses the established enrollment, approval, revocation, trust convergence, and database transaction primitives without introducing Controller federation or automatic failover.
 
-
-The real-process acceptance runner exercises both source dispositions:
+The real-process acceptance suite validates both source dispositions:
 
 ```sh
 OCSERV_REBIND_E2E=revoked scripts/database-controller-e2e.sh postgres all
 OCSERV_REBIND_E2E=unreachable scripts/database-controller-e2e.sh postgres all
 ```
 
-It starts independent Controller databases, transport identities and command
-keys, uses the existing private TLS relays, and runs the installed local rebind
-CLI against real Agent/privd binaries and Ocserv. The target requires normal
-bootstrap possession, independent approval and root attestation registration.
-The test verifies unchanged endpoint/business/key bytes, a new NodeID, a fresh
-signed session after restart, and a successful target user mutation. It restores
-an unavailable source and submits an unexpired original source envelope directly
-to privd as the Agent UID, requiring an authority rejection. Finally it runs the
-independent worker before and after the fixture's retention cutoff and checks
-that old command identities/proofs and a retired tombstone survive.
+Each run provisions two independent Controller databases, transport identities, and command signing keys, routes traffic through the private TLS relays, and executes the installed local rebind CLI against real Agent, privd, and Ocserv binaries. Completing the transfer requires standard bootstrap possession proof, independent approval, and root attestation registration on the target Controller. The suite then confirms that endpoint keys and local business state are byte-for-byte unchanged, a new NodeID and fresh signed session are active after service restart, and a user mutation succeeds under the target Controller. To verify authority isolation, the test brings an unreachable source Controller back online and injects an unexpired source-signed command envelope directly into privd under the Agent UID, asserting that privd rejects the old authority. Finally, the suite triggers the retention worker before and after the configured cutoff and verifies that compacted command identities, proofs, and retired tombstones remain intact.
 
-The container has no systemd PID 1: its systemctl adapter only supervises real
-processes and translates Ocserv probes/reload. Enrollment, sessions, command
-signatures, root effects, database state and retention are not mocked.
+Because the test container does not boot systemd as PID 1, its systemctl adapter supervises real daemon processes directly and translates Ocserv status probes and reload requests, while enrollment, sessions, command signatures, root effects, database transactions, and retention passes all run unmocked.

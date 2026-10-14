@@ -1,20 +1,8 @@
 # Identity, authorization, approval, and audit operations
 
-Production API access supports Local only, OIDC only, and Local + OIDC.
-When OIDC is enabled, it uses Authorization Code flow with PKCE S256.
-Configure an HTTPS issuer, exact HTTPS callback URL and client credentials for
-OIDC; in production its redirect origin must match `OCSERV_PUBLIC_ORIGIN`. Every
-production mode requires a 32-byte session encryption key, a 32-byte audit
-checkpoint key, and an independent 32-byte audit event authentication key with
-a stable key ID. The browser
-receives only Secure, HttpOnly, SameSite session cookies; OIDC tokens are not
-stored in browser storage. Existing sessions remain usable during a temporary
-identity-provider outage, while new SSO logins fail closed. Local login remains
-available when enabled.
+Production API access supports three authentication configurations: Local only, OIDC only, and Local + OIDC. When OIDC is enabled, login uses the Authorization Code flow with PKCE S256 against an HTTPS issuer, an exact HTTPS callback URL, and configured client credentials; in production, the callback redirect origin must match `OCSERV_PUBLIC_ORIGIN`. Every production configuration requires a 32-byte session encryption key, a 32-byte audit checkpoint key, and an independent 32-byte audit event authentication key paired with a stable key ID. Browsers receive only Secure, HttpOnly, SameSite session cookies, and OIDC tokens are never written to browser storage. If the external identity provider experiences an outage, existing sessions continue to work while new SSO logins fail closed; Local login remains available whenever it is enabled.
 
-See [production authentication](../operations/authentication.md) for deployment
-examples, secret mounts, first-admin bootstrap and login behavior. Common
-authentication and audit settings are:
+See [production authentication](../operations/authentication.md) for deployment examples, secret mounts, first-admin bootstrap, and login workflows. The primary authentication and audit environment variables are:
 
 ```text
 OCSERV_LOCAL_AUTH_ENABLED
@@ -26,179 +14,49 @@ OCSERV_AUDIT_EVENT_KEY_ID
 OCSERV_AUDIT_EVENT_KEY_FILE
 ```
 
-The symmetric key values contain 64 lowercase hexadecimal characters. The
-event key file must be a process-owned, single-link regular file with mode
-`0400` or `0600` below root- or process-owned non-writable ancestry. Production startup
-fails when both Local and OIDC are disabled, OIDC is incomplete, or a required
-session/audit key is absent.
+Symmetric keys are encoded as 64 lowercase hexadecimal characters. The audit event key file must be a process-owned, single-link regular file with mode `0400` or `0600` beneath root-owned or process-owned non-writable parent directories. Production startup aborts if both Local and OIDC authentication are disabled, if OIDC configuration is incomplete, or if any required session or audit key is missing.
 
-Development authentication is not a production mode. `OCSERV_DEV_AUTH` makes
-every request the development principal and is accepted only with
-`environment=development` and a loopback HTTP address; `OCSERV_DEV_AUTH_TOKEN`
-(at least 32 characters, sent as `Authorization: Bearer`) is accepted only with
-`environment=development`. The development principal has no identity row or
-role binding. Route-level RBAC is skipped for it (the event stream still needs a
-valid workspace), `/local-users` and `/auth/change-password` reject it, and it
-cannot create or decide approvals because those require a requester or approver
-identity. Browser-hidden buttons are never authorization evidence; the backend
-checks above are the only boundary.
+Development authentication is strictly for local development and is rejected in production. Setting `OCSERV_DEV_AUTH` authenticates every request as the development principal and is accepted only when `environment=development` and the HTTP listener is bound to loopback; `OCSERV_DEV_AUTH_TOKEN` (at least 32 characters, sent in `Authorization: Bearer`) is accepted only when `environment=development`. Because the development principal has no identity row or role binding, route-level RBAC checks are bypassed for it (though the event stream still requires a valid workspace), while `/local-users` and `/auth/change-password` reject it outright. It also cannot create or decide approval requests, which require persisted requester and approver identities. Hiding buttons in the browser UI never substitutes for authorization; the backend checks above are the sole enforcement boundary.
 
-Authorization combines a subject, workspace, resource type, resource ID, and
-action. The baseline roles are Viewer, Operator, UserManager, ConfigManager,
-Auditor, SecurityAdmin, and PlatformAdmin. Collection requests carry
-`X-Workspace-ID`; when it is omitted, the principal's single authorized
-workspace is used and zero or several candidates are refused. Object routes
-independently resolve the object's workspace so changing an ID cannot cross an
-authorization boundary.
+Authorization evaluates a subject, workspace, resource type, resource ID, and action against the baseline roles Viewer, Operator, UserManager, ConfigManager, Auditor, SecurityAdmin, and PlatformAdmin. Collection endpoints read `X-Workspace-ID`; if the header is omitted, the server selects the caller's single authorized workspace and rejects the request when zero or multiple workspaces match. Object-addressed routes resolve the target object's owning workspace directly from storage so tampering with an ID in the URL cannot cross workspace boundaries.
 
-Node activation (`node.approve`), node revocation (`node.revoke`), service
-reload, configuration apply, certificate issue/revoke/private-key export, Agent
-upgrade and rollout, batch user disable, elevated role bindings and Local
-password reset (`local_user.reset-password`) require an approved request. Create
-the request first, have a different authorized principal approve it, then submit
-the mutation with `X-Approval-ID`. Approval records are scoped to one requester,
-action, workspace, resource, content hash and expiry; they are consumed in the
-business transaction and cannot be replayed. PlatformAdmin does not bypass this
-requirement. The approver must hold SecurityAdmin or PlatformAdmin covering every
-authority resource, bound no later than the request's authority snapshot.
+High-risk mutations require an approved request before execution: node activation (`node.approve`), node revocation (`node.revoke`), service reload, configuration apply, certificate issuance, revocation, and private-key export, Agent upgrades and rollouts, batch user disable, elevated role bindings, and Local administrator password resets (`local_user.reset-password`). The caller creates an approval request first, waits for a different authorized principal to approve it, and then submits the mutation with `X-Approval-ID`. Each approval record is bound to a single requester, action, workspace, target resource, content hash, and expiration timestamp, and is consumed atomically inside the business transaction so it cannot be replayed. Holding PlatformAdmin does not bypass independent two-principal approval, which enforces two distinct authenticated principals, credentials, and sessions without proving that two different natural persons hold custody of those credentials (see the [approval principal boundary](../reference/stable-contracts.md#approval-principal-boundary)). The approving principal must hold SecurityAdmin or PlatformAdmin covering every authority resource on the request, granted no later than the request's authority snapshot.
 
-Audit intents commit with business writes. Agent terminal results append a
-separate event. Every new row authenticates its canonical event hash with a
-domain-separated application HMAC; signed checkpoints use a separate key.
-Audit identities, original hashes/MACs and checkpoints are immutable. Ordinary
-UPDATE, DELETE and TRUNCATE remain denied. A separate bounded retention pass may
-clear aged reason/before/after detail through a narrow database routine after
-verifying its original hash and MAC. It authenticates the retained record and
-original proof with the distinct `ocservia/audit-detail-compaction/v1` MAC domain;
-chain links and checkpoint hashes do not change. The verification endpoint checks
-both original and compaction MACs, the hash chain and latest checkpoint, and reports
-`compacted_events` so verified retained evidence is distinguishable from full detail.
-Legacy unsigned rows and their transition anchor are not compacted. A failed audit insert rolls back
-the business transaction. Chain hashing uses the persisted microsecond clock
-value, and summaries are parsed to their logical JSON representation before
-canonicalization, so writer and reader agree even for whitespace around a
-top-level JSON `null`; the historical v1 float64 numeric rounding is
-deliberately preserved rather than re-signed. Audit append retains its
-per-workspace transaction lock; verification reads at repeatable read.
+Audit intent records commit in the same transaction as the business write, and terminal Agent command results append a separate follow-up audit event. Every newly inserted audit row authenticates its canonical event hash with a domain-separated application HMAC, while signed checkpoints use a separate key. Audit identities, original hashes and MACs, and checkpoints are immutable, and ordinary UPDATE, DELETE, and TRUNCATE statements are denied at the database level. If an audit insert fails, the enclosing business transaction rolls back.
+
+A bounded retention job can clear aged reason strings and before/after detail summaries through a narrow database routine after verifying each row's original hash and MAC. Compaction re-authenticates the retained columns and original proof under the dedicated `ocservia/audit-detail-compaction/v1` MAC domain without altering hash-chain links or checkpoint digests. The audit verification endpoint validates both original and compaction MACs alongside the hash chain and latest checkpoint, reporting `compacted_events` so operators can distinguish verified compacted records from full-detail rows. Legacy unsigned rows and their transition anchor are never compacted. Chain hashing uses the persisted microsecond timestamp, and JSON summaries are parsed into their logical representation before canonicalization so writers and readers produce identical digests regardless of whitespace around a top-level JSON `null`; historical v1 float64 numeric rounding stays intact instead of being re-signed. Appending an audit event acquires the per-workspace transaction lock, while verification reads run at repeatable-read isolation.
 
 <a id="local-authentication-core-p1"></a>
 ## Local authentication core
 
-The internal `auth.Service` can be constructed without an OIDC provider.
-Trusted Go callers may opt in with `auth.Config.LocalEnabled`, provision an
-identity using `CreateLocalCredential`, and log in using `AuthenticateLocal`.
-Provisioning grants no roles. Runtime configuration, HTTP login, Local-only
-production startup and user management use this core through the shared session
-and authorization stack.
+The internal `auth.Service` can run without an OIDC provider. Trusted Go callers enable local authentication via `auth.Config.LocalEnabled`, provision accounts with `CreateLocalCredential`, and verify credentials through `AuthenticateLocal`. Account creation does not grant any RBAC roles. Runtime configuration, HTTP login handlers, Local-only production startup, and Local user management all build on this core service and share the standard session and authorization stack.
 
-Passwords are stored only in `local_credentials`, keyed by
-`identity_id`. Local identities use issuer `local` and the normalized username
-as subject. Usernames are trimmed and lowercased, with a 128-byte input limit;
-the accepted alphabet is ASCII letters/digits plus `.`, `_`, and `-`, starting
-with a letter or digit. No email/name matching or OIDC account linking occurs.
-Every new hash passes `ValidateNewPassword` through `hashPassword`: provisioning,
-bootstrap, administrator reset and self-service change all use it, and any new
-password-setting path must too. Historical 1..1024-byte credentials
-still verify unchanged. See the [Local password policy](../operations/authentication.md#local-new-password-policy).
+Password hashes live exclusively in `local_credentials`, keyed by `identity_id`. Local identities set their issuer to `local` and their subject to the normalized username (trimmed, lowercased, up to 128 bytes, starting with an ASCII letter or digit and containing only ASCII letters, digits, `.`, `_`, and `-`). The service never links accounts to OIDC identities or matches users by email or display name. Every password write passes through `ValidateNewPassword` inside `hashPassword`, covering initial provisioning, first-admin bootstrap, administrator password resets, self-service password changes, and any future password-setting code path. Historical 1..1024-byte credentials continue to verify as stored; see the [Local password policy](../operations/authentication.md#local-new-password-policy).
 
-Hashes use `golang.org/x/crypto/argon2` Argon2id v19, independent 16-byte random
-salts, 32-byte outputs, and self-contained PHC parameters. The write cost is
-19 MiB, two passes, one lane, following the
-[OWASP recommendation](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#argon2id).
-Verification reads stored parameters with resource bounds (up to 64 MiB, five
-passes, four lanes). Unknown users perform a dummy verification at the current
-write cost. Local login rechecks the credential and disabled state under lock
-before the shared session insert; session cookies, AEAD, authentication,
-logout, RBAC, approval, audit, and break-glass semantics remain unchanged.
+Credential hashing uses `golang.org/x/crypto/argon2` Argon2id v19 with an independent 16-byte random salt, a 32-byte tag, and self-contained PHC parameter strings. New hashes are written at 19 MiB memory, two passes, and one lane in line with the [OWASP recommendation](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#argon2id), while verification honors the stored parameters within hard resource caps (at most 64 MiB, five passes, and four lanes). Login attempts for nonexistent usernames run a dummy Argon2id verification at the current write cost to equalize timing. Before inserting a session, Local login re-locks the credential row and rechecks the account's disabled status; session cookies, AEAD encryption, request authentication, logout, RBAC, approvals, auditing, and break-glass behavior work identically to OIDC sessions.
 
-Local login requires the installed release's complete backend schema, including
-`local_auth_attempts` and its expiry index. The runtime needs only
-SELECT/INSERT/UPDATE/DELETE on that table, not Owner or TRUNCATE permissions.
-`AuthenticateLocal` reserves a database-backed single-flight lease before reading a
-credential or executing KDF, then completes only an observed incorrect password
-as a failure. Admission serializes capacity allocation in a short transaction;
-verification runs after commit, without a held connection or database lock.
-Success clears the matching lease in the credential-revalidation/session
-transaction. Reset and disable invalidate the state in their existing transaction,
-so a stale completion cannot overwrite the next credential epoch's failures.
-See [Local account failure backoff](../operations/authentication.md#local-account-failure-backoff-r2)
-for parameters, expiry, capacity, response behavior and upgrade constraints.
+Local login depends on the release's complete backend schema, including `local_auth_attempts` and its expiry index, though the runtime database role needs only SELECT/INSERT/UPDATE/DELETE on that table, never Owner or TRUNCATE privileges. Before reading a credential or running the KDF, `AuthenticateLocal` acquires a database-backed single-flight lease in a short transaction, then runs Argon2id verification after committing so no database connection or row lock is held during hashing. Only an observed wrong password records a failed attempt. When authentication succeeds, the session-creation transaction clears the matching lease; password resets and account disables invalidate attempt state inside their own transactions so an in-flight failure from an older credential epoch cannot tarnish the new credential. See [Local account failure backoff](../operations/authentication.md#local-account-failure-backoff-r2) for backoff parameters, expiry rules, table capacity, HTTP responses, and upgrade requirements.
 
 ### Attempt completion and expiry
 
-Database and corrupt-hash errors are not password failures. A correct password
-for a disabled identity cannot create a session and is not counted as incorrect.
-Once an incorrect password is observed, completion uses a separate bounded
-context so client cancellation cannot erase it. Cancellation before verification
-releases the reservation without adding a failure. Process exit, ambiguous commit
-or unavailable completion leaves at most the lease duration before admission can
-recover; abandoned reservations are not silently classified as bad passwords.
-Expired lease holders cannot clear replacement state or create a session.
+Database errors and malformed password hashes do not count as bad password attempts, and submitting the right password for a disabled account fails login without incrementing the failure counter. Once verification observes an incorrect password, failure recording runs under a detached, bounded context so client request cancellation cannot skip the write. If the caller cancels before verification starts, the reservation is released without recording a failure. A process crash, ambiguous commit, or failed completion leaves the row leased for at most the lease TTL before admission recovers, never silently turning an interrupted check into a password failure. Holders of an expired lease cannot clear newer attempt state or open a session.
 
-Expiry is driven by the database clock. Admission deletes expired rows through
-the expiry index before allocating capacity. Rows expire when the observation
-window, cooldown and active lease no longer require them. Without login traffic,
-expired rows may remain physically present until the next admission, but the
-table remains bounded. Random usernames cannot evict live state: at capacity,
-new keys receive generic 503 while tracked keys retain their protection.
-Cleanup/admission/completion errors also fail closed with generic 503, never
-unlimited verification. PostgreSQL autovacuum handles its dead tuples; this is
-not a MySQL maintenance mechanism.
+Attempt expiration uses the database wall clock. Before allocating capacity for a new login attempt, admission deletes expired rows via the expiry index once their observation window, cooldown period, and active lease have all elapsed. When login traffic is idle, expired rows may sit on disk until the next admission pass, but total table size stays strictly bounded. Brute-forcing random usernames cannot evict active lockout state: once the table reaches capacity, untracked usernames receive a generic 503 response while tracked accounts keep their backoff state. Any database error during cleanup, admission, or completion also fails closed with a generic 503 instead of allowing unbounded password checks. PostgreSQL relies on autovacuum to reclaim dead tuples from these deletes; MySQL does not use autovacuum.
 
-Password reset and disable delete the account state in the existing credential,
-revocation and audit transaction. Rollback preserves it. Credential revalidation
-and lease-token matching prevent an older verified request from clearing failures
-or leases created after that transaction commits.
+Administrator password resets and account disables delete the target's account state inside the same transaction that updates the credential, revokes sessions, and appends the audit record, preserving the row if the transaction rolls back. Revalidating the credential epoch and matching the lease token at completion time prevents a slow login check started before the reset from clearing failures or leases recorded afterward.
 
 <a id="local-initialization-and-lifecycle-r4"></a>
 ## Local initialization and lifecycle
 
-Apply migrations first using the existing `--migrate-only` procedure. Select an
-existing workspace to own platform Local identity administration. Its UUIDv7 is
-required explicitly: the repository has workspace-scoped RBAC, not global role
-bindings. Bootstrap records this choice permanently; API headers cannot select
-another workspace to obtain access to shared login identities.
+Before bootstrapping Local administrators, run database migrations with `--migrate-only` and choose the existing workspace that will own platform Local identity management. Because RBAC role bindings in this repository are always workspace-scoped with no global role bindings, bootstrap requires that workspace's explicit UUIDv7 and binds it permanently; callers cannot pass a different workspace header on API requests to administer shared Local login identities.
 
-Use the [operator bootstrap procedure](../operations/authentication.md#bootstrap-the-first-local-admin)
-for backend-specific workspace setup, secret mounts and one-shot commands.
+Follow the [operator bootstrap procedure](../operations/authentication.md#bootstrap-the-first-local-admin) for backend-specific workspace preparation, secret file mounts, and one-shot CLI invocations.
 
-Provision two different passwords separately using the deployment secret
-manager. The bootstrap reader uses the existing bounded Secret value format
-(one trailing LF, then CR removed) and additionally enforces bootstrap-process ownership,
-private mode, regular file, no final symlink and no hard links on the opened
-descriptor. Nonblocking open prevents FIFO substitution from hanging the CLI.
-Both new credentials use the shared password policy. No default, plaintext
-environment password or password CLI option exists. Independent credentials
-and sessions are required; two-person custody is a separate
-[security profile](../reference/stable-contracts.md#approval-principal-boundary).
-Remove both temporary mounts and bootstrap settings after success.
+Provision two distinct initial passwords through your deployment secret manager. The bootstrap secret reader strips at most one trailing LF (and preceding CR) under the standard bounded Secret format, opens the descriptor in nonblocking mode so a FIFO substitution cannot hang the CLI, and verifies that the opened descriptor is a regular file with private permissions, owned by the bootstrap process, with no final symlink and no hard links. Both passwords must satisfy the shared password policy; there are no default credentials, plaintext password environment variables, or password CLI flags. Bootstrap creates two separate principals with independent credentials and sessions for independent two-principal approval; human two-person custody is not verified automatically by the system and is covered by the [security profile](../reference/stable-contracts.md#approval-principal-boundary). Remove the temporary secret mounts and bootstrap environment settings as soon as the command succeeds.
 
-The one-shot exits without starting listeners/workers or contacting OIDC. One
-transaction creates two `local` identities, Argon2id credentials, existing
-workspace-scoped `PlatformAdmin` and `SecurityAdmin` bindings respectively,
-singleton completion marker and both audit events. A missing workspace or any insert/audit failure rolls everything
-back. Concurrent or later bootstrap attempts fail closed; an existing Local
-SecurityAdmin/PlatformAdmin also prevents bootstrap. Disabling the bootstrap
-identity or changing its password does not clear the marker. Normal startup does
-not read the bootstrap password file or synchronize credentials. Preserve the
-marker in backups; do not drop migrations or delete the marker to reset credentials.
+The bootstrap one-shot command exits without starting HTTP listeners, background workers, or OIDC discovery. Inside a single database transaction, it creates two `local` identities, writes their Argon2id credentials, binds them to `PlatformAdmin` and `SecurityAdmin` in the management workspace, inserts the singleton completion marker, and appends both audit events. If the target workspace is missing or any insert or audit step fails, the transaction rolls back completely. Concurrent or repeated bootstrap runs fail closed, as does any attempt to bootstrap when a Local SecurityAdmin/PlatformAdmin already exists. Disabling a bootstrapped account or rotating its password later leaves the completion marker in place. Normal server startup never reads the bootstrap password files or reconciles credentials from disk. Keep the bootstrap marker table in database backups, and never drop migration records or delete the marker row to force a credential reset.
 
-The stored bootstrap marker freezes the historical single-admin completion
-exception: the original bootstrap
-identity must still be an active Local workspace PlatformAdmin with its original
-bootstrap audit and no other historical elevated binding in that workspace.
-Only that state receives `completion_pending=true`; other existing states close
-the exception. `--complete-local-bootstrap` requires the original username,
-fixed workspace, current administrator Secret and a separate new approver Secret.
-It verifies the current password with the existing account lease/backoff,
-rechecks credential/state under the initialization lock, then creates only the
-new SecurityAdmin and atomically records completion and audit. It cannot replace
-an existing account or password. New elevated grants permanently close pending
-completion. Normal startup never fills this state. Stop old writers before
-migrating; current startup validates SQL artifact
-provenance, not a minimum Controller schema version. Runtime is still not Owner
-and receives only lifecycle-column UPDATE privileges on the bootstrap marker,
-not DELETE or DDL. See the [executable operator steps](../operations/authentication.md).
+The persisted bootstrap marker also governs the legacy single-admin completion path: `completion_pending=true` is set only when the original bootstrapped account remains an active Local workspace PlatformAdmin with its original bootstrap audit event and no other historical elevated role bindings in the workspace; every other database state closes the exception permanently. Running `--complete-local-bootstrap` takes the original administrator username, the fixed management workspace, the current administrator Secret, and a separate new approver Secret. The command verifies the existing administrator's password under standard account lease and backoff protection, rechecks the credential and marker state under the initialization lock, provisions only the new SecurityAdmin account, and atomically marks bootstrap complete with an audit event. It cannot overwrite an existing account or rotate an existing password, and granting any new elevated role closes pending completion permanently. Normal server startup never populates this marker state. Always stop older Controller writers before migrating; current startup checks SQL artifact provenance directly without relying on a minimum Controller schema version. At runtime, the service account remains unprivileged (never Owner) and holds only lifecycle-column UPDATE privileges on the bootstrap marker, without DELETE or DDL rights. Detailed commands are in the [executable operator steps](../operations/authentication.md).
 
 Lifecycle endpoints (under `/api/v1`, `Content-Type: application/json`):
 
@@ -209,105 +67,34 @@ Lifecycle endpoints (under `/api/v1`, `Content-Type: application/json`):
 | `POST /local-users/{identity_id}:reset-password` | `{"password":"..."}` | 204 |
 | `POST /auth/change-password` | `{"current_password":"...","new_password":"..."}` | 204, all old sessions revoked; re-login required |
 
-Every administrative mutation requires an authenticated session, exact trusted `Origin`, and
-existing RBAC action `local_user.manage` in the fixed management workspace.
-Only existing `PlatformAdmin` has this action via its wildcard; SecurityAdmin,
-UserManager, and PlatformAdmin in other workspaces do not. The existing explicit
-break-glass policy remains available; development pseudo-principals are rejected.
-Creating an account grants no roles. Use `/role-bindings` for subsequent grants,
-including the unchanged independent approval requirement for elevated grants.
+Every administrative Local-user mutation requires an authenticated session, an exact trusted `Origin` header, and the existing RBAC action `local_user.manage` within the fixed management workspace. Only an existing `PlatformAdmin` in that management workspace holds `local_user.manage` via its wildcard grant; SecurityAdmin, UserManager, and PlatformAdmin bindings in other workspaces are denied. Explicit break-glass sessions remain permitted where policy allows, while development pseudo-principals are always rejected. Creating a Local user assigns no RBAC roles; grant roles afterward through `/role-bindings`, which continues to require independent two-principal approval for elevated roles.
 
-Reset additionally requires `X-Approval-ID`. Request approval through
-`POST /approval-requests` in the management workspace using
-`action: local_user.reset-password`, `resource_type: local_user`, the target
-`resource_id`, `reason`, and `ttl_seconds`. A different existing authorized
-SecurityAdmin/PlatformAdmin approves the returned request hash through the normal
-approval endpoint. Approval authorizes replacing that identity's password, not a
-specific password value; no password or password hash enters approval content.
-Consumption, reset, session revocation and audit commit together. Replay fails.
-Bootstrap now establishes separately owned approval authority; normal high-role
-grants and administrator resets still consume independent approvals.
+Administrator password resets also require `X-Approval-ID`. First submit `POST /approval-requests` in the management workspace with `action: local_user.reset-password`, `resource_type: local_user`, the target `resource_id`, `reason`, and `ttl_seconds`, then have a different authorized SecurityAdmin/PlatformAdmin principal approve the resulting request hash through the standard approval decision endpoint. The approval authorizes resetting that identity's password without embedding any cleartext password or hash in the approval record. Consuming the approval, writing the new password hash, revoking active sessions, and recording the audit event all commit in one transaction, and the consumed approval cannot be replayed. Although initial bootstrap provisions the first two Local principals directly, all subsequent elevated role grants and administrator password resets require independent two-principal approval.
 
-Self-service change is separate from `local_user.manage`: it requires only a
-valid non-Break-glass Local session for its own identity. Strict JSON rejects
-target identity/workspace fields. Current-password failures share login backoff;
-new passwords use the existing policy. The transaction locks the identity,
-rechecks disabled state, session revocation/expiry and the verified credential
-hash (credential epoch), fences the attempt lease, changes the password, revokes
-all sessions and appends audit. OIDC/Break-glass cannot obtain Local credentials.
+Self-service password rotation is distinct from `local_user.manage` and requires only a valid, non-Break-glass Local session for the caller's own identity; strict JSON decoding rejects any request body that includes a target identity or workspace field. Failed current-password checks share the login backoff tracker, and new passwords must pass the standard password policy. Inside the transaction, the service locks the identity row, rechecks disabled status, session validity, and the verified credential hash (the credential epoch), fences the attempt lease, writes the new password hash, revokes all sessions for that identity, and appends the audit event. OIDC/Break-glass principals cannot create or hold Local credentials.
 
-Disable serializes on the initialization/management advisory lock, then
-rechecks the acting session and fixed-workspace authority. It refuses to remove
-an effective Local elevated identity if that leaves no active workspace
-PlatformAdmin or fewer than two distinct active Local workspace approvers.
-Disabled identities, inconsistent/missing Local credentials, other workspaces
-and narrower bindings do not count. This conservative Local recovery-anchor
-policy does not treat OIDC availability or temporary Break-glass as substitutes.
-Role creation shares the lock. There is no production role/identity deletion
-API; raw database administration is outside the HTTP boundary.
+Disabling a Local user acquires the initialization/management advisory lock before rechecking the caller's session and management-workspace authority. The service refuses to disable an effective Local elevated account if doing so would leave the management workspace without an active Local PlatformAdmin or with fewer than two distinct active Local workspace approvers. Disabled accounts, identities with missing or inconsistent Local credentials, bindings in other workspaces, and narrower roles do not count toward those minimums, and neither OIDC availability nor temporary Break-glass access satisfies this Local recovery-anchor requirement. Role-binding creation serializes on the same lock. The HTTP API provides no endpoint to delete roles or identities; raw database edits lie outside the supported HTTP boundary.
 
-Disable and reset revoke **all** `auth_sessions` for the target identity in the
-same transaction as the change and audit. `Authenticate` also checks
-`identities.disabled_at` on every request. A login verified before the change
-rechecks the locked credential and disabled state before creating a session, so
-it cannot issue a usable stale session after commit. Already-authorized in-flight
-requests are not retroactively cancelled. Reset does not re-enable a disabled
-identity. Each successful mutation records actor, session, target identity,
-action, request ID and (for reset) approval ID in the existing audit chain.
+Both disable and administrator password reset revoke all `auth_sessions` rows for the target identity inside the same transaction as the state change and audit write, and `Authenticate` also checks `identities.disabled_at` on every request. Because a concurrent login that finished Argon2id verification just before the mutation must re-lock the credential row and recheck disabled state before inserting a session, it cannot mint a stale session after the disable or reset commits. Requests that already passed authentication and authorization before commit are not aborted mid-flight. Resetting a password does not re-enable a disabled account. Every successful lifecycle mutation writes the actor, session, target identity, action, request ID, and (for password resets) approval ID to the audit chain.
 
-These resources are platform login identities, not `/nodes/{node_id}/users` VPN
-accounts. Duplicate normalized usernames return 409. Invalid input returns 400;
-OIDC/non-Local identity targets return 404 and are never modified, even with the
-same username/email. There is no linking, self-registration or MFA. Recovery uses
-surviving independently controlled accounts and approved resets, or the existing
-authorized [backend-specific recovery](../operations/incident-recovery.md#database-recovery);
-it never reopens Bootstrap.
+These resources represent platform console identities and are completely separate from `/nodes/{node_id}/users` VPN accounts. Creating a duplicate normalized username returns 409, malformed input returns 400, and targeting an OIDC/non-Local identity ID returns 404 without modifying the record even if the username or email matches. Account linking, self-registration, and MFA are not supported. If administrators lose access, recover through remaining independently controlled Local accounts and approved password resets, or follow the [backend-specific recovery](../operations/incident-recovery.md#database-recovery) procedure; Bootstrap can never be reopened.
 
-Local identity administration follows OWASP's [least privilege and deny-by-default authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)
-and [current-password verification for password changes](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).
+Local identity management follows the OWASP guidelines for [least privilege and deny-by-default authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) and [current-password verification for password changes](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).
 
 ## Break-glass
 
-Local auth is not a replacement for this independent emergency offline access
-mechanism. Its rotation, alert, audit and short-session requirements are unchanged.
+Local authentication does not replace the independent offline break-glass mechanism, which keeps its existing credential rotation, critical alerting, audit logging, and short session lifetime rules.
 
-Break-glass passes RBAC route checks but has no role bindings, so it cannot
-supply the independent approver authority an approval requires.
+A break-glass session passes route-level RBAC checks so an operator can perform emergency recovery, but because the break-glass principal holds no persisted role bindings, it cannot act as the independent approver on an approval request.
 
-Break-glass is disabled unless `OCSERV_BREAK_GLASS_ENABLED=true` and
-`OCSERV_BREAK_GLASS_TOKEN_SHA256` contains the SHA-256 digest of a high-entropy
-offline credential. Its session lasts 15 minutes. Every use creates a critical
-alert and workspace audit event, and that credential cannot be reused until the
-offline credential is rotated and the configured digest changes.
+Break-glass remains disabled unless `OCSERV_BREAK_GLASS_ENABLED=true` and `OCSERV_BREAK_GLASS_TOKEN_SHA256` is configured with the SHA-256 digest of a high-entropy offline secret. Each break-glass session expires after 15 minutes, emits a critical alert and workspace audit event on login, and consumes the configured token digest so the credential cannot be used again until the operator rotates the offline secret and updates the digest.
 
 ## Rollout and rollback
 
-Apply the installed release's complete backend migrations before enabling OIDC;
-`000011` is the historical PostgreSQL introduction, not a cross-backend target.
-Establish at least two separately
-owned SecurityAdmin bindings and test the independent approval path before
-removing development access. Verify an audit checkpoint, an IdP outage, and a
-break-glass rotation in the target environment.
+Run the installed release's full backend migrations before enabling OIDC (`000011` was only the historical PostgreSQL migration number and is not a cross-backend target). Provision at least two distinct SecurityAdmin principal bindings and verify the end-to-end independent two-principal approval flow before turning off development authentication (keeping human two-person credential custody in your organizational security procedures, as the system verifies principal and session separation only). In the target environment, also test audit checkpoint verification, simulated IdP outage behavior, and break-glass token rotation.
 
-For rollback, stop new writes, preserve audit, identity, session, approval, and
-alert tables, and deploy the previous binary only after active OIDC sessions are
-revoked or their expiry is accepted. Database down migrations are not provided.
-Preserve these records and use a forward fix or an explicitly planned isolated
-restore; a binary rollback does not reverse database changes or guarantee that
-the previous binary can use current state.
+If you need to roll back the Controller binary, stop new API writes first, keep the audit, identity, session, approval, and alert tables intact, and deploy the older binary only after active OIDC sessions have been revoked or allowed to expire. Because the repository provides no down-migration SQL, retain all database records and use a forward fix or a planned isolated restore; rolling back the binary alone never reverses schema changes or guarantees that an older binary can read current database state.
 
+In the Web console, the Approvals page lists pending requests that the current user is eligible to decide by calling `GET /api/v1/approval-requests` in the active workspace. The `page_size` parameter defaults to 50 (accepting 1 to 200), and `cursor` takes the opaque last approval ID from `page.next_cursor`. Approval IDs sort in ascending order and remain valid cursors even after a request is decided or expires. The backend filters rows by permission before applying the page limit: every authority resource on a returned request must be covered by an active SecurityAdmin or PlatformAdmin binding granted to the caller no later than the request's authority snapshot, and self-authored, expired, already-approved, or consumed requests are excluded. Existing workspace-prefix and authority/role indexes back these query predicates.
 
-The console Approvals page discovers independent pending requests via
-`GET /api/v1/approval-requests` in the selected workspace. `page_size` defaults
-to 50 and accepts 1–200; `cursor` is the opaque last approval ID returned in
-`page.next_cursor`. IDs sort ascending and remain usable after a decision or
-expiry. Each response is bounded and permission-filtered before the limit:
-all authority resources must be covered by a current SecurityAdmin or
-PlatformAdmin binding created no later than the request's authority snapshot.
-Self-authored, expired, approved and consumed requests are excluded. Existing
-workspace-prefix and authority/role indexes support the scope predicates.
-Refresh starts at the first page; new requests may appear on later pages.
-The list omits the content/hash summaries. Clicking a request fetches the
-existing immutable detail and explicit hash-bound
-review. Listing does not authorize a decision or consume an approval; the
-existing decision and consumption checks remain authoritative.
+Refreshing the queue restarts pagination from the first page, while newly created requests sort onto later pages. Collection responses omit the full content and hash summaries; selecting a row fetches the immutable detail record for explicit hash-bound review. Appearing in the list response neither authorizes a decision nor consumes the approval, as the decision and consumption transactions re-evaluate all authority checks independently.

@@ -1,21 +1,25 @@
 # Single-instance resilience
 
-Each supported deployment uses one Controller, one database instance and one
-dedicated Relay. PostgreSQL and MySQL retain their current versions and
-deployment scope in [production deployment](../operations/production-deployment.md#database-support).
-Integrated / standalone and bundled / external modes remain available, as does
-management of multiple Agents. The components need not share a physical host.
+Supported deployments run a single Controller, a single database instance, and
+one dedicated Relay, with PostgreSQL and MySQL version and deployment support
+defined in
+[production deployment](../operations/production-deployment.md#database-support).
+Both Integrated and standalone topologies as well as bundled and external
+databases remain supported, and a deployment can manage multiple Agents whether
+the components share a host or run on separate machines.
 
-Controller HA, multiple Relay failover, database replication clusters,
-PostgreSQL automatic failover and PITR readiness are outside this support scope.
-Ordinary backups, verification and isolated restore remain supported. Rebind
-uses two independent Controller deployments to transfer authority; it is not HA.
+Out of scope are Controller high availability, multi-Relay failover, database
+replication clusters, PostgreSQL automatic failover, and point-in-time recovery
+(PITR) readiness. Standard backups, backup verification, and isolated restores
+remain supported, and Controller Rebind transfers authority between two
+independent Controller deployments without providing live HA failover.
 
 ## Recovery coverage and ownership
 
-The checks below reuse the existing Business and database owners. Manual Release Check
-requires `run-resilience=true` for Integrated Business Smoke;
-there is no separate G6 workflow or evidence framework.
+Single-instance recovery checks run under the existing Business and database
+owners. Manual Release Check invokes Integrated Business Smoke with
+`run-resilience=true`; the older G6 workflow and its separate evidence
+framework have been retired.
 
 | Check | Owner and entrypoint | Required observation |
 | --- | --- | --- |
@@ -24,32 +28,43 @@ there is no separate G6 workflow or evidence framework.
 | R3 Database interruption | Same smoke environment | Stop the bundled PostgreSQL container, require database-unavailable readiness, start it, recover readiness and Agent connectivity, then complete normal business. No outage mutation. MySQL and external databases have no Business-level recovery check. |
 | R4 Sole Relay interruption | Same smoke environment | Stop the only Relay, observe Agent offline with direct UDP blocked, restart Relay, acquire a fresh session and recover authorized business and VPN traffic. |
 
-Manual integration (the extended Business profile) replaces R1 to R4 with deeper
-variants (separate Controller and transport restarts, outage mutation, unsent
-queue, idempotent replay, exact reload and API/DB/journal/root-receipt checks).
-These are not required by Release Smoke. Full CI separately runs the Full
-database scope and the PostgreSQL and MySQL backup/restore smoke; those are
-database-level checks, not Controller, Agent or Relay recovery.
+When running the extended manual integration profile, deeper variants replace
+R1 through R4: separate Controller and transport restarts, mutations submitted
+during the outage, unsent offline queueing, idempotent replay, exact native
+reload counts, and cross-checks across the API, database, Agent journal, and
+root receipts. Release Smoke does not require those extended variants. Full CI
+separately runs the full database suite alongside the PostgreSQL and MySQL
+backup/restore smoke scripts, which validate database-level recovery without
+covering Controller, Agent, or Relay restarts.
 
-Use the Business job status and actual recovery checkpoints in `result.json`.
-Sanitized failure diagnostics use seven-day Actions artifacts. Selected checks must actually finish successfully;
-missing fields, failure, cancellation and unexpected skips block acceptance.
-Unselected resilience is explicitly `SKIPPED`. Required scenario checkpoints
-are only `controller`, `agent`, `database`, and `relay`; there is no synthetic
-completion checkpoint or separate required transport scenario.
+Acceptance relies on the Business job status together with the scenario
+checkpoints recorded in `result.json`, while sanitized failure diagnostics are
+retained as seven-day GitHub Actions artifacts. When resilience is enabled,
+only `controller`, `agent`, `database`, and `relay` are required scenario
+checkpoints (there is no synthetic overall checkpoint or standalone transport
+scenario), and each of the four must finish and pass; missing fields, failures,
+cancellations, or unexpected skips block acceptance. Runs that do not select
+resilience record `SKIPPED`.
 
 ## Recovery boundaries
 
-Business builds its native Relay image. The independent token-authenticated
-TCP/QUIC probe checks networking only, not the real business recovery chain.
+During Business runs, the harness builds the native Relay container image from
+the candidate tree. The standalone token-authenticated TCP/QUIC network probe
+verifies transport reachability in isolation and does not exercise the
+end-to-end business recovery chain.
 
-Production installation and launch entrypoints require Relay A and reject
-nonempty B before side effects. Existing A/B deployments require an explicit
-operator change to one Relay; installer reruns preserve identity and trust state.
+Production installers and launch scripts require Relay A and reject a non-empty
+Relay B before making any host or container changes. Upgrading an older A/B
+deployment requires the operator to switch the configuration to a single Relay
+explicitly, after which installer reruns preserve existing node identity and
+trust state.
 
-Owner/epoch/fence/lease, transactional outbox, authorization, approval, signing,
-idempotent command identities, Agent SQLite journal and privd receipts remain
-required. Unknown outcomes use read-only reconciliation and the existing
-explicit retry after proven effect absence. Never treat a failed, provably
-unsent offline command as expected Unknown. These checks do not promise general
-exactly-once execution or production RTO/RPO.
+Across all recovery scenarios, the command pipeline still enforces
+owner/epoch/fence/lease validation, the transactional outbox, authorization,
+independent two-principal approvals, cryptographic signatures, idempotent command IDs,
+the Agent SQLite journal, and privd receipts. Operations that end in an Unknown
+state rely on read-only reconciliation followed by the existing explicit retry
+once absence of effect is confirmed, whereas a queued offline command that was
+provably never sent must never be treated as expected Unknown if it fails.
+Passing these checks does not imply general exactly-once execution or
+production RTO/RPO guarantees.

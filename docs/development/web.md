@@ -2,172 +2,69 @@
 
 ## Startup, routing and development server
 
-- [`main.ts`](../../web/src/main.ts) installs Pinia, the router and i18n, then
-  mounts only after `router.isReady()`, so `/login` never renders the shell.
-- [`shared/routes.ts`](../../web/src/shared/routes.ts) declares the console
-  routes. The `/dev` simulator route is registered only on a development
-  runtime; production navigation never registers it. Overview, the default
-  landing page, is in the entry chunk; other pages load on first visit. When
-  a page chunk fails to load (a redeploy removed it, or the network failed),
-  the current page and its unsaved input stay and the console offers a reload;
-  nothing reloads automatically. If the initial navigation's chunk fails, the
-  app still mounts to show only that offer, without the shell or any request.
-  Only chunk failures reported by Vite's `vite:preloadError` are handled;
-  other router errors go to the console. The Gateway sends HTML with
-  `Cache-Control: no-cache`, so a new page load sees the current build.
-- [`App.vue`](../../web/src/App.vue) runs Workspace discovery, the readiness
-  refresh and the one-time login return described below.
-- `npm run dev` (the `web` service of the [local stack](../getting-started/local-development.md)
-  on port `4173`) proxies `/api` to `VITE_API_TARGET` and, when
-  `VITE_DEV_AUTH_TOKEN` is set, adds that bearer token to proxied requests.
-  A direct `npm run dev` listens on `127.0.0.1` only; the container passes
-  `--host 0.0.0.0` and Compose publishes the port on host loopback.
-  [`vite.config.ts`](../../web/vite.config.ts) refuses `vite build` while the
-  token is set. Production serves the built bundle from the Gateway, whose
-  [Caddyfile](../../deploy/production/Caddyfile) proxies `/api/*`; it is not the
-  Vite proxy.
-- Use the Node and npm versions in [`toolchains.lock`](../../toolchains.lock)
-  and `npm ci` in `web/`. Checks are listed in [Validation](#validation).
+- [`main.ts`](../../web/src/main.ts) registers Pinia, the router, and i18n, then waits for `router.isReady()` before mounting so `/login` never flashes the application shell.
+- [`shared/routes.ts`](../../web/src/shared/routes.ts) defines the console route table. The `/dev` simulator route is registered only in development builds and is omitted from production navigation. The default Overview landing page ships in the entry bundle, while all other views load lazily on first visit. If a lazy route chunk fails to load (for example after a deployment removes old assets or during a network drop), the router keeps the current view and any unsaved form input on screen and prompts the user to reload manually instead of refreshing the page on its own. When the very first navigation hits a chunk load error, the app mounts a minimal reload prompt without rendering the shell or firing API requests. This recovery path handles only Vite `vite:preloadError` events; other router errors are logged to the console. Because Gateway serves HTML responses with `Cache-Control: no-cache`, a manual reload always fetches the current build's entry document.
+- [`App.vue`](../../web/src/App.vue) coordinates initial Workspace discovery, periodic readiness refreshes, and the one-time post-login redirect described below.
+- Running `npm run dev` (which powers the `web` service in the [local stack](../getting-started/local-development.md) on port `4173`) proxies `/api` requests to `VITE_API_TARGET` and injects `VITE_DEV_AUTH_TOKEN` as a bearer header whenever that variable is set. Invoking `npm run dev` directly on the host binds `127.0.0.1` only, whereas the development container passes `--host 0.0.0.0` while Compose publishes the port on host loopback. [`vite.config.ts`](../../web/vite.config.ts) aborts `vite build` if `VITE_DEV_AUTH_TOKEN` is present in the environment. In production, the static bundle is served by Gateway, whose [Caddyfile](../../deploy/production/Caddyfile) proxies `/api/*` directly without using the Vite development server.
+- Install the exact Node and npm versions pinned in [`toolchains.lock`](../../toolchains.lock) and run `npm ci` inside `web/`. Verification commands are listed under [Validation](#validation).
 
 ## API boundaries
 
-The handwritten Web API layer uses the generated local `@ocservia/api-client`
-package. Domain modules import one `api/transport.ts` configuration; they do not
-instantiate authentication state, select a Workspace, navigate to a view, or
-decide operation terminal states.
+Handwritten modules under `web/src/api` wrap the generated local `@ocservia/api-client` package. Every domain API module imports the shared `api/transport.ts` configuration and stays free of UI state: API modules never instantiate authentication stores, choose a Workspace, trigger router navigation, or classify terminal operation states.
 
 ### Ownership
 
-- `api/transport.ts` owns the authenticated fetch, `/api/v1` base path,
-  `same-origin` credentials, development-only bearer token, optional request
-  signal and idempotency key generation. It forwards 401 responses to the
-  session coordinator, then returns the original response. It does not retry.
-- `shared/session.ts` owns the redirect guard and login return path. The
-  transport requests login navigation; `App.vue` consumes the saved path after
-  successful Workspace discovery. Neither imports a view. The existing
-  `shared/login.ts` keeps path validation and OIDC attempt helpers.
-- `api/workspace.ts` is the sole owner of selected/authorized Workspaces,
-  in-flight discovery and generation. Generated API instances are stateless
-  clients sharing the transport configuration, not additional state owners.
-- `api/platform.ts` owns the independent, in-flight-only authentication probe.
-  Probing `/workspaces` must not update the Workspace cache or selection.
-- Domain modules adapt parameters, scopes, pagination and mutation policies.
-  Callers import their actual owner directly; there is no `api/client.ts`
-  compatibility barrel or temporary re-export.
-- Fleet and local-slice stores still own their EventSource, cancellation,
-  listeners and timers. Moving imports adds no module-load subscriptions and
-  does not unify their intentionally different terminal-state definitions.
+- `api/transport.ts` configures the authenticated fetch wrapper, the `/api/v1` base URL, `same-origin` credentials, the development-only bearer header, optional request signal propagation, and idempotency key generation. When a call returns 401, the transport notifies the session coordinator and returns the original response to the caller without retrying.
+- `shared/session.ts` manages the unauthenticated redirect guard and the saved post-login return path. The transport layer asks the coordinator to navigate to login, and `App.vue` consumes the stored return path once Workspace discovery succeeds. Neither module imports Vue route views, while `shared/login.ts` retains internal path validation and OIDC login attempt helpers.
+- `api/workspace.ts` is the single source of truth for the active and authorized Workspace list, coalesced in-flight discovery, and the Workspace generation counter. Generated OpenAPI client instances are lightweight stateless wrappers around the shared transport configuration and hold no state of their own.
+- `api/platform.ts` provides an independent, in-flight-only authentication probe. Probing `/workspaces` through this helper checks session validity without mutating the cached Workspace list or current selection.
+- Domain API modules translate request parameters, Workspace scopes, pagination cursors, and idempotency rules for their specific endpoints. Components and features import the owning domain module directly, with no `api/client.ts` barrel file or compatibility re-exports.
+- The Fleet and local-slice Pinia stores manage their own EventSource connections, abort controllers, event listeners, and polling timers. Importing an API module never starts a background subscription, and the two stores intentionally keep their separate terminal-state rules.
 
 ### Static import boundaries
 
-[`eslint.config.ts`](../../web/eslint.config.ts) restricts static imports and
-re-exports in handwritten API modules and configuration/certificate features.
-They cannot import views, routing or concrete Fleet/local-slice stores; API
-modules also cannot import features. Generated sources are excluded. This is
-not a transitive dependency or runtime ownership check and does not cover
-constructed/dynamic imports or every Vue SFC.
+[`eslint.config.ts`](../../web/eslint.config.ts) enforces static import and re-export boundaries across handwritten API modules and the configuration and certificate feature composables. Neither layer may import view components, the router, or the concrete Fleet and local-slice stores, and API modules are further barred from importing feature composables. Generated client files are excluded from these lint rules. Note that ESLint inspects only static module specifiers and does not police dynamic imports, runtime references, or arbitrary Vue SFCs outside those directories.
 
-The same configuration lints `src/**/*.vue` with eslint-plugin-vue's essential
-rules (invalid directives, prop mutation, `v-if` with `v-for`, missing keys) and
-passes `<script lang="ts">` to the typed TypeScript parser. Only the
-`components/ui` shadcn-vue primitives keep single-word component names.
+The same ESLint configuration checks `src/**/*.vue` against eslint-plugin-vue's essential rule set (catching invalid directives, prop mutations, combined `v-if` with `v-for` usage, and missing keys) and parses `<script lang="ts">` blocks with the typed TypeScript parser. Single-word component names are permitted only for the shadcn-vue primitives under `components/ui`.
 
-Keep the `@/` mapping to `web/src` identical in TypeScript and Vite configuration.
-Features receive context and tracking callbacks from the page; they may use Vue,
-generated types, domain APIs and `features/node-workflow.ts`. API transport may
-call the session coordinator. Remove unused forwarding exports when their last
-consumer disappears; use the [API source directory](../../web/src/api) for the
-current export inventory.
+Keep the `@/` path alias mapped to `web/src` identically in both TypeScript and Vite configs. Feature composables receive their Workspace context and operation-tracking callbacks as arguments from the hosting page; they may import Vue reactivity APIs, generated client types, domain API modules, and `features/node-workflow.ts`. The transport module is allowed to call the session coordinator. Delete unused forwarding exports as soon as their last caller is removed, and consult the [API source directory](../../web/src/api) for the current export surface.
 
 <a id="export-and-caller-inventory"></a>
 ### Request and Workspace invariants
 
-Domain adapters preserve workspace headers, pagination, abort signals, revision
-`If-Match`, approvals, command TTLs and endpoint-specific idempotency policy.
-Do not add mutation retries or assume every endpoint uses identical headers.
-Certificate downloads use their grant token and same-origin session, without a
-Workspace header; event-stream URLs must never contain bearer tokens.
+Domain API adapters attach Workspace headers, pagination parameters, abort signals, `If-Match` revisions, approval IDs, command TTLs, and endpoint-specific idempotency keys as required by each route. Never add automatic mutation retries in the client or assume every endpoint accepts the same headers: certificate artifact downloads authenticate with their one-time grant token and same-origin session cookie without a Workspace header, and SSE stream URLs must never carry bearer tokens in query parameters.
 
-Workspace discovery is cached and coalesced; selection accepts authorized IDs
-only and increments a generation on change. Async consumers must fence results
-by both Workspace ID and generation, including a switch away and back to the
-same ID. The independent authentication probe must not change that authority.
-Login return paths are validated internal paths and consumed once. The
-remembered Workspace ID and login return path are optional `sessionStorage`
-preferences: storage failures mean no preference and never block login,
-Workspace selection or change events. SSE stores
-own their subscriptions, timers and cancellation; importing an API starts none.
+Workspace discovery coalesces concurrent requests and caches the result; selecting a Workspace accepts only authorized IDs and increments the generation counter on every change. Asynchronous callers must fence their responses against both the active Workspace ID and the generation counter so a switch away from and back to the same Workspace still invalidates earlier in-flight reads. Running the independent authentication probe must never alter that Workspace state. Post-login return paths are validated as internal console routes and consumed at most once. Both the remembered Workspace ID and the login return path are stored in `sessionStorage` on a best-effort basis: if storage is unavailable or throws, the console proceeds without a saved preference and never blocks login, Workspace selection, or change notifications. SSE stores start and stop their own subscriptions, timers, and abort controllers explicitly.
 
 <a id="verification"></a>
-Validation entry points are collected in [Validation](#validation).
+Verification commands for these boundaries are listed in [Validation](#validation).
 
 ## UI components and styles
 
-The console is built from [shadcn-vue](https://www.shadcn-vue.com) primitives
-on [Reka UI](https://reka-ui.com) and Tailwind CSS v4. Every page uses
-utilities and these components; there is no second stylesheet or class
-system.
+The console UI is built with [shadcn-vue](https://www.shadcn-vue.com) primitives on top of [Reka UI](https://reka-ui.com) and Tailwind CSS v4. All views compose these primitives and Tailwind utility classes directly without a secondary stylesheet or parallel CSS class hierarchy.
 
 ### Cascade
 
-`web/src/main.css` is the only CSS entry and owns the layer order
-`theme, base, ui-base, utilities`:
+`web/src/main.css` is the sole stylesheet entry point and declares the explicit CSS cascade layer order `theme, base, ui-base, utilities`:
 
-- `base` holds the few page-wide rules: font stack, page color and background
-  from the tokens, `box-sizing`, `body` margin and minimum width, and links
-  inheriting color. Add a rule here only when every page needs it; style
-  anything else with utilities in the component that renders it.
-- Tailwind's global Preflight is not imported. `ui-base` applies the reset the
-  primitives need only to elements carrying the `data-slot` marker (form
-  controls also inherit font and color), which also covers content a
-  primitive teleports to `<body>`. Use `components/ui` primitives instead of
-  bare form controls, which keep browser default styles.
-- Utilities win over both by layer order, never by `!important`. Unlayered
-  rules (Vue scoped styles) would beat every layer; no component has one.
-- Tailwind scans `web/src` for utility candidates. Keep complete utility class
-  names visible in source; constructed class fragments are not reliable scan input.
+- `base` contains only global document defaults: the font stack, page foreground and background colors bound to theme tokens, `box-sizing`, `body` margin and minimum width, and links inheriting text color. Add rules to `base` only when every screen requires them; component-specific styling belongs in utility classes on the template that renders the element.
+- Tailwind's global Preflight reset is intentionally omitted. Instead, `ui-base` scopes the minimal element reset required by primitives to nodes carrying a `data-slot` attribute (and ensures form controls inherit font and text color), which also covers popovers and dialogs teleported to `<body>`. Always use the `components/ui` form primitives in place of raw HTML form tags, which would otherwise retain unstyled browser defaults.
+- Utility classes override `base` and `ui-base` through cascade layer precedence without needing `!important`. Because unlayered CSS beats every named layer, Vue `<style scoped>` blocks are not used in any component.
+- Tailwind scans `web/src` statically for utility class names, so keep complete class strings literal in source files instead of assembling class names dynamically at runtime.
 
 ### Tokens
 
-Theme tokens are plain custom properties on `:root` in `main.css`, mapped to
-Tailwind colors and radii through `@theme inline`: `background`, `foreground`,
-`card`, `popover`, `primary`, `secondary`, `muted`, `accent` (each with a
-`-foreground` pair), `destructive`, `success`, `border`, `input`, `ring`,
-`sidebar` (with `-foreground`, `-accent`, `-accent-foreground`, `-border`) and
-`--radius` (`rounded-sm` to `rounded-xl`). Values follow the shadcn-vue
-new-york-v4 neutral palette, with muted text, input and ring darkened for
-contrast. Change a color by editing its token,
-not the utilities that use it. Warning states use Tailwind's `amber` scale
-directly. The `dark` variant only matches an explicit `.dark` class; dark mode
-is not a product capability and must not follow the OS setting.
+Design tokens are defined as plain CSS custom properties on `:root` in `main.css` and exposed to Tailwind color and border-radius utilities via `@theme inline`: `background`, `foreground`, `card`, `popover`, `primary`, `secondary`, `muted`, `accent` (each paired with a `-foreground` token), `destructive`, `success`, `border`, `input`, `ring`, `sidebar` (with `-foreground`, `-accent`, `-accent-foreground`, and `-border`), and `--radius` (backing `rounded-sm` through `rounded-xl`). The palette follows shadcn-vue's new-york-v4 neutral scale, with muted text, form inputs, and focus rings darkened to meet contrast targets. Adjust colors by editing the token definitions in `main.css` instead of overriding individual utility classes. Warning badges and callouts use Tailwind's built-in `amber` scale directly. The `dark` variant is bound to an explicit `.dark` selector; dark mode is not a supported product feature and must never activate automatically from the OS setting.
 
 ### Supported browsers
 
-The Web console supports Chrome 111+, Safari 16.4+, Firefox 128+ and other
-Chromium-based browsers built on Chromium 111+ (for example Edge 111+). This
-matches Tailwind CSS v4's baseline (cascade layers, `@property`,
-`color-mix()`), and `vite.config.ts` sets the same `build.target`. Change both
-together; do not lower the range without a reviewed compatibility plan.
+The Web console supports Chrome 111+, Safari 16.4+, Firefox 128+, and Chromium-based browsers built on Chromium 111 or newer (such as Edge 111+). That floor matches Tailwind CSS v4's native CSS requirements (cascade layers, `@property`, and `color-mix()`), and `vite.config.ts` configures the same `build.target`. Update both settings together, and do not lower the browser floor without a reviewed compatibility plan.
 
-The support range is a policy, not a test matrix. Basic CI's `web` job runs
-`scripts/web-check.sh basic` and no browser. The separate `web-browser` job runs
-only for its routed paths ([GitHub Actions](github-actions.md#path-routing)):
-Quick runs the Chromium `desktop` project, Full adds the `firefox` and `webkit`
-projects (see [Validation](#validation)). The `mobile` project is Chromium
-emulation. Playwright's Firefox and WebKit builds are not the minimum Safari
-16.4 or Firefox 128 releases; record manual results for UI changes that depend
-on those browsers.
+This browser list defines the support policy and is distinct from the automated CI matrix. Basic CI's `web` job runs `scripts/web-check.sh basic` without launching a browser, while the path-routed `web-browser` workflow ([GitHub Actions](github-actions.md#path-routing)) runs only the Chromium `desktop` Playwright project in Quick mode and adds the `firefox` and `webkit` projects in Full mode (see [Validation](#validation)). The `mobile` project emulates a mobile viewport inside Chromium. Because Playwright's bundled Firefox and WebKit engines do not match the minimum supported Safari 16.4 or Firefox 128 releases, record manual verification results whenever a UI change relies on browser-specific rendering or behavior.
 
 ### Component sources
 
-`web/components.json` records the shadcn-vue CLI settings. Primitives are
-project-owned source in `web/src/components/ui`; a CLI run is not an upgrade.
-Compare upstream changes by hand (keyboard behavior, ARIA, Portal and props)
-and keep the local modifications below. When the CLI generates icon imports
-from `lucide-vue-next`, rewrite them to the existing `@lucide/vue` package.
-
-The upstream paths are `apps/v4/registry/new-york-v4/ui/<component>` and
-`apps/v4/registry/new-york-v4/lib/utils.ts`. Preserve these local adaptations:
+`web/components.json` holds the configuration for the shadcn-vue CLI, but the files under `web/src/components/ui` are maintained as project-owned source code, and a CLI run is not an upgrade. When pulling upstream changes from `apps/v4/registry/new-york-v4/ui/<component>` or `apps/v4/registry/new-york-v4/lib/utils.ts`, review diffs manually for keyboard handling, ARIA attributes, Portal mounting, and prop types, rewrite any generated `lucide-vue-next` imports to `@lucide/vue`, and preserve the local adaptations below:
 
 | Area | Local behavior to preserve |
 | --- | --- |
@@ -178,116 +75,51 @@ The upstream paths are `apps/v4/registry/new-york-v4/ui/<component>` and
 | Dialog | Content scrolls within `max-h-[calc(100dvh-2rem)]`; no footer-generated close button |
 | DropdownMenu | No animation utilities; Trigger defaults `as` to `button`; explicit `as`/`dir`/`modelValue` defaults, Content limited to `align`/`side`/`sideOffset` and items without `textValue` for `exactOptionalPropertyTypes`; no Sub or Radio parts |
 
-All sources were taken on 2026-10-04 from `unovue/shadcn-vue` commit
-`b251d9fd92aa496495e127137a7734704fb34a29` (CLI 2.8.2) and are MIT licensed;
-the notice is kept in `web/src/components/ui/LICENSE.shadcn-vue`. Runtime
-dependencies are pinned in `web/package.json`: `reka-ui`, `@vueuse/core`
-(already required by `reka-ui`), `class-variance-authority`, `clsx` and
-`tailwind-merge`; build-time
-`tailwindcss` and `@tailwindcss/vite`. Primitives do not call APIs, read the
-Workspace or decide permissions.
+The baseline primitives were vendor-copied on 2026-10-04 from `unovue/shadcn-vue` commit `b251d9fd92aa496495e127137a7734704fb34a29` (CLI 2.8.2) under the MIT license, preserved at `web/src/components/ui/LICENSE.shadcn-vue`. Runtime dependencies are pinned in `web/package.json` (`reka-ui`, `@vueuse/core`, `class-variance-authority`, `clsx`, and `tailwind-merge`), paired with build-time `tailwindcss` and `@tailwindcss/vite`. UI primitives remain purely presentational and never call APIs, read Workspace state, or evaluate permissions.
 
 ### Shell and page components
 
-The shell follows the shadcn-vue `dashboard-01` inset layout without the
-`sidebar` primitive set: the sidebar sits on the `sidebar` token, page content
-is an inset rounded panel, and the site header shows the current section title
-from `components/layout/navigation.ts`.
+The application shell adapts the shadcn-vue `dashboard-01` inset layout without pulling in the upstream `sidebar` primitive family: the navigation rail uses the `sidebar` theme tokens, the active view renders inside an inset rounded panel, and the top header displays the section title resolved from `components/layout/navigation.ts`.
 
-`App.vue` owns readiness, Workspace selection and login-return navigation.
-Layout/common components present caller-owned data; primitives do not fetch or
-decide permissions. The shell owns page width and padding; views render a bare
-`<main>`. Keep the skip link, `aria-current` navigation, titled mobile Sheet,
-focus movement after navigation and `status`/`alert` data states.
+`App.vue` manages readiness polling, Workspace selection, and post-login return navigation. Layout and shared components render data passed down by their parent view, while views render a plain `<main>` element inside the shell's width and padding container. Keep the keyboard skip link, `aria-current` nav markers, titled mobile navigation Sheet, post-navigation focus management, and `status`/`alert` live regions intact.
 
-Node write forms use `OperationDialog` with one form. Pages own fields, pending
-state and submit handlers. Preserve focus trapping/return, Escape/Cancel behavior,
-translated labels and help through `aria-describedby`. Pending requests disable
-submission; errors retain ordinary inputs while secret owners clear passwords.
-Show disabled-action reasons visibly as well as in `title`; approval fields do
-not replace server authorization. Quota help must explain UTC monthly periods,
-direction, zero disabling the user and unlimited quota; expiry is UTC.
+Node mutation dialogs wrap a single form inside `OperationDialog`, while the parent page or feature owns form fields, pending flags, and submit handlers. Maintain focus trapping and restoration, Escape and Cancel dismissal, and localized labels wired to help text through `aria-describedby`. While a request is in flight, disable form submission; if a request fails, keep ordinary field values intact while clearing any password inputs held by secret-owning forms. Render disabled-action explanations visibly in the UI as well as in `title` attributes, and remember that client-side approval inputs never substitute for server-side authorization. Quota help text must explain UTC calendar-month resets, traffic direction, zero disabling the user, and unlimited quota, and expiration inputs must state that timestamps are evaluated in UTC.
 
 <a id="nodes-list"></a>
 <a id="node-detail-read-areas"></a>
 <a id="node-detail-write-forms"></a>
 ### Read models and list state
 
-- Nodes filters, search, sorting and optional columns run on the complete Fleet
-  snapshot. Replace it only after all pages load; label failed refreshes as stale.
-  [`node-list.ts`](../../web/src/features/nodes/node-list.ts) owns filter/sort and
-  URL query rules. Keep unknown observations explicit and timestamp handling
-  valid for infinity/extended years. The list follows the Tailscale Machines
-  layout: search, a single Filters menu, removable chips for active filter
-  values, and a per-row action menu. Filter groups stay flat in one menu;
-  nested submenus are unreliable on touch screens.
-- Rollout selection uses node IDs. Select-all covers visible eligible rows,
-  confirmation lists every selected target, hidden selections remain visible as
-  a count, and Workspace changes clear selection. Node list rows have no action
-  availability; advisory write permissions come from detail reads.
-- Detail navigation preserves the originating list query when available. Missing
-  observations and unavailable/not-found states remain distinguishable. Views
-  own route/selection and refresh; presentation components add no data loading.
-- Overview metrics name their sources and distinguish ready, stale, unavailable
-  and loading. Observed sessions are last-reported counts; direct paths include
-  offline nodes. Active/unknown operations are workspace-wide, but failed counts
-  cover only the latest 20. Do not turn these snapshots into historical trends.
+- On the Nodes view, filtering, search, sorting, and optional column toggles operate over the complete Fleet snapshot, which swaps in only after all pages finish loading; if a background refresh fails, the existing table stays visible and is badged as stale. [`node-list.ts`](../../web/src/features/nodes/node-list.ts) owns the filter, sort, and URL query synchronization logic, preserving explicit unknown-observation states and supporting infinity or extended-year timestamps. Visually, the table follows the Tailscale Machines pattern with a search box, a single flat Filters menu (avoiding nested submenus that behave poorly on touch devices), removable filter chips, and a per-row action menu.
+- Fleet rollout target selection tracks node IDs across filter changes: Select All toggles currently visible eligible rows, the confirmation step lists every selected node explicitly, selections hidden by active filters remain visible as a badge count, and switching Workspaces clears the selection. Node list rows do not fetch or display per-action write availability; advisory action permissions are loaded only on the node detail view.
+- Navigating from the Nodes list to a node detail page preserves the list's query string so the Back link restores the operator's filters. Detail views distinguish missing Agent observations from unavailable or 404 node states, and presentation components never trigger their own data fetches.
+- Overview cards identify their backing API source and distinguish ready, stale, unavailable, and loading states. Session totals reflect the last count reported by each node, and direct-path indicators include offline nodes. Active and `unknown` operation counts span the entire Workspace, whereas the recent failed count covers only the latest 20 operations; do not present these point-in-time counters as historical time series.
 
 <a id="operations-and-rollouts"></a>
 <a id="approvals-and-audit"></a>
 <a id="overview"></a>
 ### Operations, approvals and audit
 
-Automatic snapshot refresh runs only while the document is visible and focused.
-Fleet closes its event stream and cancels snapshot reads on blur/hide, then
-rebuilds and reconnects immediately on return. With a healthy event stream,
-Fleet and overview supplement live updates every 60 seconds after the previous
-refresh completes; stream/read failures use 15 seconds. Readiness checks use
-60 seconds when healthy and 15 seconds after failure. Active rollout detail
-retains its 2-second interval. Successful reads clear the existing stale state.
-The shared `foreground-refresh.ts` scheduler merges event notifications and
-periodic polls into one timer per owner, never overlaps scheduled reads, and
-coalesces events during a read into one follow-up. Leaving a Fleet view stops
-its snapshot reads and clears detail selection; returning refreshes immediately.
-Accepted node-operation tracking remains independent and is not cancelled by
-focus changes or leaving the view.
+Background snapshot refreshes run only while the browser tab is visible and focused. When the document loses focus or becomes hidden, Fleet closes its EventSource stream and aborts in-flight snapshot reads; when the user returns, it immediately rebuilds state from REST and reconnects the stream. While the event stream is healthy, Fleet and Overview run a supplemental full refresh 60 seconds after the previous read finishes, dropping to a 15-second retry interval after a stream or read error. Readiness polling follows the same 60-second healthy and 15-second failure cadence, while an active rollout detail view polls every 2 seconds. Any successful read clears the stale indicator.
 
-A plain operation's `unknown` is a warning and Fleet keeps polling it. Upgrade
-and rollout-node `unknown` are terminal failures. Tone helpers never decide
-polling. Rollout totals distinguish success, failure (including rolled back) and
-unknown, and leaving rollout detail stops its polling. Rollout reads, resume
-and create results are fenced by route rollout, Workspace ID and generation; a
-route or Workspace change clears the shown rollout and its resume action before
-reading again. A read in flight when resume starts is dropped, and a resume or
-create without a confirmed response is never resent automatically. Closing the
-create dialog gives up the automatic navigation, not the submitted request. See
-[`fleet.ts`](../../web/src/shared/fleet.ts) and
-[`state-tone.ts`](../../web/src/features/operations/state-tone.ts).
+All periodic and event-driven refreshes go through the shared `foreground-refresh.ts` scheduler, which collapses event notifications and timer ticks into a single timer per owner, prevents overlapping reads, and coalesces events that arrive during an in-flight read into one follow-up fetch. Navigating away from a Fleet view stops its snapshot timer and clears the active detail selection, and navigating back triggers an immediate refresh. Tracking for already-accepted node operations runs independently and continues across focus changes or route transitions.
 
-Approval queues use cursor paging and clear stale rows after refresh failure.
-Deep links, lookup and queue rows share the detail route. Approval authorizes
-execution; its status is not the resulting operation's outcome. Expired requests
-have no decision form. Decisions require a reason and reviewed checkbox; lost
-or rejected decisions (including 409) clear detail and require refresh, never an
-automatic resend. Audit search/filter covers only the latest 50 records loaded
-in the browser; it is not a server-wide search.
+For a standalone node operation, an `unknown` state renders as a warning while Fleet continues polling for convergence; for an Agent upgrade or rollout node item, `unknown` is treated as a terminal failure. Visual tone helpers in [`state-tone.ts`](../../web/src/features/operations/state-tone.ts) never control polling behavior (which lives in [`fleet.ts`](../../web/src/shared/fleet.ts)). Rollout summary counts separate succeeded, failed (including rolled-back), and `unknown` nodes, and leaving the rollout detail page stops its 2-second poller. Rollout detail reads, resume calls, and creation responses are fenced by the route's rollout ID, the active Workspace ID, and the Workspace generation counter: changing the route or Workspace clears the displayed rollout and hides the resume button before fetching fresh data. Starting a resume drops any in-flight detail read, and neither resume nor rollout creation ever resends automatically if the HTTP response is lost. Closing the rollout creation dialog cancels automatic navigation to the new rollout without aborting the already-submitted POST request.
 
-Keep wide tables inside scrollable regions on narrow screens, with expanded
-content constrained to the visible width.
+The Approvals queue paginates with opaque cursors and clears stale rows if a refresh fails, while deep links, ID lookups, and queue rows all resolve to the same detail route. Granting an approval authorizes a future mutation; the approval's own status does not report whether that downstream operation succeeded. Expired approval requests hide the decision form. Submitting a decision requires both a reason string and the review confirmation checkbox, and any lost or rejected decision (including a 409 conflict) clears the detail view and forces a fresh read without resending. On the Audit view, client-side search and filtering operate strictly over the latest 50 records loaded in memory instead of querying the server across the full audit log.
+
+On narrow viewports, wrap wide data tables in horizontal scroll containers while keeping expanded row details constrained to the visible viewport width.
 
 <a id="ui-regression-checklist"></a>
-UI regression checks are listed under [Validation](#validation).
+UI regression test requirements are covered in [Validation](#validation).
 
 ## Node detail workflows
 
-NodeDetail composes configuration and certificate workflows during setup.
-The quota-and-expiry dialog is `components/nodes/UserPolicyDialog.vue` and its
-mapping lives in `adapters/user-policy.ts`; other desired-state and
-controlled-action handlers remain in the page.
+NodeDetail wires up the configuration and certificate feature composables during component setup. User quota and expiry editing is encapsulated in `components/nodes/UserPolicyDialog.vue` (backed by `adapters/user-policy.ts`), while remaining desired-state user/group forms and controlled session or service actions stay directly in the page view.
 
 ### Boundaries
 
-Paths below are relative to `web/src`.
+Paths in the table below are relative to `web/src`.
 
 | Owner                                            | Responsibilities                                                                                                                   |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
@@ -299,63 +131,30 @@ Paths below are relative to `web/src`.
 | `shared/fleet.ts`                                | Shared operation tracking and telemetry; feature disposal does not stop Fleet tracking                                             |
 | `api/workspace.ts`                               | Sole Workspace authority; features receive its context getter, not a second Workspace store                                        |
 
-Each feature receives only a readonly node ref, readonly successful-read flag,
-Workspace context getter, operation-tracking callback and translator. Neither
-imports the router, Fleet, a view or the other feature. The page constructs each
-feature once during setup, passes the route-matched authorized node and computes
-readiness from detail loading, Fleet selection and selection error.
+Each feature composable receives only a readonly node ref, a readonly flag indicating whether the initial authorized node read succeeded, a Workspace context getter, an operation-tracking callback, and the i18n translator function. Neither composable imports the router, the Fleet store, any view component, or the other feature composable. NodeDetail instantiates each composable once during setup, binds it to the route-matched authorized node, and derives overall view readiness from the detail request state, Fleet selection, and any selection error.
 
 ### Preserved Behavior
 
-- ConfigPlan captures only a known, nonnegative JavaScript-safe configuration
-  revision. It does not use node version or rebase/retry a stale revision.
-- Closing a dialog synchronously cancels reads and polling and clears its
-  transient state. The feature's scope disposal also performs this cleanup;
-  route and Workspace changes still close dialogs in the page.
-- Mutations are not aborted or automatically resent on teardown. Late accepted
-  IDs remain recoverable through the existing receipt/ticket owner. Reopening
-  waits for acknowledgement and re-reads authorized server state.
-- ConfigPlan terminal states and the certificate `csr_pending` polling rule
-  remain different. Both keep their existing 30 attempts and 500 ms delay.
-- Apply closes its dialog before handing off operation tracking. P12/revoke
-  hand off tracking without closing the certificate dialog. Disposing a
-  feature only detaches its own reads, not accepted server work.
-- Artifact credentials remain memory-only, scoped to Workspace/node/certificate
-  and bounded by expiry. An already requested one-time download still completes
-  after dialog closure. No credential is added to persistent receipts; a full
-  browser refresh, page termination or another tab cannot recover these secrets.
-- A certificate receipt's operation is restored only when its resource ID matches
-  the selected certificate. Falling back to another certificate, or finding no
-  active certificate, does not fetch or display the old receipt's operation.
+- ConfigPlan workflows capture only a known, nonnegative JavaScript-safe configuration revision from the node detail response, never substituting node version or automatically rebasing or retrying a stale revision.
+- Closing a workflow dialog immediately aborts its in-flight reads and polling loops and resets its transient form state. Disposing the composable's Vue effect scope runs the same cleanup, and route or Workspace changes continue to close open dialogs from the parent view.
+- Component teardown never aborts an already-sent mutation request or resends it automatically. If an accepted operation or plan ID arrives after the dialog closes, the shared receipt and ticket helpers in `features/node-workflow.ts` record it so reopening the workflow waits for the in-flight request to settle and then reloads authorized server state.
+- Configuration Plan polling and certificate `csr_pending` polling keep their distinct terminal-state predicates while sharing the same 30-attempt cap and 500 ms retry delay.
+- Submitting Configuration Apply closes the dialog before handing the resulting operation ID to Fleet tracking, whereas PKCS#12 export and certificate revocation hand off operation tracking while keeping the certificate dialog open. Disposing a feature composable detaches only its local reads and leaves accepted server operations tracked in Fleet.
+- One-time certificate download grants stay strictly in memory, scoped to the active Workspace, node, and certificate ID and bounded by their expiration timestamp. A download triggered just before closing the dialog still runs to completion, and grant tokens are never written to persistent storage, so a full page reload, tab close, or second browser tab cannot recover the secret.
+- Stored certificate operation receipts are restored only when the receipt's resource ID matches the currently selected certificate; switching to another certificate or viewing a node with no active certificate neither fetches nor displays the older receipt's operation.
 
 <a id="verification-1"></a>
-Feature and browser validation are listed under [Validation](#validation).
+Unit and browser verification suites for these workflows are listed under [Validation](#validation).
 
 ### Advisory action availability
 
-The authorized node detail read includes `effective_actions`. Telemetry derives
-node trust and approved capabilities through the existing Operations Store;
-Node HTTP asks its parent-supplied callback to apply the same resource-scoped
-RBAC checks as writes. The callback carries the original request context and
-adds no authorization store or permission engine to the module. Reads fail
-closed on lookup errors, and the caller-specific detail response is not cached.
-List reads do not perform these additional lookups.
+Authorized node detail responses include an `effective_actions` map. On the backend, the telemetry read path combines node trust state and approved capabilities from the Operations Store, and the Node HTTP handler invokes its parent-supplied callback to evaluate the same resource-scoped RBAC rules used by write endpoints. That callback reuses the caller's request context without introducing a second authorization store or permission engine inside the module. Any lookup error fails closed, caller-specific detail responses are never shared across sessions, and collection list endpoints skip these per-node action lookups.
 
-NodeDetail disables the relevant actions and explains missing capability,
-trust or role permissions before a form is filled. Certificate browsing uses
-its separate read permission. This remains advisory: writes still enforce
-capabilities, role checks, sealing keys, versions, approvals, secret references
-and command-specific constraints. Configuration forms identify their template
-source and captured revision; generated results identify the full redacted
-candidate without inventing current field values. Existing desired/observed
-fields distinguish unmanaged resources and missing observations in the display,
-without changing convergence records or taking over existing accounts.
+In the browser, NodeDetail uses `effective_actions` to disable unavailable buttons and explain which capability, trust state, or RBAC permission is missing before the operator fills out a dialog. Viewing certificate metadata continues to use its dedicated read permission. Because `effective_actions` is strictly advisory UI guidance, every write endpoint enforces its corresponding server-side authorization and domain validation checks on submission, while only the applicable sensitive or node-targeted operations require independent two-principal approval, node capabilities, expected revisions, sealing keys, or `SecretRef` constraints. Configuration dialogs display their template source and captured configuration revision, and generated Plan previews show the complete redacted candidate without fabricating current field values. Existing desired and observed user/group tables clearly distinguish unmanaged local accounts from missing Agent observations without altering convergence records or implicitly adopting unmanaged accounts.
 
 ## Validation
 
-Use an authorized isolated environment with dependencies installed; select checks
-according to [Validate a change](testing.md). Paths in the table are relative to
-`web/` unless a repository script is shown.
+Run verification checks inside an authorized, isolated environment with all dependencies installed, selecting suites according to [Validate a change](testing.md). Unless a repository-root script is shown, file paths in the table below are relative to `web/`.
 
 | Change | Relevant evidence |
 | --- | --- |
@@ -366,42 +165,15 @@ according to [Validate a change](testing.md). Paths in the table are relative to
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
 | ESLint configuration | `npm run lint`, `npx vitest run test/eslint-vue.test.ts` (Vue rules reach SFCs) and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |
 
-`scripts/web-check.sh basic` runs generated-client build, formatting, lint,
-typecheck, unit tests, production build and generated-auth checks. Its `full`
-mode adds the focused authentication browser runner (`test/run-auth-browser.mjs`)
-but not the Playwright specs, which need `npm run test:e2e` or `make e2e`. This runner and stubbed
-browser specs do not validate a live Controller, database recovery or installation.
-Specs requiring the development simulator (`local-slice` and the first two
-`overview` tests) need a running backend; report missing coverage as not run.
-For a separately served production build, set `PLAYWRIGHT_BASE_URL` before
-running focused Playwright specs.
+`scripts/web-check.sh basic` builds the generated OpenAPI client and runs formatting checks, ESLint, typecheck, Vitest unit tests, the production Vite build, and generated-auth verification. Running `scripts/web-check.sh full` adds the focused authentication browser runner (`test/run-auth-browser.mjs`), while the full Playwright E2E suite requires `npm run test:e2e` or `make e2e`. Neither this runner nor stubbed Playwright specs validate a live Controller, database recovery, or host installation. Specs that exercise the development simulator (`local-slice` and the first two `overview` tests) require a running backend stack; if the backend is not running, report those specs as not run. To run focused Playwright specs against an already-serving production bundle, export `PLAYWRIGHT_BASE_URL` beforehand.
 
-Playwright projects name their engine: `desktop` is Chromium, `mobile` is the
-iPhone 13 viewport emulated in Chromium (not Safari coverage), and `firefox` and
-`webkit` run only the login/Workspace, rollout, node-form, password-dialog and
-shell-navigation specs. `npm run test:e2e` runs all four projects; select one
-with `--project`. The runner accepts the same selection, for example
-`node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`,
-and fails when a selected browser is missing. Report a project whose engine is
-not installed as not run. `--gateway` (Docker required) serves `dist/` through
-the pinned production Caddy with `deploy/production/Caddyfile` over HTTPS
-instead of Vite preview; `--gateway=integrated` instead runs the Integrated
-Edge (`edge.Dockerfile` base image with `deploy/production/integrated`'s NGINX
-template and entrypoint) in front of the Integrated Caddyfile, published at
-`https://controller.localhost` on `127.0.0.1:443`, so Caddy only sees requests
-through Edge's SNI routing and PROXY protocol. The cross-engine specs import `e2e/csp.ts`, which
-fails a test on any `securitypolicyviolation`. Because the policy is
-enforced and has no report endpoint, `csp-control.spec.ts` must also observe
-a deliberate violation blocked with `disposition=enforce` in every selected project. Playwright WebKit and Firefox builds are not the
-minimum supported Safari 16.4 or Firefox 128 releases.
+Playwright projects are named after their browser target: `desktop` runs Chromium, `mobile` emulates an iPhone 13 viewport inside Chromium (and therefore does not provide Safari engine coverage), and `firefox` and `webkit` run the cross-engine subset covering login/Workspace selection, rollouts, node forms, password dialogs, and shell navigation. `npm run test:e2e` executes all four projects unless filtered with `--project`. `node test/run-auth-browser.mjs` accepts the same `--project` flags (for example `node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`) and exits with an error if a requested browser binary is missing; always report any project whose browser engine is not installed as not run.
 
-For shared UI changes, record in the PR:
+Passing `--gateway` (which requires Docker) serves `dist/` behind the pinned production Caddy image and `deploy/production/Caddyfile` over HTTPS in place of Vite preview. Passing `--gateway=integrated` places the Integrated Edge container (`edge.Dockerfile` base image with the NGINX template and entrypoint from `deploy/production/integrated`) in front of the Integrated Caddyfile at `https://controller.localhost` on `127.0.0.1:443` so Caddy receives traffic only through Edge's SNI router and PROXY protocol. The cross-engine specs import `e2e/csp.ts`, which fails the test on any `securitypolicyviolation` event. Because the Content Security Policy is enforced without a report endpoint, `csp-control.spec.ts` also triggers a deliberate inline violation and asserts that the browser blocks it with `disposition=enforce` across every selected project. Remember that Playwright's WebKit and Firefox builds do not substitute for testing on minimum supported Safari 16.4 or Firefox 128 releases.
 
-- Before/after screenshots with identical fixtures at 1440 px and 390 px for
-  overview, nodes, node detail/missing node, operations, rollout, approvals/detail,
-  audit, settings and login. The page itself must not scroll horizontally.
-- Keyboard skip link, sidebar/mobile navigation, Nodes filters/detail link, and
-  dialog open/cancel/confirm with focus returning to the trigger.
-- CSS/JS bundle size compared with the base branch and reasons for new dependencies.
-- Manual Safari/Firefox results when affected; Chromium device emulation does
-  not supply those browsers' coverage.
+When a pull request modifies shared UI primitives, layout, or styles, include the following evidence in the PR description:
+
+- Before-and-after screenshots captured against identical fixtures at both 1440 px and 390 px widths for overview, nodes, node detail (including missing-node state), operations, rollout, approvals list and detail, audit, settings, and login, confirming that the document itself never scrolls horizontally.
+- Verification of the keyboard skip link, desktop sidebar and mobile Sheet navigation, Nodes filter controls and detail links, and dialog open, cancel, and confirm flows returning focus to the triggering element.
+- CSS and JS production bundle size comparisons against the base branch, along with the rationale for any newly added package dependencies.
+- Manual Safari and Firefox test results whenever the change touches browser-sensitive CSS or DOM APIs, since Chromium mobile emulation does not cover those engines.
