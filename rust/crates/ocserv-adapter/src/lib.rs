@@ -1186,7 +1186,8 @@ impl Adapter {
     ///
     /// # Errors
     ///
-    /// Rejects a malformed or stale target and propagates bounded child failures.
+    /// Rejects a malformed or stale target, or an Ocserv whose `occtl` has no
+    /// `terminate` command, before any child runs; propagates bounded child failures.
     pub async fn session_terminate(
         &self,
         session_id: &str,
@@ -1194,6 +1195,11 @@ impl Adapter {
     ) -> Result<MutationResult, AdapterError> {
         self.ensure_boot_id(boot_id).await?;
         let session_id = numeric_session_id(session_id)?;
+        if !ocservia_agent_protocol::supports_session_terminate(
+            &self.ocserv_version().await?.version,
+        ) {
+            return Err(AdapterError::InvalidRequest);
+        }
         self.execute(&self.resources.occtl, &["terminate", "id", session_id])
             .await?;
         Ok(MutationResult { applied: true })
@@ -7386,17 +7392,28 @@ mod tests {
         let boot = directory.join("boot_id");
         let boot_id = Uuid::now_v7().to_string();
         std::fs::write(&boot, &boot_id).expect("write boot fixture");
-        let resources = FixedResources::new(
-            systemctl,
-            PathBuf::from("/bin/false"),
-            occtl,
-            PathBuf::from("/etc/hosts"),
-            boot,
-        )
-        .expect("fixed resources");
+        let ocserv = directory.join("ocserv");
+        let version = directory.join("version");
+        std::fs::write(&version, "1.4.2").expect("write version fixture");
+        write_executable(
+            &ocserv,
+            format!(
+                "#!/bin/sh\necho \"ocserv $(cat '{}')\" >&2\n",
+                version.display()
+            ),
+        );
+        let resources =
+            FixedResources::new(systemctl, ocserv, occtl, PathBuf::from("/etc/hosts"), boot)
+                .expect("fixed resources");
         let adapter = Adapter::new(resources, Limits::default());
         assert!(adapter.session_disconnect("42", &boot_id).await.is_ok());
         assert!(adapter.session_terminate("42", &boot_id).await.is_ok());
+        // Ocserv before 1.4.2 has no `occtl terminate`: reject before any child runs.
+        std::fs::write(&version, "1.2.4").expect("write old version fixture");
+        assert!(matches!(
+            adapter.session_terminate("42", &boot_id).await,
+            Err(AdapterError::InvalidRequest)
+        ));
         assert!(adapter.ip_ban_remove("192.0.2.9").await.is_ok());
         assert!(adapter.service_reload().await.is_ok());
         assert!(matches!(
