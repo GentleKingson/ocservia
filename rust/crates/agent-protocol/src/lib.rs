@@ -10,6 +10,19 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// Reports whether this Ocserv version's `occtl` has `terminate id`, which
+/// upstream added in 1.4.2; anything unparsable is unsupported.
+#[must_use]
+pub fn supports_session_terminate(version: &str) -> bool {
+    let mut parts = version.split('.').map(str::parse::<u32>);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => {
+            (major, minor, patch) >= (1, 4, 2)
+        }
+        _ => false,
+    }
+}
+
 /// Maximum encoded local RPC frame size.
 pub const MAX_FRAME_BYTES: usize = 384 * 1024;
 
@@ -757,6 +770,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_terminate_requires_ocserv_1_4_2() {
+        for version in ["1.2.4", "1.3.0", "1.4.1", "1.4", "1.4.2.1", "", "unknown"] {
+            assert!(!supports_session_terminate(version), "{version}");
+        }
+        for version in ["1.4.2", "1.4.10", "1.5.0"] {
+            assert!(supports_session_terminate(version), "{version}");
+        }
+    }
 
     #[tokio::test]
     async fn frame_round_trip_and_oversize_rejection() {

@@ -17,7 +17,8 @@ use ocservia_agent::{
 };
 use ocservia_agent_protocol::{
     ArtifactConsumeRequest, ArtifactReadRequest, DesiredEffectState, ErrorKind,
-    MAX_MANAGED_RESOURCES, PrivdResponse, UpgradeOperationResult, privd_request, privd_response,
+    MAX_MANAGED_RESOURCES, PrivdResponse, ReadRequest, UpgradeOperationResult, privd_request,
+    privd_response,
 };
 use ocservia_command_authorization::{
     ControllerCommandKeyring, FenceBindingClaimsV2, VerifiedConnectionFenceV2,
@@ -488,6 +489,24 @@ fn supported_capabilities() -> Vec<String> {
         .collect()
 }
 
+/// Session capabilities this node can honor now. `occtl terminate` exists
+/// only from Ocserv 1.4.2, so terminate is withheld unless privd reports such
+/// a version. Enrollment keeps the static build set, so approval and
+/// re-enrollment matching stay stable.
+async fn session_capabilities(privd: &PrivdClient) -> Vec<String> {
+    let terminate = matches!(
+        privd
+            .call(privd_request::Operation::OcservVersion(ReadRequest {}))
+            .await,
+        Ok(PrivdResponse { result: Some(privd_response::Result::OcservVersion(version)), .. })
+            if ocservia_agent_protocol::supports_session_terminate(&version.version)
+    );
+    supported_capabilities()
+        .into_iter()
+        .filter(|capability| terminate || capability != "ocserv.session.terminate")
+        .collect()
+}
+
 #[allow(clippy::too_many_lines)]
 async fn connect_once(
     endpoint: &Endpoint,
@@ -495,7 +514,7 @@ async fn connect_once(
     session: &mut SessionContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let connection = endpoint.connect(controller.clone(), AGENT_ALPN).await?;
-    let supported_capabilities = supported_capabilities();
+    let supported_capabilities = session_capabilities(session.privd).await;
     let handshake = SessionHandshake {
         protocol_major: 1,
         protocol_minor: 1,
@@ -4735,12 +4754,67 @@ mod tests {
 
     async fn serve_snapshot(listener: tokio::net::UnixListener) {
         let mut handlers = tokio::task::JoinSet::new();
-        for _ in 0..7 {
+        // One handshake Ocserv version read, then the seven snapshot reads.
+        for _ in 0..8 {
             let (stream, _) = listener.accept().await.expect("accept snapshot request");
             handlers.spawn(answer_snapshot(stream));
         }
         while let Some(result) = handlers.join_next().await {
             result.expect("snapshot handler");
+        }
+    }
+
+    #[tokio::test]
+    async fn session_capabilities_withhold_terminate_below_ocserv_1_4_2() {
+        for (version, terminate) in [(Some("1.2.4"), false), (Some("1.4.2"), true), (None, false)] {
+            let socket = PathBuf::from(format!("/tmp/ocsv-{}.sock", Uuid::now_v7().simple()));
+            let listener = tokio::net::UnixListener::bind(&socket).expect("bind privd fixture");
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept version request");
+                let request: PrivdRequest = read_frame(&mut stream).await.expect("version request");
+                assert!(matches!(
+                    request.operation,
+                    Some(privd_request::Operation::OcservVersion(_))
+                ));
+                let result =
+                    version.map_or_else(
+                        || {
+                            privd_response::Result::Error(
+                                ocservia_agent_protocol::PrivdError::default(),
+                            )
+                        },
+                        |version| {
+                            privd_response::Result::OcservVersion(OcservVersion {
+                                version: version.to_owned(),
+                            })
+                        },
+                    );
+                write_frame(
+                    &mut stream,
+                    &PrivdResponse {
+                        request_id: request.request_id,
+                        privileged_result_proof: None,
+                        result: Some(result),
+                    },
+                )
+                .await
+                .expect("version response");
+            });
+            let privd =
+                PrivdClient::new(socket.clone(), Duration::from_secs(2)).expect("privd client");
+            let capabilities = session_capabilities(&privd).await;
+            server.await.expect("privd fixture");
+            std::fs::remove_file(&socket).expect("remove privd fixture");
+            assert_eq!(
+                capabilities
+                    .iter()
+                    .any(|capability| capability == "ocserv.session.terminate"),
+                terminate,
+                "{version:?}"
+            );
+            let mut expected = supported_capabilities();
+            expected.retain(|capability| terminate || capability != "ocserv.session.terminate");
+            assert_eq!(capabilities, expected);
         }
     }
 
