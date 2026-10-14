@@ -424,6 +424,82 @@ certutil() { :; }
                     assert label == 'accepted', 'bootstrap evidence accepted: ' + label
                     assert record.call_args.args[0] == 'bootstrap_token_consumed_and_bound_pending'
 
+        # Revocation passes only on synchronously applied trust, a closed and not readmitted
+        # session, and old authority that leaves privd untouched; a 503 or a
+        # timeout never stands in for that evidence.
+        def revocation_case(synced=True, queued=True, readmitted='0', effects_change=False):
+            state = {'revoked': False, 'effects': 0}
+            def fake_api(path, body=None, *, role='requester', status=200, headers=None, **_kwargs):
+                headers = headers or {}
+                if path == 'nodes/node':
+                    return {'connection_state': 'offline' if state['revoked'] else 'online',
+                            'trust_status': 'revoked' if state['revoked'] else 'active', 'version': 7}
+                if path == 'approval-requests':
+                    return {'id': 'pending'}
+                if path.startswith('approval-requests/'):
+                    return {'status': 'consumed' if state['revoked'] and path.endswith('revoke') else 'approved'}
+                if path == 'nodes/node/revocation':
+                    if role == 'requester' and headers.get('X-Approval-ID') == 'revoke' and 'Origin' not in headers:
+                        assert status == 200
+                        state['revoked'] = True
+                        if not synced:
+                            raise RuntimeError('POST nodes/node/revocation: HTTP 503, expected 200')
+                        return None
+                    assert status in (400, 401, 403, 409)
+                    return None
+                if path == 'nodes/node/service:reload':
+                    assert status == 404 and state['revoked']
+                    return {'type': 'https://ocservia.dev/problems/not-found'}
+                raise AssertionError(path)
+            def fake_sql(query):
+                if 'FROM node_trust_convergence' in query:
+                    return 't' if queued else 'f'
+                if 'owner_epoch>' in query:
+                    return readmitted
+                if 'lease_until>clock_timestamp()' in query:
+                    return 't'
+                if 'status||' in query:
+                    return 'revoked|3'
+                if 'FROM node_endpoint_keys' in query:
+                    return 'revoked'
+                if 'SELECT status FROM nodes' in query:
+                    return 'active'
+                if 'FROM operations' in query:
+                    return '0'
+                raise AssertionError(query)
+            def fake_run(*args):
+                if args[:2] == ('systemctl', 'show'):
+                    return '42' if 'MainPID' in args else 'active'
+                if 'journalctl' in args and 'ocservia-agent' in args:
+                    return 'controller connection ended\n'
+                if 'sqlite3' in args:
+                    if state['revoked'] and effects_change:
+                        state['effects'] += 1
+                    return str(state['effects'])
+                return ''
+            clock = {'now': 0}
+            with patch.dict(os.environ, env), patch.object(business, 'api', side_effect=fake_api), \
+                    patch.object(business, 'sql', side_effect=fake_sql), patch.object(business, 'run', side_effect=fake_run), \
+                    patch.object(business, 'owner', return_value={'owner_epoch': 5}), \
+                    patch.object(business, 'approval', side_effect=lambda action, *_: 'revoke' if action == 'node.revoke' else 'stale'), \
+                    patch.object(business.time, 'monotonic', side_effect=lambda: clock['now']), \
+                    patch.object(business.time, 'sleep', side_effect=lambda delay: clock.update(now=clock['now'] + delay)), \
+                    patch.object(business, 'record') as record:
+                try:
+                    business.revocation()
+                except (AssertionError, RuntimeError):
+                    return [c.args[0] for c in record.call_args_list], False
+                return [c.args[0] for c in record.call_args_list], True
+        names, passed = revocation_case()
+        assert passed and names == ['revocation_unauthorized_and_unapproved_rejected',
+                                    'node_revoked_trust_converged_and_disconnected',
+                                    'revoked_node_old_authority_without_privd_effect']
+        for label, case in [('trust sync pending', {'synced': False}), ('intent not queued', {'queued': False}), ('session readmitted', {'readmitted': '1'}),
+                            ('privd effect', {'effects_change': True})]:
+            names, passed = revocation_case(**case)
+            assert not passed, 'revocation accepted: ' + label
+            assert 'revoked_node_old_authority_without_privd_effect' not in names, label
+
 
 if __name__ == '__main__':
     main()

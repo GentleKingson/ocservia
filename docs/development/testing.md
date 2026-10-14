@@ -124,6 +124,12 @@ the behavior under test:
   which starts PostgreSQL, `transportd-stub`, the Controller, and Web under
   Docker Compose before running the Playwright `e2e` service; it does not
   exercise MySQL or a native managed node.
+- For real processes without a native host,
+  `scripts/database-controller-e2e.sh <postgres|mysql> [all|split]` runs
+  `TestControllerTransportBackendE2E` with the real Controller, `transportd`,
+  Agent, `privd`, Relay, and ocserv inside one container (no systemd PID 1 and
+  no managed-node installer). It is a manual check outside CI; native systemd
+  behavior belongs to [Business Smoke and Integration](real-business-validation.md).
 - For Rust workspace checks, run `make rust-check` (`cargo fmt --check`, Clippy
   with `-D warnings`, and workspace tests); for full Web verification including
   the browser auth run, use `make web-check`.

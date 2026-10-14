@@ -101,9 +101,9 @@ jobs:
             "$DIAGNOSTICS/result.json" >/dev/null
           jq -e --arg profile "$BUSINESS_PROFILE" '
             (if $profile == "smoke" then
-              (["bootstrap_token_enrollment_pending_and_rerun_identity", "real_browser_subset", "approved_config_apply_and_vpn_user", "real_vpn_after_config_apply"] - .passed_checkpoints | length) == 0
+              (["bootstrap_token_enrollment_pending_and_rerun_identity", "real_browser_subset", "approved_config_apply_and_vpn_user", "real_vpn_after_config_apply", "real_node_revocation_and_disconnect"] - .passed_checkpoints | length) == 0
              else
-              (["real_external_oidc", "real_certificate_lifecycle", "real_browser_subset", "real_vpn_business_and_recovery", "real_browser_agent_rollout"] - .passed_checkpoints | length) == 0
+              (["real_external_oidc", "real_certificate_lifecycle", "real_browser_subset", "real_vpn_business_and_recovery", "real_browser_agent_rollout", "real_node_revocation_and_disconnect"] - .passed_checkpoints | length) == 0
              end)' "$DIAGNOSTICS/result.json" >/dev/null
           if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
             grep -Fx integrated_entry_and_internal_tls "$DIAGNOSTICS/checkpoints.txt"
