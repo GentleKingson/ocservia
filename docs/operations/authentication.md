@@ -232,8 +232,12 @@ Quick host.
 
 1. Complete the pinned Controller installation with Local enabled and a
    [supported database deployment](production-deployment.md#database-support).
-   Apply the installed release's full migration history, not just the historical
-   Local-auth migrations. Stop incompatible older Controllers before migration.
+   Run the installed release's one-shot owner migration (`--migrate-only`),
+   which initializes an empty database from `schema.sql` or applies bounded
+   forward upgrades from `upgrade.sql` against `schema_revisions` (accepting
+   only current-epoch receipts or the fixed `v1.2.0` checkpoint at epoch 1 /
+   revision 0; arbitrary historical databases cannot upgrade directly and must
+   reach `v1.2.0` first). Stop incompatible older Controllers before migration.
    Confirm the guarded installation's migration process exited successfully
    (`database migrations complete`) and the Controller is ready.
    Use the installed release checkout and its effective exported production
@@ -381,19 +385,21 @@ VALUES (@workspace_id, 'Administration', 'administration', @created_at, @created
 ```
 
 Do not use swapped UUID bytes, `now()` directly in BIGINT columns, or this
-current-schema example on an incompletely migrated historical database.
+current-schema example on an unmigrated or pre-checkpoint database.
 After either branch, return to step 3 of the shared bootstrap procedure.
 
 ### Upgrading a single-administrator installation
 
-The historical PostgreSQL migration `000034` records `completion_pending=true`
-only for the original active
+Before the `v1.2.0` checkpoint, historical PostgreSQL migration `000034`
+recorded `completion_pending=true` only for the original active
 Local bootstrap PlatformAdmin, with a matching bootstrap audit event and no
 other historical SecurityAdmin/PlatformAdmin binding in the fixed workspace.
-Disabled bindings also close eligibility. All other existing deployments are
-marked closed without changing identities, credentials or roles. No marker or
-no verifiable original admin means no automatic recovery exception.
-MySQL does not run that PostgreSQL migration; its initialized schema
+Disabled bindings also closed eligibility, and all other existing deployments
+were marked closed without changing identities, credentials or roles. Current
+releases upgrade only from the `v1.2.0` checkpoint or current-epoch
+`schema_revisions` and do not replay removed pre-checkpoint migrations. No
+marker or no verifiable original admin means no automatic recovery exception.
+MySQL never ran that pre-checkpoint PostgreSQL migration; its initialized schema
 includes the two-principal contract. Use the stored eligibility marker, not a
 backend revision number, to decide whether completion is allowed.
 
