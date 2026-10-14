@@ -1013,6 +1013,68 @@ def single_relay_recovery(ping, native_session, operations):
     record('resilience_relay', operation_id=pending['id'], native_reload_delta=1)
 
 
+def native_bans():
+    return [row['IP'] for row in json.loads(run('sudo', 'occtl', '--json', 'show', 'ip', 'bans'))]
+
+
+def session_and_ban_controls(mutation, connect, native_ids, attempt, password):
+    """Controller session/IP-ban operations must leave real occtl effects."""
+    prefix = 'nodes/' + os.environ['T07_NODE']
+    client_ip = '10.207.0.2'
+
+    def observed(native_id):
+        node = api(prefix)
+        listed = any(row.get('id') == native_id for row in api(prefix + '/sessions').get('items', []))
+        return node['boot_id'] if listed and node.get('boot_id') else None
+
+    def controlled(action, native_id):
+        boot = wait_for(f'Controller observes session {native_id}', lambda: observed(native_id))
+        operation, _ = mutation(f'sessions/{native_id}:{action}', {'boot_id': boot}, api(prefix)['version'])
+        return operation
+
+    def stop_clients():
+        subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect'],
+                       capture_output=True, check=False)
+        wait_for('VPN clients stopped', lambda: not native_ids(), 30)
+
+    live = native_ids()
+    assert len(live) == 1
+    operation = controlled('disconnect', live[0])
+    wait_for('native session disconnect', lambda: live[0] not in native_ids(), 60)
+    record('session_disconnect_native_effect', operation_id=operation['id'], native_session_id=live[0])
+
+    stop_clients()
+    connect('openconnect-terminate.log')
+    fresh = wait_for('fresh native session', native_ids, 40)
+    assert len(fresh) == 1 and fresh[0] != live[0]
+    operation = controlled('terminate', fresh[0])
+    wait_for('native session terminate', lambda: not native_ids(), 60)
+    # Unlike disconnect, terminate also invalidates the cookie: no resumed session.
+    time.sleep(10)
+    assert not native_ids()
+    record('session_terminate_native_effect', operation_id=operation['id'], native_session_id=fresh[0])
+
+    stop_clients()
+    wrong = secrets.token_hex(24)
+    for _ in range(15):
+        if client_ip in native_bans():
+            break
+        result = attempt(wrong)
+        assert result.returncode != 0 and b'COOKIE=' not in result.stdout
+    assert client_ip in native_bans()
+    # A banned source cannot authenticate even with the valid password.
+    result = attempt(password)
+    assert result.returncode != 0 and b'COOKIE=' not in result.stdout
+    wait_for('Controller observes IP ban',
+             lambda: any(row.get('ip') == client_ip for row in api(prefix + '/ip-bans').get('items', [])))
+    assert client_ip in native_bans()
+    operation, _ = mutation(f'ip-bans/{client_ip}:remove', {}, api(prefix)['version'])
+    assert client_ip not in native_bans()
+    result = attempt(password)
+    assert result.returncode == 0 and b'COOKIE=' in result.stdout
+    record('ip_ban_remove_native_effect', operation_id=operation['id'], ip=client_ip)
+
+
 def business():
     node = os.environ['T07_NODE']
     prefix = f'nodes/{node}'
@@ -1067,11 +1129,14 @@ def business():
         state = api(prefix + '/user-group-state')
         return next(item['desired_version'] for item in state['items'] if item['kind'] == 'user' and item['name'] == 't07-vpn')
 
+    def attempt(password):
+        return subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'timeout', '20', 'openconnect',
+                               '--authenticate', '--non-inter', '--protocol=anyconnect', '--user=t07-vpn',
+                               '--passwd-on-stdin', '--cafile', str(WORK / 'ca.crt'), 'https://10.207.0.1:44443'],
+                              input=(password + '\n').encode(), capture_output=True)
+
     def authenticate(password, success):
-        result = subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'timeout', '20', 'openconnect',
-                                 '--authenticate', '--non-inter', '--protocol=anyconnect', '--user=t07-vpn',
-                                 '--passwd-on-stdin', '--cafile', str(WORK / 'ca.crt'), 'https://10.207.0.1:44443'],
-                                input=(password + '\n').encode(), capture_output=True)
+        result = attempt(password)
         if success:
             assert result.returncode == 0 and b'COOKIE=' in result.stdout
         else:
@@ -1109,23 +1174,32 @@ def business():
     assert int(sql(f"SELECT count(*) FROM audit_events WHERE workspace_id='{WORKSPACE}' AND id IN ({audit_ids});")) == len(audit)
     record('audit_api_database_readback', event_ids=[item['id'] for item in audit])
     # The network namespace confines tunnel addresses/routes to the test client.
-    client_log = (WORK / 'private' / 'openconnect.log').open('wb')
-    vpn = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 't07-client', 'openconnect', '--non-inter',
-                            '--protocol=anyconnect', '--user=t07-vpn', '--passwd-on-stdin',
-                            '--cafile', str(WORK / 'ca.crt'), '--script', str(WORK / 'vpn-script'),
-                            'https://10.207.0.1:44443'], stdin=subprocess.PIPE, stdout=client_log, stderr=client_log)
-    vpn.stdin.write((password2 + '\n').encode())
-    vpn.stdin.close()
+    clients = []
+
+    def connect(log):
+        with (WORK / 'private' / log).open('wb') as client_log:
+            client = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 't07-client', 'openconnect', '--non-inter',
+                                       '--protocol=anyconnect', '--user=t07-vpn', '--passwd-on-stdin',
+                                       '--cafile', str(WORK / 'ca.crt'), '--script', str(WORK / 'vpn-script'),
+                                       'https://10.207.0.1:44443'], stdin=subprocess.PIPE, stdout=client_log, stderr=client_log)
+        clients.append(client)
+        client.stdin.write((password2 + '\n').encode())
+        client.stdin.close()
+
+    connect('openconnect.log')
 
     def ping():
         result = subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'ping', '-c', '2', '-W', '2', '10.208.0.1'],
                                 capture_output=True)
-        return result.returncode == 0 and vpn.poll() is None
+        return result.returncode == 0 and clients[0].poll() is None
 
     wait_for('real VPN ICMP', ping, 40)
-    def native_session():
+    def native_ids():
         rows = json.loads(run('sudo', 'occtl', '--json', 'show', 'users'))
-        return next(row['ID'] for row in rows if row['Username'] == 't07-vpn')
+        return [str(row['ID']) for row in rows if row['Username'] == 't07-vpn']
+
+    def native_session():
+        return native_ids()[0]
 
     live_session = native_session()
     ocserv_started = run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
@@ -1135,10 +1209,14 @@ def business():
     record('live_vpn_session_and_bans_read', session_count=len(session))
     try:
         single_relay_recovery(ping, native_session, operations)
+        controlled = len(operations)
+        session_and_ban_controls(mutation, connect, native_ids, attempt, password2)
+        verify_completed_operations(operations[controlled:])
     finally:
-        run('sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect')
-        vpn.wait(timeout=15)
-        client_log.close()
+        subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect'],
+                       capture_output=True, check=False)
+        for client in clients:
+            client.wait(timeout=15)
 
 
 def vpn_smoke(phase, relay_recovery=False):

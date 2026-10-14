@@ -122,6 +122,13 @@ harness records them as explicit limitations and never scores them as PASS:
   OpenConnect client runs inside an isolated network namespace on the same
   runner to protect host routing tables, exercising synthetic test traffic on
   one machine without a separate client host or live user traffic.
+- After Relay recovery, manual integration drives the Controller's session and
+  IP-ban operations against real `occtl` state. A disconnect removes the live
+  session, and a terminate removes a fresh one with no resumed session. Wrong
+  passwords then get the client source banned under ocserv's default ban
+  score, so even the valid password fails. The ban is removed through the
+  Controller, after which `occtl` no longer lists it and the valid password
+  authenticates again.
 - Both profiles end with a terminal revocation of the real node (in Extended,
   after the rollout). Anonymous, foreign-Origin, unapproved,
   stale-approval, and pending-approval requests, and the approver spending the
