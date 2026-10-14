@@ -60,13 +60,17 @@ for BUSINESS_PROFILE in smoke extended; do
 done
 grep -q 'release-business-api.py vpn_after_config_apply' "${fixture}/smoke-phases"
 grep -q 'release-business-api.py resilience' "${fixture}/smoke-phases"
-[[ "$(wc -l <"${fixture}/smoke-phases")" == 2 ]]
+[[ "$(wc -l <"${fixture}/smoke-phases")" == 3 ]]
 for phase in configuration vpn_after_rollback business; do
   grep -q "release-business-api.py ${phase}$" "${fixture}/extended-phases"
 done
 grep -q 'release-integrated-acceptance.py recovery' "${fixture}/extended-phases"
-# The rollout replaces the Agent, so it must be the extended profile's last phase.
-[[ "$(tail -n 1 "${fixture}/extended-phases")" == "bash ${ROOT}/scripts/release-business-rollout.sh" ]]
+# Revocation ends the node's authority, so it is each profile's last phase;
+# the rollout replaces the Agent, so it is the extended profile's last version check.
+for profile in smoke extended; do
+  [[ "$(tail -n 1 "${fixture}/${profile}-phases")" == "${ROOT}/scripts/release-business-api.py revocation" ]]
+done
+[[ "$(tail -n 2 "${fixture}/extended-phases" | head -n 1)" == "bash ${ROOT}/scripts/release-business-rollout.sh" ]]
 python3 scripts/test-release-business-smoke.py
 node scripts/test-release-upgrade.mjs
 bash scripts/test-release-rust-cache.sh

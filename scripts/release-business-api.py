@@ -802,6 +802,77 @@ def rollout_verify():
            from_version=os.environ['VERSION'], target_version=target)
 
 
+def node_side_effects():
+    reloads = run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
+    return {'root_effects': run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-privd/desired-effects.sqlite3',
+                                'SELECT count(*) FROM authorized_effects;').strip(),
+            'agent_journal': run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-agent/agent.db',
+                                 'SELECT count(*) FROM command_journal;').strip(),
+            'ocserv_reloads': reloads,
+            'native_files': run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf', '/etc/ocserv/ocpasswd')}
+
+
+def revocation():
+    # Terminal stage: the node loses its Controller authority for good.
+    node = os.environ['T07_NODE']
+    prefix = 'nodes/' + node
+    wait_for('online before revocation', lambda: api(prefix)['connection_state'] == 'online')
+    before = owner()
+    agent_pid = run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip()
+    effects = node_side_effects()
+    # Approved before revocation and never spent: the old authority under test.
+    stale = approval('service.reload', 'node', node)
+    path, body = prefix + '/revocation', {'reason': 'T07 terminal node revocation'}
+    api(path, body, role='anonymous', status=401)
+    api(path, body, headers={'X-Workspace-ID': '00000000-0000-7000-8000-000000000072'}, status=403)
+    api(path, body, headers={'Origin': 'https://attacker.invalid'}, status=403)
+    api(path, body, status=400)
+    api(path, body, headers={'X-Approval-ID': stale}, status=409)
+    pending = api('approval-requests', {'action': 'node.revoke', 'resource_type': 'node', 'resource_id': node,
+                                        'reason': 'T07 unapproved revocation', 'ttl_seconds': 600}, status=201)
+    api(path, body, headers={'X-Approval-ID': pending['id']}, status=409)
+    decision = approval('node.revoke', 'node', node)
+    # The approver also holds node.revoke, yet cannot spend the requester's approval.
+    api(path, body, role='approver', headers={'X-Approval-ID': decision}, status=409)
+    assert api('approval-requests/' + decision)['status'] == 'approved'
+    assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'active'
+    record('revocation_unauthorized_and_unapproved_rejected', approval_id=decision)
+    started = int(time.time())
+    # 503 only reports pending transport synchronization; convergence below decides.
+    api(path, body, headers={'X-Approval-ID': decision}, status=(200, 503))
+    assert api('approval-requests/' + decision)['status'] == 'consumed'
+    status, revision = sql(f"SELECT status||'|'||authorization_revision FROM nodes WHERE id='{node}';").split('|')
+    assert status == 'revoked'
+    assert sql(f"SELECT state FROM node_endpoint_keys WHERE node_id='{node}';") == 'revoked'
+    assert api(prefix)['trust_status'] == 'revoked'
+    wait_for('revoked trust applied and connection closed', lambda: sql(
+        "SELECT desired_state='revoked' AND update_applied AND close_applied FROM node_trust_convergence "
+        f"WHERE node_id='{node}' AND revision={int(revision)};") == 't')
+    wait_for('revoked owner lease invalidation', lambda: sql(
+        "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
+        f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND lease_until>clock_timestamp());") == 't')
+    wait_for('revoked node offline', lambda: api(prefix)['connection_state'] == 'offline', seconds=180)
+    # The same Agent process keeps redialing, and no new session is admitted.
+    assert run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip() == agent_pid
+    assert run('systemctl', 'show', 'ocservia-agent', '-p', 'ActiveState', '--value').strip() == 'active'
+    assert sql("SELECT count(*) FROM connection_owner_fencing "
+               f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND owner_epoch>{int(before['owner_epoch'])};") == '0'
+    ended = run('sudo', 'journalctl', '--no-pager', '-u', 'ocservia-agent', '--since', f'@{started}', '-o', 'cat').count(
+        'controller connection ended')
+    assert ended >= 1
+    record('node_revoked_trust_converged_and_disconnected', approval_id=decision,
+           authorization_revision=int(revision), agent_session_ends=ended)
+    key = secrets.token_hex(16)
+    denied = api(prefix + '/service:reload', {'reason': 'T07 old authority after revocation', 'ttl_seconds': 300},
+                 headers={'Idempotency-Key': key, 'If-Match': f'"revision-{api(prefix)["version"]}"',
+                          'X-Approval-ID': stale}, status=404)
+    assert denied['type'] == 'https://ocservia.dev/problems/not-found'
+    assert sql(f"SELECT count(*) FROM operations WHERE workspace_id='{WORKSPACE}' AND idempotency_key='{key}';") == '0'
+    assert api('approval-requests/' + stale)['status'] == 'approved'
+    assert node_side_effects() == effects
+    record('revoked_node_old_authority_without_privd_effect', stale_approval_id=stale, side_effects=effects)
+
+
 def completed(operation):
     result = api('operations/' + operation['id'])
     (EVIDENCE / ('operation-' + operation['id'] + '.json')).write_text(json.dumps(result))
@@ -1102,7 +1173,7 @@ if __name__ == '__main__':
     phase = sys.argv[1]
     if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'bootstrap_token', 'bootstrap_verify', 'approve', 'certificate', 'config_prepare', 'configuration',
                      'browser_prepare', 'browser_verify', 'business', 'smoke_user', 'rollout_ready', 'rollout_verify',
-                     'vpn_after_config_apply', 'vpn_after_rollback', 'resilience'):
+                     'vpn_after_config_apply', 'vpn_after_rollback', 'resilience', 'revocation'):
         raise SystemExit('unknown phase')
     if phase.startswith('vpn_'):
         vpn_smoke(phase.removeprefix('vpn_'))

@@ -122,6 +122,18 @@ harness records them as explicit limitations and never scores them as PASS:
   OpenConnect client runs inside an isolated network namespace on the same
   runner to protect host routing tables, exercising synthetic test traffic on
   one machine without a separate client host or live user traffic.
+- Both profiles end with a terminal revocation of the real node (in Extended,
+  after the rollout). Anonymous, other-workspace, foreign-Origin, unapproved,
+  stale-approval, and pending-approval requests, and the approver spending the
+  requester's approval, are all rejected while the node stays active. The
+  approved revocation (200, or 503 while transport sync is pending) passes only
+  after the approval is consumed, the node and its endpoint key read revoked,
+  trust convergence has applied both the update and the connection close at
+  that revision, no owner lease remains, and the node reads offline while the
+  same Agent process stays up and logs the ended Controller connection. The old
+  reload approval then creates no operation and leaves privd effects, the Agent
+  journal, ocserv reloads, and node files unchanged. A timeout, or a 503 without
+  that convergence, fails the run.
 
 In `result.json`, the harness writes `scope=business-smoke` or
 `scope=integration` (never full release acceptance), along with
