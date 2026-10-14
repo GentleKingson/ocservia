@@ -239,6 +239,38 @@ def token():
     (WORK / 'private' / 'enrollment-token').write_text(result['token'])
 
 
+def bootstrap_token():
+    # Standard registration: no EndpointID until the Agent's possession proof.
+    result = api('node-bootstrap-tokens', {'workspace_id': WORKSPACE, 'environment': 'production',
+                                          'expected_node_name': 't07-native',
+                                          'reason': 'T07 isolated native bootstrap'}, status=201)
+    assert result['token'].startswith('obt1_')
+    # The private copy is redaction input only; the installer consumes the source.
+    (WORK / 'private' / 'bootstrap-token').write_text(result['token'])
+    (WORK / 'bootstrap-token-id').write_text(result['id'])
+    source = WORK / 'bootstrap' / 'node-bootstrap-token'
+    source.parent.mkdir(mode=0o700)
+    with os.fdopen(os.open(source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as output:
+        output.write(result['token'])
+    assert sql(f"SELECT expected_endpoint_id IS NULL AND consumed_at IS NULL FROM node_bootstrap_tokens WHERE id='{result['id']}';") == 't'
+    record('bootstrap_token_created_unbound', token_id=result['id'])
+
+
+def bootstrap_verify():
+    node, endpoint = os.environ['T07_NODE'], os.environ['T07_ENDPOINT']
+    token_id = (WORK / 'bootstrap-token-id').read_text()
+    digest = hashlib.sha256((WORK / 'private' / 'bootstrap-token').read_text().encode()).hexdigest()
+    row = json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(token_hash,'hex') token_hash,"
+                         "encode(bound_endpoint_id,'hex') bound_endpoint,expected_endpoint_id IS NULL unbound_at_creation,"
+                         "consumed_node_id,consumed_at IS NOT NULL consumed "
+                         f"FROM node_bootstrap_tokens WHERE id='{token_id}') s;"))
+    assert row == {'token_hash': digest, 'bound_endpoint': endpoint, 'unbound_at_creation': True,
+                   'consumed_node_id': node, 'consumed': True}, 'bootstrap token binding'
+    assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'pending'
+    assert sql(f"SELECT encode(endpoint_id,'hex') FROM node_endpoint_keys WHERE node_id='{node}';") == endpoint
+    record('bootstrap_token_consumed_and_bound_pending', token_id=token_id, node_id=node)
+
+
 def approve():
     node = os.environ['T07_NODE']
     assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'pending'
@@ -1068,7 +1100,7 @@ def vpn_smoke(phase, relay_recovery=False):
 
 if __name__ == '__main__':
     phase = sys.argv[1]
-    if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'approve', 'certificate', 'config_prepare', 'configuration',
+    if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'bootstrap_token', 'bootstrap_verify', 'approve', 'certificate', 'config_prepare', 'configuration',
                      'browser_prepare', 'browser_verify', 'business', 'smoke_user', 'rollout_ready', 'rollout_verify',
                      'vpn_after_config_apply', 'vpn_after_rollback', 'resilience'):
         raise SystemExit('unknown phase')

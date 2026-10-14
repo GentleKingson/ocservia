@@ -80,7 +80,15 @@ harness records them as explicit limitations and never scores them as PASS:
   the existing strict-TLS binary flag without patching descriptors or launcher
   scripts. The managed-node installer drives enrollment and writes the final
   node configuration while keeping preparation, PENDING_APPROVAL, and
-  SERVICES_ACTIVE as distinct checkpoints.
+  SERVICES_ACTIVE as distinct checkpoints. Smoke registers through the standard
+  path: a `POST /api/v1/node-bootstrap-tokens` token without an EndpointID,
+  handed to the first installer run as a protected `BOOTSTRAP_TOKEN_SOURCE`,
+  reaches `ENROLLED_LOCAL` in that run. The harness then checks that the
+  Controller stored only the token digest, bound it to the Agent's EndpointID
+  on consumption, and kept the node pending, and that installer reruns while
+  pending and after activation keep the same node ID and identity files.
+  Extended keeps the legacy endpoint-bound two-phase registration
+  (`ENROLLMENT_READY`, then `POST /api/v1/enrollment-tokens`).
 - For Local authentication, the requester and approver log in as separate
   principals with distinct credentials and isolated browser sessions, without
   relying on devAuth or sessions injected directly into the database (direct

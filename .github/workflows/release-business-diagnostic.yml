@@ -92,12 +92,16 @@ jobs:
           DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
         run: |
           test -s "$DIAGNOSTICS/probe.log"
+          if grep -rIEq 'obt1_[A-Za-z0-9_-]{43}' "$DIAGNOSTICS"; then
+            echo 'diagnostics contain a node bootstrap token' >&2
+            exit 1
+          fi
           jq -e --arg profile "$BUSINESS_PROFILE" \
             '.profile == $profile and .probe_status == "PASS" and .exit_code == 0 and (.timings | type == "array" and length > 0)' \
             "$DIAGNOSTICS/result.json" >/dev/null
           jq -e --arg profile "$BUSINESS_PROFILE" '
             (if $profile == "smoke" then
-              (["real_browser_subset", "approved_config_apply_and_vpn_user", "real_vpn_after_config_apply"] - .passed_checkpoints | length) == 0
+              (["bootstrap_token_enrollment_pending_and_rerun_identity", "real_browser_subset", "approved_config_apply_and_vpn_user", "real_vpn_after_config_apply"] - .passed_checkpoints | length) == 0
              else
               (["real_external_oidc", "real_certificate_lifecycle", "real_browser_subset", "real_vpn_business_and_recovery", "real_browser_agent_rollout"] - .passed_checkpoints | length) == 0
              end)' "$DIAGNOSTICS/result.json" >/dev/null

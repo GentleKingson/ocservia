@@ -429,10 +429,8 @@ sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
 sudo systemctl daemon-reload
 sudo systemctl restart ocserv
 sudo /usr/libexec/ocservia/ocservia-privd --host-preflight
-bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-prepare.log"
-grep -q ENROLLMENT_READY "${ARTIFACT_DIR}/managed-prepare.log"
-record signed_native_package_and_managed_prepare
-
+# Enrollment crosses the sole Relay, so it must be up before the first
+# Smoke installer run consumes its bootstrap token.
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
 mkdir -m 700 "${work}/relay"
 cp "${OCSERV_SECRET_DIR}/tls.crt" "${work}/relay/relay.crt"
@@ -447,6 +445,21 @@ docker run -d --name "${T07_RELAY_CONTAINER}" --read-only --cap-drop ALL \
   -v "${ROOT}/deploy/test-fixtures/relay.toml:/etc/iroh-relay/relay.toml:ro" \
   "${T07_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}" --config-path /etc/iroh-relay/relay.toml
 fi
+if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
+  # Standard path: an EndpointID-unbound bootstrap token from the protected
+  # source completes registration in the first installer run.
+  python3 "${ROOT}/scripts/release-business-api.py" bootstrap_token
+  BOOTSTRAP_TOKEN_SOURCE="${work}/bootstrap/node-bootstrap-token" \
+    bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-enrollment.log"
+  grep -Fxq 'protected node bootstrap token staged for enrollment' "${ARTIFACT_DIR}/managed-enrollment.log"
+  if grep -q ENROLLMENT_READY "${ARTIFACT_DIR}/managed-enrollment.log"; then exit 1; fi
+  [[ ! -e "${work}/bootstrap/node-bootstrap-token" ]]
+else
+  # Extended keeps the legacy endpoint-bound two-phase registration.
+  bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-prepare.log"
+  grep -q ENROLLMENT_READY "${ARTIFACT_DIR}/managed-prepare.log"
+fi
+record signed_native_package_and_managed_prepare
 export T07_TRANSPORT_CONTAINER
 T07_TRANSPORT_CONTAINER="$(compose ps -q transportd)"
 [[ -n "${T07_TRANSPORT_CONTAINER}" ]]
@@ -475,9 +488,11 @@ export T07_ENDPOINT T07_USER_HASH T07_P12_HASH
 T07_ENDPOINT="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --controller "${CONTROLLER_ENDPOINT_ID}" --prepare-enrollment)"
 T07_USER_HASH="$(openssl pkey -pubin -in "${work}/user.pub.pem" -outform DER | sha256sum | cut -d' ' -f1)"
 T07_P12_HASH="$(sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-private.pem -pubout -outform DER | sha256sum | cut -d' ' -f1)"
-python3 "${ROOT}/scripts/release-business-api.py" token
-sudo install -o root -g ocserv-agent -m 640 "${work}/private/enrollment-token" /etc/ocservia-agent/enrollment-token
-bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-enrollment.log"
+if [[ "${BUSINESS_PROFILE}" == extended ]]; then
+  python3 "${ROOT}/scripts/release-business-api.py" token
+  sudo install -o root -g ocserv-agent -m 640 "${work}/private/enrollment-token" /etc/ocservia-agent/enrollment-token
+  bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-enrollment.log"
+fi
 # Bootstrap reports only local enrollment; approve() below independently
 # checks the Controller's pending state before the authorized transition.
 grep -q '^ENROLLED_LOCAL$' "${ARTIFACT_DIR}/managed-enrollment.log"
@@ -492,6 +507,19 @@ sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-private.pem -pubout 
 sudo test ! -e /etc/ocservia-agent/enrollment-token
 cmp "${ROOT}/deploy/production/systemd/agent-relays.sh" /usr/libexec/ocservia/ocservia-agent-relays
 [[ ! -e /etc/systemd/system/ocservia-agent.service.d/99-t07-ca.conf ]]
+identity_digest() {
+  sudo sha256sum /var/lib/ocservia-agent/identity/endpoint.key /var/lib/ocservia-agent/identity/controller.endpoint
+}
+enrolled_identity="$(identity_digest)"
+if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
+  python3 "${ROOT}/scripts/release-business-api.py" bootstrap_verify
+  # A pending rerun validates, never re-enrolls or regenerates identity.
+  bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-pending-rerun.log"
+  grep -Fxq ENROLLED_LOCAL "${ARTIFACT_DIR}/managed-pending-rerun.log"
+  grep -Fxq "NODE_ID: ${T07_NODE}" "${ARTIFACT_DIR}/managed-pending-rerun.log"
+  [[ "$(identity_digest)" == "${enrolled_identity}" ]]
+  record bootstrap_token_enrollment_pending_and_rerun_identity
+fi
 record official_managed_enrollment_and_unchanged_launchers
 # Prevent direct UDP connectivity from masking the single-Relay outage.
 sudo iptables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
@@ -516,6 +544,8 @@ fi
 sudo systemctl enable --now ocservia-privd ocservia-agent
 bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"
 grep -q SERVICES_ACTIVE "${ARTIFACT_DIR}/managed-active.log"
+grep -Fxq "NODE_ID: ${T07_NODE}" "${ARTIFACT_DIR}/managed-active.log"
+[[ "$(identity_digest)" == "${enrolled_identity}" ]]
 record native_node_services
 if [[ "${BUSINESS_PROFILE}" == extended ]]; then
 next_stage certificate
