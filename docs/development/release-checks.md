@@ -95,6 +95,17 @@ such as test refactors or CI-only maintenance; it excludes the PR from automatic
 notes, including when other labels are present. Do not apply it to user-facing
 security fixes or breaking changes.
 
+GitHub natively generates the Release notes body (`gh release create
+--generate-notes` with [`.github/release.yml`](../../.github/release.yml)).
+During publication, [`scripts/strip-release-owner-attribution.py`](../../scripts/strip-release-owner-attribution.py)
+strips only the repeated ` by @GentleKingson` suffix from PR bullet lines while
+preserving other authors, PR links, category headings, manual prose, and the
+`Full Changelog` comparison link. The workflow compares the notes before calling
+`gh release edit --notes-file`, so both initial publication and reruns are
+idempotent. Never add `GentleKingson` to `changelog.exclude.authors` in
+`.github/release.yml`, because GitHub would omit those PRs entirely. Published
+historical Releases are not retroactively modified.
+
 The [PR template](../../.github/PULL_REQUEST_TEMPLATE.md) offers an optional,
 one-sentence user-facing Release note. GitHub's generator uses PR titles and
 labels, not this field; use descriptive user-facing titles and consult the field
@@ -125,14 +136,41 @@ Every candidate and final needs a fresh Release Check on its exact commit.
 
 Package filenames and binary versions use `X.Y.Z-rc.N`; nFPM encodes native
 metadata as `X.Y.Z~rc.N-1` (DEB) and Version `X.Y.Z~rc.N`, Release `1` (RPM).
-To exercise three real packages on a disposable native systemd runner, use
-`RC_LIFECYCLE=true RUN_ID=<unique-id> ARTIFACT_DIR=<path>
-scripts/release-native-package-smoke.sh` with the native package tools prepared.
-It builds `1.2.0-rc.1`, `1.2.0-rc.2`, and `1.2.0` and checks both upgrade steps.
-Keep `STUB_BINARIES=false` for release acceptance; stub runs are scriptlet tests.
-Run on both native architectures. A build-only RC rehearsal uses
-`gh workflow run release.yml --ref <candidate-branch> -f version=1.2.0-rc.1`;
-all product and asset jobs must pass and Publish must be skipped.
+Keep the three package-validation boundaries distinct:
+
+1. **Same-source relabeled native package lifecycle**: without `PRODUCTS_DIR`,
+   [`scripts/release-native-package-smoke.sh`](../../scripts/release-native-package-smoke.sh)
+   rebuilds the current checkout under synthetic version labels (`1.0.0 -> 1.0.1`
+   by default, or fixed `1.2.0-rc.1 -> 1.2.0-rc.2 -> 1.2.0` when
+   `RC_LIFECYCLE=true`) on a disposable native systemd runner:
+
+   ```bash
+   RC_LIFECYCLE=true RUN_ID=<unique-id> ARTIFACT_DIR=<path> \
+     scripts/release-native-package-smoke.sh
+   ```
+
+   Keep `STUB_BINARIES=false` when exercising real binaries; `STUB_BINARIES=true`
+   is for scriptlet-only PR CI. The fixed `1.2.0` sequence retains real test
+   value for DEB/RPM `~rc.N` version ordering, upgrade/rollback snapshots, and
+   scriptlet transitions, but it relabels one source tree and does **not** prove
+   real upgrade compatibility for the next formal release's RC.
+2. **Current candidate product build and install smoke**: in
+   [`.github/workflows/release-products.yml`](../../.github/workflows/release-products.yml),
+   `PRODUCTS_DIR` and `VERSION` pass the actual candidate packages built for
+   `VERSION` into `scripts/release-native-package-smoke.sh` on both `amd64` and
+   `arm64` to verify native ELF identity, install, same-version reinstall/upgrade,
+   rollback, removal, state preservation, and corruption rejection.
+3. **Cross-historical-release compatibility**: no longer promised by the
+   [support policy](../reference/support-policy.md) and not certified by either
+   check.
+
+A build-only RC rehearsal on `amd64` and `arm64` (which runs both the candidate
+product smoke for `version` and the `RC_LIFECYCLE=true` check while skipping
+`publish`) uses:
+
+```bash
+gh workflow run release.yml --ref <candidate-branch> -f version=<X.Y.Z>-rc.1
+```
 
 ## Coverage ownership
 
