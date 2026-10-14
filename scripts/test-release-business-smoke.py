@@ -424,10 +424,10 @@ certutil() { :; }
                     assert label == 'accepted', 'bootstrap evidence accepted: ' + label
                     assert record.call_args.args[0] == 'bootstrap_token_consumed_and_bound_pending'
 
-        # Revocation passes only on converged trust, a closed and not readmitted
+        # Revocation passes only on synchronously applied trust, a closed and not readmitted
         # session, and old authority that leaves privd untouched; a 503 or a
         # timeout never stands in for that evidence.
-        def revocation_case(converged=True, readmitted='0', effects_change=False):
+        def revocation_case(synced=True, queued=True, readmitted='0', effects_change=False):
             state = {'revoked': False, 'effects': 0}
             def fake_api(path, body=None, *, role='requester', status=200, headers=None, **_kwargs):
                 headers = headers or {}
@@ -440,8 +440,10 @@ certutil() { :; }
                     return {'status': 'consumed' if state['revoked'] and path.endswith('revoke') else 'approved'}
                 if path == 'nodes/node/revocation':
                     if role == 'requester' and headers.get('X-Approval-ID') == 'revoke' and 'Origin' not in headers:
-                        assert status == (200, 503)
+                        assert status == 200
                         state['revoked'] = True
+                        if not synced:
+                            raise RuntimeError('POST nodes/node/revocation: HTTP 503, expected 200')
                         return None
                     assert status in (400, 401, 403, 409)
                     return None
@@ -451,7 +453,7 @@ certutil() { :; }
                 raise AssertionError(path)
             def fake_sql(query):
                 if 'FROM node_trust_convergence' in query:
-                    return 't' if converged else 'f'
+                    return 't' if queued else 'f'
                 if 'owner_epoch>' in query:
                     return readmitted
                 if 'lease_until>clock_timestamp()' in query:
@@ -492,7 +494,7 @@ certutil() { :; }
         assert passed and names == ['revocation_unauthorized_and_unapproved_rejected',
                                     'node_revoked_trust_converged_and_disconnected',
                                     'revoked_node_old_authority_without_privd_effect']
-        for label, case in [('trust pending', {'converged': False}), ('session readmitted', {'readmitted': '1'}),
+        for label, case in [('trust sync pending', {'synced': False}), ('intent not queued', {'queued': False}), ('session readmitted', {'readmitted': '1'}),
                             ('privd effect', {'effects_change': True})]:
             names, passed = revocation_case(**case)
             assert not passed, 'revocation accepted: ' + label

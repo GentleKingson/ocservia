@@ -126,14 +126,15 @@ harness records them as explicit limitations and never scores them as PASS:
   after the rollout). Anonymous, foreign-Origin, unapproved,
   stale-approval, and pending-approval requests, and the approver spending the
   requester's approval, are all rejected while the node stays active. The
-  approved revocation (200, or 503 while transport sync is pending) passes only
-  after the approval is consumed, the node and its endpoint key read revoked,
-  trust convergence has applied both the update and the connection close at
-  that revision, no owner lease remains, and the node reads offline while the
-  same Agent process stays up and logs the ended Controller connection. The old
-  reload approval then creates no operation and leaves privd effects, the Agent
-  journal, ocserv reloads, and node files unchanged. A timeout, or a 503 without
-  that convergence, fails the run.
+  approved revocation must return 200, meaning the request itself applied the
+  revoked trust and the connection close. It passes only after the approval is
+  consumed, the node and its endpoint key read revoked, the revoked trust
+  convergence intent is queued at that revision, no owner lease remains, and
+  the node reads offline while the same Agent process stays up and logs the
+  ended Controller connection. The old reload approval then creates no
+  operation and leaves privd effects, the Agent journal, ocserv reloads, and
+  node files unchanged. A 503 (synchronization left to the background worker)
+  or a timeout fails the run.
 
 In `result.json`, the harness writes `scope=business-smoke` or
 `scope=integration` (never full release acceptance), along with

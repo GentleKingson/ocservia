@@ -837,16 +837,18 @@ def revocation():
     assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'active'
     record('revocation_unauthorized_and_unapproved_rejected', approval_id=decision)
     started = int(time.time())
-    # 503 only reports pending transport synchronization; convergence below decides.
-    api(path, body, headers={'X-Approval-ID': decision}, status=(200, 503))
+    # 200 means the revoked trust and the connection close were both applied in
+    # the request. A 503 leaves them to the background worker, which cannot reach
+    # a node whose owner session already ended, so it never stands in for them.
+    api(path, body, headers={'X-Approval-ID': decision})
     assert api('approval-requests/' + decision)['status'] == 'consumed'
     status, revision = sql(f"SELECT status||'|'||authorization_revision FROM nodes WHERE id='{node}';").split('|')
     assert status == 'revoked'
     assert sql(f"SELECT state FROM node_endpoint_keys WHERE node_id='{node}';") == 'revoked'
     assert api(prefix)['trust_status'] == 'revoked'
-    wait_for('revoked trust applied and connection closed', lambda: sql(
-        "SELECT desired_state='revoked' AND update_applied AND close_applied FROM node_trust_convergence "
-        f"WHERE node_id='{node}' AND revision={int(revision)};") == 't')
+    # The durable revoked intent stays queued for any later owner session.
+    assert sql("SELECT desired_state='revoked' AND close_required FROM node_trust_convergence "
+               f"WHERE node_id='{node}' AND revision={int(revision)};") == 't'
     wait_for('revoked owner lease invalidation', lambda: sql(
         "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
         f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND lease_until>clock_timestamp());") == 't')
