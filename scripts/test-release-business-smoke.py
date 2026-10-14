@@ -501,5 +501,61 @@ certutil() { :; }
             assert 'revoked_node_old_authority_without_privd_effect' not in names, label
 
 
+        # Session and IP-ban operations pass only on the real occtl effect; an
+        # operation that succeeds without changing ocserv must not pass.
+        for fault in (None, 'disconnect ignored', 'ban kept'):
+            native = {'sessions': ['7'], 'bans': set(), 'score': 0}
+
+            def mutation(path, body, revision, native=native):
+                assert revision == 3 and body == ({} if 'ip-bans' in path else {'boot_id': 'boot'})
+                target, action = path.split('/', 1)[1].split(':')
+                if action == 'remove' and fault != 'ban kept':
+                    native['bans'].discard(target)
+                elif action == 'disconnect' and fault != 'disconnect ignored':
+                    native['sessions'].remove(target)
+                return {'id': action}, {}
+
+            def attempt(password, native=native):
+                if '10.207.0.2' in native['bans']:
+                    return SimpleNamespace(returncode=1, stdout=b'')
+                if password == 'valid':
+                    return SimpleNamespace(returncode=0, stdout=b'COOKIE=x')
+                native['score'] += 10
+                if native['score'] >= 80:
+                    native['bans'].add('10.207.0.2')
+                return SimpleNamespace(returncode=1, stdout=b'')
+
+            def control_api(path, *_args, native=native, **_kwargs):
+                if path == 'nodes/node':
+                    return {'boot_id': 'boot', 'version': 3}
+                if path.endswith('/sessions'):
+                    return {'items': [{'id': item} for item in native['sessions']]}
+                return {'items': [{'ip': item} for item in native['bans']]}
+
+            def stopped(*_args, native=native, **_kwargs):
+                native['sessions'].clear()
+
+            def bounded_wait(description, fn, seconds=120):
+                result = fn()
+                if not result:
+                    raise RuntimeError(description)
+                return result
+
+            with patch.dict(os.environ, env), patch.object(business, 'api', side_effect=control_api), \
+                    patch.object(business, 'native_bans', side_effect=lambda native=native: sorted(native['bans'])), \
+                    patch.object(business, 'wait_for', side_effect=bounded_wait), \
+                    patch.object(business.subprocess, 'run', side_effect=stopped), \
+                    patch.object(business, 'record') as record:
+                try:
+                    business.session_and_ban_controls(mutation, lambda native=native: list(native['sessions']),
+                                                      attempt, 'valid')
+                except (AssertionError, RuntimeError):
+                    assert fault, 'real session and ban controls rejected'
+                else:
+                    assert fault is None, 'missing native effect accepted: ' + fault
+                names = [c.args[0] for c in record.call_args_list]
+                assert ('ip_ban_remove_native_effect' in names) == (fault is None), fault
+                assert ('session_disconnect_native_effect' in names) == (fault != 'disconnect ignored'), fault
+
 if __name__ == '__main__':
     main()
