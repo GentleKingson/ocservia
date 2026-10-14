@@ -55,7 +55,7 @@ On the node side, AgentUpgrade keeps the Controller-authorized
 protected staging, architecture verification, safe extraction, and service
 lifecycle transitions, the upgrade path checks the downloaded archive's SHA-256
 against the command and aborts on any mismatch. All standard command guarantees
-remain in force: runtime command authorization, multi-principal approvals,
+remain in force: runtime command authorization, independent two-principal approvals,
 owner/epoch/fence/lease checks, idempotency, the Agent SQLite journal, privd
 receipts, Unknown outcome reconciliation, semantic payload hashes,
 command/fence/receipt signatures, and durable immutable operation intent. The

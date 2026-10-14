@@ -4,7 +4,7 @@ ocservia provides a central control plane for OpenConnect (ocserv) VPN gateways 
 
 ## Purpose and constraints
 
-Operators use the control plane to verify node trust and reachability, roll out configuration changes without interactive shell access, and reconcile commands whose outcomes become ambiguous. High-risk changes require independent approval from a second authenticated principal, and disaster recovery preserves node identities alongside the recorded history of state transitions.
+Operators use the control plane to verify node trust and reachability, roll out configuration changes without interactive shell access, and reconcile commands whose outcomes become ambiguous. High-risk changes require independent two-principal approval from a second authenticated principal, and disaster recovery preserves node identities alongside the recorded history of state transitions.
 
 A supported production deployment consists of one Controller instance, a relational database, a Signer service for certificate issuance, and a single dedicated Relay serving multiple Agents (a non-empty second Relay URL is rejected). Those services can run on separate hosts, or co-locate on the Controller host in Integrated mode. High-availability topologies such as multi-master Controller clusters, redundant Relays, and automated database failover are outside the [supported scope](reference/support-policy.md#deployment-capability-distinctions); internal lease mechanisms and package modularity do not imply HA support.
 
@@ -64,7 +64,7 @@ Production hosts must match the [production support matrix](operations/productio
 2. Populate `install.env` and place cryptographic secrets in protected directories outside the repository checkout.
 3. Deploy the single dedicated Relay that routes control-plane traffic.
 4. Install the managed-node package on each target ocserv host.
-5. Complete cryptographic node enrollment, approve the pending node in the Controller using a second principal, and start the node daemons.
+5. Complete cryptographic node enrollment, complete independent two-principal approval for the pending node in the Controller, and start the node daemons.
 6. Manage node configurations, users, access policies, and telemetry from the web console or HTTP API.
 
 ## How a node change is applied
@@ -103,7 +103,7 @@ The table below traces `service:reload`. Other controlled operations share the o
 
 Privileged execution on a managed node is limited to compiled routines inside `privd`, which rejects arbitrary binaries, shell command strings, dynamic systemd unit names, and unconstrained filesystem paths.
 
-Node enrollment uses a separate handshake protocol: a single-use token binds the node's persistent `EndpointID` to a pending inventory record, and a second administrator must approve the node before the `Agent` can establish an authenticated control session. Installing the package or starting local services does not grant control-plane access prior to approval; see [enrollment](how-to/enroll-node.md) and [`enrollment/service.go`](../control-plane/internal/enrollment/service.go).
+Node enrollment uses a separate handshake protocol: a single-use token binds the node's persistent `EndpointID` to a pending inventory record, and the node requires independent two-principal approval before the `Agent` can establish an authenticated control session. Installing the package or starting local services does not grant control-plane access prior to approval; see [enrollment](how-to/enroll-node.md) and [`enrollment/service.go`](../control-plane/internal/enrollment/service.go).
 
 ## State and recovery boundaries
 
@@ -136,7 +136,7 @@ Before tuning concurrency settings or splitting services, measure queue depth, m
 - Production deployments pin immutable release tags or container image digests.
 - Managed-node packages are verified against an expected SHA-256 digest (supplied by the operator or a signed Controller upgrade command) before installation; a plain checksum guards against file corruption and does not grant execution authority.
 - Private keys, TLS certificates, relay access tokens, and database or admin credentials are provisioned out of band in protected host directories.
-- High-risk mutations require approval from a second authenticated principal bound to the exact request payload, with self-approval rejected. Principal separation is enforced at the credential and session layer and does not prove that two distinct human beings hold those credentials ([approval principal boundary](reference/stable-contracts.md#approval-principal-boundary)).
+- High-risk mutations require independent two-principal approval bound to the exact request payload, with self-approval rejected. The system enforces separation across two distinct authenticated principals, credentials, and sessions, while human two-person custody of those credentials remains outside what the software can automatically verify ([approval principal boundary](reference/stable-contracts.md#approval-principal-boundary)).
 - Audit events commit in the same database transaction as the state changes they record.
 - Production rollouts require tested backup restoration and rollback procedures.
 

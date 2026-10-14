@@ -61,7 +61,7 @@ trust state.
 
 Across all recovery scenarios, the command pipeline still enforces
 owner/epoch/fence/lease validation, the transactional outbox, authorization,
-multi-principal approvals, cryptographic signatures, idempotent command IDs,
+independent two-principal approvals, cryptographic signatures, idempotent command IDs,
 the Agent SQLite journal, and privd receipts. Operations that end in an Unknown
 state rely on read-only reconciliation followed by the existing explicit retry
 once absence of effect is confirmed, whereas a queued offline command that was

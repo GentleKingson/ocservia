@@ -228,10 +228,10 @@ Controller inventory.
 
 ## Revoke a node
 
-Node revocation follows the same two-person approval pattern as activation and
-works from any non-revoked state, including a pending node. You also use this
-flow on a reachable source Controller when rebinding a node to another
-Controller.
+Node revocation follows the same independent two-principal approval pattern as
+activation and works from any non-revoked state, including a pending node. You
+also use this flow on a reachable source Controller when rebinding a node to
+another Controller.
 
 1. As the requester (a principal holding `node.revoke`, such as SecurityAdmin
    or PlatformAdmin), create a content-bound revocation request:
