@@ -37,17 +37,24 @@ the public first-install guide obtains the installer from a clean exact-release
 checkout; the installed native package has no runtime dependency on Git.
 
 Build all three node binaries natively on the package's target architecture,
-then create a deterministic package. For a local development build:
+then create a deterministic package. Formal Releases build inside the isolated
+Rocky Linux builder via `scripts/build-release-agent.sh` in the Release workflow
+after [Release Check](../development/release-checks.md) passes. For a local
+development build on a native Linux host, set one explicit SemVer `VERSION` so
+the compiled Rust binaries (`OCSERV_AGENT_RELEASE_VERSION`), `package-agent.sh`
+(`VERSION`, checked against each binary's `--version` output), the archive name,
+and the SHA-256 verification input all match:
 
 ```bash
-(cd rust && OCSERV_AGENT_RELEASE_VERSION=1.0.0 cargo build --locked --release \
+: "${VERSION:?set the SemVer package version, such as 1.2.3}"
+(cd rust && OCSERV_AGENT_RELEASE_VERSION="${VERSION}" cargo build --locked --release \
   --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
 OUTPUT_DIR=dist \
-  VERSION=1.0.0 PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 scripts/package-agent.sh
+  VERSION="${VERSION}" PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 scripts/package-agent.sh
 # A plain checksum detects transfer corruption; it is not an authorization key.
-EXPECTED_SHA256="$(awk '{print $1}' dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256)"
+EXPECTED_SHA256="$(awk '{print $1}' "dist/ocservia-agent-${VERSION}-linux-amd64.tar.gz.sha256")"
 VERIFIED_PACKAGE="$(sudo scripts/verify-agent-package.sh \
-  dist/ocservia-agent-1.0.0-linux-amd64.tar.gz "${EXPECTED_SHA256}")"
+  "dist/ocservia-agent-${VERSION}-linux-amd64.tar.gz" "${EXPECTED_SHA256}")"
 sudo INSTALL_PRODUCTION_RELAYS=true \
   "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
 ```
@@ -105,10 +112,11 @@ the services.
 
 ## Native installer packages
 
-Build native packages from the archive and checksum created above:
+Build native packages from the archive and checksum created above using the
+same `VERSION`:
 
 ```bash
-OUTPUT_DIR=dist VERSION=1.0.0 PACKAGE_ARCH=amd64 \
+OUTPUT_DIR=dist VERSION="${VERSION}" PACKAGE_ARCH=amd64 \
   SOURCE_DATE_EPOCH=1786147200 scripts/package-native-agent.sh
 ```
 
