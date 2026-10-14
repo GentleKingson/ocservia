@@ -754,6 +754,25 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 	return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 }
 
+// RecordRevocationSynchronized settles the revoked-trust intent Revoke queued
+// once the request itself completed the fenced STATE_UPDATE for exactly this
+// node, endpoint, revision and reason, and closed reports whether the fenced
+// CONNECTION_CLOSE that followed also succeeded. A superseded or different
+// intent is left to the convergence worker, which never treats lost
+// ownership as delivery.
+func (s *Service) RecordRevocationSynchronized(ctx context.Context, trust NodeTrust, reason string, closed bool) (bool, error) {
+	var recorded bool
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := enrollmentstore.Trust(tx)
+		if err != nil {
+			return err
+		}
+		recorded, err = store.RecordSynchronized(ctx, enrollmentstore.TrustJob{NodeID: trust.NodeID, EndpointID: trust.EndpointID, DesiredState: "revoked", Revision: trust.Revision, Reason: reason}, closed)
+		return err
+	})
+	return recorded, err
+}
+
 func (s *Service) CheckEndpoint(ctx context.Context, request *transportv1.CheckEndpointRequest) (bool, error) {
 	if len(request.GetEndpointId()) != 32 {
 		return false, nil

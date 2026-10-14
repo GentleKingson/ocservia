@@ -29,6 +29,9 @@ type TrustJob struct {
 // Enqueue only replaces older revisions. Completion and release are scoped to
 // the claimed node, revision, worker and attempt with an unexpired lease.
 // Attempts never reset, so a late call cannot affect a worker's next claim.
+// RecordSynchronized settles only the exact queued intent (node, endpoint,
+// state, revision and reason) whose fenced mutations a caller already
+// completed; closed records the close only when one is required.
 type TrustStore interface {
 	Enqueue(context.Context, TrustJob, value.Timestamp) error
 	Claim(context.Context, uuid.UUID) (TrustJob, error)
@@ -37,6 +40,7 @@ type TrustStore interface {
 	MarkCloseApplied(context.Context, TrustJob, uuid.UUID) (bool, error)
 	UnlockComplete(context.Context, TrustJob, uuid.UUID) error
 	Release(context.Context, TrustJob, uuid.UUID, time.Duration, string) error
+	RecordSynchronized(context.Context, TrustJob, bool) (bool, error)
 }
 
 func Trust(tx database.Tx) (TrustStore, error) {

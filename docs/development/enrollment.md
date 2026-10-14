@@ -108,7 +108,13 @@ revision, keeping stale or rejected responses pending and closing a revoked
 node's connection only after its exact tombstone is applied. Meanwhile,
 Controller event ingress checks every incoming event's node ID and `EndpointID`
 against active database trust, rejecting events from any lingering revoked
-session before convergence finishes.
+session before convergence finishes. When the revocation request itself
+completes the fenced trust update and then the fenced connection close, it
+records them on the queued task for exactly that node, endpoint, revision and
+reason, so the worker does not retry a close whose connection, and with it the
+fencing owner, is already gone; a failed close stays pending. The worker never
+counts lost connection ownership as delivery, and any other intent stays with
+the worker.
 
 When claiming trust-convergence work, the worker computes lease deadlines from
 a fresh database wall-clock read after acquiring the claim lock, and uses the

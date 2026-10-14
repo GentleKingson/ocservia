@@ -127,3 +127,13 @@ func (s trustConvergenceStore) Release(ctx context.Context, v enrollmentstore.Tr
 	_, err = s.Exec(ctx, `UPDATE node_trust_convergence SET locked_by=NULL,locked_until=NULL,available_at=$2,last_error=$3,updated_at=$4 WHERE node_id=$1`, v.NodeID, next, detail, at)
 	return err
 }
+
+func (s trustConvergenceStore) RecordSynchronized(ctx context.Context, v enrollmentstore.TrustJob, closed bool) (bool, error) {
+	at, err := database.WallTime(ctx, s.Tx)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.Exec(ctx, `UPDATE node_trust_convergence SET update_applied=true,close_applied=close_applied OR (close_required AND $6),last_error=NULL,updated_at=$7
+		WHERE node_id=$1 AND endpoint_id=$2 AND desired_state=$3 AND revision=$4 AND reason=$5`, v.NodeID, v.EndpointID, v.DesiredState, v.Revision, v.Reason, closed, at)
+	return n == 1, err
+}

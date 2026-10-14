@@ -49,6 +49,7 @@ backend-enrollment internal/enrollment TestTrustLeaseBackendIntegration/same-wor
 backend-enrollment internal/enrollment TestTrustLeaseBackendIntegration/expiry-during-lock-wait
 backend-enrollment internal/enrollment TestTrustLeaseBackendIntegration/new-revision
 backend-enrollment internal/enrollment TestTrustWorkerRenewalBackendIntegration
+backend-enrollment internal/enrollment TestTrustSynchronousRevocationBackendIntegration
 backend-enrollment internal/enrollment TestEnrollmentSafetyBackendIntegration
 backend-enrollment internal/enrollment TestEnrollmentSafetyBackendIntegration/expiry-before-consumption-rolls-back
 backend-enrollment internal/enrollment TestEnrollmentSafetyBackendIntegration/bootstrap-concurrent-endpoint-and-revoked-replay

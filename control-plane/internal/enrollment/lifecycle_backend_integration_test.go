@@ -20,6 +20,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	localstore "github.com/GentleKingson/ocservia/control-plane/internal/localslice/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 )
 
@@ -322,6 +323,74 @@ func TestTrustWorkerRenewalBackendIntegration(t *testing.T) {
 	transport.update = func(context.Context) error { return nil }
 	if worked, err := worker.RunOnce(ctx); !worked || err != nil {
 		t.Fatal(worked, err)
+	}
+}
+
+type ownerLostTransport struct{ calls int }
+
+func (s *ownerLostTransport) UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64, []byte, *agentv1.FenceBindingV2) error {
+	s.calls++
+	return ownersession.ErrNotOwner
+}
+func (s *ownerLostTransport) CloseNode(context.Context, []byte, string, *agentv1.FenceBindingV2) error {
+	s.calls++
+	return ownersession.ErrNotOwner
+}
+
+// A revocation request that closed the owner's connection leaves the worker
+// without an owner. Lost ownership must never count as delivery; only the
+// request's own fenced successes for the exact queued intent settle it.
+func TestTrustSynchronousRevocationBackendIntegration(t *testing.T) {
+	f, ctx := newLifecycleFixture(t), context.Background()
+	service := NewBackend(f.b, "", "", nil)
+	transport := &ownerLostTransport{}
+	worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := f.job(t)
+	if worked, err := worker.RunOnce(ctx); !worked || !errors.Is(err, ownersession.ErrNotOwner) {
+		t.Fatal(worked, err)
+	}
+	if got := f.snapshot(t, v.NodeID); got.Update || got.Close || got.Error == nil {
+		t.Fatal("lost ownership settled trust convergence", got)
+	}
+	before := f.snapshot(t, v.NodeID)
+	for _, other := range []struct {
+		trust  NodeTrust
+		reason string
+	}{
+		{NodeTrust{v.NodeID, v.EndpointID, v.Revision + 1}, v.Reason},
+		{NodeTrust{v.NodeID, v.EndpointID, v.Revision - 1}, v.Reason},
+		{NodeTrust{v.NodeID, bytes.Repeat([]byte{7}, 32), v.Revision}, v.Reason},
+		{NodeTrust{v.NodeID, v.EndpointID, v.Revision}, "other reason"},
+	} {
+		if recorded, err := service.RecordRevocationSynchronized(ctx, other.trust, other.reason, true); err != nil || recorded {
+			t.Fatal("settled a different intent", other, recorded, err)
+		}
+	}
+	if !reflect.DeepEqual(before, f.snapshot(t, v.NodeID)) {
+		t.Fatal("evidence for a different intent changed durable state")
+	}
+	trust := NodeTrust{v.NodeID, v.EndpointID, v.Revision}
+	if recorded, err := service.RecordRevocationSynchronized(ctx, trust, v.Reason, false); err != nil || !recorded {
+		t.Fatal(recorded, err)
+	}
+	if got := f.snapshot(t, v.NodeID); !got.Update || got.Close || got.Error != nil {
+		t.Fatal("failed close was settled", got)
+	}
+	if recorded, err := service.RecordRevocationSynchronized(ctx, trust, v.Reason, true); err != nil || !recorded {
+		t.Fatal(recorded, err)
+	}
+	f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, `UPDATE node_trust_convergence SET available_at=? WHERE node_id=?`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+	settled := f.snapshot(t, v.NodeID)
+	if !settled.Update || !settled.Close {
+		t.Fatal("synchronous revocation not settled", settled)
+	}
+	// Other fixtures' rows may still be pending; this one must not be claimed.
+	_, _ = worker.RunOnce(ctx)
+	if !reflect.DeepEqual(settled, f.snapshot(t, v.NodeID)) {
+		t.Fatal("settled revocation was claimed again")
 	}
 }
 

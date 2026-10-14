@@ -136,8 +136,8 @@ harness records them as explicit limitations and never scores them as PASS:
   requester's approval, are all rejected while the node stays active. The
   approved revocation must return 200, meaning the request itself applied the
   revoked trust and the connection close. It passes only after the approval is
-  consumed, the node and its endpoint key read revoked, the revoked trust
-  convergence intent is queued at that revision, no owner lease remains, and
+  consumed, the node and its endpoint key read revoked, the request settled
+  the revoked trust convergence task at that revision, no owner lease remains, and
   the node reads offline while the same Agent process stays up and logs the
   ended Controller connection. The old reload approval then creates no
   operation and leaves privd effects, the Agent journal, ocserv reloads, and
