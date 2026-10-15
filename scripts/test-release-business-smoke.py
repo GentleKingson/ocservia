@@ -501,6 +501,23 @@ certutil() { :; }
             assert 'revoked_node_old_authority_without_privd_effect' not in names, label
 
 
+        terminal_stage = driver.split('next_stage "node_${BUSINESS_TERMINAL}"', 1)[1]
+        terminal_shell = r"""
+set -euo pipefail
+ROOT="$1"
+BUSINESS_TERMINAL="$2"
+next_stage() { :; }
+record() { echo "checkpoint:$1"; }
+python3() { echo "api:$2"; return "$API_EXIT"; }
+"""
+        for terminal in ('revocation', 'uninstall'):
+            for code in (0, 9):
+                result = subprocess.run(['bash', '-c', terminal_shell + terminal_stage, 'terminal', str(root), terminal],
+                                        env={**os.environ, 'API_EXIT': str(code)}, capture_output=True, text=True)
+                assert result.returncode == code
+                checkpoint = 'real_node_uninstall_and_offline' if terminal == 'uninstall' else 'real_node_revocation_and_disconnect'
+                assert result.stdout.splitlines() == ['api:' + terminal] + (['checkpoint:' + checkpoint] if code == 0 else [])
+
         # Drive the actual terminal phase. No failed observation may emit its
         # final checkpoint; API errors are failures, never evidence of offline.
         for fault in (None, 'remove', 'package installed', 'process', 'timer', 'payload', 'identity', 'endpoint changed', 'online',
