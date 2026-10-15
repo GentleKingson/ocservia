@@ -1,0 +1,94 @@
+name: Native Platform Diagnostics
+on:
+  workflow_call:
+    inputs:
+      purpose:
+        type: string
+        required: true
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: '0'
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(inputs.purpose == 'native-ubuntu-arm64' && '["arm64"]' || '["amd64","arm64"]') }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: tools
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-native-packages-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Bootstrap existing pinned tools
+        run: scripts/bootstrap.sh native-packages
+      - id: target
+        run: |
+          builder_hash="$(sha256sum rust/agent-build.Dockerfile | cut -c1-16)"
+          echo "path=rust/target/agent-${{ matrix.arch }}-${builder_hash}" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: agent-cache
+        with:
+          path: ${{ steps.target.outputs.path }}
+          key: release-agent-target-v1-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: release-agent-target-v1-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
+      - name: Build current-source native Agent package and adapter tests
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+          OUTPUT_DIR: ${{ runner.temp }}/p3-products
+          VERSION: 0.0.0
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          bash scripts/build-release-agent.sh
+          source scripts/env.sh
+          cargo test --locked --manifest-path rust/Cargo.toml -p ocservia-ocserv-adapter -p ocservia-agent-protocol
+          cargo test --locked --manifest-path rust/Cargo.toml -p ocservia-ocserv-adapter --lib --no-run --message-format=json >"$RUNNER_TEMP/adapter-build.jsonl"
+          binary="$(jq -rs '[.[] | select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable] | unique | if length == 1 then .[0] else error("expected one native adapter test ELF") end' "$RUNNER_TEMP/adapter-build.jsonl")"
+          echo "I13_TEST_BINARY=$binary" >>"$GITHUB_ENV"
+      - name: Real native platform acceptance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PURPOSE: ${{ inputs.purpose }}
+          PLATFORM_ARCH: ${{ matrix.arch }}
+        run: |
+          case "$PURPOSE" in
+            native-ubuntu-arm64) distro=ubuntu24.04 ;;
+            native-debian13) distro=debian13 ;;
+            *) exit 2 ;;
+          esac
+          bash scripts/release-native-platform-smoke.sh host "$distro" "$PLATFORM_ARCH" \
+            "$RUNNER_TEMP/p3-evidence" "$I13_TEST_BINARY" "$RUNNER_TEMP/p3-products"
+      - name: Preserve bounded platform evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-platform-${{ inputs.purpose }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/p3-evidence/*.json
+            ${{ runner.temp }}/p3-evidence/*.txt
+            ${{ runner.temp }}/p3-evidence/SHA256SUMS
+            ${{ runner.temp }}/p3-evidence/runtime.log
+            ${{ runner.temp }}/p3-evidence/i13/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        if: success() && steps.agent-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.target.outputs.path }}
+          key: ${{ steps.agent-cache.outputs.cache-primary-key }}
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        if: success() && steps.tools.outputs.cache-hit != 'true'
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.tools.outputs.cache-primary-key }}
