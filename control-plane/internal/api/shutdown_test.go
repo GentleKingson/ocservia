@@ -17,23 +17,8 @@ import (
 
 func TestShutdownWaitsForTimedOutHandler(t *testing.T) {
 	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Millisecond, false, "")
-	release, finished := make(chan struct{}), make(chan struct{})
+	started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	defer close(release)
-	handler := s.timeout(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer close(finished)
-		<-r.Context().Done()
-		<-release
-	}))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest("GET", "/", nil))
-	if response.Code != http.StatusServiceUnavailable {
-		t.Fatal("request did not time out", response.Code)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if err := s.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("shutdown ignored inner database handler: %v", err)
-	}
 	// Cleanup the deliberately stalled test handler without leaving a waiter.
 	t.Cleanup(func() {
 		select {
@@ -42,6 +27,28 @@ func TestShutdownWaitsForTimedOutHandler(t *testing.T) {
 			t.Error("inner handler did not finish")
 		}
 	})
+	handler := s.timeout(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(finished)
+		close(started)
+		<-r.Context().Done()
+		<-release
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest("GET", "/", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatal("request did not time out", response.Code)
+	}
+	// A timeout response can arrive before the inner goroutine is scheduled.
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("inner handler did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := s.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown ignored inner database handler: %v", err)
+	}
 }
 
 func TestShutdownDoesNotReopenEventStreams(t *testing.T) {
