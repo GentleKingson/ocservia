@@ -139,6 +139,13 @@ other prerelease tag or build metadata is rejected. Publishing an RC passes
 `--prerelease --latest=false` and pushes only the exact RC image tags, while
 manual workflow dispatches never publish assets or images.
 
+For `v2.0.0-rc.2`, the workflow prepends the checked-in
+[version-specific notes](../../.github/release-notes/v2.0.0-rc.2.md) using
+GitHub's `--notes` option alongside `--generate-notes`. This preserves the
+generated categories, PR list, contributor credits and comparison link.
+The supplement applies only to that exact version; existing Release bodies
+are retained on reruns apart from the owner-attribution cleanup above.
+
 When generating release notes, `rc.1` and final stable releases diff against
 the most recently published non-draft stable Release (ignoring the target
 release itself on reruns). For `rc.N` with N > 1, the immediately preceding RC
