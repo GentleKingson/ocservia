@@ -44,6 +44,9 @@ compatibility-policy reset in v1.1.0 described below.
 
 ### Security
 
+- Update rustls to 0.23.46 in the Rust workspace and independent Relay build
+  for RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and
+  RUSTSEC-2026-0349.
 - Enforce Content Security Policy in Standalone and Integrated gateways,
   including gateway error responses.
 - Update Go to 1.26.9, Controller `x/net` to v0.60.0 and affected Vue,
