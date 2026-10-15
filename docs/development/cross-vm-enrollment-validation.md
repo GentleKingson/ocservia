@@ -1,7 +1,52 @@
 # Cross-VM enrollment validation
 
 Cross-VM enrollment runs manually through the `deploy/real-e2e` fixtures and
-helper scripts; it stays outside Basic CI and has no dedicated Actions workflow.
+helper scripts. The opt-in `real-e2e.yml` workflow runs two independent
+`ubuntu-24.04` GitHub-hosted VMs, outside Basic CI and Release Check.
+
+## GitHub-hosted execution
+
+```sh
+gh workflow run real-e2e.yml --ref <candidate-branch>
+```
+
+Controller and Agent jobs have no dependency on each other. They check native
+systemd PID 1, Docker/Compose, Ubuntu version and required utilities, exchange
+boot IDs and environment evidence, and reject same-host or mixed-commit peers.
+The Controller runs real PostgreSQL, Control Plane and transportd; the Agent
+builds and runs the real enrollment binary using Iroh's default public relay
+configuration. No public inbound listener is required on either runner.
+
+The existing run-attempt-scoped artifact helper coordinates bounded waits and
+stops on a peer failure. The Agent generates a fresh RSA-3072 key for each run;
+only its public key is uploaded. The Controller encrypts the short-lived bound
+enrollment token with RSA-OAEP SHA-256. Only ciphertext is uploaded; decrypted
+tokens, endpoint private keys, and raw process/build logs remain private in
+`RUNNER_TEMP` and are removed by unconditional cleanup. Uploaded evidence is
+limited to environment, process/network, binding and cleanup records; raw logs
+are never uploaded. The final job deletes rendezvous artifacts with narrowly
+scoped Actions write permission, verifies both role jobs succeeded, then reports
+`CROSS_VM_ENROLLMENT=PASS`. A timeout, missing binding, token-consumption mismatch
+or failed cleanup cannot pass. Evidence artifacts are retained for seven days.
+Job cancellation can prevent final cleanup; in that case no PASS is valid and
+rendezvous artifacts must be deleted through the Actions API before closing the
+run. Hosted VMs are disposable; no persistent server is provisioned.
+
+The token is the existing EndpointID-bound development enrollment token, not an
+unbound production node bootstrap token. Its consumed node, expected endpoint,
+workspace and environment are checked against the pending UUIDv7 node record.
+This profile alone leaves `CROSS_VM_PRODUCTION` and
+`DEDICATED_RELAY_RECOVERY` BLOCKED: installation, approval, Online, native
+ocserv/privd/Signer and dedicated-relay recovery require separate authorized
+network infrastructure. A public-relay enrollment run cannot prove those claims.
+
+Local checks (not live acceptance):
+
+```sh
+python3 scripts/test-real-e2e-hosted.py  # requires PyYAML
+bash scripts/test-real-e2e-artifact.sh
+make real-e2e-check
+```
 
 Prepare two separate Linux VMs that have different boot IDs (read from
 `/proc/sys/kernel/random/boot_id`), the same repository commit, and outbound

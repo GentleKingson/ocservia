@@ -93,6 +93,7 @@ checksum/drift/invalid-config matrices, or historical repair suites.
 | `security.yml` | Weekly/manual scans; reusable, and called by Release Check (not by `release.yml`) |
 | `release-check.yml` | Manual main Full CI, Security, Integrated Business Smoke + single-instance recovery, Quick Install (Pebble ACME, amd64) |
 | `release.yml` | Tag build/image-security/smoke/publish; manual build-only dry-run |
+| `real-e2e.yml` | Manual two-hosted-VM enrollment with encrypted token exchange; outside Basic CI and Release Check |
 | `release-upgrade.yml` | Manual local Business smoke or Integration diagnostics (workflow name Release Diagnostics) |
 | `release-products.yml`, `release-business-diagnostic.yml` | Reusable build/smoke (called by `release.yml`) and native Business probe (called by Release Check and `release-upgrade.yml`); not triggered directly |
 | `integrated-network.yml` | Manual or candidate-branch Integrated Network prototype (isolated network or public-fixture probe); not part of Basic CI or Release Check |
@@ -235,7 +236,7 @@ or dedicated Linux hosts:
   `scripts/security-acceptance-f3.sh` run the live security acceptance phases.
 - `scripts/real-e2e-controller.sh`, `scripts/real-e2e-node.sh`,
   `scripts/real-e2e-artifact.sh`, and `deploy/real-e2e` support manual
-  two-machine enrollment; see
+  two-machine enrollment, including the opt-in hosted `real-e2e.yml`; see
   [Cross-VM enrollment validation](cross-vm-enrollment-validation.md).
 
 Running `make real-e2e-check` only checks Bash syntax across the three real-E2E

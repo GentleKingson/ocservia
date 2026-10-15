@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
@@ -70,7 +71,7 @@ enroll() {
   user_hash="$(sha256sum "${SECRETS}/user-password-seal.der" | awk '{print $1}')"
   p12_hash="$(sha256sum "${SECRETS}/p12-password-seal.der" | awk '{print $1}')"
   [[ "${user_hash}" != "${p12_hash}" ]]
-  enrollment_output="$("${TARGET}/release/ocservia-agent" \
+  "${TARGET}/release/ocservia-agent" \
     --identity-dir "${IDENTITY}" \
     --controller "${controller}" \
     --enrollment-token-file "${SECRETS}/enrollment-token" \
@@ -78,7 +79,12 @@ enroll() {
     --user-password-seal-key-id real-e2e-user-v1 \
     --user-password-seal-public-key-sha256 "${user_hash}" \
     --p12-password-seal-key-id real-e2e-p12-v1 \
-    --p12-password-seal-public-key-sha256 "${p12_hash}")"
+    --p12-password-seal-public-key-sha256 "${p12_hash}" >"${SECRETS}/enrollment-output" &
+  local agent_pid=$!
+  mkdir -p "${OUTBOX}/enrollment-result"
+  printf '%s\n' "$agent_pid" >"${OUTBOX}/enrollment-result/agent-pid"
+  wait "$agent_pid"
+  enrollment_output="$(<"${SECRETS}/enrollment-output")"
   mapfile -t node_ids < <(grep -E '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' <<<"${enrollment_output}")
   [[ ${#node_ids[@]} -eq 1 ]] || {
     echo "enrollment did not return a UUIDv7 node ID" >&2
