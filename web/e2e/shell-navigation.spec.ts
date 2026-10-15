@@ -164,6 +164,10 @@ test("long Workspace choices keep the section and readiness reachable", async ({
   }
   await select.selectOption(betaId);
   await expect(select).toHaveValue(betaId);
+  await select.focus();
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Enter");
+  await expect(select).toHaveValue(alphaId);
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.evaluate(() => {
     document.documentElement.style.zoom = "2";

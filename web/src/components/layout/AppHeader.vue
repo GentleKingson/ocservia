@@ -98,9 +98,10 @@ function restoreFocus(event: Event): void {
       class="text-foreground min-w-0 shrink-0 truncate text-sm font-semibold"
       >{{ $t(sectionLabel) }}</span
     >
+    <!-- Contain native option overflow in WebKit; padding preserves the focus outline. -->
     <div
       data-testid="workspace"
-      class="ml-auto flex min-w-0 items-center justify-end gap-2 max-sm:order-last max-sm:ml-0 max-sm:w-full max-sm:justify-start"
+      class="ml-auto flex min-w-0 items-center justify-end gap-2 overflow-hidden p-1 max-sm:order-last max-sm:ml-0 max-sm:w-full max-sm:justify-start"
     >
       <template v-if="workspaces.length > 1">
         <label
@@ -112,7 +113,7 @@ function restoreFocus(event: Event): void {
         <select
           id="workspace-select"
           :value="workspaceId"
-          class="border-input bg-card text-foreground focus-visible:outline-ring h-9 w-48 min-w-0 rounded-md border px-3 text-sm font-medium max-sm:flex-1 focus-visible:outline-2 focus-visible:outline-offset-1"
+          class="border-input bg-card text-foreground focus-visible:outline-ring h-9 w-48 min-w-0 max-w-full truncate rounded-md border px-3 text-sm font-medium max-sm:flex-1 focus-visible:outline-2 focus-visible:outline-offset-1"
           @change="requestWorkspace"
         >
           <option
