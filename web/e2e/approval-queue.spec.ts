@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./csp";
 const workspace = "019fc0a4-6d92-765c-a8a1-4af556614ea1";
 const first = "019fc0a4-6d92-765c-a8a1-4af556614ea2";
 const second = "019fc0a4-6d92-765c-a8a1-4af556614ea3";

@@ -266,7 +266,7 @@ jobs:
           npm run build
           args=()
           for project in ${BROWSER_PROJECTS}; do args+=("--project=${project}"); done
-          specs=(agent-rollout.spec.ts node-forms.spec.ts user-password.spec.ts shell-navigation.spec.ts apple-layout.spec.ts nodes-list.spec.ts node-detail.spec.ts operations.spec.ts)
+          specs=(agent-rollout.spec.ts node-forms.spec.ts user-password.spec.ts shell-navigation.spec.ts apple-layout.spec.ts nodes-list.spec.ts node-detail.spec.ts operations.spec.ts approval-queue.spec.ts approvals-audit.spec.ts certificate-lifecycle.spec.ts)
           if [[ -z "${BROWSER_GATEWAYS}" ]]; then
             node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}"
           fi

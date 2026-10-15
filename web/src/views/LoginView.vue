@@ -107,11 +107,16 @@ onMounted(loadMethods);
   <main
     class="grid min-h-screen content-start justify-items-center px-5 pt-[18vh] pb-8"
   >
-    <section class="w-full max-w-[360px]" :aria-label="t('loginTitle')">
+    <section
+      class="bg-card border-border w-full max-w-[400px] rounded-xl border p-6 shadow-xs"
+      :aria-label="t('loginTitle')"
+    >
       <div class="text-primary flex items-center gap-2.5 text-xl font-semibold">
         <Activity :size="24" aria-hidden="true" /><span>{{ t("brand") }}</span>
       </div>
-      <h1 class="text-foreground mt-7 mb-6 text-2xl font-semibold">
+      <h1
+        class="text-foreground mt-7 mb-6 text-2xl font-semibold tracking-tight"
+      >
         {{ t("loginTitle") }}
       </h1>
       <p v-if="loading" class="text-muted-foreground text-sm" role="status">

@@ -69,14 +69,16 @@ onBeforeUnmount(() => {
     />
     <div v-else class="grid gap-4 md:grid-cols-2">
       <section
-        class="bg-card border-border rounded-lg border p-5"
+        class="bg-card border-border min-w-0 rounded-xl border p-5 shadow-xs"
         aria-labelledby="settings-workspace"
       >
         <header class="border-border border-b pb-3">
-          <p class="text-muted-foreground m-0 mb-1 text-xs uppercase">
+          <p
+            class="text-muted-foreground m-0 mb-1 text-xs font-medium tracking-wide"
+          >
             {{ $t("workspace") }}
           </p>
-          <h2 id="settings-workspace" class="m-0 text-base font-semibold">
+          <h2 id="settings-workspace" class="m-0 text-sm font-semibold">
             {{ $t("workspaceInformation") }}
           </h2>
         </header>
@@ -110,14 +112,16 @@ onBeforeUnmount(() => {
         </dl>
       </section>
       <section
-        class="bg-card border-border rounded-lg border p-5"
+        class="bg-card border-border min-w-0 rounded-xl border p-5 shadow-xs"
         aria-labelledby="settings-platform"
       >
         <header class="border-border border-b pb-3">
-          <p class="text-muted-foreground m-0 mb-1 text-xs uppercase">
+          <p
+            class="text-muted-foreground m-0 mb-1 text-xs font-medium tracking-wide"
+          >
             {{ $t("platform") }}
           </p>
-          <h2 id="settings-platform" class="m-0 text-base font-semibold">
+          <h2 id="settings-platform" class="m-0 text-sm font-semibold">
             {{ $t("platformContext") }}
           </h2>
         </header>

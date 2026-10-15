@@ -126,7 +126,7 @@ classify_path() {
   case "${path}" in
     web/src/api/*|web/src/shared/*|web/src/App.vue|web/src/main.ts|web/src/main.css|web/index.html|\
     web/src/components/ui/*|web/src/components/layout/*|web/src/components/overview/*|web/src/features/operations/*|\
-    web/src/views/LoginView.vue|web/src/views/OverviewView.vue|web/src/views/OperationsView.vue|web/src/views/RolloutDetailView.vue|\
+    web/src/views/LoginView.vue|web/src/views/ApprovalsView.vue|web/src/views/AuditView.vue|web/src/views/SettingsView.vue|web/src/views/OverviewView.vue|web/src/views/OperationsView.vue|web/src/views/RolloutDetailView.vue|\
     web/src/views/NodesView.vue|web/src/views/NodeDetailView.vue|web/src/components/common/*|\
     web/src/components/nodes/*|web/src/features/configuration/*|web/src/features/certificates/*|\
     web/src/features/node-workflow.ts|web/src/features/user-password.ts|web/src/adapters/user-policy.ts|\
