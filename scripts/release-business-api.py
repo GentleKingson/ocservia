@@ -813,6 +813,106 @@ def node_side_effects():
             'native_files': run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf', '/etc/ocserv/ocpasswd')}
 
 
+def uninstall_identity():
+    # Hash protected files without exporting their contents (including sealing keys).
+    return run('sudo', 'find', '/var/lib/ocservia-agent/identity', '/etc/ocservia-agent',
+               '-type', 'f', '-exec', 'sha256sum', '{}', '+').splitlines()
+
+
+def uninstall_native():
+    units = json.loads(run('systemctl', 'list-units', '--all', '--no-pager', '--output=json', 'ocservia-*'))
+    # /proc also finds an unlinked running ELF, which package file checks miss.
+    processes = json.loads(run('sudo', 'python3', '-c', r"""
+import json, pathlib
+found = []
+for entry in pathlib.Path('/proc').iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        exe = str((entry / 'exe').readlink())
+        argv = (entry / 'cmdline').read_bytes().split(b'\0')
+    except FileNotFoundError:
+        continue
+    if exe.startswith('/usr/libexec/ocservia/') or any(a.startswith(b'/usr/libexec/ocservia/') for a in argv):
+        found.append(entry.name)
+print(json.dumps(found))
+"""))
+    return {'units': units, 'processes': processes}
+
+
+def assert_uninstalled(native, paths):
+    assert not native['processes'], 'Agent/privd/upgrader process remains'
+    assert all(unit['active'] == 'inactive' for unit in native['units']), 'Agent unit or timer remains'
+    for path in paths:
+        assert run('sudo', 'test', '!', '-e', path) == '', 'package payload remains: ' + path
+
+
+def uninstall():
+    # Only the disposable Business environment may call this terminal phase.
+    run('bash', str(ROOT / 'scripts/release-business-environment.sh'))
+    node = os.environ['T07_NODE']
+    prefix = 'nodes/' + node
+    before = api(prefix)
+    assert before['trust_status'] == 'active' and before['connection_state'] == 'online'
+    owner_before = owner()
+    assert owner_before
+    identity = sorted(uninstall_identity())
+    assert any('/identity/endpoint.key' in line for line in identity)
+    assert any('/identity/controller.endpoint' in line for line in identity)
+    effects = node_side_effects()
+    ocserv = run('systemctl', 'show', 'ocserv', '-p', 'MainPID', '-p', 'ExecMainStartTimestampMonotonic', '-p', 'ActiveState')
+    assert 'ActiveState=active' in ocserv and 'MainPID=0\n' not in ocserv
+    native_before = uninstall_native()
+    assert native_before['processes']
+    for unit in ('ocservia-agent.service', 'ocservia-privd.service', 'ocservia-agent-retention.timer'):
+        assert any(row['unit'] == unit and row['active'] == 'active' for row in native_before['units'])
+    trust_query = ("SELECT status||'|'||authorization_revision FROM nodes WHERE id='" + node + "';")
+    trust = sql(trust_query)
+    endpoint_query = f"SELECT state FROM node_endpoint_keys WHERE node_id='{node}' ORDER BY endpoint_id;"
+    endpoint_trust = sql(endpoint_query)
+    assert trust.startswith('active|') and endpoint_trust == 'active'
+    assert run('dpkg-query', '-W', '-f=${Status}', 'ocservia-agent') == 'install ok installed'
+    payload = run('dpkg-query', '-L', 'ocservia-agent').splitlines()
+    paths = [path for path in payload if path.startswith(('/usr/libexec/ocservia/', '/usr/share/ocservia-agent/'))
+             and run('sudo', 'find', path, '-maxdepth', '0', '-type', 'f').strip()]
+    assert paths
+    paths += ['/usr/libexec/ocservia', '/usr/lib/systemd/system/' + 'ocservia-agent.service',
+              '/usr/lib/systemd/system/ocservia-privd.service', '/usr/lib/systemd/system/ocservia-agent-retention.timer',
+              '/usr/lib/systemd/system/ocservia-agent-retention.service', '/usr/lib/systemd/system/ocservia-upgrader@.service']
+    record('uninstall_before', node_id=node, endpoint_id=os.environ['T07_ENDPOINT'], identity=identity,
+           owner=owner_before, trust=trust, endpoint_trust=endpoint_trust, ocserv=ocserv, native=native_before)
+    # No purge, autoremove, revocation or preliminary systemctl stop.
+    output = run('sudo', 'apt-get', 'remove', '-y', 'ocservia-agent')
+    (EVIDENCE / 'package-removal.log').write_text(output)
+    status = subprocess.run(['dpkg-query', '-W', '-f=${Status}', 'ocservia-agent'], capture_output=True, check=False)
+    assert status.returncode in (0, 1)
+    assert status.stdout.decode() in ('', 'deinstall ok config-files', 'unknown ok not-installed')
+    assert_uninstalled(uninstall_native(), paths)
+    record('package_removal', package_status=status.stdout.decode(), removed_paths=paths)
+    # telemetry.OfflineAfter=90s; default OwnerLeaseTTL=30s. 180s allows
+    # the final shutdown heartbeat and polling slack without changing either.
+    wait_for('uninstalled Agent offline', lambda: api(prefix)['connection_state'] == 'offline', seconds=180)
+    wait_for('uninstalled owner lease expired', lambda: sql(
+        "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
+        f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND lease_until>clock_timestamp());") == 't', seconds=60)
+    # Observe a further whole owner lease: no late restart, lease or root effect.
+    for _ in range(16):
+        assert api(prefix)['connection_state'] == 'offline'
+        assert api(prefix)['trust_status'] == 'active'
+        assert sql(trust_query) == trust and sql(endpoint_query) == endpoint_trust
+        assert sorted(uninstall_identity()) == identity, 'identity/configuration changed'
+        assert_uninstalled(uninstall_native(), paths)
+        assert node_side_effects() == effects, 'new privileged effect after removal'
+        assert run('systemctl', 'show', 'ocserv', '-p', 'MainPID', '-p', 'ExecMainStartTimestampMonotonic', '-p', 'ActiveState') == ocserv
+        assert sql("SELECT count(*) FROM connection_owner_fencing "
+                   f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND owner_epoch>{int(owner_before['owner_epoch'])};") == '0'
+        time.sleep(2)
+    record('agent_offline', node_id=node, owner_lease_expired=True, observation_seconds=32)
+    record('identity_preserved', identity=identity, trust=trust, endpoint_trust=endpoint_trust)
+    vpn_smoke('after_uninstall')
+    record('ocserv_unaffected', service=ocserv, side_effects=effects)
+
+
 def revocation():
     # Terminal stage: the node loses its Controller authority for good.
     node = os.environ['T07_NODE']
@@ -1294,7 +1394,7 @@ if __name__ == '__main__':
     phase = sys.argv[1]
     if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'bootstrap_token', 'bootstrap_verify', 'approve', 'certificate', 'config_prepare', 'configuration',
                      'browser_prepare', 'browser_verify', 'business', 'smoke_user', 'rollout_ready', 'rollout_verify',
-                     'vpn_after_config_apply', 'vpn_after_rollback', 'resilience', 'revocation'):
+                     'vpn_after_config_apply', 'vpn_after_rollback', 'resilience', 'revocation', 'uninstall'):
         raise SystemExit('unknown phase')
     if phase.startswith('vpn_'):
         vpn_smoke(phase.removeprefix('vpn_'))

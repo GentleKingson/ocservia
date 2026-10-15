@@ -21,6 +21,11 @@ on:
         description: Integrated deployment with real Signer and CRL enforcement in a disposable runner
         type: boolean
         default: true
+      terminal:
+        description: Terminal lifecycle (uninstall never revokes the node)
+        type: choice
+        options: [revocation, uninstall]
+        default: revocation
       ocserv_package:
         description: Native ocserv for the disposable runner (backport-1.5.0 also requires real session terminate)
         type: choice
@@ -40,3 +45,4 @@ jobs:
       profile: ${{ (inputs.purpose == 'integration') && 'extended' || 'smoke' }}
       production_signer: ${{ inputs.production_signer }}
       ocserv_package: ${{ inputs.ocserv_package }}
+      terminal: ${{ inputs.terminal }}

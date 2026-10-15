@@ -138,7 +138,7 @@ harness records them as explicit limitations and never scores them as PASS:
   cookie is rejected while a new password authentication establishes a session
   again; that run requires both checkpoints, and a terminate ending `unknown`
   fails it.
-- Both profiles end with a terminal revocation of the real node (in Extended,
+- By default both profiles end with a terminal revocation of the real node (in Extended,
   after the rollout). Anonymous, foreign-Origin, unapproved,
   stale-approval, and pending-approval requests, and the approver spending the
   requester's approval, are all rejected while the node stays active. The
@@ -151,6 +151,51 @@ harness records them as explicit limitations and never scores them as PASS:
   operation and leaves privd effects, the Agent journal, ocserv reloads, and
   node files unchanged. A 503 (synchronization left to the background worker)
   or a timeout fails the run.
+
+## Manual package removal terminal
+
+Release Diagnostics (`release-upgrade.yml`) accepts `terminal=uninstall` as an
+opt-in alternative to the default `terminal=revocation`. Use `purpose=smoke`
+to reuse Bootstrap Token enrollment, pending identity reruns, independent
+requester/approver approval, Online convergence, browser configuration apply,
+and the real VPN before removing the package. This adds no Basic CI or Release
+Check E2E requirement and changes no production lifecycle behavior.
+
+```sh
+gh workflow run release-upgrade.yml --ref <candidate-branch> \
+  -f purpose=smoke -f terminal=uninstall -f version=0.0.0 \
+  -f production_signer=true -f run-resilience=false
+```
+
+The terminal requires a disposable Ubuntu 24.04 amd64 systemd runner. It records
+NodeID, EndpointID, protected identity/configuration file digests, active native
+units/process IDs, ocserv PID/start time, Controller trust revision and owner
+session before running `apt-get remove -y ocservia-agent`. It never substitutes
+revocation or a separate service stop for the DEB transaction. Evidence includes
+`package-removal.log` and separate `package_removal`, `agent_offline`,
+`identity_preserved`, and `ocserv_unaffected` API checkpoints. The final checkpoint
+also requires a fresh authenticated OpenConnect tunnel with working ICMP.
+
+Offline is determined by `telemetry.OfflineAfter` (90 seconds since the last
+heartbeat), independently of the default 30-second owner lease. The test allows
+180 seconds for Offline, then 60 seconds for lease expiration, and observes a
+further 32 seconds without a new owner epoch, running Agent component, active
+unit/timer, trust change, identity/configuration change, privileged effect,
+ocserv restart or reload. It checks removed payloads and `/proc` executables,
+including unlinked running binaries. An API error, removal failure, stale online
+state, live owner, unexpected trust revision/revocation or incomplete evidence
+fails the run; process exit alone cannot pass it.
+
+The lifecycle interpretation follows [Debian Policy section 6.5](https://www.debian.org/doc/debian-policy/ch-maintainerscripts.html#summary-of-ways-maintainer-scripts-are-called),
+[dpkg remove/purge](https://manpages.debian.org/bookworm/dpkg/dpkg.1.en.html), and
+[systemctl disable/stop](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html).
+DEB removal calls `prerm remove`; upgrades call `prerm upgrade` and must retain
+services and identity. `disable --now` also stops the units; disabling alone does
+not. The repository's preremove delegates actual removal to the verified archive's
+uninstaller without `--purge-state`, preserving generated identity, state and
+configuration. dpkg purge removes conffiles and invokes a package postrm if one
+exists; it does not imply the repository's explicit `--purge-state` operation.
+No purge, rebind, revocation or lifecycle script contract is changed here.
 
 In `result.json`, the harness writes `scope=business-smoke` or
 `scope=integration` (never full release acceptance), along with

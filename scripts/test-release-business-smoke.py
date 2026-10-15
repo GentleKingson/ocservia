@@ -501,6 +501,69 @@ certutil() { :; }
             assert 'revoked_node_old_authority_without_privd_effect' not in names, label
 
 
+        # Drive the actual terminal phase. No failed observation may emit its
+        # final checkpoint; API errors are failures, never evidence of offline.
+        for fault in (None, 'remove', 'process', 'timer', 'payload', 'identity', 'online',
+                      'api timeout', 'revoked', 'owner', 'readmitted', 'effect', 'ocserv'):
+            state = {'removed': False}
+            def native():
+                active = not state['removed']
+                return {'processes': ['42'] if active or fault == 'process' else [],
+                        'units': [{'unit': unit, 'active': 'active' if active or fault == 'timer' else 'inactive'}
+                                  for unit in ('ocservia-agent.service', 'ocservia-privd.service', 'ocservia-agent-retention.timer')]}
+            def terminal_run(*args):
+                if args[:3] == ('sudo', 'apt-get', 'remove'):
+                    if fault == 'remove':
+                        raise RuntimeError('apt remove failed')
+                    state['removed'] = True
+                    return 'Removing ocservia-agent'
+                if args[0] == 'dpkg-query':
+                    return '/usr/share/ocservia-agent/package' if '-L' in args else 'install ok installed'
+                if 'find' in args:
+                    return 'file'
+                if 'test' in args and fault == 'payload':
+                    raise RuntimeError('payload remains')
+                if args[:2] == ('systemctl', 'show'):
+                    return 'ActiveState=active\nMainPID=' + ('99' if state['removed'] and fault == 'ocserv' else '42') + '\n'
+                return ''
+            def terminal_api(*_args, **_kwargs):
+                if state['removed'] and fault == 'api timeout':
+                    raise TimeoutError('API timed out')
+                return {'trust_status': 'revoked' if state['removed'] and fault == 'revoked' else 'active',
+                        'connection_state': 'offline' if state['removed'] and fault != 'online' else 'online'}
+            def terminal_sql(query):
+                if 'owner_epoch>' in query:
+                    return '1' if fault == 'readmitted' else '0'
+                if 'NOT EXISTS' in query:
+                    return 'f' if fault == 'owner' else 't'
+                return 'active|3' if 'authorization_revision' in query else 'active'
+            def once(description, fn, seconds=120):
+                value = fn()
+                if not value:
+                    raise RuntimeError('timeout: ' + description)
+                return value
+            with patch.dict(os.environ, {**env, 'T07_ENDPOINT': 'endpoint'}), \
+                    patch.object(business, 'api', side_effect=terminal_api), \
+                    patch.object(business, 'sql', side_effect=terminal_sql), \
+                    patch.object(business, 'run', side_effect=terminal_run), \
+                    patch.object(business, 'owner', return_value={'owner_epoch': 5}), \
+                    patch.object(business, 'uninstall_native', side_effect=native), \
+                    patch.object(business, 'uninstall_identity', side_effect=lambda: ['x /identity/endpoint.key', 'y /identity/controller.endpoint'] + (['changed'] if state['removed'] and fault == 'identity' else [])), \
+                    patch.object(business, 'node_side_effects', side_effect=lambda: {'effects': int(state['removed'] and fault == 'effect')}), \
+                    patch.object(business.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout=b'')), \
+                    patch.object(business, 'wait_for', side_effect=once), patch.object(business.time, 'sleep'), \
+                    patch.object(business, 'vpn_smoke') as vpn, patch.object(business, 'record') as record:
+                passed = False
+                try:
+                    business.uninstall()
+                    passed = True
+                except (AssertionError, RuntimeError, TimeoutError):
+                    pass
+                assert passed == (fault is None), fault
+                names = [call.args[0] for call in record.call_args_list]
+                assert ('ocserv_unaffected' in names) == passed, fault
+                assert vpn.call_count == int(passed), fault
+
         # Session and IP-ban operations pass only on the real occtl effect; an
         # operation that succeeds without changing ocserv must not pass. Ocserv
         # 1.2.4 has no terminate; from 1.4.2 terminate must revoke a cookie
