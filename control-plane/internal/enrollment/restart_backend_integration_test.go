@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
@@ -117,6 +118,15 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 		t.Fatal("restart changed trust state", before, after)
 	}
 	s = NewBackend(f.b, "", "test", signer)
+	for _, alpn := range []string{"ocserv-platform/enroll/1", "ocserv-platform/agent/1"} {
+		if allowed, err := s.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: alpn}); err != nil || allowed {
+			t.Fatal("restart readmitted revoked endpoint", alpn, allowed, err)
+		}
+	}
+	bindings, err := s.ListNodeTrust(ctx)
+	if err != nil || len(bindings) != 1 || bindings[0].State != transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED || bindings[0].Revision != before.Revision {
+		t.Fatal("restart lost authoritative trust snapshot", bindings, err)
+	}
 	if _, err := s.Enroll(ctx, request); !errors.Is(err, ErrInvalidToken) {
 		t.Fatal("restart forgot consumed token", err)
 	}

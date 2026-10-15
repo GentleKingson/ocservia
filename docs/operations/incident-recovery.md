@@ -15,6 +15,76 @@ session lifetimes to mask the outage. Before closing an OIDC incident, restore
 connectivity to the issuer and confirm that discovery, signing-key refresh, and
 login callbacks succeed.
 
+## Revocation committed with synchronization pending
+
+The revocation endpoint's HTTP `503` with title `Revocation committed` means
+the database transaction committed: node trust is revoked and the convergence
+intent was queued. It does not mean the transaction rolled back, or that both
+the transport trust update and connection close were acknowledged. Other `503`
+responses, such as database errors, need their own investigation; retain the
+response body and Request ID.
+
+Treat these as separate states:
+
+| State | Evidence and limit |
+| --- | --- |
+| Controller trust | Database node/endpoint revocation and authorization revision block new handshakes and reject events from lingering revoked sessions. |
+| Transport trust | transportd's in-memory policy applies exact trust revisions and reloads the database TrustSnapshot at startup. A missing RPC acknowledgement leaves its result uncertain to the caller. |
+| Connection owner | The owner lease/epoch authorizes mutations. Offline status or a missing connection/fence is a current snapshot, not proof of a previous close. |
+| Queue convergence | `update_applied`, `close_required` and `close_applied` record progress under the existing RPC contracts. In particular, CloseNode `NOT_FOUND` satisfies current absence, not historical execution. |
+
+1. Preserve the original Request ID, approval ID, node ID, EndpointID, reason,
+   authorization revision, response and Controller/transportd errors. Use
+   `GET /api/v1/nodes/{node_id}` with the original authorized workspace to check
+   `trust_status` and `connection_state`; an offline result alone is insufficient.
+2. Through an authorized read-only database connection, inspect the exact node
+   and queued intent. For PostgreSQL, replace the UUID placeholder:
+
+   ```sql
+   SELECT n.id, n.status, n.authorization_revision,
+          e.state AS endpoint_state, encode(e.endpoint_id, 'hex') AS endpoint_id,
+          q.desired_state, q.revision, q.reason, q.update_applied,
+          q.close_required, q.close_applied, q.attempts, q.available_at,
+          q.locked_by, q.locked_until, q.last_error
+   FROM nodes n
+   LEFT JOIN node_endpoint_keys e ON e.node_id = n.id
+   LEFT JOIN node_trust_convergence q ON q.node_id = n.id
+   WHERE n.id = '<node-uuidv7>'::uuid;
+   ```
+
+   For MySQL 8.4, UUIDs use binary storage and timestamps below are raw logical
+   microseconds from `2000-01-01`, with sentinel values for infinities:
+
+   ```sql
+   SELECT HEX(n.id) AS node_id, n.status, n.authorization_revision,
+          e.state AS endpoint_state, HEX(e.endpoint_id) AS endpoint_id,
+          q.desired_state, q.revision, q.reason, q.update_applied,
+          q.close_required, q.close_applied, q.attempts, q.available_at,
+          HEX(q.locked_by) AS locked_by, q.locked_until, q.last_error
+   FROM nodes n
+   LEFT JOIN node_endpoint_keys e ON e.node_id = n.id
+   LEFT JOIN node_trust_convergence q ON q.node_id = n.id
+   WHERE n.id = UNHEX(REPLACE('<node-uuidv7>', '-', ''));
+   ```
+
+3. Correlate the exact intent with logs for `converge node trust` and
+   `record synchronous revocation convergence`. A successful transport mutation
+   followed by failed bookkeeping can still leave the queue pending. Attempts
+   and retry backoff do not prove delivery; there is no retry count that turns
+   failure into success.
+4. Restore a diagnosed Controller/transportd or database outage through the
+   existing recovery procedure. The worker attempts only mutations permitted
+   by the current owner fence and exact revision. If ownership has ended,
+   evidence conflicts, or the outcome remains uncertain, keep the revocation
+   and pending intent intact and escalate for engineering review. There is no
+   guaranteed automatic recovery interval. A restart can restore revoked trust
+   admission checks without proving that an earlier close completed.
+
+Do not blindly resubmit an uncertain request, create another approval, replace
+the revoked Agent identity, bypass fencing, or directly update/delete convergence
+records. The original consumed approval permits only the existing authorized
+replay rules; it does not grant new authority or repair missing transport evidence.
+
 ## Lost Local administration authority
 
 When a deployment loses its last working administrator and independent approver
