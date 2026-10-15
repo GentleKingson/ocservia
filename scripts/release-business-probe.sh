@@ -11,6 +11,9 @@ export SOURCE_COMMIT
 # shellcheck source=scripts/env.sh
 # shellcheck disable=SC1091
 source "$ROOT/scripts/env.sh"
+: "${BUSINESS_TERMINAL:=revocation}"
+export BUSINESS_TERMINAL
+[[ "$BUSINESS_TERMINAL" == revocation || "$BUSINESS_TERMINAL" == uninstall ]]
 : "${BUSINESS_PROFILE:=smoke}"
 export BUSINESS_PROFILE
 : "${PRODUCTION_SIGNER_ACCEPTANCE:=false}"
@@ -125,7 +128,7 @@ cleanup() {
   [[ -f "${ARTIFACT_DIR}/checkpoints.txt" ]] || : >"${ARTIFACT_DIR}/checkpoints.txt"
   jq -n --arg version "${VERSION}" --arg start "${started}" \
     --arg end "$(date -u +%FT%TZ)" --arg stage "${failed_stage}" --argjson code "${code}" \
-    --arg profile "${BUSINESS_PROFILE}" \
+    --arg source "$SOURCE_COMMIT" --arg profile "${BUSINESS_PROFILE}" --arg terminal "$BUSINESS_TERMINAL" \
     --arg resilience "$resilience_result" --argjson resilience_requested "$BUSINESS_RUN_RESILIENCE" \
     --argjson resilience_scenarios "$(if [[ -f "${ARTIFACT_DIR}/api-checkpoints.jsonl" ]]; then jq -s '[.[] | select(.name | startswith("resilience_")) | {name,status,time}]' "${ARTIFACT_DIR}/api-checkpoints.jsonl"; else printf '[]'; fi)" \
     --arg arch "$CONTROLLER_ARCH" \
@@ -133,7 +136,7 @@ cleanup() {
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
     --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
     --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
-    '{version:$version,run_id:$run,run_attempt:$attempt,profile:$profile,
+    '{source_commit:$source,version:$version,run_id:$run,run_attempt:$attempt,profile:$profile,terminal:$terminal,
       execution_environment:(if $disposable_container then "BuildServer isolated Docker/systemd" else "GitHub-hosted runner" end),
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
       timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
@@ -638,8 +641,13 @@ if [[ "$BUSINESS_PROFILE" == extended ]]; then
   bash "${ROOT}/scripts/release-business-rollout.sh"
   record real_browser_agent_rollout
 fi
-# Terminal stage in both profiles: revocation ends the node's authority.
-next_stage node_revocation
-python3 "${ROOT}/scripts/release-business-api.py" revocation
-record real_node_revocation_and_disconnect
+# Default release acceptance retains terminal revocation; manual diagnostics
+# may instead prove package removal without changing the node's trust.
+next_stage "node_${BUSINESS_TERMINAL}"
+python3 "${ROOT}/scripts/release-business-api.py" "$BUSINESS_TERMINAL"
+if [[ "$BUSINESS_TERMINAL" == uninstall ]]; then
+  record real_node_uninstall_and_offline
+else
+  record real_node_revocation_and_disconnect
+fi
 next_stage complete
