@@ -12,8 +12,10 @@ only; exactly one Relay is supported per deployment, see
 For 1.2.0, the archive SHA-256 is
 `beb2294a9749d6a25fd7cd8bcf0fccd932f20716d4f967d85d3f23c7135ae6a2`.
 `relay.Cargo.lock` starts from that archive's lock and applies only
-`cargo update -p rustls --precise 0.23.45`, including its required aws-lc and
-webpki dependencies. This fixes GHSA-2mjx-qc3c-rqvc in the independent binary;
+`cargo update -p rustls --precise 0.23.46`, including its required aws-lc and
+webpki dependencies. This retains the GHSA-2mjx-qc3c-rqvc fix and addresses
+RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and
+RUSTSEC-2026-0349 in the independent binary;
 the endpoint workspace lock cannot constrain `cargo install`.
 
 On a future version change, verify the new registry archive checksum, extract
