@@ -47,6 +47,9 @@ abort 'dependency layer must retain config and patched source inputs' unless
 puts 'Release Rust cache identity, unconditional rebuild and dependency layering contracts passed'
 RUBY
 ruby -r yaml - <<'RUBY'
+require 'fileutils'
+require 'open3'
+require 'tmpdir'
 def check(value, message)
   abort message unless value
 end
@@ -91,5 +94,66 @@ products = YAML.safe_load(File.read('.github/workflows/release-products.yml')).d
   check(actual == Marshal.load(Marshal.dump(expected)).transform_values { |v| v.is_a?(String) ? v.gsub('${{ inputs.arch }}', 'amd64') : v.transform_values { |x| x.gsub('${{ inputs.arch }}', 'amd64') } }, "Business #{id} must match the native release builder")
 end
 check(business.none? { |s| s.dig('with', 'path').to_s.lines.map(&:strip).include?('rust/target') }, 'Business must not cache all Rust targets')
+targets = File.readlines('scripts/build-release-controller.sh').grep(/^\s*build_image\s/).map do |line|
+  match = line.match(/^\s*build_image ([a-z_]+) ([\w.\/-]+Dockerfile)\s*$/)
+  check(match, "unsupported Controller build_image call: #{line.strip}")
+  match.captures
+end
+check(targets.length == 8 && targets.map(&:first).uniq.length == targets.length,
+      'Controller builder must declare all eight distinct image targets')
+probes = Hash.new { |hash, path| hash[path] = [] }
+targets.each do |image, dockerfile|
+  probes[dockerfile] << image
+  File.foreach(dockerfile) do |line|
+    check(!line.match?(/^\s*ADD\b/i), "ADD inputs need explicit Controller routing coverage: #{dockerfile}")
+    next unless line.match?(/^\s*COPY\b/i)
+    words = line.strip.split
+    words.shift
+    options = []
+    options << words.shift while words.first&.start_with?('--')
+    check(options.all? { |option| option.match?(/\A--(?:from=[\w.-]+|chmod=[0-7]{3,4})\z/) },
+          "unsupported COPY options in #{dockerfile}: #{line.strip}")
+    next if options.any? { |option| option.start_with?('--from=') }
+    check(words.length >= 2 && words.all? { |word| word.match?(/\A[\w.\/-]+\z/) },
+          "unsupported COPY format in #{dockerfile}: #{line.strip}")
+    words[0...-1].each do |source|
+      check(!source.split('/').include?('..') && (File.file?(source) || File.directory?(source)),
+            "unsupported COPY source in #{dockerfile}: #{source}")
+      path = File.directory?(source) ? File.join(source, 'ci-cache-input-probe.txt') : source
+      probes[path] << image
+    end
+  end
+end
+router = File.expand_path('scripts/ci-relevance.sh')
+Dir.mktmpdir('controller-cache-inputs-') do |tmp|
+  fixture = File.join(tmp, 'repo')
+  FileUtils.mkdir_p(fixture)
+  run = lambda do |*command|
+    output, error, status = Open3.capture3(*command, chdir: fixture)
+    check(status.success?, "Controller cache routing fixture failed: #{command.join(' ')}\n#{error}")
+    output.strip
+  end
+  run.call('git', 'init', '-q')
+  run.call('git', 'config', 'user.name', 'test')
+  run.call('git', 'config', 'user.email', 'test@example.invalid')
+  run.call('git', 'commit', '--allow-empty', '-qm', 'base')
+  base = run.call('git', 'rev-parse', 'HEAD')
+  probes.each do |path, images|
+    run.call('git', 'checkout', '-q', '--detach', base)
+    file = File.join(fixture, path)
+    FileUtils.mkdir_p(File.dirname(file))
+    File.write(file, "change\n")
+    run.call('git', 'add', '-f', '--', path)
+    run.call('git', 'commit', '-qm', 'change')
+    output = File.join(tmp, 'routing')
+    File.write(output, '')
+    run.call('bash', router, 'push', base, run.call('git', 'rev-parse', 'HEAD'), output, 'quick')
+    routing = File.readlines(output, chomp: true).to_h { |line| line.split('=', 2) }
+    selected = routing.fetch('controller_cache_images').split
+    check(routing.fetch('run_controller_cache') == 'true' && (images.uniq - selected).empty?,
+          "Controller cache routing lost #{images.uniq.join(' ')} for COPY/Dockerfile input #{path}: #{selected.join(' ')}")
+  end
+end
+puts "Controller cache routing covers #{probes.length} direct COPY and Dockerfile inputs"
 puts 'CI tools, Rust objects, npm downloads and Business isolated target cache contracts passed'
 RUBY

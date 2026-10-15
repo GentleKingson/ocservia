@@ -165,6 +165,17 @@ adds `database-recovery-full`, whereas a manual Quick run uses two database
 legs (PostgreSQL and a single MySQL smoke leg). Controller cache refresh runs
 only on pushes to main when routing sets `run_controller_cache`.
 
+Controller cache refresh uses the union of the changed images' Dockerfile
+inputs on both native architectures, rather than rebuilding all eight images
+for every product change. For example, Web changes refresh `gateway`, Signer
+changes refresh `signer`, and shared backup-entrypoint changes refresh both
+backup images. Shared build/cache machinery and unknown paths select all eight.
+The existing Go test-only exclusions remain. Dockerfile/COPY routing contracts
+guard the input mapping. Missing or empty image selection in the cache builder
+falls back to all images, while invalid names fail before Docker runs. Product
+builds always build all eight images; cache scopes, runtime OS updates, native
+coverage and release acceptance checks retain their existing behavior.
+
 ## Go caches
 
 Go jobs retain the existing module and build caches alongside locked bootstrap

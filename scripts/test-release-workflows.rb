@@ -74,6 +74,8 @@ products.fetch('jobs').each do |name,job|
 end
 controller = products.fetch('jobs').fetch('build-controller-images')
 writer = load_workflow('ci').fetch('jobs').fetch('controller-cache')
+require_check(load_workflow('ci').dig('jobs','ci-relevance','outputs','controller_cache_images') == '${{ steps.relevance.outputs.controller_cache_images }}' &&
+              writer.dig('env','CONTROLLER_CACHE_IMAGES') == '${{ needs.ci-relevance.outputs.controller_cache_images }}', 'Controller image selection must flow from path routing to the cache builder')
 require_check(writer['needs'] == 'ci-relevance' && writer['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ci-relevance.outputs.run_controller_cache == 'true'", 'Controller cache writes must only run on trusted main pushes with Controller image inputs changed')
 require_check(writer.dig('strategy','matrix','arch') == %w[amd64 arm64] && writer['runs-on'].include?('ubuntu-24.04-arm'), 'main cache writer must cover both native architectures')
 require_check(!writer.key?('permissions') && !writer.key?('environment') && !writer.key?('continue-on-error'), 'cache writer must retain read-only authority and propagate export failures')
