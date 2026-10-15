@@ -7,7 +7,7 @@ defineProps<{ kind: "loading" | "error"; message: string }>();
 <template>
   <div
     :role="kind === 'error' ? 'alert' : 'status'"
-    class="bg-card border-border grid min-h-56 place-content-center justify-items-center gap-2.5 rounded-lg border p-7 text-center text-sm"
+    class="bg-card border-border grid min-h-56 place-content-center justify-items-center gap-2.5 rounded-xl border p-7 text-center text-sm wrap-anywhere shadow-xs"
     :class="kind === 'error' ? 'text-destructive' : 'text-muted-foreground'"
   >
     <LoaderCircle

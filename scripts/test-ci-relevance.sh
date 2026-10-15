@@ -81,7 +81,9 @@ web/src/components/overview/MetricCard.vue run_web run_web_browser run_controlle
 web/src/components/nodes/NodeDetailHeader.vue run_web run_web_browser run_controller_cache
 web/src/features/configuration/useNodeConfiguration.ts run_web run_web_browser run_controller_cache
 web/src/features/user-password.ts run_web run_web_browser run_controller_cache
-web/src/views/AuditView.vue run_web run_controller_cache
+web/src/views/AuditView.vue run_web run_web_browser run_controller_cache
+web/src/views/ApprovalsView.vue run_web run_web_browser run_controller_cache
+web/src/views/SettingsView.vue run_web run_web_browser run_controller_cache
 web/e2e/login.spec.ts run_web run_web_browser run_controller_cache
 rust/crates/agent/src/lib.rs run_rust run_controller_cache
 control-plane/internal/platform/app/run.go run_go run_database run_controller_cache

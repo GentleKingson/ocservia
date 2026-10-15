@@ -4,7 +4,7 @@ import { defineConfig, devices } from "@playwright/test";
 // lifecycle, dialogs, form focus and keyboard navigation. Playwright's patched
 // engines are not the supported Safari/Firefox releases themselves.
 const crossEngineSpecs =
-  /(^|\/)(login|auth-workspace|agent-rollout|node-forms|user-password|shell-navigation|apple-layout|nodes-list|node-detail|operations|csp-control)\.spec\.ts$/;
+  /(^|\/)(login|auth-workspace|agent-rollout|node-forms|user-password|shell-navigation|apple-layout|nodes-list|node-detail|operations|approval-queue|approvals-audit|csp-control)\.spec\.ts$/;
 
 export default defineConfig({
   testDir: "./e2e",

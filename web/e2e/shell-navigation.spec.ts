@@ -64,9 +64,9 @@ test("desktop navigation marks the current section on detail routes", async ({
 
 test("navigation sheet opens and closes from the keyboard", async ({
   page,
-  isMobile,
 }) => {
-  test.skip(!isMobile, "the navigation sheet is the narrow-screen navigation");
+  // Exercise the narrow layout in every engine, including desktop projects.
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/nodes/${nodeId}`);
   await expect(page.getByTestId("workspace")).toBeVisible();
   await expect(page.getByTestId("workspace")).toContainText("Alpha");
