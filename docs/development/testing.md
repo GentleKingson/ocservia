@@ -69,6 +69,10 @@ targets give faster feedback during local iteration.
 
 ## Choose a broader check when needed
 
+Manual platform diagnostics reuse the native I13 adapter fixture with the fixed
+ocserv-backport `1.5.0-2` release. See [platform coverage](release-checks.md#native-platform-diagnostics)
+for the opt-in Ubuntu ARM64 and Debian 13 commands and their evidence limits.
+
 Reach for `make verify` when a change spans multiple modules and needs a full
 local baseline, not as the default check for small single-module edits.
 

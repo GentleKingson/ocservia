@@ -135,12 +135,26 @@ unset password
 
 run_native_phase() {
   local phase=$1
+  # Run a host-built native libtest ELF inside a same-architecture container,
+  # without installing a second Rust toolchain there. The ordinary Cargo path
+  # remains the default. Never accept a binary which silently runs zero tests.
+  if [[ -n "${OCSERVIA_I13_TEST_BINARY:-}" ]]; then
+    OCSERVIA_I13_NATIVE_ROOT="${NATIVE_ROOT}" OCSERVIA_I13_NATIVE_PHASE="${phase}" \
+      "${OCSERVIA_I13_TEST_BINARY}" tests::native_user_and_group_operations --ignored --exact
+    return
+  fi
   OCSERVIA_I13_NATIVE_ROOT="${NATIVE_ROOT}" OCSERVIA_I13_NATIVE_PHASE="${phase}" cargo test \
     --locked \
     --manifest-path "${ROOT}/rust/Cargo.toml" \
     -p ocservia-ocserv-adapter tests::native_user_and_group_operations \
     -- --ignored --exact
 }
+
+if [[ -n "${OCSERVIA_I13_TEST_BINARY:-}" ]]; then
+  [[ "${OCSERVIA_I13_TEST_BINARY}" == /* && -x "${OCSERVIA_I13_TEST_BINARY}" ]]
+  [[ "$("${OCSERVIA_I13_TEST_BINARY}" --list --ignored --exact tests::native_user_and_group_operations)" == \
+    "$(printf 'tests::native_user_and_group_operations: test\n\n1 test, 0 benchmarks')" ]]
+fi
 
 run_native_phase create-p1
 test "$(stat -c '%u:%g:%a:%h' -- "${NATIVE_ROOT}/ocpasswd")" = "0:0:600:1" \

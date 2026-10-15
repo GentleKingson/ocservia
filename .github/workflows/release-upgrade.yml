@@ -14,7 +14,7 @@ on:
       purpose:
         description: Diagnostic scope
         type: choice
-        options: [smoke, integration]
+        options: [smoke, integration, native-ubuntu-arm64, native-debian13]
         default: integration
         required: true
       production_signer:
@@ -38,6 +38,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   business:
+    if: inputs.purpose == 'smoke' || inputs.purpose == 'integration'
     uses: ./.github/workflows/release-business-diagnostic.yml
     with:
       version: ${{ inputs.version }}
@@ -46,3 +47,8 @@ jobs:
       production_signer: ${{ inputs.production_signer }}
       ocserv_package: ${{ inputs.ocserv_package }}
       terminal: ${{ inputs.terminal }}
+  native-platform:
+    if: inputs.purpose == 'native-ubuntu-arm64' || inputs.purpose == 'native-debian13'
+    uses: ./.github/workflows/release-native-platform.yml
+    with:
+      purpose: ${{ inputs.purpose }}

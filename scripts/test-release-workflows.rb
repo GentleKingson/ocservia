@@ -161,7 +161,12 @@ Dir.mktmpdir('release-check-') do |dir|
   require_check(!run_recovery.call(sample.merge('planned_topology'=>{})), 'recovery without native node accepted')
   require_check(run_recovery.call(sample.merge('resilience_requested'=>false,'resilience_result'=>'SKIPPED','resilience_scenarios'=>[]),{'BUSINESS_RUN_RESILIENCE'=>'false'}), 'unselected recovery must be skipped')
 end
-require_check(manual['permissions'] == {'contents'=>'read'} && manual.fetch('jobs').values.all? {|j| j['uses'] == './.github/workflows/release-business-diagnostic.yml'}, 'manual diagnostics must use the same local checks')
+require_check(manual['permissions'] == {'contents'=>'read'} && manual.dig('jobs','business','uses') == './.github/workflows/release-business-diagnostic.yml', 'manual business diagnostics must use the same local checks')
+require_check(manual.dig('jobs','business','if') == "inputs.purpose == 'smoke' || inputs.purpose == 'integration'", 'platform diagnostics must not run business acceptance')
+require_check(manual.dig('jobs','native-platform','uses') == './.github/workflows/release-native-platform.yml' && manual.dig('jobs','native-platform','if') == "inputs.purpose == 'native-ubuntu-arm64' || inputs.purpose == 'native-debian13'", 'native diagnostics must be explicitly selected')
+platform = load_workflow('release-native-platform')
+require_check(platform.fetch('on').keys == ['workflow_call'] && platform['permissions'] == {'contents'=>'read'}, 'platform diagnostics must be read-only and reusable only')
+require_check(platform.dig('jobs','native','timeout-minutes') == 60 && platform.dig('jobs','native','runs-on').include?('ubuntu-24.04-arm'), 'native diagnostics need bounded native runners')
 puts 'Tag builds, dispatch write guard, Release Check failure propagation and actual recovery contracts passed'
 
 require_check(!manual.dig('jobs','business','with','profile').include?('production_signer'), 'Signer must not force integration')

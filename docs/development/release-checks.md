@@ -215,6 +215,44 @@ not certify upgrades from historical releases or mixed-version clusters.
 
 ## Diagnostics and build rehearsal
 
+### Native platform diagnostics
+
+The dispatch-only `release-upgrade.yml` purposes below are separate from Business,
+Basic CI, Release Check and release publication. They build the current source's
+real Agent package and adapter test ELF on matching GitHub-hosted runners, verify
+the fixed [ocserv-backport 1.5.0-2 release](https://github.com/GentleKingson/ocserv-backport/releases/tag/1.5.0-2)
+metadata, `SHA256SUMS`, package digest and dpkg fields, then run the existing I13
+authentication, password rotation, disable/enable, group, occtl parsing, terminate,
+concurrency and file-permission fixture. Download, dependency or validation
+failures fail the job; no emulation or mock counts as native evidence.
+
+```bash
+gh workflow run release-upgrade.yml --ref <candidate-branch> -f purpose=native-ubuntu-arm64
+gh workflow run release-upgrade.yml --ref <candidate-branch> -f purpose=native-debian13
+```
+
+Ubuntu uses `ubuntu-24.04-arm`. Debian uses `ubuntu-24.04` and
+`ubuntu-24.04-arm`, each running the same-architecture official
+`docker.io/library/debian:trixie-slim` index pinned at
+`sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f`.
+Only the isolated Debian container receives TUN and `NET_ADMIN`; it has no host
+network, Docker socket or systemd. Its Agent DEB dependencies, layout and verified
+payload executables are checked without invoking systemd-dependent scriptlets.
+This proves PACKAGE and limited NATIVE_RUNTIME, and an executed I13 fixture
+additionally proves adapter NATIVE_OPERATIONS. It proves neither Debian systemd
+service lifecycle nor CONTROLLER_E2E. Those require a separately authorized native
+VM and complete Business acceptance. Ubuntu I13 also does not prove Controller E2E.
+
+Evidence artifacts retain the run ID/attempt, source SHA, kernel/Docker
+architecture, package metadata/digests, runtime log, I13 summary and cleanup result
+for seven days. The adapter libtest ELF may be passed explicitly through
+`OCSERVIA_I13_TEST_BINARY` so Debian needs no second Rust toolchain; the I13
+driver first checks that it contains exactly the requested ignored test. This
+option is for matching native ELF binaries only. Platform diagnostics do not
+broaden the [support policy](../reference/support-policy.md) or replace a
+candidate's formal Release Check. No Controller, database or production secrets
+are involved.
+
 To run the extended [Business integration](real-business-validation.md) suite
 on a branch:
 
