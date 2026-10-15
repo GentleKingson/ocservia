@@ -581,7 +581,7 @@ async function submitRollout(): Promise<void> {
       @submit="submitRollout"
     >
       <FormField id="rollout-target" :label="$t('targetVersion')">
-        <output id="rollout-target" class="font-mono text-sm">{{
+        <output id="rollout-target" class="font-mono text-sm break-all">{{
           rolloutTarget
         }}</output>
       </FormField>

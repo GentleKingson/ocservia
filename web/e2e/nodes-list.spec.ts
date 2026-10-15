@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./csp";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614fa1";
 const longName =
@@ -166,6 +166,31 @@ test("keeps wide tables inside their own scroll region", async ({ page }) => {
         document.documentElement.clientWidth,
     ),
   ).toBeLessThanOrEqual(0);
+
+  for (const width of [1280, 1440, 1920, 320, 390, 768]) {
+    await page.setViewportSize({ width, height: 1000 });
+    expect(
+      await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      ),
+    ).toBeLessThanOrEqual(0);
+  }
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "2";
+  });
+  expect(
+    await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    ),
+  ).toBeLessThanOrEqual(0);
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "1";
+  });
 });
 
 test("refreshes after focus returns and recovers from a failed snapshot", async ({

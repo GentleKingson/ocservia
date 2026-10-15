@@ -14,14 +14,14 @@ const relative = (value: string) =>
   relativeTimestamp(value, now.value.getTime(), locale.value);
 
 const tile =
-  "bg-card border-border grid content-start gap-1 rounded-lg border px-4 py-3";
+  "bg-card border-border grid min-w-0 grid-cols-1 content-start gap-1 rounded-xl border px-4 py-3";
 const label = "text-muted-foreground text-xs";
-const value = "text-sm font-semibold break-words";
+const value = "text-sm font-semibold wrap-anywhere";
 </script>
 
 <template>
   <section
-    class="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-5"
+    class="mb-6 grid grid-cols-[repeat(auto-fit,minmax(min(100%,8rem),1fr))] gap-3"
     :aria-label="$t('observedState')"
   >
     <div :class="tile">

@@ -81,7 +81,7 @@ function keepOpen(event: Event): void {
 </script>
 
 <template>
-  <div class="mb-3 grid gap-2">
+  <div class="bg-muted/50 border-border mb-4 grid gap-3 rounded-lg border p-3">
     <div class="flex flex-wrap items-center gap-2">
       <div class="relative min-w-0 flex-1 basis-64">
         <Search

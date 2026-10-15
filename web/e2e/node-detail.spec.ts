@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./csp";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614fa1";
 const bootId = "019fc0a4-6d92-765c-a8a1-4af556614fd0-boot-identifier-long";
@@ -153,6 +153,31 @@ test("copies long identifiers from a directly opened detail", async ({
     () => document.documentElement.scrollWidth > window.innerWidth,
   );
   expect(overflow).toBe(false);
+
+  for (const width of [1280, 1440, 1920, 320, 390, 768]) {
+    await page.setViewportSize({ width, height: 1000 });
+    expect(
+      await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      ),
+    ).toBeLessThanOrEqual(0);
+  }
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "2";
+  });
+  expect(
+    await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    ),
+  ).toBeLessThanOrEqual(0);
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "1";
+  });
 
   await page.getByRole("link", { name: "Back to nodes" }).click();
   await expect(page).toHaveURL(/\/nodes$/);

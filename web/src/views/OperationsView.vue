@@ -410,7 +410,7 @@ onBeforeUnmount(() => {
           <dt class="text-muted-foreground">
             {{ $t("targetVersion") }}
           </dt>
-          <dd class="m-0">
+          <dd class="m-0 break-all">
             <code>{{ selectedOperation.agentUpgradeTargetVersion }}</code>
           </dd>
         </template>

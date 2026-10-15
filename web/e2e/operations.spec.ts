@@ -1,4 +1,5 @@
-import { expect, test, type Page, type Request } from "@playwright/test";
+import type { Page, Request } from "@playwright/test";
+import { expect, test } from "./csp";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614da1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614da2";
@@ -82,6 +83,33 @@ async function stubShell(page: Page): Promise<Request[]> {
   return writes;
 }
 
+async function expectResponsiveLayout(page: Page): Promise<void> {
+  for (const width of [1280, 1440, 1920, 320, 390, 768]) {
+    await page.setViewportSize({ width, height: 1000 });
+    expect(
+      await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      ),
+    ).toBeLessThanOrEqual(0);
+  }
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "2";
+  });
+  expect(
+    await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    ),
+  ).toBeLessThanOrEqual(0);
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "1";
+  });
+}
+
 test("separates unknown outcomes, pages by cursor and refreshes details read-only", async ({
   page,
 }) => {
@@ -150,6 +178,7 @@ test("separates unknown outcomes, pages by cursor and refreshes details read-onl
   await expect.poll(() => detailReads).toBe(2);
   expect(listUrls).toHaveLength(2);
   expect(writes).toHaveLength(0);
+  await expectResponsiveLayout(page);
 
   await detail.getByRole("link", { name: nodeId }).click();
   await expect(page).toHaveURL(`/nodes/${nodeId}`);
@@ -186,6 +215,7 @@ test("keeps partial rollout failures visible and stops polling after leaving", a
     batch.getByRole("link", { description: otherNodeId }),
   ).toHaveAttribute("href", `/nodes/${otherNodeId}`);
   await expect.poll(() => rolloutReads).toBeGreaterThan(1);
+  await expectResponsiveLayout(page);
 
   await page.getByRole("link", { name: "Back to operations" }).click();
   await expect(page).toHaveURL("/operations");
