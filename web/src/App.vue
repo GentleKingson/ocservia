@@ -116,7 +116,7 @@ function focusMainContent(): void {
       <AppSidebar />
     </aside>
     <div
-      class="bg-background min-h-screen min-w-0 md:m-2 md:ml-0 md:min-h-[calc(100vh-1rem)] md:rounded-xl md:shadow-sm"
+      class="bg-card min-h-screen min-w-0 md:m-2 md:ml-0 md:min-h-[calc(100vh-1rem)] md:rounded-xl md:shadow-xs"
     >
       <AppHeader
         :workspace-id="selectedWorkspaceId"
