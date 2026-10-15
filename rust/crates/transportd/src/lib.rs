@@ -6650,6 +6650,260 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn revoked_update_retry_after_lost_ack_requires_the_same_live_fence() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (term, fence, router, client, connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 12).await;
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+        let operation_id = ocservia_command_authorization::state_update_operation_id(
+            &node_id,
+            &term.endpoint_id,
+            NodeTrustState::Revoked as u32,
+            3,
+            "revoke",
+        );
+        let binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::StateUpdate,
+            operation_id,
+            "ocserv.fencing.v2",
+        );
+        let request = UpdateNodeTrustRequest {
+            node_id: node_id.to_vec(),
+            endpoint_id: term.endpoint_id.to_vec(),
+            state: NodeTrustState::Revoked.into(),
+            reason: "revoke".into(),
+            revision: 3,
+            fence_binding: Some(binding),
+            operation_id: operation_id.to_vec(),
+        };
+        // Deliberately discard the first success: policy and connection effects
+        // happened, but this acknowledgement is unavailable to the caller.
+        drop(
+            service
+                .update_node_trust(Request::new(request.clone()))
+                .await
+                .expect("apply revoke"),
+        );
+        tokio::time::timeout(Duration::from_secs(2), connection.closed())
+            .await
+            .expect("update closes connection");
+        let retry = service
+            .update_node_trust(Request::new(request.clone()))
+            .await
+            .expect("same live fence retry")
+            .into_inner();
+        assert_eq!(
+            retry.disposition,
+            i32::from(TrustUpdateDisposition::Applied)
+        );
+        assert_eq!(retry.retained_revision, 3);
+        assert_eq!(retry.retained_state, i32::from(NodeTrustState::Revoked));
+        let mut changed = request.clone();
+        changed.reason = "another operation".into();
+        assert_eq!(
+            service
+                .update_node_trust(Request::new(changed))
+                .await
+                .expect_err("carrier mismatch")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        // An absent connection also exists without any CloseNode invocation.
+        // A verified close now returns NOT_FOUND, not a historical receipt.
+        let close_binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::ConnectionClose,
+            node_id,
+            "ocserv.fencing.v2",
+        );
+        assert_eq!(
+            service
+                .close_node(Request::new(CloseNodeRequest {
+                    node_id: node_id.to_vec(),
+                    reason: "revoke".into(),
+                    fence_binding: Some(close_binding),
+                }))
+                .await
+                .expect_err("already absent after update")
+                .code(),
+            tonic::Code::NotFound
+        );
+        // Simulate retained fence expiry without waiting for the wall clock.
+        service
+            .shared
+            .inner
+            .fences
+            .lock()
+            .await
+            .get_mut(node_id.as_slice())
+            .expect("retained fence")
+            .verified
+            .lease_until_seconds = 0;
+        assert_eq!(
+            service
+                .update_node_trust(Request::new(request))
+                .await
+                .expect_err("expired fence retry")
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+        shutdown(&service, router).await.expect("shutdown router");
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn lost_close_ack_leaves_absence_without_a_historical_receipt() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (_term, fence, router, client, connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 12).await;
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+        let binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::ConnectionClose,
+            node_id,
+            "ocserv.fencing.v2",
+        );
+        let request = CloseNodeRequest {
+            node_id: node_id.to_vec(),
+            reason: "revoke".into(),
+            fence_binding: Some(binding),
+        };
+        drop(
+            service
+                .close_node(Request::new(request.clone()))
+                .await
+                .expect("close executed; discard ack"),
+        );
+        tokio::time::timeout(Duration::from_secs(2), connection.closed())
+            .await
+            .expect("connection closed");
+        assert_eq!(
+            service
+                .close_node(Request::new(request))
+                .await
+                .expect_err("retry has no history")
+                .code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            service
+                .get_node_connection(Request::new(GetNodeConnectionRequest {
+                    node_id: node_id.to_vec(),
+                }))
+                .await
+                .expect_err("current absence")
+                .code(),
+            tonic::Code::NotFound
+        );
+        shutdown(&service, router).await.expect("shutdown router");
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn restored_trust_snapshot_blocks_revoked_endpoint_without_operation_history() {
+        let agent_key = SecretKey::generate();
+        let endpoint = agent_key.public();
+        let handshake = handshake(&agent_key);
+        let node = handshake.node_id.clone();
+        let controller_key = SecretKey::generate();
+        for state in [NodeTrustState::Active, NodeTrustState::Revoked] {
+            let restored = IdentityPolicy::default();
+            restored
+                .replace_snapshot([(endpoint, node.clone(), state, 3)])
+                .expect("restore authoritative snapshot");
+            assert_eq!(
+                restored.permits(endpoint, AGENT_ALPN),
+                state == NodeTrustState::Active
+            );
+            assert_eq!(
+                restored.permits(endpoint, ENROLL_ALPN),
+                state == NodeTrustState::Active
+            );
+            assert_eq!(restored.revision(endpoint), 3);
+            assert_eq!(restored.retained_state(endpoint), state);
+            // Recreate both transport service and router with restored trust;
+            // the old service's in-memory operation history is unavailable.
+            let service = IrohTransportService::new_with_policy(8, restored.clone());
+            let router = build_router(
+                controller_key.clone(),
+                RelayMode::Disabled,
+                restored,
+                &service,
+            )
+            .await
+            .expect("restart transport router");
+            let client = Endpoint::builder(presets::Minimal)
+                .secret_key(agent_key.clone())
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("build agent");
+            let connected = tokio::time::timeout(
+                Duration::from_secs(3),
+                client.connect(router.endpoint().addr(), AGENT_ALPN),
+            )
+            .await
+            .expect("bounded connection attempt");
+            if state == NodeTrustState::Active {
+                let connection = connected.expect("active snapshot admits agent");
+                assert_eq!(
+                    send_handshake(&connection, &handshake).await.result,
+                    i32::from(HandshakeResult::Accepted)
+                );
+                wait_until_registered(&service, &node).await;
+            } else {
+                if let Ok(connection) = connected {
+                    tokio::time::timeout(Duration::from_secs(3), connection.closed())
+                        .await
+                        .expect("revoked transport closes connection");
+                }
+                assert!(
+                    !service
+                        .shared
+                        .inner
+                        .connections
+                        .lock()
+                        .await
+                        .contains_key(&node)
+                );
+            }
+            shutdown(&service, router)
+                .await
+                .expect("shutdown restarted router");
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
     async fn foreign_fence_terms_cannot_drive_state_updates() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();

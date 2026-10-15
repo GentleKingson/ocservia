@@ -264,8 +264,14 @@ another Controller.
 
    The response reports `status: revoked`. If you receive a `503` ("Revocation
    committed") response, the revocation is already committed in the database
-   and the trust convergence worker will finish synchronizing the transport
-   disconnect in the background.
+   but transport trust update or connection-close confirmation is incomplete.
+   The worker retries under the existing revision and owner-fencing rules;
+   owner loss or an uncertain RPC outcome can leave the task pending without
+   a guaranteed completion time. An offline node does not prove that a prior
+   close request succeeded. Preserve the original Request ID, approval ID,
+   reason, revision and error, and follow
+   [Revocation committed with synchronization pending](../operations/incident-recovery.md#revocation-committed-with-synchronization-pending)
+   before retrying or requesting another approval.
 
 ## Troubleshooting
 

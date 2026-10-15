@@ -116,6 +116,28 @@ fencing owner, is already gone; a failed close stays pending. The worker never
 counts lost connection ownership as delivery, and any other intent stays with
 the worker.
 
+An RPC timeout, cancellation or unavailable response can occur before or after
+the mutation. Neither that error nor a later owner/connection snapshot proves
+the historical result. An identical trust update is idempotent for the same
+node, EndpointID, state and revision, but still requires a valid binding for its
+operation identity (which also covers the reason). Applying a higher revision
+can itself close the old connection, so a lost update acknowledgement can also
+remove the owner needed for a retry. Retries are conditional on fencing and
+cannot guarantee eventual completion.
+
+`CloseNode` verifies its binding before removing the current connection; its
+`NOT_FOUND` response is treated by the Go client as satisfied current absence.
+That response does not identify which earlier operation, if any, closed the
+connection. Accordingly, `close_applied` records satisfaction of the existing
+close contract, not a durable receipt for a particular historical close.
+`GetNodeConnection` and `GetOwnerFence` expose current in-memory snapshots, not
+operation receipts. Restart loads authoritative database trust into transportd's
+in-memory policy before accepting connections, but does not reconstruct lost
+RPC acknowledgements or settle queue records. A failed or nonmatching
+`RecordSynchronized` can leave work pending even after transport effects ran;
+the API logs a persistence error but does not undo committed revocation.
+See the [read-only incident checks](../operations/incident-recovery.md#revocation-committed-with-synchronization-pending).
+
 When claiming trust-convergence work, the worker computes lease deadlines from
 a fresh database wall-clock read after acquiring the claim lock, and uses the
 retained attempt counter to fence late RPC responses even if the same worker

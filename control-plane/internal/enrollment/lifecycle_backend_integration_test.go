@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +24,8 @@ import (
 	localstore "github.com/GentleKingson/ocservia/control-plane/internal/localslice/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type lifecycleFixture struct {
@@ -259,15 +263,253 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 
 type leasedTransport struct {
 	update func(context.Context) error
+	close  func(context.Context) error
 	closes int
 }
 
 func (s *leasedTransport) UpdateNodeTrust(ctx context.Context, _, _ []byte, _ transportv1.NodeTrustState, _ string, _ uint64, _ []byte, _ *agentv1.FenceBindingV2) error {
 	return s.update(ctx)
 }
-func (s *leasedTransport) CloseNode(context.Context, []byte, string, *agentv1.FenceBindingV2) error {
+func (s *leasedTransport) CloseNode(ctx context.Context, _ []byte, _ string, _ *agentv1.FenceBindingV2) error {
 	s.closes++
+	if s.close != nil {
+		return s.close(ctx)
+	}
 	return nil
+}
+
+// The injector knows whether a side effect ran; the worker only sees the RPC
+// result. Equal errors before and after execution must leave equal durable
+// progress. This does not claim that a fake proves transport idempotency.
+func TestTrustUncertainRPCBackendIntegration(t *testing.T) {
+	for _, operation := range []string{"update", "close"} {
+		for _, code := range []codes.Code{codes.OK, codes.DeadlineExceeded, codes.Unavailable, codes.Canceled} {
+			for _, after := range []bool{false, true} {
+				if code == codes.OK && !after {
+					continue
+				}
+				name := fmt.Sprintf("%s/%s/after-execution=%t", operation, code, after)
+				t.Run(name, func(t *testing.T) {
+					f, ctx := newLifecycleFixture(t), context.Background()
+					v := f.job(t)
+					// Commit real revoked authority as well as the queue intent.
+					f.within(t, func(tx database.Tx) error {
+						s, err := enrollmentstore.Enrollment(tx)
+						if err != nil {
+							return err
+						}
+						at, err := database.WallTime(ctx, tx)
+						if err != nil {
+							return err
+						}
+						revision, err := s.Revoke(ctx, v.NodeID, at)
+						if err == nil && revision != v.Revision {
+							return errors.New("fixture revision mismatch")
+						}
+						return err
+					})
+					bindings, err := NewBackend(f.b, "", "", nil).ListNodeTrust(ctx)
+					if err != nil || !slices.ContainsFunc(bindings, func(binding *transportv1.NodeTrustBinding) bool {
+						return bytes.Equal(binding.NodeId, v.NodeID[:]) && binding.Revision == v.Revision && binding.State == transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED
+					}) {
+						t.Fatal("revoked authority not committed", bindings, err)
+					}
+					effects, updates := 0, 0
+					inject := func(context.Context) error {
+						if after {
+							effects++
+						}
+						return status.Error(code, "injected RPC outcome")
+					}
+					transport := &leasedTransport{update: func(ctx context.Context) error {
+						updates++
+						if operation == "update" {
+							return inject(ctx)
+						}
+						return nil
+					}}
+					if operation == "close" {
+						transport.close = inject
+					}
+					worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+					if err != nil {
+						t.Fatal(err)
+					}
+					worked, err := worker.RunOnce(ctx)
+					if !worked || status.Code(err) != code {
+						t.Fatal(worked, err)
+					}
+					got := f.snapshot(t, v.NodeID)
+					wantUpdate := operation == "close" || code == codes.OK
+					wantCloses := 0
+					if wantUpdate {
+						wantCloses = 1
+					}
+					if got.Update != wantUpdate || got.Close != (code == codes.OK) || !got.Required || got.Worker != nil || got.Attempts != 1 || (got.Error != nil) != (code != codes.OK) || transport.closes != wantCloses || effects != boolInt(after) {
+						t.Fatalf("outcome=%+v effects=%d closes=%d", got, effects, transport.closes)
+					}
+					// Neither uncertain RPC results nor a subsequent lost owner
+					// can manufacture the missing acknowledgement.
+					if code != codes.OK {
+						f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, `UPDATE node_trust_convergence SET available_at=? WHERE node_id=?`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+						transport.update = func(context.Context) error { updates++; return ownersession.ErrNotOwner }
+						transport.close = func(context.Context) error { return ownersession.ErrNotOwner }
+						if worked, err := worker.RunOnce(ctx); !worked || !errors.Is(err, ownersession.ErrNotOwner) {
+							t.Fatal(worked, err)
+						}
+						got = f.snapshot(t, v.NodeID)
+						if got.Update != wantUpdate || got.Close || got.Attempts != 2 || got.Error == nil {
+							t.Fatal("owner loss acknowledged an unknown result", got)
+						}
+						if operation == "close" && updates != 1 {
+							t.Fatal("replayed acknowledged update", updates)
+						}
+					}
+					t.Logf("RPC=%s side_effect=%t DB update=%t close=%t attempts=%d", code, after, got.Update, got.Close, got.Attempts)
+				})
+			}
+		}
+	}
+}
+
+func TestTrustOwnerEndedBackendIntegration(t *testing.T) {
+	for _, ending := range []string{"closed", "expired", "replaced"} {
+		t.Run(ending, func(t *testing.T) {
+			f, ctx := newLifecycleFixture(t), context.Background()
+			v := f.job(t)
+			signer, err := commandauth.NewRandomSigner()
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager, err := ownersession.NewManagerBackend(f.b, signer, &recordingRegistrar{}, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var endpoint [32]byte
+			copy(endpoint[:], v.EndpointID)
+			fence, err := manager.OpenSession(ctx, [16]byte(v.NodeID), endpoint, 1, []string{ownersession.FencingCapability})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			action := func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error { calls++; return nil }
+			if err := manager.ExecuteFenced(ctx, [16]byte(v.NodeID), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(v.NodeID), ownersession.FencingCapability, action); err != nil || calls != 1 {
+				t.Fatal("live owner refused", err, calls)
+			}
+			var connection [16]byte
+			copy(connection[:], fence.ConnectionId)
+			if ending == "closed" {
+				if err := manager.CloseSession(ctx, [16]byte(v.NodeID), connection, int64(fence.OwnerEpoch)); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// Wait for the actual signed lease deadline. Shortening only the
+				// database deadline would not expire the already-issued fence.
+				time.Sleep(time.Until(fence.LeaseUntil.AsTime()) + 50*time.Millisecond)
+				if ending == "replaced" {
+					successor, err := ownersession.NewManagerBackend(f.b, signer, &recordingRegistrar{}, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+					if err != nil {
+						t.Fatal(err)
+					}
+					next, err := successor.OpenSession(ctx, [16]byte(v.NodeID), endpoint, 1, []string{ownersession.FencingCapability})
+					if err != nil || next.GetOwnerEpoch() <= fence.OwnerEpoch {
+						t.Fatal(next, err)
+					}
+				}
+			}
+			if err := manager.ExecuteFenced(ctx, [16]byte(v.NodeID), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(v.NodeID), ownersession.FencingCapability, action); !errors.Is(err, ownersession.ErrNotOwner) || calls != 1 {
+				t.Fatal("ended owner issued binding", err, calls)
+			}
+		})
+	}
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func TestTrustSynchronousWorkerRaceBackendIntegration(t *testing.T) {
+	for _, success := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late-worker-success=%t", success), func(t *testing.T) {
+			f, ctx := newLifecycleFixture(t), context.Background()
+			v := f.job(t)
+			service := NewBackend(f.b, "", "", nil)
+			entered, resume := make(chan struct{}), make(chan struct{})
+			transport := &leasedTransport{update: func(context.Context) error {
+				close(entered)
+				<-resume
+				if !success {
+					return status.Error(codes.Unavailable, "late failure")
+				}
+				return nil
+			}}
+			worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { _, err := worker.RunOnce(ctx); done <- err }()
+			<-entered
+			// The API records its own acknowledgements while the worker holds
+			// a claim, then the worker delivers a late result for that intent.
+			recorded, recordErr := service.RecordRevocationSynchronized(ctx, NodeTrust{v.NodeID, v.EndpointID, v.Revision}, v.Reason, true)
+			close(resume)
+			err = <-done
+			if recordErr != nil || !recorded || (err == nil) != success {
+				t.Fatal(recorded, recordErr, err)
+			}
+			got := f.snapshot(t, v.NodeID)
+			if !got.Update || !got.Close || got.Worker != nil || got.Attempts != 1 {
+				t.Fatal("late worker lost synchronous evidence", got)
+			}
+			if worked, err := worker.RunOnce(ctx); worked || err != nil {
+				t.Fatal("settled intent reclaimed", worked, err)
+			}
+		})
+	}
+}
+
+func TestTrustSupersededResultBackendIntegration(t *testing.T) {
+	f, ctx := newLifecycleFixture(t), context.Background()
+	v := f.job(t)
+	old := v
+	transport := &leasedTransport{update: func(context.Context) error {
+		v.Revision++
+		v.EndpointID = bytes.Repeat([]byte{9}, 32)
+		v.Reason = "superseding intent"
+		f.trust(t, func(s enrollmentstore.TrustStore) error {
+			return s.Enqueue(ctx, v, value.Timestamp{Valid: true, Micros: value.NegativeInfinity})
+		})
+		return nil
+	}}
+	worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := worker.RunOnce(ctx); !worked || err == nil {
+		t.Fatal(worked, err)
+	}
+	before := f.snapshot(t, v.NodeID)
+	if before.Revision != v.Revision || before.Update || before.Close || transport.closes != 0 {
+		t.Fatal(before)
+	}
+	service := NewBackend(f.b, "", "", nil)
+	if changed, err := service.RecordRevocationSynchronized(ctx, NodeTrust{old.NodeID, old.EndpointID, old.Revision}, old.Reason, true); changed || err != nil {
+		t.Fatal(changed, err)
+	}
+	if !reflect.DeepEqual(before, f.snapshot(t, v.NodeID)) {
+		t.Fatal("old synchronous result changed new intent")
+	}
+	transport.update = func(context.Context) error { return nil }
+	if worked, err := worker.RunOnce(ctx); !worked || err != nil {
+		t.Fatal(worked, err)
+	}
+	if got := f.snapshot(t, v.NodeID); !got.Update || !got.Close {
+		t.Fatal(got)
+	}
 }
 
 func TestTrustWorkerRenewalBackendIntegration(t *testing.T) {
@@ -373,6 +615,28 @@ func TestTrustSynchronousRevocationBackendIntegration(t *testing.T) {
 		t.Fatal("evidence for a different intent changed durable state")
 	}
 	trust := NodeTrust{v.NodeID, v.EndpointID, v.Revision}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if recorded, err := service.RecordRevocationSynchronized(cancelled, trust, v.Reason, true); err == nil || recorded {
+		t.Fatal("cancelled bookkeeping claimed success", recorded, err)
+	}
+	if !reflect.DeepEqual(before, f.snapshot(t, v.NodeID)) {
+		t.Fatal("failed bookkeeping changed durable progress")
+	}
+	writeFailure := errors.New("injected bookkeeping transaction failure")
+	err = database.Within(ctx, f.b, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := enrollmentstore.Trust(tx)
+		if err != nil {
+			return err
+		}
+		if changed, err := store.RecordSynchronized(ctx, v, true); err != nil || !changed {
+			return errors.Join(err, errors.New("bookkeeping write not exercised"))
+		}
+		return writeFailure
+	})
+	if !errors.Is(err, writeFailure) || !reflect.DeepEqual(before, f.snapshot(t, v.NodeID)) {
+		t.Fatal("rolled-back bookkeeping left completion flags", err)
+	}
 	if recorded, err := service.RecordRevocationSynchronized(ctx, trust, v.Reason, false); err != nil || !recorded {
 		t.Fatal(recorded, err)
 	}

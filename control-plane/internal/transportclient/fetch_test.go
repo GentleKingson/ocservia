@@ -40,7 +40,7 @@ func (s *blockingFetchServer) FetchArtifact(request *transportv1.FetchArtifactRe
 	return stream.Send(&agentv1.ArtifactChunk{ArtifactId: request.GetArtifactId(), Data: data, Eof: true, Sha256: digest[:]})
 }
 
-func startFetchServer(t *testing.T, server *blockingFetchServer) string {
+func startFetchServer(t *testing.T, server transportv1.TransportServiceServer) string {
 	t.Helper()
 	workingDirectory, err := os.Getwd()
 	if err != nil {

@@ -26,8 +26,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
+	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -80,12 +82,49 @@ func enrollmentBackend(t *testing.T) database.Backend {
 	if dsn == "" {
 		t.Skip("real PostgreSQL or PR02 backend required")
 	}
-	pool, err := pgxpool.New(ctx, dsn)
+	// Claims are global, so each fixture needs its own database, just as on
+	// MySQL. Otherwise a worker can claim another test's pending intent.
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		t.Fatal("owner URL required for isolated enrollment database")
+	}
+	admin, err := pgxpool.New(ctx, ownerURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
-	return postgres.WrapPool(pool)
+	t.Cleanup(admin.Close)
+	name := "enrollment_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	identifier := pgx.Identifier{name}.Sanitize()
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE "+identifier); err != nil {
+			t.Error(err)
+		}
+	})
+	open := func(url string) *pgxpool.Pool {
+		t.Helper()
+		cfg, err := pgxpool.ParseConfig(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.ConnConfig.Database = name
+		pool, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(pool.Close)
+		return pool
+	}
+	owner, runtime := open(ownerURL), open(dsn)
+	if err := migrations.Migrate(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.GrantRuntimePrivileges(ctx, owner, runtime.Config().ConnConfig.User); err != nil {
+		t.Fatal(err)
+	}
+	return postgres.WrapPool(runtime)
 }
 
 func TestEnrollmentBackendIntegration(t *testing.T) {
@@ -330,6 +369,11 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}
 	if replay, err := s.Revoke(ctx, revocation); err != nil || replay.Revision != revoked.Revision {
 		t.Fatal("revoke replay", replay, err)
+	}
+	unrelated := revocation
+	unrelated.ApprovalID = uuid.New()
+	if _, err := s.Revoke(ctx, unrelated); !errors.Is(err, approvals.ErrNotReady) {
+		t.Fatal("unrelated approval authorized revoked-node replay", err)
 	}
 	for _, alpn := range []string{"ocserv-platform/enroll/1", "ocserv-platform/agent/1"} {
 		if permitted, err := s.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: alpn}); err != nil || permitted {
