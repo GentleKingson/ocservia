@@ -76,6 +76,8 @@ CLAUDE.md run_docs
 web/src/App.vue run_web run_web_browser run_controller_cache
 web/src/api/generated/index.ts run_web run_web_browser run_controller_cache
 web/src/views/NodesView.vue run_web run_web_browser run_controller_cache
+web/src/views/OverviewView.vue run_web run_web_browser run_controller_cache
+web/src/components/overview/MetricCard.vue run_web run_web_browser run_controller_cache
 web/src/components/nodes/NodeDetailHeader.vue run_web run_web_browser run_controller_cache
 web/src/features/configuration/useNodeConfiguration.ts run_web run_web_browser run_controller_cache
 web/src/features/user-password.ts run_web run_web_browser run_controller_cache

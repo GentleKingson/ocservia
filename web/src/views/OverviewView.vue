@@ -280,7 +280,7 @@ onBeforeUnmount(() => {
           </p>
           <ol
             v-else
-            class="divide-border m-0 grid list-none divide-y p-0"
+            class="divide-border m-0 grid min-w-0 grid-cols-1 list-none divide-y p-0"
             data-testid="overview-operations-list"
           >
             <li
@@ -356,7 +356,7 @@ onBeforeUnmount(() => {
           </p>
           <ol
             v-else
-            class="divide-border m-0 grid list-none divide-y p-0"
+            class="divide-border m-0 grid min-w-0 grid-cols-1 list-none divide-y p-0"
             data-testid="overview-events"
           >
             <li
@@ -387,7 +387,7 @@ onBeforeUnmount(() => {
       :title="$t('offlineStaleNodes')"
     >
       <ol
-        class="divide-border m-0 grid list-none divide-y p-0"
+        class="divide-border m-0 grid min-w-0 grid-cols-1 list-none divide-y p-0"
         data-testid="overview-notable-nodes"
       >
         <li

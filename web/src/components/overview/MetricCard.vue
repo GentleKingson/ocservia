@@ -17,7 +17,7 @@ defineProps<{
   <RouterLink
     :to="to"
     :aria-label="title"
-    class="from-primary/5 to-card border-border text-card-foreground hover:border-primary/50 focus-visible:ring-ring grid content-start gap-3 rounded-xl border bg-gradient-to-t p-5 no-underline shadow-xs transition-[border-color,box-shadow] hover:shadow-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+    class="bg-card border-border text-card-foreground hover:border-primary/50 focus-visible:ring-ring grid min-w-0 content-start gap-3 rounded-xl border p-5 no-underline shadow-xs motion-safe:transition-[border-color,box-shadow] hover:shadow-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
   >
     <div class="flex items-start justify-between gap-3">
       <h2 class="text-muted-foreground m-0 text-sm font-medium">
@@ -25,13 +25,13 @@ defineProps<{
       </h2>
       <component
         :is="icon"
-        class="text-muted-foreground size-5 shrink-0"
+        class="text-primary size-5 shrink-0"
         aria-hidden="true"
       />
     </div>
     <div class="grid gap-1">
       <strong
-        class="text-foreground text-2xl leading-none font-semibold tabular-nums md:text-3xl"
+        class="text-foreground text-3xl leading-tight font-semibold tracking-tight wrap-anywhere tabular-nums md:text-4xl"
         :data-testid="valueTestid"
         >{{ value }}</strong
       >
