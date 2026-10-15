@@ -536,7 +536,7 @@ python3() { echo "api:$2"; return "$API_EXIT"; }
         # Drive the actual terminal phase. No failed observation may emit its
         # final checkpoint; API errors are failures, never evidence of offline.
         for fault in (None, 'remove', 'package installed', 'process', 'timer', 'payload', 'identity', 'endpoint changed', 'online',
-                      'api timeout', 'revoked', 'owner', 'readmitted', 'effect', 'ocserv'):
+                      'api timeout', 'revoked', 'trust revision', 'owner', 'readmitted', 'effect', 'ocserv'):
             state = {'removed': False}
             def native():
                 active = not state['removed']
@@ -561,14 +561,16 @@ python3() { echo "api:$2"; return "$API_EXIT"; }
             def terminal_api(*_args, **_kwargs):
                 if state['removed'] and fault == 'api timeout':
                     raise TimeoutError('API timed out')
-                return {'trust_status': 'revoked' if state['removed'] and fault == 'revoked' else 'active',
+                return {'trust_status': 'revoked' if state['removed'] and fault == 'revoked' else ('offline' if state['removed'] else 'active'),
                         'connection_state': 'offline' if state['removed'] and fault != 'online' else 'online'}
             def terminal_sql(query):
                 if 'owner_epoch>' in query:
                     return '1' if fault == 'readmitted' else '0'
                 if 'NOT EXISTS' in query:
                     return 'f' if not state['removed'] or fault == 'owner' else 't'
-                return 'active|3' if 'authorization_revision' in query else ('changed|active' if state['removed'] and fault == 'endpoint changed' else 'endpoint|active')
+                if 'authorization_revision' in query:
+                    return ('offline|4' if fault == 'trust revision' else 'offline|3') if state['removed'] else 'active|3'
+                return ('changed|active' if state['removed'] and fault == 'endpoint changed' else 'endpoint|active')
             def once(description, fn, seconds=120):
                 value = fn()
                 if not value:

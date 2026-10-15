@@ -180,7 +180,8 @@ Offline is determined by `telemetry.OfflineAfter` (90 seconds since the last
 heartbeat), independently of the default 30-second owner lease. The test allows
 180 seconds for Offline, then 60 seconds for lease expiration, and observes a
 further 32 seconds without a new owner epoch, running Agent component, active
-unit/timer, trust change, identity/configuration change, privileged effect,
+unit/timer, authorization revision or endpoint-key change, identity/configuration
+change, privileged effect,
 ocserv restart or reload. It checks removed payloads and `/proc` executables,
 including unlinked running binaries. An API error, removal failure, stale online
 state, live owner, unexpected trust revision/revocation or incomplete evidence
@@ -194,7 +195,12 @@ not. The repository's preremove delegates actual removal to the verified archive
 uninstaller without `--purge-state`, preserving generated identity, state and
 configuration. dpkg purge removes conffiles and invokes a package postrm if one
 exists; it does not imply the repository's explicit `--purge-state` operation.
-No purge, rebind, revocation or lifecycle script contract is changed here.
+The existing Controller also persists `nodes.status=offline` on disconnect or
+telemetry maintenance and exposes that value as API `trust_status`. This normal
+transition is allowed; the endpoint key must remain active and the authorization
+revision must stay unchanged (`postgres/transport_ingress.go`,
+`postgres/telemetry_maintenance.go`, and `postgres/enrollment.go`). No purge,
+rebind, revocation or lifecycle script contract is changed here.
 
 In `result.json`, the harness writes `scope=business-smoke` or
 `scope=integration` (never full release acceptance), along with

@@ -820,7 +820,6 @@ def uninstall_identity():
 
 
 def uninstall_native():
-    # list-units uses a table on systemd 255; --output affects status journals.
     listing = run('systemctl', 'list-units', '--all', '--no-pager', '--plain', '--no-legend', 'ocservia-*')
     units = [dict(zip(('unit', 'load', 'active', 'sub'), line.split()[:4]))
              for line in listing.splitlines() if line.strip()]
@@ -876,6 +875,7 @@ def uninstall():
     trust = sql(trust_query)
     endpoint_query = f"SELECT encode(endpoint_id,'hex')||'|'||state FROM node_endpoint_keys WHERE node_id='{node}' ORDER BY endpoint_id;"
     endpoint_trust = sql(endpoint_query)
+    authorization_revision = trust.split('|')[1]
     assert trust.startswith('active|') and endpoint_trust == os.environ['T07_ENDPOINT'] + '|active'
     assert run('dpkg-query', '-W', '-f=${Status}', 'ocservia-agent') == 'install ok installed'
     payload = run('dpkg-query', '-L', 'ocservia-agent').splitlines()
@@ -903,8 +903,13 @@ def uninstall():
     for _ in range(16):
         assert sql(expired_query) == 't', 'owner lease became live again'
         assert api(prefix)['connection_state'] == 'offline'
-        assert api(prefix)['trust_status'] == 'active'
-        assert sql(trust_query) == trust and sql(endpoint_query) == endpoint_trust
+        # The existing ingress/telemetry contract persists nodes.status=offline
+        # and exposes it as trust_status. Admission stays active via the endpoint
+        # key; neither offline transition is a revocation or authority revision.
+        assert api(prefix)['trust_status'] in ('active', 'offline')
+        current_status, current_revision = sql(trust_query).split('|')
+        assert current_status in ('active', 'offline') and current_revision == authorization_revision
+        assert sql(endpoint_query) == endpoint_trust
         assert sorted(uninstall_identity()) == identity, 'identity/configuration changed'
         assert_uninstalled(uninstall_native(), paths)
         assert node_side_effects() == effects, 'new privileged effect after removal'
@@ -913,7 +918,8 @@ def uninstall():
                    f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND owner_epoch>{int(owner_before['owner_epoch'])};") == '0'
         time.sleep(2)
     record('agent_offline', node_id=node, owner_lease_expired=True, observation_seconds=32)
-    record('identity_preserved', identity=identity, trust=trust, endpoint_trust=endpoint_trust)
+    record('identity_preserved', identity=identity, trust_before=trust, trust_after=sql(trust_query),
+           endpoint_trust=endpoint_trust, authorization_revision=int(authorization_revision))
     vpn_smoke('after_uninstall')
     record('ocserv_unaffected', service=ocserv, side_effects=effects)
 
