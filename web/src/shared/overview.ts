@@ -28,8 +28,6 @@ export const useOverviewStore = defineStore("overview", () => {
   const operations = ref<Operation[]>([]);
   const events = ref<PlatformEvent[]>([]);
   const summary = ref<OperationSummary>({ active: 0, unknown: 0 });
-  const operationsLoading = ref(false);
-  const eventsLoading = ref(false);
   const operationsLoaded = ref(false);
   const eventsLoaded = ref(false);
   const operationsUnavailable = ref(false);
@@ -73,7 +71,6 @@ export const useOverviewStore = defineStore("overview", () => {
     const controller = new AbortController();
     operationsController = controller;
     const sequence = ++operationsSequence;
-    operationsLoading.value = true;
     let context: WorkspaceContext | undefined;
     try {
       context = await currentContext();
@@ -108,7 +105,6 @@ export const useOverviewStore = defineStore("overview", () => {
     } finally {
       if (operationsController === controller) {
         operationsController = undefined;
-        operationsLoading.value = false;
       }
     }
   }
@@ -118,7 +114,6 @@ export const useOverviewStore = defineStore("overview", () => {
     const controller = new AbortController();
     eventsController = controller;
     const sequence = ++eventsSequence;
-    eventsLoading.value = true;
     const incremental = eventsLoaded.value;
     // The first load reads one newest-first page so the cost stays bounded
     // no matter how much durable history the workspace has. Incremental
@@ -165,7 +160,6 @@ export const useOverviewStore = defineStore("overview", () => {
     } finally {
       if (eventsController === controller) {
         eventsController = undefined;
-        eventsLoading.value = false;
       }
     }
   }
@@ -213,8 +207,6 @@ export const useOverviewStore = defineStore("overview", () => {
     operations.value = [];
     events.value = [];
     summary.value = { active: 0, unknown: 0 };
-    operationsLoading.value = false;
-    eventsLoading.value = false;
     operationsLoaded.value = false;
     eventsLoaded.value = false;
     operationsUnavailable.value = false;
@@ -268,8 +260,6 @@ export const useOverviewStore = defineStore("overview", () => {
   return {
     operations,
     events,
-    operationsLoading,
-    eventsLoading,
     operationsLoaded,
     eventsLoaded,
     operationsUnavailable,
