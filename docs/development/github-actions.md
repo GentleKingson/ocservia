@@ -25,8 +25,7 @@ Quick.
 | docs | `scripts/docs-check.sh` only: CRLF, non-empty Markdown, audited Claude settings keys, a few bootstrap/`AGENTS.md` text and link rules (details in [testing](testing.md)); no general link, anchor, SQL or support-fact check, and no `policy-check` |
 | go | `go-check.sh standard`: gofmt, vet and `go test -count=1` without race in both `control-plane` and `signer`. The same job also runs the selected CI guard and release self-test suites when routing sets `run_ci_tools` |
 | rust | `rust-check.sh`: format, Clippy and workspace tests, only when routing sets `run_rust`. Full additionally runs the seven focused vendored iroh patch tests against the archive lock (`rust/vendor/iroh/OCSERVIA-PROVENANCE.md`) and fails unless all seven ran. The same job also runs the installer and Relay-launcher self-tests when routing sets `run_installers`, in which case `rust-check.sh` does not run unless Rust is also selected |
-| web | `web-check.sh basic`: format, lint, types, unit tests, build and generated-client authentication; no browser installation/regression |
-| web-browser | Only when routing sets `run_web_browser`: installs Playwright engines and runs `web/test/run-auth-browser.mjs` with the authentication, rollout, form/dialog, password/certificate, shell/Overview layout, Nodes/detail, Operations and approvals/audit specs against the stubbed production build. Quick runs Chromium `desktop`/`mobile` plus the `firefox` and `webkit` key-spec projects; Full also serves the build through the production Standalone gateway and then the Integrated Edge and gateway (`--gateway=standalone`, `--gateway=integrated`), where those specs fail on any CSP violation and an enforced positive control must be observed. A missing browser or non-declared skip fails the job |
+| web | `web-check.sh basic`: format, lint, types, unit tests, build and generated-client authentication. When routing sets `run_web_browser`, the same job installs Playwright engines and runs `web/test/run-auth-browser.mjs`, reusing its dependencies, generated client and production build. The authentication, rollout, form/dialog, password/certificate, shell/Overview layout, Nodes/detail, Operations and approvals/audit specs remain selected. Quick runs Chromium `desktop`/`mobile` plus the `firefox` and `webkit` key-spec projects; Full also serves the build through the production Standalone gateway and then the Integrated Edge and gateway (`--gateway=standalone`, `--gateway=integrated`), where those specs fail on any CSP violation and an enforced positive control must be observed. A missing browser or non-declared skip fails the job |
 | database-smoke | PostgreSQL 18.x and MySQL 8.4 LTS; Quick runs smoke, Full runs full database acceptance (MySQL as three parallel `DATABASE_SHARD` legs: `mysql-cutover`, `mysql-core`, `services`); both first enforce the SQL artifact window and both check current snapshot equivalence (MySQL Full: once, in `services`). The job keeps this name in Full |
 | database-recovery-full | PostgreSQL physical and MySQL logical backup/restore, including snapshot provenance, Full only |
 | Basic CI Result | Always checks routing and selected job results; required missing/skipped/failed/cancelled jobs fail |
@@ -138,7 +137,7 @@ including `control-plane/` and `docs/`, selects `docs` alone.
 | Paths (first match wins) | Quick checks |
 | --- | --- |
 | Other Markdown, `LICENSE*`, `.claude/settings.json` | docs |
-| `web/*`, `scripts/web-check.sh` | web; also web-browser for `web/src/{api,shared,components/ui,components/layout,features/operations}/*`, `App.vue`, `main.*`, login/operations/rollout/nodes/node-detail views, `components/{common,nodes}`, configuration/certificate features, `node-workflow.ts`, `user-password.ts`, the user-policy adapter and `upstream/UserPolicyFields.vue`, `web/e2e/*`, Playwright/Vite config, `index.html`, the browser runner and npm manifests |
+| `web/*`, `scripts/web-check.sh` | web; also browser regressions for `web/src/{api,shared,components/ui,components/layout,features/operations}/*`, `App.vue`, `main.*`, login/operations/rollout/nodes/node-detail views, `components/{common,nodes}`, configuration/certificate features, `node-workflow.ts`, `user-password.ts`, the user-policy adapter and `upstream/UserPolicyFields.vue`, `web/e2e/*`, Playwright/Vite config, `index.html`, the browser runner and npm manifests |
 | `rust/*` (Dockerfiles aside), `scripts/rust-check.sh` | rust |
 | `control-plane/{cmd,migrations,internal}/*`, Go locks and `go.work*`, `deploy/compose`, `deploy/database-e2e`, database/MySQL/PostgreSQL scripts | go + database smoke on both engines |
 | Other `control-plane/*`, `scripts/go-check.sh`, `signer/*.go`, `signer/go.mod`, `signer/go.sum` | go |
@@ -157,8 +156,8 @@ path, the router fails closed by enabling every Basic flag and both CI tool
 suites while keeping the Quick profile (smoke database scope); path routing
 never escalates a Quick run to Full.
 
-Manual workflow dispatches bypass path routing altogether: docs, go, rust, web,
-web-browser, and database jobs always run, while the CI-tool suites, installer
+Manual workflow dispatches bypass path routing altogether: docs, go, rust, web
+(including browser regressions), and database jobs always run, while the CI-tool suites, installer
 self-tests, and Controller cache refresh stay off. A manual Full run expands
 the database matrix to four legs (PostgreSQL plus the three MySQL shards) and
 adds `database-recovery-full`, whereas a manual Quick run uses two database
@@ -203,10 +202,24 @@ entrypoints with no scheduled Actions workflow.
 
 `basic-ci-result` publishes the `Basic CI Result` status context. It
 passes only when path routing succeeds, every selected job passes, and every
-unselected job is skipped; any missing, failed, cancelled, or unexpectedly
-skipped job fails the check. Repository administrators must configure GitHub
+unselected job is skipped. The selected browser step must also report success
+through the `web` job output; missing, failed, cancelled or unexpectedly skipped
+browser checks fail the result. Repository administrators must configure GitHub
 rulesets to require this context and remove retired status contexts, since
 editing workflow YAML does not update branch protection settings.
+
+## Measuring CI changes
+
+After each CI optimization merges, observe at least seven complete days before
+deciding whether to retain it or add another optimization. Sum actual job
+execution minutes, including failed and cancelled work, and separately track
+queue time and workflow wall time. Deduplicate successful jobs carried forward
+by failed-job reruns. Compare runner minutes per run within the same event,
+Quick/Full profile and selected checks, then normalize to a common mix of runs;
+raw daily totals can change simply because more changes landed. Preserve the
+before/after commit and sample window with the comparison. Planning estimates
+are not acceptance targets; stop or revert if measured gains do not justify
+maintenance cost or workflow latency increases materially.
 
 ## Separate acceptance
 

@@ -197,34 +197,9 @@ jobs:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_web == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      npm_config_audit: "false"
-      npm_config_fund: "false"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Cache pinned web tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
-      - name: Cache npm downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
-      - run: scripts/bootstrap.sh web
-      - run: scripts/web-check.sh basic
-
-  web-browser:
-    needs: ci-relevance
-    if: needs.ci-relevance.outputs.run_web_browser == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 50
+    outputs:
+      browser_result: ${{ steps.browser.outcome }}
     env:
       npm_config_audit: "false"
       npm_config_fund: "false"
@@ -252,18 +227,20 @@ jobs:
           path: .cache/npm
           key: npm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
       - run: scripts/bootstrap.sh web
+      - run: scripts/web-check.sh basic
       - name: Install Playwright browsers
+        if: needs.ci-relevance.outputs.run_web_browser == 'true'
         run: |
           source scripts/env.sh
           cd web
           # shellcheck disable=SC2086 # space-separated engine list
           npx --no-install playwright install --with-deps ${BROWSER_ENGINES}
       - name: Browser regressions on the production build
+        id: browser
+        if: needs.ci-relevance.outputs.run_web_browser == 'true'
         run: |
           source scripts/env.sh
           cd web
-          npm --prefix src/api/generated run build
-          npm run build
           args=()
           for project in ${BROWSER_PROJECTS}; do args+=("--project=${project}"); done
           specs=(agent-rollout.spec.ts node-forms.spec.ts user-password.spec.ts shell-navigation.spec.ts apple-layout.spec.ts nodes-list.spec.ts node-detail.spec.ts operations.spec.ts approval-queue.spec.ts approvals-audit.spec.ts certificate-lifecycle.spec.ts)
@@ -399,7 +376,7 @@ jobs:
   basic-ci-result:
     name: Basic CI Result
     if: always()
-    needs: [ci-relevance, docs, go, rust, web, web-browser, database-smoke, database-recovery-full]
+    needs: [ci-relevance, docs, go, rust, web, database-smoke, database-recovery-full]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -416,11 +393,14 @@ jobs:
             (if $routing.profile == "full" then
               all(["run_docs", "run_go", "run_rust", "run_web", "run_web_browser", "run_database"][]; $routing[.] == "true")
             else true end) and
-            all(["docs", "go", "rust", "web", "web-browser", "database-smoke"][];
+            ($routing.run_web_browser == "false" or $routing.run_web == "true") and
+            (if $routing.run_web == "true" then
+              .web.outputs.browser_result == (if $routing.run_web_browser == "true" then "success" else "skipped" end)
+            else true end) and
+            all(["docs", "go", "rust", "web", "database-smoke"][];
               . as $job | (if $job == "go" then ($routing.run_go == "true" or $routing.run_ci_tools == "true")
                 elif $job == "rust" then ($routing.run_rust == "true" or $routing.run_installers == "true")
                 elif $job == "database-smoke" then $routing.run_database == "true"
-                elif $job == "web-browser" then $routing.run_web_browser == "true"
                 else $routing["run_" + $job] == "true" end) as $selected |
               ($selected and $results[$job].result == "success") or
               ($selected == false and $results[$job].result == "skipped")) and

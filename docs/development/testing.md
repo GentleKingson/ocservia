@@ -96,7 +96,9 @@ from `web` (the hook override applies only to that lint invocation; running
 `npm run lint` or `npm run typecheck` directly still builds the generated
 client first). Locally, `make web-check` uses `full` mode, which adds the
 Playwright Chromium browser authentication suite
-(`web/test/run-auth-browser.mjs`), whereas Basic CI runs `basic` mode.
+(`web/test/run-auth-browser.mjs`). Basic CI runs `basic` mode once, then runs
+the path-selected browser regressions in the same `web` job against that build,
+without reinstalling npm dependencies or rebuilding the generated client.
 
 For subsystem-specific and integration checks, pick the entrypoint that matches
 the behavior under test:

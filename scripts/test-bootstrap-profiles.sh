@@ -32,7 +32,7 @@ end
 
 worker_flags = {
   "docs" => "run_docs", "go" => "run_go", "rust" => "run_rust",
-  "web" => "run_web", "web-browser" => "run_web_browser", "database-smoke" => "run_database"
+  "web" => "run_web", "database-smoke" => "run_database"
 }
 reject("Basic CI triggers drifted") unless workflow.fetch(true).keys.sort == %w[pull_request push workflow_call workflow_dispatch]
 reject("reusable Basic CI must require an explicit profile") unless
@@ -44,6 +44,28 @@ worker_flags.each do |id, flag|
   condition += " || needs.ci-relevance.outputs.run_installers == 'true'" if id == "rust"
   reject("#{id} must follow routing") unless jobs.fetch(id).fetch("if") == condition
 end
+web = jobs.fetch("web")
+reject("browser checks must reuse the web job") if jobs.key?("web-browser")
+web_steps = web.fetch("steps")
+basic_index = web_steps.index { |s| s["run"] == "scripts/web-check.sh basic" }
+install_index = web_steps.index { |s| s["name"] == "Install Playwright browsers" }
+browser_index = web_steps.index { |s| s["id"] == "browser" }
+reject("web must prepare and build once before browser checks") unless
+  web_steps.count { |s| s["run"] == "scripts/bootstrap.sh web" } == 1 &&
+  [basic_index, install_index, browser_index].none?(&:nil?) &&
+  basic_index < install_index && install_index < browser_index &&
+  web_steps.count { |s| s.fetch("run", "").include?("scripts/web-check.sh") } == 1
+browser = web_steps[browser_index]
+reject("browser install and regressions must follow routing") unless
+  [web_steps[install_index], browser].all? { |s| s["if"] == "needs.ci-relevance.outputs.run_web_browser == 'true'" }
+reject("browser regressions must reuse the existing production build") if
+  browser.fetch("run").match?(/npm.*run build|bootstrap\.sh/)
+reject("browser outcome must be visible to the required check") unless
+  web.dig("outputs", "browser_result") == "${{ steps.browser.outcome }}"
+reject("all desktop/mobile engines and Full gateways must remain selected") unless
+  web.dig("env", "BROWSER_PROJECTS") == "desktop mobile firefox webkit" &&
+  web.dig("env", "BROWSER_ENGINES") == "chromium firefox webkit" &&
+  web.dig("env", "BROWSER_GATEWAYS") == "${{ needs.ci-relevance.outputs.profile == 'full' && 'standalone integrated' || '' }}"
 %w[go rust].each do |id|
   steps = jobs.fetch(id).fetch("steps")
   heavy = steps.select { |s| s.fetch("run", "").match?(/scripts\/(go-check|rust-check)\.sh|bootstrap.sh rust-basic/) }
@@ -86,17 +108,19 @@ require "json"
 require "open3"
 summary = result.fetch("steps").first.fetch("run")
 %w[quick full].each do |profile|
-  selections = profile == "full" ? [worker_flags.keys] : [%w[docs], %w[web], %w[rust], %w[go database-smoke], %w[ci_tools], %w[installers], %w[ci_tools installers], worker_flags.keys]
+  selections = profile == "full" ? [worker_flags.keys + %w[browser]] : [%w[docs], %w[web], %w[web browser], %w[rust], %w[go database-smoke], %w[ci_tools], %w[installers], %w[ci_tools installers], worker_flags.keys + %w[browser]]
   selections.each do |selected|
     flags = worker_flags.to_h { |id, flag| [flag, selected.include?(id).to_s] }
     flags["run_ci_tools"] = selected.include?("ci_tools").to_s
     flags["run_installers"] = selected.include?("installers").to_s
     flags["run_controller_cache"] = (selected.include?("web") || selected.include?("installers")).to_s
+    flags["run_web_browser"] = selected.include?("browser").to_s
     selected = selected.dup
     selected << "go" if flags["run_ci_tools"] == "true"
     selected << "rust" if flags["run_installers"] == "true"
     needs = {"ci-relevance" => {"result" => "success", "outputs" => flags.merge("profile" => profile)}}
     worker_flags.each_key { |id| needs[id] = {"result" => selected.include?(id) ? "success" : "skipped"} }
+    needs["web"]["outputs"] = {"browser_result" => selected.include?("browser") ? "success" : "skipped"} if selected.include?("web")
     needs["database-recovery-full"] = {"result" => profile == "full" ? "success" : "skipped"}
     check = ->(data) { Open3.capture3({"RESULTS" => JSON.generate(data)}, "bash", "-eo", "pipefail", "-c", summary).last.success? }
     reject("summary rejected valid #{profile} selection") unless check.call(needs)
@@ -109,6 +133,22 @@ summary = result.fetch("steps").first.fetch("run")
         reject("summary accepted #{id}/#{state}") if check.call(broken)
       end
     end
+    if selected.include?("web")
+      [nil, "", "success", "skipped", "failure", "cancelled"].each do |outcome|
+        next if outcome == needs["web"]["outputs"]["browser_result"]
+        broken = Marshal.load(Marshal.dump(needs))
+        if outcome.nil? then broken["web"].delete("outputs")
+        else broken["web"]["outputs"]["browser_result"] = outcome end
+        reject("summary accepted browser outcome #{outcome.inspect}") if check.call(broken)
+      end
+    end
+    broken = Marshal.load(Marshal.dump(needs))
+    broken["ci-relevance"]["outputs"].merge!("run_web" => "false", "run_web_browser" => "true")
+    broken["web"] = {"result" => "skipped"}
+    reject("summary accepted browser routing without web") if check.call(broken)
+    broken = Marshal.load(Marshal.dump(needs))
+    broken["ci-relevance"]["outputs"].delete("run_web_browser")
+    reject("summary accepted missing browser routing") if check.call(broken)
     needs["ci-relevance"]["outputs"].delete("run_database")
     reject("summary accepted missing routing") if check.call(needs)
     needs["ci-relevance"]["outputs"]["run_database"] = flags["run_database"]
@@ -121,6 +161,27 @@ end
 # replaced by recording stubs. The Release upgrade contract itself stays real.
 require "tmpdir"
 require "fileutils"
+# Exercise the actual browser step for both profiles without starting browsers.
+Dir.mktmpdir("ci-web-entrypoint-") do |tmp|
+  FileUtils.mkdir_p(["#{tmp}/scripts", "#{tmp}/web", "#{tmp}/bin"])
+  File.write("#{tmp}/scripts/env.sh", "")
+  File.write("#{tmp}/bin/node", "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>\"$CI_TRACE\"\n")
+  FileUtils.chmod(0755, "#{tmp}/bin/node")
+  projects = %w[desktop mobile firefox webkit].map { |p| "--project=#{p}" }
+  specs = %w[agent-rollout.spec.ts node-forms.spec.ts user-password.spec.ts shell-navigation.spec.ts apple-layout.spec.ts nodes-list.spec.ts node-detail.spec.ts operations.spec.ts approval-queue.spec.ts approvals-audit.spec.ts certificate-lifecycle.spec.ts]
+  [[], %w[standalone integrated]].each do |gateways|
+    trace = "#{tmp}/trace"
+    File.write(trace, "")
+    env = {"PATH" => "#{tmp}/bin:#{ENV.fetch('PATH')}", "CI_TRACE" => trace,
+           "BROWSER_PROJECTS" => "desktop mobile firefox webkit", "BROWSER_GATEWAYS" => gateways.join(" ")}
+    output, status = Open3.capture2e(env, "bash", "-euo", "pipefail", "-c", browser.fetch("run"), chdir: tmp)
+    reject("browser entrypoint failed: #{output}") unless status.success?
+    expected = (gateways.empty? ? [nil] : gateways).map do |gateway|
+      (["test/run-auth-browser.mjs"] + specs + projects + (gateway ? ["--gateway=#{gateway}"] : [])).join(" ")
+    end
+    reject("browser project/spec/gateway coverage changed") unless File.readlines(trace, chomp: true) == expected
+  end
+end
 standard = jobs.fetch("go").fetch("steps").find { |step| step["run"] == "scripts/go-check.sh standard" }
 reject("standard Go checks must follow run_go") unless standard && standard["if"] == "needs.ci-relevance.outputs.run_go == 'true'"
 reject("tool checks must receive the same Go selection") unless
