@@ -1,0 +1,165 @@
+name: Cross-VM Enrollment
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: cross-vm-enrollment-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+  COMPOSE_PROJECT: cross-vm-${{ github.run_id }}-${{ github.run_attempt }}
+  CARGO_INCREMENTAL: '0'
+jobs:
+  controller:
+    name: Cross-VM Controller
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      REAL_E2E_ROLE: controller
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify hosted VM and dependencies
+        run: bash scripts/real-e2e-hosted.sh preflight
+      - name: start
+        run: bash scripts/real-e2e-hosted.sh start
+      - name: Publish controller-ready
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-controller-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/controller-ready
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for agent-endpoint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          timeout --kill-after=10s 42m bash scripts/real-e2e-artifact.sh wait-download
+          real-e2e-agent-endpoint-${{ github.run_id }}-${{ github.run_attempt }}
+          "$RUNNER_TEMP/real-e2e-private-$RUN_ID-controller/agent-endpoint" 2400 "Cross-VM Agent"
+      - name: issue-token
+        run: bash scripts/real-e2e-hosted.sh issue-token
+      - name: Publish enrollment-token
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-enrollment-token-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/real-e2e-private-${{ env.RUN_ID }}-controller/encrypted-token
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for enrollment-result
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          timeout --kill-after=10s 42m bash scripts/real-e2e-artifact.sh wait-download
+          real-e2e-enrollment-result-${{ github.run_id }}-${{ github.run_attempt }}
+          "$RUNNER_TEMP/real-e2e-private-$RUN_ID-controller/enrollment-result" 2400 "Cross-VM Agent"
+      - name: verify
+        run: bash scripts/real-e2e-hosted.sh verify
+      - name: Clean private files and task resources
+        if: always()
+        timeout-minutes: 5
+        run: timeout --kill-after=15s 240s bash scripts/real-e2e-hosted.sh cleanup
+      - name: Preserve allowlisted evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cross-vm-evidence-controller-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/real-e2e-evidence-controller
+          if-no-files-found: error
+          retention-days: 7
+  node:
+    name: Cross-VM Agent
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      REAL_E2E_ROLE: node
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify hosted VM and dependencies
+        run: bash scripts/real-e2e-hosted.sh preflight
+      - name: build
+        run: bash scripts/real-e2e-hosted.sh build
+      - name: Wait for controller-ready
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          timeout --kill-after=10s 42m bash scripts/real-e2e-artifact.sh wait-download
+          real-e2e-controller-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          "$RUNNER_TEMP/real-e2e-private-$RUN_ID-node/controller-ready" 2400 "Cross-VM Controller"
+      - name: prepare
+        run: bash scripts/real-e2e-hosted.sh prepare
+      - name: Publish agent-endpoint
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-agent-endpoint-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/agent-endpoint
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for enrollment-token
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          timeout --kill-after=10s 42m bash scripts/real-e2e-artifact.sh wait-download
+          real-e2e-enrollment-token-${{ github.run_id }}-${{ github.run_attempt }}
+          "$RUNNER_TEMP/real-e2e-private-$RUN_ID-node/encrypted-token" 2400 "Cross-VM Controller"
+      - name: enroll
+        run: bash scripts/real-e2e-hosted.sh enroll
+      - name: Publish enrollment-result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-enrollment-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/enrollment-result
+          if-no-files-found: error
+          retention-days: 1
+      - name: Clean private files and task resources
+        if: always()
+        timeout-minutes: 5
+        run: timeout --kill-after=15s 240s bash scripts/real-e2e-hosted.sh cleanup
+      - name: Preserve allowlisted evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cross-vm-evidence-node-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/real-e2e-evidence-node
+          if-no-files-found: error
+          retention-days: 7
+  verdict:
+    name: Cross-VM Verdict and Artifact Cleanup
+    needs: [controller, node]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Delete run-attempt rendezvous artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ids="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name | test("^real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
+          for id in $ids; do
+            gh api --method DELETE "repos/$GH_REPO/actions/artifacts/$id"
+          done
+          remaining="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name | test("^real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
+          test -z "$remaining"
+      - name: Require both VMs and cleanup to succeed
+        env:
+          CONTROLLER_RESULT: ${{ needs.controller.result }}
+          NODE_RESULT: ${{ needs.node.result }}
+        run: |
+          test "$CONTROLLER_RESULT" = success
+          test "$NODE_RESULT" = success
+          echo 'CROSS_VM_ENROLLMENT=PASS' >>"$GITHUB_STEP_SUMMARY"
+          echo 'CROSS_VM_PRODUCTION=BLOCKED' >>"$GITHUB_STEP_SUMMARY"
+          echo 'DEDICATED_RELAY_RECOVERY=BLOCKED' >>"$GITHUB_STEP_SUMMARY"
+          echo 'CLEANUP=PASS' >>"$GITHUB_STEP_SUMMARY"

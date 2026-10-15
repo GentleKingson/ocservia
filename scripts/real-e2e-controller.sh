@@ -113,13 +113,19 @@ issue_enrollment_token() {
     >"${OUTBOX}/enrollment-token/enrollment-token"
   chmod 0600 "${OUTBOX}/enrollment-token/enrollment-token"
   printf '%s\n' "${endpoint}" >"${STATE}/agent-endpoint-id"
+  jq -er '.id | select(test("^[0-9a-f-]{36}$"))' "${token_response}" >"${STATE}/token-id"
+  printf '%s\n' "${peer_runner}" >"${STATE}/agent-runner-instance"
 }
 
 verify_enrollment() {
   local result_dir="${1:?enrollment result directory is required}"
-  local node_id endpoint observed
+  local node_id endpoint observed token_id token_observed
   node_id="$(<"${result_dir}/node-id")"
   endpoint="$(<"${STATE}/agent-endpoint-id")"
+  [[ "$(<"${result_dir}/runner-instance")" == "$(<"${STATE}/agent-runner-instance")" ]]
+  require_endpoint "${endpoint}"
+  token_id="$(<"${STATE}/token-id")"
+  [[ "$token_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
   [[ "${node_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
     echo "Agent returned an invalid UUIDv7 node ID" >&2
     return 1
@@ -130,6 +136,14 @@ verify_enrollment() {
     echo "Controller did not persist the expected pending EndpointID binding" >&2
     return 1
   }
+  token_observed="$(compose exec -T postgres psql -At -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+    -c "SELECT consumed_node_id || ':' || encode(expected_endpoint_id,'hex') FROM enrollment_tokens WHERE id='${token_id}' AND consumed_at IS NOT NULL AND workspace_id='${WORKSPACE_ID}' AND expected_environment='development'")"
+  [[ "$token_observed" == "$node_id:$endpoint" ]]
+  mkdir -p "$ARTIFACT_DIR"
+  jq -n --arg node "$node_id" --arg endpoint "$endpoint" \
+    --arg controller "$OCSERV_CONTROLLER_ENDPOINT_ID" --arg token "$token_id" \
+    '{node_id:$node,agent_endpoint_id:$endpoint,controller_endpoint_id:$controller,token_id:$token,status:"pending",token_consumed:true}' \
+    >"$ARTIFACT_DIR/binding.json"
   printf 'cross_vm_runner=PASS\nreal_transportd=PASS\nreal_iroh_enrollment=PASS\nnode_state=pending\n' \
     >"${ARTIFACT_DIR}/result.txt"
 }
