@@ -165,7 +165,7 @@ require_check(manual['permissions'] == {'contents'=>'read'} && manual.dig('jobs'
 require_check(manual.dig('jobs','business','if') == "inputs.purpose == 'smoke' || inputs.purpose == 'integration'", 'platform diagnostics must not run business acceptance')
 require_check(manual.dig('jobs','native-platform','uses') == './.github/workflows/release-native-platform.yml' && manual.dig('jobs','native-platform','if') == "inputs.purpose == 'native-ubuntu-arm64' || inputs.purpose == 'native-debian13'", 'native diagnostics must be explicitly selected')
 platform = load_workflow('release-native-platform')
-require_check(platform.fetch('on').keys == ['workflow_call'] && platform['permissions'] == {'contents'=>'read'}, 'platform diagnostics must be read-only and reusable only')
+require_check(platform.fetch(true).keys == ['workflow_call'] && platform['permissions'] == {'contents'=>'read'}, 'platform diagnostics must be read-only and reusable only')
 require_check(platform.dig('jobs','native','timeout-minutes') == 60 && platform.dig('jobs','native','runs-on').include?('ubuntu-24.04-arm'), 'native diagnostics need bounded native runners')
 puts 'Tag builds, dispatch write guard, Release Check failure propagation and actual recovery contracts passed'
 

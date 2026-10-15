@@ -28,6 +28,8 @@ if [[ "$mode" == runtime ]]; then
   # shellcheck disable=SC1091
   source /etc/os-release
   [[ "$ID$VERSION_ID" == "$distro" ]]
+  printf 'NATIVE_OS=%s\nKERNEL_ARCH=%s\nDPKG_ARCH=%s\n' "$ID$VERSION_ID" "$(uname -m)" "$(dpkg --print-architecture)"
+  getconf GNU_LIBC_VERSION
   python3 "$ROOT/scripts/verify-native-platform-package.py" "$work" "$distro" "$arch" >"$work/package.json"
   package="$work/ocserv_1.5.0-1.${distro}.2_${arch}.deb"
   # Refuse an existing installation; no user data or identity is cleanup input.
@@ -50,6 +52,7 @@ if [[ "$mode" == runtime ]]; then
   # Debian containers have no systemd. Inspect and execute the real verified
   # package payload without substituting a systemctl shim or invoking scriptlets.
   agent="$products/ocservia-agent_0.0.0-1_${arch}.deb"
+  sha256sum "$agent"
   [[ "$(dpkg-deb -f "$agent" Package Version Architecture)" == \
     "$(printf 'Package: ocservia-agent\nVersion: 0.0.0-1\nArchitecture: %s' "$arch")" ]]
   dpkg-deb -f "$agent" Depends
@@ -63,6 +66,7 @@ if [[ "$mode" == runtime ]]; then
     path="$verified/rust/target/release/$binary"
     check_elf "$path"
     [[ "$("$path" --version)" == "$binary 0.0.0" ]]
+    "$path" --version
   done
   for unit in ocservia-agent.service ocservia-privd.service ocservia-agent-retention.timer; do
     test -s "$verified/deploy/systemd/$unit"
