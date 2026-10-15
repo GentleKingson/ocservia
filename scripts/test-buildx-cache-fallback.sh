@@ -220,11 +220,22 @@ chmod 0755 "${fake_bin}/uname"
 for arch in amd64 arm64; do
   machine=x86_64
   [[ "$arch" != arm64 ]] || machine=aarch64
-  for mode in product cache; do
+  for mode in product cache subset; do
     log="${test_dir}/controller-${arch}-${mode}.log"
     args=()
-    [[ "$mode" != cache ]] || args+=(--cache-only)
-    PATH="${fake_bin}:${PATH}" BUILD_FAKE_MACHINE="$machine" \
+    filter_env=()
+    names=(gateway control transport backup edge relay signer mysql_backup)
+    case "$mode" in
+      product) filter_env+=(CONTROLLER_CACHE_IMAGES=$'unknown\ngateway') ;;
+      cache) args+=(--cache-only) ;;
+      subset)
+        args+=(--cache-only)
+        filter_env+=(CONTROLLER_CACHE_IMAGES='relay gateway signer')
+        names=(gateway relay signer)
+        ;;
+    esac
+    env -u CONTROLLER_CACHE_IMAGES "${filter_env[@]}" \
+      PATH="${fake_bin}:${PATH}" BUILD_FAKE_MACHINE="$machine" \
       BUILD_FAKE_DOCKER_LOG="$log" BUILD_FAKE_IMPORT_OK=true \
       BUILD_CACHE_AVAILABLE=true ACTIONS_RUNTIME_TOKEN=test \
       BUILD_CACHE_FAILURE_DIR="${test_dir}/controller-${arch}-${mode}" \
@@ -232,8 +243,8 @@ for arch in amd64 arm64; do
       OUTPUT_DIR="${test_dir}/images" BUILDX_BUILDER=test \
       GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
       bash "${ROOT}/scripts/build-release-controller.sh" "${args[@]}"
-    [[ "$(grep -c '^buildx build ' "$log")" == 8 ]]
-    for name in gateway control transport backup edge relay signer mysql_backup; do
+    [[ "$(grep -c '^buildx build ' "$log")" == "${#names[@]}" ]]
+    for name in "${names[@]}"; do
       line="$(grep -- "--tag ghcr.io/gentlekingson/ocservia/${name}:" "$log")"
       [[ "$line" == *"--cache-from type=gha,scope=controller-v1-${name}-linux-${arch},"* ]]
       [[ "$line" == *"--platform linux/${arch}"* ]]
@@ -262,6 +273,39 @@ for arch in amd64 arm64; do
       fi
     done
   done
+done
+# Empty and whitespace-only filters retain the default full refresh.
+filter_case=0
+for filter in '' $' \t '; do
+  log="${test_dir}/controller-empty-${filter_case}.log"
+  PATH="${fake_bin}:${PATH}" BUILD_FAKE_MACHINE=x86_64 \
+    BUILD_FAKE_DOCKER_LOG="$log" BUILD_FAKE_IMPORT_OK=true \
+    BUILD_CACHE_AVAILABLE=true ACTIONS_RUNTIME_TOKEN=test \
+    BUILD_CACHE_FAILURE_DIR="${test_dir}/controller-empty-${filter_case}" \
+    VERSION=0.0.0 SOURCE_COMMIT=test CONTROLLER_ARCH=amd64 \
+    BUILDX_BUILDER=test GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
+    CONTROLLER_CACHE_IMAGES="$filter" \
+    bash "${ROOT}/scripts/build-release-controller.sh" --cache-only
+  [[ "$(grep -c '^buildx build ' "$log")" == 8 ]]
+  filter_case=$((filter_case + 1))
+done
+# Reject malformed filters before even creating a builder.
+filter_case=0
+for filter in 'gateway unknown' 'gateway,relay' $'gateway\nrelay' $'gateway\n' $'\n' $'gateway\rrelay'; do
+  log="${test_dir}/controller-invalid-${filter_case}.log"
+  status=0
+  PATH="${fake_bin}:${PATH}" BUILD_FAKE_MACHINE=x86_64 \
+    BUILD_FAKE_DOCKER_LOG="$log" BUILD_CACHE_AVAILABLE=false \
+    VERSION=0.0.0 SOURCE_COMMIT=test CONTROLLER_ARCH=amd64 \
+    BUILDX_BUILDER=test GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
+    CONTROLLER_CACHE_IMAGES="$filter" \
+    bash "${ROOT}/scripts/build-release-controller.sh" --cache-only \
+    >"${test_dir}/controller-invalid-${filter_case}.out" 2>&1 || status=$?
+  [[ "$status" == 2 && ! -e "$log" ]] || {
+    echo "invalid Controller cache filter ${filter_case} must exit 2 before invoking docker" >&2
+    exit 1
+  }
+  filter_case=$((filter_case + 1))
 done
 # A PR, tag or dispatch cannot opt into the privileged main writer path.
 for identity in 'pull_request refs/pull/1/merge' 'push refs/tags/v1.0.0' 'workflow_dispatch refs/heads/main'; do

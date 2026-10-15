@@ -44,6 +44,7 @@ jobs:
       run_web_browser: ${{ steps.relevance.outputs.run_web_browser }}
       run_database: ${{ steps.relevance.outputs.run_database }}
       run_controller_cache: ${{ steps.relevance.outputs.run_controller_cache }}
+      controller_cache_images: ${{ steps.relevance.outputs.controller_cache_images }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -383,6 +384,7 @@ jobs:
       VERSION: '0.0.0'
       SOURCE_COMMIT: ${{ github.sha }}
       CONTROLLER_ARCH: ${{ matrix.arch }}
+      CONTROLLER_CACHE_IMAGES: ${{ needs.ci-relevance.outputs.controller_cache_images }}
       BUILDX_BUILDER: controller-cache-${{ github.run_id }}-${{ matrix.arch }}
       BUILD_CACHE_TIMEOUT: 300s
     steps:

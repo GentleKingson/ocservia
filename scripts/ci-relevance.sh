@@ -21,6 +21,8 @@ for flag in "${flags[@]}"; do printf -v "${flag}" false; done
 reason=recognized_paths
 changed=()
 ci_suites=()
+controller_images=(gateway control transport backup edge relay signer mysql_backup)
+controller_cache_images=()
 
 tools_suite() {
   # Read indirectly with the other routing flags below.
@@ -31,11 +33,25 @@ tools_suite() {
   ci_suites+=("$1")
 }
 
+select_controller_images() {
+  # Read indirectly with the other routing flags below.
+  # shellcheck disable=SC2034
+  run_controller_cache=true
+  local image selected
+  for image in "$@"; do
+    for selected in "${controller_cache_images[@]}"; do
+      [[ "${selected}" != "${image}" ]] || continue 2
+    done
+    controller_cache_images+=("${image}")
+  done
+}
+
 fail_closed() {
   local flag
   reason="$1"
   for flag in "${flags[@]}"; do printf -v "${flag}" true; done
   tools_suite guards; tools_suite release
+  select_controller_images "${controller_images[@]}"
 }
 
 # Flags are read indirectly through ${!flag} when writing the outputs.
@@ -108,18 +124,27 @@ classify_path() {
     # Keep their Go/DB checks above, but avoid refreshing eight production images
     # on both architectures. A mixed production change still selects the cache.
     control-plane/*_test.go|signer/*_test.go) ;;
-    web/*|control-plane/*|signer/*|THIRD_PARTY_NOTICES.md|\
+    web/*|deploy/production/gateway.Dockerfile|deploy/production/Caddyfile)
+      select_controller_images gateway ;;
+    control-plane/*|THIRD_PARTY_NOTICES.md) select_controller_images control ;;
+    signer/*|deploy/production/signer.Dockerfile) select_controller_images signer ;;
     rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/.cargo/*|rust/vendor/*|rust/crates/*|\
-    rust/transportd.Dockerfile|\
-    deploy/production/Caddyfile|deploy/production/*.Dockerfile|deploy/production/backup-entrypoint.sh|\
+    rust/transportd.Dockerfile|deploy/production/transportd-relays.sh|deploy/prepare-transport-runtime.sh)
+      select_controller_images transport ;;
+    deploy/production/backup.Dockerfile|scripts/postgres-backup.sh)
+      select_controller_images backup ;;
+    deploy/production/backup.mysql.Dockerfile|scripts/mysql-server-check.sh|scripts/mysql-backup.sh|scripts/mysql-restore-verify.sh)
+      select_controller_images mysql_backup ;;
+    deploy/production/backup-entrypoint.sh) select_controller_images backup mysql_backup ;;
+    deploy/production/edge.Dockerfile) select_controller_images edge ;;
+    deploy/production/integrated/*) select_controller_images gateway edge ;;
+    deploy/production/relay.Dockerfile|scripts/build-relay.sh|\
     deploy/production/relay-entrypoint.sh|deploy/production/relay-healthcheck.sh|\
-    deploy/production/relay.Cargo.lock|deploy/production/transportd-relays.sh|\
-    deploy/production/integrated/*|deploy/prepare-transport-runtime.sh|\
-    scripts/postgres-backup.sh|scripts/mysql-server-check.sh|scripts/mysql-backup.sh|\
-    scripts/mysql-restore-verify.sh|scripts/build-relay.sh|scripts/checksums.txt|toolchains.lock|\
+    deploy/production/relay.Cargo.lock) select_controller_images relay ;;
+    deploy/production/*.Dockerfile|scripts/bootstrap.sh|scripts/env.sh|scripts/checksums.txt|toolchains.lock|\
     .dockerignore|scripts/build-release-controller.sh|scripts/buildx-cache.sh|\
     .github/actions/build-cache-credentials/*|.github/workflows/ci.yml)
-      run_controller_cache=true ;;
+      select_controller_images "${controller_images[@]}" ;;
   esac
   # Session/Workspace, routing, rollout and shared UI paths also run the stubbed
   # browser regressions (docs/development/web.md#validation).
@@ -186,5 +211,6 @@ fi
   printf 'reason=%s\n' "${reason}"
   printf 'changed_count=%s\n' "${#changed[@]}"
   printf 'ci_suites=%s\n' "${ci_suites[*]}"
+  printf 'controller_cache_images=%s\n' "${controller_cache_images[*]}"
   for flag in "${flags[@]}"; do printf '%s=%s\n' "${flag}" "${!flag}"; done
 } >>"${output}"

@@ -14,6 +14,20 @@ case "${1:-}" in
   *) exit 2 ;;
 esac
 [[ $# -le 1 ]] || exit 2
+cache_images=(gateway control transport backup edge relay signer mysql_backup)
+if [[ "${export_cache}" == true && -n "${CONTROLLER_CACHE_IMAGES:-}" ]]; then
+  [[ "${CONTROLLER_CACHE_IMAGES}" != *$'\n'* && "${CONTROLLER_CACHE_IMAGES}" != *$'\r'* ]] || exit 2
+  read -r -a selected_images <<<"${CONTROLLER_CACHE_IMAGES}"
+  if ((${#selected_images[@]})); then
+    for image in "${selected_images[@]}"; do
+      case "${image}" in
+        gateway|control|transport|backup|edge|relay|signer|mysql_backup) ;;
+        *) echo "unknown Controller cache image: ${image}" >&2; exit 2 ;;
+      esac
+    done
+    cache_images=("${selected_images[@]}")
+  fi
+fi
 case "${CONTROLLER_ARCH}:$(uname -m)" in amd64:x86_64|arm64:aarch64) ;; *) exit 2 ;; esac
 # buildx forwards SOURCE_DATE_EPOCH as a build arg, which stamps WORKDIR and
 # changes cache keys per commit; keep keys identical to the main cache refresh.
@@ -30,6 +44,7 @@ docker buildx create --driver docker-container \
   "${driver_opts[@]}" --name "${BUILDX_BUILDER}" --bootstrap --use
 build_image() {
   local name="$1" dockerfile="$2" cache_mode=min
+  if [[ "${export_cache}" == true && " ${cache_images[*]} " != *" ${name} "* ]]; then return 0; fi
   local -a args=(--builder "${BUILDX_BUILDER}" --platform "linux/${CONTROLLER_ARCH}"
     --provenance=false --pull
     --label "org.opencontainers.image.version=${VERSION}"
