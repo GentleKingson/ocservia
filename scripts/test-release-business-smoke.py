@@ -501,6 +501,21 @@ certutil() { :; }
             assert 'revoked_node_old_authority_without_privd_effect' not in names, label
 
 
+        with patch.object(business, 'run', side_effect=[
+                'ocservia-agent.service loaded active running Ocservia Agent\n'
+                'ocservia-agent-retention.timer loaded inactive dead Retention timer\n', '[]']):
+            native = business.uninstall_native()
+            assert native['units'][0]['active'] == 'active'
+            assert native['units'][1]['active'] == 'inactive'
+            try:
+                business.assert_uninstalled(native, [])
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError('active unit table was accepted')
+        with patch.object(business, 'run', side_effect=['', '[]']):
+            business.assert_uninstalled(business.uninstall_native(), [])
+
         terminal_stage = driver.split('next_stage "node_${BUSINESS_TERMINAL}"', 1)[1]
         terminal_shell = r"""
 set -euo pipefail

@@ -820,7 +820,10 @@ def uninstall_identity():
 
 
 def uninstall_native():
-    units = json.loads(run('systemctl', 'list-units', '--all', '--no-pager', '--output=json', 'ocservia-*'))
+    # list-units uses a table on systemd 255; --output affects status journals.
+    listing = run('systemctl', 'list-units', '--all', '--no-pager', '--plain', '--no-legend', 'ocservia-*')
+    units = [dict(zip(('unit', 'load', 'active', 'sub'), line.split()[:4]))
+             for line in listing.splitlines() if line.strip()]
     # /proc also finds an unlinked running ELF, which package file checks miss.
     processes = json.loads(run('sudo', 'python3', '-c', r"""
 import json, pathlib
