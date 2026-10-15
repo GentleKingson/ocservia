@@ -130,12 +130,14 @@ harness records them as explicit limitations and never scores them as PASS:
   password authenticates again. The distribution ocserv 1.2.4 predates
   `occtl terminate` (added in 1.4.2), so the default run does not exercise
   terminate. With the pinned ocserv 1.5.0 backport package
-  (`ocserv_package=backport-1.5.0`), an OpenConnect client connected with a
-  cookie from `--authenticate` must reconnect with that cookie after a
-  Controller disconnect, must not reconnect after a Controller terminate, and a
-  fresh client replaying that cookie is rejected while a new password
-  authentication establishes a session again; that run requires both
-  checkpoints, and a terminate ending `unknown` fails it.
+  (`ocserv_package=backport-1.5.0`), a cookie from `--authenticate` must
+  still authenticate a replaying client after the first client is killed
+  without logging off (a server disconnect already invalidates cookies on
+  1.5.0 unless `persistent-cookies` is set), the replaying client must not
+  reconnect after a Controller terminate, and a fresh client replaying that
+  cookie is rejected while a new password authentication establishes a session
+  again; that run requires both checkpoints, and a terminate ending `unknown`
+  fails it.
 - Both profiles end with a terminal revocation of the real node (in Extended,
   after the rollout). Anonymous, foreign-Origin, unapproved,
   stale-approval, and pending-approval requests, and the approver spending the

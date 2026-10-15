@@ -503,10 +503,10 @@ certutil() { :; }
 
         # Session and IP-ban operations pass only on the real occtl effect; an
         # operation that succeeds without changing ocserv must not pass. Ocserv
-        # 1.2.4 has no terminate; from 1.4.2 terminate must also revoke the
-        # cookie that a disconnect keeps.
+        # 1.2.4 has no terminate; from 1.4.2 terminate must revoke a cookie
+        # that a replay proved still valid after the client died.
         cases = [((1, 2, 4), fault) for fault in (None, 'disconnect ignored', 'ban kept')]
-        cases += [((1, 5, 0), fault) for fault in (None, 'terminate ignored', 'cookie kept', 'disconnect revokes cookie')]
+        cases += [((1, 5, 0), fault) for fault in (None, 'terminate ignored', 'cookie kept', 'kill revokes cookie')]
         for version, fault in cases:
             native = {'sessions': ['7'], 'bans': set(), 'score': 0, 'cookies': {}, 'next': 8, 'clients': []}
 
@@ -540,10 +540,6 @@ certutil() { :; }
                     native['bans'].discard(target)
                 elif action == 'disconnect' and fault != 'disconnect ignored':
                     native['sessions'].remove(target)
-                    if client and fault == 'disconnect revokes cookie':
-                        native['cookies'][client.cookie], client.code = False, 1
-                    elif client:
-                        client.session = new_session()
                 elif action == 'terminate' and fault != 'terminate ignored':
                     native['sessions'].remove(target)
                     if fault == 'cookie kept':
@@ -571,12 +567,16 @@ certutil() { :; }
                     return {'items': [{'id': item} for item in native['sessions']]}
                 return {'items': [{'ip': item} for item in native['bans']]}
 
-            def stopped(*_args, native=native, **_kwargs):
-                # SIGINT logs every client off, invalidating its cookie.
+            def stopped(argv, *_args, native=native, **_kwargs):
+                # SIGINT logs every client off, invalidating its cookie; SIGKILL
+                # ends the sessions without a logoff, so cookies stay valid.
+                killed = '-KILL' in argv
                 native['sessions'].clear()
                 for client in native['clients']:
                     if client.code is None:
-                        native['cookies'][client.cookie], client.code = False, 0
+                        client.code = -9 if killed else 0
+                        if not killed or fault == 'kill revokes cookie':
+                            native['cookies'][client.cookie] = False
 
             def bounded_wait(description, fn, seconds=120):
                 result = fn()
@@ -602,7 +602,7 @@ certutil() { :; }
                 assert ('ip_ban_remove_native_effect' in names) == (fault is None), fault
                 assert ('session_disconnect_native_effect' in names) == (fault != 'disconnect ignored'), fault
                 assert ('session_terminate_native_effect' in names) == (fault is None and version >= (1, 4, 2)), fault
-                assert ('session_disconnect_keeps_cookie' in names) == (version >= (1, 4, 2) and fault in (None, 'terminate ignored', 'cookie kept')), fault
+                assert ('session_cookie_replay_control' in names) == (version >= (1, 4, 2) and fault in (None, 'terminate ignored', 'cookie kept')), fault
 
 if __name__ == '__main__':
     main()

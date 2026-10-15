@@ -1075,17 +1075,18 @@ def session_and_ban_controls(mutation, native_ids, attempt, password):
             client = cookie_client(cookie, log)
             try:
                 first = wait_for('cookie VPN session', lambda: native_ids() if len(native_ids()) == 1 else None, 60)[0]
-                operation = control('disconnect', first)
-                # Disconnect keeps the cookie, so the same client reconnects with it.
-                def reconnected():
-                    ids = native_ids()
-                    return None if first in ids else next(iter(ids), None)
-
-                second = wait_for('cookie reconnect after disconnect', reconnected, 90)
-                assert client.poll() is None
-                record('session_disconnect_keeps_cookie', operation_id=operation['id'], native_session_ids=[first, second])
+                # Control: a client that dies without logging off leaves its cookie
+                # valid, so a replay authenticates. (A server disconnect already
+                # invalidates cookies on 1.5.0 unless persistent-cookies is set.)
+                subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-KILL', '-x', 'openconnect'],
+                               capture_output=True, check=False)
+                wait_for('killed cookie client session ends', lambda: first not in native_ids(), 60)
+                client = cookie_client(cookie, log)
+                second = wait_for('cookie replay before terminate',
+                                  lambda: next(iter(native_ids()), None) if len(native_ids()) == 1 and client.poll() is None else None, 60)
+                record('session_cookie_replay_control', native_session_ids=[first, second])
                 operation = control('terminate', second)
-                # Terminate also invalidates the cookie, so that client cannot reconnect.
+                # Terminate invalidates the cookie, so that client cannot reconnect.
                 wait_for('terminated cookie client exits', lambda: client.poll() is not None, 90)
                 assert not native_ids()
                 replay = cookie_client(cookie, log)
