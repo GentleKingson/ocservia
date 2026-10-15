@@ -189,8 +189,7 @@ fails the run; process exit alone cannot pass it.
 The lifecycle interpretation follows [Debian Policy section 6.5](https://www.debian.org/doc/debian-policy/ch-maintainerscripts.html#summary-of-ways-maintainer-scripts-are-called),
 [dpkg remove/purge](https://manpages.debian.org/bookworm/dpkg/dpkg.1.en.html), and
 [systemctl disable/stop](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html).
-DEB removal calls `prerm remove`; upgrades call `prerm upgrade` and must retain
-services and identity. `disable --now` also stops the units; disabling alone does
+DEB removal calls `prerm remove`; upgrades call `prerm upgrade` and do not enter this removal path. `disable --now` also stops the units; disabling alone does
 not. The repository's preremove delegates actual removal to the verified archive's
 uninstaller without `--purge-state`, preserving generated identity, state and
 configuration. dpkg purge removes conffiles and invokes a package postrm if one

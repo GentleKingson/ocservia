@@ -503,7 +503,7 @@ certutil() { :; }
 
         # Drive the actual terminal phase. No failed observation may emit its
         # final checkpoint; API errors are failures, never evidence of offline.
-        for fault in (None, 'remove', 'process', 'timer', 'payload', 'identity', 'online',
+        for fault in (None, 'remove', 'package installed', 'process', 'timer', 'payload', 'identity', 'endpoint changed', 'online',
                       'api timeout', 'revoked', 'owner', 'readmitted', 'effect', 'ocserv'):
             state = {'removed': False}
             def native():
@@ -535,8 +535,8 @@ certutil() { :; }
                 if 'owner_epoch>' in query:
                     return '1' if fault == 'readmitted' else '0'
                 if 'NOT EXISTS' in query:
-                    return 'f' if fault == 'owner' else 't'
-                return 'active|3' if 'authorization_revision' in query else 'active'
+                    return 'f' if not state['removed'] or fault == 'owner' else 't'
+                return 'active|3' if 'authorization_revision' in query else ('changed|active' if state['removed'] and fault == 'endpoint changed' else 'endpoint|active')
             def once(description, fn, seconds=120):
                 value = fn()
                 if not value:
@@ -550,7 +550,7 @@ certutil() { :; }
                     patch.object(business, 'uninstall_native', side_effect=native), \
                     patch.object(business, 'uninstall_identity', side_effect=lambda: ['x /identity/endpoint.key', 'y /identity/controller.endpoint'] + (['changed'] if state['removed'] and fault == 'identity' else [])), \
                     patch.object(business, 'node_side_effects', side_effect=lambda: {'effects': int(state['removed'] and fault == 'effect')}), \
-                    patch.object(business.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout=b'')), \
+                    patch.object(business.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=b'install ok installed' if fault == 'package installed' else b'')), \
                     patch.object(business, 'wait_for', side_effect=once), patch.object(business.time, 'sleep'), \
                     patch.object(business, 'vpn_smoke') as vpn, patch.object(business, 'record') as record:
                 passed = False

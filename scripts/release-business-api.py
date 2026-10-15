@@ -856,6 +856,9 @@ def uninstall():
     assert before['trust_status'] == 'active' and before['connection_state'] == 'online'
     owner_before = owner()
     assert owner_before
+    expired_query = ("SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
+                     f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND lease_until>clock_timestamp());")
+    assert sql(expired_query) == 'f', 'missing live owner before removal'
     identity = sorted(uninstall_identity())
     assert any('/identity/endpoint.key' in line for line in identity)
     assert any('/identity/controller.endpoint' in line for line in identity)
@@ -868,15 +871,15 @@ def uninstall():
         assert any(row['unit'] == unit and row['active'] == 'active' for row in native_before['units'])
     trust_query = ("SELECT status||'|'||authorization_revision FROM nodes WHERE id='" + node + "';")
     trust = sql(trust_query)
-    endpoint_query = f"SELECT state FROM node_endpoint_keys WHERE node_id='{node}' ORDER BY endpoint_id;"
+    endpoint_query = f"SELECT encode(endpoint_id,'hex')||'|'||state FROM node_endpoint_keys WHERE node_id='{node}' ORDER BY endpoint_id;"
     endpoint_trust = sql(endpoint_query)
-    assert trust.startswith('active|') and endpoint_trust == 'active'
+    assert trust.startswith('active|') and endpoint_trust == os.environ['T07_ENDPOINT'] + '|active'
     assert run('dpkg-query', '-W', '-f=${Status}', 'ocservia-agent') == 'install ok installed'
     payload = run('dpkg-query', '-L', 'ocservia-agent').splitlines()
     paths = [path for path in payload if path.startswith(('/usr/libexec/ocservia/', '/usr/share/ocservia-agent/'))
              and run('sudo', 'find', path, '-maxdepth', '0', '-type', 'f').strip()]
     assert paths
-    paths += ['/usr/libexec/ocservia', '/usr/lib/systemd/system/' + 'ocservia-agent.service',
+    paths += ['/usr/libexec/ocservia', '/usr/lib/systemd/system/ocservia-agent.service',
               '/usr/lib/systemd/system/ocservia-privd.service', '/usr/lib/systemd/system/ocservia-agent-retention.timer',
               '/usr/lib/systemd/system/ocservia-agent-retention.service', '/usr/lib/systemd/system/ocservia-upgrader@.service']
     record('uninstall_before', node_id=node, endpoint_id=os.environ['T07_ENDPOINT'], identity=identity,
@@ -892,11 +895,10 @@ def uninstall():
     # telemetry.OfflineAfter=90s; default OwnerLeaseTTL=30s. 180s allows
     # the final shutdown heartbeat and polling slack without changing either.
     wait_for('uninstalled Agent offline', lambda: api(prefix)['connection_state'] == 'offline', seconds=180)
-    wait_for('uninstalled owner lease expired', lambda: sql(
-        "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
-        f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND lease_until>clock_timestamp());") == 't', seconds=60)
+    wait_for('uninstalled owner lease expired', lambda: sql(expired_query) == 't', seconds=60)
     # Observe a further whole owner lease: no late restart, lease or root effect.
     for _ in range(16):
+        assert sql(expired_query) == 't', 'owner lease became live again'
         assert api(prefix)['connection_state'] == 'offline'
         assert api(prefix)['trust_status'] == 'active'
         assert sql(trust_query) == trust and sql(endpoint_query) == endpoint_trust
