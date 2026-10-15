@@ -54,6 +54,11 @@ PY
 
 case "${1:-}" in
   preflight) preflight ;;
+  wait-download)
+    # Confine even helper failure/timeout scratch archives to our private tree.
+    RUNNER_TEMP="$PRIVATE" timeout --kill-after=10s 42m bash "$ROOT/scripts/real-e2e-artifact.sh" \
+      wait-download "${2:?artifact name}" "$PRIVATE/${3:?destination}" 2400 "${4:?peer job}"
+    ;;
   start)
     private_run start bash "$ROOT/scripts/real-e2e-controller.sh" start
     cp "$EVIDENCE/environment.json" "$WORK/outbox/controller-ready/environment.json"
@@ -99,6 +104,8 @@ case "${1:-}" in
     done <"$PRIVATE/container-ids" >"$EVIDENCE/controller-process-network.txt"
     ;;
   cleanup)
+    trap 'rm -rf -- "$PRIVATE"' EXIT
+    trap 'exit 143' TERM
     status=0
     # An outer deadline prevents a broken Docker daemon from holding cleanup open.
     private_run cleanup bash "$ROOT/scripts/real-e2e-$ROLE.sh" cleanup || status=$?

@@ -37,9 +37,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
-          timeout --kill-after=10s 42m bash scripts/real-e2e-artifact.sh wait-download
+          bash scripts/real-e2e-hosted.sh wait-download
           real-e2e-agent-endpoint-${{ github.run_id }}-${{ github.run_attempt }}
-          "$RUNNER_TEMP/real-e2e-private-$RUN_ID-controller/agent-endpoint" 2400 "Cross-VM Agent"
+          agent-endpoint "Cross-VM Agent"
       - name: issue-token
         run: bash scripts/real-e2e-hosted.sh issue-token
       - name: Publish enrollment-token
@@ -53,9 +53,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
-          timeout --kill-after=10s 42m bash scripts/real-e2e-artifact.sh wait-download
+          bash scripts/real-e2e-hosted.sh wait-download
           real-e2e-enrollment-result-${{ github.run_id }}-${{ github.run_attempt }}
-          "$RUNNER_TEMP/real-e2e-private-$RUN_ID-controller/enrollment-result" 2400 "Cross-VM Agent"
+          enrollment-result "Cross-VM Agent"
       - name: verify
         run: bash scripts/real-e2e-hosted.sh verify
       - name: Clean private files and task resources
@@ -88,9 +88,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
-          timeout --kill-after=10s 42m bash scripts/real-e2e-artifact.sh wait-download
+          bash scripts/real-e2e-hosted.sh wait-download
           real-e2e-controller-ready-${{ github.run_id }}-${{ github.run_attempt }}
-          "$RUNNER_TEMP/real-e2e-private-$RUN_ID-node/controller-ready" 2400 "Cross-VM Controller"
+          controller-ready "Cross-VM Controller"
       - name: prepare
         run: bash scripts/real-e2e-hosted.sh prepare
       - name: Publish agent-endpoint
@@ -104,9 +104,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
-          timeout --kill-after=10s 42m bash scripts/real-e2e-artifact.sh wait-download
+          bash scripts/real-e2e-hosted.sh wait-download
           real-e2e-enrollment-token-${{ github.run_id }}-${{ github.run_attempt }}
-          "$RUNNER_TEMP/real-e2e-private-$RUN_ID-node/encrypted-token" 2400 "Cross-VM Controller"
+          encrypted-token "Cross-VM Controller"
       - name: enroll
         run: bash scripts/real-e2e-hosted.sh enroll
       - name: Publish enrollment-result
@@ -159,7 +159,9 @@ jobs:
         run: |
           test "$CONTROLLER_RESULT" = success
           test "$NODE_RESULT" = success
-          echo 'CROSS_VM_ENROLLMENT=PASS' >>"$GITHUB_STEP_SUMMARY"
-          echo 'CROSS_VM_PRODUCTION=BLOCKED' >>"$GITHUB_STEP_SUMMARY"
-          echo 'DEDICATED_RELAY_RECOVERY=BLOCKED' >>"$GITHUB_STEP_SUMMARY"
-          echo 'CLEANUP=PASS' >>"$GITHUB_STEP_SUMMARY"
+          {
+            echo 'CROSS_VM_ENROLLMENT=PASS'
+            echo 'CROSS_VM_PRODUCTION=BLOCKED'
+            echo 'DEDICATED_RELAY_RECOVERY=BLOCKED'
+            echo 'CLEANUP=PASS'
+          } >>"$GITHUB_STEP_SUMMARY"

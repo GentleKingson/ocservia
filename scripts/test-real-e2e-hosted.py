@@ -104,4 +104,41 @@ esac
     run('bash', wrapper, 'cleanup', env=env)
     assert not (temp / 'real-e2e-private-4242-1-node').exists()
     assert (temp / 'real-e2e-evidence-node/cleanup.txt').read_text() == 'CLEANUP=PASS\n'
-print('hosted workflow, peer rejection, real OAEP round-trip/corruption and cleanup checks passed')
+    # Drive the real verifier against controlled SQL responses. A consumed
+    # token mismatch must fail even when the node's Pending binding is correct.
+    state = temp / 'ocservia-real-e2e-controller-4242-1/state'
+    state.mkdir(parents=True)
+    endpoint = 'a' * 64
+    node = '019d0000-0000-7000-8000-000000000002'
+    token = '019d0000-0000-7000-8000-000000000003'
+    for name, value in [('controller-endpoint-id','b'*64), ('agent-endpoint-id',endpoint),
+                        ('token-id',token), ('agent-runner-instance','peer-boot')]:
+        (state / name).write_text(value + '\n')
+    result = temp / 'result'
+    result.mkdir()
+    (result / 'node-id').write_text(node + '\n')
+    (result / 'runner-instance').write_text('peer-boot\n')
+    binary = temp / 'bin'
+    binary.mkdir()
+    (binary / 'docker').write_text('''#!/bin/bash
+set -euo pipefail
+case "${!#}" in
+  "SELECT n.id"*) printf '%s\\n' "$DB_NODE" ;;
+  "SELECT consumed_node_id"*) printf '%s\\n' "$DB_TOKEN" ;;
+  *) exit 2 ;;
+esac
+''')
+    (binary / 'docker').chmod(0o755)
+    verified = temp / 'verification'
+    for db_node, db_token, ok in [(node+':pending:'+endpoint,node+':'+endpoint,True),
+                                  (node+':active:'+endpoint,node+':'+endpoint,False),
+                                  (node+':pending:'+endpoint,'',False),
+                                  (node+':pending:'+endpoint,node+':'+'c'*64,False)]:
+        shutil.rmtree(verified, ignore_errors=True)
+        verify_env = {**env, 'REAL_E2E_ROLE':'controller', 'COMPOSE_PROJECT':'real-e2e-test',
+                      'ARTIFACT_DIR':str(verified), 'PATH':str(binary)+os.pathsep+os.environ['PATH'],
+                      'DB_NODE':db_node, 'DB_TOKEN':db_token}
+        run('bash', str(ROOT / 'scripts/real-e2e-controller.sh'), 'verify-enrollment', str(result),
+            env=verify_env, ok=ok)
+        assert (verified / 'result.txt').exists() == ok
+print('hosted workflow, peer rejection, OAEP/corruption, binding rejection and cleanup checks passed')
