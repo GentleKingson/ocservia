@@ -44,6 +44,8 @@ compatibility-policy reset in v1.1.0 described below.
 
 ### Security
 
+- Update the MySQL backup image's pcre2 packages for Oracle Linux
+  ELSA-2026-81532 while retaining the pinned MySQL 8.4.11 base.
 - Update rustls to 0.23.46 in the Rust workspace and independent Relay build
   for RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and
   RUSTSEC-2026-0349.
