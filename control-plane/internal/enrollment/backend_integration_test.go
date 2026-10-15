@@ -99,6 +99,9 @@ func enrollmentBackend(t *testing.T) database.Backend {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		// The restart fixture also invalidates this otherwise idle admin pool.
+		// Cleanup must reconnect rather than reuse a pre-restart connection.
+		admin.Reset()
 		if _, err := admin.Exec(context.Background(), "DROP DATABASE "+identifier); err != nil {
 			t.Error(err)
 		}
