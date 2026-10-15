@@ -228,9 +228,9 @@ jobs:
     env:
       npm_config_audit: "false"
       npm_config_fund: "false"
-      # Quick runs Chromium; Full adds the Firefox and WebKit key-spec projects.
-      BROWSER_PROJECTS: ${{ needs.ci-relevance.outputs.profile == 'full' && 'desktop firefox webkit' || 'desktop' }}
-      BROWSER_ENGINES: ${{ needs.ci-relevance.outputs.profile == 'full' && 'chromium firefox webkit' || 'chromium' }}
+      # Shared UI regressions run in mobile Chromium and all three engines.
+      BROWSER_PROJECTS: desktop mobile firefox webkit
+      BROWSER_ENGINES: chromium firefox webkit
       # Full also serves the build through the production Standalone gateway and
       # then the Integrated Edge and gateway, where the cross-engine specs fail
       # on any CSP violation.
@@ -266,7 +266,7 @@ jobs:
           npm run build
           args=()
           for project in ${BROWSER_PROJECTS}; do args+=("--project=${project}"); done
-          specs=(agent-rollout.spec.ts node-forms.spec.ts user-password.spec.ts shell-navigation.spec.ts)
+          specs=(agent-rollout.spec.ts node-forms.spec.ts user-password.spec.ts shell-navigation.spec.ts apple-layout.spec.ts)
           if [[ -z "${BROWSER_GATEWAYS}" ]]; then
             node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}"
           fi
