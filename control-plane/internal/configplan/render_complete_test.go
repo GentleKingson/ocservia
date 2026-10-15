@@ -64,6 +64,7 @@ func TestCompleteRenderRejectsOldNodesAndIncompleteOrUnsafeCandidates(t *testing
 		{"legacy capabilities", func(i *RenderInput) { i.Capabilities = []string{"ocserv.config.plan", "config.tls"} }},
 		{"unobserved version", func(i *RenderInput) { i.OcservVersion = "unknown" }},
 		{"unsupported version", func(i *RenderInput) { i.OcservVersion = "2.0.0" }},
+		{"unadmitted 1.5 patch", func(i *RenderInput) { i.OcservVersion = "1.5.1" }},
 		{"missing device", func(i *RenderInput) {
 			i.Template.Directives = append(i.Template.Directives[:2], i.Template.Directives[3:]...)
 		}},

@@ -205,7 +205,11 @@ def before():
                       f'ca-cert = {NODE_CRL}/ca.pem\ncrl = {NODE_CRL}/crl.pem\n')
     run('sudo', 'install', '-m', '600', config, NODE_CRL / 'ocserv.conf')
     run('sudo', 'ocserv', '--test-config', '-c', NODE_CRL / 'ocserv.conf')
+    # ocserv 1.5.0 resets occtl-socket-file to its built-in /var/run/occtl.socket
+    # on SIGHUP and unlinks that path on exit; hide the primary socket from this
+    # disposable instance so stopping it cannot remove the primary one.
     run('sudo', 'systemd-run', '--unit=ocservia-p2-crl', '--property=Type=simple',
+        '--property=InaccessiblePaths=-/run/occtl.socket',
         '/usr/sbin/ocserv', '-f', '-c', NODE_CRL / 'ocserv.conf')
     for _ in range(30):
         try:

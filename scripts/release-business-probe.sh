@@ -198,8 +198,27 @@ docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay"
 record products_built
 next_stage dependency_install
 sudo apt-get update -qq
-sudo apt-get install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping
+case "${OCSERV_PACKAGE:-distribution}" in
+  distribution) ocserv_package=ocserv ;;
+  backport-1.5.0)
+    # The pinned ocserv-backport release asset brings `occtl terminate` (>= 1.4.2).
+    ocserv_version=1.5.0-1~ubuntu24.04.2
+    ocserv_package="${work}/ocserv_1.5.0-1.ubuntu24.04.2_amd64.deb"
+    curl -fsSL --retry 3 -o "${ocserv_package}" \
+      https://github.com/GentleKingson/ocserv-backport/releases/download/1.5.0-2/ocserv_1.5.0-1.ubuntu24.04.2_amd64.deb
+    echo "5a15dd005267d5a20a249f2e97417c36464a02cb03a47b4220f51a100302fc89  ${ocserv_package}" | sha256sum -c --strict -
+    [[ "$(dpkg-deb -f "${ocserv_package}" Package Version Architecture)" == \
+      "$(printf 'Package: ocserv\nVersion: %s\nArchitecture: amd64' "${ocserv_version}")" ]]
+    ;;
+  *) echo 'OCSERV_PACKAGE must be distribution or backport-1.5.0' >&2; exit 2 ;;
+esac
+sudo apt-get install -y --no-install-recommends "${ocserv_package}" openconnect vpnc-scripts sqlite3 iputils-ping
 sudo systemctl stop ocserv
+if [[ "${OCSERV_PACKAGE:-distribution}" == backport-1.5.0 ]]; then
+  [[ "$(dpkg-query -W -f='${Version}' ocserv)" == "${ocserv_version}" ]]
+  [[ "$(ocserv --version 2>&1 | head -n1)" == 'OpenConnect VPN Server 1.5.0' ]]
+  record ocserv_backport_package
+fi
 { dpkg-query -W ocserv openconnect libgnutls30t64 openssl systemd; ocserv --version; } >>"${ARTIFACT_DIR}/environment.txt" 2>&1
 # Subsequent output can contain task-only secret data. Keep it private until
 # the exact-value redactor runs; the uploaded results never contain cookies.

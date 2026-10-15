@@ -226,6 +226,11 @@ gh workflow run release-upgrade.yml --ref <branch> \
 
 Setting `purpose=smoke` narrows the run to the Smoke scope regardless of Signer
 mode, while `production_signer=false` switches to the standalone topology.
+The default `ocserv_package=distribution` keeps the runner's Ubuntu ocserv;
+`ocserv_package=backport-1.5.0` installs the pinned, SHA256-checked
+[ocserv-backport](https://github.com/GentleKingson/ocserv-backport/releases/tag/1.5.0-2)
+1.5.0 package instead, and the run then also requires the session terminate
+checkpoints described in [Business integration](real-business-validation.md).
 Diagnostic runs never publish releases, push to GHCR, or read production
 Secrets, and they do not substitute for Release Check.
 

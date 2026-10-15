@@ -502,24 +502,59 @@ certutil() { :; }
 
 
         # Session and IP-ban operations pass only on the real occtl effect; an
-        # operation that succeeds without changing ocserv must not pass.
-        for fault in (None, 'disconnect ignored', 'ban kept'):
-            native = {'sessions': ['7'], 'bans': set(), 'score': 0}
+        # operation that succeeds without changing ocserv must not pass. Ocserv
+        # 1.2.4 has no terminate; from 1.4.2 terminate must revoke a cookie
+        # that a replay proved still valid after the client died.
+        cases = [((1, 2, 4), fault) for fault in (None, 'disconnect ignored', 'ban kept')]
+        cases += [((1, 5, 0), fault) for fault in (None, 'terminate ignored', 'cookie kept', 'kill revokes cookie')]
+        for version, fault in cases:
+            native = {'sessions': ['7'], 'bans': set(), 'score': 0, 'cookies': {}, 'next': 8, 'clients': []}
 
-            def mutation(path, body, revision, native=native):
+            def new_session(native=native):
+                native['next'] += 1
+                native['sessions'].append(str(native['next']))
+                return str(native['next'])
+
+            class Client:
+                def __init__(self, cookie, _log, native=native, new_session=new_session):
+                    self.cookie, self.code, self.session = cookie, None, None
+                    if native['cookies'].get(cookie):
+                        self.session = new_session()
+                        native['clients'].append(self)
+                    else:
+                        self.code = 1
+
+                def poll(self):
+                    return self.code
+
+                def wait(self, timeout):
+                    if self.code is None:
+                        raise subprocess.TimeoutExpired('openconnect', timeout)
+                    return self.code
+
+            def mutation(path, body, revision, native=native, new_session=new_session):
                 assert revision == 3 and body == ({} if 'ip-bans' in path else {'boot_id': 'boot'})
                 target, action = path.split('/', 1)[1].split(':')
+                client = next((item for item in native['clients'] if item.code is None and item.session == target), None)
                 if action == 'remove' and fault != 'ban kept':
                     native['bans'].discard(target)
                 elif action == 'disconnect' and fault != 'disconnect ignored':
                     native['sessions'].remove(target)
+                elif action == 'terminate' and fault != 'terminate ignored':
+                    native['sessions'].remove(target)
+                    if fault == 'cookie kept':
+                        client.session = new_session()
+                    else:
+                        native['cookies'][client.cookie], client.code = False, 1
                 return {'id': action}, {}
 
             def attempt(password, native=native):
                 if '10.207.0.2' in native['bans']:
                     return SimpleNamespace(returncode=1, stdout=b'')
                 if password == 'valid':
-                    return SimpleNamespace(returncode=0, stdout=b'COOKIE=x')
+                    cookie = f"c{len(native['cookies'])}"
+                    native['cookies'][cookie] = True
+                    return SimpleNamespace(returncode=0, stdout=f"COOKIE='{cookie}'\n".encode())
                 native['score'] += 10
                 if native['score'] >= 80:
                     native['bans'].add('10.207.0.2')
@@ -532,8 +567,16 @@ certutil() { :; }
                     return {'items': [{'id': item} for item in native['sessions']]}
                 return {'items': [{'ip': item} for item in native['bans']]}
 
-            def stopped(*_args, native=native, **_kwargs):
+            def stopped(argv, *_args, native=native, **_kwargs):
+                # SIGINT logs every client off, invalidating its cookie; SIGKILL
+                # ends the sessions without a logoff, so cookies stay valid.
+                killed = '-KILL' in argv
                 native['sessions'].clear()
+                for client in native['clients']:
+                    if client.code is None:
+                        client.code = -9 if killed else 0
+                        if not killed or fault == 'kill revokes cookie':
+                            native['cookies'][client.cookie] = False
 
             def bounded_wait(description, fn, seconds=120):
                 result = fn()
@@ -544,6 +587,8 @@ certutil() { :; }
             with patch.dict(os.environ, env), patch.object(business, 'api', side_effect=control_api), \
                     patch.object(business, 'native_bans', side_effect=lambda native=native: sorted(native['bans'])), \
                     patch.object(business, 'wait_for', side_effect=bounded_wait), \
+                    patch.object(business, 'ocserv_version', return_value=version), \
+                    patch.object(business, 'cookie_client', side_effect=Client), \
                     patch.object(business.subprocess, 'run', side_effect=stopped), \
                     patch.object(business, 'record') as record:
                 try:
@@ -556,6 +601,8 @@ certutil() { :; }
                 names = [c.args[0] for c in record.call_args_list]
                 assert ('ip_ban_remove_native_effect' in names) == (fault is None), fault
                 assert ('session_disconnect_native_effect' in names) == (fault != 'disconnect ignored'), fault
+                assert ('session_terminate_native_effect' in names) == (fault is None and version >= (1, 4, 2)), fault
+                assert ('session_cookie_replay_control' in names) == (version >= (1, 4, 2) and fault in (None, 'terminate ignored', 'cookie kept')), fault
 
 if __name__ == '__main__':
     main()

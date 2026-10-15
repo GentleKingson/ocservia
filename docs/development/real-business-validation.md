@@ -127,9 +127,17 @@ harness records them as explicit limitations and never scores them as PASS:
   session. Wrong passwords then get the client source banned under ocserv's
   default ban score, so even the valid password fails. The ban is removed
   through the Controller, after which `occtl` no longer lists it and the valid
-  password authenticates again. Session terminate is not exercised: the
-  fixture's distribution ocserv 1.2.4 predates `occtl terminate` (added in
-  1.4.2), so a terminate there ends `unknown` and is never scored PASS.
+  password authenticates again. The distribution ocserv 1.2.4 predates
+  `occtl terminate` (added in 1.4.2), so the default run does not exercise
+  terminate. With the pinned ocserv 1.5.0 backport package
+  (`ocserv_package=backport-1.5.0`), a cookie from `--authenticate` must
+  still authenticate a replaying client after the first client is killed
+  without logging off (a server disconnect already invalidates cookies on
+  1.5.0 unless `persistent-cookies` is set), the replaying client must not
+  reconnect after a Controller terminate, and a fresh client replaying that
+  cookie is rejected while a new password authentication establishes a session
+  again; that run requires both checkpoints, and a terminate ending `unknown`
+  fails it.
 - Both profiles end with a terminal revocation of the real node (in Extended,
   after the rollout). Anonymous, foreign-Origin, unapproved,
   stale-approval, and pending-approval requests, and the approver spending the

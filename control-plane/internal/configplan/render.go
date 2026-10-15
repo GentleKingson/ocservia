@@ -166,7 +166,9 @@ func supportedVersion(value string) (major, minor int, observed bool, err error)
 	if err != nil {
 		return 0, 0, true, ErrInvalid
 	}
-	if _, patchErr := strconv.Atoi(parts[2]); patchErr != nil || major != 1 || minor < 2 || minor > 4 {
+	// Mirror the Agent adapter's admission: 1.2.x through 1.4.x, plus exactly 1.5.0.
+	patch, patchErr := strconv.Atoi(parts[2])
+	if patchErr != nil || major != 1 || minor < 2 || minor > 5 || minor == 5 && patch != 0 {
 		return 0, 0, true, fmt.Errorf("%w: unsupported Ocserv version", ErrInvalid)
 	}
 	return major, minor, true, nil
