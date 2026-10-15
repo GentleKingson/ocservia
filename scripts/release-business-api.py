@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import ssl
 import subprocess
@@ -1017,6 +1018,27 @@ def native_bans():
     return [row['IP'] for row in json.loads(run('sudo', 'occtl', '--json', 'show', 'ip', 'bans'))]
 
 
+def ocserv_version():
+    result = subprocess.run(['ocserv', '--version'], capture_output=True, check=True)
+    match = re.search(rb'^(?:ocserv|OpenConnect VPN Server) (\d+)\.(\d+)\.(\d+)', result.stdout + result.stderr, re.M)
+    return tuple(int(part) for part in match.groups())
+
+
+def issued_cookie(result):
+    match = re.search(rb"^COOKIE='([^']+)'$", result.stdout, re.M)
+    return match.group(1).decode() if result.returncode == 0 and match else None
+
+
+def cookie_client(cookie, log):
+    client = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 't07-client', 'openconnect', '--non-inter',
+                               '--protocol=anyconnect', '--cookie-on-stdin', '--cafile', str(WORK / 'ca.crt'),
+                               '--script', str(WORK / 'vpn-script'), 'https://10.207.0.1:44443'],
+                              stdin=subprocess.PIPE, stdout=log, stderr=log)
+    client.stdin.write((cookie + '\n').encode())
+    client.stdin.close()
+    return client
+
+
 def session_and_ban_controls(mutation, native_ids, attempt, password):
     """Controller session/IP-ban operations must leave real occtl effects."""
     prefix = 'nodes/' + os.environ['T07_NODE']
@@ -1027,9 +1049,9 @@ def session_and_ban_controls(mutation, native_ids, attempt, password):
         listed = any(row.get('id') == native_id for row in api(prefix + '/sessions').get('items', []))
         return node['boot_id'] if listed and node.get('boot_id') else None
 
-    def disconnect(native_id):
+    def control(action, native_id):
         boot = wait_for(f'Controller observes session {native_id}', lambda: observed(native_id))
-        operation, _ = mutation(f'sessions/{native_id}:disconnect', {'boot_id': boot}, api(prefix)['version'])
+        operation, _ = mutation(f'sessions/{native_id}:{action}', {'boot_id': boot}, api(prefix)['version'])
         return operation
 
     def stop_clients():
@@ -1039,13 +1061,46 @@ def session_and_ban_controls(mutation, native_ids, attempt, password):
 
     live = native_ids()
     assert len(live) == 1
-    operation = disconnect(live[0])
+    operation = control('disconnect', live[0])
     wait_for('native session disconnect', lambda: live[0] not in native_ids(), 60)
     record('session_disconnect_native_effect', operation_id=operation['id'], native_session_id=live[0])
 
-    # ponytail: no terminate here; the fixture's ocserv 1.2.4 occtl lacks
-    # `terminate id` (added in 1.4.2). Add it once the fixture runs ocserv >= 1.4.2.
     stop_clients()
+    # ponytail: ocserv < 1.4.2 (the distribution 1.2.4) has no `occtl terminate`,
+    # so the Agent never negotiates it there; only the pinned backport runs this.
+    if ocserv_version() >= (1, 4, 2):
+        cookie = issued_cookie(attempt(password))
+        assert cookie
+        with (WORK / 'private' / 'openconnect-cookie.log').open('ab') as log:
+            client = cookie_client(cookie, log)
+            try:
+                first = wait_for('cookie VPN session', lambda: native_ids() if len(native_ids()) == 1 else None, 60)[0]
+                operation = control('disconnect', first)
+                # Disconnect keeps the cookie, so the same client reconnects with it.
+                def reconnected():
+                    ids = native_ids()
+                    return None if first in ids else next(iter(ids), None)
+
+                second = wait_for('cookie reconnect after disconnect', reconnected, 90)
+                assert client.poll() is None
+                record('session_disconnect_keeps_cookie', operation_id=operation['id'], native_session_ids=[first, second])
+                operation = control('terminate', second)
+                # Terminate also invalidates the cookie, so that client cannot reconnect.
+                wait_for('terminated cookie client exits', lambda: client.poll() is not None, 90)
+                assert not native_ids()
+                replay = cookie_client(cookie, log)
+                try:
+                    code = replay.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    code = None
+                assert code not in (None, 0) and not native_ids(), 'terminated cookie still authenticates'
+                fresh_cookie = issued_cookie(attempt(password))
+                assert fresh_cookie
+                fresh = cookie_client(fresh_cookie, log)
+                wait_for('fresh authentication after terminate', lambda: len(native_ids()) == 1 and fresh.poll() is None, 60)
+            finally:
+                stop_clients()
+        record('session_terminate_native_effect', operation_id=operation['id'], native_session_id=second)
     wrong = secrets.token_hex(24)
     for _ in range(15):
         if client_ip in native_bans():

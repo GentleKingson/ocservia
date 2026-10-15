@@ -14,6 +14,9 @@ on:
       production_signer:
         type: boolean
         default: false
+      ocserv_package:
+        type: string
+        default: distribution
 permissions:
   contents: read
 env:
@@ -28,6 +31,7 @@ jobs:
       BUSINESS_PROFILE: ${{ inputs.profile }}
       BUSINESS_RUN_RESILIENCE: ${{ inputs.run-resilience }}
       PRODUCTION_SIGNER_ACCEPTANCE: ${{ inputs.production_signer }}
+      OCSERV_PACKAGE: ${{ inputs.ocserv_package }}
       CONTROLLER_ARCH: amd64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -59,7 +63,7 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/business-diagnostics
         run: |
           if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-            sudo --preserve-env=ARTIFACT_DIR,VERSION,BUSINESS_PROFILE,BUSINESS_RUN_RESILIENCE,PRODUCTION_SIGNER_ACCEPTANCE,GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_ENVIRONMENT,RUNNER_ARCH,CONTROLLER_ARCH,CARGO_INCREMENTAL \
+            sudo --preserve-env=ARTIFACT_DIR,VERSION,BUSINESS_PROFILE,BUSINESS_RUN_RESILIENCE,PRODUCTION_SIGNER_ACCEPTANCE,OCSERV_PACKAGE,GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_ENVIRONMENT,RUNNER_ARCH,CONTROLLER_ARCH,CARGO_INCREMENTAL \
               --preserve-env=BUILD_CACHE_AVAILABLE,ACTIONS_RUNTIME_TOKEN,ACTIONS_CACHE_URL,ACTIONS_RESULTS_URL \
               bash scripts/release-business-probe.sh
           else
@@ -113,6 +117,14 @@ jobs:
             else
               grep -Fx integrated_recreation_and_authorized_sse "$DIAGNOSTICS/checkpoints.txt"
               jq -e '.primary_occtl_preserved == true and .before_auth == true and .revoked_rejected == true and .control_auth == true and .refresh == "signed-export-atomic-install-sighup"' "$DIAGNOSTICS/crl-acceptance.json" >/dev/null
+            fi
+          fi
+          if [[ "$OCSERV_PACKAGE" == backport-1.5.0 ]]; then
+            grep -Fx ocserv_backport_package "$DIAGNOSTICS/checkpoints.txt"
+            if [[ "$BUSINESS_PROFILE" == extended ]]; then
+              for name in session_disconnect_keeps_cookie session_terminate_native_effect; do
+                jq -se --arg name "$name" 'any(.[]; .name == $name and .status == "PASS")' "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
+              done
             fi
           fi
           node --input-type=module <<'JS'
