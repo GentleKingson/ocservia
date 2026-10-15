@@ -2,7 +2,9 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +19,7 @@ import (
 func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 	owner, _, options := migrateFixture(t)
 	ctx := context.Background()
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Second)
 	if err := owner.PrepareControllerTelemetry(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -25,10 +27,15 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	options.DSN = strings.Replace(options.DSN, "ocservia_owner:pr02-owner-test-only@", "ocservia_app:pr02-runtime-test-only@", 1)
-	b, err := Open(ctx, options)
+	config, err := configuration(options)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Maintenance also reads the database clock. Keep every runtime connection
+	// aligned with the fixture so setup cannot move its oldest 5m/1h bucket.
+	config.Params["timestamp"] = strconv.FormatInt(now.Unix(), 10)
+	pool := sql.OpenDB(&connector{config: config})
+	b := &Backend{store: store{pool}, pool: pool, engine: options.Engine}
 	defer b.Close()
 	for _, query := range []string{
 		`DELETE FROM telemetry_maintenance_progress WHERE 1=0`,
