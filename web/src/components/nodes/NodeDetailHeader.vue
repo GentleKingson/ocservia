@@ -29,7 +29,7 @@ const tones = {
 </script>
 
 <template>
-  <header class="mb-6 grid gap-3">
+  <header class="mb-6 grid min-w-0 grid-cols-1 gap-3">
     <RouterLink
       :to="backTo"
       class="text-primary focus-visible:outline-ring inline-flex w-fit items-center gap-1.5 rounded-sm text-sm font-medium hover:underline focus-visible:outline-2 focus-visible:outline-offset-2"
@@ -41,15 +41,17 @@ const tones = {
       class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between"
     >
       <div class="grid min-w-0 gap-1">
-        <p class="text-muted-foreground text-xs font-semibold uppercase">
+        <p class="text-muted-foreground m-0 text-xs font-medium tracking-wide">
           {{ $t("nodeDetail") }}
         </p>
-        <h1 class="m-0 text-2xl leading-tight font-semibold break-words">
+        <h1
+          class="m-0 text-2xl leading-tight font-semibold tracking-tight wrap-anywhere md:text-3xl"
+        >
           {{ title }}
         </h1>
         <p
           v-if="nodeId"
-          class="text-muted-foreground flex min-w-0 items-center gap-1 text-xs"
+          class="text-muted-foreground m-0 mt-1 flex min-w-0 items-center gap-1 text-xs"
         >
           <span class="shrink-0">{{ $t("nodeId") }}</span>
           <code class="min-w-0 break-all">{{ nodeId }}</code>

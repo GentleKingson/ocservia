@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./csp";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614fa1";
 const bootId = "019fc0a4-6d92-765c-a8a1-4af556614fd0-boot-identifier-long";
@@ -44,6 +44,9 @@ test.beforeEach(async ({ page }) => {
       onerror = null;
       onmessage = null;
       onopen = null;
+      constructor() {
+        document.documentElement.dataset.fixtureFleetStream = "started";
+      }
       addEventListener(): void {}
       removeEventListener(): void {}
       close(): void {}
@@ -154,6 +157,31 @@ test("copies long identifiers from a directly opened detail", async ({
   );
   expect(overflow).toBe(false);
 
+  for (const width of [1280, 1440, 1920, 320, 390, 768]) {
+    await page.setViewportSize({ width, height: 1000 });
+    expect(
+      await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      ),
+    ).toBeLessThanOrEqual(0);
+  }
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "2";
+  });
+  expect(
+    await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    ),
+  ).toBeLessThanOrEqual(0);
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "1";
+  });
+
   await page.getByRole("link", { name: "Back to nodes" }).click();
   await expect(page).toHaveURL(/\/nodes$/);
 });
@@ -175,8 +203,16 @@ test("recovers an initial detail failure and stops its reads after leaving", asy
   await page.clock.install();
   await page.goto(`/nodes/${relayNode.id}`);
   await expect(page.getByText("Node state is unavailable")).toBeVisible();
+  // The stream is created after the initial snapshot/detail work completes;
+  // only then does its owner schedule the next 15-second retry.
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-fixture-fleet-stream",
+    "started",
+  );
+  const failedReads = reads;
   fail = false;
   await page.clock.runFor(15_000);
+  await expect.poll(() => reads).toBeGreaterThan(failedReads);
   await expect(page.getByTestId("node-detail-status")).toHaveText(
     "Latest observation",
   );

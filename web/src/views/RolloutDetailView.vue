@@ -252,7 +252,7 @@ onBeforeUnmount(() => {
     />
     <template v-else>
       <section
-        class="bg-card border-border mb-6 rounded-lg border p-4 md:p-5"
+        class="bg-card border-border mb-6 rounded-xl border p-4 shadow-xs md:p-5"
         :aria-label="$t('rollingUpgrade')"
       >
         <dl
@@ -323,7 +323,8 @@ onBeforeUnmount(() => {
           <strong>{{ $t("rolloutState_paused") }}</strong>
           <span>{{ $t("pausedNotice") }}</span>
           <small v-if="rollout.pauseCode"
-            >{{ $t("pauseCode") }}: <code>{{ rollout.pauseCode }}</code></small
+            >{{ $t("pauseCode") }}:
+            <code class="break-all">{{ rollout.pauseCode }}</code></small
           >
         </div>
         <Button
