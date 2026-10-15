@@ -16,7 +16,9 @@ def validate(local, peer):
             raise ValueError('missing network evidence')
     if {local['role'], peer['role']} != {'controller', 'node'}:
         raise ValueError('wrong peer role')
-    if local['boot_id'] == peer['boot_id'] or local['hostname'] == peer['hostname']:
+    # Hosted VM images can reuse hostnames and namespace inode numbers.
+    # Kernel boot IDs, not image labels, identify the independent instances.
+    if local['boot_id'] == peer['boot_id']:
         raise ValueError('same runner')
     if local['source_commit'] != peer['source_commit']:
         raise ValueError('mixed source commits')

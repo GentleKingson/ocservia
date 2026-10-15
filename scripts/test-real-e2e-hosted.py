@@ -18,7 +18,8 @@ local = dict(role='controller', boot_id=str(uuid.uuid4()), hostname='controller'
              default_routes=[{'dev':'eth0'}], network_namespace='net:[1]', source_commit='a'*40)
 peer = {**local, 'role':'node', 'boot_id':str(uuid.uuid4()), 'hostname':'agent'}
 evidence.validate(local, peer)
-for key, value in [('boot_id',local['boot_id']), ('hostname','controller'), ('role','controller'),
+evidence.validate(local, {**peer, 'hostname':local['hostname']})
+for key, value in [('boot_id',local['boot_id']), ('role','controller'),
                    ('source_commit','b'*40), ('runner_environment','self-hosted'), ('default_routes',[])]:
     bad = {**peer, key:value}
     try:
