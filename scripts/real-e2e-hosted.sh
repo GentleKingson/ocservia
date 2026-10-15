@@ -42,7 +42,7 @@ import json, os, pathlib, socket, subprocess, sys
 p = pathlib.Path
 out = {'role':sys.argv[2], 'boot_id':p('/proc/sys/kernel/random/boot_id').read_text().strip(),
        'hostname':socket.gethostname(), 'pid1':p('/proc/1/comm').read_text().strip(),
-       'network_namespace':os.readlink('/proc/1/ns/net'),
+       'network_namespace':os.readlink('/proc/self/ns/net'),
        'default_routes':json.loads(subprocess.check_output(['ip','-json','route','show','default'])),
        'runner_os':'ubuntu-24.04', 'runner_environment':os.environ['RUNNER_ENVIRONMENT'],
        'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
