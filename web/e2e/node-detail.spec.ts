@@ -44,6 +44,9 @@ test.beforeEach(async ({ page }) => {
       onerror = null;
       onmessage = null;
       onopen = null;
+      constructor() {
+        document.documentElement.dataset.fixtureFleetStream = "started";
+      }
       addEventListener(): void {}
       removeEventListener(): void {}
       close(): void {}
@@ -200,8 +203,16 @@ test("recovers an initial detail failure and stops its reads after leaving", asy
   await page.clock.install();
   await page.goto(`/nodes/${relayNode.id}`);
   await expect(page.getByText("Node state is unavailable")).toBeVisible();
+  // The stream is created after the initial snapshot/detail work completes;
+  // only then does its owner schedule the next 15-second retry.
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-fixture-fleet-stream",
+    "started",
+  );
+  const failedReads = reads;
   fail = false;
   await page.clock.runFor(15_000);
+  await expect.poll(() => reads).toBeGreaterThan(failedReads);
   await expect(page.getByTestId("node-detail-status")).toHaveText(
     "Latest observation",
   );
