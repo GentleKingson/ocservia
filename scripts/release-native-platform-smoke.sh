@@ -107,7 +107,9 @@ bash "$ROOT/scripts/release-upgrade-native.sh" "$arch" >"$work/native.json"
 git -C "$ROOT" rev-parse HEAD >"$work/source-sha.txt"
 printf 'run_id=%s\nattempt=%s\ndistribution=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$distro" >"$work/run.txt"
 base=https://github.com/GentleKingson/ocserv-backport/releases/download/1.5.0-2
-curl -fsSL --retry 3 https://api.github.com/repos/GentleKingson/ocserv-backport/releases/tags/1.5.0-2 -o "$work/release.json"
+# Avoid the shared hosted runner IP's unauthenticated API quota. The token is
+# read-only and is used only for this GitHub API request, never asset downloads.
+gh api repos/GentleKingson/ocserv-backport/releases/tags/1.5.0-2 >"$work/release.json"
 curl -fsSL --retry 3 "$base/SHA256SUMS" -o "$work/SHA256SUMS"
 curl -fsSL --retry 3 "$base/ocserv_1.5.0-1.${distro}.2_${arch}.deb" -o "$work/ocserv_1.5.0-1.${distro}.2_${arch}.deb"
 python3 "$ROOT/scripts/verify-native-platform-package.py" "$work" "$distro" "$arch"

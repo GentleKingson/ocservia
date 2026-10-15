@@ -56,6 +56,7 @@ jobs:
           echo "I13_TEST_BINARY=$binary" >>"$GITHUB_ENV"
       - name: Real native platform acceptance
         env:
+          GH_TOKEN: ${{ github.token }}
           PURPOSE: ${{ inputs.purpose }}
           PLATFORM_ARCH: ${{ matrix.arch }}
         run: |
