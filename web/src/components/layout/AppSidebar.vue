@@ -17,8 +17,8 @@ const footerLinks = computed(() =>
 </script>
 
 <template>
-  <div class="text-sidebar-foreground flex h-full flex-col gap-2 p-2">
-    <div class="flex h-12 items-center gap-2 px-2 text-sm font-semibold">
+  <div class="text-sidebar-foreground flex h-full flex-col gap-3 p-3">
+    <div class="flex h-12 items-center gap-2.5 px-2 text-sm font-semibold">
       <span
         class="bg-primary text-primary-foreground flex size-8 items-center justify-center rounded-lg"
       >
@@ -28,7 +28,7 @@ const footerLinks = computed(() =>
     </div>
     <nav :aria-label="$t('navigation')" class="flex flex-1 flex-col">
       <p
-        class="text-sidebar-foreground/70 m-0 flex h-8 items-center px-2 text-xs font-medium"
+        class="text-muted-foreground m-0 flex h-8 items-center px-2 text-xs font-medium tracking-wide"
       >
         {{ $t("platform") }}
       </p>
@@ -45,7 +45,7 @@ const footerLinks = computed(() =>
               :aria-current="
                 isCurrentSection(link.to, route.path) ? 'page' : undefined
               "
-              class="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-ring aria-[current=page]:bg-sidebar-accent aria-[current=page]:text-sidebar-accent-foreground flex h-9 items-center gap-2 rounded-md px-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-1 aria-[current=page]:font-medium md:h-8"
+              class="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-ring aria-[current=page]:bg-sidebar-accent aria-[current=page]:text-sidebar-accent-foreground flex h-9 items-center gap-3 rounded-lg px-3 text-sm focus-visible:outline-2 focus-visible:outline-offset-1 aria-[current=page]:font-semibold"
               @click="
                 navigate($event);
                 emit('navigate');

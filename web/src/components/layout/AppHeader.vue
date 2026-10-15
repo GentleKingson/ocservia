@@ -62,7 +62,7 @@ function restoreFocus(event: Event): void {
 
 <template>
   <header
-    class="text-muted-foreground border-border flex min-h-12 items-center gap-2 border-b px-4 text-sm md:px-6"
+    class="text-muted-foreground border-border flex min-h-14 items-center gap-x-3 gap-y-2 border-b px-4 text-sm max-sm:flex-wrap max-sm:py-3 md:px-6"
   >
     <Sheet v-model:open="navigationOpen">
       <SheetTrigger as-child>
@@ -95,24 +95,24 @@ function restoreFocus(event: Event): void {
     ></span>
     <span
       v-if="sectionLabel"
-      class="text-foreground truncate text-base font-medium"
+      class="text-foreground min-w-0 shrink-0 truncate text-sm font-semibold"
       >{{ $t(sectionLabel) }}</span
     >
     <div
       data-testid="workspace"
-      class="ml-auto flex min-w-0 items-center justify-end gap-2"
+      class="ml-auto flex min-w-0 items-center justify-end gap-2 max-sm:order-last max-sm:ml-0 max-sm:w-full max-sm:justify-start"
     >
       <template v-if="workspaces.length > 1">
         <label
           for="workspace-select"
-          class="text-xs font-medium uppercase max-sm:sr-only"
+          class="text-xs font-medium max-sm:sr-only"
         >
           {{ $t("workspace") }}
         </label>
         <select
           id="workspace-select"
           :value="workspaceId"
-          class="border-input bg-background text-foreground focus-visible:outline-ring h-9 w-48 min-w-0 rounded-md border px-2 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-1"
+          class="border-input bg-card text-foreground focus-visible:outline-ring h-9 w-48 min-w-0 rounded-md border px-3 text-sm font-medium max-sm:flex-1 focus-visible:outline-2 focus-visible:outline-offset-1"
           @change="requestWorkspace"
         >
           <option
@@ -126,7 +126,7 @@ function restoreFocus(event: Event): void {
       </template>
       <!-- A single authorized Workspace has nothing to choose, so it reads as text. -->
       <template v-else-if="workspaces.length === 1">
-        <span class="text-xs font-medium uppercase max-sm:sr-only">
+        <span class="text-xs font-medium max-sm:sr-only">
           {{ $t("workspace") }}
         </span>
         <span class="text-foreground truncate font-semibold">
@@ -134,10 +134,13 @@ function restoreFocus(event: Event): void {
         </span>
       </template>
     </div>
-    <span class="bg-border h-4 w-px shrink-0" aria-hidden="true"></span>
+    <span
+      class="bg-border h-4 w-px shrink-0 max-sm:hidden"
+      aria-hidden="true"
+    ></span>
     <div
       data-testid="readiness"
-      class="inline-flex shrink-0 items-center gap-2"
+      class="inline-flex shrink-0 items-center gap-2 max-sm:ml-auto"
     >
       <span
         class="size-2 rounded-full"

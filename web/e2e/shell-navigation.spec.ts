@@ -123,3 +123,52 @@ test("navigation sheet opens and closes from the keyboard", async ({
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   await expectNoPageOverflow(page);
 });
+
+test("long Workspace choices keep the section and readiness reachable", async ({
+  page,
+}, info) => {
+  const betaId = "019fc0a4-6d92-765c-a8a1-4af556614cc2";
+  const longName = "ProductionWorkspaceWithoutWhitespace".repeat(4);
+  await page.route("**/api/v1/workspaces", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          { id: alphaId, name: longName, slug: "alpha", version: 1 },
+          { id: betaId, name: `${longName}-beta`, slug: "beta", version: 1 },
+        ],
+      },
+    }),
+  );
+  await page.goto("/settings");
+  const select = page.getByLabel("Workspace", { exact: true });
+  await expect(select).toHaveValue(alphaId);
+  for (const width of [1280, 1440, 1920, 320, 390, 768]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expectNoPageOverflow(page);
+    await expect(
+      page.locator("header").first().getByText("Settings", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByTestId("readiness")).toHaveText("Ready");
+    const bounds = await select.boundingBox();
+    if (!bounds) throw new Error("Workspace select has no layout bounds");
+    expect(bounds.width).toBeGreaterThanOrEqual(160);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+    if (
+      process.env.OCSERVIA_UI_EVIDENCE_DIR &&
+      (width === 1440 || width === 390)
+    )
+      await page.screenshot({
+        path: `${process.env.OCSERVIA_UI_EVIDENCE_DIR}/${info.project.name}/shell-workspace-${String(width)}.png`,
+        fullPage: true,
+      });
+  }
+  await select.selectOption(betaId);
+  await expect(select).toHaveValue(betaId);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "2";
+  });
+  await expectNoPageOverflow(page);
+  await select.focus();
+  await expect(select).toBeFocused();
+});
