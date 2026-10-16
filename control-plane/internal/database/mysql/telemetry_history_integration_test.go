@@ -35,7 +35,7 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 	// aligned with the fixture so setup cannot move its oldest 5m/1h bucket.
 	config.Params["timestamp"] = strconv.FormatInt(now.Unix(), 10)
 	pool := sql.OpenDB(&connector{config: config})
-	b := &Backend{store: store{pool}, pool: pool, engine: options.Engine}
+	b := &Backend{store: store{pool}, pool: pool}
 	defer b.Close()
 	for _, query := range []string{
 		`DELETE FROM telemetry_maintenance_progress WHERE 1=0`,

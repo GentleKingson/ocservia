@@ -52,7 +52,7 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 		if err != nil {
 			return nil, err
 		}
-		if err := conn.Migrate(databaseCtx, auditManager); err != nil {
+		if err := conn.Migrate(databaseCtx); err != nil {
 			return nil, fmt.Errorf("migrate database: %w", err)
 		}
 		if err := auditManager.EnsureAuthenticity(databaseCtx); err != nil {
