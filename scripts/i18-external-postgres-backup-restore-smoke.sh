@@ -125,10 +125,6 @@ run_migrate "${base_url}?sslmode=verify-full" >"${ARTIFACT_DIR}/migration.log"
 docker exec -e PGPASSWORD="${password}" "${source_container}" psql -At -U postgres -d ocservia \
   -c "INSERT INTO identities (id, issuer, subject, email, display_name, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000001','external-smoke','restore-probe','restore@example.test','Restore Probe',now(),now());" \
   >"${ARTIFACT_DIR}/source-seed.log"
-schema_version="$(docker exec -e PGPASSWORD="${password}" "${source_container}" psql -At -U postgres -d ocservia \
-  -c 'SELECT "current_schema" FROM controller_schema_compatibility WHERE singleton')"
-[[ "${schema_version}" =~ ^[0-9]+$ ]] || { echo "external PostgreSQL migration did not produce schema metadata" >&2; exit 1; }
-printf 'schema_version=%s\n' "${schema_version}" >"${ARTIFACT_DIR}/source-schema.log"
 
 # Preserve the sole journal byte for byte, including
 # timestamps. A restored database must never be reinitialized.

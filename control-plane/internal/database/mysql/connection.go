@@ -142,7 +142,7 @@ func Open(ctx context.Context, o Options) (*Backend, error) {
 		db.Close()
 		return nil, errors.New("database backend: requires Oracle MySQL 8.4 LTS")
 	}
-	return &Backend{store: store{db}, pool: db, engine: o.Engine}, nil
+	return &Backend{store: store{db}, pool: db}, nil
 }
 
 // Neither server error messages nor DSNs are safe log fields. Preserve neutral

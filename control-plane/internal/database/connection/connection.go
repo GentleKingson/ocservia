@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"path/filepath"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
@@ -113,7 +112,7 @@ func (c *Connection) Close() {
 	}
 }
 
-func (c *Connection) Migrate(ctx context.Context, manager *audit.Manager) error {
+func (c *Connection) Migrate(ctx context.Context) error {
 	if c.pg != nil {
 		return migrations.Migrate(ctx, c.pg)
 	}

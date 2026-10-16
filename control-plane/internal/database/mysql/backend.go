@@ -19,8 +19,7 @@ type executor interface {
 type store struct{ executor executor }
 type Backend struct {
 	store
-	pool   *sql.DB
-	engine Engine
+	pool *sql.DB
 }
 type transaction struct {
 	store
