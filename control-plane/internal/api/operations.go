@@ -292,7 +292,15 @@ func (s *Server) queueMetrics(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
 		return
 	}
-	metrics, err := s.operations.Metrics(r.Context())
+	// The unscoped development principal keeps controller-wide totals; every
+	// other principal only sees the workspace it was authorized for.
+	var metrics operationstore.QueueMetrics
+	var err error
+	if principal(r).Issuer == "development" {
+		metrics, err = s.operations.Metrics(r.Context())
+	} else {
+		metrics, err = s.operations.WorkspaceMetrics(r.Context(), workspace(r))
+	}
 	if err != nil {
 		s.writeOperationError(w, r, err)
 		return

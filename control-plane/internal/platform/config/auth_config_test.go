@@ -24,18 +24,19 @@ func TestProductionAuthenticationConfiguration(t *testing.T) {
 		for mask := 0; mask < 16; mask++ {
 			t.Run(fmt.Sprintf("local=%t/oidc=%04b", local, mask), func(t *testing.T) {
 				values := map[string]string{
-					"OCSERV_DATABASE_URL":             "postgres://db/test",
-					"OCSERV_ENVIRONMENT":              "production",
-					"OCSERV_LOCAL_AUTH_ENABLED":       strconv.FormatBool(local),
-					"OCSERV_PUBLIC_ORIGIN":            "https://app.example.test/",
-					"OCSERV_SESSION_KEY":              strings.Repeat("11", 32),
-					"OCSERV_AUDIT_CHECKPOINT_KEY":     strings.Repeat("33", 32),
-					"OCSERV_AUDIT_EVENT_KEY_ID":       "audit-v1",
-					"OCSERV_AUDIT_EVENT_KEY_FILE":     keyPath,
-					"OCSERV_COMMAND_SIGNING_KEY_FILE": "/run/secrets/command-key",
-					"OCSERV_CONTROLLER_ENDPOINT_ID":   strings.Repeat("ab", 32),
-					"OCSERV_TRANSPORT_UID":            strconv.Itoa(os.Geteuid() + 1),
-					"OCSERV_TRANSPORT_GID":            strconv.Itoa(os.Getegid()),
+					"OCSERV_DATABASE_URL":              "postgres://postgres/test",
+					"OCSERV_DATABASE_BUNDLED_POSTGRES": "true",
+					"OCSERV_ENVIRONMENT":               "production",
+					"OCSERV_LOCAL_AUTH_ENABLED":        strconv.FormatBool(local),
+					"OCSERV_PUBLIC_ORIGIN":             "https://app.example.test/",
+					"OCSERV_SESSION_KEY":               strings.Repeat("11", 32),
+					"OCSERV_AUDIT_CHECKPOINT_KEY":      strings.Repeat("33", 32),
+					"OCSERV_AUDIT_EVENT_KEY_ID":        "audit-v1",
+					"OCSERV_AUDIT_EVENT_KEY_FILE":      keyPath,
+					"OCSERV_COMMAND_SIGNING_KEY_FILE":  "/run/secrets/command-key",
+					"OCSERV_CONTROLLER_ENDPOINT_ID":    strings.Repeat("ab", 32),
+					"OCSERV_TRANSPORT_UID":             strconv.Itoa(os.Geteuid() + 1),
+					"OCSERV_TRANSPORT_GID":             strconv.Itoa(os.Getegid()),
 				}
 				for i, key := range []string{"OCSERV_OIDC_ISSUER", "OCSERV_OIDC_CLIENT_ID", "OCSERV_OIDC_CLIENT_SECRET", "OCSERV_OIDC_REDIRECT_URL"} {
 					if mask&(1<<i) != 0 {

@@ -36,8 +36,14 @@ services:
         limits: {cpus: "2.0", memory: 2G, pids: 256}
 
   migrate:
+    environment:
+      OCSERV_DATABASE_BUNDLED_POSTGRES: "true"
     depends_on:
       postgres: {condition: service_healthy}
+
+  control-plane:
+    environment:
+      OCSERV_DATABASE_BUNDLED_POSTGRES: "true"
 
   backup:
     restart: unless-stopped

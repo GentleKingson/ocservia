@@ -9,6 +9,7 @@ import (
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 )
 
@@ -101,6 +102,19 @@ func (s *Server) listAgentRollouts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		limit = parsed
+	}
+	// Workspace selection also admits node-scoped bindings, but the list
+	// covers every rollout in the workspace, so it needs workspace-level read.
+	if actor := principal(r); actor.Issuer != "development" {
+		if s.rbac == nil {
+			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
+			return
+		}
+		resource := rbac.Resource{WorkspaceID: workspace(r), Type: "workspace"}
+		if err := s.rbac.Authorize(r.Context(), actor.IdentityID, "operation.read", resource, actor.BreakGlass); err != nil {
+			s.writeAuthorizationError(w, r, err)
+			return
+		}
 	}
 	rollouts, err := s.operations.ListAgentRollouts(r.Context(), workspace(r), limit)
 	if err != nil {

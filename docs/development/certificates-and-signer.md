@@ -277,7 +277,8 @@ import or disable node bindings:
    checked by privd at startup without exporting private keys. Set `umask 077`
    before redirecting its output.
 2. On the Controller host, run `/usr/local/bin/ocserv-sealing-export` with
-   `--database-url-file`, `--backend`, optional `--database-ca-file`, and the
+   `--database-url-file`, `--backend`, `--database-ca-file` for an external
+   database or `--bundled-postgres` for bundled PostgreSQL, and the
    independently verified `--workspace`, `--node`, `--endpoint`, and
    `--approval` flags. This OS-protected administrative CLI authenticates
    directly to the database without exposing a public API. The database

@@ -429,6 +429,7 @@ func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Environment = "production"
+	cfg.DatabaseURL = "postgres://127.0.0.1/test"
 	cfg.OIDCIssuer = "https://id.example.test"
 	cfg.OIDCClientID = "ocservia"
 	cfg.OIDCClientSecret = strings.Repeat("s", 11)
@@ -655,6 +656,32 @@ func TestRecommendedAgentVersion(t *testing.T) {
 			}
 			if config.RecommendedAgentVersion != test.want {
 				t.Fatalf("recommended agent version=%q want %q", config.RecommendedAgentVersion, test.want)
+			}
+		})
+	}
+}
+
+func TestProductionPostgreSQLTransportDeclaration(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		values map[string]string
+		ok     bool
+	}{
+		{"undeclared bundled host", map[string]string{"OCSERV_DATABASE_URL": "postgres://postgres/ocservia?sslmode=disable"}, false},
+		{"declared bundled host", map[string]string{"OCSERV_DATABASE_URL": "postgres://postgres/ocservia?sslmode=disable", "OCSERV_DATABASE_BUNDLED_POSTGRES": "true"}, true},
+		{"declared remote host", map[string]string{"OCSERV_DATABASE_URL": "postgres://database.example.test/ocservia?sslmode=disable", "OCSERV_DATABASE_BUNDLED_POSTGRES": "true"}, false},
+		{"invalid declaration", map[string]string{"OCSERV_DATABASE_URL": "postgres://postgres/ocservia?sslmode=disable", "OCSERV_DATABASE_BUNDLED_POSTGRES": "maybe"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.values["OCSERV_ENVIRONMENT"] = "production"
+			tc.values["OCSERV_RUNTIME_DATABASE_ROLE"] = "ocservia_app"
+			_, err := Load([]string{"--migrate-only"}, func(key string) (string, bool) { v, ok := tc.values[key]; return v, ok })
+			// Later production checks may still fail; only the transport gate matters here.
+			if tc.ok && err != nil && strings.Contains(err.Error(), "PostgreSQL") {
+				t.Fatalf("declared bundled PostgreSQL rejected: %v", err)
+			}
+			if !tc.ok && (err == nil || !strings.Contains(err.Error(), "PostgreSQL") && !strings.Contains(err.Error(), "BUNDLED")) {
+				t.Fatalf("Load() error = %v, want PostgreSQL transport rejection", err)
 			}
 		})
 	}

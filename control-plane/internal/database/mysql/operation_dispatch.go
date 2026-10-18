@@ -267,15 +267,17 @@ func (s operationStore) ExtendDispatch(ctx context.Context, d operationstore.Dis
 	return err
 }
 
-func (s operationStore) QueueMetrics(ctx context.Context) (v operationstore.QueueMetrics, err error) {
+func (s operationStore) QueueMetrics(ctx context.Context, workspaceID uuid.UUID, all bool) (v operationstore.QueueMetrics, err error) {
 	at, err := database.TransactionTime(ctx, s.Tx)
 	if err != nil {
 		return v, err
 	}
 	var oldest value.Timestamp
-	err = s.QueryRow(ctx, `SELECT COUNT(CASE WHEN published_at IS NULL THEN 1 END),MIN(CASE WHEN published_at IS NULL THEN created_at END),
-		(SELECT COUNT(*) FROM commands WHERE state='queued'),(SELECT COUNT(*) FROM commands WHERE state='unknown'),
-		(SELECT COUNT(*) FROM config_apply_operations WHERE state='rolled_back'),(SELECT COUNT(*) FROM config_apply_operations WHERE state='failed_critical') FROM outbox_events`).
+	workspace := UUIDBytes(workspaceID)
+	err = s.QueryRow(ctx, `SELECT COUNT(CASE WHEN o.published_at IS NULL THEN 1 END),MIN(CASE WHEN o.published_at IS NULL THEN o.created_at END),
+		(SELECT COUNT(*) FROM commands WHERE state='queued' AND (? OR workspace_id=?)),(SELECT COUNT(*) FROM commands WHERE state='unknown' AND (? OR workspace_id=?)),
+		(SELECT COUNT(*) FROM config_apply_operations WHERE state='rolled_back' AND (? OR workspace_id=?)),(SELECT COUNT(*) FROM config_apply_operations WHERE state='failed_critical' AND (? OR workspace_id=?))
+		FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE ? OR c.workspace_id=?`, all, workspace, all, workspace, all, workspace, all, workspace, all, workspace).
 		Scan(&v.Unpublished, &oldest, &v.Queued, &v.Unknown, &v.ConfigRollbacks, &v.ConfigFailedCritical)
 	if err != nil {
 		return v, err

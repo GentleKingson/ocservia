@@ -18,6 +18,7 @@ func main() {
 	backend := flag.String("backend", "postgres", "database backend")
 	dsnFile := flag.String("database-url-file", "", "protected Controller database credential file")
 	ca := flag.String("database-ca-file", "", "database trust CA")
+	bundled := flag.Bool("bundled-postgres", false, "the URL targets the bundled PostgreSQL service")
 	workspace := flag.String("workspace", "", "expected workspace UUID")
 	node := flag.String("node", "", "expected node UUID")
 	approval := flag.String("approval", "", "consumed enrollment approval UUID")
@@ -37,7 +38,7 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	db, err := connection.Open(ctx, connection.Options{Backend: *backend, Environment: "production", URL: strings.TrimSpace(string(dsn)), CAFile: *ca})
+	db, err := connection.Open(ctx, connection.Options{Backend: *backend, Environment: "production", URL: strings.TrimSpace(string(dsn)), CAFile: *ca, BundledPostgres: *bundled})
 	if err != nil {
 		fail()
 	}

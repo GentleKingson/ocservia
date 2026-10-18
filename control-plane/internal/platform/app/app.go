@@ -46,7 +46,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 	}()
 
-	conn, err := connection.Open(ctx, connection.Options{Backend: cfg.DatabaseBackend, Environment: cfg.Environment, URL: cfg.DatabaseURL, CAFile: cfg.DatabaseTLSCAFile})
+	conn, err := connection.Open(ctx, connection.Options{Backend: cfg.DatabaseBackend, Environment: cfg.Environment, URL: cfg.DatabaseURL, CAFile: cfg.DatabaseTLSCAFile, BundledPostgres: cfg.DatabaseBundledPostgres})
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ package connection
 import (
 	"context"
 	"errors"
+	"net"
 	"net/url"
 	"path/filepath"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,7 +24,13 @@ var ErrUnmanagedWorkspaces = errors.New("workspaces exist without the administra
 
 type Options struct {
 	Backend, Environment, URL, CAFile string
+	// BundledPostgres is the explicit deployment declaration that the URL
+	// targets the official bundled PostgreSQL service on its internal network.
+	BundledPostgres bool
 }
+
+// bundledPostgresHost is the fixed Compose service name of bundled PostgreSQL.
+const bundledPostgresHost = "postgres"
 
 type Store interface {
 	database.Backend
@@ -41,7 +49,15 @@ func postgresURL(options Options) (string, error) {
 		return "", errors.New("OCSERV_DATABASE_URL must be a PostgreSQL URL")
 	}
 	if options.CAFile == "" {
+		if options.BundledPostgres || options.Environment == "production" {
+			if err := validatePlaintextPostgres(options); err != nil {
+				return "", err
+			}
+		}
 		return options.URL, nil
+	}
+	if options.BundledPostgres {
+		return "", errors.New("bundled PostgreSQL cannot use an external database CA")
 	}
 	if !filepath.IsAbs(options.CAFile) {
 		return "", errors.New("external PostgreSQL CA file must use an absolute path")
@@ -56,12 +72,43 @@ func postgresURL(options Options) (string, error) {
 	return u.String(), nil
 }
 
+// validatePlaintextPostgres admits a connection without a verified CA only
+// when every target the driver would dial is a loopback address, or the
+// deployment explicitly declares the bundled service. A production URL that
+// merely names a host like the bundled one is not exempt without that
+// declaration, because DNS search domains can resolve it elsewhere.
+func validatePlaintextPostgres(options Options) error {
+	config, err := pgconn.ParseConfig(options.URL)
+	if err != nil {
+		return errors.New("OCSERV_DATABASE_URL must be a PostgreSQL URL")
+	}
+	hosts := []string{config.Host}
+	for _, fallback := range config.Fallbacks {
+		hosts = append(hosts, fallback.Host)
+	}
+	for _, host := range hosts {
+		ip := net.ParseIP(host)
+		switch {
+		case options.BundledPostgres && host == bundledPostgresHost:
+		case !options.BundledPostgres && ip != nil && ip.IsLoopback():
+		case options.BundledPostgres:
+			return errors.New("bundled PostgreSQL must target only the postgres service")
+		default:
+			return errors.New("production PostgreSQL requires OCSERV_DATABASE_TLS_CA_FILE with sslmode=verify-full unless it targets loopback or the declared bundled service")
+		}
+	}
+	return nil
+}
+
 func ValidateOptions(options Options) error {
 	switch options.Backend {
 	case "", "postgres":
 		_, err := postgresURL(options)
 		return err
 	case "mysql":
+		if options.BundledPostgres {
+			return errors.New("bundled PostgreSQL cannot be declared for MySQL")
+		}
 		return mysql.ValidateOptions(mysql.Options{Engine: mysql.Engine(options.Backend), Environment: options.Environment, DSN: options.URL, CAFile: options.CAFile})
 	default:
 		return errors.New("unsupported Controller database backend")
