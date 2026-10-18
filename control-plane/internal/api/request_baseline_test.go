@@ -91,7 +91,7 @@ func TestHTTPStrictJSONBaseline(t *testing.T) {
 		{"trailing-junk", "application/json", "{} x", "request body must contain one JSON value", 400},
 		{"null", "application/json", "null", "workspace_id must be UUIDv7", 400},
 		{"parameters", "application/json; charset=utf-8", "{}", "workspace_id must be UUIDv7", 400},
-		{"duplicate-key", "application/json", "{\"reason\":\"a\",\"reason\":\"b\"}", "workspace_id must be UUIDv7", 400},
+		{"duplicate-key", "application/json", "{\"reason\":\"a\",\"reason\":\"b\"}", "request body must not repeat an object member", 400},
 		{"at-limit", "application/json", "{}" + strings.Repeat(" ", 1022), "workspace_id must be UUIDv7", 400},
 		{"over-limit", "application/json", "{}" + strings.Repeat(" ", 1023), "request body must be valid UTF-8 JSON", 400},
 		{"read-error", "application/json", "", "request body must be valid UTF-8 JSON", 400},

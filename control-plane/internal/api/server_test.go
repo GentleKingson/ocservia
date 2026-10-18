@@ -557,3 +557,21 @@ func TestBreakGlassRejectsCrossSiteRequests(t *testing.T) {
 		})
 	}
 }
+
+func TestAPIResponsesAreNotCacheable(t *testing.T) {
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	for _, test := range []struct {
+		path, want string
+	}{
+		{"/api/v1/nodes", "no-store"},
+		{"/api/v1/not-a-route", "no-store"},
+		{"/api/v1/auth/session", "no-store"},
+		{"/healthz", ""},
+	} {
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
+		if got := response.Header().Get("Cache-Control"); got != test.want {
+			t.Fatalf("%s status=%d Cache-Control=%q want %q", test.path, response.Code, got, test.want)
+		}
+	}
+}

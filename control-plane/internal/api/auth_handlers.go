@@ -150,7 +150,11 @@ func (s *Server) breakGlass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body breakGlassRequest
-	if !decodeStrictJSON(w, r, &body) || strings.TrimSpace(body.Token) == "" {
+	if !decodeStrictJSON(w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.Token) == "" {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "token is required")
 		return
 	}
 	// Failed requests cannot lock out the holder of the emergency credential.
