@@ -2366,6 +2366,17 @@ async fn read_agent_events(
                 .await;
                 return;
             };
+            // A result is only evidence for the command dispatched on this
+            // stream; the Controller still re-checks node and command ownership.
+            if result.command_id != command.command_id {
+                publish_command_unknown(
+                    event_context,
+                    &command,
+                    "Agent command result names a different command",
+                )
+                .await;
+                return;
+            }
             if !valid_privileged_result_proof(&command, &result) {
                 publish_command_unknown(
                     event_context,
@@ -2481,7 +2492,7 @@ fn valid_privileged_result_proof(command: &CommandEnvelope, result: &CommandResu
         && proof.signature.len() == 64
         && proof.encoded_len() <= 65_536
         && receipt.node_id.len() == 16
-        && receipt.command_id.len() == 16
+        && receipt.command_id == command.command_id
         && receipt.operation_id.len() == 16
         && receipt.idempotency_key.len() == 16
         && receipt.semantic_payload_sha256.len() == 32
@@ -3616,7 +3627,7 @@ mod tests {
         }
     }
 
-    async fn respond_to_command(connection: Connection, include_receipt: bool) {
+    async fn respond_to_command(connection: Connection, include_receipt: bool, foreign_id: bool) {
         let (mut send, mut recv) = connection.accept_bi().await.expect("accept command");
         let mut length = [0_u8; 4];
         recv.read_exact(&mut length)
@@ -3633,9 +3644,13 @@ mod tests {
                 .signature,
             RELAYED_AUTHORIZATION_SIGNATURE
         );
+        let mut result = privileged_command_result(&decoded, include_receipt);
+        if foreign_id {
+            result.command_id = Uuid::now_v7().as_bytes().to_vec();
+        }
         let response = AgentEvent {
             r#type: AgentEventType::CommandResult.into(),
-            payload: privileged_command_result(&decoded, include_receipt).encode_to_vec(),
+            payload: result.encode_to_vec(),
         }
         .encode_to_vec();
         let response_len = u32::try_from(response.len()).expect("response length fits u32");
@@ -3666,6 +3681,15 @@ mod tests {
             .expect("proof")
             .version = PrivdReceiptVersion::Unspecified.into();
         assert!(!valid_privileged_result_proof(&command, &malformed));
+
+        let mut foreign_receipt = privileged_command_result(&command, true);
+        foreign_receipt
+            .privileged_result_proof
+            .as_mut()
+            .and_then(|proof| proof.receipt_v1.as_mut())
+            .expect("receipt")
+            .command_id = Uuid::now_v7().as_bytes().to_vec();
+        assert!(!valid_privileged_result_proof(&command, &foreign_receipt));
     }
 
     async fn end_command_without_response(connection: Connection) {
@@ -4748,7 +4772,7 @@ mod tests {
         );
 
         tokio::time::sleep(Duration::from_millis(2)).await;
-        let agent = tokio::spawn(respond_to_command(connection.clone(), true));
+        let agent = tokio::spawn(respond_to_command(connection.clone(), true, false));
         let mut events = service
             .watch_events(Request::new(WatchEventsRequest {
                 after_event_id: Vec::new(),
@@ -4797,7 +4821,7 @@ mod tests {
         );
 
         let missing_receipt_traceparent = new_traceparent();
-        let agent = tokio::spawn(respond_to_command(connection.clone(), false));
+        let agent = tokio::spawn(respond_to_command(connection.clone(), false, false));
         let missing_receipt_command_bytes = command_envelope(
             &handshake.node_id,
             &missing_receipt_traceparent,
@@ -4827,6 +4851,29 @@ mod tests {
             result.idempotency_key,
             missing_receipt_command.idempotency_key
         );
+
+        let foreign_traceparent = new_traceparent();
+        let agent = tokio::spawn(respond_to_command(connection.clone(), true, true));
+        let foreign_command_bytes =
+            command_envelope(&handshake.node_id, &foreign_traceparent, String::new());
+        let foreign_command = CommandEnvelope::decode(foreign_command_bytes.as_slice())
+            .expect("decode foreign-result command");
+        service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: handshake.node_id.clone(),
+                command_envelope: foreign_command_bytes,
+            }))
+            .await
+            .expect("send command answered for another command");
+        agent.await.expect("foreign-result response task");
+        let event = next_event(&mut events, TransportEventType::CommandResult).await;
+        assert_eq!(event.traceparent, foreign_traceparent);
+        let result = CommandResult::decode(event.payload.as_slice()).expect("unknown result");
+        assert_eq!(
+            CommandResultState::try_from(result.state).expect("result state"),
+            CommandResultState::Unknown
+        );
+        assert_eq!(result.command_id, foreign_command.command_id);
 
         let eof_traceparent = new_traceparent();
         let agent = tokio::spawn(end_command_without_response(connection.clone()));
