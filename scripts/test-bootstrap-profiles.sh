@@ -131,6 +131,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
   files += %w[.github/release.yml .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/release-upgrade.yml
               .github/release-notes/v1.1.0-history-rewrite.md
               .github/release-notes/v2.0.0-rc.2.md
+              .github/release-notes/v2.0.0-rc.3.md
               .github/workflows/release-products.yml
               .github/workflows/release-native-platform.yml
               .github/workflows/release-business-diagnostic.yml .github/workflows/release-check.yml
