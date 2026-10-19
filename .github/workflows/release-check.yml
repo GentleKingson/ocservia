@@ -19,6 +19,16 @@ jobs:
   security:
     needs: main
     uses: ./.github/workflows/security.yml
+  products:
+    needs: main
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    uses: ./.github/workflows/release-products.yml
+    with:
+      version: '0.0.0'
+      arch: ${{ matrix.arch }}
   business:
     needs: main
     strategy:
@@ -56,14 +66,14 @@ jobs:
             bash scripts/release-quick-acceptance.sh
   result:
     name: Release Check Result
-    needs: [main, full-ci, security, business, quick]
+    needs: [main, full-ci, security, products, business, quick]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          if jq -e 'keys == ["business","full-ci","main","quick","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
+          if jq -e 'keys == ["business","full-ci","main","products","quick","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
             echo PASS >>"$GITHUB_STEP_SUMMARY"
           else
             echo FAIL >>"$GITHUB_STEP_SUMMARY"
