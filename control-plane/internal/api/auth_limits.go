@@ -65,15 +65,26 @@ func (a *authAdmission) admitReason(source netip.Addr, now time.Time, emergency 
 		if a.globalLimit > 0 && a.global.count >= a.globalLimit {
 			return nil, a.global.until.Sub(now), localGlobalLimited
 		}
+		// A concurrency rejection does no authentication work, so it must not
+		// spend the source or global rate budget.
+		if !a.acquire() {
+			return nil, time.Second, localConcurrencyLimited
+		}
 		window.count++
 		a.sources[source] = window
 		a.global.count++
+	} else if !a.acquire() {
+		return nil, time.Second, localConcurrencyLimited
 	}
+	return func() { <-a.active }, 0, 0
+}
+
+func (a *authAdmission) acquire() bool {
 	select {
 	case a.active <- struct{}{}:
-		return func() { <-a.active }, 0, 0
+		return true
 	default:
-		return nil, time.Second, localConcurrencyLimited
+		return false
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -119,5 +120,84 @@ func TestValidBreakGlassTokenIsOnlyCredentialAdmission(t *testing.T) {
 	service.breakGlassEnabled = false
 	if service.ValidBreakGlassToken("correct") {
 		t.Fatal("disabled emergency credential accepted")
+	}
+}
+
+func TestOIDCProviderCacheCoalescesAndRecovers(t *testing.T) {
+	service, err := NewBackend(postgres.WrapPool(&pgxpool.Pool{}), Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1000, 0)
+	service.now = func() time.Time { return now }
+	var calls atomic.Int32
+	fail := true
+	release := make(chan struct{})
+	service.discover = func(ctx context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
+		calls.Add(1)
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > oidcDiscoveryTimeout {
+			t.Errorf("Discovery is not bounded: %v %t", deadline, ok)
+		}
+		<-release
+		if ctx.Err() != nil {
+			t.Errorf("Discovery inherited a caller cancellation: %v", ctx.Err())
+		}
+		if fail {
+			return oauth2.Config{}, nil, errors.New("issuer unavailable")
+		}
+		return oauth2.Config{ClientID: "client"}, nil, nil
+	}
+
+	// A failed first Discovery is shared by concurrent callers and not cached.
+	errs := make(chan error, 3)
+	for range 3 {
+		go func() { _, _, err := service.provider(context.Background()); errs <- err }()
+	}
+	waitForCalls(t, &calls, 1)
+	close(release)
+	for range 3 {
+		if err := <-errs; err == nil {
+			t.Fatal("failed Discovery returned a provider")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("concurrent Discovery calls = %d, want 1", calls.Load())
+	}
+
+	// A cancelled caller stops waiting without failing the shared Discovery.
+	fail = false
+	release = make(chan struct{})
+	cancelled, cancel := context.WithCancel(context.Background())
+	go func() { _, _, err := service.provider(cancelled); errs <- err }()
+	waitForCalls(t, &calls, 2)
+	waiter := make(chan error, 1)
+	go func() { _, _, err := service.provider(context.Background()); waiter <- err }()
+	cancel()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled caller error = %v", err)
+	}
+	close(release)
+	if err := <-waiter; err != nil {
+		t.Fatalf("cancellation failed the shared Discovery: %v", err)
+	}
+
+	// Recovery is cached until the TTL ends.
+	if config, _, err := service.provider(context.Background()); err != nil || config.ClientID != "client" || calls.Load() != 2 {
+		t.Fatalf("cached provider: %v calls=%d", err, calls.Load())
+	}
+	now = now.Add(oidcDiscoveryTTL)
+	if _, _, err := service.provider(context.Background()); err != nil || calls.Load() != 3 {
+		t.Fatalf("expired provider was not refreshed: %v calls=%d", err, calls.Load())
+	}
+}
+
+func waitForCalls(t *testing.T, calls *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("Discovery calls = %d, want %d", calls.Load(), want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
