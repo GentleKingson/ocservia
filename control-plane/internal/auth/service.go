@@ -83,6 +83,8 @@ type oidcDiscovery struct {
 	group  singleflight.Group
 	mu     sync.Mutex
 	cached *oidcProvider
+	// joined is a test hook run after a caller has joined the shared Discovery.
+	joined func()
 }
 
 type oidcProvider struct {
@@ -245,6 +247,9 @@ func (s *Service) provider(ctx context.Context) (oauth2.Config, *oidc.IDTokenVer
 		s.discovery.mu.Unlock()
 		return provider, nil
 	})
+	if s.discovery.joined != nil {
+		s.discovery.joined()
+	}
 	select {
 	case <-ctx.Done():
 		return oauth2.Config{}, nil, fmt.Errorf("discover OIDC provider: %w", ctx.Err())
