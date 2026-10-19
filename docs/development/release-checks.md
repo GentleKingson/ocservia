@@ -139,9 +139,10 @@ other prerelease tag or build metadata is rejected. Publishing an RC passes
 `--prerelease --latest=false` and pushes only the exact RC image tags, while
 manual workflow dispatches never publish assets or images.
 
-For `v2.0.0-rc.2` and `v2.0.0-rc.3`, the workflow prepends the corresponding
-checked-in notes ([RC.2](../../.github/release-notes/v2.0.0-rc.2.md),
-[RC.3](../../.github/release-notes/v2.0.0-rc.3.md)) using
+For `v2.0.0-rc.2`, `v2.0.0-rc.3` and `v2.0.0-rc.4`, the workflow prepends the
+corresponding checked-in notes ([RC.2](../../.github/release-notes/v2.0.0-rc.2.md),
+[RC.3](../../.github/release-notes/v2.0.0-rc.3.md),
+[RC.4](../../.github/release-notes/v2.0.0-rc.4.md)) using
 GitHub's `--notes` option alongside `--generate-notes`. This preserves the
 generated categories, PR list, contributor credits and comparison link.
 Each supplement applies only to its exact version; existing Release bodies

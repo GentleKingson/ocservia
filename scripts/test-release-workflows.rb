@@ -216,7 +216,7 @@ Dir.mktmpdir('release-rc-') do |dir|
   env={'PATH'=>"#{dir}:#{ENV.fetch('PATH')}",'GITHUB_OUTPUT'=>"#{dir}/outputs",'CALLS'=>"#{dir}/calls",'GH_REPO'=>'test/repo','GH_TOKEN'=>'test','GITHUB_ACTOR'=>'test','RUNNER_TEMP'=>dir,'GITHUB_SHA'=>'test-publish-sha','BRIDGE_FILE'=>File.expand_path('.github/release-notes/v1.1.0-history-rewrite.md'),'CREATE_ARGS'=>"#{dir}/create-args"}
   notes = publish['steps'].find {|s| s['id']=='notes'}.fetch('run')
   publication = publish['steps'].find {|s| s['name']=='Publish version images and Release assets'}.fetch('run')
-  [['1.2.3-rc.1','v1.1.0'],['1.2.3-rc.2','v1.2.3-rc.1'],['1.2.3-rc.10','v1.2.3-rc.9'],['1.2.3','v1.1.0'],['1.3.0-rc.1','v1.2.3'],['1.3.0','v1.2.3'],['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0','v1.1.0']].each do |version,base|
+  [['1.2.3-rc.1','v1.1.0'],['1.2.3-rc.2','v1.2.3-rc.1'],['1.2.3-rc.10','v1.2.3-rc.9'],['1.2.3','v1.1.0'],['1.3.0-rc.1','v1.2.3'],['1.3.0','v1.2.3'],['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0-rc.4','v2.0.0-rc.3'],['2.0.0','v1.1.0']].each do |version,base|
     File.write("#{dir}/outputs",'')
     File.write("#{dir}/calls",'')
     current=env.merge('VERSION'=>version,'IS_PRERELEASE'=>version.include?('-rc.') ? 'true' : 'false','STABLE_BASE'=>version.start_with?('1.3.0') ? 'v1.2.3' : 'v1.1.0')
@@ -226,13 +226,13 @@ Dir.mktmpdir('release-rc-') do |dir|
     require_check(status.success?, "publication failed: #{err}")
     create=File.binread("#{dir}/create-args").split("\0")
     require_check(create[create.index('--notes-start-tag')+1] == base && create.include?('--verify-tag') && create.include?('--generate-notes'), 'publication lost native notes, explicit base or tag verification')
-    require_check(create.include?('--notes') == (base == 'v1.1.0' || %w[2.0.0-rc.2 2.0.0-rc.3].include?(version)), 'supplement must only apply to its selected version or history base')
+    require_check(create.include?('--notes') == (base == 'v1.1.0' || %w[2.0.0-rc.2 2.0.0-rc.3 2.0.0-rc.4].include?(version)), 'supplement must only apply to its selected version or history base')
     if base == 'v1.1.0'
       require_check(create[create.index('--notes')+1] == File.read(env['BRIDGE_FILE']).rstrip, 'history bridge content changed in CLI arguments')
     else
       require_check(!File.read("#{dir}/calls").include?('/contents/'), 'other bases must not fetch the history bridge')
     end
-    if %w[2.0.0-rc.2 2.0.0-rc.3].include?(version)
+    if %w[2.0.0-rc.2 2.0.0-rc.3 2.0.0-rc.4].include?(version)
       supplement = File.read(".github/release-notes/v#{version}.md").rstrip
       require_check(create[create.index('--notes')+1] == supplement, "#{version} supplement content changed in CLI arguments")
       combined, error, status = Open3.capture3('python3', filter, stdin_data: supplement + "\n\n" + original)
@@ -240,7 +240,7 @@ Dir.mktmpdir('release-rc-') do |dir|
     end
     require_check(create.include?('--prerelease') == version.include?('-rc.') && create.include?('--latest=false') == version.include?('-rc.'), 'wrong publication flags')
   end
-  [['1.3.0','v1.2.3'],['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2']].each do |version,base|
+  [['1.3.0','v1.2.3'],['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0-rc.4','v2.0.0-rc.3']].each do |version,base|
     [false, true].each do |exists|
       [original, expected].each do |body|
         File.write("#{dir}/calls", '')
@@ -255,7 +255,7 @@ Dir.mktmpdir('release-rc-') do |dir|
       end
     end
   end
-  [['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2']].each do |version,base|
+  [['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0-rc.4','v2.0.0-rc.3']].each do |version,base|
     File.write("#{dir}/calls", '')
     failed=env.merge('VERSION'=>version,'IS_PRERELEASE'=>'true','NOTES_BASE'=>base)
     Dir.chdir(dir) do

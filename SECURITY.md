@@ -8,6 +8,13 @@ release line, not the default branch, unreleased commits, pull requests,
 release candidates, or draft releases. The supported platform set and retained
 safety contracts follow the [current support policy](docs/reference/support-policy.md).
 
+The `v1` line is end of life. No further `v1` patch releases are planned and
+security fixes are not backported to `v1`; the only `v1` artifact still
+referenced by `v2` is the fixed `v1.2.0` database checkpoint used for the
+forward-only upgrade. `v2.0.0` release candidates are prereleases for
+evaluation: they receive fixes on the `v2` release train, but they are not a
+stable supported production release line until `v2.0.0` is published.
+
 Published `v1.1.0` removes software-version compatibility admission and the
 previous cross-version support promise, including the additive-only `1.x`
 promise. This breaking policy change does not relax signature verification,
@@ -17,8 +24,9 @@ rejects it; plan backups, recovery and any required redeployment explicitly.
 
 | Version | Supported |
 | --- | --- |
-| Latest published release line | Yes |
-| Older release lines | No |
+| Latest published stable release line (`v2.0.x` once published) | Yes |
+| `v2.0.0` release candidates | Prerelease; fixes ship only in later candidates |
+| `v1.x` | No (end of life) |
 
 Users should update to the latest available patch release in the current
 release line before reporting a vulnerability believed to affect an older
