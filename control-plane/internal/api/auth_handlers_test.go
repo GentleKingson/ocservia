@@ -113,7 +113,7 @@ func TestLocalLoginHTTPBoundary(t *testing.T) {
 		{"null", `null`, authTestOrigin, "application/json", "", 400},
 		{"missing password", `{"username":"a"}`, authTestOrigin, "application/json", "", 400},
 		{"wrong type", `{"username":1,"password":"b"}`, authTestOrigin, "application/json", "", 400},
-		{"body limit", `{"username":"a","password":"` + strings.Repeat("p", 8192) + `"}`, authTestOrigin, "application/json", "", 400},
+		{"body limit", `{"username":"a","password":"` + strings.Repeat("p", 8192) + `"}`, authTestOrigin, "application/json", "", 413},
 		{"username limit", `{"username":"` + strings.Repeat("a", 129) + `","password":"b"}`, authTestOrigin, "application/json", "", 401},
 		{"password byte limit", `{"username":"a","password":"` + strings.Repeat("\u00e9", 513) + `"}`, authTestOrigin, "application/json", "", 401},
 	} {
@@ -491,7 +491,15 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 	if w := call("GET", "workspaces", "", 200); !strings.Contains(w.Body.String(), workspaceID.String()) {
 		t.Fatalf("authorized workspace missing: %s", w.Body)
 	}
-	call("POST", "role-bindings", binding, 400)
+	// An elevated role without an approval conflicts with approval state, an
+	// unknown role is invalid, and repeating a binding conflicts with it.
+	call("POST", "role-bindings", binding, 409)
+	call("POST", "role-bindings", strings.Replace(binding, `"SecurityAdmin"`, `"Unknown"`, 1), 400)
+	viewer := strings.Replace(binding, `"SecurityAdmin"`, `"Viewer"`, 1)
+	call("POST", "role-bindings", viewer, 201)
+	if w := call("POST", "role-bindings", viewer, 409); !strings.Contains(w.Body.String(), "role-binding-exists") {
+		t.Fatalf("duplicate binding problem: %s", w.Body)
+	}
 	w := call("POST", "approval-requests", fmt.Sprintf(`{"action":"role_binding.elevate","resource_type":"role_binding","resource_id":%q,"reason":"P6 parity","ttl_seconds":600,"role_binding":{"identity_id":%q,"role":"SecurityAdmin","resource_type":"workspace"}}`, targetID, targetID), 201)
 	var approval approvals.Approval
 	if err := json.Unmarshal(w.Body.Bytes(), &approval); err != nil {
@@ -509,9 +517,11 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 	}
 	approvedBinding := strings.TrimSuffix(binding, "}") + fmt.Sprintf(`,"approval_id":%q}`, approval.ID)
 	call("POST", "role-bindings", approvedBinding, 201)
-	call("POST", "role-bindings", approvedBinding, 400)
+	if w := call("POST", "role-bindings", approvedBinding, 409); !strings.Contains(w.Body.String(), "approval-not-ready") {
+		t.Fatalf("consumed approval problem: %s", w.Body)
+	}
 	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND actor_id=$2 AND source_session_id=$3 AND action='role_binding.create' AND result='succeeded'`, workspaceID, actor.IdentityID.String(), actor.SessionID).Scan(&count); err != nil || count != 1 {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND actor_id=$2 AND source_session_id=$3 AND action='role_binding.create' AND result='succeeded'`, workspaceID, actor.IdentityID.String(), actor.SessionID).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("principal/session audit parity: %d %v", count, err)
 	}
 }

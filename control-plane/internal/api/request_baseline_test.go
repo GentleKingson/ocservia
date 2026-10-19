@@ -93,7 +93,7 @@ func TestHTTPStrictJSONBaseline(t *testing.T) {
 		{"parameters", "application/json; charset=utf-8", "{}", "workspace_id must be UUIDv7", 400},
 		{"duplicate-key", "application/json", "{\"reason\":\"a\",\"reason\":\"b\"}", "request body must not repeat an object member", 400},
 		{"at-limit", "application/json", "{}" + strings.Repeat(" ", 1022), "workspace_id must be UUIDv7", 400},
-		{"over-limit", "application/json", "{}" + strings.Repeat(" ", 1023), "request body must be valid UTF-8 JSON", 400},
+		{"over-limit", "application/json", "{}" + strings.Repeat(" ", 1023), "request body exceeds the size limit", 413},
 		{"read-error", "application/json", "", "request body must be valid UTF-8 JSON", 400},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,8 +108,11 @@ func TestHTTPStrictJSONBaseline(t *testing.T) {
 			w := httptest.NewRecorder()
 			s.http.Handler.ServeHTTP(w, r)
 			kind, title := "invalid-request", "Invalid request"
-			if tc.status == 415 {
+			switch tc.status {
+			case 415:
 				kind, title = "unsupported-media-type", "Unsupported media type"
+			case 413:
+				kind, title = "request-too-large", "Request too large"
 			}
 			assertBaselineProblem(t, w, r.URL.Path, tc.status, kind, title, tc.detail)
 		})

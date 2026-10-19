@@ -19,6 +19,7 @@ import (
 var (
 	ErrForbidden      = errors.New("authorization denied")
 	ErrGrantForbidden = errors.New("role grant exceeds actor permissions")
+	ErrInvalidBinding = errors.New("role binding is invalid")
 )
 
 type Resource struct {
@@ -158,7 +159,7 @@ func (s *Service) CreateBinding(ctx context.Context, request BindingRequest) (uu
 	if request.IdentityID == uuid.Nil || request.WorkspaceID == uuid.Nil || request.ActorID == uuid.Nil || request.SessionID == uuid.Nil || request.RequestID == "" || request.Reason == "" ||
 		!slices.Contains([]string{"Viewer", "Operator", "UserManager", "ConfigManager", "Auditor", "SecurityAdmin", "PlatformAdmin"}, request.Role) ||
 		!slices.Contains([]string{"workspace", "node", "resource", "secret_ref", "certificate", "config_plan", "batch_operation", "role_binding"}, request.ResourceType) || (request.ResourceType == "workspace") != (request.ResourceID == uuid.Nil) {
-		return uuid.Nil, errors.New("role binding is invalid")
+		return uuid.Nil, ErrInvalidBinding
 	}
 	id := uuid.Must(uuid.NewV7())
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {

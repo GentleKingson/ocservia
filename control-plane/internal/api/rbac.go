@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/google/uuid"
@@ -95,11 +97,18 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.rbac.CreateBinding(r.Context(), rbac.BindingRequest{IdentityID: identityID, WorkspaceID: workspaceID, ResourceID: resourceID, ActorID: actor.IdentityID, SessionID: actor.SessionID, ApprovalID: approvalID, Role: body.Role, ResourceType: body.ResourceType, RequestID: requestID(r), Reason: body.Reason})
 	if err != nil {
-		if errors.Is(err, rbac.ErrGrantForbidden) {
+		switch {
+		case errors.Is(err, rbac.ErrGrantForbidden):
 			writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the requested role exceeds the actor's effective permissions")
-			return
+		case errors.Is(err, rbac.ErrInvalidBinding), errors.Is(err, database.ErrForeignKey), errors.Is(err, database.ErrConstraint):
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "the role binding could not be created")
+		case errors.Is(err, approvals.ErrNotReady):
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-not-ready", "Approval unavailable", "the approval is expired, consumed, or does not match")
+		case errors.Is(err, database.ErrUnique):
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/role-binding-exists", "Role binding exists", "the identity already holds this role binding")
+		default:
+			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Role binding unavailable", "role binding state is temporarily unavailable")
 		}
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "the role binding could not be created")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id})

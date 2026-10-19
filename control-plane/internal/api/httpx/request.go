@@ -45,6 +45,11 @@ func DecodeStrictJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	// limitBody has already bounded the request. Check before encoding/json
 	// can silently replace malformed UTF-8 in strings with U+FFFD.
 	body, err := io.ReadAll(r.Body)
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		WriteProblem(w, r, http.StatusRequestEntityTooLarge, "https://ocservia.dev/problems/request-too-large", "Request too large", "request body exceeds the size limit")
+		return false
+	}
 	if err != nil || !utf8.Valid(body) {
 		WriteProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "request body must be valid UTF-8 JSON")
 		return false
