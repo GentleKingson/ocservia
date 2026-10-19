@@ -47,5 +47,5 @@ type DispatchStore interface {
 	CloseDispatch(context.Context, Dispatch, value.Timestamp) error
 	FailDispatch(context.Context, Dispatch, string, value.Timestamp) error
 	ExtendDispatch(context.Context, Dispatch, uuid.UUID, time.Duration) error
-	QueueMetrics(context.Context) (QueueMetrics, error)
+	QueueMetrics(ctx context.Context, workspaceID uuid.UUID, all bool) (QueueMetrics, error)
 }

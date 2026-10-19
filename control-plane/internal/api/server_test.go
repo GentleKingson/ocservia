@@ -223,14 +223,31 @@ func TestOperationsAcceptConfiguredDevelopmentBearer(t *testing.T) {
 }
 
 func TestCreateSimulationRejectsNullBody(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters")
 	server.EnableLocalSlice(localslice.NewBackend(nil, nil))
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/development/simulations", strings.NewReader("null"))
-	request.Header.Set("Content-Type", "application/json")
-	server.http.Handler.ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	for _, test := range []struct {
+		name, host, token string
+		want              int
+	}{
+		{"anonymous", "127.0.0.1:8080", "", http.StatusUnauthorized},
+		{"wrong token", "127.0.0.1:8080", "wrong", http.StatusUnauthorized},
+		{"rebound host", "attacker.example:8080", "local-development-token-32-characters", http.StatusForbidden},
+		{"loopback IPv6", "[::1]:8080", "local-development-token-32-characters", http.StatusBadRequest},
+		{"localhost", "localhost:8080", "local-development-token-32-characters", http.StatusBadRequest},
+		{"compose web proxy", "web:4173", "local-development-token-32-characters", http.StatusBadRequest},
+		{"loopback", "127.0.0.1:8080", "local-development-token-32-characters", http.StatusBadRequest},
+	} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/development/simulations", strings.NewReader("null"))
+		request.Host = test.host
+		request.Header.Set("Content-Type", "application/json")
+		if test.token != "" {
+			request.Header.Set("Authorization", "Bearer "+test.token)
+		}
+		server.http.Handler.ServeHTTP(response, request)
+		if response.Code != test.want {
+			t.Fatalf("%s: status = %d, body = %s", test.name, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -252,9 +269,11 @@ func TestDevelopmentRuntimeKeepsProcessMetricsWhenDatabaseIsUnavailable(t *testi
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	server := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters")
 	server.SetLocalSimulatorEnabled(true)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/development/runtime", nil)
+	request.Host = "127.0.0.1:8080"
+	request.Header.Set("Authorization", "Bearer local-development-token-32-characters")
 	response := httptest.NewRecorder()
 
 	server.developmentRuntime(response, request)
@@ -555,5 +574,23 @@ func TestBreakGlassRejectsCrossSiteRequests(t *testing.T) {
 				t.Fatalf("break-glass boundary status = %d, body = %s", response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestAPIResponsesAreNotCacheable(t *testing.T) {
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	for _, test := range []struct {
+		path, want string
+	}{
+		{"/api/v1/nodes", "no-store"},
+		{"/api/v1/not-a-route", "no-store"},
+		{"/api/v1/auth/session", "no-store"},
+		{"/healthz", ""},
+	} {
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
+		if got := response.Header().Get("Cache-Control"); got != test.want {
+			t.Fatalf("%s status=%d Cache-Control=%q want %q", test.path, response.Code, got, test.want)
+		}
 	}
 }

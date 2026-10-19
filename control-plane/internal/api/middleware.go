@@ -50,6 +50,12 @@ func (s *Server) requestContext(next http.Handler) http.Handler {
 			requestID = randomID()
 		}
 		w.Header().Set("X-Request-ID", requestID)
+		// API responses carry session-bound or authorization-scoped data, so
+		// no cache may keep them by default; handlers may still override it,
+		// as the event streams do.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
 		if s.hasOperationPrincipal(r) {
 			w.Header().Set("X-Ocservia-Dev-Subject", "developer")
 		}

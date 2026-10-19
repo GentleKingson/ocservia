@@ -166,3 +166,23 @@ func TestBreakGlassInvalidTokensLimitedBeforeService(t *testing.T) {
 		}
 	}
 }
+
+func TestBreakGlassEmptyTokenIsRejected(t *testing.T) {
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	var err error
+	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.EnableBrowserOrigin("https://admin.example.com")
+	for _, body := range []string{`{}`, `{"token":""}`, `{"token":"   "}`} {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/break-glass", strings.NewReader(body))
+		request.Header.Set("Origin", "https://admin.example.com")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest || response.Header().Get("Set-Cookie") != "" || response.Header().Get("Content-Type") != "application/problem+json" {
+			t.Fatalf("body=%s status=%d headers=%v", body, response.Code, response.Header())
+		}
+	}
+}

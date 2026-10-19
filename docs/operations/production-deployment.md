@@ -79,7 +79,10 @@ At startup, the production launcher pairs `deploy/production/compose.yaml` with
 a single database descriptor. The default bundled PostgreSQL 18 configuration
 runs the HTTPS gateway, control plane, transport service, PostgreSQL server,
 and backup worker together, keeping database, application, and observability
-traffic on internal Docker networks. External database deployments attach
+traffic on internal Docker networks. Its Compose descriptor sets
+`OCSERV_DATABASE_BUNDLED_POSTGRES=true`, the only declaration under which a
+production PostgreSQL URL without `OCSERV_DATABASE_TLS_CA_FILE` may target the
+`postgres` service (otherwise only loopback is accepted). External database deployments attach
 database client containers to the dedicated non-internal `database-egress`
 network without publishing any database port from ocservia: external PostgreSQL
 18 requires `sslmode=verify-full` with `database-ca.pem` across owner, runtime,

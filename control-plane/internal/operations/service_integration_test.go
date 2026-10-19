@@ -356,6 +356,14 @@ func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 	if metrics.Unpublished != 1 || metrics.Queued != 1 || metrics.Unknown != 1 {
 		t.Fatalf("metrics after dispatch = %+v", metrics)
 	}
+	scoped, err := service.WorkspaceMetrics(context.Background(), workspaceID)
+	if err != nil || scoped.Unpublished != 1 || scoped.Queued != 1 || scoped.Unknown != 1 || scoped.OldestAge <= 0 {
+		t.Fatalf("workspace metrics after dispatch = %+v, %v", scoped, err)
+	}
+	foreign, err := service.WorkspaceMetrics(context.Background(), uuid.Must(uuid.NewV7()))
+	if err != nil || foreign != (QueueMetrics{}) {
+		t.Fatalf("foreign workspace metrics = %+v, %v", foreign, err)
+	}
 }
 
 // TestClaimedCommandExpiryDoesNotLeakNodeLeaseIntegration reproduces the

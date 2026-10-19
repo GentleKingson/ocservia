@@ -52,7 +52,8 @@ before an Agent result arrives.
 Clients can inspect operation progress over REST or subscribe to the resumable
 `/api/v1/operations/{operation_id}/events` SSE stream, while
 `/api/v1/operations/queue-metrics` reports unpublished event count, oldest age,
-queue depth, and `unknown` count. Across both supported database backends,
+queue depth, and `unknown` count for the authorized workspace (only the
+development principal sees Controller-wide totals). Across both supported database backends,
 dispatch and recovery rely exclusively on the worker polling the outbox every
 200 ms and reaping expired leases once per second.
 

@@ -184,7 +184,7 @@ wait_succeeded() {
 
 create_probe() {
   local heartbeat_count=$1 delay_millis=$2
-  curl --fail --silent -H 'Content-Type: application/json' \
+  curl --fail --silent -H 'Content-Type: application/json' -H "Authorization: Bearer ${AUTH_TOKEN}" \
     -d "{\"heartbeat_count\":${heartbeat_count},\"delay_millis\":${delay_millis}}" \
     "http://127.0.0.1:${API_PORT}/api/v1/development/simulations"
 }
@@ -206,7 +206,7 @@ read_stub_stats() {
 record_sample() {
   local phase=$1 database_available=${2:-true}
   local runtime stub control_rss control_fd stub_rss stub_fd postgres_io
-  runtime="$(curl --fail --silent --max-time 5 "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
+  runtime="$(curl --fail --silent --max-time 5 -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
   stub="$(read_stub_stats)"
   control_rss="$("${COMPOSE[@]}" exec -T control-plane sh -c "awk '/VmRSS/ {print \$2}' /proc/1/status")"
   control_fd="$("${COMPOSE[@]}" exec -T control-plane sh -c 'find /proc/1/fd -mindepth 1 -maxdepth 1 | wc -l')"
@@ -296,14 +296,14 @@ sample_resources &
 SAMPLE_PID=$!
 sample_phase_now capacity-load
 
-export API_PORT HEARTBEAT_COUNT HEARTBEAT_INTERVAL_MS TMP_ROOT
+export API_PORT AUTH_TOKEN HEARTBEAT_COUNT HEARTBEAT_INTERVAL_MS TMP_ROOT
 # The child Bash expands the exported load settings.
 # shellcheck disable=SC2016
 seq 1 "${AGENT_COUNT}" | xargs -P "${REQUEST_CONCURRENCY}" -I '{}' bash -c '
   index=$1
   body="${TMP_ROOT}/operation-${index}.json"
   latency=$(curl --fail --silent --output "${body}" --write-out "%{time_total}" \
-    -H "Content-Type: application/json" \
+    -H "Content-Type: application/json" -H "Authorization: Bearer ${AUTH_TOKEN}" \
     -d "{\"heartbeat_count\":${HEARTBEAT_COUNT},\"delay_millis\":${HEARTBEAT_INTERVAL_MS}}" \
     "http://127.0.0.1:${API_PORT}/api/v1/development/simulations")
   jq -r --arg index "${index}" --arg latency "${latency}" "[\$index,.id,.node_id,\$latency]|@tsv" "${body}"
@@ -349,10 +349,10 @@ stream_viewer() {
       "${sse_url}" >/dev/null || true
   done
 }
-queries_before="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime" | jq -r .sse_sql_queries)"
+queries_before="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/development/runtime" | jq -r .sse_sql_queries)"
 for _ in $(seq 1 "${SSE_VIEWERS}"); do stream_viewer & SSE_PIDS+=("$!"); done
 for _ in $(seq 1 100); do
-  active_streams="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime" | jq -r .sse_active_streams)"
+  active_streams="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/development/runtime" | jq -r .sse_active_streams)"
   [[ "${active_streams}" -ge "${SSE_VIEWERS}" ]] && break
   sleep 0.1
 done
@@ -382,7 +382,7 @@ echo "Last-Event-ID reconnect passed: ${last_event} -> ${replayed_event}"
 printf 'Last-Event-ID reconnect: %s -> %s\n' "${last_event}" "${replayed_event}" >>"${TMP_ROOT}/metrics.txt"
 
 sleep 3
-sse_runtime="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
+sse_runtime="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
 test "$(jq -r .sse_watchers <<<"${sse_runtime}")" -eq 1
 shared_queries="$(( $(jq -r .sse_sql_queries <<<"${sse_runtime}") - queries_before ))"
 test "${shared_queries}" -le 20
@@ -406,7 +406,7 @@ wait_ready
 resume_periodic_sampler
 sample_phase_now controller-restart
 for _ in $(seq 1 100); do
-  active_streams="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime" | jq -r .sse_active_streams)"
+  active_streams="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/development/runtime" | jq -r .sse_active_streams)"
   [[ "${active_streams}" -ge "${SSE_VIEWERS}" ]] && break
   sleep 0.1
 done
@@ -472,7 +472,7 @@ pause_periodic_sampler postgres-recovered
 wait_ready
 resume_periodic_sampler
 sample_phase_now postgres-recovered
-recovered_sse_runtime="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
+recovered_sse_runtime="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
 test "$(jq -r .sse_unhealthy_watchers <<<"${recovered_sse_runtime}")" -eq 0
 before="$(psql_value "SELECT count(*) FROM operations WHERE state = 'succeeded'")"
 create_probe 1 25 >/dev/null
@@ -485,7 +485,7 @@ for pid in "${SSE_PIDS[@]}"; do kill -TERM "${pid}" 2>/dev/null || true; done
 for pid in "${SSE_PIDS[@]}"; do wait "${pid}" 2>/dev/null || true; done
 SSE_PIDS=()
 for _ in $(seq 1 100); do
-  released_runtime="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
+  released_runtime="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
   if [[ "$(jq -r .sse_active_streams <<<"${released_runtime}")" -eq 0 ]] && \
     [[ "$(jq -r .sse_watchers <<<"${released_runtime}")" -eq 0 ]]; then
     break

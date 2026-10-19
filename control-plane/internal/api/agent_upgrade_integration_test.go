@@ -217,6 +217,10 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	canaryID, batchID, otherID := nodeIDs[0], nodeIDs[1], nodeIDs[2]
 	offlineNodeID, incapableNodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	operatorBinding := uuid.Must(uuid.NewV7())
+	// A node-scoped Viewer and a foreign-workspace Viewer must not list the
+	// workspace's rollouts.
+	nodeViewerID, foreignViewerID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	nodeViewerBinding, foreignViewerBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	allNodes := append([]uuid.UUID{offlineNodeID, incapableNodeID}, nodeIDs...)
 	fixtures := []struct {
 		query string
@@ -226,6 +230,8 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		{"INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now())", []any{operatorID, operatorID.String(), approverID, approverID.String()}},
 		{"INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())", []any{operatorSession, operatorID}},
 		{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Operator','workspace',NULL,$2,now())", []any{operatorBinding, operatorID, workspaceID}},
+		{"INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now())", []any{nodeViewerID, nodeViewerID.String(), foreignViewerID, foreignViewerID.String()}},
+		{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Viewer','workspace',NULL,$2,now())", []any{foreignViewerBinding, foreignViewerID, otherWorkspaceID}},
 	}
 	for index, nodeID := range allNodes {
 		fixtures = append(fixtures,
@@ -268,6 +274,10 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			query string
 			args  []any
 		}{"INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'foreign-node','active',1,now(),now())", []any{otherNodeID, otherWorkspaceID}},
+		struct {
+			query string
+			args  []any
+		}{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Viewer','node',$4,$2,now())", []any{nodeViewerBinding, nodeViewerID, workspaceID, canaryID}},
 	)
 	for _, fixture := range fixtures {
 		if _, err := pool.Exec(ctx, fixture.query, fixture.args...); err != nil {
@@ -296,9 +306,9 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			{"DELETE FROM commands WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
 			{"DELETE FROM operations WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
 			{"DELETE FROM approval_requests WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
-			{"DELETE FROM role_bindings WHERE id=$1", []any{operatorBinding}},
+			{"DELETE FROM role_bindings WHERE id IN ($1,$2,$3)", []any{operatorBinding, nodeViewerBinding, foreignViewerBinding}},
 			{"DELETE FROM auth_sessions WHERE id=$1", []any{operatorSession}},
-			{"DELETE FROM identities WHERE id IN ($1,$2)", []any{operatorID, approverID}},
+			{"DELETE FROM identities WHERE id IN ($1,$2,$3,$4)", []any{operatorID, approverID, nodeViewerID, foreignViewerID}},
 			{"DELETE FROM node_observed_snapshots WHERE node_id=ANY($3)", []any{nil, nil, allNodes}},
 			{"DELETE FROM node_capabilities WHERE node_id=ANY($3)", []any{nil, nil, allNodes}},
 			{"DELETE FROM node_privd_attestation_keys WHERE node_id=ANY($3)", []any{nil, nil, allNodes}},
@@ -457,6 +467,31 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	got := getRollout(rolloutID)
 	if got.Code != http.StatusOK {
 		t.Fatalf("get rollout status=%d body=%s", got.Code, got.Body.String())
+	}
+	listRollouts := func(actor auth.Principal, workspaceHeader string) (*httptest.ResponseRecorder, error) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/agent-rollouts", nil)
+		if workspaceHeader != "" {
+			request.Header.Set("X-Workspace-ID", workspaceHeader)
+		}
+		authorized, err := server.authorizeRoute(request, actor)
+		if err != nil {
+			return nil, err
+		}
+		response := httptest.NewRecorder()
+		server.listAgentRollouts(response, request.WithContext(authorized))
+		return response, nil
+	}
+	if listed, err := listRollouts(operator, ""); err != nil || listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), rolloutID.String()) {
+		t.Fatalf("workspace operator rollout list err=%v response=%+v", err, listed)
+	}
+	nodeViewer := auth.Principal{IdentityID: nodeViewerID, Subject: nodeViewerID.String(), Issuer: "integration"}
+	if listed, err := listRollouts(nodeViewer, ""); err == nil && listed.Code != http.StatusForbidden {
+		t.Fatalf("node-scoped viewer listed workspace rollouts status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	foreignViewer := auth.Principal{IdentityID: foreignViewerID, Subject: foreignViewerID.String(), Issuer: "integration"}
+	if listed, err := listRollouts(foreignViewer, workspaceID.String()); err == nil {
+		t.Fatalf("foreign workspace viewer listed rollouts status=%d body=%s", listed.Code, listed.Body.String())
 	}
 	var fetched rolloutResponse
 	if err := json.Unmarshal(got.Body.Bytes(), &fetched); err != nil {

@@ -96,7 +96,7 @@ def import_binding():
         approved = run('docker', 'run', '--rm', '--read-only', '--cap-drop=ALL',
                        '--security-opt=no-new-privileges:true', '--network', 'ocservia-production_database',
                        '-v', f'{dsn}:/run/export-dsn:ro', '--entrypoint', '/usr/local/bin/ocserv-sealing-export',
-                       os.environ['OCSERV_CONTROL_IMAGE'], '--database-url-file', '/run/export-dsn',
+                       os.environ['OCSERV_CONTROL_IMAGE'], '--database-url-file', '/run/export-dsn', '--bundled-postgres',
                        '--workspace', os.environ['T07_WORKSPACE'], '--node', node, '--endpoint', endpoint,
                        '--approval', (WORK / 'node-approval').read_text().strip())
     finally:

@@ -160,7 +160,7 @@ stop_pid() {
 
 create_probe() {
   local body=$1
-  curl --fail --silent -H 'Content-Type: application/json' \
+  curl --fail --silent -H 'Content-Type: application/json' -H "Authorization: Bearer ${AUTH_TOKEN}" \
     -d "${body}" "http://127.0.0.1:${API_PORT}/api/v1/development/simulations"
 }
 

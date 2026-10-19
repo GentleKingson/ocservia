@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'PlatformAdmin','workspace',?)`, bindingID, identity, workspace, at)
 	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(backend)})
 	server.EnableLocalSlice(localslice.NewBackend(backend, nil))
+	server.devAuthToken = "read-backend-development-token-32-characters"
 	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
 	login := authHTTPRequest(server, "POST", "login", `{"username":"`+username+`","password":"`+password+`"}`, authTestOrigin)
 	if login.Code != http.StatusNoContent || len(login.Result().Cookies()) != 1 {
@@ -65,6 +67,10 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	get := func(path string, scope uuid.UUID, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(http.MethodGet, path, nil)
+		if strings.HasPrefix(path, "/api/v1/development/") {
+			r.Host = "127.0.0.1:8080"
+			r.Header.Set("Authorization", "Bearer "+server.devAuthToken)
+		}
 		if scope != uuid.Nil {
 			r.Header.Set("X-Workspace-ID", scope.String())
 		}

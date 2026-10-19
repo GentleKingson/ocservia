@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -14,10 +16,35 @@ import (
 	"github.com/google/uuid"
 )
 
+// allowDevelopmentRequest admits development routes only for the development
+// principal addressed through a loopback Host or the development Compose web
+// service, whose Vite proxy forwards the browser Host and enforces the same
+// allowedHosts list. The default development token is public, so the Host
+// check keeps a DNS-rebound browser page from reaching these routes.
+func (s *Server) allowDevelopmentRequest(w http.ResponseWriter, r *http.Request) bool {
+	if !s.hasOperationPrincipal(r) {
+		w.Header().Set("WWW-Authenticate", "OIDC")
+		writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "development routes require the development principal")
+		return false
+	}
+	host := r.Host
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	if ip := net.ParseIP(strings.Trim(host, "[]")); host != "localhost" && host != "web" && (ip == nil || !ip.IsLoopback()) {
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "development routes require a loopback Host")
+		return false
+	}
+	return true
+}
+
 func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
 	service := s.localSliceService()
 	if service == nil || !s.localSimulator {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
+		return
+	}
+	if !s.allowDevelopmentRequest(w, r) {
 		return
 	}
 	var scenario *localslice.Scenario
@@ -188,6 +215,9 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) developmentRuntime(w http.ResponseWriter, r *http.Request) {
 	if !s.localSimulator {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
+		return
+	}
+	if !s.allowDevelopmentRequest(w, r) {
 		return
 	}
 	var pool database.PoolStats

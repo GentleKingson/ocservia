@@ -49,3 +49,37 @@ func TestDecodeStrictJSONBodyLimit(t *testing.T) {
 		t.Fatal("oversized body was decoded")
 	}
 }
+
+func TestDecodeStrictJSONDuplicateMembers(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		valid      bool
+	}{
+		{"distinct", `{"value":"a","labels":{"env":"x","Env":"y"},"items":[{"value":"a"},{"value":"a"}]}`, true},
+		{"null", `null`, true},
+		{"top-level", `{"value":"a","value":"b"}`, false},
+		{"escaped-repeat", `{"value":"a","value":"b"}`, false},
+		{"nested-object", `{"labels":{"env":"x","env":"y"}}`, false},
+		{"object-in-array", `{"items":[{"value":"a","value":"b"}]}`, false},
+		{"after-nested-value", `{"labels":{"a":"b"},"items":[],"labels":{}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body))
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			var target *struct {
+				Value  string            `json:"value"`
+				Labels map[string]string `json:"labels"`
+				Items  []struct {
+					Value string `json:"value"`
+				} `json:"items"`
+			}
+			if got := decodeStrictJSON(w, r, &target); got != tc.valid {
+				t.Fatalf("decode result=%v status=%d body=%s", got, w.Code, w.Body)
+			}
+			if !tc.valid && w.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d", w.Code)
+			}
+		})
+	}
+}

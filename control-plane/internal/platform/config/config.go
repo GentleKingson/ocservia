@@ -50,6 +50,7 @@ type Config struct {
 	DatabaseURL              string
 	DatabaseBackend          string
 	DatabaseTLSCAFile        string
+	DatabaseBundledPostgres  bool
 	OTLPEndpoint             string
 	DevAuth                  bool
 	DevAuthToken             string
@@ -298,6 +299,13 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		}
 		cfg.LocalAuth = parsed
 	}
+	if value, ok := lookup("OCSERV_DATABASE_BUNDLED_POSTGRES"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("OCSERV_DATABASE_BUNDLED_POSTGRES: %w", err)
+		}
+		cfg.DatabaseBundledPostgres = parsed
+	}
 	if value, ok := lookup("OCSERV_DEV_AUTH"); ok {
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
@@ -405,7 +413,7 @@ func (c Config) Validate() error {
 	if c.MigrateOnly && strings.TrimSpace(c.RuntimeDBRole) == "" {
 		return errors.New("OCSERV_RUNTIME_DATABASE_ROLE is required with --migrate-only")
 	}
-	if err := connection.ValidateOptions(connection.Options{Backend: c.DatabaseBackend, Environment: c.Environment, URL: c.DatabaseURL, CAFile: c.DatabaseTLSCAFile}); err != nil {
+	if err := connection.ValidateOptions(connection.Options{Backend: c.DatabaseBackend, Environment: c.Environment, URL: c.DatabaseURL, CAFile: c.DatabaseTLSCAFile, BundledPostgres: c.DatabaseBundledPostgres}); err != nil {
 		return err
 	}
 	if c.DevAuth {

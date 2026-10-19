@@ -39,6 +39,8 @@ jq -e '
   .services.postgres.entrypoint == ["/bin/bash", "/usr/local/bin/ocservia-postgres-entrypoint"] and
   ([.services.postgres.volumes[] | select(.source == "postgres-data") | .target] == ["/var/lib/postgresql"]) and
   .services.migrate.depends_on.postgres.condition == "service_healthy" and
+  .services.migrate.environment.OCSERV_DATABASE_BUNDLED_POSTGRES == "true" and
+  .services["control-plane"].environment.OCSERV_DATABASE_BUNDLED_POSTGRES == "true" and
   .services.backup.depends_on.postgres.condition == "service_healthy" and
   (.services.postgres.healthcheck.test | length > 0) and
   (.services.backup.healthcheck.test | length > 0) and
@@ -60,6 +62,8 @@ jq -e '
   .services.backup.environment.PGSSLMODE == "verify-full" and
   .services.backup.environment.POSTGRES_SERVER_MAJOR == "18" and
   .services.migrate.environment.OCSERV_DATABASE_TLS_CA_FILE == "/run/secrets/database_ca" and
+  (.services.migrate.environment | has("OCSERV_DATABASE_BUNDLED_POSTGRES") | not) and
+  (.services["control-plane"].environment | has("OCSERV_DATABASE_BUNDLED_POSTGRES") | not) and
   .services["control-plane"].environment.OCSERV_DATABASE_TLS_CA_FILE == "/run/secrets/database_ca" and
   (.services.backup.healthcheck.test | length > 0) and
   ([.services.backup.secrets[].source] | index("postgres_pgpass") != null) and

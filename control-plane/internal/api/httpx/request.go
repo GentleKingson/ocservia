@@ -49,6 +49,10 @@ func DecodeStrictJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 		WriteProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "request body must be valid UTF-8 JSON")
 		return false
 	}
+	if hasDuplicateKey(body) {
+		WriteProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "request body must not repeat an object member")
+		return false
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -60,6 +64,56 @@ func DecodeStrictJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 		return false
 	}
 	return true
+}
+
+// hasDuplicateKey reports whether any object in the bounded body repeats a
+// member name, which encoding/json would otherwise resolve as last-wins.
+// Malformed JSON is left to the decoder's own error. Only exact repeats count:
+// case-only variants are distinct map keys, while for struct fields
+// DisallowUnknownFields and the field match still decide.
+func hasDuplicateKey(body []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	type frame struct {
+		object bool
+		keys   map[string]bool
+		key    bool
+	}
+	var stack []*frame
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		switch value := token.(type) {
+		case json.Delim:
+			switch value {
+			case '{', '[':
+				if top != nil && top.object {
+					top.key = true
+				}
+				stack = append(stack, &frame{object: value == '{', keys: map[string]bool{}, key: true})
+			default:
+				stack = stack[:len(stack)-1]
+			}
+			continue
+		case string:
+			if top != nil && top.object && top.key {
+				if top.keys[value] {
+					return true
+				}
+				top.keys[value] = true
+				top.key = false
+				continue
+			}
+		}
+		if top != nil && top.object {
+			top.key = true
+		}
+	}
 }
 
 func ParseUUIDv7(value string) (uuid.UUID, error) {

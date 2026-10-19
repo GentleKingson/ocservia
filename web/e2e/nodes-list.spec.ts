@@ -240,7 +240,7 @@ test("refreshes after focus returns and recovers from a failed snapshot", async 
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await expect(stale).toHaveCount(0);
-  expect(requests).toBe(pausedRequests + 1);
+  await expect.poll(() => requests).toBe(pausedRequests + 1);
   await page.clock.runFor(60_000);
   await expect.poll(() => requests).toBe(pausedRequests + 2);
 });

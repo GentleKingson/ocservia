@@ -149,4 +149,38 @@ if (
 fi
 test -f "${cleanup_marker}"
 
+# The capacity load generator runs in fresh child shells; replay it against a
+# recording curl so every child must see the development bearer token.
+load_bin="${temporary}/load-bin"
+mkdir -p "${load_bin}"
+cat >"${load_bin}/curl" <<'SH'
+#!/usr/bin/env bash
+while (($#)); do
+  case "$1" in
+    -H) [[ "$2" == Authorization:* ]] && printf '%s\n' "$2" >>"${CURL_HEADERS}"; shift 2 ;;
+    --output) printf '{"id":"operation","node_id":"node"}' >"$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '0.001'
+SH
+chmod +x "${load_bin}/curl"
+load_generator="$(awk 'index($0, "export API_PORT ") == 1 { found = 1 } found { print } found && index($0, "\x27 _ \x27{}\x27") == 1 { exit }' \
+  "${ROOT}/scripts/p1-resilience-capacity.sh")"
+test -n "${load_generator}"
+(
+  unset AUTH_TOKEN API_PORT HEARTBEAT_COUNT HEARTBEAT_INTERVAL_MS TMP_ROOT
+  export PATH="${load_bin}:${PATH}" CURL_HEADERS="${temporary}/load-headers"
+  # Plain shell variables, as in the harness: only its own export reaches the children.
+  # shellcheck disable=SC2034
+  AUTH_TOKEN=load-generator-token-32-characters
+  # shellcheck disable=SC2034
+  AGENT_COUNT=3 REQUEST_CONCURRENCY=2 RESULTS="${temporary}/load-results.tsv"
+  # shellcheck disable=SC2034
+  API_PORT=1 HEARTBEAT_COUNT=1 HEARTBEAT_INTERVAL_MS=1 TMP_ROOT="${temporary}"
+  eval "${load_generator}"
+)
+test "$(grep -cFx 'Authorization: Bearer load-generator-token-32-characters' "${temporary}/load-headers")" = 3
+test "$(wc -l <"${temporary}/load-headers" | tr -d ' ')" = 3
+
 echo "P1 resilience capacity boundary tests passed"

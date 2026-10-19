@@ -186,6 +186,12 @@ func TestRealOperationDispatch(t *testing.T) {
 	if err != nil || v.State != "unknown" {
 		t.Fatal("unknown observation dispatch", v, err)
 	}
+	if scoped, err := service.WorkspaceMetrics(ctx, workspace); err != nil || scoped.Unknown != 1 {
+		t.Fatal("workspace queue metrics", scoped, err)
+	}
+	if foreign, err := service.WorkspaceMetrics(ctx, uuid.Must(uuid.NewV7())); err != nil || foreign != (operationstore.QueueMetrics{}) {
+		t.Fatal("foreign workspace queue metrics", foreign, err)
+	}
 	run(`UPDATE commands SET state='succeeded' WHERE id=?`, UUIDBytes(d.CommandID))
 	run(`UPDATE operations SET state='succeeded' WHERE id=?`, UUIDBytes(first))
 	jobs, err = service.Claim(ctx, worker, 10, time.Minute)

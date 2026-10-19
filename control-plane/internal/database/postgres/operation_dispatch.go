@@ -217,10 +217,11 @@ func (s operationStore) ExtendDispatch(ctx context.Context, d operationstore.Dis
 	return err
 }
 
-func (s operationStore) QueueMetrics(ctx context.Context) (v operationstore.QueueMetrics, err error) {
-	err = s.QueryRow(ctx, `SELECT count(*) FILTER(WHERE published_at IS NULL),COALESCE(extract(epoch FROM now()-min(created_at) FILTER(WHERE published_at IS NULL)),0),
-		(SELECT count(*) FROM commands WHERE state='queued'),(SELECT count(*) FROM commands WHERE state='unknown'),
-		(SELECT count(*) FROM config_apply_operations WHERE state='rolled_back'),(SELECT count(*) FROM config_apply_operations WHERE state='failed_critical') FROM outbox_events`).
+func (s operationStore) QueueMetrics(ctx context.Context, workspaceID uuid.UUID, all bool) (v operationstore.QueueMetrics, err error) {
+	err = s.QueryRow(ctx, `SELECT count(*) FILTER(WHERE o.published_at IS NULL),COALESCE(extract(epoch FROM now()-min(o.created_at) FILTER(WHERE o.published_at IS NULL)),0),
+		(SELECT count(*) FROM commands WHERE state='queued' AND ($1::boolean OR workspace_id=$2)),(SELECT count(*) FROM commands WHERE state='unknown' AND ($1::boolean OR workspace_id=$2)),
+		(SELECT count(*) FROM config_apply_operations WHERE state='rolled_back' AND ($1::boolean OR workspace_id=$2)),(SELECT count(*) FROM config_apply_operations WHERE state='failed_critical' AND ($1::boolean OR workspace_id=$2))
+		FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE $1::boolean OR c.workspace_id=$2`, all, workspaceID).
 		Scan(&v.Unpublished, &v.OldestAge, &v.Queued, &v.Unknown, &v.ConfigRollbacks, &v.ConfigFailedCritical)
 	return
 }

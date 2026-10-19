@@ -263,13 +263,23 @@ func guardDispatchAuthority(ctx context.Context, store operationstore.Store, d D
 	return err
 }
 
-func (s *Service) Metrics(ctx context.Context) (m QueueMetrics, err error) {
+// Metrics reports controller-wide queue totals for unscoped callers.
+func (s *Service) Metrics(ctx context.Context) (QueueMetrics, error) {
+	return s.queueMetrics(ctx, uuid.Nil, true)
+}
+
+// WorkspaceMetrics reports the same totals restricted to one workspace.
+func (s *Service) WorkspaceMetrics(ctx context.Context, workspaceID uuid.UUID) (QueueMetrics, error) {
+	return s.queueMetrics(ctx, workspaceID, false)
+}
+
+func (s *Service) queueMetrics(ctx context.Context, workspaceID uuid.UUID, all bool) (m QueueMetrics, err error) {
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := operationstore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		m, err = store.QueueMetrics(ctx)
+		m, err = store.QueueMetrics(ctx, workspaceID, all)
 		return err
 	})
 	return
