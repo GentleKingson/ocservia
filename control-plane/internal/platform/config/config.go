@@ -45,6 +45,7 @@ type Config struct {
 	LocalBootstrapWorkspace  string
 	RuntimeDBRole            string
 	Environment              string
+	EnvironmentSet           bool
 	HTTPAddress              string
 	AuthTrustedProxyCIDRs    []netip.Prefix
 	DatabaseURL              string
@@ -117,6 +118,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		TransportUID:          uint32(os.Geteuid()), TransportGID: uint32(os.Getegid()),
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
+	_, cfg.EnvironmentSet = lookup("OCSERV_ENVIRONMENT")
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
 	if raw, ok := lookup("OCSERV_AUTH_TRUSTED_PROXY_CIDRS"); ok && strings.TrimSpace(raw) != "" {
 		for _, value := range strings.Split(raw, ",") {
@@ -415,6 +417,17 @@ func (c Config) Validate() error {
 	}
 	if err := connection.ValidateOptions(connection.Options{Backend: c.DatabaseBackend, Environment: c.Environment, URL: c.DatabaseURL, CAFile: c.DatabaseTLSCAFile, BundledPostgres: c.DatabaseBundledPostgres}); err != nil {
 		return err
+	}
+	// The development default is only implicit on a loopback listener, so a
+	// reachable Controller never runs as development by omission.
+	if !c.EnvironmentSet {
+		host, _, err := net.SplitHostPort(c.HTTPAddress)
+		if err != nil {
+			return fmt.Errorf("invalid HTTP address: %w", err)
+		}
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return errors.New("OCSERV_ENVIRONMENT must be set explicitly when the HTTP address is not loopback")
+		}
 	}
 	if c.DevAuth {
 		host, _, err := net.SplitHostPort(c.HTTPAddress)

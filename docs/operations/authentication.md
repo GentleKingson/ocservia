@@ -86,7 +86,11 @@ lowercase hexadecimal characters. Both secret files follow the launcher-owned
 `0444` file mode inside a private `0700` parent directory. Never place
 production passwords or secret values in Compose YAML, `install.env`, shell
 arguments, or Git, and do not add the fixed `*_FILE` variables above to
-`install.env`.
+`install.env`. The Controller checks only that each `*_FILE` path is an
+absolute regular file, so Docker and Compose secret mounts keep working; host
+file protection comes from `compose.sh`, which rejects other modes, owners and
+parent directories. A custom launcher must keep the same private parent
+directory and must not mount these files from a shared location.
 
 Both the production installer and the versioned Controller bootstrap accept and
 forward the authentication mode, origin, session TTL, and OIDC redirect
@@ -228,6 +232,14 @@ and refetches signing keys when a token fails against the cached keys, so change
 provider endpoints take effect within that window; failed Discovery is not
 cached. Browser sessions use `Secure`, `HttpOnly`, `SameSite` cookies
 without storing OIDC tokens in browser storage.
+
+Every subject the IdP authenticates receives an identity row and a session on
+first login, even without any role binding; such a principal sees no
+workspaces and is denied by every RBAC-checked route until a role is granted. The API has no endpoint
+to delete or disable OIDC identities, and rows are kept for audit history, so
+restrict sign-in at the IdP (application assignment or group policy) to the
+intended operators rather than relying on the Controller to filter them. Treat
+the identity table as growing with that assigned population.
 
 ### Correcting a historical issuer configuration
 

@@ -60,7 +60,7 @@ for details; every other deployment combination below follows the manual path.
 | DNS names | Controller name | Two distinct lowercase names: `OCSERV_PUBLIC_HOST`, `OCSERV_RELAY_PUBLIC_HOST` |
 | Controller / Relay TLS | `tls.crt` and `tls.key` in `OCSERV_SECRET_DIR`; ACME is not supported | Manual: those files in `OCSERV_SECRET_DIR` and `OCSERV_RELAY_SECRET_DIR`; or `OCSERV_TLS_MODE=acme` with `OCSERV_ACME_EMAIL` (Quick always uses ACME) |
 | Relay | Operator-run HTTPS Relay: `OCSERV_RELAY_URL_A` required | Bundled single Relay; URL derived from `OCSERV_RELAY_PUBLIC_HOST` |
-| Signer | External HTTPS endpoint in `OCSERV_CERTIFICATE_SIGNER_URL` plus `certificate-signer-token` | Bundled Signer at `https://signer:9443/sign`; manual: operator-prepared Signer files; Quick: generated |
+| Signer | External HTTPS endpoint in `OCSERV_CERTIFICATE_SIGNER_URL` plus `certificate-signer-token`, on a [private listener](../development/certificates-and-signer.md#runtime-contract) | Bundled Signer at `https://signer:9443/sign`; manual: operator-prepared Signer files; Quick: generated |
 | Published ports | TCP 443 | TCP 443 (Edge) and UDP 7842 (Relay) |
 | `uninstall --purge-data` | Supported | Refused |
 

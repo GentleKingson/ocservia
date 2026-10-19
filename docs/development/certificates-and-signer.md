@@ -123,6 +123,14 @@ deployment inconsistent (see [State and recovery](#state-and-recovery)). A
 committed revocation updates the ledger and subsequent CRL exports, while
 active VPN sessions remain connected until enforced by the verifier.
 
+Both writes are idempotent by certificate ID. Repeating `/sign` with the same
+CSR returns the original issuance, and a different CSR returns `409`. Repeating
+`/sign/revoke` with the same serial and reason returns `204` without changing
+the original revocation time, a different serial or reason returns `409`, and
+an unknown ID returns `404`. A `204` therefore does not say which request
+performed the revocation; the ledger's revocation state and the CRL are
+authoritative.
+
 ### Runtime contract
 
 Build the container image with `docker build -f deploy/production/signer.Dockerfile .`.
@@ -130,6 +138,12 @@ The container executes `/ocserv-signer serve` as UID:GID `65532:65532` with a
 read-only root filesystem, all Linux capabilities dropped,
 `no-new-privileges`, and network attachment restricted to the internal
 Controller-to-Signer network without host port bindings.
+
+The default `:9443` listener assumes that internal network. When the Signer
+runs outside the Integrated Compose network, such as the external Signer of a
+Standalone deployment, bind `--listen` to a private address and allow TCP 9443
+only from the Controller host. Never publish the Signer on a public interface;
+its Bearer token and TLS do not replace network isolation.
 
 Default file paths and listener settings:
 
@@ -176,7 +190,9 @@ readiness off, without performing any signing operation. The CLI check
 `health --url https://signer:9443/healthz` validates HTTPS with `--tls-ca`,
 refuses HTTP redirects, and can target loopback only when the leaf SAN permits
 it. If a storage fault latches readiness off, restart the service after
-repairing the underlying volume; restarting preserves ledger state.
+repairing the underlying volume; restarting preserves ledger state. See
+[Signer unavailable](../operations/incident-recovery.md#signer-unavailable) for
+the recovery steps.
 
 The server exposes four POST endpoints: `/sign`, `/sign/revoke`, `/sign/seal`,
 and `/sign/public-key`. JSON request bodies are capped at 64 KiB, while raw
