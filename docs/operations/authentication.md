@@ -223,7 +223,10 @@ must match `OCSERV_PUBLIC_ORIGIN`, or production startup fails. In dual-auth
 mode (`Local + OIDC`), enabling Local authentication does not relax OIDC
 validation. If the identity provider becomes unreachable, existing sessions
 continue working, new SSO logins fail closed, and Local login remains available
-when enabled. Browser sessions use `Secure`, `HttpOnly`, `SameSite` cookies
+when enabled. The Controller caches successful issuer Discovery for 15 minutes
+and refetches signing keys when a token fails against the cached keys, so changed
+provider endpoints take effect within that window; failed Discovery is not
+cached. Browser sessions use `Secure`, `HttpOnly`, `SameSite` cookies
 without storing OIDC tokens in browser storage.
 
 ### Correcting a historical issuer configuration

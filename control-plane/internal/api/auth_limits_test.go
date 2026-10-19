@@ -28,6 +28,12 @@ func TestAuthAdmissionLimitsAndRecovery(t *testing.T) {
 		t.Fatal("concurrent request was not bounded")
 	}
 	release()
+	// The concurrency rejection did no authentication work and spent no budget.
+	release, _ = budget.admit(source, now, false)
+	if release == nil {
+		t.Fatal("concurrency rejection consumed the source budget")
+	}
+	release()
 	if next, retry := budget.admit(source, now, false); next != nil || retry != time.Minute {
 		t.Fatal("source limit was not enforced")
 	}

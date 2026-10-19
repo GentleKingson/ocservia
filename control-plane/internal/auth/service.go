@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
@@ -25,6 +26,14 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
+)
+
+const (
+	// Discovery is cached so login traffic does not refetch issuer metadata;
+	// the verifier's key set still refetches JWKS when an unknown key appears.
+	oidcDiscoveryTTL     = 15 * time.Minute
+	oidcDiscoveryTimeout = 10 * time.Second
 )
 
 const (
@@ -67,6 +76,19 @@ type Service struct {
 	now                 func() time.Time
 	random              io.Reader
 	discover            func(context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error)
+	discovery           *oidcDiscovery
+}
+
+type oidcDiscovery struct {
+	group  singleflight.Group
+	mu     sync.Mutex
+	cached *oidcProvider
+}
+
+type oidcProvider struct {
+	oauth     oauth2.Config
+	verifier  *oidc.IDTokenVerifier
+	expiresAt time.Time
 }
 
 type Principal struct {
@@ -125,7 +147,7 @@ func NewBackend(backend database.Backend, cfg Config) (*Service, error) {
 		accountLogKey: deriveAccountLogKey(cfg.SessionKey),
 		backend:       backend, issuer: cfg.Issuer, clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, redirectURL: cfg.RedirectURL, aead: aead, sessionTTL: cfg.SessionTTL,
 		breakGlassEnabled: cfg.BreakGlassEnabled, breakGlassTokenHash: cfg.BreakGlassTokenHash,
-		now: func() time.Time { return time.Now().UTC() }, random: rand.Reader,
+		now: func() time.Time { return time.Now().UTC() }, random: rand.Reader, discovery: &oidcDiscovery{},
 	}, nil
 }
 
@@ -197,9 +219,45 @@ func (s *Service) provider(ctx context.Context) (oauth2.Config, *oidc.IDTokenVer
 	if !s.oidcEnabled {
 		return oauth2.Config{}, nil, ErrOIDCDisabled
 	}
-	if s.discover != nil {
-		return s.discover(ctx)
+	s.discovery.mu.Lock()
+	cached := s.discovery.cached
+	s.discovery.mu.Unlock()
+	if cached != nil && s.now().Before(cached.expiresAt) {
+		return cached.oauth, cached.verifier, nil
 	}
+	// Concurrent callers share one Discovery request. It is detached from the
+	// first caller so its cancellation cannot fail the others; each caller
+	// still stops waiting when its own context ends.
+	result := s.discovery.group.DoChan("provider", func() (any, error) {
+		discoverCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), oidcDiscoveryTimeout)
+		defer cancel()
+		discover := s.discoverProvider
+		if s.discover != nil {
+			discover = s.discover
+		}
+		oauth, verifier, err := discover(discoverCtx)
+		if err != nil {
+			return nil, err
+		}
+		provider := &oidcProvider{oauth: oauth, verifier: verifier, expiresAt: s.now().Add(oidcDiscoveryTTL)}
+		s.discovery.mu.Lock()
+		s.discovery.cached = provider
+		s.discovery.mu.Unlock()
+		return provider, nil
+	})
+	select {
+	case <-ctx.Done():
+		return oauth2.Config{}, nil, fmt.Errorf("discover OIDC provider: %w", ctx.Err())
+	case outcome := <-result:
+		if outcome.Err != nil {
+			return oauth2.Config{}, nil, outcome.Err
+		}
+		provider := outcome.Val.(*oidcProvider)
+		return provider.oauth, provider.verifier, nil
+	}
+}
+
+func (s *Service) discoverProvider(ctx context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
 	provider, err := oidc.NewProvider(ctx, s.issuer)
 	if err != nil {
 		return oauth2.Config{}, nil, fmt.Errorf("discover OIDC provider: %w", err)

@@ -47,7 +47,7 @@ func testOIDCAuthorizationCodePKCE(t *testing.T, suffix string) {
 	}
 	var issuer string
 	var discoveryMismatch, unavailable bool
-	discoveryRequests := 0
+	discoveryRequests, keyRequests := 0, 0
 	var expected loginState
 	redirectURL := "https://console.example/api/v1/auth/callback"
 	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +69,7 @@ func testOIDCAuthorizationCodePKCE(t *testing.T, suffix string) {
 			base := strings.TrimSuffix(issuer, suffix)
 			_ = json.NewEncoder(w).Encode(map[string]any{"issuer": advertised, "authorization_endpoint": base + "/authorize", "token_endpoint": base + "/token", "jwks_uri": base + "/keys", "id_token_signing_alg_values_supported": []string{"RS256"}})
 		case "/keys":
+			keyRequests++
 			writeJWKS(t, w, &key.PublicKey)
 		case "/token":
 			if err := r.ParseForm(); err != nil {
@@ -130,15 +131,18 @@ func testOIDCAuthorizationCodePKCE(t *testing.T, suffix string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	location, loginCookie, err := service.BeginLogin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var skew time.Duration
+	service.now = func() time.Time { return time.Now().UTC().Add(skew) }
+	// A failed first Discovery is not cached; the next login recovers.
 	discoveryMismatch = true
 	if _, cookie, err := service.BeginLogin(ctx); err == nil || cookie != nil || !strings.Contains(err.Error(), "did not match the issuer") {
 		t.Fatalf("Discovery mismatch accepted or wrong failure: %v", err)
 	}
 	discoveryMismatch = false
+	location, loginCookie, err := service.BeginLogin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := service.open(loginCookie.Value, &expected); err != nil {
 		t.Fatal(err)
 	}
@@ -163,8 +167,12 @@ func testOIDCAuthorizationCodePKCE(t *testing.T, suffix string) {
 		t.Fatalf("authenticate established session: %#v, %v", authenticated, err)
 	}
 	unavailable = true
+	if _, _, err := service.BeginLogin(ctx); err != nil {
+		t.Fatalf("cached Discovery was not reused during a short issuer outage: %v", err)
+	}
+	skew = oidcDiscoveryTTL + time.Second
 	if _, _, err := service.BeginLogin(ctx); err == nil {
-		t.Fatal("new login succeeded while the OIDC issuer was unavailable")
+		t.Fatal("new login succeeded after cached Discovery expired while the OIDC issuer was unavailable")
 	}
 	if authenticated, err := service.Authenticate(ctx, sessionCookie); err != nil || authenticated.IdentityID != principal.IdentityID {
 		t.Fatalf("bounded existing session failed during issuer outage: %#v, %v", authenticated, err)
@@ -186,9 +194,17 @@ func testOIDCAuthorizationCodePKCE(t *testing.T, suffix string) {
 			t.Fatalf("invalid token %s accepted: %v", code, err)
 		}
 	}
+	// Signing key rotation is picked up from JWKS without a new Discovery.
+	if key, err = rsa.GenerateKey(rand.Reader, 2048); err != nil {
+		t.Fatal(err)
+	}
+	keysBefore := keyRequests
 	second, existing, err := service.CompleteLogin(ctx, expected.State, "valid-code", loginCookie)
 	if err != nil || existing.IdentityID != principal.IdentityID || second == nil {
 		t.Fatalf("existing identity login: %+v, %v", existing, err)
+	}
+	if keyRequests != keysBefore+1 {
+		t.Fatalf("rotated signing key fetched JWKS %d times, want 1", keyRequests-keysBefore)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE identities SET disabled_at=now() WHERE id=$1`, principal.IdentityID); err != nil {
 		t.Fatal(err)
@@ -204,8 +220,9 @@ func testOIDCAuthorizationCodePKCE(t *testing.T, suffix string) {
 	if !errors.Is(loginErr, ErrUnauthenticated) || denied != nil || sessions != 2 || identities != 1 || !disabled || !errors.Is(authErr, ErrUnauthenticated) {
 		t.Fatalf("disabled identity login: %v", loginErr)
 	}
-	if discoveryRequests != 12 {
-		t.Fatalf("real Discovery requests = %d, want 12", discoveryRequests)
+	// Mismatch, first success, expired outage, recovery; every other login used the cache.
+	if discoveryRequests != 4 {
+		t.Fatalf("real Discovery requests = %d, want 4", discoveryRequests)
 	}
 }
 
