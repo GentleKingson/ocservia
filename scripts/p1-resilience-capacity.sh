@@ -296,7 +296,7 @@ sample_resources &
 SAMPLE_PID=$!
 sample_phase_now capacity-load
 
-export API_PORT HEARTBEAT_COUNT HEARTBEAT_INTERVAL_MS TMP_ROOT
+export API_PORT AUTH_TOKEN HEARTBEAT_COUNT HEARTBEAT_INTERVAL_MS TMP_ROOT
 # The child Bash expands the exported load settings.
 # shellcheck disable=SC2016
 seq 1 "${AGENT_COUNT}" | xargs -P "${REQUEST_CONCURRENCY}" -I '{}' bash -c '
