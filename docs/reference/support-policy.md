@@ -16,6 +16,8 @@ Release acceptance validates the current candidate across the supported architec
 
 The [published 1.0 policy](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/docs/reference/support-policy.md) remains in git history as the record of the original 1.0 line, without governing `v1.1.0` or later releases. Nothing in this policy certifies an unreleased commit or an unexecuted validation suite for production use.
 
+The `v1` line is end of life: it receives no further patch releases, security backports, compatibility matrices or new migration paths, and `v1.2.0` remains relevant only as the fixed database checkpoint described above. `v2.0.0` release candidates are prereleases for evaluation and do not constitute a stable supported production release; see [SECURITY.md](../../SECURITY.md).
+
 Release tags follow `X.Y.Z` for stable releases and `X.Y.Z-rc.N` (with a positive integer `N` and no leading zeros) for release candidates. Both RC and stable builds run the same [Release Check](../development/release-checks.md) workflow, where `workflow_dispatch` runs act as non-publishing dry runs and tag-triggered runs build, scan, and smoke-test artifacts before publishing through the protected release environment. Promoting an RC to a final release creates a separate `X.Y.Z` tag and GitHub Release while retaining the RC tags in history.
 
 Lifecycle commands operate on explicitly pinned release artifacts without relying on bridge releases or overriding OS package-manager rules, while database schema admission continues to follow the migration contract above. Commands that settle in an `Unknown` state must be handled through [incident recovery](../operations/incident-recovery.md) without blind replay.

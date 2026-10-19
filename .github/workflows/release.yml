@@ -158,7 +158,7 @@ jobs:
             if [[ "$NOTES_BASE" == v1.1.0 ]]; then
               flags+=(--notes "$(gh api "repos/$GH_REPO/contents/.github/release-notes/v1.1.0-history-rewrite.md?ref=$GITHUB_SHA" \
                 -H 'Accept: application/vnd.github.raw+json')")
-            elif [[ "$VERSION" == 2.0.0-rc.2 || "$VERSION" == 2.0.0-rc.3 ]]; then
+            elif [[ "$VERSION" == 2.0.0-rc.2 || "$VERSION" == 2.0.0-rc.3 || "$VERSION" == 2.0.0-rc.4 ]]; then
               notes_file=".github/release-notes/v$VERSION.md"
               test -s "$notes_file"
               flags+=(--notes "$(cat "$notes_file")")
