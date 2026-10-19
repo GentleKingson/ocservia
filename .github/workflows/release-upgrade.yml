@@ -2,6 +2,11 @@ name: Release Diagnostics
 on:
   workflow_dispatch:
     inputs:
+      arch:
+        description: Native runner architecture for business diagnostics
+        type: choice
+        options: [amd64, arm64]
+        default: amd64
       run-resilience:
         description: Run finite single-instance recovery
         type: boolean
@@ -41,6 +46,7 @@ jobs:
     if: inputs.purpose == 'smoke' || inputs.purpose == 'integration'
     uses: ./.github/workflows/release-business-diagnostic.yml
     with:
+      arch: ${{ inputs.arch }}
       version: ${{ inputs.version }}
       run-resilience: ${{ inputs.run-resilience }}
       profile: ${{ (inputs.purpose == 'integration') && 'extended' || 'smoke' }}

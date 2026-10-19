@@ -7,6 +7,7 @@ case "${arch}" in
   *) exit 2 ;;
 esac
 [[ "${RUNNER_ARCH:?RUNNER_ARCH required}" == "${runner_arch}" && "$(uname -m)" == "${kernel}" ]]
+[[ "$(dpkg --print-architecture)" == "${arch}" ]]
 [[ "$(docker version --format '{{.Server.Arch}}')" == "${arch}" ]]
 [[ "$(docker context inspect --format '{{.Endpoints.docker.Host}}')" == unix://* ]]
 [[ -z "${DOCKER_HOST:-}" || "${DOCKER_HOST}" == unix://* ]]

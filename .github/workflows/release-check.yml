@@ -21,16 +21,25 @@ jobs:
     uses: ./.github/workflows/security.yml
   business:
     needs: main
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     uses: ./.github/workflows/release-business-diagnostic.yml
     with:
+      arch: ${{ matrix.arch }}
       version: '0.0.0'
       profile: smoke
       production_signer: true
       run-resilience: true
   quick:
-    name: Quick Install (Pebble ACME, amd64)
+    name: Quick Install (Pebble ACME, ${{ matrix.arch }})
     needs: main
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -40,8 +49,9 @@ jobs:
       - name: Quick install, rerun, upgrade and rollback against Pebble
         env:
           VERSION: '0.0.0'
+          CONTROLLER_ARCH: ${{ matrix.arch }}
         run: |
-          sudo --preserve-env=VERSION,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT \
+          sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT \
             --preserve-env=BUILD_CACHE_AVAILABLE,ACTIONS_RUNTIME_TOKEN,ACTIONS_CACHE_URL,ACTIONS_RESULTS_URL \
             bash scripts/release-quick-acceptance.sh
   result:

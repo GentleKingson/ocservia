@@ -3,7 +3,8 @@
 Business Smoke runs the real Controller, native systemd Agent/privd/ocserv
 services, Local requester and approver browser sign-in, Workspace selection,
 VPN user creation, approval and reload, approved ConfigPlan apply, and an
-OpenConnect VPN session on a single disposable amd64 runner with one
+OpenConnect VPN session on a single disposable native runner (`arch=amd64` or
+`arm64`; Release Check runs both) with one
 Controller and one dedicated Relay. Every production binary, service, Relay,
 and VPN path runs without mocks. Setting `production_signer=true` (the default
 in Release Check and `release-upgrade.yml`) enables production Signer sealing
@@ -167,7 +168,7 @@ gh workflow run release-upgrade.yml --ref <candidate-branch> \
   -f production_signer=true -f run-resilience=false
 ```
 
-The terminal requires a disposable Ubuntu 24.04 amd64 systemd runner. It records
+The terminal requires a disposable Ubuntu 24.04 systemd runner of the selected architecture. It records
 NodeID, EndpointID, protected identity/configuration file digests, active native
 units/process IDs, ocserv PID/start time, Controller trust revision and owner
 session before running `apt-get remove -y ocservia-agent`. It never substitutes

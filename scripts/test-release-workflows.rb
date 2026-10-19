@@ -108,9 +108,14 @@ jobs = check.fetch('jobs')
 require_check(jobs.fetch('main').fetch('steps').first.fetch('run') == 'test "$GITHUB_REF" = refs/heads/main', 'Release Check must use main')
 require_check(jobs.fetch('full-ci')['uses'] == './.github/workflows/ci.yml' && jobs.dig('full-ci','with','profile') == 'full', 'Full CI missing')
 require_check(jobs.fetch('security')['uses'] == './.github/workflows/security.yml', 'Security missing')
-require_check(jobs.fetch('business')['uses'] == './.github/workflows/release-business-diagnostic.yml' && jobs.dig('business','with') == {'version'=>'0.0.0','profile'=>'smoke','production_signer'=>true,'run-resilience'=>true}, 'Integrated Business Smoke and recovery must run')
+require_check(jobs.fetch('business')['uses'] == './.github/workflows/release-business-diagnostic.yml' && jobs.dig('business','with') == {'arch'=>'${{ matrix.arch }}','version'=>'0.0.0','profile'=>'smoke','production_signer'=>true,'run-resilience'=>true}, 'Integrated Business Smoke and recovery must run')
 quick = jobs.fetch('quick')
 require_check(quick['needs'] == 'main' && quick['steps'].any? {|s| s.fetch('run','').include?('bash scripts/release-quick-acceptance.sh')}, 'Quick Install acceptance must run')
+# Both native legs run to completion; one failure must not cancel the other's evidence.
+%w[business quick].each do |id|
+  require_check(jobs.dig(id,'strategy') == {'fail-fast'=>false,'matrix'=>{'arch'=>%w[amd64 arm64]}} && !jobs[id].key?('continue-on-error'), "#{id} must run on both native architectures")
+end
+require_check(quick['runs-on'] == "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}" && quick['steps'].last.dig('env','CONTROLLER_ARCH') == '${{ matrix.arch }}' && quick['steps'].last['run'].include?('--preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,'), 'Quick Install must target its native runner')
 result = jobs.fetch('result')
 require_check(result['if'] == 'always()' && result['needs'].sort == %w[business full-ci main quick security], 'Release Check result must handle every dependency')
 command = result.fetch('steps').first.fetch('run')
@@ -143,8 +148,14 @@ Dir.mktmpdir('release-check-') do |dir|
   require_check(status.success? && output.include?('controller_image_build') && output.include?('real_vpn_relay_recovery') && output.include?('RuntimeError: timeout'), 'safe diagnostic summary missing')
   require_check(!output.include?('omit-this-field') && !output.include?('unrelated log line'), 'summary must select safe fields instead of dumping logs')
   require_check(diagnostic['permissions'] == {'contents'=>'read'} && !consumer.key?('environment'), 'Business must run without publishing authority')
-  require_check(consumer['runs-on'] == 'ubuntu-24.04' && !consumer.key?('strategy') && consumer.dig('env','CONTROLLER_ARCH') == 'amd64', 'Business must exercise only native amd64')
+  require_check(diagnostic.dig(true,'workflow_call','inputs','arch') == {'type'=>'string','required'=>true} && !consumer.key?('strategy'), 'Business callers must choose one architecture per job')
+  require_check(consumer['runs-on'] == "${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}" && consumer.dig('env','CONTROLLER_ARCH') == '${{ inputs.arch }}', 'Business must run on the native runner of its architecture')
+  agent_cache = consumer['steps'].find {|s| s['id'] == 'agent-target-cache'}.fetch('with')
+  require_check(agent_cache['key'].start_with?('release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-') && agent_cache['restore-keys'].start_with?('release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-') &&
+                consumer['steps'].find {|s| s['id'] == 'agent-target'}['run'].include?('rust/target/agent-${{ inputs.arch }}-'), 'Agent build caches must be isolated per architecture')
+  require_check(consumer['steps'].find {|s| s['name'] == 'Preserve business timings and sanitized diagnostics'}.dig('with','name').include?('${{ inputs.arch }}'), 'Business evidence must be traceable per architecture')
   gate = consumer['steps'].find {|s| s['name'] == 'Require completed business and actual recovery scenarios'}.fetch('run')
+  require_check(!gate.match?(/arch|amd64|arm64/), 'both architectures must pass identical business checkpoints')
   recovery = gate[/node --input-type=module <<'JS'\n(.*?)\nJS\n?/m,1]
   require_check(recovery, 'actual recovery result gate missing')
   names = %w[controller agent database relay]
@@ -164,6 +175,7 @@ Dir.mktmpdir('release-check-') do |dir|
   require_check(run_recovery.call(sample.merge('resilience_requested'=>false,'resilience_result'=>'SKIPPED','resilience_scenarios'=>[]),{'BUSINESS_RUN_RESILIENCE'=>'false'}), 'unselected recovery must be skipped')
 end
 require_check(manual['permissions'] == {'contents'=>'read'} && manual.dig('jobs','business','uses') == './.github/workflows/release-business-diagnostic.yml', 'manual business diagnostics must use the same local checks')
+require_check(manual.dig(true,'workflow_dispatch','inputs','arch','options') == %w[amd64 arm64] && manual.dig('jobs','business','with','arch') == '${{ inputs.arch }}', 'manual business diagnostics must select a native architecture')
 require_check(manual.dig('jobs','business','if') == "inputs.purpose == 'smoke' || inputs.purpose == 'integration'", 'platform diagnostics must not run business acceptance')
 require_check(manual.dig('jobs','native-platform','uses') == './.github/workflows/release-native-platform.yml' && manual.dig('jobs','native-platform','if') == "inputs.purpose == 'native-ubuntu-arm64' || inputs.purpose == 'native-debian13'", 'native diagnostics must be explicitly selected')
 platform = load_workflow('release-native-platform')

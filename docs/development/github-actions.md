@@ -91,7 +91,7 @@ checksum/drift/invalid-config matrices, or historical repair suites.
 | --- | --- |
 | `ci.yml` | PR/main Quick; manual Quick/Full key checks; called by Release Check as Full |
 | `security.yml` | Weekly/manual scans; reusable, and called by Release Check (not by `release.yml`) |
-| `release-check.yml` | Manual main Full CI, Security, Integrated Business Smoke + single-instance recovery, Quick Install (Pebble ACME, amd64) |
+| `release-check.yml` | Manual main Full CI, Security, Integrated Business Smoke + single-instance recovery and Quick Install (Pebble ACME), each on native amd64 and arm64 |
 | `release.yml` | Tag build/image-security/smoke/publish; manual build-only dry-run |
 | `real-e2e.yml` | Manual two-hosted-VM enrollment with encrypted token exchange; outside Basic CI and Release Check |
 | `release-upgrade.yml` | Manual local Business smoke or Integration diagnostics (workflow name Release Diagnostics) |

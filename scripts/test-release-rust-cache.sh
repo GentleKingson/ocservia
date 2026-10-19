@@ -91,7 +91,7 @@ products = YAML.safe_load(File.read('.github/workflows/release-products.yml')).d
 %w[agent-target agent-target-cache].each do |id|
   actual = business.find { |s| s['id'] == id }
   expected = products.find { |s| s['id'] == id }
-  check(actual == Marshal.load(Marshal.dump(expected)).transform_values { |v| v.is_a?(String) ? v.gsub('${{ inputs.arch }}', 'amd64') : v.transform_values { |x| x.gsub('${{ inputs.arch }}', 'amd64') } }, "Business #{id} must match the native release builder")
+  check(actual == expected, "Business #{id} must match the native release builder")
 end
 check(business.none? { |s| s.dig('with', 'path').to_s.lines.map(&:strip).include?('rust/target') }, 'Business must not cache all Rust targets')
 targets = File.readlines('scripts/build-release-controller.sh').grep(/^\s*build_image\s/).map do |line|
