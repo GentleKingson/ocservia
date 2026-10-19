@@ -111,13 +111,14 @@ require_check(jobs.fetch('security')['uses'] == './.github/workflows/security.ym
 require_check(jobs.fetch('business')['uses'] == './.github/workflows/release-business-diagnostic.yml' && jobs.dig('business','with') == {'arch'=>'${{ matrix.arch }}','version'=>'0.0.0','profile'=>'smoke','production_signer'=>true,'run-resilience'=>true}, 'Integrated Business Smoke and recovery must run')
 quick = jobs.fetch('quick')
 require_check(quick['needs'] == 'main' && quick['steps'].any? {|s| s.fetch('run','').include?('bash scripts/release-quick-acceptance.sh')}, 'Quick Install acceptance must run')
+require_check(jobs.fetch('products')['uses'] == './.github/workflows/release-products.yml' && jobs.dig('products','with') == {'version'=>'0.0.0','arch'=>'${{ matrix.arch }}'}, 'Release Check must build, scan and smoke the release products')
 # Both native legs run to completion; one failure must not cancel the other's evidence.
-%w[business quick].each do |id|
+%w[products business quick].each do |id|
   require_check(jobs.dig(id,'strategy') == {'fail-fast'=>false,'matrix'=>{'arch'=>%w[amd64 arm64]}} && !jobs[id].key?('continue-on-error'), "#{id} must run on both native architectures")
 end
 require_check(quick['runs-on'] == "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}" && quick['steps'].last.dig('env','CONTROLLER_ARCH') == '${{ matrix.arch }}' && quick['steps'].last['run'].include?('--preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,'), 'Quick Install must target its native runner')
 result = jobs.fetch('result')
-require_check(result['if'] == 'always()' && result['needs'].sort == %w[business full-ci main quick security], 'Release Check result must handle every dependency')
+require_check(result['if'] == 'always()' && result['needs'].sort == %w[business full-ci main products quick security], 'Release Check result must handle every dependency')
 command = result.fetch('steps').first.fetch('run')
 Dir.mktmpdir('release-check-') do |dir|
   results = result['needs'].to_h {|id| [id,{'result'=>'success'}]}
