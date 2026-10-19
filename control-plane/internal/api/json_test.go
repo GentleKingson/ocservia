@@ -45,7 +45,7 @@ func TestDecodeStrictJSONBodyLimit(t *testing.T) {
 	var target struct {
 		Value string `json:"value"`
 	}
-	if decodeStrictJSON(w, r, &target) || w.Code != http.StatusBadRequest || target.Value != "" {
+	if decodeStrictJSON(w, r, &target) || w.Code != http.StatusRequestEntityTooLarge || target.Value != "" {
 		t.Fatal("oversized body was decoded")
 	}
 }

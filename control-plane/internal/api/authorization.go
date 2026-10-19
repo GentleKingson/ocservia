@@ -364,7 +364,12 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, r *http.Request,
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}
-	writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the principal is not authorized for this resource and action")
+	if errors.Is(err, rbac.ErrForbidden) {
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the principal is not authorized for this resource and action")
+		return
+	}
+	// A failed role or resource lookup is not a denial.
+	writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Authorization unavailable", "authorization state is temporarily unavailable")
 }
 
 func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {

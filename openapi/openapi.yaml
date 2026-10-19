@@ -1729,8 +1729,17 @@ paths:
         "201":
           description: Role binding created.
           content: { application/json: { schema: { $ref: "#/components/schemas/RoleBinding" } } }
+        "400":
+          description: The role, resource scope, or referenced identity is invalid.
+          content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
         "403": { $ref: "#/components/responses/Problem" }
+        "409":
+          description: The identity already holds this binding (`role-binding-exists`), or an elevated role's approval is missing, expired, consumed, or does not match (`approval-not-ready`).
+          content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "503":
+          description: Role binding state is temporarily unavailable.
+          content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
         default: { $ref: "#/components/responses/Problem" }
   /approval-requests:
     get:
