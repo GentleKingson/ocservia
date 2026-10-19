@@ -3342,6 +3342,14 @@ async fn build_router_with_direct(
         .secret_key(secret_key)
         .relay_mode(relay_mode)
         .clear_address_lookup()
+        // System DNS and hosts only: fail visibly instead of querying iroh's
+        // public fallback resolvers.
+        .dns_resolver(
+            iroh::dns::DnsResolver::builder()
+                .with_system_defaults()
+                .disable_fallback()
+                .build(),
+        )
         .keep_relays_connected(keep_relays_connected)
         .transport_config(transport)
         .hooks(SecurityHook::new(policy.clone(), trust.as_ref()));
