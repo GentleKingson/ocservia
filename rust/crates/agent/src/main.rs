@@ -269,6 +269,7 @@ async fn enroll_agent(
     .secret_key(identity.secret_key().clone())
     .relay_mode(config.relay_mode.clone())
     .clear_address_lookup()
+    .dns_resolver(system_dns_resolver())
     .keep_relays_connected(keep_relays_connected)
     .bind()
     .await?;
@@ -672,6 +673,7 @@ fn agent_endpoint_factory(
                 .secret_key(secret_key)
                 .relay_mode(relay_mode)
                 .clear_address_lookup()
+                .dns_resolver(system_dns_resolver())
                 .keep_relays_connected(keep_relays_connected)
                 .transport_config(transport)
                 .bind()
@@ -2478,6 +2480,15 @@ fn load_relay_tls_roots(
         return Err(invalid("relay CA file contains no certificates"));
     }
     Ok(roots)
+}
+
+/// Resolves Relay names through system DNS and hosts only; a lookup failure is
+/// reported instead of falling back to iroh's public resolvers.
+fn system_dns_resolver() -> iroh::dns::DnsResolver {
+    iroh::dns::DnsResolver::builder()
+        .with_system_defaults()
+        .disable_fallback()
+        .build()
 }
 
 /// Applies the optional private relay CA to one endpoint builder.

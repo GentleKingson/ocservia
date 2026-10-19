@@ -12,10 +12,12 @@ recovery test must prove that traffic actually depends on the Relay path.
 
 Agent enrollment, Agent sessions, and transportd disable public endpoint address
 publishing and lookup. They use the configured Relay addresses; an EndpointID
-alone is not enough to discover a peer. Ordinary DNS resolution remains enabled:
-the current resolver can fall back to Cloudflare, Google, and Quad9 when the
-system nameservers fail. Disabling public endpoint discovery does not restrict
-those DNS requests to operator-owned infrastructure.
+alone is not enough to discover a peer. They resolve the Relay name only
+through the host's system DNS configuration and hosts file, with iroh's public
+fallback resolvers disabled. If those cannot resolve the name, the Relay
+connection fails and logs the resolution error; existing reconnection keeps
+retrying the configured resolvers. Public nameservers listed in the host's own
+DNS configuration remain an operator dependency.
 
 ## Before you begin
 
