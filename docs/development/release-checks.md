@@ -7,8 +7,8 @@ PR -> Basic CI -> merge main
    -> manual Release Check
       - Full CI
       - Security
-      - amd64 Business Smoke + four finite single-instance recoveries
-      - amd64 Quick Install against a Pebble ACME directory
+      - amd64 and arm64 Business Smoke + four finite single-instance recoveries
+      - amd64 and arm64 Quick Install against a Pebble ACME directory
    -> PASS -> operator version confirmation -> vX.Y.Z-rc.N or vX.Y.Z tag
    -> Release
       - amd64 build + Controller image security + install/image smoke
@@ -204,7 +204,7 @@ gh workflow run release.yml --ref <candidate-branch> -f version=<X.Y.Z>-rc.1
 
 | Behavior | Owner |
 | --- | --- |
-| Native bootstrap-token registration and online node, browser login/Workspace/user creation/approval/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | amd64 Integrated Business Smoke |
+| Native bootstrap-token registration and online node, browser login/Workspace/user creation/approval/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke, amd64 and arm64 with the same checkpoint gate |
 | Controller/transport, Agent/privd, bundled PostgreSQL and sole Relay recovery (no Business-level MySQL recovery) | Business Smoke with `run-resilience=true` |
 | Terminal real-node revocation: rejected unauthorized/unapproved requests, approved revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Business Smoke and manual integration |
 | OIDC positive/negative paths; native session disconnect and IP-ban removal; CSR, issue, one-use P12, revoke and persistence (including browser checks); offline queue and exact root effects; one-node browser canary rollout to a locally built next Agent version | Manual integration |
@@ -213,8 +213,10 @@ gh workflow run release.yml --ref <candidate-branch> -f version=<X.Y.Z>-rc.1
 | Source/dependency vulnerabilities and repository secrets, within the [tool scope](github-actions.md#independent-security-checks) (Go advisories cover `control-plane` and `signer`) | Security |
 | Tagged-source build and GitHub/GHCR publication | Release |
 
-Business workflows build candidate artifacts locally and install from a
-loopback registry on disposable amd64 runners. Native package checks require
+Business and Quick Install workflows build candidate artifacts locally and
+install from a loopback registry on disposable native runners of the selected
+architecture; they first require the runner, kernel, dpkg and Docker
+architectures to match and check every loaded Controller image's platform. Native package checks require
 the host kernel, Docker daemon, container image, and executed ELF binaries to
 share the same architecture, so cross-compilation alone never counts as native
 acceptance. Those checks enforce architecture and version matching, root-owned
@@ -271,7 +273,8 @@ gh workflow run release-upgrade.yml --ref <branch> \
   -f production_signer=true -f run-resilience=true
 ```
 
-Setting `purpose=smoke` narrows the run to the Smoke scope regardless of Signer
+`arch` (default `amd64`) selects the native `ubuntu-24.04` or
+`ubuntu-24.04-arm` runner. Setting `purpose=smoke` narrows the run to the Smoke scope regardless of Signer
 mode, while `production_signer=false` switches to the standalone topology.
 The default `ocserv_package=distribution` keeps the runner's Ubuntu ocserv;
 `ocserv_package=backport-1.5.0` installs the pinned, SHA256-checked

@@ -10,7 +10,8 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${VERSION:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}"
 SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD)"
-export SOURCE_COMMIT CONTROLLER_ARCH=amd64
+CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
+export SOURCE_COMMIT CONTROLLER_ARCH
 [[ "${EUID}" == 0 && -n "${SUDO_UID:-}" && "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" ]]
 [[ ! -e /etc/ocservia && ! -e /var/lib/ocservia-controller && ! -e /root/ocservia-initial-credentials ]]
@@ -57,6 +58,7 @@ pass() { echo "PASS: $1"; }
 # errexit ignores negated commands, so absence is asserted explicitly.
 absent() { if grep -qF -- "$@"; then echo "unexpected: $1" >&2; return 1; fi; }
 
+bash "${ROOT}/scripts/release-upgrade-native.sh" "${CONTROLLER_ARCH}"
 bash "${ROOT}/scripts/build-release-controller.sh" >"${work}/controller-build.log" 2>&1
 
 stage=publish
@@ -65,6 +67,7 @@ manifest_args=(--image "postgres=${POSTGRES_IMAGE}" --image "otel=${OTEL_IMAGE}"
 roles=(gateway control transport backup edge relay signer mysql_backup)
 for name in "${roles[@]}"; do
   docker load -i "${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
+  [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}")" == "linux/${CONTROLLER_ARCH}" ]]
   docker tag "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}" "localhost:5000/${name}:v${VERSION}"
   docker push "localhost:5000/${name}:v${VERSION}"
   manifest_args+=(--image "${name}=localhost:5000/${name}:v${VERSION}")

@@ -44,7 +44,9 @@ work="${T07_WORK}"
 stage=preflight
 started="$(date -u +%FT%TZ)"
 stage_started="$(date +%s)"
-export PACKAGE_ARCH=amd64 CONTROLLER_ARCH=amd64
+CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
+[[ "${CONTROLLER_ARCH}" == amd64 || "${CONTROLLER_ARCH}" == arm64 ]]
+export PACKAGE_ARCH="${CONTROLLER_ARCH}" CONTROLLER_ARCH
 export SOURCE_DATE_EPOCH OUTPUT_DIR="${work}/products"
 export DEPLOYMENT_CONFIG_DIR="${work}/bundle"
 SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)"
@@ -194,6 +196,8 @@ next_stage controller_image_build
 bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
 for name in gateway control transport backup edge relay signer mysql_backup; do
   docker load -i "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar"
+  # Unrelated binfmt handlers could otherwise run a foreign image emulated.
+  [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "ghcr.io/gentlekingson/ocservia/$name:$VERSION-linux-$CONTROLLER_ARCH")" == "linux/$CONTROLLER_ARCH" ]]
 done
 export T07_SIGNER_IMAGE="ghcr.io/gentlekingson/ocservia/signer:$VERSION-linux-$CONTROLLER_ARCH"
 docker tag "ghcr.io/gentlekingson/ocservia/relay:$VERSION-linux-$CONTROLLER_ARCH" "${BUILDX_BUILDER}-relay"
@@ -206,12 +210,16 @@ case "${OCSERV_PACKAGE:-distribution}" in
   backport-1.5.0)
     # The pinned ocserv-backport release asset brings `occtl terminate` (>= 1.4.2).
     ocserv_version=1.5.0-1~ubuntu24.04.2
-    ocserv_package="${work}/ocserv_1.5.0-1.ubuntu24.04.2_amd64.deb"
+    case "${CONTROLLER_ARCH}" in
+      amd64) ocserv_sha256=5a15dd005267d5a20a249f2e97417c36464a02cb03a47b4220f51a100302fc89 ;;
+      arm64) ocserv_sha256=33f64b7464a8f47420952a883b287c4fce7d4df430412487b85d879ae7bfb173 ;;
+    esac
+    ocserv_package="${work}/ocserv_1.5.0-1.ubuntu24.04.2_${CONTROLLER_ARCH}.deb"
     curl -fsSL --retry 3 -o "${ocserv_package}" \
-      https://github.com/GentleKingson/ocserv-backport/releases/download/1.5.0-2/ocserv_1.5.0-1.ubuntu24.04.2_amd64.deb
-    echo "5a15dd005267d5a20a249f2e97417c36464a02cb03a47b4220f51a100302fc89  ${ocserv_package}" | sha256sum -c --strict -
+      "https://github.com/GentleKingson/ocserv-backport/releases/download/1.5.0-2/ocserv_1.5.0-1.ubuntu24.04.2_${CONTROLLER_ARCH}.deb"
+    echo "${ocserv_sha256}  ${ocserv_package}" | sha256sum -c --strict -
     [[ "$(dpkg-deb -f "${ocserv_package}" Package Version Architecture)" == \
-      "$(printf 'Package: ocserv\nVersion: %s\nArchitecture: amd64' "${ocserv_version}")" ]]
+      "$(printf 'Package: ocserv\nVersion: %s\nArchitecture: %s' "${ocserv_version}" "${CONTROLLER_ARCH}")" ]]
     ;;
   *) echo 'OCSERV_PACKAGE must be distribution or backport-1.5.0' >&2; exit 2 ;;
 esac

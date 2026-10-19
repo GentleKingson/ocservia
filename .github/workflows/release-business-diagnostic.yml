@@ -2,6 +2,9 @@ name: Native Business Diagnostics
 on:
   workflow_call:
     inputs:
+      arch:
+        type: string
+        required: true
       run-resilience:
         type: boolean
         default: false
@@ -26,8 +29,8 @@ env:
   CARGO_INCREMENTAL: '0'
 jobs:
   business:
-    name: Business (${{ inputs.profile }}, amd64)
-    runs-on: ubuntu-24.04
+    name: Business (${{ inputs.profile }}, ${{ inputs.arch }})
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     env:
       VERSION: ${{ inputs.version }}
@@ -36,7 +39,7 @@ jobs:
       BUSINESS_RUN_RESILIENCE: ${{ inputs.run-resilience }}
       PRODUCTION_SIGNER_ACCEPTANCE: ${{ inputs.production_signer }}
       OCSERV_PACKAGE: ${{ inputs.ocserv_package }}
-      CONTROLLER_ARCH: amd64
+      CONTROLLER_ARCH: ${{ inputs.arch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -54,14 +57,14 @@ jobs:
         id: agent-target
         run: |
           builder_hash="$(sha256sum rust/agent-build.Dockerfile | cut -c1-16)"
-          echo "path=rust/target/agent-amd64-${builder_hash}" >>"${GITHUB_OUTPUT}"
+          echo "path=rust/target/agent-${{ inputs.arch }}-${builder_hash}" >>"${GITHUB_OUTPUT}"
       - name: Restore Rocky Agent compilation cache
         id: agent-target-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ steps.agent-target.outputs.path }}
-          key: release-agent-target-v1-${{ runner.os }}-amd64-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: release-agent-target-v1-${{ runner.os }}-amd64-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
+          key: release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
       - name: Build local products and exercise real business
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/business-diagnostics
@@ -159,7 +162,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: business-${{ inputs.profile }}-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          name: business-${{ inputs.profile }}-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/business-diagnostics
           if-no-files-found: warn
           retention-days: 7
