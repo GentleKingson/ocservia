@@ -29,8 +29,8 @@ sealing. When the signer is unreachable, certificate issuance transitions to
 and revocation transitions to `revocation_unknown` (which a retry may submit
 again); both paths return a service-unavailable problem response without
 marking the operation successful. Setting `OCSERV_CERTIFICATE_SIGNER_CA_FILE`
-to a public PEM CA bundle configures a private trust chain scoped exclusively
-to this client, leaving the process-wide trust store and other external HTTPS
+to a public PEM CA bundle configures a private trust chain used only by
+this client, leaving the process-wide trust store and other external HTTPS
 connections untouched. See [Production Signer](#production-signer) for the
 bundled implementation, public-key transfer workflow, and offline recovery
 procedures.

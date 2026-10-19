@@ -4,7 +4,7 @@ Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag (with 
 
 A managed node is an existing ocserv server with the ocservia node daemons installed alongside it. The local ocserv instance continues to terminate VPN tunnels and forward traffic, while the ocservia services handle enrollment, health telemetry, and signed administrative commands from the Controller.
 
-This guide walks through the standard package-first installation. Package verification details, manual archive installation, rollback, and uninstallation are covered in the [Agent package lifecycle reference](../operations/agent-lifecycle.md).
+This guide covers the standard package-first installation. Package verification details, manual archive installation, rollback, and uninstallation are covered in the [Agent package lifecycle reference](../operations/agent-lifecycle.md).
 
 Always pair matched, published Controller and node artifacts when installing a fresh node. While the v1.1.0 policy removed software-version admission checks, it does not guarantee cross-version compatibility or provide automatic conversion for historical deployments and keys. Never reset an existing node's identity to force an installation through; see the [support policy](../reference/support-policy.md).
 

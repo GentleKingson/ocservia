@@ -302,7 +302,7 @@ Schedule this probe in the node's monitoring agent every 15 minutes with a
 3 UNKNOWN; configure alerts on exit codes 1, 2, or 3, on timeouts, or after two
 missed samples. The default warning and critical thresholds are 80% and 90% for
 both disk and inode usage, and can be tuned with `STORAGE_WARNING_PERCENT` and
-`STORAGE_CRITICAL_PERCENT`. These defaults serve as starting operational
+`STORAGE_CRITICAL_PERCENT`. These defaults are starting operational
 thresholds and do not guarantee capacity. The repository does not install a
 scheduler or notification destination automatically.
 
@@ -420,7 +420,7 @@ read-only into the control-plane container:
 }
 ```
 
-This manifest serves as the sole digest source for the workflow and must list
+This manifest is the only digest source for the workflow and must list
 between 1 and 512 unique `(version, architecture)` entries; once
 `OCSERV_AGENT_RELEASE_MANIFEST` is set, a missing, unreadable, malformed, or
 ambiguous file aborts Controller startup. The Controller does not synchronize
@@ -524,10 +524,10 @@ remaining count, an overall rollout status of `succeeded` does not imply that
 every originally selected node was upgraded.
 
 Rollout state persists across Controller restarts and console sessions.
-Viewing a rollout requires `operation.read`, creating or resuming one requires
-`agent.upgrade`, and each rollout is visible and resumable only within its own
-workspace.
-
+Viewing a rollout requires `operation.read`, and listing a workspace's rollouts
+requires that permission at workspace scope (node-scoped bindings do not list
+them). Creating or resuming a rollout requires `agent.upgrade`, and each rollout
+is visible and resumable only within its own workspace.
 
 ## UTC and network-monitor diagnostics
 

@@ -182,7 +182,7 @@ To rotate the signing key, distribute the new public key to every Agent and
 privd instance first, then switch the Controller to the new private key. Keep
 the previous public key pinned until all commands signed under it have expired
 and any pending reconciliation has finished, after which the old public key can
-be removed. Rolling back during rotation simply switches the Controller back to
+be removed. Rolling back during rotation switches the Controller back to
 the previous private key while both public keys remain pinned on the nodes.
 
 Because protocol `1.1` enforces a strict mutation compatibility boundary,

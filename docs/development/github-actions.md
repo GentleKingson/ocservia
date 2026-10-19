@@ -259,7 +259,7 @@ execute live enrollment.
 To reproduce the Go unit checks, Quick database smoke, and the Full-only MySQL
 backup/restore smoke locally, run the following commands against the candidate
 commit inside an authorized, isolated environment prepared according to
-[testing](testing.md). Note that this sequence omits docs, Rust, Web, the SQL
+[testing](testing.md). This sequence omits docs, Rust, Web, the SQL
 artifact-window and snapshot-equivalence steps, the PostgreSQL volume-layout
 check, and the full database suites:
 
@@ -312,6 +312,6 @@ artifacts.
 Business and Release workflows keep their tool caches separate from the Agent
 compilation cache, while sharing the `rust/target/agent-<arch>-<builder-hash>`
 directory and cache identity to rebuild and verify the requested Agent version
-on each run. None of the workflows cache runtime state or credentials, and the
+on each run. None of the workflows cache runtime state or credentials. Image builds use
 per-image, per-architecture BuildKit GitHub Actions caches (`mode=max` with
-bounded cold fallback) remain unchanged.
+bounded cold fallback).

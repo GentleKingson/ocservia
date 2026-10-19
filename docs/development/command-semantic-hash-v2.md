@@ -41,7 +41,7 @@ against which the plan was built. `ConfigApply` continues to bind its 32-byte
 candidate hash, 32-byte expected current hash, and unsigned 64-bit desired
 effect revision.
 
-While the Controller issues v2 exclusively, both the Agent and privd recompute
+The Controller issues only v2, but both the Agent and privd recompute
 whichever supported version a command carries, and the Agent validates the
 digest before recording acceptance in its journal. Stored commands replay only
 under their original hash version, command results preserve that exact version,

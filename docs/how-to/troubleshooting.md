@@ -81,7 +81,7 @@ pins have not changed. Because enrollment tokens are single-purpose, always
 query the Controller by that EndpointID after a failed or unknown enrollment
 response (see [Enroll a node](enroll-node.md)) before issuing a new token, as a
 replacement token on its own does not prove the earlier attempt failed.
-Remember that enrollment only creates a pending node record: a different
+Enrollment only creates a pending node record: a different
 authorized principal must approve the node before it can open a normal
 mutation-capable session, even if the host already shows `ENROLLED_LOCAL` or
 active local services.
@@ -93,7 +93,7 @@ failed, then verify `/etc/ocservia-agent/agent.env`, the independently
 provisioned command verification key, both distinct sealing keys, `relays.env`
 (which requires a literal HTTPS `RELAY_URL_A` and rejects any non-empty
 `RELAY_URL_B`), and the relay access token and CA files it references. When an
-upgrade fails during preflight before modifying files on disk, simply fix the
+upgrade fails during preflight before modifying files on disk, fix the
 reported prerequisite and retry. If the new binaries were already installed and
 must be reverted, run [Agent rollback](agent-lifecycle.md#rollback) instead of
 copying binaries from an unverified directory.

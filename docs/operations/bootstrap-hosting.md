@@ -108,10 +108,11 @@ Beyond `--version`, Stage-0 accepts only `--root-lifecycle` and, on the
 Controller entrypoint, `--check` and the [Quick mode](#quick-mode) flags. Pass
 all configuration and secrets through the environment or protected host paths
 consumed by Stage-1, as Stage-0 neither parses nor prints secret material. On a
-managed node, automated bootstrap stops at `PENDING_APPROVAL`, leaving node
-approval and service activation as explicit post-enrollment steps.
+managed node, automated bootstrap stops at `ENROLLED_LOCAL` with the node
+pending approval on the Controller, leaving approval and service activation as
+explicit post-enrollment steps.
 
-Stage-0 is solely a first-install bootstrapper. Subsequent Controller upgrades
+Stage-0 is only a first-install bootstrapper. Subsequent Controller upgrades
 and rollbacks run through `controller.sh` and its protected lifecycle state,
 while managed-node upgrades and removals run through the authorized upgrader or
 native package manager. Persist long-lived settings in `install.env` or the
@@ -154,7 +155,7 @@ when invoked with `--check`):
 - Both `--controller-domain` and `--relay-domain` must resolve to the same IPv4
   addresses. If a resolved IPv4 address is not bound to a local interface, the
   preflight emits a warning because NAT or cloud elastic IP mappings cannot be
-  verified locally. By contrast, an `AAAA` record pointing to an IPv6 address
+  verified locally. An `AAAA` record pointing to an IPv6 address
   not bound to the host fails the preflight because ACME validation prefers
   IPv6.
 - Host ports `TCP 443` and `UDP 7842` must be unused unless

@@ -5,7 +5,7 @@ environment. Any step that installs native packages, modifies systemd units, or
 injects network faults belongs on the disposable Business runner or inside a
 dedicated test container.
 
-## Lightweight Checks
+## Lightweight checks
 
 Inside an isolated environment with the repository's Rust toolchain, run:
 
@@ -68,7 +68,7 @@ the full I18 `nofile` assertion on the untouched database overlay; the full and
 `--contract-only` I18 modes still enforce that check and must be run
 separately when needed.
 
-## Network Probe
+## Network probe
 
 After building the current transportd runtime image (with its Relay launcher)
 and the authenticated iroh-relay image from
@@ -99,7 +99,7 @@ the rendered JSON, invoke the probe with `--expect-isolated` in place of
 `--cold-start`, and keep the modified JSON with the test artifacts. Never alter
 live production networks to reproduce that failure.
 
-## Real Agent Chain
+## Real Agent chain
 
 End-to-end single-node recovery runs inside the Business Smoke and Integration
 environment via the Release Diagnostics workflow with `run-resilience=true`;
@@ -119,7 +119,7 @@ replaying the API idempotency key must return the existing operation and
 command without triggering another reload. A queued command that fails in this
 flow cannot be accepted as expected Unknown.
 
-## Package Lifecycle And Cleanup
+## Package lifecycle and cleanup
 
 For current DEB and RPM packages, run `i18-agent-package-smoke.sh` and
 `release-native-package-smoke.sh` inside disposable systemd and packaging
@@ -139,7 +139,7 @@ exported the run evidence, remove the task-owned systemd container, temporary
 image tags, built test packages, and private working directories without running
 a global Docker prune.
 
-## Design References
+## Design references
 
 - [iroh-relay 1.2.0 RelayMap](https://docs.rs/iroh-relay/1.2.0/iroh_relay/struct.RelayMap.html)
 - [Compose services](https://docs.docker.com/reference/compose-file/services/)

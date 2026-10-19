@@ -150,7 +150,7 @@ endpoint-bound enrollment flow.
 
 ## Approve the node
 
-5. Once the Agent configuration and production relay path are in place, use the
+1. Once the Agent configuration and production relay path are in place, use the
    requester account to create a content-bound `node.approve` request:
 
    ```http
@@ -177,7 +177,7 @@ endpoint-bound enrollment flow.
    `labels`, `policy`, and `capabilities` in this payload, request only the
    capabilities required by the node's policy.
 
-6. Have a second authorized principal review the request content and approve it
+2. Have a second authorized principal review the request content and approve it
    by binding the decision to the returned `request_hash`:
 
    ```http
@@ -190,7 +190,7 @@ endpoint-bound enrollment flow.
    }
    ```
 
-7. Using the requester account, activate the pending node with the approved
+3. Using the requester account, activate the pending node with the approved
    request ID:
 
    ```http
@@ -251,7 +251,7 @@ another Controller.
    ```
 
 2. Have a different SecurityAdmin or PlatformAdmin verify and approve the
-   returned request hash, just as in step 6 above.
+   returned request hash, as in step 2 of [Approve the node](#approve-the-node).
 3. As the requester, submit the revocation with the approved request ID:
 
    ```http
@@ -302,9 +302,9 @@ original EndpointID, identity directory, and protected token material intact.
 When using a bootstrap token, rerun the same installer with the original
 bootstrap binding so the Controller's same-endpoint recovery path can return
 the enrollment record it already committed. Never generate a new identity or
-issue a new token simply because the client did not receive a response.
+issue a new token just because the client did not receive a response.
 
-Legacy endpoint-bound enrollment tokens do not support that bootstrap replay
+Endpoint-bound enrollment tokens do not support that bootstrap replay
 contract. Before deciding whether a new token is needed after an interrupted
 endpoint-bound run, an administrator must look up the node by its original
 EndpointID in the Controller inventory. Similarly, if an approval request

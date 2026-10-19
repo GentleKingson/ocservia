@@ -54,9 +54,9 @@ reads runtime and code-generator versions from
 archive against [`scripts/checksums.txt`](../../scripts/checksums.txt).
 
 For day-to-day work inside a single module, use `make test-go`,
-`make test-rust`, or `make test-web`. Note that `make test-go` runs
+`make test-rust`, or `make test-web`. `make test-go` runs
 `go test ./...` inside `control-plane` alone, skipping the `signer` module as
-well as `gofmt`, `go vet`, `-count=1`, and race runs. By contrast,
+well as `gofmt`, `go vet`, `-count=1`, and race runs.
 `make go-check` (`scripts/go-check.sh`, which defaults to mode `full`) covers
 both `control-plane` and `signer` with `gofmt`, `go vet`, `go test -count=1`,
 and (except in `standard` mode) `go test -race`, using a private `TMPDIR` under
@@ -76,7 +76,7 @@ for the opt-in Ubuntu ARM64 and Debian 13 commands and their evidence limits.
 Reach for `make verify` when a change spans multiple modules and needs a full
 local baseline, not as the default check for small single-module edits.
 
-Under the hood, `make verify` (`scripts/verify.sh`) runs `scripts/lint.sh common`
+`make verify` (`scripts/verify.sh`) runs `scripts/lint.sh common`
 (ShellCheck, Buf, OpenAPI lint, `check-public-repository.sh`, and
 `docs-check.sh`), the Buf breaking-change check, `go-check.sh` in full mode
 across both Go modules, `rust-check.sh`, the transport and Agent boundary
@@ -85,7 +85,7 @@ consistency self-tests, `security-check.sh` (Gitleaks), `license-check.sh`, the
 generated-code checks, and the P1 harness bounds self-test, deduplicating the
 vet, Clippy, and Web format/lint/typecheck passes so each runs once.
 Running standalone `make lint` still executes all lint steps, though its
-`go vet` pass covers only `control-plane`. Even so, `make verify` does not
+`go vet` pass covers only `control-plane`. `make verify` does not
 start database containers or run `make integration`, `make e2e`, the CI
 router/selector/bootstrap self-tests, the installer or release self-tests, or
 manual acceptance harnesses, and it is distinct from Basic CI.
@@ -148,7 +148,7 @@ the behavior under test:
 
 Go's `commandauth.TestStrictWireCommandFixtures` and Rust's
 `contracts::strict_wire` test suite share `testdata/command-strict-wire.json`.
-The file keeps the six historical test vectors and adds all 18 payload variants
+The file keeps the six historical test vectors and adds all 20 payload variants
 populated with non-default field values, while the full echo envelope exercises
 authorization, owner fences, timestamps, and envelope metadata. Using
 reflection, the Go test verifies that at least one fixture populates every
@@ -188,7 +188,7 @@ The focused Go command above skips database integration tests. Separately,
 fixture values pass the exact-value Gitleaks allowlist while modified secrets
 are still caught.
 
-Keep in mind that the vectors in `testdata/command-strict-wire.json` test raw
+The vectors in `testdata/command-strict-wire.json` test raw
 wire decoding instead of authenticated command execution: they populate
 deprecated fields to exercise accepted wire tags, carry dummy signature bytes,
 and do not relax protocol 1.1's runtime rejection of legacy password fields.

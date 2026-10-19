@@ -54,7 +54,7 @@ Clients can inspect operation progress over REST or subscribe to the resumable
 `/api/v1/operations/queue-metrics` reports unpublished event count, oldest age,
 queue depth, and `unknown` count for the authorized workspace (only the
 development principal sees Controller-wide totals). Across both supported database backends,
-dispatch and recovery rely exclusively on the worker polling the outbox every
+dispatch and recovery rely only on the worker polling the outbox every
 200 ms and reaping expired leases once per second.
 
 ## Agent journal
@@ -125,7 +125,7 @@ independent of database migration numbers). Every ingested `command_result`
 event must decode cleanly and satisfy all state, identity, hash-version,
 digest, size, and timestamp checks, or the entire ingestion transaction rolls
 back. Development simulation runs use a separate `simulation_result` event
-type, and Agent-reported timestamps are stored strictly as historical metadata
+type, and Agent-reported timestamps are stored only as historical metadata
 without overwriting Controller-observed authority timestamps.
 
 ## Recovery

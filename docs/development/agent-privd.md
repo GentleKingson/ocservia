@@ -29,7 +29,7 @@ group is `ocserv-agent` for socket access, paired with supplementary group
 `0600` without granting general `CAP_CHOWN`.
 
 Privileged mutations record their state in a bounded, root-only SQLite store
-under `/var/lib/ocservia-privd` that stays strictly local to the host. Each
+under `/var/lib/ocservia-privd` that never leaves the host. Each
 authenticated command record binds the node, command, operation, idempotency
 key, action, authorization and effect revisions, semantic payload hash, effect
 kind, resource, expiry, and bounded successful result, allowing an exact replay
