@@ -10,6 +10,13 @@ Public or default relays are never used as a production fallback. Because
 normal direct connectivity remains active alongside the Relay, any Relay
 recovery test must prove that traffic actually depends on the Relay path.
 
+Agent enrollment, Agent sessions, and transportd disable public endpoint address
+publishing and lookup. They use the configured Relay addresses; an EndpointID
+alone is not enough to discover a peer. Ordinary DNS resolution remains enabled:
+the current resolver can fall back to Cloudflare, Google, and Quad9 when the
+system nameservers fail. Disabling public endpoint discovery does not restrict
+those DNS requests to operator-owned infrastructure.
+
 ## Before you begin
 
 - One independent Relay host with a DNS name and matching TLS certificate.

@@ -3341,6 +3341,7 @@ async fn build_router_with_direct(
     let mut endpoint_builder = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
         .relay_mode(relay_mode)
+        .clear_address_lookup()
         .keep_relays_connected(keep_relays_connected)
         .transport_config(transport)
         .hooks(SecurityHook::new(policy.clone(), trust.as_ref()));

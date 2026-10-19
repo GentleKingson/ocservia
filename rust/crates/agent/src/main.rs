@@ -268,6 +268,7 @@ async fn enroll_agent(
     )
     .secret_key(identity.secret_key().clone())
     .relay_mode(config.relay_mode.clone())
+    .clear_address_lookup()
     .keep_relays_connected(keep_relays_connected)
     .bind()
     .await?;
@@ -670,6 +671,7 @@ fn agent_endpoint_factory(
             with_relay_tls_roots(Endpoint::builder(presets::N0), relay_tls_roots)
                 .secret_key(secret_key)
                 .relay_mode(relay_mode)
+                .clear_address_lookup()
                 .keep_relays_connected(keep_relays_connected)
                 .transport_config(transport)
                 .bind()
