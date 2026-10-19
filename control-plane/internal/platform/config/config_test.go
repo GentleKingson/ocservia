@@ -196,13 +196,36 @@ func TestDevAuthGuard(t *testing.T) {
 	}
 }
 
+func TestImplicitEnvironmentRequiresLoopback(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		env  map[string]string
+		ok   bool
+	}{
+		{"implicit loopback", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}, true},
+		{"implicit IPv6 loopback", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_HTTP_ADDRESS": "[::1]:8080"}, true},
+		{"implicit all interfaces", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080"}, false},
+		{"implicit empty host", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_HTTP_ADDRESS": ":8080"}, false},
+		{"implicit hostname", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_HTTP_ADDRESS": "controller:8080"}, false},
+		{"explicit development", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "development", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080"}, true},
+		{"explicit test", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "test", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080"}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(nil, func(key string) (string, bool) { v, ok := tt.env[key]; return v, ok })
+			if (err == nil) != tt.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, tt.ok)
+			}
+		})
+	}
+}
+
 func TestDevAuthTokenGuard(t *testing.T) {
 	tests := []struct {
 		name string
 		env  map[string]string
 		ok   bool
 	}{
-		{"development", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080", "OCSERV_DEV_AUTH_TOKEN": "local-development-token-32-characters"}, true},
+		{"development", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "development", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080", "OCSERV_DEV_AUTH_TOKEN": "local-development-token-32-characters"}, true},
 		{"too short", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_DEV_AUTH_TOKEN": "short"}, false},
 		{"production", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "production", "OCSERV_DEV_AUTH_TOKEN": "local-development-token-32-characters"}, false},
 	}

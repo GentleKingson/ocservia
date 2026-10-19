@@ -163,6 +163,26 @@ When an existing deployment requires a separately approved issuer migration:
    overwriting the newer records, and attach all rollback evidence to the
    original change ticket.
 
+## Signer unavailable
+
+An unexpected ledger write failure latches the Signer closed: `/healthz` and
+every authenticated signing, revocation and sealing request return `503` until
+the process restarts. This is deliberate; do not bypass it.
+
+1. Pause certificate issuance, revocation and P12 export approvals while the
+   Signer is down.
+2. Read the Signer logs and repair the cause on the state volume: free space,
+   ownership by the runtime UID, mode `0700` on the state directory and `0600`
+   on `ledger.db`, and the health of the underlying disk.
+3. Restart the Signer. Never run `init` or replace `ledger.db` to clear the
+   fault; startup refuses a missing, corrupt or foreign ledger, and that refusal
+   means a [ledger restore](../development/certificates-and-signer.md#state-and-recovery),
+   not a re-initialization.
+4. Confirm `health --url https://signer:9443/healthz` succeeds, then retry the
+   affected Controller operations. Signer writes are idempotent by certificate
+   ID, so a retry returns the original result for any request that had already
+   committed.
+
 ## Transport and credentials
 
 Production deployments support only a single dedicated Relay and reject any
