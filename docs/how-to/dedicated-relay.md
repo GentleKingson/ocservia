@@ -15,9 +15,12 @@ publishing and lookup. They use the configured Relay addresses; an EndpointID
 alone is not enough to discover a peer. They resolve the Relay name only
 through the host's system DNS configuration and hosts file, with iroh's public
 fallback resolvers disabled. If those cannot resolve the name, the Relay
-connection fails and logs the resolution error; existing reconnection keeps
-retrying the configured resolvers. Public nameservers listed in the host's own
-DNS configuration remain an operator dependency.
+connection fails and existing reconnection keeps retrying the configured
+resolvers. The Agent logs `Failed to connect to relay server` with
+`Resolve failed`. transportd dials the Relay only after selecting it as its home
+Relay, so it may log only `probe timed out`; the failure then shows as Agents
+unable to connect and the node going offline. Public nameservers listed in the
+host's own DNS configuration remain an operator dependency.
 
 ## Before you begin
 
