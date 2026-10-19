@@ -4,6 +4,11 @@ Cross-VM enrollment runs manually through the `deploy/real-e2e` fixtures and
 helper scripts. The opt-in `real-e2e.yml` workflow runs two independent
 `ubuntu-24.04` GitHub-hosted VMs, outside Basic CI and Release Check.
 
+Public endpoint address lookup is now disabled in Agent and transportd. The
+default-Relay, EndpointID-only rendezvous in this profile cannot complete
+enrollment without explicit Relay addressing. The instructions below describe
+that existing fixture, not acceptance for the dedicated-Relay deployment.
+
 ## GitHub-hosted execution
 
 ```sh
