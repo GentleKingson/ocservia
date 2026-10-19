@@ -415,9 +415,10 @@ bindings.
 To run end-to-end acceptance on a test branch, dispatch `release-upgrade.yml`
 with `purpose=integration`, `production_signer=true`, and a plain test version
 such as `0.0.0`. The workflow natively builds all eight first-party images on
-amd64 and pushes them to a loopback registry using standard platform
-configuration, while release publication jobs separately scan amd64 and arm64
-images prior to smoke testing and publishing. The Integrated lifecycle harness
+the selected `arch` (amd64 by default) and pushes them to a loopback registry
+using standard platform configuration, while the release products jobs in
+Release Check and Release separately scan amd64 and arm64 images prior to
+smoke testing and publishing. The Integrated lifecycle harness
 runs the production Go Signer without granting GHCR publishing permissions to
 test jobs. While manual Release Check runs on `main` always execute Integrated
 Business Smoke with four finite single-instance recoveries, the extended checks

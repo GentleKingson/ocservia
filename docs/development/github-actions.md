@@ -94,8 +94,8 @@ checksum/drift/invalid-config matrices, or historical repair suites.
 | `release-check.yml` | Manual main Full CI, Security, Release products build/image-security/smoke, Integrated Business Smoke + single-instance recovery and Quick Install (Pebble ACME), each on native amd64 and arm64 |
 | `release.yml` | Tag build/image-security/smoke/publish; manual build-only dry-run |
 | `real-e2e.yml` | Manual two-hosted-VM enrollment with encrypted token exchange; outside Basic CI and Release Check |
-| `release-upgrade.yml` | Manual local Business smoke or Integration diagnostics (workflow name Release Diagnostics) |
-| `release-products.yml`, `release-business-diagnostic.yml` | Reusable build/smoke (called by `release.yml`) and native Business probe (called by Release Check and `release-upgrade.yml`); not triggered directly |
+| `release-upgrade.yml` | Manual local Business smoke, Integration or native platform diagnostics on a chosen architecture (workflow name Release Diagnostics) |
+| `release-products.yml`, `release-business-diagnostic.yml`, `release-native-platform.yml` | Reusable build/smoke (called by `release.yml` and Release Check), native Business probe (called by Release Check and `release-upgrade.yml`) and native platform diagnostics (called by `release-upgrade.yml`); not triggered directly |
 | `integrated-network.yml` | Manual or candidate-branch Integrated Network prototype (isolated network or public-fixture probe); not part of Basic CI or Release Check |
 | `strip-claude-footer.yml` | PR-body housekeeping only; no validation |
 

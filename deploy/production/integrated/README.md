@@ -124,10 +124,11 @@ profile instead of starting without certificates.
 ## CI and publication
 
 Manual [Release Check](../../../docs/development/release-checks.md) runs Full CI,
-Security, amd64 Integrated Business Smoke with four finite single-instance
-recoveries, and amd64 Quick Install against a Pebble ACME directory on merged
-main. Business uses fresh local builds and a loopback
-registry on disposable amd64 runners;
+Security, release products (build, Controller image security and
+package/image smoke), Integrated Business Smoke with four finite
+single-instance recoveries, and Quick Install against a Pebble ACME directory
+on merged main, each on native amd64 and arm64. Business uses fresh local
+builds and a loopback registry on disposable runners of each architecture;
 it does not publish GHCR images. The operator confirms the version after PASS.
 Its tag then triggers fresh native builds, exact Controller image security scans,
 install/image smoke on amd64 and arm64, and ordinary

@@ -69,10 +69,10 @@ enrollment completion. Each class maintains its own rolling rate window,
 concurrency semaphore, bounded metrics, and rejection reason so unknown
 enrollment traffic can never consume capacity reserved for enrolled Agents, and
 when the bounded identity table fills, new unknown identities are shed without
-evicting existing entries. Across `trust_attempts_total`,
-`trust_budget_rejections_total`, and `trust_checks_in_flight`, the fixed class
-name is the sole trust metric label; raw `EndpointID`s and tokens are never
-exported as metric labels.
+evicting existing entries. Each class keeps in-process counters for accepted
+attempts, rate and capacity rejections, and checks in flight, keyed only by the
+fixed class name and never by raw `EndpointID`s or tokens. `transportd` does
+not export these counters as metrics.
 
 On the enrollment ALPN, `transportd` reads a single bounded application frame
 under a strict deadline to extract the format-checked one-time token. Still
@@ -145,7 +145,7 @@ reflects the Rust compiler version, not an Iroh endpoint or Relay protocol
 version. Never substitute an unpinned `cargo install --version` build, because
 upstream Relay `1.2.0`'s bundled lockfile still resolves `rustls` `0.23.41`,
 whereas the audited `deploy/production/relay.Cargo.lock` upgrades it to
-`0.23.45`.
+`0.23.46`.
 
 Production deployments support a single dedicated Relay; the low-level
 multi-member mechanism in the transport library does not extend product support
