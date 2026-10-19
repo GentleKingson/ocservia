@@ -1,6 +1,6 @@
 # ocservia documentation
 
-These guides and specifications cover ocservia deployment, day-two operations, and internal system contracts. New operators can start with the installation walkthroughs below, while routine maintenance and protocol boundaries are covered in the operational runbooks and technical reference sections.
+These guides cover deploying and operating ocservia and document its internal contracts. New operators should start with the installation walkthroughs.
 
 ## Start here
 
@@ -76,4 +76,4 @@ Running `make generate` overwrites all generated artifacts, so do not edit those
 
 ## Documentation scope
 
-Each topic in `docs/` has a single authoritative home and covers current operational procedures and runtime contracts. Historical release decisions, rollout timelines, and one-off task reports live in Git history; the records under `upstream/` are retained specifically for provenance attribution and backport verification.
+Each topic in `docs/` has a single authoritative home and covers current operational procedures and runtime contracts. Historical release decisions, rollout timelines, and one-off task reports live in Git history; the records under `upstream/` are kept for provenance attribution and backport verification.

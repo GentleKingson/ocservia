@@ -140,7 +140,7 @@ image to an explicit version tag or SHA-256 reference via
 `OCSERV_DATABASE_BACKUP_IMAGE` for standalone v1 manifests, or through the
 selected backend image field in v2 deployment configurations. Snapshot restore,
 PITR, failover, and cross-engine migration remain separate procedures, and no
-PostgreSQL G6, HA, or PITR claim applies to MySQL.
+PostgreSQL HA or PITR claim applies to MySQL.
 
 Details on Local only, OIDC only, and Local + OIDC configuration, login
 behavior, and one-shot first-admin creation live in

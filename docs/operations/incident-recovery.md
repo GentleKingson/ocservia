@@ -90,7 +90,7 @@ replay rules; it does not grant new authority or repair missing transport eviden
 When a deployment loses its last working administrator and independent approver
 pair, halt application writes and preserve the incident evidence. Recover to a
 verified state that has independently controlled credentials by following the
-authorized [backend-specific recovery procedure](incident-recovery.md#database-recovery),
+authorized [backend-specific recovery procedure](#database-recovery),
 leaving all initialization markers and audit history intact. Before reopening
 traffic, use the protected administrative database connection to revoke all
 active restored sessions. On PostgreSQL, run:
@@ -192,9 +192,8 @@ online at its original address with the existing TLS certificate and
 credentials, then confirming fresh Agent heartbeats and reconciled command
 outcomes. Nodes that depend on the Relay remain unreachable for management
 until the original path returns. Do not point production traffic at public
-relays, reset node identities, or re-enroll nodes to work around a Relay outage,
-and keep in mind during testing that direct peer connectivity can mask a broken
-Relay path.
+relays, reset node identities, or re-enroll nodes to work around a Relay outage.
+During testing, direct peer connectivity can mask a broken Relay path.
 
 To recover a lost Controller endpoint key, restore the encrypted offline backup
 to `controller-iroh.key` inside `OCSERV_SECRET_DIR` with owner `65532:65532` and
@@ -242,7 +241,7 @@ verifiers and secret files only if the database and on-disk files still match
 either the initial baseline or the values written during that run, never
 overwriting unexpected concurrent changes. Keep any reported recovery snapshot
 protected and leave services stopped until recovery finishes. Passwords are read
-strictly from files and are never accepted on the command line or printed to logs.
+only from files and are never accepted on the command line or printed to logs.
 
 ## Deployment rollback
 

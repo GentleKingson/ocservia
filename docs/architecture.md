@@ -4,7 +4,7 @@ ocservia provides a central control plane for OpenConnect (ocserv) VPN gateways 
 
 ## Purpose and constraints
 
-Operators use the control plane to verify node trust and reachability, roll out configuration changes without interactive shell access, and reconcile commands whose outcomes become ambiguous. High-risk changes require independent two-principal approval from a second authenticated principal, and disaster recovery preserves node identities alongside the recorded history of state transitions.
+Operators use the control plane to verify node trust and reachability, roll out configuration changes without interactive shell access, and reconcile commands whose outcomes become ambiguous. High-risk changes require approval from a second, independently authenticated principal, and disaster recovery preserves node identities alongside the recorded history of state transitions.
 
 A supported production deployment consists of one Controller instance, a relational database, a Signer service for certificate issuance, and a single dedicated Relay serving multiple Agents (a non-empty second Relay URL is rejected). Those services can run on separate hosts, or co-locate on the Controller host in Integrated mode. High-availability topologies such as multi-master Controller clusters, redundant Relays, and automated database failover are outside the [supported scope](reference/support-policy.md#deployment-capability-distinctions); internal lease mechanisms and package modularity do not imply HA support.
 
@@ -146,7 +146,7 @@ ocservia lives in a single repository organized around explicit module and proce
 
 ### Ownership and task navigation
 
-Consult the row that matches the area you are changing; each linked document holds the detailed behavioral and compatibility rules for that boundary.
+Each linked document holds the detailed behavioral and compatibility rules for its boundary.
 
 | Boundary / task | Responsibility and dependency direction | Read next |
 | --- | --- | --- |
@@ -190,9 +190,9 @@ flowchart LR
     end
 ```
 
-The Signer service lives in its own Go module (`signer/`, wired via `go.work`) and communicates with the Controller strictly over HTTPS. On the Rust side, `privd` links the `upgrader` library to trigger the `ocservia-upgrader@` systemd unit, and `agent` pulls in `transportd` only as a `[dev-dependencies]` crate for tests. Exact crate dependencies are defined in `rust/Cargo.toml` and each crate's manifest.
+The Signer service lives in its own Go module (`signer/`, wired via `go.work`) and communicates with the Controller only over HTTPS. On the Rust side, `privd` links the `upgrader` library to trigger the `ocservia-upgrader@` systemd unit, and `agent` pulls in `transportd` only as a `[dev-dependencies]` crate for tests. Exact crate dependencies are defined in `rust/Cargo.toml` and each crate's manifest.
 
-Runtime process graphs and source import graphs serve different purposes: how processes are supervised or connected over sockets is independent of how source packages import one another. Add a new diagram only when a change introduces a new process, trust boundary, or isolation model.
+Add a new diagram only when a change introduces a new process, trust boundary, or isolation model.
 
 ### Intentional exceptions
 

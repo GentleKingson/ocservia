@@ -1,4 +1,4 @@
-# oneOf Map Conversion
+# oneOf map conversion
 
 `modelOneOf.mustache` is the TypeScript Fetch template from the OpenAPI
 Generator artifact pinned in [`toolchains.lock`](../../../toolchains.lock). The only local changes preserve free-form

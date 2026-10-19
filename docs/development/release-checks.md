@@ -39,7 +39,7 @@ Published release artifacts consist of Agent archives, plain archive checksums,
 DEB and RPM packages, Controller container images, and the bootstrap files
 consumed by the installers. Plain checksums guard against download corruption
 without acting as cryptographic signatures or a trust root, and
-`controller-release.json` serves as standard deployment configuration for
+`controller-release.json` is the standard deployment configuration for
 Integrated lifecycle consumers. Rerunning a release replaces GitHub Release
 assets and updates version image tags in place; the pipeline does not maintain
 separate artifact signing, provenance attestations, registry bindings, or

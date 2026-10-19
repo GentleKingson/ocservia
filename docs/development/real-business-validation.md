@@ -49,8 +49,8 @@ OpenConnect tunnel and verify end-to-end ICMP traffic. Manual integration then
 submits a reviewed configuration revision engineered to fail during ocserv
 reload, confirms that the node automatically restores the previous files byte
 for byte, and establishes a fresh OpenConnect tunnel with working ICMP traffic.
-Note that this stage tests automatic rollback when an apply fails on the node,
-as opposed to an operator-initiated rollback of an already active revision.
+This stage tests automatic rollback when an apply fails on the node, not an
+operator-initiated rollback of an already active revision.
 
 In its final stage, manual integration builds the next patch version of the
 Agent package, drops it into the node's root-owned upgrade spool, and recreates
@@ -218,7 +218,7 @@ the queued command was never transmitted while the Relay was down, and then
 requires the original operation to finish with exactly one additional native
 ocserv reload once the same Relay comes back online. An EXPECTED-UNKNOWN
 classification cannot convert a failure in this scenario into a pass. For other
-interrupted operations whose side effects are genuinely uncertain, the system
+interrupted operations whose side effects are uncertain, the system
 relies on read-only reconciliation followed by an explicit safe retry once
 absence of effect is confirmed.
 

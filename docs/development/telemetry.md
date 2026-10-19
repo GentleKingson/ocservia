@@ -53,7 +53,7 @@ series are queried from the node `telemetry` resource with a required metric
 name, a resolution of `raw`, `5m` (default), or `1h`, and an optional RFC 3339
 `since` timestamp (defaulting to 24 hours ago), returning up to 2,000 data
 points ordered from oldest to newest starting at `since`. Because the SSE
-stream acts solely as an invalidation signal, clients fetch authoritative state
+stream is only an invalidation signal, clients fetch authoritative state
 via REST after connecting or reconnecting; a reconnecting client may supply its
 last seen event ID as a cursor, which returns `400` (`invalid-cursor`) if that
 event is no longer visible within the caller's authorized scope.

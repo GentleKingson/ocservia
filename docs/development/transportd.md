@@ -69,10 +69,10 @@ enrollment completion. Each class maintains its own rolling rate window,
 concurrency semaphore, bounded metrics, and rejection reason so unknown
 enrollment traffic can never consume capacity reserved for enrolled Agents, and
 when the bounded identity table fills, new unknown identities are shed without
-evicting existing entries. Across `trust_attempts_total`,
-`trust_budget_rejections_total`, and `trust_checks_in_flight`, the fixed class
-name is the sole trust metric label; raw `EndpointID`s and tokens are never
-exported as metric labels.
+evicting existing entries. Each class keeps in-process counters for accepted
+attempts, rate and capacity rejections, and checks in flight, keyed only by the
+fixed class name and never by raw `EndpointID`s or tokens. `transportd` does
+not export these counters as metrics.
 
 On the enrollment ALPN, `transportd` reads a single bounded application frame
 under a strict deadline to extract the format-checked one-time token. Still
@@ -85,7 +85,7 @@ rejecting any concurrent or subsequent replay. Node approval, revocation, and
 endpoint rotation advance the synchronized trust snapshot, and revoked
 identities remain fail-closed even if the Controller becomes unreachable.
 Direct and Relay connections share the same internal admission classes; Relay
-authentication acts strictly as defense in depth and neither establishes an
+authentication acts only as defense in depth and neither establishes an
 Agent principal nor taps reserved Controller capacity.
 
 Connection status queries return the Agent instance ID, active direct or relay
@@ -93,7 +93,7 @@ path with path details, RTT, connection establishment timestamp, and last-seen
 timestamp, together with the negotiated capability set, authorization revision,
 and signed-session expiration time. Static read-only sessions report revision
 zero and no expiration, whereas database-backed sessions accept a nonzero
-revision and expiry exclusively from the Controller handshake response. Before
+revision and expiry only from the Controller handshake response. Before
 opening an Agent stream for command dispatch or artifact transfer, `transportd`
 verifies the session mode, negotiated capability, authorization revision, and
 grant expiry, and closes any connection whose retained session grant is
@@ -140,12 +140,12 @@ The [standalone `iroh-relay` build](../../deploy/production/relay-build.md) is
 pinned separately under `iroh` in `toolchains.lock`: `scripts/build-relay.sh`
 verifies the upstream crate archive and compiles the unmodified CLI against
 `deploy/production/relay.Cargo.lock` for the production Relay image
-(`deploy/production/relay.Dockerfile`). Note that the Rust base image tag
+(`deploy/production/relay.Dockerfile`). The Rust base image tag
 reflects the Rust compiler version, not an Iroh endpoint or Relay protocol
 version. Never substitute an unpinned `cargo install --version` build, because
 upstream Relay `1.2.0`'s bundled lockfile still resolves `rustls` `0.23.41`,
 whereas the audited `deploy/production/relay.Cargo.lock` upgrades it to
-`0.23.45`.
+`0.23.46`.
 
 Production deployments support a single dedicated Relay; the low-level
 multi-member mechanism in the transport library does not extend product support

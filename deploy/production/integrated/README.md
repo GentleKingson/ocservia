@@ -5,7 +5,7 @@ Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
 
 The P1 network prototype was developed against source baseline
 [`e861b72130d4d409883f68d01805566f26cbafbc`](https://github.com/GentleKingson/ocservia/commit/e861b72130d4d409883f68d01805566f26cbafbc),
-and initial P1/P3–P5 rollout and main acceptance records
+and initial P1 and P3-P5 rollout and main acceptance records
 ([`368906c65d23bc7abff088dc4bbbdbf160012b32`](https://github.com/GentleKingson/ocservia/commit/368906c65d23bc7abff088dc4bbbdbf160012b32))
 are archived at
 [`af40cd3684269f7e31a3c8d6981775411a8172ec`](https://github.com/GentleKingson/ocservia/blob/af40cd3684269f7e31a3c8d6981775411a8172ec/deploy/production/integrated/README.md).
@@ -124,10 +124,11 @@ profile instead of starting without certificates.
 ## CI and publication
 
 Manual [Release Check](../../../docs/development/release-checks.md) runs Full CI,
-Security, amd64 Integrated Business Smoke with four finite single-instance
-recoveries, and amd64 Quick Install against a Pebble ACME directory on merged
-main. Business uses fresh local builds and a loopback
-registry on disposable amd64 runners;
+Security, release products (build, Controller image security and
+package/image smoke), Integrated Business Smoke with four finite
+single-instance recoveries, and Quick Install against a Pebble ACME directory
+on merged main, each on native amd64 and arm64. Business uses fresh local
+builds and a loopback registry on disposable runners of each architecture;
 it does not publish GHCR images. The operator confirms the version after PASS.
 Its tag then triggers fresh native builds, exact Controller image security scans,
 install/image smoke on amd64 and arm64, and ordinary
@@ -271,7 +272,7 @@ docker run --rm --network "$RELAY_EGRESS_NETWORK" \
 This manual diagnostic is not selected single-node recovery acceptance and
 does not establish a real Agent command result.
 
-The real single-node command and recovery chain now belongs to the signed
+The real single-node command and recovery chain belongs to the signed
 Business Smoke / Integration environment. Use its optional `run-resilience`
 input; see [resilience coverage](../../../docs/development/resilience.md).
 The former G6 engineering real-node entrypoint and its public-endpoint mode

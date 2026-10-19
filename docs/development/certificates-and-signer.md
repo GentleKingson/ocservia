@@ -29,8 +29,8 @@ sealing. When the signer is unreachable, certificate issuance transitions to
 and revocation transitions to `revocation_unknown` (which a retry may submit
 again); both paths return a service-unavailable problem response without
 marking the operation successful. Setting `OCSERV_CERTIFICATE_SIGNER_CA_FILE`
-to a public PEM CA bundle configures a private trust chain scoped exclusively
-to this client, leaving the process-wide trust store and other external HTTPS
+to a public PEM CA bundle configures a private trust chain used only by
+this client, leaving the process-wide trust store and other external HTTPS
 connections untouched. See [Production Signer](#production-signer) for the
 bundled implementation, public-key transfer workflow, and offline recovery
 procedures.
@@ -415,9 +415,10 @@ bindings.
 To run end-to-end acceptance on a test branch, dispatch `release-upgrade.yml`
 with `purpose=integration`, `production_signer=true`, and a plain test version
 such as `0.0.0`. The workflow natively builds all eight first-party images on
-amd64 and pushes them to a loopback registry using standard platform
-configuration, while release publication jobs separately scan amd64 and arm64
-images prior to smoke testing and publishing. The Integrated lifecycle harness
+the selected `arch` (amd64 by default) and pushes them to a loopback registry
+using standard platform configuration, while the release products jobs in
+Release Check and Release separately scan amd64 and arm64 images prior to
+smoke testing and publishing. The Integrated lifecycle harness
 runs the production Go Signer without granting GHCR publishing permissions to
 test jobs. While manual Release Check runs on `main` always execute Integrated
 Business Smoke with four finite single-instance recoveries, the extended checks

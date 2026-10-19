@@ -40,7 +40,7 @@ High-risk operations must be requested and approved by independently authenticat
 
 Operators and API clients send commands to the Go Controller over an HTTPS REST API and subscribe to server-sent events (SSE) for state updates. For node communication, the Controller speaks gRPC over a local Unix domain socket to `transportd`, which manages the Iroh endpoint and maintains connections to remote agents.
 
-Production deployments route control traffic through a single Relay; multi-relay failover is not supported. The Relay handles network routing and peer EndpointID verification alongside Controller-signed session credentials and payload signatures.
+Production deployments use a single dedicated Relay; multi-relay failover is not supported. The Relay forwards Iroh traffic for clients that hold the relay access token. The endpoints verify each other's EndpointID themselves, and commands carry Controller-signed session credentials and payload signatures.
 
 ```text
 Browser (Vue 3 / TypeScript)

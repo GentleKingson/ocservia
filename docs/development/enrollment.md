@@ -5,7 +5,7 @@ For the step-by-step operator workflow, see [Enroll a node](../how-to/enroll-nod
 Node enrollment registers an Agent identity without activating the node. The
 standard bootstrap flow uses a token created via
 `POST /api/v1/node-bootstrap-tokens`, which carries an `obt1_` prefix, is
-persisted solely as a SHA-256 digest, and remains unbound to any `EndpointID`
+persisted only as a SHA-256 digest, and remains unbound to any `EndpointID`
 until a valid endpoint possession proof arrives at the Controller. When the
 token creation request specifies the optional `expected_endpoint_id`, the
 Controller rejects any other endpoint before consuming the token. In a single
@@ -60,7 +60,7 @@ versioned, domain-separated canonical transcript that binds the token digest,
 `EndpointID`, protocol version, Agent metadata, environment, nonce, timestamp,
 and sorted capability list. The Controller verifies this signature
 independently, treating the `EndpointID` reported by `transportd` as an
-additional channel binding. Legacy tokens are strictly single-use: any
+additional channel binding. Legacy tokens are single-use: any
 concurrent or subsequent replay is rejected even if the initial network
 response was dropped, in which case operators look up the pending node ID in
 the authenticated Controller inventory without rerunning the enrollment

@@ -111,9 +111,9 @@ curl --fail --silent --show-error \
   "https://${OCSERV_PUBLIC_HOST}/api/v1/version"
 ```
 
-On a manual deployment with Local login enabled, run the [one-shot Local admin bootstrap](../operations/authentication.md#bootstrap-the-first-local-admin) before testing login, as fresh manual installs have no default administrator password and normal restarts never reset credentials. OIDC-only deployments authenticate through their configured identity provider and RBAC mappings, whereas Quick mode writes the generated passwords for its two initial Local administrators to root-readable files under `/root/ocservia-initial-credentials`.
+On a manual deployment with Local login enabled, run the [one-shot Local admin bootstrap](../operations/authentication.md#bootstrap-the-first-local-admin) before testing login, as fresh manual installs have no default administrator password and normal restarts never reset credentials. OIDC-only deployments authenticate through their configured identity provider and RBAC mappings. Quick mode writes the generated passwords for its two initial Local administrators to root-readable files under `/root/ocservia-initial-credentials`.
 
-Finally, confirm that operator login succeeds, a managed node can connect through the dedicated Relay, the initial backup artifact is present, and (when observability is enabled) traces reach your OpenTelemetry backend. Note that a healthy `transportd` container status only confirms that its local Unix socket is up, not that the external Relay is reachable.
+Finally, confirm that operator login succeeds, a managed node can connect through the dedicated Relay, the initial backup artifact is present, and (when observability is enabled) traces reach your OpenTelemetry backend. A healthy `transportd` container status only shows that its local Unix socket is up; it says nothing about whether the external Relay is reachable.
 
 ## 6. After installation
 

@@ -1,4 +1,4 @@
-# Standalone Relay Build
+# Standalone Relay build
 
 `bash scripts/build-relay.sh <install-root> [release|debug]` builds the unmodified
 crates.io `iroh-relay` CLI. `toolchains.lock` selects the Relay version, while

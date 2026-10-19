@@ -257,7 +257,7 @@ independent subject-ownership evidence and explicit migration approval.
 
 Ocservia ships with no default administrator password. On a manual
 installation, operators initialize the first Local accounts through a separate
-one-shot command outside the normal install and restart path. By contrast, a
+one-shot command outside the normal install and restart path. A
 Quick installation (`quick-install.sh`) runs the equivalent initialization
 automatically: it provisions the management workspace using the owner one-shot
 below, generates two random passwords, and runs `--bootstrap-local-admin` to
@@ -304,8 +304,8 @@ host.
 3. Prepare separate requester and approver principals with distinct identities,
    credentials, authenticated sessions, and RBAC roles; never share a
    credential between them or substitute a second identity ID during
-   authentication. Baseline 1.0 enforces this technical separation of
-   principals in the system, while deployments subject to a two-person custody
+   authentication. The system enforces this technical separation of
+   principals, while deployments subject to a two-person custody
    rule must also assign the credentials to two different people under their
    enterprise security procedures (automated two-principal tests verify only
    the technical separation). Provision two distinct passwords from your secret

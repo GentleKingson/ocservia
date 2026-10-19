@@ -2,7 +2,7 @@
 
 The local Compose stack runs the Controller, Web console, database, and simulated agent nodes on a single machine so you can explore the interface without connecting to a live VPN server.
 
-Because the stack uses fixed development credentials, a development-only authentication token, and the bounded agent simulator (`OCSERV_LOCAL_SIMULATOR=true`) without managing a real ocserv daemon, it is intended strictly for local evaluation and testing. Keep it bound to the loopback ports below and do not reuse it for a production Controller, relay, or managed-node deployment; production hosts follow the [managed-node](managed-node.md) and production installation guides.
+Because the stack uses fixed development credentials, a development-only authentication token, and the bounded agent simulator (`OCSERV_LOCAL_SIMULATOR=true`) without managing a real ocserv daemon, it is only for local evaluation and testing. Keep it bound to the loopback ports below and do not reuse it for a production Controller, relay, or managed-node deployment; production hosts follow the [managed-node](managed-node.md) and production installation guides.
 
 ## Requirements
 

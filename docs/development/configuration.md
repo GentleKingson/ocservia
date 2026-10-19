@@ -117,7 +117,7 @@ modes, missing versions, mismatched node or slot bindings, expired
 certificates, or private keys that do not match the public certificate. Private
 key bytes and digests of private key material never enter command payloads, API
 responses, audit logs, or Controller database tables. The on-disk bundle
-manifest is strictly a local trust input under a shared file lock that
+manifest is only a local trust input, read under a shared file lock that
 prevents version removal or replacement while a plan, apply, or rollback is in
 progress.
 
@@ -207,7 +207,7 @@ privd command restarts the daemon. Keep the previous configuration and TLS
 bundle intact so both can be restored under the same maintenance window if the
 restart fails.
 
-### Plan And Apply
+### Plan and apply
 
 In a complete-profile template, `server-cert`, `server-key`, and optional
 `ca-cert` all reference the same `SecretRef` UUID, and privd's root resolver
