@@ -130,7 +130,8 @@ func TestOIDCProviderCacheCoalescesAndRecovers(t *testing.T) {
 	}
 	now := time.Unix(1000, 0)
 	service.now = func() time.Time { return now }
-	var calls atomic.Int32
+	var calls, joins atomic.Int32
+	service.discovery.joined = func() { joins.Add(1) }
 	fail := true
 	release := make(chan struct{})
 	service.discover = func(ctx context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
@@ -153,7 +154,7 @@ func TestOIDCProviderCacheCoalescesAndRecovers(t *testing.T) {
 	for range 3 {
 		go func() { _, _, err := service.provider(context.Background()); errs <- err }()
 	}
-	waitForCalls(t, &calls, 1)
+	waitForCalls(t, &joins, 3)
 	close(release)
 	for range 3 {
 		if err := <-errs; err == nil {
@@ -172,6 +173,7 @@ func TestOIDCProviderCacheCoalescesAndRecovers(t *testing.T) {
 	waitForCalls(t, &calls, 2)
 	waiter := make(chan error, 1)
 	go func() { _, _, err := service.provider(context.Background()); waiter <- err }()
+	waitForCalls(t, &joins, 5)
 	cancel()
 	if err := <-errs; !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled caller error = %v", err)
