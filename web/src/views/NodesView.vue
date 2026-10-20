@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { Ellipsis } from "@lucide/vue";
 import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
-import { defaultWindow, useEventListener, useNow } from "@vueuse/core";
+import {
+  defaultWindow,
+  useEventListener,
+  useIntervalFn,
+  useNow,
+} from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
@@ -47,7 +52,7 @@ const fleet = useFleetStore();
 const route = useRoute();
 const router = useRouter();
 const { t, locale } = useI18n();
-const now = useNow({ interval: 30_000 });
+const now = useNow({ scheduler: (update) => useIntervalFn(update, 30_000) });
 
 onMounted(() => {
   fleet.start();
