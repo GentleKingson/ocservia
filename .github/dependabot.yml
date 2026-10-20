@@ -1,0 +1,31 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/control-plane"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+
+  - package-ecosystem: "gomod"
+    directory: "/signer"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+
+  - package-ecosystem: "cargo"
+    directory: "/rust"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
