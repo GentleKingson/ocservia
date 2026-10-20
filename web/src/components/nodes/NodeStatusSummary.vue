@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { NodeObservedState } from "@ocservia/api-client";
-import { useNow } from "@vueuse/core";
+import { useIntervalFn, useNow } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
 
 import { agentVersionLabel } from "@/shared/agent-version";
@@ -9,7 +9,7 @@ import { formatTimestamp, relativeTimestamp } from "@/shared/timestamp";
 defineProps<{ node: NodeObservedState; sessionCount: number }>();
 
 const { locale } = useI18n();
-const now = useNow({ interval: 30_000 });
+const now = useNow({ scheduler: (update) => useIntervalFn(update, 30_000) });
 const relative = (value: string) =>
   relativeTimestamp(value, now.value.getTime(), locale.value);
 
