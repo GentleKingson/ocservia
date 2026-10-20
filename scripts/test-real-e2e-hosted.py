@@ -40,6 +40,19 @@ assert set(workflow[True]['workflow_call']['secrets']) == {
     'CROSS_VM_RELAY_URL', 'CROSS_VM_RELAY_CA', 'CROSS_VM_RELAY_TOKEN'}
 assert 'secrets: inherit' not in (ROOT / '.github/workflows/real-e2e.yml').read_text()
 assert workflow['permissions'] == {'contents':'read', 'actions':'read'}
+preflight = workflow['jobs']['preflight']
+assert preflight['needs'] == 'admission' and preflight['if'] == "needs.admission.outputs.mode == 'run'"
+admission = workflow['jobs']['admission']
+assert admission['permissions'] == {} and 'environment' not in admission and 'secrets.' not in str(admission)
+assert admission['outputs'] == {'mode':'${{ steps.trust.outputs.mode }}'}
+trust = admission['steps'][0]
+assert trust['name'] == 'Require trusted main workflow before repository code'
+assert 'uses' not in trust and 'scripts/' not in trust['run']
+assert set(trust['env']) == {'SOURCE_REPOSITORY', 'SOURCE_REF', 'SOURCE_SHA', 'JOB_CONTEXT', 'EVENT_NAME', 'SCHEDULE_ENABLED'}
+for role in ('preflight', 'controller', 'node'):
+    assert workflow['jobs'][role]['environment'] == {'name':'cross-vm-test-relay', 'deployment':False}
+assert 'environment' not in workflow['jobs']['verdict']
+assert 'secrets.' not in str(workflow['jobs']['verdict'])
 for role in ('controller', 'node'):
     job = workflow['jobs'][role]
     assert job['runs-on'] == 'ubuntu-24.04' and job['needs'] == 'preflight' and 'container' not in job
@@ -54,9 +67,7 @@ for role in ('controller', 'node'):
     if role == 'controller':
         token = next(step for step in uploads if step.get('name') == 'Publish enrollment-token')
         assert token['with']['path'].endswith('/encrypted-token')
-assert workflow['jobs']['verdict']['needs'] == ['preflight', 'controller', 'node']
-preflight = workflow['jobs']['preflight']['steps']
-assert preflight[-1]['run'] == 'test "$GITHUB_REF" = refs/heads/main'
+assert workflow['jobs']['verdict']['needs'] == ['admission', 'preflight', 'controller', 'node']
 compose = yaml.safe_load((ROOT / 'deploy/real-e2e/controller.compose.yaml').read_text())
 for name in ('transportd', 'transport-endpoint-bootstrap'):
     command = compose['services'][name]['command']
@@ -96,19 +107,52 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-test-') as directory:
     # represented by their enclosing role's job result.
     import json
     verdict = workflow['jobs']['verdict']['steps'][-1]['run']
-    results = {name:{'result':'success'} for name in ('controller', 'node', 'preflight')}
-    def verdict_check(items, ok):
+    results = {name:{'result':'success'} for name in ('admission', 'controller', 'node', 'preflight')}
+    results['admission']['outputs'] = {'mode':'run'}
+    trusted_env = {**os.environ, 'SOURCE_REPOSITORY':'GentleKingson/ocservia',
+                   'SOURCE_REF':'refs/heads/main', 'SOURCE_SHA':'a'*40,
+                   'JOB_CONTEXT':json.dumps({'workflow_ref':'GentleKingson/ocservia/.github/workflows/real-e2e.yml@refs/heads/main', 'workflow_sha':'a'*40}),
+                   'EVENT_NAME':'workflow_dispatch',
+                   'SCHEDULE_ENABLED':''}
+    def trust_check(changes, ok, mode='run'):
+        summary = temp / 'trust-summary'
+        summary.write_text('')
+        output = temp / 'trust-output'
+        output.write_text('')
+        run('bash', '-euo', 'pipefail', '-c', trust['run'], ok=ok,
+            env={**trusted_env, **changes, 'GITHUB_STEP_SUMMARY':str(summary), 'GITHUB_OUTPUT':str(output)})
+        assert ('BLOCKED_AUTH' in summary.read_text()) != ok
+        assert output.read_text() == ('mode=' + mode + '\n' if ok else '')
+    trust_check({}, True)
+    for key, value in [('SOURCE_REF','refs/heads/feature'), ('SOURCE_REF','refs/tags/main'),
+                       ('SOURCE_REPOSITORY','fork/ocservia'), ('JOB_CONTEXT',trusted_env['JOB_CONTEXT'].replace('heads/main','heads/feature')),
+                       ('JOB_CONTEXT',trusted_env['JOB_CONTEXT'].replace('a'*40, 'b'*40)),
+                       ('JOB_CONTEXT','{}'), ('JOB_CONTEXT','null'), ('JOB_CONTEXT','invalid JSON'), ('SOURCE_SHA',''),
+                       ('EVENT_NAME','pull_request_target'), ('EVENT_NAME','workflow_run')]:
+        trust_check({key:value}, False)
+    for enabled in ('', 'false', 'TRUE', 'True', 'unexpected'):
+        trust_check({'EVENT_NAME':'schedule', 'SCHEDULE_ENABLED':enabled}, True, mode='disabled')
+    trust_check({'EVENT_NAME':'schedule', 'SCHEDULE_ENABLED':'true'}, True)
+    trust_check({'EVENT_NAME':'push', 'SCHEDULE_ENABLED':'false'}, True)
+    def verdict_check(items, ok, changes=None, acceptance=None):
         summary = temp / 'verdict-summary'
         summary.write_text('')
         run('bash', '-euo', 'pipefail', '-c', verdict, ok=ok,
-            env={**os.environ, 'RESULTS':json.dumps(items), 'GITHUB_STEP_SUMMARY':str(summary)})
-        assert ('CROSS_VM_ENROLLMENT=PASS' in summary.read_text()) == ok
+            env={**trusted_env, **(changes or {}), 'RESULTS':json.dumps(items), 'GITHUB_STEP_SUMMARY':str(summary)})
+        assert ('CROSS_VM_ENROLLMENT=PASS' in summary.read_text()) == (ok if acceptance is None else acceptance)
     verdict_check(results, True)
     for name in results:
         for status in ('failure', 'cancelled', 'skipped'):
             verdict_check({**results, name:{'result':status}}, False)
         verdict_check({key:value for key,value in results.items() if key != name}, False)
     verdict_check({**results, 'extra':{'result':'success'}}, False)
+    disabled = {name:{'result':'skipped'} for name in ('controller', 'node', 'preflight')}
+    disabled['admission'] = {'result':'success', 'outputs':{'mode':'disabled'}}
+    verdict_check(disabled, True, {'EVENT_NAME':'schedule'}, acceptance=False)
+    verdict_check(results, True, {'EVENT_NAME':'schedule'})
+    verdict_check({**disabled, 'preflight':{'result':'success'}}, False, {'EVENT_NAME':'schedule'})
+    verdict_check({**disabled, 'admission':results['admission']}, False, {'EVENT_NAME':'schedule'})
+    verdict_check(disabled, False)
     # Execute the actual wrapper's encryption and decryption phases, mocking
     # only the role scripts so no services, identities or VM claims are invented.
     fixture = temp / 'repo'

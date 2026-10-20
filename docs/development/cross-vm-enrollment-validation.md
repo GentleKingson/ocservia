@@ -20,13 +20,37 @@ must resolve through system DNS on both VMs and inside the Controller's Docker
 network. There is no public Relay, public endpoint lookup or DNS fallback.
 Do not point this fixture at an existing production service.
 
-Configure these repository secrets once, without placing credentials in source:
+Create a dedicated GitHub Environment named `cross-vm-test-relay` before enabling
+credentialed execution. Under **Deployment branches and tags**, select only
+the **branch** `main` (no tags). Disable required reviewers, wait timers and
+custom protection rules. The preflight, Controller and Agent jobs use this
+Environment with `deployment: false`, preserving its access rules without
+creating deployment records. The verdict job has no Environment or Relay
+secrets. These controls require repository-administration permission; declaring
+the Environment in YAML does not establish that its server-side policy exists.
+
+Store these secrets only in that Environment, without placing values in source:
 
 | Secret | Value |
 |---|---|
 | `CROSS_VM_RELAY_URL` | One credential-free `https://host[:port]` URL |
 | `CROSS_VM_RELAY_CA` | PEM test CA certificate, with no private key |
 | `CROSS_VM_RELAY_TOKEN` | Matching Relay token, 32–512 non-whitespace bytes |
+
+Do not store copies under repository or organization secrets. If migrating
+existing values, configure and verify the restricted Environment before removing
+the other copies. A non-main branch can change its own workflow YAML, so a shell
+check or job condition cannot replace the Environment's server-side restriction.
+
+Leave the non-sensitive repository variable `CROSS_VM_SCHEDULE_ENABLED` unset
+or set to `false` until real dual-VM acceptance succeeds. Only the exact value
+`true` enables scheduled qualification. The switch does not disable manual or
+reusable execution. Missing or unexpected values disable scheduled execution
+before any Environment job is eligible or any build starts. The final job
+requires all three credential jobs to be skipped in that case and reports
+`CROSS_VM_ENROLLMENT=NOT_RUN_SCHEDULE_DISABLED`; this is no acceptance result.
+Cleanup failure still fails the workflow. Any other unexpected skip fails
+qualification.
 
 The operator owns token expiry/rotation and the external Relay's lifecycle.
 The fixture copies credentials into each run's private directory and deletes
@@ -44,16 +68,35 @@ gh workflow run real-e2e.yml --ref main
 ```
 
 The workflow supports dispatch, daily schedule (`17 3 * * *`, 11:17 Hong Kong
-time), and `workflow_call`. Scheduling becomes active only on the default
+time), and `workflow_call`. Enabled scheduling becomes active only on the default
 branch and may be delayed or missed by GitHub. A reusable caller must explicitly
 pass the three named secrets and grant `contents: read` and `actions: write`;
 the latter is narrowed to `actions: read` except in the final cleanup job.
 Invoke this fixture once per run attempt: rendezvous/evidence names are scoped
 to that attempt. Jobs API lookup accepts reusable caller prefixes but rejects
 ambiguous peers.
-There is no `secrets: inherit`, OIDC identity or publishing permission. Configured
-execution requires trusted `refs/heads/main`; branch diagnostics can demonstrate
-missing-infrastructure failure but cannot run an externally authenticated test.
+Environment secrets take precedence over repository/organization values with
+the same names; explicit reusable mappings remain required even when values
+exist only in the Environment. Call the workflow from trusted main with the
+local `./.github/workflows/real-e2e.yml` path. There is no `secrets: inherit`,
+OIDC identity or publishing permission.
+
+An uncredentialed admission job runs first, with no checkout, Environment,
+Relay secrets or token permissions. It checks the caller repository/ref, the
+defining workflow's main ref and SHA, and the event, then compares the schedule
+switch in Bash. Actions expression equality ignores case; it is not used to
+interpret the variable. Only a constant `mode=run` output makes preflight
+eligible; a disabled schedule produces `mode=disabled`. Only manual, scheduled and main push
+caller events are accepted; `pull_request_target` and `workflow_run` callers
+are rejected. GitHub's `job.workflow_ref`/`job.workflow_sha` identify the reusable
+callee, while `github` identifies its caller. These GitHub.com fields are read
+through the job JSON context so absent fields fail closed. Environment policies
+evaluate the caller's ref; trusted main must never invoke an untrusted workflow
+revision or pass credentials to untrusted code. See GitHub's
+[reusable workflow guidance](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows).
+
+Non-main dispatch demonstrates `BLOCKED_AUTH`, with no credentialed job or
+checkout. Missing configuration on authorized main reports `BLOCKED_INFRA`.
 Checkout must equal `GITHUB_SHA`. Concurrency is scoped to the run and attempt,
 with a different prefix from Release Check.
 
@@ -100,9 +143,10 @@ This profile leaves `CROSS_VM_PRIVATE_BUSINESS` and
 ocserv/privd/Signer, independent OpenConnect and sole-Relay recovery need separate
 implementation and real evidence. A private overlay does not prove public ingress.
 
-There are four jobs when configured: a short preflight, two build/test VM roles
-(60-minute deadline each), and a short verdict/cleanup. Missing infrastructure
-runs only preflight and verdict; both must fail qualification. Actual runner
+There are five jobs when configured: admission, a short preflight, two build/test
+VM roles (60-minute deadline each), and a short verdict/cleanup. Missing
+infrastructure runs admission, preflight and verdict and fails qualification;
+non-main and disabled schedules never start credentialed jobs. Actual runner
 minutes, build/queue time and network costs must be measured from a real run;
 no successful-run cost or acceptance result is established by static checks.
 
