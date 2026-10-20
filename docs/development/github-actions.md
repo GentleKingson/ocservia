@@ -93,7 +93,7 @@ checksum/drift/invalid-config matrices, or historical repair suites.
 | `security.yml` | Weekly/manual scans; reusable, and called by Release Check (not by `release.yml`) |
 | `release-check.yml` | Manual main Full CI, Security, Release products build/image-security/smoke, Integrated Business Smoke + single-instance recovery and Quick Install (Pebble ACME), each on native amd64 and arm64 |
 | `release.yml` | Tag build/image-security/smoke/publish; manual build-only dry-run |
-| `real-e2e.yml` | Manual two-hosted-VM enrollment with encrypted token exchange; outside Basic CI and Release Check |
+| `real-e2e.yml` | Opt-in daily/manual/reusable two-hosted-VM enrollment over an Environment-protected test Relay; schedules default off, unauthorized refs and missing infrastructure fail closed; outside Basic CI and Release Check |
 | `release-upgrade.yml` | Manual local Business smoke, Integration or native platform diagnostics on a chosen architecture (workflow name Release Diagnostics) |
 | `release-products.yml`, `release-business-diagnostic.yml`, `release-native-platform.yml` | Reusable build/smoke (called by `release.yml` and Release Check), native Business probe (called by Release Check and `release-upgrade.yml`) and native platform diagnostics (called by `release-upgrade.yml`); not triggered directly |
 | `integrated-network.yml` | Manual or candidate-branch Integrated Network prototype (isolated network or public-fixture probe); not part of Basic CI or Release Check |
@@ -247,10 +247,10 @@ or dedicated Linux hosts:
   `scripts/security-acceptance-f3.sh` run the live security acceptance phases.
 - `scripts/real-e2e-controller.sh`, `scripts/real-e2e-node.sh`,
   `scripts/real-e2e-artifact.sh`, and `deploy/real-e2e` support manual
-  two-machine enrollment, including the opt-in hosted `real-e2e.yml`; see
+  two-machine enrollment, including the hosted `real-e2e.yml`; see
   [Cross-VM enrollment validation](cross-vm-enrollment-validation.md).
 
-Running `make real-e2e-check` only checks Bash syntax across the three real-E2E
+Running `make real-e2e-check` only checks Bash syntax across the four real-E2E
 scripts; Basic CI does not call it, and it does not inspect workflow files or
 execute live enrollment.
 

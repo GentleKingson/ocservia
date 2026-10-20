@@ -58,6 +58,34 @@ grep -q 'peer job Real E2E Node failed at step Enroll the isolated node (failure
   exit 1
 }
 
+# Reusable workflows qualify job names; missing and ambiguous matches still fail.
+# shellcheck disable=SC2016
+qualified="$(install_curl_shim '
+url="${!#}"
+case "${url}" in
+  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[]}'\'' ;;
+  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"cross-vm / Real E2E Node","status":"completed","conclusion":"failure","steps":[]}]}'\'' ;;
+  *) exit 64 ;;
+esac' qualified)"
+if run_wait "${qualified}" >"${qualified}/stdout" 2>"${qualified}/stderr"; then
+  echo 'artifact wait accepted failed reusable peer' >&2
+  exit 1
+fi
+grep -q 'peer job cross-vm / Real E2E Node completed with conclusion failure' "${qualified}/stderr"
+# shellcheck disable=SC2016
+ambiguous="$(install_curl_shim '
+url="${!#}"
+case "${url}" in
+  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[]}'\'' ;;
+  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"one / Real E2E Node"},{"name":"two / Real E2E Node"}]}'\'' ;;
+  *) exit 64 ;;
+esac' ambiguous)"
+if run_wait "${ambiguous}" >"${ambiguous}/stdout" 2>"${ambiguous}/stderr"; then
+  echo 'artifact wait accepted ambiguous reusable peers' >&2
+  exit 1
+fi
+grep -q 'expected exactly one peer job named Real E2E Node, found 2' "${ambiguous}/stderr"
+
 # shellcheck disable=SC2016  # the generated shim expands these at execution
 peer_succeeded="$(install_curl_shim '
 url="${!#}"

@@ -37,6 +37,7 @@ preflight() {
   systemctl show --property=Version >/dev/null
   docker info >/dev/null
   docker compose version >/dev/null
+  [[ "$(git -C "$ROOT" rev-parse HEAD)" == "${GITHUB_SHA:?}" ]]
   python3 - "$EVIDENCE/environment.json" "$ROLE" <<'PY'
 import json, os, pathlib, socket, subprocess, sys
 p = pathlib.Path
@@ -45,6 +46,8 @@ out = {'role':sys.argv[2], 'boot_id':p('/proc/sys/kernel/random/boot_id').read_t
        'network_namespace':os.readlink('/proc/self/ns/net'),
        'default_routes':json.loads(subprocess.check_output(['ip','-json','route','show','default'])),
        'runner_os':'ubuntu-24.04', 'runner_environment':os.environ['RUNNER_ENVIRONMENT'],
+       'runner_arch':subprocess.check_output(['uname','-m'],text=True).strip(),
+       'run_id':os.environ['RUN_ID'],
        'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
        'docker':subprocess.check_output(['docker','version','--format','{{.Server.Version}}'],text=True).strip(),
        'compose':subprocess.check_output(['docker','compose','version','--short'],text=True).strip()}
@@ -54,6 +57,34 @@ PY
 
 case "${1:-}" in
   preflight) preflight ;;
+  configure-relay)
+    python3 "$ROOT/scripts/real-e2e-relay.py" "$WORK/relay"
+    python3 - "$EVIDENCE/environment.json" "$WORK/relay/metadata.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+item = json.loads(path.read_text())
+item['relay'] = json.loads(pathlib.Path(sys.argv[2]).read_text())
+path.write_text(json.dumps(item, indent=2) + '\n')
+PY
+    ;;
+  relay-check)
+    # Test TLS with the configured trust, then an unrelated CA. Only curl's
+    # certificate-verification error counts; timeouts or DNS failures do not.
+    mkdir -p "$PRIVATE/empty-ca"
+    private_run relay-tls curl --silent --show-error --connect-timeout 5 --max-time 20 \
+      --proto '=https' --cacert "$WORK/relay/ca.pem" --capath "$PRIVATE/empty-ca" \
+      --output /dev/null "$(<"$WORK/relay/url")"
+    private_run wrong-ca-generate openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+      -subj /CN=unrelated-real-e2e-ca -keyout "$PRIVATE/wrong-ca.key" -out "$PRIVATE/wrong-ca.pem"
+    status=0
+    curl --silent --show-error --connect-timeout 5 --max-time 20 --proto '=https' \
+      --cacert "$PRIVATE/wrong-ca.pem" --capath "$PRIVATE/empty-ca" \
+      --output /dev/null "$(<"$WORK/relay/url")" >"$PRIVATE/wrong-ca.log" 2>&1 || status=$?
+    [[ "$status" == 60 ]] || { echo 'RELAY: wrong CA did not produce a certificate rejection' >&2; exit 1; }
+    private_run relay-auth "$RUNNER_TEMP/ocservia-real-e2e-target-$RUN_ID/release/ocservia-relay-network-probe" \
+      "$(<"$WORK/relay/url")" "$WORK/relay/ca.pem" "$WORK/relay/token" --tcp-only
+    printf 'TLS=PASS\nWRONG_CA_REJECTED=PASS\nTOKEN_AUTH=PASS\nWRONG_TOKEN_REJECTED=PASS\n' >"$EVIDENCE/relay.txt"
+    ;;
   wait-download)
     # Confine even helper failure/timeout scratch archives to our private tree.
     RUNNER_TEMP="$PRIVATE" timeout --kill-after=10s 42m bash "$ROOT/scripts/real-e2e-artifact.sh" \

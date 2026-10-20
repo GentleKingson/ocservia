@@ -10,6 +10,7 @@ WORK="${RUNNER_TEMP:-/tmp}/ocservia-real-e2e-controller-${RUN_ID}"
 STATE="${WORK}/state"
 SECRETS="${WORK}/secrets"
 OUTBOX="${WORK}/outbox"
+export REAL_E2E_RELAY_DIR="${WORK}/relay"
 WORKSPACE_ID="019d0000-0000-7000-8000-000000000001"
 
 case "${RUN_ID}${COMPOSE_PROJECT}" in
@@ -22,6 +23,8 @@ OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})"
 export OCSERV_CONTROLLER_ENDPOINT_ID
 
 compose() {
+  export REAL_E2E_RELAY_URL
+  REAL_E2E_RELAY_URL="$(<"${REAL_E2E_RELAY_DIR}/url")" || return 1
   docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
 }
 
@@ -47,6 +50,11 @@ start_controller() {
   local endpoint
   mkdir -p "${STATE}" "${SECRETS}" "${OUTBOX}/controller-ready" "${ARTIFACT_DIR}"
   chmod 0700 "${WORK}" "${SECRETS}"
+  # Only the token is secret inside the read-only transportd mount. Docker
+  # mounts the directory directly; the host WORK ancestor remains private.
+  sudo chown 65532:65532 "${REAL_E2E_RELAY_DIR}/token"
+  chmod 0755 "${REAL_E2E_RELAY_DIR}"
+  chmod 0444 "${REAL_E2E_RELAY_DIR}/ca.pem"
   OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})"
   export OCSERV_CONTROLLER_ENDPOINT_ID
 
@@ -176,7 +184,10 @@ collect_diagnostics() {
 
 cleanup_controller() {
   local status=0
-  compose --profile bootstrap down --volumes --remove-orphans --rmi local || status=$?
+  # Cleanup must also work when configuration failed before any service start.
+  REAL_E2E_RELAY_URL=https://unconfigured.invalid docker compose \
+    --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" \
+    --profile bootstrap down --volumes --remove-orphans --rmi local || status=$?
   rm -rf -- "${WORK}" "${RUNNER_TEMP:-/tmp}/real-e2e-agent-endpoint" \
     "${RUNNER_TEMP:-/tmp}/real-e2e-enrollment-result" || status=$?
   return "${status}"

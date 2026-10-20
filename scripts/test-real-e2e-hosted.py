@@ -15,12 +15,16 @@ evidence = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(evidence)
 local = dict(role='controller', boot_id=str(uuid.uuid4()), hostname='controller',
              runner_environment='github-hosted', runner_os='ubuntu-24.04', pid1='systemd',
-             default_routes=[{'dev':'eth0'}], network_namespace='net:[1]', source_commit='a'*40)
+             default_routes=[{'dev':'eth0'}], network_namespace='net:[1]', source_commit='a'*40,
+             runner_arch='x86_64', run_id='4242-1',
+             relay={'url':'https://relay.e2e.test', 'ca_sha256':'c'*64})
 peer = {**local, 'role':'node', 'boot_id':str(uuid.uuid4()), 'hostname':'agent'}
 evidence.validate(local, peer)
 evidence.validate(local, {**peer, 'hostname':local['hostname']})
 for key, value in [('boot_id',local['boot_id']), ('role','controller'),
-                   ('source_commit','b'*40), ('runner_environment','self-hosted'), ('default_routes',[])]:
+                   ('source_commit','b'*40), ('runner_environment','self-hosted'), ('default_routes',[]),
+                   ('source_commit',''), ('runner_arch','aarch64'), ('run_id','4242-2'),
+                   ('relay', {**peer['relay'], 'ca_sha256':'d'*64})]:
     bad = {**peer, key:value}
     try:
         evidence.validate(local, bad)
@@ -30,11 +34,28 @@ for key, value in [('boot_id',local['boot_id']), ('role','controller'),
         raise AssertionError('accepted invalid ' + key)
 
 workflow = yaml.safe_load((ROOT / '.github/workflows/real-e2e.yml').read_text())
-assert set(workflow[True]) == {'workflow_dispatch'}
+assert set(workflow[True]) == {'workflow_dispatch', 'workflow_call', 'schedule'}
+assert workflow[True]['schedule'] == [{'cron':'17 3 * * *'}]
+assert set(workflow[True]['workflow_call']['secrets']) == {
+    'CROSS_VM_RELAY_URL', 'CROSS_VM_RELAY_CA', 'CROSS_VM_RELAY_TOKEN'}
+assert 'secrets: inherit' not in (ROOT / '.github/workflows/real-e2e.yml').read_text()
 assert workflow['permissions'] == {'contents':'read', 'actions':'read'}
+preflight = workflow['jobs']['preflight']
+assert preflight['needs'] == 'admission' and preflight['if'] == "needs.admission.outputs.mode == 'run'"
+admission = workflow['jobs']['admission']
+assert admission['permissions'] == {} and 'environment' not in admission and 'secrets.' not in str(admission)
+assert admission['outputs'] == {'mode':'${{ steps.trust.outputs.mode }}'}
+trust = admission['steps'][0]
+assert trust['name'] == 'Require trusted main workflow before repository code'
+assert 'uses' not in trust and 'scripts/' not in trust['run']
+assert set(trust['env']) == {'SOURCE_REPOSITORY', 'SOURCE_REF', 'SOURCE_SHA', 'JOB_CONTEXT', 'EVENT_NAME', 'SCHEDULE_ENABLED'}
+for role in ('preflight', 'controller', 'node'):
+    assert workflow['jobs'][role]['environment'] == {'name':'cross-vm-test-relay', 'deployment':False}
+assert 'environment' not in workflow['jobs']['verdict']
+assert 'secrets.' not in str(workflow['jobs']['verdict'])
 for role in ('controller', 'node'):
     job = workflow['jobs'][role]
-    assert job['runs-on'] == 'ubuntu-24.04' and 'needs' not in job and 'container' not in job
+    assert job['runs-on'] == 'ubuntu-24.04' and job['needs'] == 'preflight' and 'container' not in job
     assert job['timeout-minutes'] <= 60
     uploads = [step for step in job['steps'] if step.get('uses','').startswith('actions/upload-artifact@')]
     assert all(step['with']['if-no-files-found'] == 'error' for step in uploads)
@@ -46,7 +67,13 @@ for role in ('controller', 'node'):
     if role == 'controller':
         token = next(step for step in uploads if step.get('name') == 'Publish enrollment-token')
         assert token['with']['path'].endswith('/encrypted-token')
-assert workflow['jobs']['verdict']['needs'] == ['controller', 'node']
+assert workflow['jobs']['verdict']['needs'] == ['admission', 'preflight', 'controller', 'node']
+compose = yaml.safe_load((ROOT / 'deploy/real-e2e/controller.compose.yaml').read_text())
+for name in ('transportd', 'transport-endpoint-bootstrap'):
+    command = compose['services'][name]['command']
+    assert command[command.index('--relay-mode') + 1] == 'custom'
+    assert command.count('--relay-url') == 1
+    assert '--relay-token-file' in command and '--relay-ca-file' in command
 
 with tempfile.TemporaryDirectory(prefix='real-e2e-test-') as directory:
     temp = Path(directory)
@@ -54,12 +81,84 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-test-') as directory:
         result = subprocess.run(args, cwd=ROOT, env=env, capture_output=True)
         assert (result.returncode == 0) == ok, (args, result.stderr.decode())
         return result
+    # No network is involved: malformed or absent infrastructure must fail
+    # before either expensive VM role runs, without reflecting secret input.
+    relay_helper = str(ROOT / 'scripts/real-e2e-relay.py')
+    config_env = {key:value for key,value in os.environ.items() if not key.startswith('REAL_E2E_RELAY_')}
+    missing = run('python3', relay_helper, ok=False, env=config_env)
+    assert b'BLOCKED_INFRA' in missing.stderr
+    run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+        '-subj', '/CN=local-test-ca', '-keyout', str(temp / 'ca.key'), '-out', str(temp / 'ca.pem'))
+    config_env.update(REAL_E2E_RELAY_URL='https://relay.e2e.test:3443',
+                      REAL_E2E_RELAY_CA=(temp / 'ca.pem').read_text(), REAL_E2E_RELAY_TOKEN='t'*32)
+    configured = temp / 'configured'
+    run('python3', relay_helper, str(configured), env=config_env)
+    assert (configured / 'token').stat().st_mode & 0o777 == 0o600
+    assert (configured / 'token').read_text() == 't'*32
+    for key, value in [('URL','http://relay.e2e.test'), ('URL','https://private-token@relay.e2e.test'),
+                       ('URL','https://relay.e2e.test:invalid'), ('URL','https://relay.e2e.test?a=secret'),
+                       ('URL','https://relay.e2e.test/#'), ('TOKEN',''), ('TOKEN','t'*32+'\n'),
+                       ('CA','invalid private CA')]:
+        result = run('python3', relay_helper, ok=False,
+                     env={**config_env, 'REAL_E2E_RELAY_' + key:value})
+        assert value.encode() not in result.stderr if value else b'BLOCKED_INFRA' in result.stderr
+    # Execute the final verdict shell with success, failure, cancellation,
+    # skipped jobs and missing/extra keys, including cleanup-step failures
+    # represented by their enclosing role's job result.
+    import json
+    verdict = workflow['jobs']['verdict']['steps'][-1]['run']
+    results = {name:{'result':'success'} for name in ('admission', 'controller', 'node', 'preflight')}
+    results['admission']['outputs'] = {'mode':'run'}
+    trusted_env = {**os.environ, 'SOURCE_REPOSITORY':'GentleKingson/ocservia',
+                   'SOURCE_REF':'refs/heads/main', 'SOURCE_SHA':'a'*40,
+                   'JOB_CONTEXT':json.dumps({'workflow_ref':'GentleKingson/ocservia/.github/workflows/real-e2e.yml@refs/heads/main', 'workflow_sha':'a'*40}),
+                   'EVENT_NAME':'workflow_dispatch',
+                   'SCHEDULE_ENABLED':''}
+    def trust_check(changes, ok, mode='run'):
+        summary = temp / 'trust-summary'
+        summary.write_text('')
+        output = temp / 'trust-output'
+        output.write_text('')
+        run('bash', '-euo', 'pipefail', '-c', trust['run'], ok=ok,
+            env={**trusted_env, **changes, 'GITHUB_STEP_SUMMARY':str(summary), 'GITHUB_OUTPUT':str(output)})
+        assert ('BLOCKED_AUTH' in summary.read_text()) != ok
+        assert output.read_text() == ('mode=' + mode + '\n' if ok else '')
+    trust_check({}, True)
+    for key, value in [('SOURCE_REF','refs/heads/feature'), ('SOURCE_REF','refs/tags/main'),
+                       ('SOURCE_REPOSITORY','fork/ocservia'), ('JOB_CONTEXT',trusted_env['JOB_CONTEXT'].replace('heads/main','heads/feature')),
+                       ('JOB_CONTEXT',trusted_env['JOB_CONTEXT'].replace('a'*40, 'b'*40)),
+                       ('JOB_CONTEXT','{}'), ('JOB_CONTEXT','null'), ('JOB_CONTEXT','invalid JSON'), ('SOURCE_SHA',''),
+                       ('EVENT_NAME','pull_request_target'), ('EVENT_NAME','workflow_run')]:
+        trust_check({key:value}, False)
+    for enabled in ('', 'false', 'TRUE', 'True', 'unexpected'):
+        trust_check({'EVENT_NAME':'schedule', 'SCHEDULE_ENABLED':enabled}, True, mode='disabled')
+    trust_check({'EVENT_NAME':'schedule', 'SCHEDULE_ENABLED':'true'}, True)
+    trust_check({'EVENT_NAME':'push', 'SCHEDULE_ENABLED':'false'}, True)
+    def verdict_check(items, ok, changes=None, acceptance=None):
+        summary = temp / 'verdict-summary'
+        summary.write_text('')
+        run('bash', '-euo', 'pipefail', '-c', verdict, ok=ok,
+            env={**trusted_env, **(changes or {}), 'RESULTS':json.dumps(items), 'GITHUB_STEP_SUMMARY':str(summary)})
+        assert ('CROSS_VM_ENROLLMENT=PASS' in summary.read_text()) == (ok if acceptance is None else acceptance)
+    verdict_check(results, True)
+    for name in results:
+        for status in ('failure', 'cancelled', 'skipped'):
+            verdict_check({**results, name:{'result':status}}, False)
+        verdict_check({key:value for key,value in results.items() if key != name}, False)
+    verdict_check({**results, 'extra':{'result':'success'}}, False)
+    disabled = {name:{'result':'skipped'} for name in ('controller', 'node', 'preflight')}
+    disabled['admission'] = {'result':'success', 'outputs':{'mode':'disabled'}}
+    verdict_check(disabled, True, {'EVENT_NAME':'schedule'}, acceptance=False)
+    verdict_check(results, True, {'EVENT_NAME':'schedule'})
+    verdict_check({**disabled, 'preflight':{'result':'success'}}, False, {'EVENT_NAME':'schedule'})
+    verdict_check({**disabled, 'admission':results['admission']}, False, {'EVENT_NAME':'schedule'})
+    verdict_check(disabled, False)
     # Execute the actual wrapper's encryption and decryption phases, mocking
     # only the role scripts so no services, identities or VM claims are invented.
     fixture = temp / 'repo'
     scripts = fixture / 'scripts'
     scripts.mkdir(parents=True)
-    for name in ('real-e2e-hosted.sh', 'real-e2e-evidence.py'):
+    for name in ('real-e2e-hosted.sh', 'real-e2e-evidence.py', 'real-e2e-relay.py'):
         (scripts / name).write_bytes((ROOT / 'scripts' / name).read_bytes())
     (scripts / 'real-e2e-controller.sh').write_text('''#!/bin/bash
 set -euo pipefail
@@ -72,7 +171,9 @@ set -euo pipefail
 case "$1" in
 prepare) mkdir -p "$RUNNER_TEMP/ocservia-real-e2e-node-$RUN_ID/outbox/agent-endpoint" ;;
 enroll) test "$(cat "$2/enrollment-token")" = "$(printf '%043d' 1)" ;;
-cleanup) rm -rf "$RUNNER_TEMP/ocservia-real-e2e-node-$RUN_ID" "$RUNNER_TEMP/ocservia-real-e2e-target-$RUN_ID" ;;
+cleanup)
+  test "${CLEANUP_STATUS:-0}" = 0
+  rm -rf "$RUNNER_TEMP/ocservia-real-e2e-node-$RUN_ID" "$RUNNER_TEMP/ocservia-real-e2e-target-$RUN_ID" ;;
 esac
 ''')
     env = {**os.environ, 'RUN_ID':'4242-1','GITHUB_RUN_ID':'4242','GITHUB_RUN_ATTEMPT':'1',
@@ -86,6 +187,35 @@ esac
     received.mkdir(parents=True)
     (received / 'environment.json').write_bytes((temp / 'real-e2e-evidence-controller/environment.json').read_bytes())
     wrapper = str(scripts / 'real-e2e-hosted.sh')
+    run('bash', wrapper, 'configure-relay', env={**env, **{
+        key:value for key,value in config_env.items() if key.startswith('REAL_E2E_RELAY_')}})
+    assert json.loads((temp / 'real-e2e-evidence-node/environment.json').read_text())['relay']['url'] == config_env['REAL_E2E_RELAY_URL']
+    # Wrapper tests with controlled network-probe results. A curl timeout or
+    # DNS error must never stand in for certificate rejection.
+    probe = temp / 'ocservia-real-e2e-target-4242-1/release/ocservia-relay-network-probe'
+    probe.parent.mkdir(parents=True)
+    probe.write_text('#!/bin/bash\nexit "${PROBE_STATUS:-0}"\n')
+    probe.chmod(0o755)
+    curl_bin = temp / 'curl-bin'
+    curl_bin.mkdir()
+    (curl_bin / 'curl').write_text('''#!/bin/bash
+for argument in "$@"; do
+  if [[ "$argument" == */wrong-ca.pem ]]; then exit "${WRONG_CA_STATUS:-60}"; fi
+done
+exit 0
+''')
+    (curl_bin / 'curl').chmod(0o755)
+    probe_env = {**env, 'PATH':str(curl_bin)+os.pathsep+os.environ['PATH']}
+    relay_evidence = temp / 'real-e2e-evidence-node/relay.txt'
+    for status in ('0', '6', '28'):
+        run('bash', wrapper, 'relay-check', env={**probe_env, 'WRONG_CA_STATUS':status}, ok=False)
+        assert not relay_evidence.exists()
+    run('bash', wrapper, 'relay-check', env={**probe_env, 'PROBE_STATUS':'1'}, ok=False)
+    assert not relay_evidence.exists()
+    run('bash', wrapper, 'relay-check', env=probe_env)
+    assert 'WRONG_TOKEN_REJECTED=PASS' in relay_evidence.read_text()
+    # Restore matching synthetic peer metadata after configuration exercise.
+    (temp / 'real-e2e-evidence-node/environment.json').write_text(json.dumps(peer))
     run('bash', wrapper, 'prepare', env=env)
     import shutil
     shutil.copytree(temp / 'ocservia-real-e2e-node-4242-1/outbox/agent-endpoint',
@@ -102,6 +232,8 @@ esac
     cipher.write_bytes(original)
     run('bash', wrapper, 'enroll', env=env)
     assert not (temp / 'real-e2e-private-4242-1-node/exchange.key').exists()
+    run('bash', wrapper, 'cleanup', env={**env, 'CLEANUP_STATUS':'1'}, ok=False)
+    assert not (temp / 'real-e2e-evidence-node/cleanup.txt').exists()
     run('bash', wrapper, 'cleanup', env=env)
     assert not (temp / 'real-e2e-private-4242-1-node').exists()
     assert (temp / 'real-e2e-evidence-node/cleanup.txt').read_text() == 'CLEANUP=PASS\n'
@@ -109,6 +241,9 @@ esac
     # token mismatch must fail even when the node's Pending binding is correct.
     state = temp / 'ocservia-real-e2e-controller-4242-1/state'
     state.mkdir(parents=True)
+    relay = state.parent / 'relay'
+    relay.mkdir()
+    (relay / 'url').write_text('https://relay.e2e.test')
     endpoint = 'a' * 64
     node = '019d0000-0000-7000-8000-000000000002'
     token = '019d0000-0000-7000-8000-000000000003'
@@ -142,4 +277,4 @@ esac
         run('bash', str(ROOT / 'scripts/real-e2e-controller.sh'), 'verify-enrollment', str(result),
             env=verify_env, ok=ok)
         assert (verified / 'result.txt').exists() == ok
-print('hosted workflow, peer rejection, OAEP/corruption, binding rejection and cleanup checks passed')
+print('hosted workflow, Relay configuration/negative controls, fail-closed verdict, peer rejection, OAEP, binding and cleanup checks passed (local contracts only)')

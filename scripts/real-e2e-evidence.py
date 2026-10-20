@@ -2,6 +2,7 @@
 """Reject same-host, wrong-role, or mixed-commit hosted rendezvous evidence."""
 import json
 import pathlib
+import re
 import sys
 import uuid
 
@@ -14,6 +15,12 @@ def validate(local, peer):
             raise ValueError('unexpected runner')
         if not item['default_routes'] or not item['network_namespace']:
             raise ValueError('missing network evidence')
+        if not re.fullmatch(r'[a-f0-9]{40}', item['source_commit']):
+            raise ValueError('invalid source commit')
+        if item['runner_arch'] != 'x86_64' or not re.fullmatch(r'[0-9]+-[0-9]+', item['run_id']):
+            raise ValueError('unexpected architecture or run attempt')
+        if set(item['relay']) != {'url', 'ca_sha256'}:
+            raise ValueError('missing Relay evidence')
     if {local['role'], peer['role']} != {'controller', 'node'}:
         raise ValueError('wrong peer role')
     # Hosted VM images can reuse hostnames and namespace inode numbers.
@@ -22,6 +29,8 @@ def validate(local, peer):
         raise ValueError('same runner')
     if local['source_commit'] != peer['source_commit']:
         raise ValueError('mixed source commits')
+    if local['run_id'] != peer['run_id'] or local['relay'] != peer['relay']:
+        raise ValueError('mixed run attempts or Relay configuration')
 
 
 if __name__ == '__main__':

@@ -1,21 +1,95 @@
 name: Cross-VM Enrollment
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_call:
+    secrets:
+      CROSS_VM_RELAY_URL:
+        required: false
+      CROSS_VM_RELAY_CA:
+        required: false
+      CROSS_VM_RELAY_TOKEN:
+        required: false
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: cross-vm-enrollment-${{ github.ref }}
+  group: cross-vm-enrollment-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: false
 env:
   RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
   COMPOSE_PROJECT: cross-vm-${{ github.run_id }}-${{ github.run_attempt }}
   CARGO_INCREMENTAL: '0'
 jobs:
+  admission:
+    name: Cross-VM Admission
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      mode: ${{ steps.trust.outputs.mode }}
+    steps:
+      - name: Require trusted main workflow before repository code
+        id: trust
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ github.sha }}
+          JOB_CONTEXT: ${{ toJSON(job) }}
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_ENABLED: ${{ vars.CROSS_VM_SCHEDULE_ENABLED }}
+        run: |
+          if [[ "$SOURCE_REPOSITORY" != GentleKingson/ocservia || "$SOURCE_REF" != refs/heads/main ||
+                ! "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] ||
+             ! jq -e --arg ref 'GentleKingson/ocservia/.github/workflows/real-e2e.yml@refs/heads/main' \
+               --arg sha "$SOURCE_SHA" '.workflow_ref == $ref and .workflow_sha == $sha' <<<"$JOB_CONTEXT" >/dev/null; then
+            echo 'CROSS_VM_ENROLLMENT=BLOCKED_AUTH' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          case "$EVENT_NAME" in
+            workflow_dispatch|schedule|push) ;;
+            *) echo 'CROSS_VM_ENROLLMENT=BLOCKED_AUTH' >>"$GITHUB_STEP_SUMMARY"; exit 1 ;;
+          esac
+          # Actions expression equality ignores case. Decide here, without
+          # credentials, so only the exact repository-variable value enables it.
+          if [[ "$EVENT_NAME" == schedule && "$SCHEDULE_ENABLED" != true ]]; then
+            echo 'mode=disabled' >>"$GITHUB_OUTPUT"
+            echo 'CROSS_VM_ENROLLMENT=NOT_RUN_SCHEDULE_DISABLED' >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo 'mode=run' >>"$GITHUB_OUTPUT"
+          fi
+  preflight:
+    name: Cross-VM Infrastructure Preflight
+    needs: admission
+    if: needs.admission.outputs.mode == 'run'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment:
+      name: cross-vm-test-relay
+      deployment: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Require explicit test network configuration
+        env:
+          REAL_E2E_RELAY_URL: ${{ secrets.CROSS_VM_RELAY_URL }}
+          REAL_E2E_RELAY_CA: ${{ secrets.CROSS_VM_RELAY_CA }}
+          REAL_E2E_RELAY_TOKEN: ${{ secrets.CROSS_VM_RELAY_TOKEN }}
+        run: |
+          if ! python3 scripts/real-e2e-relay.py; then
+            echo 'CROSS_VM_ENROLLMENT=BLOCKED_INFRA' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
   controller:
     name: Cross-VM Controller
     runs-on: ubuntu-24.04
+    needs: preflight
     timeout-minutes: 60
+    environment:
+      name: cross-vm-test-relay
+      deployment: false
     env:
       REAL_E2E_ROLE: controller
     steps:
@@ -24,6 +98,12 @@ jobs:
           persist-credentials: false
       - name: Verify hosted VM and dependencies
         run: bash scripts/real-e2e-hosted.sh preflight
+      - name: Configure dedicated test Relay
+        env:
+          REAL_E2E_RELAY_URL: ${{ secrets.CROSS_VM_RELAY_URL }}
+          REAL_E2E_RELAY_CA: ${{ secrets.CROSS_VM_RELAY_CA }}
+          REAL_E2E_RELAY_TOKEN: ${{ secrets.CROSS_VM_RELAY_TOKEN }}
+        run: bash scripts/real-e2e-hosted.sh configure-relay
       - name: start
         run: bash scripts/real-e2e-hosted.sh start
       - name: Publish controller-ready
@@ -73,7 +153,11 @@ jobs:
   node:
     name: Cross-VM Agent
     runs-on: ubuntu-24.04
+    needs: preflight
     timeout-minutes: 60
+    environment:
+      name: cross-vm-test-relay
+      deployment: false
     env:
       REAL_E2E_ROLE: node
     steps:
@@ -82,8 +166,16 @@ jobs:
           persist-credentials: false
       - name: Verify hosted VM and dependencies
         run: bash scripts/real-e2e-hosted.sh preflight
+      - name: Configure dedicated test Relay
+        env:
+          REAL_E2E_RELAY_URL: ${{ secrets.CROSS_VM_RELAY_URL }}
+          REAL_E2E_RELAY_CA: ${{ secrets.CROSS_VM_RELAY_CA }}
+          REAL_E2E_RELAY_TOKEN: ${{ secrets.CROSS_VM_RELAY_TOKEN }}
+        run: bash scripts/real-e2e-hosted.sh configure-relay
       - name: build
         run: bash scripts/real-e2e-hosted.sh build
+      - name: Verify TLS and real Relay authentication negative controls
+        run: bash scripts/real-e2e-hosted.sh relay-check
       - name: Wait for controller-ready
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -130,7 +222,7 @@ jobs:
           retention-days: 7
   verdict:
     name: Cross-VM Verdict and Artifact Cleanup
-    needs: [controller, node]
+    needs: [admission, preflight, controller, node]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -152,16 +244,24 @@ jobs:
           remaining="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
             --jq '.artifacts[] | select(.name | test("^real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
           test -z "$remaining"
-      - name: Require both VMs and cleanup to succeed
+      - name: Require preflight, both VMs and cleanup to succeed
         env:
-          CONTROLLER_RESULT: ${{ needs.controller.result }}
-          NODE_RESULT: ${{ needs.node.result }}
+          RESULTS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          test "$CONTROLLER_RESULT" = success
-          test "$NODE_RESULT" = success
+          if [[ "$EVENT_NAME" == schedule ]] && jq -e '
+            keys == ["admission","controller","node","preflight"] and
+            .admission.result == "success" and .admission.outputs.mode == "disabled" and
+            ([.controller,.node,.preflight] | all(.[]; .result == "skipped"))' <<<"$RESULTS" >/dev/null; then
+            echo 'CROSS_VM_ENROLLMENT=NOT_RUN_SCHEDULE_DISABLED' >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          jq -e 'keys == ["admission","controller","node","preflight"] and
+            .admission.outputs.mode == "run" and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null
           {
             echo 'CROSS_VM_ENROLLMENT=PASS'
-            echo 'CROSS_VM_PRODUCTION=BLOCKED'
-            echo 'DEDICATED_RELAY_RECOVERY=BLOCKED'
+            echo 'CROSS_VM_PRIVATE_BUSINESS=NOT_PROVEN'
+            echo 'DEDICATED_RELAY_RECOVERY=NOT_PROVEN'
+            echo 'CROSS_WAN_PUBLIC_INGRESS=NOT_TESTED'
             echo 'CLEANUP=PASS'
           } >>"$GITHUB_STEP_SUMMARY"

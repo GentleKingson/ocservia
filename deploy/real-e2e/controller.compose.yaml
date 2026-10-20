@@ -104,8 +104,15 @@ services:
       - --control-plane-gid
       - "65532"
       - --relay-mode
-      - default
+      - custom
+      - --relay-url
+      - ${REAL_E2E_RELAY_URL:?set REAL_E2E_RELAY_URL}
+      - --relay-token-file
+      - /run/real-e2e-relay/token
+      - --relay-ca-file
+      - /run/real-e2e-relay/ca.pem
     volumes:
+      - ${REAL_E2E_RELAY_DIR:?set REAL_E2E_RELAY_DIR}:/run/real-e2e-relay:ro
       - type: volume
         source: transport-runtime
         target: /run/ocserv-platform
@@ -176,8 +183,15 @@ services:
       - --control-plane-gid
       - "65532"
       - --relay-mode
-      - default
+      - custom
+      - --relay-url
+      - ${REAL_E2E_RELAY_URL:?set REAL_E2E_RELAY_URL}
+      - --relay-token-file
+      - /run/real-e2e-relay/token
+      - --relay-ca-file
+      - /run/real-e2e-relay/ca.pem
     volumes:
+      - ${REAL_E2E_RELAY_DIR:?set REAL_E2E_RELAY_DIR}:/run/real-e2e-relay:ro
       - type: volume
         source: transport-runtime
         target: /run/ocserv-platform
