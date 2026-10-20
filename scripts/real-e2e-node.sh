@@ -54,7 +54,7 @@ prepare_endpoint() {
 
 build_agent() {
   (cd "${ROOT}/rust" && CARGO_TARGET_DIR="${TARGET}" \
-    cargo build --locked --release --package ocservia-agent)
+    cargo build --locked --release --package ocservia-agent --package ocservia-relay-network-probe)
 }
 
 enroll() {
@@ -74,6 +74,10 @@ enroll() {
   "${TARGET}/release/ocservia-agent" \
     --identity-dir "${IDENTITY}" \
     --controller "${controller}" \
+    --relay-mode custom \
+    --relay-url "$(<"${WORK}/relay/url")" \
+    --relay-ca-file "${WORK}/relay/ca.pem" \
+    --relay-token-file "${WORK}/relay/token" \
     --enrollment-token-file "${SECRETS}/enrollment-token" \
     --enrollment-environment development \
     --user-password-seal-key-id real-e2e-user-v1 \

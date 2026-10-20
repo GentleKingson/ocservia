@@ -112,13 +112,17 @@ default_peer_job_name() {
 peer_job_state() {
   local response="${1:?jobs API response is required}"
   local peer_job="${2:?peer job name is required}"
-  local count failed_step failed_conclusion failed_step_json status conclusion
-  count="$(jq -er --arg peer "${peer_job}" \
-    '[.jobs[] | select(.name == $peer)] | length' <<<"${response}")" || return 2
+  local count matches failed_step failed_conclusion failed_step_json status conclusion
+  # Reusable workflow jobs are qualified as "caller / job" by the Jobs API.
+  # Resolve one exact/suffix match, rejecting multiple invocations or collisions.
+  matches="$(jq -c --arg peer "${peer_job}" \
+    '[.jobs[] | select(.name == $peer or (.name | endswith(" / " + $peer)))]' <<<"${response}")" || return 2
+  count="$(jq -er 'length' <<<"${matches}")" || return 2
   if [[ "${count}" != 1 ]]; then
     echo "expected exactly one peer job named ${peer_job}, found ${count}" >&2
     return 2
   fi
+  peer_job="$(jq -r '.[0].name' <<<"${matches}")" || return 2
   failed_step_json="$(jq -c --arg peer "${peer_job}" '
     [.jobs[] | select(.name == $peer) | .steps[]? |
       select(.status == "completed" and

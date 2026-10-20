@@ -1,26 +1,80 @@
 # Cross-VM enrollment validation
 
-Cross-VM enrollment runs manually through the `deploy/real-e2e` fixtures and
-helper scripts. The opt-in `real-e2e.yml` workflow runs two independent
-`ubuntu-24.04` GitHub-hosted VMs, outside Basic CI and Release Check.
+The `deploy/real-e2e` fixture uses one explicitly configured HTTPS test Relay
+for two independent `ubuntu-24.04` GitHub-hosted VMs. Agent and transportd
+retain disabled public endpoint discovery and public DNS fallback. The old
+default-Relay fixture's historical results do not qualify this configuration.
 
-Public endpoint address lookup is now disabled in Agent and transportd. The
-default-Relay, EndpointID-only rendezvous in this profile cannot complete
-enrollment without explicit Relay addressing. The instructions below describe
-that existing fixture, not acceptance for the dedicated-Relay deployment.
+Status: **NOT_PROVEN / BLOCKED_INFRA** until an authorized test network is
+configured and this candidate passes a real hosted run. No dedicated test
+Relay or overlay identity is provisioned by the workflow. Three-VM native VPN,
+sole-Relay outage/recovery and revocation acceptance remain unimplemented;
+Release Check has no cross-VM requirement.
+
+## Infrastructure prerequisite
+
+An operator must first authorize a disposable or isolated test-only Relay,
+configure its authenticated token and TLS certificate with the correct SAN,
+and make its HTTPS endpoint reachable from both hosted VMs. The Relay name
+must resolve through system DNS on both VMs and inside the Controller's Docker
+network. There is no public Relay, public endpoint lookup or DNS fallback.
+Do not point this fixture at an existing production service.
+
+Configure these repository secrets once, without placing credentials in source:
+
+| Secret | Value |
+|---|---|
+| `CROSS_VM_RELAY_URL` | One credential-free `https://host[:port]` URL |
+| `CROSS_VM_RELAY_CA` | PEM test CA certificate, with no private key |
+| `CROSS_VM_RELAY_TOKEN` | Matching Relay token, 32–512 non-whitespace bytes |
+
+The operator owns token expiry/rotation and the external Relay's lifecycle.
+The fixture copies credentials into each run's private directory and deletes
+those copies; it does not create or revoke external credentials. Missing or
+malformed configuration reports `BLOCKED_INFRA` and fails before building the
+Controller or Agent. A Secrets/Variables API 403 alone does not establish
+whether configuration exists. No new account, paid VM or persistent network is
+created. A private-overlay implementation requires separate authorized identity
+and ACL setup; it is not included here.
 
 ## GitHub-hosted execution
 
 ```sh
-gh workflow run real-e2e.yml --ref <candidate-branch>
+gh workflow run real-e2e.yml --ref main
 ```
 
-Controller and Agent jobs have no dependency on each other. They check native
+The workflow supports dispatch, daily schedule (`17 3 * * *`, 11:17 Hong Kong
+time), and `workflow_call`. Scheduling becomes active only on the default
+branch and may be delayed or missed by GitHub. A reusable caller must explicitly
+pass the three named secrets and grant `contents: read` and `actions: write`;
+the latter is narrowed to `actions: read` except in the final cleanup job.
+Invoke this fixture once per run attempt: rendezvous/evidence names are scoped
+to that attempt. Jobs API lookup accepts reusable caller prefixes but rejects
+ambiguous peers.
+There is no `secrets: inherit`, OIDC identity or publishing permission. Configured
+execution requires trusted `refs/heads/main`; branch diagnostics can demonstrate
+missing-infrastructure failure but cannot run an externally authenticated test.
+Checkout must equal `GITHUB_SHA`. Concurrency is scoped to the run and attempt,
+with a different prefix from Release Check.
+
+Controller and Agent jobs start concurrently after infrastructure preflight.
+They check native
 systemd PID 1, Docker/Compose, Ubuntu version and required utilities, exchange
 boot IDs and environment evidence, and reject same-host or mixed-commit peers.
 The Controller runs real PostgreSQL, Control Plane and transportd; the Agent
-builds and runs the real enrollment binary using Iroh's default public relay
-configuration. No public inbound listener is required on either runner.
+builds and runs the real enrollment binary with the same single custom Relay,
+CA and token as transportd. They compare the source SHA, run attempt, Relay
+URL and CA fingerprint as well as distinct boot IDs. No public inbound
+listener is required on either runner.
+
+Before enrollment, the Agent VM checks TLS using the configured CA. An unrelated
+CA must produce curl certificate-verification error 60; DNS/connection errors
+and timeouts fail the test. The existing `ocservia-relay-network-probe` runs in
+TCP-only mode and requires a real authenticated connection followed by typed
+`ServerDeniedAuth` rejection of a wrong token. QUIC discovery is not required
+for this enrollment fixture. Raw probe output stays private; only fixed result
+markers enter evidence. These checks do not prove that a later business session
+cannot upgrade to a direct path, or that sole-Relay recovery works.
 
 The existing run-attempt-scoped artifact helper coordinates bounded waits and
 stops on a peer failure. The Agent generates a fresh RSA-3072 key for each run;
@@ -40,10 +94,17 @@ run. Hosted VMs are disposable; no persistent server is provisioned.
 The token is the existing EndpointID-bound development enrollment token, not an
 unbound production node bootstrap token. Its consumed node, expected endpoint,
 workspace and environment are checked against the pending UUIDv7 node record.
-This profile alone leaves `CROSS_VM_PRODUCTION` and
-`DEDICATED_RELAY_RECOVERY` BLOCKED: installation, approval, Online, native
-ocserv/privd/Signer and dedicated-relay recovery require separate authorized
-network infrastructure. A public-relay enrollment run cannot prove those claims.
+This profile leaves `CROSS_VM_PRIVATE_BUSINESS` and
+`DEDICATED_RELAY_RECOVERY` at `NOT_PROVEN`, and
+`CROSS_WAN_PUBLIC_INGRESS=NOT_TESTED`: installation, approval, Online, native
+ocserv/privd/Signer, independent OpenConnect and sole-Relay recovery need separate
+implementation and real evidence. A private overlay does not prove public ingress.
+
+There are four jobs when configured: a short preflight, two build/test VM roles
+(60-minute deadline each), and a short verdict/cleanup. Missing infrastructure
+runs only preflight and verdict; both must fail qualification. Actual runner
+minutes, build/queue time and network costs must be measured from a real run;
+no successful-run cost or acceptance result is established by static checks.
 
 Local checks (not live acceptance):
 
@@ -55,7 +116,7 @@ make real-e2e-check
 
 Prepare two separate Linux VMs that have different boot IDs (read from
 `/proc/sys/kernel/random/boot_id`), the same repository commit, and outbound
-Internet access to Iroh's default relay discovery. Both machines need the shell
+access to the authorized test Relay. Both machines need the shell
 utilities used by the scripts, including jq. The Controller VM also requires
 Docker Compose, which starts real PostgreSQL, Control Plane, and transportd
 processes. The managed-node VM requires OpenSSL and the repository's Rust
@@ -69,6 +130,15 @@ each VM. On the Controller VM, also export a unique, Docker-compatible
 `COMPOSE_PROJECT`. Reuse the same environment values across every phase through
 cleanup. Set `ARTIFACT_DIR` if you want diagnostics written outside the default
 location under `RUNNER_TEMP`.
+
+On each VM, supply `REAL_E2E_RELAY_URL`, `REAL_E2E_RELAY_CA` and
+`REAL_E2E_RELAY_TOKEN` from protected local configuration, then run
+`python3 scripts/real-e2e-relay.py "$RUNNER_TEMP/ocservia-real-e2e-<role>-$RUN_ID/relay"`,
+replacing `<role>` with `controller` or `node`. This creates a new private
+directory; it refuses to replace an existing one. Unset the input variables
+afterward. Controller startup uses sudo only to assign its copied token to
+container UID/GID 65532; the node's copy stays owned by its Agent process user.
+These manual scripts must also run only on explicitly authorized test hosts.
 
 1. On the Controller, run `scripts/real-e2e-controller.sh start`. On the node,
    run `scripts/bootstrap.sh native` (unsupported on Linux ARM64; see
@@ -111,7 +181,7 @@ This profile verifies enrollment across separate VMs with a persistent Agent
 identity, Controller-bound enrollment, and a live Iroh path over the Internet.
 It does not cover Agent package installation, Agent or privd systemd units,
 native ocserv or OpenConnect packages, two-principal OIDC approval, privileged
-mutations, dedicated relays, or production failure domains.
+mutations, dedicated Relay outage/recovery, or production failure domains.
 
 In an authorized validation environment, you can check script syntax alone:
 
@@ -119,6 +189,6 @@ In an authorized validation environment, you can check script syntax alone:
 make real-e2e-check
 ```
 
-This target runs `bash -n` on `real-e2e-controller.sh`, `real-e2e-node.sh`, and
-`real-e2e-artifact.sh`. It does not execute `scripts/test-real-e2e-artifact.sh`,
+This target runs `bash -n` on `real-e2e-controller.sh`, `real-e2e-node.sh`,
+`real-e2e-artifact.sh` and `real-e2e-hosted.sh`. It does not execute `scripts/test-real-e2e-artifact.sh`,
 start any VM, container, or Agent, or verify that enrollment works.

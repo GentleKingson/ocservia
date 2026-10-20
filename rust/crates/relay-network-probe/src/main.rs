@@ -12,7 +12,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter("warn,iroh::net_report=debug")
         .init();
     let args: Vec<_> = std::env::args().collect();
-    assert_eq!(args.len(), 4, "relay-network URL CA_FILE TOKEN_FILE");
+    let tcp_only = args.len() == 5 && args[4] == "--tcp-only";
+    assert!(
+        args.len() == 4 || tcp_only,
+        "relay-network URL CA_FILE TOKEN_FILE [--tcp-only]"
+    );
     let url: RelayUrl = args[1].parse()?;
     let roots = rustls_pki_types::CertificateDer::pem_file_iter(Path::new(&args[2]))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -20,8 +24,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token = std::fs::read_to_string(&args[3])?.trim().to_owned();
     let builder = iroh_relay::client::ClientBuilder::new(
         url.clone(),
-        SecretKey::from_bytes(&[71; 32]),
-        iroh::dns::DnsResolver::default(),
+        SecretKey::generate(),
+        iroh::dns::DnsResolver::builder()
+            .with_system_defaults()
+            .disable_fallback()
+            .build(),
     )
     .tls_client_config(ca.client_config(iroh_relay::tls::default_provider())?);
     let client = tokio::time::timeout(
@@ -44,11 +51,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "not an authentication rejection: {error:?}"
     );
     println!("wrong_token=PASS error={error:?}");
+    if tcp_only {
+        return Ok(());
+    }
     let endpoint = Endpoint::builder(presets::N0)
         .relay_mode(RelayMode::Custom(
             RelayMap::from_iter([url]).with_auth_token(token),
         ))
         .ca_tls_config(ca)
+        .clear_address_lookup()
+        .dns_resolver(
+            iroh::dns::DnsResolver::builder()
+                .with_system_defaults()
+                .disable_fallback()
+                .build(),
+        )
         .net_report_config(NetReportConfig::minimal())
         .bind()
         .await?;
