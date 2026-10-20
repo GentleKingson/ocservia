@@ -5,7 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${POSTGRES_IMAGE:-postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af}"
 # Compose overrides ENTRYPOINT and discards the image CMD unless command is explicit.
 for compose_file in deploy/compose/compose.yaml deploy/real-e2e/controller.compose.yaml; do
-  OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '%064d' 1)" docker compose -f "${ROOT}/${compose_file}" config --format json |
+  OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '%064d' 1)" \
+    REAL_E2E_RELAY_URL=https://relay.e2e.test REAL_E2E_RELAY_DIR=/unused/real-e2e-relay \
+    docker compose -f "${ROOT}/${compose_file}" config --format json |
     jq -e '(.services.postgres.entrypoint + .services.postgres.command) ==
       ["/bin/bash", "/usr/local/bin/ocservia-postgres-entrypoint", "postgres"]' >/dev/null
 done
