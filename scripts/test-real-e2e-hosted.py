@@ -94,15 +94,27 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-test-') as directory:
         return result
     failed_start_bin = temp / 'failed-start-bin'
     failed_start_bin.mkdir()
-    (failed_start_bin / 'openssl').write_text('#!/bin/bash\nexit 37\n')
-    (failed_start_bin / 'openssl').chmod(0o755)
+    (failed_start_bin / 'docker').write_text('#!/bin/bash\nexit 37\n')
+    (failed_start_bin / 'sudo').write_text('''#!/bin/bash
+if [[ "$1" == install ]]; then shift; exec install "$@"; fi
+[[ "$1" == chown ]]
+''')
+    for name in ('docker', 'sudo'):
+        (failed_start_bin / name).chmod(0o755)
+    failed_relay = temp / 'failed-start/ocservia-real-e2e-controller-negative-start/relay'
+    failed_relay.mkdir(parents=True)
+    for name in ('url', 'token', 'ca.pem'):
+        (failed_relay / name).write_text('test-only')
     failed_start = run('bash', str(ROOT / 'scripts/real-e2e-controller.sh'), 'start', ok=False,
                        env={**os.environ, 'RUN_ID':'negative-start', 'COMPOSE_PROJECT':'negative-start',
                             'RUNNER_TEMP':str(temp / 'failed-start'), 'ARTIFACT_DIR':str(temp / 'start-private'),
                             'PATH':str(failed_start_bin)+os.pathsep+os.environ['PATH']})
     assert failed_start.returncode == 37
-    assert re.fullmatch(r'(exit=37 file=real-e2e-controller.sh line=[0-9]+\n)+',
-                        (temp / 'failed-start/real-e2e-evidence-controller/startup-failure.txt').read_text())
+    failure = (temp / 'failed-start/real-e2e-evidence-controller/startup-failure.txt').read_text()
+    assert re.fullmatch(r'(exit=37 file=real-e2e-controller.sh line=[0-9]+ callers=[0-9 ]+\n)+', failure)
+    build_line = next(i for i, line in enumerate((ROOT / 'scripts/real-e2e-controller.sh').read_text().splitlines(), 1)
+                      if line.strip().startswith('compose build '))
+    assert f'callers={build_line} ' in failure
     # No network is involved: malformed or absent infrastructure must fail
     # before either expensive VM role runs, without reflecting secret input.
     relay_helper = str(ROOT / 'scripts/real-e2e-relay.py')
@@ -186,6 +198,10 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-test-') as directory:
         (scripts / name).write_bytes((ROOT / 'scripts' / name).read_bytes())
     (scripts / 'real-e2e-controller.sh').write_text('''#!/bin/bash
 set -euo pipefail
+if [[ "$1" == start ]]; then
+  echo 'private-credential-fixture signal: killed' >&2
+  exit 37
+fi
 work="$RUNNER_TEMP/ocservia-real-e2e-controller-$RUN_ID"
 mkdir -p "$work/outbox/enrollment-token"
 printf '%043d' 1 >"$work/outbox/enrollment-token/enrollment-token"
@@ -216,6 +232,10 @@ esac
     (received / 'environment.json').write_bytes((temp / 'real-e2e-evidence-controller/environment.json').read_bytes())
     (received / 'command.pub.pem').write_text('test public key fixture')
     wrapper = str(scripts / 'real-e2e-hosted.sh')
+    start_failure = run('bash', wrapper, 'start', env={**env, 'REAL_E2E_ROLE':'controller'}, ok=False)
+    failure_json = temp / 'real-e2e-evidence-controller/start-failure.json'
+    assert json.loads(failure_json.read_text()) == {'exit_code':37, 'signals':['memory']}
+    assert b'private-credential-fixture' not in start_failure.stdout + start_failure.stderr + failure_json.read_bytes()
     run('bash', wrapper, 'configure-relay', env={**env, **{
         key:value for key,value in config_env.items() if key.startswith('REAL_E2E_RELAY_')}})
     assert json.loads((temp / 'real-e2e-evidence-node/environment.json').read_text())['relay']['url'] == config_env['REAL_E2E_RELAY_URL']

@@ -244,7 +244,7 @@ case "${1:-}" in
   start)
     mkdir -p "${RUNNER_TEMP:-/tmp}/real-e2e-evidence-controller"
     # Preserve the failure location without exporting commands or secret arguments.
-    trap 'printf "exit=%s file=%s line=%s\n" "$?" "${BASH_SOURCE[0]##*/}" "$LINENO" >> "${RUNNER_TEMP:-/tmp}/real-e2e-evidence-controller/startup-failure.txt"' ERR
+    trap 'printf "exit=%s file=%s line=%s callers=%s\n" "$?" "${BASH_SOURCE[0]##*/}" "$LINENO" "${BASH_LINENO[*]}" >> "${RUNNER_TEMP:-/tmp}/real-e2e-evidence-controller/startup-failure.txt"' ERR
     start_controller ;;
   sql) compose exec -T postgres psql -XAt -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia ;;
   issue-token) issue_enrollment_token "${2:-}" ;;
