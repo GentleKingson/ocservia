@@ -11,10 +11,17 @@ only; exactly one Relay is supported per deployment, see
 
 For 1.4.0, the archive SHA-256 is
 `99f1da3af46c3bca658076e47fea877f38108dae664507a1fb35d276314363c8`.
-`relay.Cargo.lock` is the unmodified 1.4.0 archive lock. It already selects
+`relay.Cargo.lock` starts from the 1.4.0 archive lock. It already selects
 `rustls` 0.23.46, retaining the previous production security baseline for
 RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and
 RUSTSEC-2026-0349. The endpoint workspace lock cannot constrain `cargo install`.
+
+Both production locks additionally update `rustls-webpki` to 0.103.16,
+`webpki-roots` to 1.0.10 and `webpki-root-certs` to 1.0.10 for
+RUSTSEC-2026-0382, RUSTSEC-2026-0381 and RUSTSEC-2026-0383. These
+certificate distrust updates were published after the upstream archive.
+The vendor test lock remains the original archive graph and is not used for
+production builds.
 
 On a future version change, verify the new registry archive checksum, extract
 it into a private directory, update only required security dependencies, and

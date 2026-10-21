@@ -97,7 +97,10 @@ workspace. Production relay lifecycle regressions run through the transportd
 and Agent crates using `rust/Cargo.lock`, including
 `malformed_relay_batches_preserve_receive_progress`. Focused actor/path tests instead use
 the preserved archive lockfile at `vendor/iroh/Cargo.lock`; this is a different
-dependency graph, not production-graph evidence. From `rust/`, run each focused
+dependency graph, not production-graph evidence. Its preserved archive versions
+of `rustls-webpki` (0.103.15), `webpki-roots` and `webpki-root-certs` (1.0.9)
+precede the certificate distrust updates in both production locks (0.103.16
+and 1.0.10 respectively); do not use the vendor test graph for deployment. From `rust/`, run each focused
 test with:
 
 ```sh
