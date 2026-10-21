@@ -21,6 +21,26 @@ private_run() {
     echo "completed private phase: $phase"
   else
     local status=$?
+    python3 - "$PRIVATE/$phase.log" "$EVIDENCE/$phase-failure.json" "$status" <<'FAILURE' || echo 'safe failure classification unavailable' >&2
+import json, pathlib, re, sys
+log = pathlib.Path(sys.argv[1]).read_text(errors='replace').lower()
+patterns = {
+    'storage': ('no space left on device', 'disk quota exceeded'),
+    'memory': ('out of memory', 'cannot allocate memory', 'signal: killed', 'exit code: 137'),
+    'permission': ('permission denied', 'operation not permitted'),
+    'network': ('connection refused', 'connection reset', 'network is unreachable',
+                'i/o timeout', 'context deadline exceeded', 'temporary failure in name resolution',
+                'failed to resolve source metadata'),
+}
+pathlib.Path(sys.argv[2]).write_text(json.dumps({
+    'exit_code': int(sys.argv[3]),
+    'signals': [name for name, values in patterns.items() if any(value in log for value in values)],
+    'build_targets': [name for name in ('controller-key-init', 'migrate', 'gateway', 'transportd',
+                                       'transport-endpoint-bootstrap') if f'target {name}:' in log],
+    'build_locations': [{'file': name, 'line': int(line)} for name, line in sorted(set(re.findall(
+        r'\b(gateway\.dockerfile|transportd\.dockerfile|dockerfile):([0-9]+)\b', log)))],
+}) + '\n')
+FAILURE
     echo "private phase $phase failed (exit $status); raw log withheld" >&2
     return "$status"
   fi
