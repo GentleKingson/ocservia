@@ -7,6 +7,7 @@ image="${POSTGRES_IMAGE:-postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695
 for compose_file in deploy/compose/compose.yaml deploy/real-e2e/controller.compose.yaml; do
   OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '%064d' 1)" \
     REAL_E2E_RELAY_URL=https://relay.e2e.test REAL_E2E_RELAY_DIR=/unused/real-e2e-relay \
+    REAL_E2E_BUSINESS_DIR=/unused/real-e2e-business REAL_E2E_TLS_DIR=/unused/real-e2e-tls \
     docker compose -f "${ROOT}/${compose_file}" config --format json |
     jq -e '(.services.postgres.entrypoint + .services.postgres.command) ==
       ["/bin/bash", "/usr/local/bin/ocservia-postgres-entrypoint", "postgres"]' >/dev/null
