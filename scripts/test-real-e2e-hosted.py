@@ -200,6 +200,9 @@ if [[ "$1" == install ]]; then shift; exec install "$@"; fi
 set -euo pipefail
 if [[ "$1" == start ]]; then
   echo 'private-credential-fixture signal: killed target gateway: gateway.Dockerfile:2' >&2
+  echo '  File "/private/fixture/scripts/real-e2e-business.py", line 110, in run_business' >&2
+  echo 'RuntimeError: timeout: native Agent online with fresh heartbeat' >&2
+  echo 'native_online={"active":true,"online":false,"fresh":false,"heartbeat":false,"ocserv_version":false,"agent_version":false}'
   exit 37
 fi
 work="$RUNNER_TEMP/ocservia-real-e2e-controller-$RUN_ID"
@@ -236,7 +239,11 @@ esac
     failure_json = temp / 'real-e2e-evidence-controller/start-failure.json'
     assert json.loads(failure_json.read_text()) == {
         'exit_code':37, 'signals':['memory'], 'build_targets':['gateway'],
-        'build_locations':[{'file':'gateway.dockerfile', 'line':2}]}
+        'build_locations':[{'file':'gateway.dockerfile', 'line':2}],
+        'python_locations':[{'file':'real-e2e-business.py', 'line':110}],
+        'wait_timeouts':['native agent online with fresh heartbeat'],
+        'native_online':{'active':True,'online':False,'fresh':False,'heartbeat':False,
+                         'ocserv_version':False,'agent_version':False}}
     assert b'private-credential-fixture' not in start_failure.stdout + start_failure.stderr + failure_json.read_bytes()
     run('bash', wrapper, 'configure-relay', env={**env, **{
         key:value for key,value in config_env.items() if key.startswith('REAL_E2E_RELAY_')}})
@@ -283,9 +290,21 @@ exit 0
     cipher.write_bytes(original)
     run('bash', wrapper, 'enroll', env=env)
     assert (temp / 'ocservia-real-e2e-node-4242-1/exchange.key').exists()
-    run('bash', wrapper, 'cleanup', env={**env, 'CLEANUP_STATUS':'1'}, ok=False)
+    (temp / 'ocservia-real-e2e-node-4242-1/native-owned').touch()
+    (curl_bin / 'systemctl').write_text('#!/bin/bash\nprintf "ActiveState=active\\nSubState=running\\nExecMainStatus=0\\nNRestarts=2\\n"\n')
+    (curl_bin / 'sudo').write_text('#!/bin/bash\necho "private-credential-fixture privd read-only snapshot failed: session_list: permission denied"\n')
+    for name in ('systemctl', 'sudo'):
+        (curl_bin / name).chmod(0o755)
+    health_env = {**env, 'PATH':str(curl_bin)+os.pathsep+os.environ['PATH']}
+    run('bash', wrapper, 'cleanup', env={**health_env, 'CLEANUP_STATUS':'1'}, ok=False)
+    health_file = temp / 'real-e2e-evidence-node/native-health.json'
+    assert json.loads(health_file.read_text())['ocservia-agent'] == {
+        'active':True, 'running':True, 'exit_status':0, 'restarts':2,
+        'signals':['permission denied', 'privd read-only snapshot failed'],
+        'failed_reads':['session_list']}
+    assert b'private-credential-fixture' not in health_file.read_bytes()
     assert not (temp / 'real-e2e-evidence-node/cleanup.txt').exists()
-    run('bash', wrapper, 'cleanup', env=env)
+    run('bash', wrapper, 'cleanup', env=health_env)
     assert not (temp / 'real-e2e-private-4242-1-node').exists()
     assert (temp / 'real-e2e-evidence-node/cleanup.txt').read_text() == 'CLEANUP=PASS\n'
     # Drive the real verifier against controlled SQL responses. A consumed
