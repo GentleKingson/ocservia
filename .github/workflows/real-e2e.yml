@@ -114,8 +114,10 @@ jobs:
           audience: ${{ vars.TS_RELAY_AUDIENCE }}
           tags: tag:ocservia-ci-relay
           hostname: ocservia-relay-${{ github.run_id }}-${{ github.run_attempt }}
-          args: --accept-dns=false --accept-routes=false
+          args: --accept-dns=false
           use-cache: 'false'
+      - name: Reject advertised Tailnet routes
+        run: sudo tailscale set --accept-routes=false
       - name: Start private HTTPS Relay
         env:
           REAL_E2E_RELAY_TOKEN: ${{ secrets.CROSS_VM_RELAY_TOKEN }}
@@ -180,8 +182,10 @@ jobs:
           audience: ${{ vars.TS_PEER_AUDIENCE }}
           tags: tag:ocservia-ci-peer
           hostname: ocservia-controller-${{ github.run_id }}-${{ github.run_attempt }}
-          args: --accept-dns=false --accept-routes=false
+          args: --accept-dns=false
           use-cache: 'false'
+      - name: Reject advertised Tailnet routes
+        run: sudo tailscale set --accept-routes=false
       - name: Wait for Relay readiness
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -274,8 +278,10 @@ jobs:
           audience: ${{ vars.TS_PEER_AUDIENCE }}
           tags: tag:ocservia-ci-peer
           hostname: ocservia-node-${{ github.run_id }}-${{ github.run_attempt }}
-          args: --accept-dns=false --accept-routes=false
+          args: --accept-dns=false
           use-cache: 'false'
+      - name: Reject advertised Tailnet routes
+        run: sudo tailscale set --accept-routes=false
       - name: Wait for Relay readiness
         env:
           GITHUB_TOKEN: ${{ github.token }}
