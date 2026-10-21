@@ -35,6 +35,9 @@ def run(*args, data=None):
 
 
 def sql(query):
+    if os.environ.get('REAL_E2E_ROLE') == 'controller':
+        return run('bash', str(ROOT / 'scripts/real-e2e-controller.sh'), 'sql',
+                   data=query.encode()).strip()
     return run(str(ROOT / 'deploy/production/compose.sh'), 'exec', '-T', 'postgres',
                'psql', '-XAt', '-v', 'ON_ERROR_STOP=1', '-U', 'ocservia_owner', '-d', 'ocservia',
                data=query.encode()).strip()

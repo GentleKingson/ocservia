@@ -57,7 +57,7 @@ assert 'secrets.' not in str(workflow['jobs']['verdict'])
 for role in ('controller', 'node'):
     job = workflow['jobs'][role]
     assert job['runs-on'] == 'ubuntu-24.04' and job['needs'] == 'preflight' and 'container' not in job
-    assert job['timeout-minutes'] <= 60
+    assert job['timeout-minutes'] <= 90
     uploads = [step for step in job['steps'] if step.get('uses','').startswith('actions/upload-artifact@')]
     assert all(step['with']['if-no-files-found'] == 'error' for step in uploads)
     for step in job['steps']:
@@ -68,6 +68,16 @@ for role in ('controller', 'node'):
     if role == 'controller':
         token = next(step for step in uploads if step.get('name') == 'Publish enrollment-token')
         assert token['with']['path'].endswith('/encrypted-token')
+        required = ['verify', 'Approve node and issue native authority',
+                    'Apply native business and create VPN user',
+                    'Verify Controller DB and Agent native effects']
+    else:
+        required = ['enroll', 'Start native Agent and privd',
+                    'Check native effects and OpenConnect VPN', 'Publish native business result']
+    positions = [next(i for i, step in enumerate(job['steps']) if step.get('name') == name)
+                 for name in required]
+    assert positions == sorted(positions)
+    assert all('continue-on-error' not in step for step in job['steps'])
 assert workflow['jobs']['verdict']['needs'] == ['admission', 'preflight', 'relay', 'controller', 'node']
 compose = yaml.safe_load((ROOT / 'deploy/real-e2e/controller.compose.yaml').read_text())
 for name in ('transportd', 'transport-endpoint-bootstrap'):
@@ -141,6 +151,8 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-test-') as directory:
         run('bash', '-euo', 'pipefail', '-c', verdict, ok=ok,
             env={**trusted_env, **(changes or {}), 'RESULTS':json.dumps(items), 'GITHUB_STEP_SUMMARY':str(summary)})
         assert ('CROSS_VM_ENROLLMENT=PASS' in summary.read_text()) == (ok if acceptance is None else acceptance)
+        assert ('CROSS_VM_PRIVATE_BUSINESS=PASS' in summary.read_text()) == (ok if acceptance is None else acceptance)
+        assert 'DEDICATED_RELAY_RECOVERY=PASS' not in summary.read_text()
     verdict_check(results, True)
     for name in results:
         for status in ('failure', 'cancelled', 'skipped'):
@@ -170,7 +182,11 @@ printf '%043d' 1 >"$work/outbox/enrollment-token/enrollment-token"
     (scripts / 'real-e2e-node.sh').write_text('''#!/bin/bash
 set -euo pipefail
 case "$1" in
-prepare) mkdir -p "$RUNNER_TEMP/ocservia-real-e2e-node-$RUN_ID/outbox/agent-endpoint" ;;
+prepare)
+  work="$RUNNER_TEMP/ocservia-real-e2e-node-$RUN_ID"
+  mkdir -p "$work/outbox/agent-endpoint"
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$work/exchange.key" 2>/dev/null
+  openssl pkey -in "$work/exchange.key" -pubout -out "$work/outbox/agent-endpoint/exchange.pub" 2>/dev/null ;;
 enroll) test "$(cat "$2/enrollment-token")" = "$(printf '%043d' 1)" ;;
 cleanup)
   test "${CLEANUP_STATUS:-0}" = 0
@@ -187,6 +203,7 @@ esac
     received = temp / 'real-e2e-private-4242-1-node/controller-ready'
     received.mkdir(parents=True)
     (received / 'environment.json').write_bytes((temp / 'real-e2e-evidence-controller/environment.json').read_bytes())
+    (received / 'command.pub.pem').write_text('test public key fixture')
     wrapper = str(scripts / 'real-e2e-hosted.sh')
     run('bash', wrapper, 'configure-relay', env={**env, **{
         key:value for key,value in config_env.items() if key.startswith('REAL_E2E_RELAY_')}})
@@ -232,7 +249,7 @@ exit 0
     run('bash', wrapper, 'enroll', env=env, ok=False)
     cipher.write_bytes(original)
     run('bash', wrapper, 'enroll', env=env)
-    assert not (temp / 'real-e2e-private-4242-1-node/exchange.key').exists()
+    assert (temp / 'ocservia-real-e2e-node-4242-1/exchange.key').exists()
     run('bash', wrapper, 'cleanup', env={**env, 'CLEANUP_STATUS':'1'}, ok=False)
     assert not (temp / 'real-e2e-evidence-node/cleanup.txt').exists()
     run('bash', wrapper, 'cleanup', env=env)

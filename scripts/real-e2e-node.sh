@@ -7,9 +7,10 @@ RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${RUNNER_TEMP:?RUNNER_TEMP is required}/artifacts/real-e2e-node}"
 WORK="${RUNNER_TEMP:-/tmp}/ocservia-real-e2e-node-${RUN_ID}"
 TARGET="${RUNNER_TEMP:-/tmp}/ocservia-real-e2e-target-${RUN_ID}"
-IDENTITY="${WORK}/identity"
+PACKAGE_DIR="${WORK}/packages"
 SECRETS="${WORK}/secrets"
 OUTBOX="${WORK}/outbox"
+VERSION=0.0.0
 
 case "${RUN_ID}" in
   *[!a-zA-Z0-9._-]*) echo "RUN_ID contains unsafe characters" >&2; exit 2 ;;
@@ -38,66 +39,158 @@ prepare_endpoint() {
     echo "Controller and Agent resolved to the same runner instance" >&2
     return 1
   }
-  mkdir -p "${IDENTITY}" "${SECRETS}" "${OUTBOX}/agent-endpoint" "${ARTIFACT_DIR}"
-  chmod 0700 "${WORK}" "${IDENTITY}" "${SECRETS}"
-  [[ -x "${TARGET}/release/ocservia-agent" ]] || {
-    echo "Agent release binary is unavailable; run build first" >&2
-    return 1
-  }
-  endpoint="$("${TARGET}/release/ocservia-agent" --identity-dir "${IDENTITY}" \
+  mkdir -p "${SECRETS}" "${OUTBOX}/agent-endpoint" "${ARTIFACT_DIR}"
+  chmod 0700 "${WORK}" "${SECRETS}"
+  mkdir -p "${WORK}/controller-ready"
+  cp "${ready_dir}/command.pub.pem" "${WORK}/controller-ready/command.pub.pem"
+  [[ -s "${PACKAGE_DIR}/ocservia-agent_${VERSION}-1_amd64.deb" ]]
+  [[ ! -e /etc/ocservia-agent && ! -e /usr/libexec/ocservia && ! -e /etc/ocservia \
+    && ! -e /var/lib/ocservia-agent && ! -e /var/lib/ocservia-privd ]]
+  ! getent passwd ocserv-agent >/dev/null
+  ! getent passwd ocservia-vpn >/dev/null
+  ! dpkg-query -W -f='${Status}' ocservia-agent 2>/dev/null | grep -Fxq 'install ok installed'
+  ! dpkg-query -W -f='${Status}' ocserv 2>/dev/null | grep -Fxq 'install ok installed'
+  touch "${WORK}/native-owned"
+  sudo apt-get update -qq
+  sudo apt-get install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping
+  sudo systemctl stop ocserv || true
+  sudo install -d -m 0755 /etc/ocservia
+  sudo touch /etc/ocservia/agent-install-production-relays
+  sudo dpkg -i "${PACKAGE_DIR}/ocservia-agent_${VERSION}-1_amd64.deb"
+  sudo install -m 0444 "${WORK}/relay/ca.pem" /etc/ocservia-agent/relay-ca.pem
+  sudo install -m 0600 /dev/null /etc/ocserv/ocpasswd
+  sudo groupadd --system ocservia-vpn
+  sudo useradd --system --no-create-home --gid ocservia-vpn --shell /usr/sbin/nologin ocservia-vpn
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=real-e2e-vpn-ca \
+    -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+    -keyout "${SECRETS}/vpn-ca.key" -out "${WORK}/vpn-ca.crt" >/dev/null 2>&1
+  openssl req -new -newkey rsa:2048 -nodes -subj /CN=10.207.0.1 \
+    -keyout "${SECRETS}/vpn.key" -out "${SECRETS}/vpn.csr" >/dev/null 2>&1
+  printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=IP:10.207.0.1\nextendedKeyUsage=serverAuth\n' \
+    >"${SECRETS}/vpn.ext"
+  openssl x509 -req -days 1 -in "${SECRETS}/vpn.csr" -CA "${WORK}/vpn-ca.crt" \
+    -CAkey "${SECRETS}/vpn-ca.key" -CAcreateserial -extfile "${SECRETS}/vpn.ext" \
+    -out "${WORK}/vpn.crt" >/dev/null 2>&1
+  sudo install -m 0600 "${SECRETS}/vpn.key" /etc/ocserv/t07.key
+  sudo install -m 0644 "${WORK}/vpn.crt" /etc/ocserv/t07.crt
+  cat >"${WORK}/ocserv.conf" <<'EOF'
+auth = "plain[passwd=/etc/ocserv/ocpasswd]"
+tcp-port = 44443
+udp-port = 0
+run-as-user = ocservia-vpn
+run-as-group = ocservia-vpn
+socket-file = /run/ocserv.socket
+server-cert = /etc/ocserv/t07.crt
+server-key = /etc/ocserv/t07.key
+max-clients = 4
+max-same-clients = 2
+cookie-timeout = 300
+device = vpns
+ipv4-network = 10.208.0.0/24
+dns = 1.1.1.1
+route = default
+use-occtl = true
+EOF
+  sudo install -m 0600 "${WORK}/ocserv.conf" /etc/ocserv/ocserv.conf
+  sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
+  sudo systemctl restart ocserv
+  export CONTROLLER_ENDPOINT_ID="${controller}" RELAY_URL_A="$(<"${WORK}/relay/url")" RELAY_URL_B=
+  export RELAY_ACCESS_TOKEN_SOURCE="${WORK}/relay/token"
+  export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${WORK}/controller-ready/command.pub.pem"
+  export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=development
+  bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${SECRETS}/managed-prepare.log"
+  grep -Fxq ENROLLMENT_READY "${SECRETS}/managed-prepare.log"
+  endpoint="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
     --controller "${controller}" --prepare-enrollment)"
   require_endpoint "${endpoint}"
   printf '%s\n' "${endpoint}" >"${OUTBOX}/agent-endpoint/agent-endpoint-id"
   runner_instance_id >"${OUTBOX}/agent-endpoint/runner-instance"
   printf '%s\n' "${controller}" >"${WORK}/controller-endpoint-id"
+  sudo openssl pkey -in /etc/ocservia-agent/user-password-seal-private.pem -pubout >"${OUTBOX}/agent-endpoint/user.pub.pem"
+  openssl x509 -in "${WORK}/vpn.crt" -outform DER | sha256sum | cut -d' ' -f1 >"${OUTBOX}/agent-endpoint/vpn-cert-sha256"
+  openssl x509 -in "${WORK}/vpn.crt" -pubkey -noout | openssl pkey -pubin -outform DER \
+    | sha256sum | cut -d' ' -f1 >"${OUTBOX}/agent-endpoint/vpn-spki-sha256"
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "${WORK}/exchange.key" \
+    2>"${SECRETS}/exchange-keygen.log"
+  openssl pkey -in "${WORK}/exchange.key" -pubout \
+    -out "${OUTBOX}/agent-endpoint/exchange.pub" 2>/dev/null
 }
 
 build_agent() {
+  mkdir -p "${PACKAGE_DIR}"
+  VERSION="${VERSION}" PACKAGE_ARCH=amd64 OUTPUT_DIR="${PACKAGE_DIR}" \
+    SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)" \
+    bash "${ROOT}/scripts/build-release-agent.sh"
   (cd "${ROOT}/rust" && CARGO_TARGET_DIR="${TARGET}" \
-    cargo build --locked --release --package ocservia-agent --package ocservia-relay-network-probe)
+    cargo build --locked --release --package ocservia-relay-network-probe)
 }
 
 enroll() {
   local token_dir="${1:?enrollment token directory is required}"
-  local controller user_hash p12_hash enrollment_output node_id
+  local controller enrollment_output node_id
   local -a node_ids
   controller="$(<"${WORK}/controller-endpoint-id")"
   require_endpoint "${controller}"
-  install -m 0600 "${token_dir}/enrollment-token" "${SECRETS}/enrollment-token"
-  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${SECRETS}/user-password-seal.pem" >/dev/null 2>&1
-  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${SECRETS}/p12-password-seal.pem" >/dev/null 2>&1
-  openssl pkey -in "${SECRETS}/user-password-seal.pem" -pubout -outform DER -out "${SECRETS}/user-password-seal.der" >/dev/null 2>&1
-  openssl pkey -in "${SECRETS}/p12-password-seal.pem" -pubout -outform DER -out "${SECRETS}/p12-password-seal.der" >/dev/null 2>&1
-  user_hash="$(sha256sum "${SECRETS}/user-password-seal.der" | awk '{print $1}')"
-  p12_hash="$(sha256sum "${SECRETS}/p12-password-seal.der" | awk '{print $1}')"
-  [[ "${user_hash}" != "${p12_hash}" ]]
-  "${TARGET}/release/ocservia-agent" \
-    --identity-dir "${IDENTITY}" \
-    --controller "${controller}" \
-    --relay-mode custom \
-    --relay-url "$(<"${WORK}/relay/url")" \
-    --relay-ca-file "${WORK}/relay/ca.pem" \
-    --relay-token-file "${WORK}/relay/token" \
-    --enrollment-token-file "${SECRETS}/enrollment-token" \
-    --enrollment-environment development \
-    --user-password-seal-key-id real-e2e-user-v1 \
-    --user-password-seal-public-key-sha256 "${user_hash}" \
-    --p12-password-seal-key-id real-e2e-p12-v1 \
-    --p12-password-seal-public-key-sha256 "${p12_hash}" >"${SECRETS}/enrollment-output" &
-  local agent_pid=$!
-  mkdir -p "${OUTBOX}/enrollment-result"
-  printf '%s\n' "$agent_pid" >"${OUTBOX}/enrollment-result/agent-pid"
-  wait "$agent_pid"
+  sudo install -o root -g ocserv-agent -m 0640 "${token_dir}/enrollment-token" /etc/ocservia-agent/enrollment-token
+  export CONTROLLER_ENDPOINT_ID="${controller}" RELAY_URL_A="$(<"${WORK}/relay/url")" RELAY_URL_B=
+  export RELAY_ACCESS_TOKEN_SOURCE="${WORK}/relay/token"
+  export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${WORK}/controller-ready/command.pub.pem"
+  export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=development
+  bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${SECRETS}/enrollment-output"
   enrollment_output="$(<"${SECRETS}/enrollment-output")"
-  mapfile -t node_ids < <(grep -E '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' <<<"${enrollment_output}")
+  mapfile -t node_ids < <(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' <<<"${enrollment_output}")
   [[ ${#node_ids[@]} -eq 1 ]] || {
     echo "enrollment did not return a UUIDv7 node ID" >&2
     return 1
   }
   node_id="${node_ids[0]}"
+  grep -Fxq ENROLLED_LOCAL "${SECRETS}/enrollment-output"
+  sudo test ! -e /etc/ocservia-agent/enrollment-token
   mkdir -p "${OUTBOX}/enrollment-result"
   printf '%s\n' "${node_id}" >"${OUTBOX}/enrollment-result/node-id"
   runner_instance_id >"${OUTBOX}/enrollment-result/runner-instance"
+}
+
+activate_native() {
+  local authority_dir="${1:?business authority directory is required}"
+  local node endpoint ref expected_key observed_key
+  node="$(<"${OUTBOX}/enrollment-result/node-id")"
+  endpoint="$(<"${OUTBOX}/agent-endpoint/agent-endpoint-id")"
+  [[ "$(jq -r .node_id "${authority_dir}/authority.json")" == "${node}" ]]
+  [[ "$(jq -r .agent_endpoint_id "${authority_dir}/authority.json")" == "${endpoint}" ]]
+  openssl pkeyutl -decrypt -inkey "${WORK}/exchange.key" \
+    -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 \
+    -in "${authority_dir}/credential.oaep" -out "${SECRETS}/privd-credential"
+  sudo /usr/libexec/ocservia/ocservia-privd attestation-registration \
+    /var/lib/ocservia-privd/attestation.key "${node}" \
+    "$(jq -r .controller_nonce_hex "${authority_dir}/authority.json")" \
+    "$(jq -r .credential_context_sha256_hex "${authority_dir}/authority.json")" \
+    >"${WORK}/proof.json"
+  jq -e 'has("credential") | not' "${WORK}/proof.json" >/dev/null
+  ref="$(jq -r .secret_ref_id "${authority_dir}/authority.json")"
+  expected_key="$(jq -r .secret_ref_key "${authority_dir}/authority.json")"
+  observed_key="$(sudo bash "${ROOT}/deploy/managed-node/provision-config-tls.sh" \
+    "${node}" "${ref}" v1 /etc/ocserv/t07.crt /etc/ocserv/t07.key | jq -r .key)"
+  [[ "${observed_key}" == "${expected_key}" ]]
+  sudo systemctl enable --now ocservia-privd ocservia-agent
+  for service in ocserv ocservia-privd ocservia-agent; do
+    [[ "$(systemctl is-active "${service}")" == active ]]
+    [[ "$(systemctl show "${service}" -p MainPID --value)" =~ ^[1-9][0-9]*$ ]]
+  done
+  mkdir -p "${OUTBOX}/business-node-ready"
+  cp "${WORK}/proof.json" "${OUTBOX}/business-node-ready/proof.json"
+  jq -n --arg node "${node}" --arg endpoint "${endpoint}" \
+    '{node_id:$node,agent_endpoint_id:$endpoint,native_services:["ocserv","ocservia-agent","ocservia-privd"]}' \
+    >"${OUTBOX}/business-node-ready/ready.json"
+}
+
+verify_native_business() {
+  local done_dir="${1:?business completion directory is required}"
+  openssl pkeyutl -decrypt -inkey "${WORK}/exchange.key" \
+    -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 \
+    -in "${done_dir}/vpn-password.oaep" -out "${SECRETS}/vpn-password"
+  python3 "${ROOT}/scripts/real-e2e-native-business.py" "${done_dir}/done.json" \
+    "${SECRETS}/vpn-password" "${OUTBOX}/business-node-result/result.json" "${WORK}"
 }
 
 collect_diagnostics() {
@@ -106,8 +199,8 @@ collect_diagnostics() {
   printf 'runner=%s\nidentity_mode=persistent\nagent_uid=%s\n' "$(hostname)" "$(id -u)" \
     >"${ARTIFACT_DIR}/node-summary.txt"
   df -h >"${ARTIFACT_DIR}/disk.txt"
-  for secret in "${SECRETS}/enrollment-token" "${SECRETS}/user-password-seal.pem" \
-    "${SECRETS}/p12-password-seal.pem" "${IDENTITY}/endpoint.key"; do
+  for secret in "${SECRETS}/enrollment-token" "${SECRETS}/privd-credential" \
+    "${SECRETS}/vpn-password" "${SECRETS}/vpn.key" "${WORK}/exchange.key"; do
     [[ -s "${secret}" ]] || continue
     while IFS= read -r hit; do
       rm -f -- "${hit}"
@@ -126,6 +219,28 @@ collect_diagnostics() {
 }
 
 cleanup_node() {
+  if [[ -f "${WORK}/native-owned" ]]; then
+    sudo ip netns pids real-e2e-client 2>/dev/null | xargs -r sudo kill || true
+    sudo ip netns del real-e2e-client 2>/dev/null || true
+    sudo ip link del real-e2e-host 2>/dev/null || true
+    sudo systemctl disable --now ocservia-agent ocservia-privd 2>/dev/null || true
+    if dpkg-query -W -f='${Status}' ocservia-agent 2>/dev/null | grep -Fxq 'install ok installed'; then
+      sudo apt-get remove -y ocservia-agent
+    fi
+    sudo systemctl stop ocserv 2>/dev/null || true
+    if dpkg-query -W -f='${Status}' ocserv 2>/dev/null | grep -Fxq 'install ok installed'; then
+      sudo apt-get purge -y ocserv
+    fi
+    sudo rm -rf -- /etc/ocservia-agent /var/lib/ocservia-agent /var/lib/ocservia-privd /etc/ocservia
+    sudo rm -f -- /etc/ocserv/t07.crt /etc/ocserv/t07.key /etc/ocserv/ocpasswd
+    sudo userdel ocservia-vpn 2>/dev/null || true
+    sudo groupdel ocservia-vpn 2>/dev/null || true
+    [[ ! -e /etc/ocservia-agent && ! -e /var/lib/ocservia-agent && ! -e /var/lib/ocservia-privd ]]
+    ! sudo ip netns list | grep -q '^real-e2e-client '
+    ! pgrep -x ocservia-agent >/dev/null
+    ! pgrep -x ocservia-privd >/dev/null
+    ! pgrep -x ocserv >/dev/null
+  fi
   rm -rf -- "${WORK}" "${TARGET}" \
     "${RUNNER_TEMP:-/tmp}/real-e2e-controller-ready" \
     "${RUNNER_TEMP:-/tmp}/real-e2e-enrollment-token"
@@ -135,7 +250,9 @@ case "${1:-}" in
   build) build_agent ;;
   prepare) prepare_endpoint "${2:-}" ;;
   enroll) enroll "${2:-}" ;;
+  activate) activate_native "${2:-}" ;;
+  verify-business) verify_native_business "${2:-}" ;;
   diagnostics) collect_diagnostics ;;
   cleanup) cleanup_node ;;
-  *) echo "usage: $0 {build|prepare CONTROLLER_DIR|enroll TOKEN_DIR|diagnostics|cleanup}" >&2; exit 2 ;;
+  *) echo "usage: $0 {build|prepare CONTROLLER_DIR|enroll TOKEN_DIR|activate AUTHORITY_DIR|verify-business DONE_DIR|diagnostics|cleanup}" >&2; exit 2 ;;
 esac

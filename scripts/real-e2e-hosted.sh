@@ -126,7 +126,7 @@ PATHINFO
     cp "$EVIDENCE/environment.json" "$WORK/outbox/controller-ready/environment.json"
     ;;
   build)
-    private_run bootstrap bash "$ROOT/scripts/bootstrap.sh" native
+    private_run bootstrap bash "$ROOT/scripts/bootstrap.sh" native-packages
     # shellcheck source=scripts/env.sh
     source "$ROOT/scripts/env.sh"
     private_run build bash "$ROOT/scripts/real-e2e-node.sh" build
@@ -135,8 +135,6 @@ PATHINFO
     python3 "$ROOT/scripts/real-e2e-evidence.py" "$EVIDENCE/environment.json" "$PRIVATE/controller-ready/environment.json"
     private_run prepare bash "$ROOT/scripts/real-e2e-node.sh" prepare "$PRIVATE/controller-ready"
     cp "$EVIDENCE/environment.json" "$WORK/outbox/agent-endpoint/environment.json"
-    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$PRIVATE/exchange.key" 2>"$PRIVATE/keygen.log"
-    openssl pkey -in "$PRIVATE/exchange.key" -pubout -out "$WORK/outbox/agent-endpoint/exchange.pub" 2>/dev/null
     ;;
   issue-token)
     python3 "$ROOT/scripts/real-e2e-evidence.py" "$EVIDENCE/environment.json" "$PRIVATE/agent-endpoint/environment.json"
@@ -149,22 +147,41 @@ PATHINFO
     ;;
   enroll)
     mkdir -p "$PRIVATE/decrypted-token"
-    openssl pkeyutl -decrypt -inkey "$PRIVATE/exchange.key" \
+    openssl pkeyutl -decrypt -inkey "$WORK/exchange.key" \
       -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 \
       -in "$PRIVATE/encrypted-token/token.oaep" -out "$PRIVATE/decrypted-token/enrollment-token"
     private_run enroll bash "$ROOT/scripts/real-e2e-node.sh" enroll "$PRIVATE/decrypted-token"
-    rm -f "$PRIVATE/decrypted-token/enrollment-token" "$PRIVATE/exchange.key"
+    rm -f "$PRIVATE/decrypted-token/enrollment-token"
     ;;
   verify)
     private_run verify bash "$ROOT/scripts/real-e2e-controller.sh" verify-enrollment "$PRIVATE/enrollment-result"
     if [[ -f "$PRIVATE/relay-ready/ready.json" ]]; then bash "$0" tailnet-path; fi
     cp "$ARTIFACT_DIR/result.txt" "$EVIDENCE/enrollment.txt"
     cp "$ARTIFACT_DIR/binding.json" "$EVIDENCE/binding.json"
-    cp "$PRIVATE/enrollment-result/agent-pid" "$EVIDENCE/agent-pid.txt"
     docker ps --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --format '{{.ID}}' >"$PRIVATE/container-ids"
     while read -r container; do
       docker inspect --format '{{json .State.Pid}} {{json .NetworkSettings.Networks}}' "$container"
     done <"$PRIVATE/container-ids" >"$EVIDENCE/controller-process-network.txt"
+    ;;
+  authority)
+    private_run authority bash "$ROOT/scripts/real-e2e-controller.sh" authority "$PRIVATE/agent-endpoint"
+    ;;
+  activate)
+    private_run activate bash "$ROOT/scripts/real-e2e-node.sh" activate "$PRIVATE/business-authority"
+    ;;
+  business)
+    private_run business bash "$ROOT/scripts/real-e2e-controller.sh" business \
+      "$PRIVATE/business-node-ready" "$PRIVATE/agent-endpoint"
+    ;;
+  native-result)
+    private_run native-result bash "$ROOT/scripts/real-e2e-node.sh" verify-business \
+      "$PRIVATE/business-controller-done"
+    ;;
+  verify-business)
+    private_run verify-business bash "$ROOT/scripts/real-e2e-controller.sh" verify-business \
+      "$PRIVATE/business-node-result"
+    cp "$ARTIFACT_DIR/business.txt" "$EVIDENCE/business.txt"
+    cp "$ARTIFACT_DIR/business.json" "$EVIDENCE/business.json"
     ;;
   tailnet-cleanup)
     trap 'rm -rf -- "$PRIVATE"' EXIT
