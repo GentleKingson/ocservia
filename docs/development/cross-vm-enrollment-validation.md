@@ -5,10 +5,10 @@ PostgreSQL and transportd, the real Agent, and one disposable iroh HTTPS Relay.
 It reuses the locked Relay Dockerfile and enrollment protocol. Production Relay
 configuration and the default transportd image target are unchanged.
 
-**Status: BLOCKED_INFRA / NOT_PROVEN until the administrator setup below and an
-authorized run on the exact merged main SHA succeed.** Local contracts, Basic CI
-and CodeQL do not prove three-VM enrollment. Earlier two-VM results do not qualify
-this topology. There is no new Release Check gate.
+**Status: NOT_PROVEN until an authorized run on the exact merged main SHA
+succeeds.** The administrator setup below is a prerequisite. Local contracts,
+Basic CI and CodeQL do not prove native three-VM business behavior. There is
+no new Release Check gate.
 
 ## One-time administrator setup
 
@@ -132,7 +132,7 @@ Tailscale transport (direct/DERP/peer relay) is separate from application iroh
 Relay use. `tailscale ping` is not used as enrollment evidence.
 
 Cleanup steps run with `always()`: Controller services/volumes/networks, Agent
-process/build/private files, Relay container/image/TLS/token files, local hosts
+native units/package/process/build/private files, Relay container/image/TLS/token files, local hosts
 mapping, Tailscale logout, daemon shutdown and in-memory credentials. Explicit
 cleanup failures fail their job, even though the upstream Action's post hook
 only warns on cleanup errors. That post hook may warn that an explicitly stopped
@@ -141,7 +141,7 @@ or loss remains best effort; ephemeral server removal is expected by Tailscale
 but always reported `SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED` without
 independent API evidence.
 
-Verdict deletes all five run-attempt rendezvous artifact kinds, re-lists them
+Verdict deletes all nine run-attempt rendezvous artifact kinds, re-lists them
 and requires zero remaining. Three allowlisted evidence artifacts remain for
 seven days. Any failed, cancelled, unexpectedly skipped, timed-out or cleanup-
 failed dependency prevents PASS; disabled schedules report NOT_RUN, never PASS.
@@ -150,9 +150,10 @@ The final positive markers are only for the exact successful run:
 ```text
 CROSS_VM_ENROLLMENT=PASS
 CLEANUP=PASS
-CROSS_VM_PRIVATE_BUSINESS=NOT_PROVEN
+CROSS_VM_PRIVATE_BUSINESS=PASS
 DEDICATED_RELAY_RECOVERY=NOT_PROVEN
 CROSS_WAN_PUBLIC_INGRESS=NOT_TESTED
+SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED
 ```
 
 Record run ID/attempt, SHA, three boot IDs, TLS/token positive and negative
@@ -166,6 +167,7 @@ Local checks (no Tailnet credentials or actual joins):
 ```sh
 make real-e2e-check
 python3 scripts/test-real-e2e-hosted.py
+python3 scripts/test-real-e2e-business.py
 bash scripts/test-real-e2e-artifact.sh
 actionlint .github/workflows/real-e2e.yml
 shellcheck -x scripts/real-e2e-{hosted,controller,node,artifact,relay-host}.sh
@@ -196,7 +198,7 @@ container UID/GID 65532; the node's copy stays owned by its Agent process user.
 These manual scripts must also run only on explicitly authorized test hosts.
 
 1. On the Controller, run `scripts/real-e2e-controller.sh start`. On the node,
-   run `scripts/bootstrap.sh native` (unsupported on Linux ARM64; see
+   run `scripts/bootstrap.sh native-packages` (unsupported on Linux ARM64; see
    [Linux ARM64 dependencies](testing.md#linux-arm64-go-validation)), source
    `scripts/env.sh`, and run `scripts/real-e2e-node.sh build`.
 2. Copy
@@ -213,7 +215,17 @@ These manual scripts must also run only on explicitly authorized test hosts.
 5. Copy the node's `outbox/enrollment-result` directory back to the Controller,
    then run `scripts/real-e2e-controller.sh verify-enrollment RESULT_DIR` to
    confirm the pending UUIDv7 node record and its EndpointID binding.
-6. Run the `diagnostics` phase and then the `cleanup` phase of the local script
+6. Run `scripts/real-e2e-controller.sh authority AGENT_ENDPOINT_DIR`; copy its
+   `outbox/business-authority` to the node and run
+   `scripts/real-e2e-node.sh activate AUTHORITY_DIR`.
+7. Copy the node's `outbox/business-node-ready` to the Controller; run
+   `scripts/real-e2e-controller.sh business NODE_READY_DIR AGENT_ENDPOINT_DIR`.
+   Copy its `outbox/business-controller-done` to the node and run
+   `scripts/real-e2e-node.sh verify-business DONE_DIR`.
+8. Copy the node's `outbox/business-node-result` to the Controller; run
+   `scripts/real-e2e-controller.sh verify-business RESULT_DIR`. Only this
+   reconciliation proves the native business checkpoint.
+9. Run the `diagnostics` phase and then the `cleanup` phase of the local script
    on each VM, including after a failed run, and delete any directories copied
    between the machines. Keep the enrollment token, private keys, and
    unredacted logs private.
@@ -232,11 +244,12 @@ it.
 
 ## Scope
 
-This profile verifies enrollment across separate VMs with a persistent Agent
-identity, Controller-bound enrollment, and a live Iroh path over the Internet.
-It does not cover Agent package installation, Agent or privd systemd units,
-native ocserv or OpenConnect packages, two-principal OIDC approval, privileged
-mutations, dedicated Relay outage/recovery, or production failure domains.
+This profile checks enrollment and private business across separate VMs with a
+persistent Agent identity, native Agent/privd/ocserv units, independent local
+Requester and Approver identities, privileged config and reload operations,
+and an OpenConnect client in a local network namespace. The VPN session is
+local to the Agent VM; this profile does not prove WAN ingress, production
+Signer acceptance, dedicated Relay outage/recovery, or production failure domains.
 
 In an authorized validation environment, you can check script syntax alone:
 

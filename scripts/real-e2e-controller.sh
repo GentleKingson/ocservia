@@ -9,9 +9,12 @@ COMPOSE_FILE="${ROOT}/deploy/real-e2e/controller.compose.yaml"
 WORK="${RUNNER_TEMP:-/tmp}/ocservia-real-e2e-controller-${RUN_ID}"
 STATE="${WORK}/state"
 SECRETS="${WORK}/secrets"
+TLS_DIR="${WORK}/tls"
 OUTBOX="${WORK}/outbox"
 export REAL_E2E_RELAY_DIR="${WORK}/relay"
 WORKSPACE_ID="019d0000-0000-7000-8000-000000000001"
+export T07_WORK="${WORK}" T07_WORKSPACE="${WORKSPACE_ID}"
+export OCSERV_CONTROLLER_PUBLIC_URL=https://localhost:8443
 
 case "${RUN_ID}${COMPOSE_PROJECT}" in
   *[!a-zA-Z0-9._-]*) echo "run or Compose project ID contains unsafe characters" >&2; exit 2 ;;
@@ -23,7 +26,7 @@ OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})"
 export OCSERV_CONTROLLER_ENDPOINT_ID
 
 compose() {
-  export REAL_E2E_RELAY_URL
+  export REAL_E2E_RELAY_URL REAL_E2E_BUSINESS_DIR="${SECRETS}" REAL_E2E_TLS_DIR="${TLS_DIR}"
   REAL_E2E_RELAY_URL="$(<"${REAL_E2E_RELAY_DIR}/url")" || return 1
   local overlay=()
   if [[ -f "${REAL_E2E_RELAY_DIR}/compose.json" ]]; then
@@ -52,8 +55,32 @@ runner_instance_id() {
 
 start_controller() {
   local endpoint
-  mkdir -p "${STATE}" "${SECRETS}" "${OUTBOX}/controller-ready" "${ARTIFACT_DIR}"
-  chmod 0700 "${WORK}" "${SECRETS}"
+  mkdir -p "${STATE}" "${SECRETS}" "${TLS_DIR}" "${WORK}/private" "${OUTBOX}/controller-ready" "${ARTIFACT_DIR}"
+  chmod 0700 "${WORK}"
+  chmod 0755 "${SECRETS}" "${TLS_DIR}"
+  openssl genpkey -algorithm ED25519 -out "${SECRETS}/command.key.pem"
+  openssl pkey -in "${SECRETS}/command.key.pem" -outform DER | tail -c 32 >"${SECRETS}/controller.key"
+  openssl pkey -in "${SECRETS}/command.key.pem" -pubout -out "${OUTBOX}/controller-ready/command.pub.pem"
+  openssl rand -hex 32 >"${SECRETS}/session-key"
+  openssl rand -hex 32 >"${SECRETS}/audit-checkpoint-key"
+  for role in requester approver; do
+    openssl rand -hex 32 >"${WORK}/private/${role}-password"
+    sudo install -o 65534 -g 65532 -m 0400 "${WORK}/private/${role}-password" "${SECRETS}/${role}-password"
+  done
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=real-e2e-ca \
+    -addext basicConstraints=critical,CA:TRUE -keyout "${SECRETS}/ca.key" -out "${WORK}/ca.crt" >/dev/null 2>&1
+  openssl req -new -newkey rsa:2048 -nodes -subj /CN=localhost \
+    -keyout "${TLS_DIR}/tls_private_key" -out "${TLS_DIR}/tls.csr" >/dev/null 2>&1
+  printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' >"${TLS_DIR}/tls.ext"
+  openssl x509 -req -days 1 -in "${TLS_DIR}/tls.csr" -CA "${WORK}/ca.crt" \
+    -CAkey "${SECRETS}/ca.key" -CAcreateserial -extfile "${TLS_DIR}/tls.ext" \
+    -out "${TLS_DIR}/tls_certificate" >/dev/null 2>&1
+  chmod 0400 "${SECRETS}/command.key.pem" "${SECRETS}/session-key" \
+    "${SECRETS}/audit-checkpoint-key" "${SECRETS}/controller.key" \
+    "${TLS_DIR}/tls_private_key" "${SECRETS}/ca.key"
+  sudo chown 65534:65532 "${SECRETS}/command.key.pem" "${SECRETS}/session-key" \
+    "${SECRETS}/audit-checkpoint-key"
+  chmod 0444 "${TLS_DIR}/tls_certificate" "${WORK}/ca.crt"
   # Only the token is secret inside the read-only transportd mount. Docker
   # mounts the directory directly; the host WORK ancestor remains private.
   sudo chown 65532:65532 "${REAL_E2E_RELAY_DIR}/token"
@@ -62,7 +89,7 @@ start_controller() {
   OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})"
   export OCSERV_CONTROLLER_ENDPOINT_ID
 
-  compose build controller-key-init migrate
+  compose build controller-key-init migrate gateway
   compose up --detach controller-key-init transport-runtime-init postgres
   compose run --rm migrate
   compose --profile bootstrap up --detach transport-endpoint-bootstrap
@@ -103,6 +130,16 @@ start_controller() {
     http://127.0.0.1:8080/readyz >/dev/null
   compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     -c "INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES('${WORKSPACE_ID}','Cross-VM Real E2E','cross-vm-real-e2e',now(),now()) ON CONFLICT (id) DO NOTHING" >/dev/null
+  compose run --rm --no-deps \
+    -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=t07-requester \
+    -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${WORKSPACE_ID}" \
+    -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/real-e2e-business/requester-password \
+    -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=t07-approver \
+    -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/real-e2e-business/approver-password \
+    control-plane --bootstrap-local-admin
+  compose up --detach gateway
+  curl --fail --silent --show-error --cacert "${WORK}/ca.crt" https://localhost:8443/readyz >/dev/null
+  python3 "${ROOT}/scripts/real-e2e-business.py" login
 
   printf '%s\n' "${endpoint}" >"${OUTBOX}/controller-ready/controller-endpoint-id"
   runner_instance_id >"${OUTBOX}/controller-ready/runner-instance"
@@ -111,7 +148,7 @@ start_controller() {
 
 issue_enrollment_token() {
   local peer_dir="${1:?agent endpoint directory is required}"
-  local endpoint peer_runner token_response
+  local endpoint peer_runner
   endpoint="$(<"${peer_dir}/agent-endpoint-id")"
   peer_runner="$(<"${peer_dir}/runner-instance")"
   require_endpoint "${endpoint}"
@@ -119,19 +156,9 @@ issue_enrollment_token() {
     echo "Controller and Agent must run on different runner instances" >&2
     return 1
   }
-  token_response="${SECRETS}/enrollment-token-response.json"
-  compose exec -T control-plane curl --fail --silent --show-error \
-    --header 'Content-Type: application/json' \
-    --data "$(jq -cn --arg workspace "${WORKSPACE_ID}" --arg endpoint "${endpoint}" \
-      '{workspace_id:$workspace,environment:"development",expected_node_name:"github-hosted-node",expected_endpoint_id:$endpoint,ttl_seconds:600,reason:"cross-VM real Iroh enrollment smoke"}')" \
-    http://127.0.0.1:8080/api/v1/enrollment-tokens >"${token_response}"
-  mkdir -p "${OUTBOX}/enrollment-token"
-  jq -er '.token | select(type == "string" and length == 43)' "${token_response}" \
-    >"${OUTBOX}/enrollment-token/enrollment-token"
-  chmod 0600 "${OUTBOX}/enrollment-token/enrollment-token"
   printf '%s\n' "${endpoint}" >"${STATE}/agent-endpoint-id"
-  jq -er '.id | select(test("^[0-9a-f-]{36}$"))' "${token_response}" >"${STATE}/token-id"
   printf '%s\n' "${peer_runner}" >"${STATE}/agent-runner-instance"
+  python3 "${ROOT}/scripts/real-e2e-business.py" issue-token "${endpoint}"
 }
 
 verify_enrollment() {
@@ -156,6 +183,7 @@ verify_enrollment() {
   token_observed="$(compose exec -T postgres psql -At -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     -c "SELECT consumed_node_id || ':' || encode(expected_endpoint_id,'hex') FROM enrollment_tokens WHERE id='${token_id}' AND consumed_at IS NOT NULL AND workspace_id='${WORKSPACE_ID}' AND expected_environment='development'")"
   [[ "$token_observed" == "$node_id:$endpoint" ]]
+  printf '%s\n' "${node_id}" >"${STATE}/node-id"
   mkdir -p "$ARTIFACT_DIR"
   jq -n --arg node "$node_id" --arg endpoint "$endpoint" \
     --arg controller "$OCSERV_CONTROLLER_ENDPOINT_ID" --arg token "$token_id" \
@@ -169,11 +197,11 @@ collect_diagnostics() {
   local leaked=0 hit
   mkdir -p "${ARTIFACT_DIR}"
   compose ps --all >"${ARTIFACT_DIR}/compose-ps.txt" 2>&1 || true
-  compose logs --no-color postgres migrate control-plane transportd \
+  compose logs --no-color postgres migrate control-plane transportd gateway \
     >"${ARTIFACT_DIR}/controller-services.log" 2>&1 || true
   docker system df >"${ARTIFACT_DIR}/docker-storage.txt" 2>&1 || true
-  for secret in "${SECRETS}/enrollment-token-response.json" \
-    "${OUTBOX}/enrollment-token/enrollment-token"; do
+  for secret in "${OUTBOX}/enrollment-token/enrollment-token" \
+    "${WORK}/private/privd-credential" "${WORK}/private/smoke-vpn-password"; do
     [[ -s "${secret}" ]] || continue
     while IFS= read -r hit; do
       rm -f -- "${hit}"
@@ -194,7 +222,9 @@ collect_diagnostics() {
 cleanup_controller() {
   local status=0
   # Cleanup must also work when configuration failed before any service start.
-  REAL_E2E_RELAY_URL=https://unconfigured.invalid docker compose \
+  REAL_E2E_RELAY_URL=https://unconfigured.invalid \
+    REAL_E2E_RELAY_DIR="${REAL_E2E_RELAY_DIR}" \
+    REAL_E2E_BUSINESS_DIR="${SECRETS}" REAL_E2E_TLS_DIR="${TLS_DIR}" docker compose \
     --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" \
     --profile bootstrap down --volumes --remove-orphans --rmi local || status=$?
   rm -rf -- "${WORK}" "${RUNNER_TEMP:-/tmp}/real-e2e-agent-endpoint" \
@@ -204,9 +234,13 @@ cleanup_controller() {
 
 case "${1:-}" in
   start) start_controller ;;
+  sql) compose exec -T postgres psql -XAt -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia ;;
   issue-token) issue_enrollment_token "${2:-}" ;;
   verify-enrollment) verify_enrollment "${2:-}" ;;
+  authority) python3 "${ROOT}/scripts/real-e2e-business.py" authority "${2:-}" ;;
+  business) python3 "${ROOT}/scripts/real-e2e-business.py" run "${2:-}" "${3:-}" ;;
+  verify-business) python3 "${ROOT}/scripts/real-e2e-business.py" verify "${2:-}" ;;
   diagnostics) collect_diagnostics ;;
   cleanup) cleanup_controller ;;
-  *) echo "usage: $0 {start|issue-token DIR|verify-enrollment DIR|diagnostics|cleanup}" >&2; exit 2 ;;
+  *) echo "usage: $0 {start|issue-token DIR|verify-enrollment DIR|authority DIR|business READY_DIR PEER_DIR|verify-business DIR|diagnostics|cleanup}" >&2; exit 2 ;;
 esac

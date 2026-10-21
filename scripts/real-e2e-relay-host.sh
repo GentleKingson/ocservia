@@ -64,7 +64,7 @@ PY
     ;;
   hold)
     # Wait for BOTH full jobs (including their cleanup and Action post steps).
-    deadline=$((SECONDS + 3900))
+    deadline=$((SECONDS + 6000))
     while ((SECONDS < deadline)); do
       [[ "$(docker inspect --format '{{.State.Running}}' "$NAME")" == true ]]
       curl --fail --silent --show-error --connect-timeout 5 --max-time 20 \

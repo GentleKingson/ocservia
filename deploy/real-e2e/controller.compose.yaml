@@ -19,14 +19,13 @@ services:
     command:
       - |
         if [ ! -s /run/ocservia-secrets/controller.key ]; then
-          umask 077
-          dd if=/dev/urandom of=/run/ocservia-secrets/controller.key bs=32 count=1 status=none
-          chown 65532:65532 /run/ocservia-secrets/controller.key
+          install -o 65532 -g 65532 -m 600 /run/real-e2e-business/controller.key /run/ocservia-secrets/controller.key
         fi
         test "$$(stat -c '%u:%g:%a:%s' /run/ocservia-secrets/controller.key)" = "65532:65532:600:32"
     network_mode: none
     cap_add: [CHOWN, DAC_OVERRIDE]
     volumes:
+      - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}:/run/real-e2e-business:ro
       - type: volume
         source: controller-secrets
         target: /run/ocservia-secrets
@@ -138,8 +137,13 @@ services:
     command: ["--role=all"]
     environment:
       OCSERV_ENVIRONMENT: development
-      OCSERV_HTTP_ADDRESS: 127.0.0.1:8080
-      OCSERV_DEV_AUTH: "true"
+      OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
+      OCSERV_DEV_AUTH: "false"
+      OCSERV_LOCAL_AUTH_ENABLED: "true"
+      OCSERV_PUBLIC_ORIGIN: https://localhost:8443
+      OCSERV_SESSION_KEY_FILE: /run/real-e2e-business/session-key
+      OCSERV_AUDIT_CHECKPOINT_KEY_FILE: /run/real-e2e-business/audit-checkpoint-key
+      OCSERV_COMMAND_SIGNING_KEY_FILE: /run/real-e2e-business/command.key.pem
       OCSERV_DATABASE_URL: postgres://ocservia_app:development-runtime-only@postgres:5432/ocservia?sslmode=disable
       OCSERV_AUDIT_EVENT_KEY_ID: real-e2e-audit-v1
       OCSERV_TEST_AUDIT_EVENT_KEY_HEX: "4444444444444444444444444444444444444444444444444444444444444444"
@@ -151,6 +155,7 @@ services:
     tmpfs:
       - /tmp:size=16m,mode=0700
     volumes:
+      - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}:/run/real-e2e-business:ro
       - type: volume
         source: transport-runtime
         target: /run/ocserv-platform
@@ -165,6 +170,24 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  gateway:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: deploy/real-e2e/gateway.Dockerfile
+    ports:
+      - 127.0.0.1:8443:8443/tcp
+    tmpfs:
+      - /config:size=16m,mode=0700
+      - /data:size=16m,mode=0700
+      - /tmp:size=16m,mode=0700
+    volumes:
+      - ${REAL_E2E_TLS_DIR:?set REAL_E2E_TLS_DIR}:/run/secrets:ro
+      - ../production/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      control-plane:
+        condition: service_healthy
 
   transportd:
     <<: *service-defaults
