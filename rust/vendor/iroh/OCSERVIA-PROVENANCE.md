@@ -1,13 +1,13 @@
 # Vendored iroh provenance
 
-This directory is the unpacked crates.io `iroh` version `1.2.0` release with a
+This directory is the unpacked crates.io `iroh` version `1.4.0` release with a
 small, repository-local relay-lifecycle patch.
 
-- Registry archive: `iroh-1.2.0.crate`
-- crates.io archive SHA-256: `b2f8d1cfffc83efe39a1031aab423ce09cb8048071baba550508931e9a81ce46`
+- Registry archive: `iroh-1.4.0.crate`
+- crates.io archive SHA-256: `a11e776f1bf36f140e465133ff4108e46bd37a3d10ecdf5b1ea8dfb3bd35a7d2`
 - Upstream repository: `https://github.com/n0-computer/iroh`
 - Upstream VCS commit recorded by the archive:
-  `17c0612f80f78f5288e97b818b1360ae6ea0a51a`
+  `55908a5809b61c72ec8deeff024038f4a9d68ab7`
 - Declared upstream license: `MIT OR Apache-2.0`
 - Upstream `LICENSE-MIT` SHA-256:
   `f169adb8124d3b005416d8485d00777c9a7bdd9099982c52a4493f9732e6d050`
@@ -61,12 +61,30 @@ random mapped addresses (`a05c9c41`), priority replies during reconnect backoff
 status map, bounded persistent retry, connected-path selection, and standby
 promotion remain: upstream does not provide equivalent opt-in semantics.
 
-The receive loop additionally stops the current batch and schedules another
-poll when dropping oversized input. Upstream 1.2.0's `continue` can leave holes
-in the returned receive slots; returning Pending after a drop can also strand
-already queued traffic without a wake. A `test-utils` bridge exercises this
-actual boundary with oversized batched/unbatched inputs and following healthy
-packets under the workspace lock. It does not open network connections.
+The receive loop is now unmodified upstream 1.4.0: PR #4573
+(`26dfe1d469e274d38fe3b41617a20f9bb7a10072`) indexes outputs by delivered
+messages and wakes after exhausting a batch of drops. The previous local
+break-and-wake implementation is removed. The existing `test-utils` bridge
+still exercises oversized batched/unbatched input followed by healthy packets
+under the production workspace lock, without opening network connections.
+
+## Local patch decisions for 1.4.0
+
+| Source | Decision and evidence |
+| --- | --- |
+| `src/endpoint.rs` | Retain builder fields, `keep_relays_connected` and test-only idle timeout; upstream has no equivalent setting. Preserve upstream bind tracing and additive datagram APIs. |
+| `src/socket.rs` | Retain option/status wiring and async relay-map reconciliation; preserve upstream immediate local-address updates and proxy storage. |
+| `src/socket/remote_map.rs` | Retain status watcher plumbing; keep its publisher alive in the shared test fixture so upstream Initial-send regressions exercise a live actor. |
+| `src/socket/remote_map/remote_state.rs` | Retain disconnected-relay path filtering and status-triggered reselection. Upstream #4512 bounds Initial send tasks and #4551 deduplicates pending paths; neither supplies connection-state filtering. Preserve both upstream fixes and their tests. |
+| `src/socket/transports.rs` | Retain combined status watcher, relay-map notifications and production-graph receive-test bridge; preserve upstream datagram send refactor. |
+| `src/socket/transports/relay.rs` | Use upstream #4573 receive implementation; retain status wiring, map notification and existing regression bridge. |
+| `src/socket/transports/relay/actor.rs` | Retain serialized status publication, disconnected queue handling, opt-in persistence, retry/close bounds, reconciliation and standby promotion. Upstream only changes connectivity log levels here; preserve those levels. |
+| `src/test_utils.rs` | Retain production-lock receive regression entrypoint; upstream unit tests alone use a different graph. |
+
+The status/path/queue changes also apply when persistence is disabled, including
+single-Relay configurations. None is removed on the assumption that production
+supports only one Relay. The seven existing focused regression names remain
+stable; no new product support or discovery service is enabled.
 
 To replay provenance, download and verify the archive above, extract it, and
 overlay the eight listed Rust files from the chosen ocservia revision. Add this

@@ -1,6 +1,6 @@
 # Iroh transport development
 
-`ocservia-transportd` manages a single Iroh `1.2.0` endpoint that routes only
+`ocservia-transportd` manages a single Iroh `1.4.0` endpoint that routes only
 `ocserv-platform/enroll/1` and `ocserv-platform/agent/1`, exposing a versioned
 gRPC service to the Go Controller over a mode `0660` Unix domain socket so Go
 packages never import Iroh types directly. The daemon holds neither a database
@@ -120,7 +120,7 @@ after an authoritative transition advances that retained state. Once an
 neither a stale message nor a higher-revision `Active` update can reactivate or
 rebind a revoked endpoint.
 
-The Rust workspace pins Iroh to `1.2.0` in `Cargo.toml` using a
+The Rust workspace pins Iroh to `1.4.0` in `Cargo.toml` using a
 provenance-bound patch of that exact `crates.io` release, with the full
 dependency graph locked in `Cargo.lock`. Production Agent and `transportd`
 launchers accept only a single dedicated Relay URL (although the underlying
@@ -143,9 +143,9 @@ verifies the upstream crate archive and compiles the unmodified CLI against
 (`deploy/production/relay.Dockerfile`). The Rust base image tag
 reflects the Rust compiler version, not an Iroh endpoint or Relay protocol
 version. Never substitute an unpinned `cargo install --version` build, because
-upstream Relay `1.2.0`'s bundled lockfile still resolves `rustls` `0.23.41`,
-whereas the audited `deploy/production/relay.Cargo.lock` upgrades it to
-`0.23.46`.
+the standalone binary must use the reviewed lock independently of the endpoint
+workspace. Relay `1.4.0`'s archive lock and the retained production Relay lock
+both select `rustls` `0.23.46`.
 
 Production deployments support a single dedicated Relay; the low-level
 multi-member mechanism in the transport library does not extend product support
