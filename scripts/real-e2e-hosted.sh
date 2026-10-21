@@ -61,7 +61,7 @@ case "${1:-}" in
     ip="$(python3 "$ROOT/scripts/real-e2e-tailnet.py" consume "$PRIVATE/relay-ready" "$EVIDENCE/environment.json")"
     printf '%s relay.ocservia.test\n' "$ip" | sudo tee -a /etc/hosts >/dev/null
     export REAL_E2E_RELAY_URL=https://relay.ocservia.test:3443
-    REAL_E2E_RELAY_CA="$(<"$PRIVATE/relay-ready/ca.pem")"
+    REAL_E2E_RELAY_CA="$(<"$PRIVATE/relay-ready/ca.pem")"$'\n'
     export REAL_E2E_RELAY_CA
     bash "$0" configure-relay
     if [[ "$ROLE" == controller ]]; then

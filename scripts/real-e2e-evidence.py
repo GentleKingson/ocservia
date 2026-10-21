@@ -33,6 +33,8 @@ def validate(local, peer):
         relay = local['relay_vm']
         if relay['boot_id'] in (local['boot_id'], peer['boot_id']):
             raise ValueError('Relay shares a peer VM')
+        if any(local['relay'][key] != relay[key] for key in ('url', 'ca_sha256')):
+            raise ValueError('Relay readiness/configuration mismatch')
         if relay['source_commit'] != local['source_commit']:
             raise ValueError('Relay source mismatch')
     if local['source_commit'] != peer['source_commit']:

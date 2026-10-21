@@ -333,6 +333,9 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-tailnet-test-') as directory:
             pass
         else:
             raise AssertionError('accepted wrong ready '+key)
+    relay_config = {key:ready[key] for key in ('url','ca_sha256')}
+    local = {**local, 'relay':relay_config}
+    peer = {**peer, 'relay':relay_config}
     evidence.validate({**local,'relay_vm':ready}, {**peer,'relay_vm':ready})
     for bad in ({**ready,'boot_id':peer['boot_id']}, {**ready,'source_commit':'b'*40}):
         try:
