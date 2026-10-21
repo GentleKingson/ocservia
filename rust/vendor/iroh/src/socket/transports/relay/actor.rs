@@ -358,7 +358,7 @@ impl ActiveRelayActor {
         let mut backoff = Self::build_backoff(self.keep_connected);
 
         while let Err(err) = self.run_once().await {
-            warn!(
+            debug!(
                 url = %self.url,
                 persistent = self.keep_connected,
                 "{err:#}"
@@ -370,7 +370,7 @@ impl ActiveRelayActor {
                 // If dialing failed, or if the relay connection failed before we received a pong,
                 // we wait an exponentially increasing time until we attempt to reconnect again.
                 let Some(delay) = backoff.next() else {
-                    warn!("retries exceeded");
+                    debug!("retries exceeded");
                     break;
                 };
                 debug!("retry in {delay:?}");
