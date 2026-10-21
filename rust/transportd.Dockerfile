@@ -36,6 +36,15 @@ COPY --chmod=0555 deploy/prepare-transport-runtime.sh /usr/local/libexec/ocservi
 COPY --chmod=0555 deploy/production/transportd-relays.sh /usr/local/libexec/ocservia-transportd-relays
 USER transportd:ocservia
 
+# Explicit opt-in target used only by the hosted enrollment Compose overlay.
+FROM build AS real-e2e-probe-build
+RUN cargo build --locked --release --package ocservia-relay-network-probe
+
+FROM runtime-base AS real-e2e-probe
+COPY --from=build /src/target/release/ocservia-transportd /usr/local/bin/ocservia-transportd
+COPY --from=real-e2e-probe-build /src/target/release/ocservia-relay-network-probe /usr/local/bin/ocservia-relay-network-probe
+ENTRYPOINT ["/usr/local/bin/ocservia-transportd"]
+
 FROM runtime-base
 COPY --from=build /src/target/release/ocservia-transportd /usr/local/bin/ocservia-transportd
 ENTRYPOINT ["/usr/local/bin/ocservia-transportd"]

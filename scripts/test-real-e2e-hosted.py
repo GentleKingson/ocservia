@@ -37,7 +37,7 @@ workflow = yaml.safe_load((ROOT / '.github/workflows/real-e2e.yml').read_text())
 assert set(workflow[True]) == {'workflow_dispatch', 'workflow_call', 'schedule'}
 assert workflow[True]['schedule'] == [{'cron':'17 3 * * *'}]
 assert set(workflow[True]['workflow_call']['secrets']) == {
-    'CROSS_VM_RELAY_URL', 'CROSS_VM_RELAY_CA', 'CROSS_VM_RELAY_TOKEN'}
+    'CROSS_VM_RELAY_TOKEN'}
 assert 'secrets: inherit' not in (ROOT / '.github/workflows/real-e2e.yml').read_text()
 assert workflow['permissions'] == {'contents':'read', 'actions':'read'}
 preflight = workflow['jobs']['preflight']
@@ -46,10 +46,11 @@ admission = workflow['jobs']['admission']
 assert admission['permissions'] == {} and 'environment' not in admission and 'secrets.' not in str(admission)
 assert admission['outputs'] == {'mode':'${{ steps.trust.outputs.mode }}'}
 trust = admission['steps'][0]
+assert trust['env']['SCHEDULE_ENABLED'] == 'false'
 assert trust['name'] == 'Require trusted main workflow before repository code'
 assert 'uses' not in trust and 'scripts/' not in trust['run']
 assert set(trust['env']) == {'SOURCE_REPOSITORY', 'SOURCE_REF', 'SOURCE_SHA', 'JOB_CONTEXT', 'EVENT_NAME', 'SCHEDULE_ENABLED'}
-for role in ('preflight', 'controller', 'node'):
+for role in ('preflight', 'relay', 'controller', 'node'):
     assert workflow['jobs'][role]['environment'] == {'name':'cross-vm-test-relay', 'deployment':False}
 assert 'environment' not in workflow['jobs']['verdict']
 assert 'secrets.' not in str(workflow['jobs']['verdict'])
@@ -67,7 +68,7 @@ for role in ('controller', 'node'):
     if role == 'controller':
         token = next(step for step in uploads if step.get('name') == 'Publish enrollment-token')
         assert token['with']['path'].endswith('/encrypted-token')
-assert workflow['jobs']['verdict']['needs'] == ['admission', 'preflight', 'controller', 'node']
+assert workflow['jobs']['verdict']['needs'] == ['admission', 'preflight', 'relay', 'controller', 'node']
 compose = yaml.safe_load((ROOT / 'deploy/real-e2e/controller.compose.yaml').read_text())
 for name in ('transportd', 'transport-endpoint-bootstrap'):
     command = compose['services'][name]['command']
@@ -107,7 +108,7 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-test-') as directory:
     # represented by their enclosing role's job result.
     import json
     verdict = workflow['jobs']['verdict']['steps'][-1]['run']
-    results = {name:{'result':'success'} for name in ('admission', 'controller', 'node', 'preflight')}
+    results = {name:{'result':'success'} for name in ('admission', 'controller', 'node', 'preflight', 'relay')}
     results['admission']['outputs'] = {'mode':'run'}
     trusted_env = {**os.environ, 'SOURCE_REPOSITORY':'GentleKingson/ocservia',
                    'SOURCE_REF':'refs/heads/main', 'SOURCE_SHA':'a'*40,
@@ -146,7 +147,7 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-test-') as directory:
             verdict_check({**results, name:{'result':status}}, False)
         verdict_check({key:value for key,value in results.items() if key != name}, False)
     verdict_check({**results, 'extra':{'result':'success'}}, False)
-    disabled = {name:{'result':'skipped'} for name in ('controller', 'node', 'preflight')}
+    disabled = {name:{'result':'skipped'} for name in ('controller', 'node', 'preflight', 'relay')}
     disabled['admission'] = {'result':'success', 'outputs':{'mode':'disabled'}}
     verdict_check(disabled, True, {'EVENT_NAME':'schedule'}, acceptance=False)
     verdict_check(results, True, {'EVENT_NAME':'schedule'})
@@ -278,3 +279,119 @@ esac
             env=verify_env, ok=ok)
         assert (verified / 'result.txt').exists() == ok
 print('hosted workflow, Relay configuration/negative controls, fail-closed verdict, peer rejection, OAEP, binding and cleanup checks passed (local contracts only)')
+
+# Three-VM additions use the existing local harness, never an OIDC request.
+spec = importlib.util.spec_from_file_location('tailnet', ROOT / 'scripts/real-e2e-tailnet.py')
+tailnet = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tailnet)
+claims = dict(iss='https://token.actions.githubusercontent.com', aud='test-audience',
+              sub=tailnet.SUBJECT, repository='GentleKingson/ocservia',
+              repository_id='1319465232', repository_owner_id='72605370',
+              ref='refs/heads/main', workflow_ref=tailnet.WORKFLOW, workflow_sha='a'*40,
+              environment='cross-vm-test-relay', runner_environment='github-hosted')
+tailnet.claims_valid(claims, 'test-audience', 'a'*40)
+for key in claims:
+    for value in ('wrong', None):
+        try:
+            tailnet.claims_valid({**claims, key:value}, 'test-audience', 'a'*40)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('accepted wrong OIDC '+key)
+for key in ('job_workflow_ref', 'job_workflow_sha'):
+    try:
+        tailnet.claims_valid({**claims, key:'wrong'}, 'test-audience', 'a'*40)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('accepted untrusted callee')
+for role in ('relay', 'controller', 'node'):
+    job = workflow['jobs'][role]
+    assert job['permissions'] == {'contents':'read', 'actions':'read', 'id-token':'write'}
+    join = next(step for step in job['steps'] if step.get('id') == 'tailnet')
+    assert join['uses'] == 'tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888'
+    assert not {'authkey', 'oauth-secret'} & join['with'].keys()
+    assert join['with']['tags'] == 'tag:ocservia-ci-' + ('relay' if role == 'relay' else 'peer')
+    assert job['needs'] == 'preflight'
+    assert next(step for step in job['steps'] if step.get('name') == 'Logout local Tailnet identity')['if'] == 'always()'
+
+with tempfile.TemporaryDirectory(prefix='real-e2e-tailnet-test-') as directory:
+    import hashlib, json
+    temp = Path(directory)
+    run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+        '-subj', '/CN=local-test-ca', '-keyout', str(temp/'ca.key'), '-out', str(temp/'ca.pem'))
+    ca = (temp/'ca.pem').read_text()
+    ready = dict(url=tailnet.URL, ip='100.64.0.1', ca_sha256=hashlib.sha256(ca.encode()).hexdigest(),
+                 source_commit=local['source_commit'], run_id='4242', attempt='1', boot_id=str(uuid.uuid4()))
+    tailnet.validate_ready(ready, ca, local)
+    for key,value in [('url','https://public.example'), ('ip','127.0.0.1'), ('ip','::1'),
+                      ('ca_sha256','0'*64), ('source_commit','b'*40), ('run_id','3'),
+                      ('attempt','2'), ('boot_id',local['boot_id']), ('token','must-not-be-published')]:
+        try:
+            tailnet.validate_ready({**ready,key:value}, ca, local)
+        except (ValueError, TypeError):
+            pass
+        else:
+            raise AssertionError('accepted wrong ready '+key)
+    evidence.validate({**local,'relay_vm':ready}, {**peer,'relay_vm':ready})
+    for bad in ({**ready,'boot_id':peer['boot_id']}, {**ready,'source_commit':'b'*40}):
+        try:
+            evidence.validate({**local,'relay_vm':bad}, {**peer,'relay_vm':bad})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('accepted non-independent Relay')
+    env = {**os.environ, 'REAL_E2E_RELAY_TOKEN':'t'*32, 'TS_POLICY_REVIEWED':'true'}
+    for role in ('PEER','RELAY'):
+        env['TS_'+role+'_CLIENT_ID'] = 'test-client-' + role
+        env['TS_'+role+'_AUDIENCE'] = 'test-audience'
+    helper = str(ROOT/'scripts/real-e2e-tailnet.py')
+    run('python3',helper,'infra',env=env)
+    run('python3',helper,'infra',env={**env,'TS_PEER_CLIENT_ID':env['TS_RELAY_CLIENT_ID']},ok=False)
+    for key in ('TS_POLICY_REVIEWED','TS_PEER_CLIENT_ID','TS_RELAY_AUDIENCE','REAL_E2E_RELAY_TOKEN'):
+        run('python3',helper,'infra',env={**env,key:''},ok=False)
+    missing = temp/'missing-ready'
+    missing.mkdir()
+    local_file=temp/'environment.json'
+    local_file.write_text(json.dumps(local))
+    run('python3',helper,'consume',str(missing),str(local_file),ok=False)
+    (missing/'ready.json').write_text(json.dumps(ready))
+    (missing/'ca.pem').write_text(ca)
+    run('python3',helper,'consume',str(missing),str(local_file))
+    (missing/'secret').write_text('not-allowed')
+    run('python3',helper,'consume',str(missing),str(local_file),ok=False)
+
+    # Exercise the actual Relay lifetime/cleanup shell with bounded local shims.
+    shim = temp/'bin'
+    shim.mkdir()
+    def executable(name, body):
+        path=shim/name
+        path.write_text('#!/bin/bash\nset -eu\n'+body)
+        path.chmod(0o755)
+    executable('docker', 'if [[ "$1" == inspect ]]; then echo "${RELAY_RUNNING:-true}"; else exit "${DOCKER_STATUS:-0}"; fi\n')
+    executable('curl', 'cat "$JOBS_FIXTURE"\n')
+    executable('sleep', 'cp "$COMPLETED_FIXTURE" "$JOBS_FIXTURE"\n')
+    ready_dir=temp/'real-e2e-relay-4242-1/ready'
+    ready_dir.mkdir(parents=True)
+    (ready_dir/'ready.json').write_text(json.dumps(ready))
+    jobs=temp/'jobs.json'
+    completed=temp/'completed.json'
+    success=[dict(name=n,status='completed',conclusion='success') for n in ('Cross-VM Controller','Cross-VM Agent')]
+    completed.write_text(json.dumps({'jobs':success}))
+    env={**os.environ,'PATH':str(shim)+os.pathsep+os.environ['PATH'],'RUNNER_TEMP':str(temp),
+         'RUN_ID':'4242-1','GITHUB_RUN_ID':'4242','GITHUB_RUN_ATTEMPT':'1','GITHUB_TOKEN':'local-test',
+         'GITHUB_API_URL':'https://api.github.com','GITHUB_REPOSITORY':'GentleKingson/ocservia',
+         'JOBS_FIXTURE':str(jobs),'COMPLETED_FIXTURE':str(completed)}
+    relay_host=str(ROOT/'scripts/real-e2e-relay-host.sh')
+    jobs.write_text(json.dumps({'jobs':[success[0],{**success[1],'status':'in_progress','conclusion':None}]}))
+    run('bash',relay_host,'hold',env=env)
+    for changed in ([success[0],{**success[1],'conclusion':'failure'}], [success[0]], success+success):
+        jobs.write_text(json.dumps({'jobs':changed}))
+        run('bash',relay_host,'hold',env=env,ok=False)
+    jobs.write_text(completed.read_text())
+    run('bash',relay_host,'hold',env={**env,'RELAY_RUNNING':'false'},ok=False)
+    run('bash',relay_host,'cleanup',env={**env,'DOCKER_STATUS':'1'},ok=False)
+    assert not (temp/'real-e2e-evidence-relay/cleanup.txt').exists()
+    run('bash',relay_host,'cleanup',env=env)
+    assert not (temp/'real-e2e-relay-4242-1').exists()
+print('three-VM OIDC, readiness, lifetime and cleanup negative contracts passed (no Tailnet credentials used)')

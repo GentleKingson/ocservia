@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROLE="${REAL_E2E_ROLE:?}"
-[[ "$ROLE" == controller || "$ROLE" == node ]]
+[[ "$ROLE" == controller || "$ROLE" == node || "$ROLE" == relay ]]
 : "${RUN_ID:?}" "${RUNNER_TEMP:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}"
 [[ "$RUN_ID" == "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]
 PRIVATE="$RUNNER_TEMP/real-e2e-private-$RUN_ID-$ROLE"
@@ -57,6 +57,23 @@ PY
 
 case "${1:-}" in
   preflight) preflight ;;
+  consume-relay)
+    ip="$(python3 "$ROOT/scripts/real-e2e-tailnet.py" consume "$PRIVATE/relay-ready" "$EVIDENCE/environment.json")"
+    printf '%s relay.ocservia.test\n' "$ip" | sudo tee -a /etc/hosts >/dev/null
+    export REAL_E2E_RELAY_URL=https://relay.ocservia.test:3443
+    REAL_E2E_RELAY_CA="$(<"$PRIVATE/relay-ready/ca.pem")"
+    export REAL_E2E_RELAY_CA
+    bash "$0" configure-relay
+    if [[ "$ROLE" == controller ]]; then
+      python3 - "$WORK/relay/compose.json" "$ip" <<'OVERLAY'
+import json, sys
+services = {name: {'extra_hosts': ['relay.ocservia.test:' + sys.argv[2]]}
+            for name in ('transportd', 'transport-endpoint-bootstrap')}
+services['transportd']['build'] = {'target': 'real-e2e-probe'}
+open(sys.argv[1], 'w').write(json.dumps({'services': services}))
+OVERLAY
+    fi
+    ;;
   configure-relay)
     python3 "$ROOT/scripts/real-e2e-relay.py" "$WORK/relay"
     python3 - "$EVIDENCE/environment.json" "$WORK/relay/metadata.json" <<'PY'
@@ -66,6 +83,19 @@ item = json.loads(path.read_text())
 item['relay'] = json.loads(pathlib.Path(sys.argv[2]).read_text())
 path.write_text(json.dumps(item, indent=2) + '\n')
 PY
+    ;;
+  tailnet-path)
+    ip="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["relay_vm"]["ip"])' "$EVIDENCE/environment.json")"
+    # Keep a compact path observation, not a full tailnet peer inventory.
+    tailscale status --json >"$PRIVATE/tailscale-status.json"
+    python3 - "$PRIVATE/tailscale-status.json" "$ip" "$EVIDENCE/tailnet-path.json" <<'PATHINFO'
+import json, sys
+state=json.load(open(sys.argv[1]))
+peers=[p for p in (state.get('Peer') or {}).values() if sys.argv[2] in p.get('TailscaleIPs', [])]
+# Path may not be selected until the real TLS/iroh exchange; report honestly.
+json.dump({'relay_ip':sys.argv[2], 'paths':[
+    {k:p.get(k) for k in ('CurAddr','Relay','PeerRelay','Active')} for p in peers]}, open(sys.argv[3],'w'))
+PATHINFO
     ;;
   relay-check)
     # Test TLS with the configured trust, then an unrelated CA. Only curl's
@@ -83,6 +113,7 @@ PY
     [[ "$status" == 60 ]] || { echo 'RELAY: wrong CA did not produce a certificate rejection' >&2; exit 1; }
     private_run relay-auth "$RUNNER_TEMP/ocservia-real-e2e-target-$RUN_ID/release/ocservia-relay-network-probe" \
       "$(<"$WORK/relay/url")" "$WORK/relay/ca.pem" "$WORK/relay/token" --tcp-only
+    if [[ -f "$PRIVATE/relay-ready/ready.json" ]]; then bash "$0" tailnet-path; fi
     printf 'TLS=PASS\nWRONG_CA_REJECTED=PASS\nTOKEN_AUTH=PASS\nWRONG_TOKEN_REJECTED=PASS\n' >"$EVIDENCE/relay.txt"
     ;;
   wait-download)
@@ -126,6 +157,7 @@ PY
     ;;
   verify)
     private_run verify bash "$ROOT/scripts/real-e2e-controller.sh" verify-enrollment "$PRIVATE/enrollment-result"
+    if [[ -f "$PRIVATE/relay-ready/ready.json" ]]; then bash "$0" tailnet-path; fi
     cp "$ARTIFACT_DIR/result.txt" "$EVIDENCE/enrollment.txt"
     cp "$ARTIFACT_DIR/binding.json" "$EVIDENCE/binding.json"
     cp "$PRIVATE/enrollment-result/agent-pid" "$EVIDENCE/agent-pid.txt"
@@ -133,6 +165,34 @@ PY
     while read -r container; do
       docker inspect --format '{{json .State.Pid}} {{json .NetworkSettings.Networks}}' "$container"
     done <"$PRIVATE/container-ids" >"$EVIDENCE/controller-process-network.txt"
+    ;;
+  tailnet-cleanup)
+    trap 'rm -rf -- "$PRIVATE"' EXIT
+    status=0
+    if command -v tailscale >/dev/null; then
+      sudo tailscale logout || status=1
+      tailscale status --json | jq -e '.BackendState == "NeedsLogin"' >/dev/null || status=1
+      # v4.1.3 stores the sudo parent PID here; statedir defaults to memory.
+      pid_file="${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/tailscaled.pid"
+      pid="$(cat "$pid_file")" || status=1
+      if [[ "$pid" =~ ^[0-9]+$ ]]; then
+        sudo pkill -P "$pid" || status=1
+      else
+        status=1
+      fi
+      for _ in {1..10}; do
+        if ! pgrep -x tailscaled >/dev/null; then break; fi
+        sleep 1
+      done
+      if pgrep -x tailscaled >/dev/null; then status=1; fi
+      sudo tailscaled --cleanup || status=1
+      rm -f -- "$pid_file" "$HOME/tailscaled.log" || status=1
+    fi
+    sudo sed -i '/ relay\.ocservia\.test$/d' /etc/hosts || status=1
+    # cleanup may already have removed PRIVATE; this phase recreated it.
+    rm -rf -- "$PRIVATE" || status=1
+    ((status == 0))
+    printf 'LOCAL_TAILNET_LOGOUT=PASS\nLOCAL_TAILSCALED_STOPPED=PASS\nSERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED\n' >"$EVIDENCE/tailnet-cleanup.txt"
     ;;
   cleanup)
     trap 'rm -rf -- "$PRIVATE"' EXIT
