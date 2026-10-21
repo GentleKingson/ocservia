@@ -199,7 +199,7 @@ if [[ "$1" == install ]]; then shift; exec install "$@"; fi
     (scripts / 'real-e2e-controller.sh').write_text('''#!/bin/bash
 set -euo pipefail
 if [[ "$1" == start ]]; then
-  echo 'private-credential-fixture signal: killed' >&2
+  echo 'private-credential-fixture signal: killed target gateway: gateway.Dockerfile:2' >&2
   exit 37
 fi
 work="$RUNNER_TEMP/ocservia-real-e2e-controller-$RUN_ID"
@@ -234,7 +234,9 @@ esac
     wrapper = str(scripts / 'real-e2e-hosted.sh')
     start_failure = run('bash', wrapper, 'start', env={**env, 'REAL_E2E_ROLE':'controller'}, ok=False)
     failure_json = temp / 'real-e2e-evidence-controller/start-failure.json'
-    assert json.loads(failure_json.read_text()) == {'exit_code':37, 'signals':['memory']}
+    assert json.loads(failure_json.read_text()) == {
+        'exit_code':37, 'signals':['memory'], 'build_targets':['gateway'],
+        'build_locations':[{'file':'gateway.dockerfile', 'line':2}]}
     assert b'private-credential-fixture' not in start_failure.stdout + start_failure.stderr + failure_json.read_bytes()
     run('bash', wrapper, 'configure-relay', env={**env, **{
         key:value for key,value in config_env.items() if key.startswith('REAL_E2E_RELAY_')}})
