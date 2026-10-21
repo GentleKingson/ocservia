@@ -155,7 +155,12 @@ services:
     tmpfs:
       - /tmp:size=16m,mode=0700
     volumes:
-      - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}:/run/real-e2e-business:ro
+      # File mounts keep the key ancestry root-owned inside the container.
+      - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}/command.key.pem:/run/real-e2e-business/command.key.pem:ro
+      - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}/session-key:/run/real-e2e-business/session-key:ro
+      - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}/audit-checkpoint-key:/run/real-e2e-business/audit-checkpoint-key:ro
+      - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}/requester-password:/run/real-e2e-business/requester-password:ro
+      - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}/approver-password:/run/real-e2e-business/approver-password:ro
       - type: volume
         source: transport-runtime
         target: /run/ocserv-platform
