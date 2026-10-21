@@ -1,6 +1,6 @@
 module github.com/GentleKingson/ocservia/control-plane
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/coreos/go-oidc/v3 v3.17.0
