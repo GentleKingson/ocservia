@@ -82,6 +82,7 @@ start_controller() {
     "${TLS_DIR}/tls_private_key" "${SECRETS}/ca.key"
   sudo chown 65534:65532 "${SECRETS}/command.key.pem" "${SECRETS}/session-key" \
     "${SECRETS}/audit-checkpoint-key"
+  sudo chown 0:0 "${TLS_DIR}/tls_private_key"
   chmod 0444 "${TLS_DIR}/tls_certificate" "${WORK}/ca.crt"
   # Only the token is secret inside the read-only transportd mount. Docker
   # mounts the directory directly; the host WORK ancestor remains private.
