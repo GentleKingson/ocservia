@@ -5,10 +5,6 @@ on:
     - cron: '17 3 * * *'
   workflow_call:
     secrets:
-      CROSS_VM_RELAY_URL:
-        required: false
-      CROSS_VM_RELAY_CA:
-        required: false
       CROSS_VM_RELAY_TOKEN:
         required: false
 permissions:
@@ -38,7 +34,8 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
           JOB_CONTEXT: ${{ toJSON(job) }}
           EVENT_NAME: ${{ github.event_name }}
-          SCHEDULE_ENABLED: ${{ vars.CROSS_VM_SCHEDULE_ENABLED }}
+          # Keep disabled until this three-VM profile passes on trusted main.
+          SCHEDULE_ENABLED: 'false'
         run: |
           if [[ "$SOURCE_REPOSITORY" != GentleKingson/ocservia || "$SOURCE_REF" != refs/heads/main ||
                 ! "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] ||
@@ -72,20 +69,93 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Require explicit test network configuration
+      - name: Require protected Tailnet configuration
         env:
-          REAL_E2E_RELAY_URL: ${{ secrets.CROSS_VM_RELAY_URL }}
-          REAL_E2E_RELAY_CA: ${{ secrets.CROSS_VM_RELAY_CA }}
+          TS_PEER_CLIENT_ID: ${{ vars.TS_PEER_CLIENT_ID }}
+          TS_PEER_AUDIENCE: ${{ vars.TS_PEER_AUDIENCE }}
+          TS_RELAY_CLIENT_ID: ${{ vars.TS_RELAY_CLIENT_ID }}
+          TS_RELAY_AUDIENCE: ${{ vars.TS_RELAY_AUDIENCE }}
+          TS_POLICY_REVIEWED: ${{ vars.TS_POLICY_REVIEWED }}
           REAL_E2E_RELAY_TOKEN: ${{ secrets.CROSS_VM_RELAY_TOKEN }}
         run: |
-          if ! python3 scripts/real-e2e-relay.py; then
+          if ! python3 scripts/real-e2e-tailnet.py infra; then
             echo 'CROSS_VM_ENROLLMENT=BLOCKED_INFRA' >>"$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+  relay:
+    name: Cross-VM Relay
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    environment:
+      name: cross-vm-test-relay
+      deployment: false
+    env:
+      REAL_E2E_ROLE: relay
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify hosted VM and dependencies
+        run: bash scripts/real-e2e-hosted.sh preflight
+      - name: Check GitHub OIDC scope before Tailnet join
+        env:
+          TS_AUDIENCE: ${{ vars.TS_RELAY_AUDIENCE }}
+        run: python3 scripts/real-e2e-tailnet.py oidc
+      - name: Join ephemeral Tailnet using OIDC
+        id: tailnet
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ vars.TS_RELAY_CLIENT_ID }}
+          audience: ${{ vars.TS_RELAY_AUDIENCE }}
+          tags: tag:ocservia-ci-relay
+          hostname: ocservia-relay-${{ github.run_id }}-${{ github.run_attempt }}
+          args: --accept-dns=false --accept-routes=false
+          use-cache: 'false'
+      - name: Start private HTTPS Relay
+        env:
+          REAL_E2E_RELAY_TOKEN: ${{ secrets.CROSS_VM_RELAY_TOKEN }}
+        run: bash scripts/real-e2e-relay-host.sh start
+      - name: Publish Relay readiness
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-relay-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/real-e2e-relay-${{ env.RUN_ID }}/ready
+          if-no-files-found: error
+          retention-days: 1
+      - name: Keep Relay alive until both peer jobs complete
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/real-e2e-relay-host.sh hold
+      - name: Clean Relay and private TLS material
+        if: always()
+        run: timeout --kill-after=15s 240s bash scripts/real-e2e-relay-host.sh cleanup
+      - name: Logout local Tailnet identity
+        if: always()
+        run: bash scripts/real-e2e-hosted.sh tailnet-cleanup
+      - name: Clean private preflight directory
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/real-e2e-private-$RUN_ID-relay"
+      - name: Preserve allowlisted evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cross-vm-evidence-relay-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/real-e2e-evidence-relay
+          if-no-files-found: error
+          retention-days: 7
   controller:
     name: Cross-VM Controller
     runs-on: ubuntu-24.04
     needs: preflight
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     timeout-minutes: 60
     environment:
       name: cross-vm-test-relay
@@ -98,12 +168,31 @@ jobs:
           persist-credentials: false
       - name: Verify hosted VM and dependencies
         run: bash scripts/real-e2e-hosted.sh preflight
+      - name: Check GitHub OIDC scope before Tailnet join
+        env:
+          TS_AUDIENCE: ${{ vars.TS_PEER_AUDIENCE }}
+        run: python3 scripts/real-e2e-tailnet.py oidc
+      - name: Join ephemeral Tailnet using OIDC
+        id: tailnet
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ vars.TS_PEER_CLIENT_ID }}
+          audience: ${{ vars.TS_PEER_AUDIENCE }}
+          tags: tag:ocservia-ci-peer
+          hostname: ocservia-controller-${{ github.run_id }}-${{ github.run_attempt }}
+          args: --accept-dns=false --accept-routes=false
+          use-cache: 'false'
+      - name: Wait for Relay readiness
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-relay-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          relay-ready "Cross-VM Relay"
       - name: Configure dedicated test Relay
         env:
-          REAL_E2E_RELAY_URL: ${{ secrets.CROSS_VM_RELAY_URL }}
-          REAL_E2E_RELAY_CA: ${{ secrets.CROSS_VM_RELAY_CA }}
           REAL_E2E_RELAY_TOKEN: ${{ secrets.CROSS_VM_RELAY_TOKEN }}
-        run: bash scripts/real-e2e-hosted.sh configure-relay
+        run: bash scripts/real-e2e-hosted.sh consume-relay
       - name: start
         run: bash scripts/real-e2e-hosted.sh start
       - name: Publish controller-ready
@@ -142,6 +231,9 @@ jobs:
         if: always()
         timeout-minutes: 5
         run: timeout --kill-after=15s 240s bash scripts/real-e2e-hosted.sh cleanup
+      - name: Logout local Tailnet identity
+        if: always()
+        run: bash scripts/real-e2e-hosted.sh tailnet-cleanup
       - name: Preserve allowlisted evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -154,6 +246,10 @@ jobs:
     name: Cross-VM Agent
     runs-on: ubuntu-24.04
     needs: preflight
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     timeout-minutes: 60
     environment:
       name: cross-vm-test-relay
@@ -166,12 +262,31 @@ jobs:
           persist-credentials: false
       - name: Verify hosted VM and dependencies
         run: bash scripts/real-e2e-hosted.sh preflight
+      - name: Check GitHub OIDC scope before Tailnet join
+        env:
+          TS_AUDIENCE: ${{ vars.TS_PEER_AUDIENCE }}
+        run: python3 scripts/real-e2e-tailnet.py oidc
+      - name: Join ephemeral Tailnet using OIDC
+        id: tailnet
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ vars.TS_PEER_CLIENT_ID }}
+          audience: ${{ vars.TS_PEER_AUDIENCE }}
+          tags: tag:ocservia-ci-peer
+          hostname: ocservia-node-${{ github.run_id }}-${{ github.run_attempt }}
+          args: --accept-dns=false --accept-routes=false
+          use-cache: 'false'
+      - name: Wait for Relay readiness
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-relay-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          relay-ready "Cross-VM Relay"
       - name: Configure dedicated test Relay
         env:
-          REAL_E2E_RELAY_URL: ${{ secrets.CROSS_VM_RELAY_URL }}
-          REAL_E2E_RELAY_CA: ${{ secrets.CROSS_VM_RELAY_CA }}
           REAL_E2E_RELAY_TOKEN: ${{ secrets.CROSS_VM_RELAY_TOKEN }}
-        run: bash scripts/real-e2e-hosted.sh configure-relay
+        run: bash scripts/real-e2e-hosted.sh consume-relay
       - name: build
         run: bash scripts/real-e2e-hosted.sh build
       - name: Verify TLS and real Relay authentication negative controls
@@ -212,6 +327,9 @@ jobs:
         if: always()
         timeout-minutes: 5
         run: timeout --kill-after=15s 240s bash scripts/real-e2e-hosted.sh cleanup
+      - name: Logout local Tailnet identity
+        if: always()
+        run: bash scripts/real-e2e-hosted.sh tailnet-cleanup
       - name: Preserve allowlisted evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -222,7 +340,7 @@ jobs:
           retention-days: 7
   verdict:
     name: Cross-VM Verdict and Artifact Cleanup
-    needs: [admission, preflight, controller, node]
+    needs: [admission, preflight, relay, controller, node]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -237,26 +355,26 @@ jobs:
         run: |
           set -euo pipefail
           ids="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name | test("^real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
+            --jq '.artifacts[] | select(.name | test("^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
           for id in $ids; do
             gh api --method DELETE "repos/$GH_REPO/actions/artifacts/$id"
           done
           remaining="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name | test("^real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
+            --jq '.artifacts[] | select(.name | test("^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
           test -z "$remaining"
-      - name: Require preflight, both VMs and cleanup to succeed
+      - name: Require preflight, three VMs and cleanup to succeed
         env:
           RESULTS: ${{ toJSON(needs) }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [[ "$EVENT_NAME" == schedule ]] && jq -e '
-            keys == ["admission","controller","node","preflight"] and
+            keys == ["admission","controller","node","preflight","relay"] and
             .admission.result == "success" and .admission.outputs.mode == "disabled" and
-            ([.controller,.node,.preflight] | all(.[]; .result == "skipped"))' <<<"$RESULTS" >/dev/null; then
+            ([.controller,.node,.preflight,.relay] | all(.[]; .result == "skipped"))' <<<"$RESULTS" >/dev/null; then
             echo 'CROSS_VM_ENROLLMENT=NOT_RUN_SCHEDULE_DISABLED' >>"$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          jq -e 'keys == ["admission","controller","node","preflight"] and
+          jq -e 'keys == ["admission","controller","node","preflight","relay"] and
             .admission.outputs.mode == "run" and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null
           {
             echo 'CROSS_VM_ENROLLMENT=PASS'

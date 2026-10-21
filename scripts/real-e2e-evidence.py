@@ -27,6 +27,16 @@ def validate(local, peer):
     # Kernel boot IDs, not image labels, identify the independent instances.
     if local['boot_id'] == peer['boot_id']:
         raise ValueError('same runner')
+    if 'relay_vm' in local or 'relay_vm' in peer:
+        if local.get('relay_vm') != peer.get('relay_vm'):
+            raise ValueError('different Relay VMs')
+        relay = local['relay_vm']
+        if relay['boot_id'] in (local['boot_id'], peer['boot_id']):
+            raise ValueError('Relay shares a peer VM')
+        if any(local['relay'][key] != relay[key] for key in ('url', 'ca_sha256')):
+            raise ValueError('Relay readiness/configuration mismatch')
+        if relay['source_commit'] != local['source_commit']:
+            raise ValueError('Relay source mismatch')
     if local['source_commit'] != peer['source_commit']:
         raise ValueError('mixed source commits')
     if local['run_id'] != peer['run_id'] or local['relay'] != peer['relay']:

@@ -1,170 +1,181 @@
 # Cross-VM enrollment validation
 
-The `deploy/real-e2e` fixture uses one explicitly configured HTTPS test Relay
-for two independent `ubuntu-24.04` GitHub-hosted VMs. Agent and transportd
-retain disabled public endpoint discovery and public DNS fallback. The old
-default-Relay fixture's historical results do not qualify this configuration.
+The hosted fixture runs three independent Ubuntu 24.04 VMs: Controller with
+PostgreSQL and transportd, the real Agent, and one disposable iroh HTTPS Relay.
+It reuses the locked Relay Dockerfile and enrollment protocol. Production Relay
+configuration and the default transportd image target are unchanged.
 
-Status: **NOT_PROVEN / BLOCKED_INFRA** until an authorized test network is
-configured and this candidate passes a real hosted run. No dedicated test
-Relay or overlay identity is provisioned by the workflow. Three-VM native VPN,
-sole-Relay outage/recovery and revocation acceptance remain unimplemented;
-Release Check has no cross-VM requirement.
+**Status: BLOCKED_INFRA / NOT_PROVEN until the administrator setup below and an
+authorized run on the exact merged main SHA succeed.** Local contracts, Basic CI
+and CodeQL do not prove three-VM enrollment. Earlier two-VM results do not qualify
+this topology. There is no new Release Check gate.
 
-## Infrastructure prerequisite
+## One-time administrator setup
 
-An operator must first authorize a disposable or isolated test-only Relay,
-configure its authenticated token and TLS certificate with the correct SAN,
-and make its HTTPS endpoint reachable from both hosted VMs. The Relay name
-must resolve through system DNS on both VMs and inside the Controller's Docker
-network. There is no public Relay, public endpoint lookup or DNS fallback.
-Do not point this fixture at an existing production service.
+1. Use a dedicated test Tailnet without Tailnet Lock (the pinned Action's WIF
+   mode does not support Tailnet Lock). Create `tag:ocservia-ci-peer` and
+   `tag:ocservia-ci-relay`, owned only by authorized administrators. Configure
+   two separate OIDC federated identities, with writable `auth_keys` scope and
+   only their respective tag. No persistent auth key or OAuth secret is needed.
+2. For **both** identities, use issuer
+   `https://token.actions.githubusercontent.com`, and the exact subject:
+   `repo:GentleKingson@72605370/ocservia@1319465232:environment:cross-vm-test-relay`.
+   The repository's OIDC customization API currently reports `use_default=true`,
+   `use_immutable_subject=true` and the ID-bearing prefix above. Recheck this
+   before installation. The Environment replaces the branch suffix in default
+   `sub`; the subject alone does **not** constrain the branch.
+   Add exact custom claim rules:
 
-Create a dedicated GitHub Environment named `cross-vm-test-relay` before enabling
-credentialed execution. Under **Deployment branches and tags**, select only
-the **branch** `main` (no tags). Disable required reviewers, wait timers and
-custom protection rules. The preflight, Controller and Agent jobs use this
-Environment with `deployment: false`, preserving its access rules without
-creating deployment records. The verdict job has no Environment or Relay
-secrets. These controls require repository-administration permission; declaring
-the Environment in YAML does not establish that its server-side policy exists.
+   | Claim | Required value |
+   |---|---|
+   | `repository` | `GentleKingson/ocservia` |
+   | `repository_id` | `1319465232` |
+   | `repository_owner_id` | `72605370` |
+   | `ref` | `refs/heads/main` |
+   | `workflow_ref` | `GentleKingson/ocservia/.github/workflows/real-e2e.yml@refs/heads/main` |
+   | `environment` | `cross-vm-test-relay` |
+   | `runner_environment` | `github-hosted` |
 
-Store these secrets only in that Environment, without placing values in source:
+   Use each identity's generated audience exactly. Do not use a wildcard subject,
+   repository, ref, workflow or audience. The local pre-join guard also compares
+   workflow SHA to the checked-out SHA and rejects a different reusable callee.
+   First qualification uses direct `workflow_dispatch`; callers with another
+   `workflow_ref` are intentionally rejected by this identity policy.
+3. Apply the following grant to the test Tailnet policy:
 
-| Secret | Value |
-|---|---|
-| `CROSS_VM_RELAY_URL` | One credential-free `https://host[:port]` URL |
-| `CROSS_VM_RELAY_CA` | PEM test CA certificate, with no private key |
-| `CROSS_VM_RELAY_TOKEN` | Matching Relay token, 32–512 non-whitespace bytes |
+   ```json
+   {
+     "tagOwners": {
+       "tag:ocservia-ci-peer": ["autogroup:admin"],
+       "tag:ocservia-ci-relay": ["autogroup:admin"]
+     },
+     "grants": [{
+       "src": ["tag:ocservia-ci-peer"],
+       "dst": ["tag:ocservia-ci-relay"],
+       "ip": ["tcp:3443"]
+     }]
+   }
+   ```
 
-Do not store copies under repository or organization secrets. If migrating
-existing values, configure and verify the restricted Environment before removing
-the other copies. A non-main branch can change its own workflow YAML, so a shell
-check or job condition cannot replace the Environment's server-side restriction.
+   Review the **entire effective policy**, including existing ACLs and grants:
+   rules are additive. Remove overlapping allow-all, wildcard, group, tag or
+   address-range rules that allow peer-to-peer, relay-to-peer, other Relay ports
+   or access to unrelated devices. Do not merely append this grant to the default
+   allow-all policy. Use Tailscale policy tests to require peer → relay TCP 3443
+   and reject peer → peer, relay → peer and peer → relay TCP 22/443/8080 and UDP
+   7842. Do not grant routes, exit nodes, SSH or Funnel. Existing networks must
+   not be silently broadened or disrupted; use the isolated test Tailnet.
+4. Preserve GitHub Environment `cross-vm-test-relay` with **only branch `main`**
+   allowed, no tag patterns. Do not relax its protection rules. Keep the existing
+   `CROSS_VM_RELAY_TOKEN` secret only there (32–512 non-whitespace bytes); never
+   put it in variables or artifacts. The old URL/CA secrets are no longer read
+   by this workflow; removal can wait until no older/manual consumers need them.
+5. Set these **Environment variables**, not secrets: `TS_PEER_CLIENT_ID`,
+   `TS_PEER_AUDIENCE`, `TS_RELAY_CLIENT_ID`, `TS_RELAY_AUDIENCE`. Only after the
+   above effective-policy/identity review, set `TS_POLICY_REVIEWED=true` there.
+   This is an administrator attestation, **not** an independent API policy audit.
+   Missing configuration fails preflight with `BLOCKED_INFRA` before any join.
+6. Set repository variable `CROSS_VM_SCHEDULE_ENABLED=false`. In addition, this
+   candidate hardcodes the admission schedule input to `false` so an inaccessible
+   or stale variable cannot enable an unqualified topology. Reconnecting the
+   variable requires a separate change after the first real success; do not do
+   that during initial acceptance. Keep Release Check unchanged.
 
-Leave the non-sensitive repository variable `CROSS_VM_SCHEDULE_ENABLED` unset
-or set to `false` until real dual-VM acceptance succeeds. Only the exact value
-`true` enables scheduled qualification. The switch does not disable manual or
-reusable execution. Missing or unexpected values disable scheduled execution
-before any Environment job is eligible or any build starts. The final job
-requires all three credential jobs to be skipped in that case and reports
-`CROSS_VM_ENROLLMENT=NOT_RUN_SCHEDULE_DISABLED`; this is no acceptance result.
-Cleanup failure still fails the workflow. Any other unexpected skip fails
-qualification.
+No administrator Tailnet API credential is passed to CI. Consequently, CI cannot
+independently enumerate all policy rules or confirm server-side device deletion.
+Do not label either as API-verified. If stronger deletion evidence is needed,
+an administrator can inspect the three run-scoped hostnames in the device API
+before/after the run without adding credentials to this workflow.
 
-The operator owns token expiry/rotation and the external Relay's lifecycle.
-The fixture copies credentials into each run's private directory and deletes
-those copies; it does not create or revoke external credentials. Missing or
-malformed configuration reports `BLOCKED_INFRA` and fails before building the
-Controller or Agent. A Secrets/Variables API 403 alone does not establish
-whether configuration exists. No new account, paid VM or persistent network is
-created. A private-overlay implementation requires separate authorized identity
-and ACL setup; it is not included here.
+## Hosted execution and evidence
 
-## GitHub-hosted execution
+After review and explicit merge authorization, record the merged SHA and run:
 
 ```sh
 gh workflow run real-e2e.yml --ref main
 ```
 
-The workflow supports dispatch, daily schedule (`17 3 * * *`, 11:17 Hong Kong
-time), and `workflow_call`. Enabled scheduling becomes active only on the default
-branch and may be delayed or missed by GitHub. A reusable caller must explicitly
-pass the three named secrets and grant `contents: read` and `actions: write`;
-the latter is narrowed to `actions: read` except in the final cleanup job.
-Invoke this fixture once per run attempt: rendezvous/evidence names are scoped
-to that attempt. Jobs API lookup accepts reusable caller prefixes but rejects
-ambiguous peers.
-Environment secrets take precedence over repository/organization values with
-the same names; explicit reusable mappings remain required even when values
-exist only in the Environment. Call the workflow from trusted main with the
-local `./.github/workflows/real-e2e.yml` path. There is no `secrets: inherit`,
-OIDC identity or publishing permission.
+Check the run's `head_sha` equals that recorded SHA. The graph is
+`admission → preflight → relay/controller/node → verdict`. Admission is
+uncredentialed and checks repository, main ref, defining workflow ref/SHA and
+event before checkout. All three role jobs use the protected Environment and
+job-local `id-token: write`. Tailscale Action v4.1.3 is fixed at
+`780049a30b6ff5c378a9e7b389d15ece7a204888`; it requests ephemeral, preapproved
+nodes with in-memory state. No long-lived Tailscale key is supplied.
 
-An uncredentialed admission job runs first, with no checkout, Environment,
-Relay secrets or token permissions. It checks the caller repository/ref, the
-defining workflow's main ref and SHA, and the event, then compares the schedule
-switch in Bash. Actions expression equality ignores case; it is not used to
-interpret the variable. Only a constant `mode=run` output makes preflight
-eligible; a disabled schedule produces `mode=disabled`. Only manual, scheduled and main push
-caller events are accepted; `pull_request_target` and `workflow_run` callers
-are rejected. GitHub's `job.workflow_ref`/`job.workflow_sha` identify the reusable
-callee, while `github` identifies its caller. These GitHub.com fields are read
-through the job JSON context so absent fields fail closed. Environment policies
-evaluate the caller's ref; trusted main must never invoke an untrusted workflow
-revision or pass credentials to untrusted code. See GitHub's
-[reusable workflow guidance](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows).
+The Relay generates a one-day CA and DNS-SAN leaf certificate for
+`relay.ocservia.test`, disables QUIC discovery in its disposable configuration,
+and publishes only its Tailnet IPv4 TCP 3443. No public port, external VPS,
+public DNS or public Relay is used. Its readiness artifact contains only the
+URL, Tailnet IP, public CA and fingerprint, source SHA, run ID, attempt and boot
+ID. Peers reject stale, mixed-source, same-VM or malformed readiness. They map
+the fixed hostname locally; a test-only Compose overlay also maps it inside
+transportd and endpoint bootstrap. Production Compose networks are unchanged.
 
-Non-main dispatch demonstrates `BLOCKED_AUTH`, with no credentialed job or
-checkout. Missing configuration on authorized main reports `BLOCKED_INFRA`.
-Checkout must equal `GITHUB_SHA`. Concurrency is scoped to the run and attempt,
-with a different prefix from Release Check.
+The Relay job remains alive, checking its container and verified HTTPS health,
+until **both full peer jobs complete**, including cleanup and post steps. Failed
+peers fail qualification, and waits have deadlines. The Controller's actual
+transportd container uses an opt-in image target containing the existing iroh
+probe. Its real authenticated connection and typed wrong-token denial must pass
+before controller-ready is published. The Agent checks the correct CA and token,
+requires curl error **60** for the unrelated CA (timeouts/DNS errors fail), and
+requires typed `ServerDeniedAuth` for the wrong token before real enrollment.
+TLS/hostname verification remains enabled everywhere.
 
-Controller and Agent jobs start concurrently after infrastructure preflight.
-They check native
-systemd PID 1, Docker/Compose, Ubuntu version and required utilities, exchange
-boot IDs and environment evidence, and reject same-host or mixed-commit peers.
-The Controller runs real PostgreSQL, Control Plane and transportd; the Agent
-builds and runs the real enrollment binary with the same single custom Relay,
-CA and token as transportd. They compare the source SHA, run attempt, Relay
-URL and CA fingerprint as well as distinct boot IDs. No public inbound
-listener is required on either runner.
+Existing OAEP exchange, real Agent enrollment and Controller database assertions
+remain intact: UUIDv7 Pending Node, EndpointID, workspace/environment, and
+consumed token → node binding. Controller and Agent compare distinct boot IDs,
+source/run identity, common Relay metadata and a third distinct Relay boot ID.
+A compact post-traffic Tailscale peer observation records `CurAddr`, `Relay`,
+`PeerRelay` and `Active`; an absent path is unknown, not proof of direct traffic.
+Tailscale transport (direct/DERP/peer relay) is separate from application iroh
+Relay use. `tailscale ping` is not used as enrollment evidence.
 
-Before enrollment, the Agent VM checks TLS using the configured CA. An unrelated
-CA must produce curl certificate-verification error 60; DNS/connection errors
-and timeouts fail the test. The existing `ocservia-relay-network-probe` runs in
-TCP-only mode and requires a real authenticated connection followed by typed
-`ServerDeniedAuth` rejection of a wrong token. QUIC discovery is not required
-for this enrollment fixture. Raw probe output stays private; only fixed result
-markers enter evidence. These checks do not prove that a later business session
-cannot upgrade to a direct path, or that sole-Relay recovery works.
+Cleanup steps run with `always()`: Controller services/volumes/networks, Agent
+process/build/private files, Relay container/image/TLS/token files, local hosts
+mapping, Tailscale logout, daemon shutdown and in-memory credentials. Explicit
+cleanup failures fail their job, even though the upstream Action's post hook
+only warns on cleanup errors. That post hook may warn that an explicitly stopped
+daemon is absent; the checked cleanup step owns the result. Runner cancellation
+or loss remains best effort; ephemeral server removal is expected by Tailscale
+but always reported `SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED` without
+independent API evidence.
 
-The existing run-attempt-scoped artifact helper coordinates bounded waits and
-stops on a peer failure. The Agent generates a fresh RSA-3072 key for each run;
-only its public key is uploaded. The Controller encrypts the short-lived bound
-enrollment token with RSA-OAEP SHA-256. Only ciphertext is uploaded; decrypted
-tokens, endpoint private keys, and raw process/build logs remain private in
-`RUNNER_TEMP` and are removed by unconditional cleanup. Uploaded evidence is
-limited to environment, process/network, binding and cleanup records; raw logs
-are never uploaded. The final job deletes rendezvous artifacts with narrowly
-scoped Actions write permission, verifies both role jobs succeeded, then reports
-`CROSS_VM_ENROLLMENT=PASS`. A timeout, missing binding, token-consumption mismatch
-or failed cleanup cannot pass. Evidence artifacts are retained for seven days.
-Job cancellation can prevent final cleanup; in that case no PASS is valid and
-rendezvous artifacts must be deleted through the Actions API before closing the
-run. Hosted VMs are disposable; no persistent server is provisioned.
+Verdict deletes all five run-attempt rendezvous artifact kinds, re-lists them
+and requires zero remaining. Three allowlisted evidence artifacts remain for
+seven days. Any failed, cancelled, unexpectedly skipped, timed-out or cleanup-
+failed dependency prevents PASS; disabled schedules report NOT_RUN, never PASS.
+The final positive markers are only for the exact successful run:
 
-The token is the existing EndpointID-bound development enrollment token, not an
-unbound production node bootstrap token. Its consumed node, expected endpoint,
-workspace and environment are checked against the pending UUIDv7 node record.
-This profile leaves `CROSS_VM_PRIVATE_BUSINESS` and
-`DEDICATED_RELAY_RECOVERY` at `NOT_PROVEN`, and
-`CROSS_WAN_PUBLIC_INGRESS=NOT_TESTED`: installation, approval, Online, native
-ocserv/privd/Signer, independent OpenConnect and sole-Relay recovery need separate
-implementation and real evidence. A private overlay does not prove public ingress.
-
-There are five jobs when configured: admission, a short preflight, two build/test
-VM roles (60-minute deadline each), and a short verdict/cleanup. Missing
-infrastructure runs admission, preflight and verdict and fails qualification;
-non-main and disabled schedules never start credentialed jobs. Actual runner
-minutes, build/queue time and network costs must be measured from a real run;
-no successful-run cost or acceptance result is established by static checks.
-
-Local checks (not live acceptance):
-
-```sh
-python3 scripts/test-real-e2e-hosted.py  # requires PyYAML
-bash scripts/test-real-e2e-artifact.sh
-make real-e2e-check
+```text
+CROSS_VM_ENROLLMENT=PASS
+CLEANUP=PASS
+CROSS_VM_PRIVATE_BUSINESS=NOT_PROVEN
+DEDICATED_RELAY_RECOVERY=NOT_PROVEN
+CROSS_WAN_PUBLIC_INGRESS=NOT_TESTED
 ```
 
-Prepare two separate Linux VMs that have different boot IDs (read from
-`/proc/sys/kernel/random/boot_id`), the same repository commit, and outbound
-access to the authorized test Relay. Both machines need the shell
-utilities used by the scripts, including jq. The Controller VM also requires
-Docker Compose, which starts real PostgreSQL, Control Plane, and transportd
-processes. The managed-node VM requires OpenSSL and the repository's Rust
-toolchain to build the real Agent.
+Record run ID/attempt, SHA, three boot IDs, TLS/token positive and negative
+results, DB binding, path observation, effective-policy review basis, artifact
+cleanup and local/server cleanup distinctions. Measure wall time and summed job
+seconds from the Jobs API; report runner minutes separately from billed minutes.
+No successful three-VM cost or duration is known before the real run.
+
+Local checks (no Tailnet credentials or actual joins):
+
+```sh
+make real-e2e-check
+python3 scripts/test-real-e2e-hosted.py
+bash scripts/test-real-e2e-artifact.sh
+actionlint .github/workflows/real-e2e.yml
+shellcheck -x scripts/real-e2e-{hosted,controller,node,artifact,relay-host}.sh
+```
+
+Official references checked for this implementation:
+[Tailscale Action at the pinned SHA](https://github.com/tailscale/github-action/tree/780049a30b6ff5c378a9e7b389d15ece7a204888),
+[workload identity federation](https://tailscale.com/docs/features/workload-identity-federation),
+[additive Grants/ACL behavior](https://tailscale.com/docs/reference/grants-vs-acls),
+[GitHub OIDC claims and immutable subjects](https://docs.github.com/en/actions/reference/security/oidc).
 
 ## Manual execution
 

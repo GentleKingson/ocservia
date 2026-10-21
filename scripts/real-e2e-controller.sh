@@ -25,7 +25,11 @@ export OCSERV_CONTROLLER_ENDPOINT_ID
 compose() {
   export REAL_E2E_RELAY_URL
   REAL_E2E_RELAY_URL="$(<"${REAL_E2E_RELAY_DIR}/url")" || return 1
-  docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
+  local overlay=()
+  if [[ -f "${REAL_E2E_RELAY_DIR}/compose.json" ]]; then
+    overlay=(--file "${REAL_E2E_RELAY_DIR}/compose.json")
+  fi
+  docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "${overlay[@]}" "$@"
 }
 
 require_endpoint() {
@@ -90,6 +94,11 @@ start_controller() {
     sleep 1
   done
   compose exec -T transportd test -S /run/ocserv-platform/transportd.sock
+  if [[ -f "${REAL_E2E_RELAY_DIR}/compose.json" ]]; then
+    compose exec -T transportd /usr/local/bin/ocservia-relay-network-probe \
+      "$(<"${REAL_E2E_RELAY_DIR}/url")" /run/real-e2e-relay/ca.pem /run/real-e2e-relay/token --tcp-only
+    printf 'TRANSPORTD_CONTAINER_RELAY_AUTH=PASS\nTRANSPORTD_WRONG_TOKEN_REJECTED=PASS\n' >"${RUNNER_TEMP}/real-e2e-evidence-controller/relay.txt"
+  fi
   compose exec -T control-plane curl --fail --silent --show-error \
     http://127.0.0.1:8080/readyz >/dev/null
   compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
