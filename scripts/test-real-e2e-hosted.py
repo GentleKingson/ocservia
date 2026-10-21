@@ -92,6 +92,17 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-test-') as directory:
         result = subprocess.run(args, cwd=ROOT, env=env, capture_output=True)
         assert (result.returncode == 0) == ok, (args, result.stderr.decode())
         return result
+    failed_start_bin = temp / 'failed-start-bin'
+    failed_start_bin.mkdir()
+    (failed_start_bin / 'openssl').write_text('#!/bin/bash\nexit 37\n')
+    (failed_start_bin / 'openssl').chmod(0o755)
+    failed_start = run('bash', str(ROOT / 'scripts/real-e2e-controller.sh'), 'start', ok=False,
+                       env={**os.environ, 'RUN_ID':'negative-start', 'COMPOSE_PROJECT':'negative-start',
+                            'RUNNER_TEMP':str(temp / 'failed-start'), 'ARTIFACT_DIR':str(temp / 'start-private'),
+                            'PATH':str(failed_start_bin)+os.pathsep+os.environ['PATH']})
+    assert failed_start.returncode == 37
+    assert re.fullmatch(r'(exit=37 file=real-e2e-controller.sh line=[0-9]+\n)+',
+                        (temp / 'failed-start/real-e2e-evidence-controller/startup-failure.txt').read_text())
     # No network is involved: malformed or absent infrastructure must fail
     # before either expensive VM role runs, without reflecting secret input.
     relay_helper = str(ROOT / 'scripts/real-e2e-relay.py')
