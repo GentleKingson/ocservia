@@ -65,10 +65,12 @@ start_controller() {
   openssl rand -hex 32 >"${SECRETS}/audit-checkpoint-key"
   for role in requester approver; do
     openssl rand -hex 32 >"${WORK}/private/${role}-password"
-    sudo install -o 65534 -g 65532 -m 0400 "${WORK}/private/${role}-password" "${SECRETS}/${role}-password"
+    sudo install -m 0400 "${WORK}/private/${role}-password" "${SECRETS}/${role}-password"
+    sudo chown 65534:65532 "${SECRETS}/${role}-password"
   done
   openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=real-e2e-ca \
-    -addext basicConstraints=critical,CA:TRUE -keyout "${SECRETS}/ca.key" -out "${WORK}/ca.crt" >/dev/null 2>&1
+    -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign \
+    -keyout "${SECRETS}/ca.key" -out "${WORK}/ca.crt" >/dev/null 2>&1
   openssl req -new -newkey rsa:2048 -nodes -subj /CN=localhost \
     -keyout "${TLS_DIR}/tls_private_key" -out "${TLS_DIR}/tls.csr" >/dev/null 2>&1
   printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' >"${TLS_DIR}/tls.ext"
@@ -129,7 +131,7 @@ start_controller() {
   compose exec -T control-plane curl --fail --silent --show-error \
     http://127.0.0.1:8080/readyz >/dev/null
   compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
-    -c "INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES('${WORKSPACE_ID}','Cross-VM Real E2E','cross-vm-real-e2e',now(),now()) ON CONFLICT (id) DO NOTHING" >/dev/null
+    -c "INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES('${WORKSPACE_ID}','Cross-VM Real E2E','cross-vm-real-e2e',now(),now()),('00000000-0000-7000-8000-000000000072','Other','cross-vm-other',now(),now()) ON CONFLICT (id) DO NOTHING" >/dev/null
   compose run --rm --no-deps \
     -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=t07-requester \
     -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${WORKSPACE_ID}" \
@@ -138,7 +140,13 @@ start_controller() {
     -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/real-e2e-business/approver-password \
     control-plane --bootstrap-local-admin
   compose up --detach gateway
-  curl --fail --silent --show-error --cacert "${WORK}/ca.crt" https://localhost:8443/readyz >/dev/null
+  for _ in {1..30}; do
+    if curl --fail --silent --show-error --max-time 3 --cacert "${WORK}/ca.crt" https://localhost:8443/readyz >/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  curl --fail --silent --show-error --max-time 3 --cacert "${WORK}/ca.crt" https://localhost:8443/readyz >/dev/null
   python3 "${ROOT}/scripts/real-e2e-business.py" login
 
   printf '%s\n' "${endpoint}" >"${OUTBOX}/controller-ready/controller-endpoint-id"
