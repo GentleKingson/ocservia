@@ -9,14 +9,19 @@ Integrated Relay service reuses) uses this entry point. It builds the Relay bina
 only; exactly one Relay is supported per deployment, see
 [dedicated Relay](../../docs/how-to/dedicated-relay.md).
 
-For 1.2.0, the archive SHA-256 is
-`beb2294a9749d6a25fd7cd8bcf0fccd932f20716d4f967d85d3f23c7135ae6a2`.
-`relay.Cargo.lock` starts from that archive's lock and applies only
-`cargo update -p rustls --precise 0.23.46`, including its required aws-lc and
-webpki dependencies. This retains the GHSA-2mjx-qc3c-rqvc fix and addresses
+For 1.4.0, the archive SHA-256 is
+`99f1da3af46c3bca658076e47fea877f38108dae664507a1fb35d276314363c8`.
+`relay.Cargo.lock` starts from the 1.4.0 archive lock. It already selects
+`rustls` 0.23.46, retaining the previous production security baseline for
 RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and
-RUSTSEC-2026-0349 in the independent binary;
-the endpoint workspace lock cannot constrain `cargo install`.
+RUSTSEC-2026-0349. The endpoint workspace lock cannot constrain `cargo install`.
+
+Both production locks additionally update `rustls-webpki` to 0.103.16,
+`webpki-roots` to 1.0.10 and `webpki-root-certs` to 1.0.10 for
+RUSTSEC-2026-0382, RUSTSEC-2026-0381 and RUSTSEC-2026-0383. These
+certificate distrust updates were published after the upstream archive.
+The vendor test lock remains the original archive graph and is not used for
+production builds.
 
 On a future version change, verify the new registry archive checksum, extract
 it into a private directory, update only required security dependencies, and

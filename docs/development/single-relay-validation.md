@@ -147,7 +147,7 @@ a global Docker prune.
 - [systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
 - [systemd.exec](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)
 
-The vendored iroh 1.2.0 tree retains the local connection-lifecycle patch:
+The vendored iroh 1.4.0 tree retains the local connection-lifecycle patch:
 keeping persistent connections across multiple Relays still requires at least
 two distinct Relays in configuration, while single-Relay reconnection reuses
 the existing Endpoint and supervisor loop without introducing a separate
