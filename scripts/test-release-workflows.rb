@@ -20,12 +20,55 @@ require_check(triggers.dig('workflow_dispatch', 'inputs').keys == ['version'], '
 require_check(release['permissions'] == {'contents'=>'read'}, 'Release must default to read-only')
 publish = release.fetch('jobs').fetch('publish')
 require_check(publish['if'] == "github.event_name == 'push'" && publish['environment'] == {'name'=>'release-publishing', 'deployment'=>false}, 'publishing must require a tag push and the publishing environment without deployment records')
-require_check(publish['permissions'] == {'contents'=>'write','packages'=>'write'}, 'publishing permissions changed')
+require_check(publish['permissions'] == {'contents'=>'write','packages'=>'write','actions'=>'read'}, 'publishing permissions changed')
 require_check(publish['needs'].sort == %w[assets build-amd64 build-arm64 prepare], 'publishing must wait for both native build/smoke legs and assets')
 require_check(publish['steps'].any? {|s| s.fetch('run','').match?(/gh release create[^\n]*--generate-notes/)}, 'Release must retain native generated notes')
 publish_body = publish['steps'].find {|step| step['name'] == 'Publish version images and Release assets'}.fetch('run')
 require_check(publish_body.include?('scripts/strip-release-owner-attribution.py') && publish_body.include?('gh release edit "v$VERSION" --notes-file "$notes_after"'), 'release notes owner cleanup missing')
 require_check(publish['steps'].first.fetch('uses', '').start_with?('actions/checkout@'), 'publication must check out the release notes filter')
+require_check(publish['steps'].first.dig('with','ref') == '${{ github.sha }}', 'publish checkout must use the immutable build SHA')
+qualification = publish['steps'][1]
+require_check(qualification['name'] == 'Require successful Release Check for the tag commit' && !qualification.key?('if') && !qualification.key?('continue-on-error'), 'qualification must fail closed before publication steps')
+require_check(qualification['env'] == {'GH_TOKEN'=>'${{ github.token }}','GH_REPO'=>'${{ github.repository }}'}, 'qualification must query the current repository with its job token')
+Dir.mktmpdir('release-qualification-') do |dir|
+  File.write("#{dir}/git", "#!/bin/sh\n[ \"$*\" = 'rev-parse HEAD' ] || exit 2\nprintf '%s\\n' \"$BUILD_SHA\"\n")
+  File.write("#{dir}/gh", <<~'SH')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$*" in
+      'api repos/test/repo/commits/tags/v1.2.3 --jq .sha')
+        [[ "${TAG_API_FAIL:-false}" == false ]] || exit 1
+        printf '%s\n' "$TAG_SHA" ;;
+      "api --paginate --slurp repos/test/repo/actions/workflows/release-check.yml/runs?head_sha=$BUILD_SHA&branch=main&event=workflow_dispatch&per_page=100")
+        [[ "${RUN_API_FAIL:-false}" == false ]] || exit 1
+        cat "$RUNS_FILE" ;;
+      *) exit 2 ;;
+    esac
+  SH
+  File.chmod(0755,"#{dir}/git","#{dir}/gh")
+  sha = 'a' * 40
+  run = {'run_number'=>10,'head_sha'=>sha,'head_branch'=>'main','event'=>'workflow_dispatch','status'=>'completed','conclusion'=>'success','html_url'=>'https://github.com/test/repo/actions/runs/10'}
+  env = {'PATH'=>"#{dir}:#{ENV.fetch('PATH')}",'BUILD_SHA'=>sha,'TAG_SHA'=>sha,'GITHUB_SHA'=>sha,'GITHUB_REF_NAME'=>'v1.2.3','GH_REPO'=>'test/repo','RUNS_FILE'=>"#{dir}/runs.json",'GITHUB_STEP_SUMMARY'=>"#{dir}/summary"}
+  execute = ->(pages, extra={}) {
+    File.write(env['RUNS_FILE'], pages.to_json)
+    File.write(env['GITHUB_STEP_SUMMARY'], '')
+    Open3.capture3(env.merge(extra),'bash','-euo','pipefail','-c',qualification.fetch('run')).last.success?
+  }
+  pages = [{'workflow_runs'=>[run]}]
+  require_check(execute.call(pages), 'same-SHA successful Release Check must allow publication')
+  require_check(File.read(env['GITHUB_STEP_SUMMARY']).include?(sha) && File.read(env['GITHUB_STEP_SUMMARY']).include?(run['html_url']), 'qualification summary must preserve SHA and run URL')
+  require_check(!execute.call([{'workflow_runs'=>[]}]), 'missing Release Check accepted')
+  [{'head_sha'=>'b'*40},{'head_branch'=>'other'},{'event'=>'push'},{'status'=>'in_progress'},
+   *%w[failure cancelled skipped timed_out action_required neutral].map {|state| {'conclusion'=>state}}, {'conclusion'=>nil}].each do |changes|
+    require_check(!execute.call([{'workflow_runs'=>[run.merge(changes)]}]), "invalid Release Check accepted: #{changes}")
+  end
+  newer = run.merge('run_number'=>11,'conclusion'=>'failure')
+  require_check(!execute.call([{'workflow_runs'=>[run]},{'workflow_runs'=>[newer]}]), 'older PASS must not hide a newer failed run on another page')
+  require_check(execute.call([{'workflow_runs'=>[run.merge('conclusion'=>'failure')]},{'workflow_runs'=>[newer.merge('conclusion'=>'success')]}]), 'latest successful qualification must supersede an older failure')
+  [{'TAG_SHA'=>'b'*40},{'BUILD_SHA'=>'b'*40},{'TAG_API_FAIL'=>'true'},{'RUN_API_FAIL'=>'true'}].each do |changes|
+    require_check(!execute.call(pages,changes), "tag/build mismatch or API failure accepted: #{changes}")
+  end
+end
 filter = File.expand_path('scripts/strip-release-owner-attribution.py')
 original = "## What's Changed\n* Fix A by @GentleKingson in https://github.com/GentleKingson/ocservia/pull/123\n* Fix B by @Other in https://github.com/GentleKingson/ocservia/pull/456\n**Full Changelog**: https://github.com/GentleKingson/ocservia/compare/a...b\nBy @GentleKingson: documentation\n"
 expected = original.sub('Fix A by @GentleKingson in', 'Fix A in')
