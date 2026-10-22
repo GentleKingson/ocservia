@@ -204,6 +204,8 @@ services:
       - /run/ocserv-platform/transportd.sock
       - --trust-socket
       - /run/ocserv-trust/control-plane.sock
+      - --controller-verification-key-file
+      - /run/real-e2e-business/command.pub.pem
       - --key-file
       - /run/ocservia-secrets/controller.key
       - --control-plane-uid
@@ -219,6 +221,7 @@ services:
       - --relay-ca-file
       - /run/real-e2e-relay/ca.pem
     volumes:
+      - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}/command.pub.pem:/run/real-e2e-business/command.pub.pem:ro
       - ${REAL_E2E_RELAY_DIR:?set REAL_E2E_RELAY_DIR}:/run/real-e2e-relay:ro
       - type: volume
         source: transport-runtime

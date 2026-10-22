@@ -61,6 +61,8 @@ start_controller() {
   openssl genpkey -algorithm ED25519 -out "${SECRETS}/command.key.pem"
   openssl pkey -in "${SECRETS}/command.key.pem" -outform DER | tail -c 32 >"${SECRETS}/controller.key"
   openssl pkey -in "${SECRETS}/command.key.pem" -pubout -out "${OUTBOX}/controller-ready/command.pub.pem"
+  sudo install -m 0440 "${OUTBOX}/controller-ready/command.pub.pem" "${SECRETS}/command.pub.pem"
+  sudo chown 0:65532 "${SECRETS}/command.pub.pem"
   openssl rand -hex 32 >"${SECRETS}/session-key"
   openssl rand -hex 32 >"${SECRETS}/audit-checkpoint-key"
   for role in requester approver; do
