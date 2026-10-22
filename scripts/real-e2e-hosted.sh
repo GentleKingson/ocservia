@@ -32,6 +32,12 @@ patterns = {
                 'i/o timeout', 'context deadline exceeded', 'temporary failure in name resolution',
                 'failed to resolve source metadata'),
 }
+online = {}
+for value in re.findall(r'^native_online=(\{[^\n]+\})$', log, re.M):
+    candidate = json.loads(value)
+    if (set(candidate) == {'active', 'online', 'fresh', 'heartbeat', 'ocserv_version', 'agent_version'}
+            and all(type(item) is bool for item in candidate.values())):
+        online = candidate
 pathlib.Path(sys.argv[2]).write_text(json.dumps({
     'exit_code': int(sys.argv[3]),
     'signals': [name for name, values in patterns.items() if any(value in log for value in values)],
@@ -39,6 +45,12 @@ pathlib.Path(sys.argv[2]).write_text(json.dumps({
                                        'transport-endpoint-bootstrap') if f'target {name}:' in log],
     'build_locations': [{'file': name, 'line': int(line)} for name, line in sorted(set(re.findall(
         r'\b(gateway\.dockerfile|transportd\.dockerfile|dockerfile):([0-9]+)\b', log)))],
+    'python_locations': [{'file': name, 'line': int(line)} for name, line in re.findall(
+        r'file "[^"\n]*/scripts/(real-e2e-business\.py|release-business-api\.py|real-e2e-native-business\.py)", line ([0-9]+)', log)],
+    'wait_timeouts': [name for name in ('native agent online with fresh heartbeat',
+                                       'cross-vm configuration plan', 'cross-vm configuration apply')
+                      if 'timeout: ' + name in log],
+    'native_online': online,
 }) + '\n')
 FAILURE
     echo "private phase $phase failed (exit $status); raw log withheld" >&2
@@ -235,6 +247,39 @@ PATHINFO
     trap 'rm -rf -- "$PRIVATE"' EXIT
     trap 'exit 143' TERM
     status=0
+    if [[ "$ROLE" == node && -f "$WORK/native-owned" ]]; then
+      # Export fixed health categories, never journal text or environment files.
+      timeout --kill-after=5s 20s python3 - "$EVIDENCE/native-health.json" <<'HEALTH' || echo 'safe native health unavailable' >&2
+import json, pathlib, subprocess, sys
+health = {}
+patterns = ('permission denied', 'operation not permitted', 'no such file or directory',
+            'privd read-only snapshot failed', 'initial read-only snapshot collected',
+            'agent session accepted', 'agent telemetry delivered', 'controller connection ended',
+            'connection refused', 'timed out', 'invalid peer certificate',
+            'fixed read operation failed', 'fixed local resource unavailable',
+            'ocserv output format unsupported', 'controller refused agent handshake',
+            'controller session grant is required', 'controller session grant response mismatch',
+            'controller mutation session omitted connection fencing',
+            'controller connection fence epoch is not newer')
+operations = ('service_status', 'ocserv_version', 'session_list', 'ip_ban_list',
+              'config_fingerprint', 'user_list', 'group_list')
+for service in ('ocserv', 'ocservia-agent', 'ocservia-privd'):
+    def read(*args):
+        return subprocess.run(args, capture_output=True, text=True, timeout=15).stdout.lower()
+    values = dict(line.split('=', 1) for line in read('systemctl', 'show', service,
+                  '-p', 'ActiveState,SubState,ExecMainStatus,NRestarts').splitlines() if '=' in line)
+    log = read('sudo', 'journalctl', '--no-pager', '-o', 'cat', '-n', '200', '-u', service)
+    health[service] = {
+        'active': values.get('activestate') == 'active',
+        'running': values.get('substate') == 'running',
+        'exit_status': int(values.get('execmainstatus', '-1')),
+        'restarts': int(values.get('nrestarts', '0')),
+        'signals': [value for value in patterns if value in log],
+        'failed_reads': [name for name in operations if name + ':' in log],
+    }
+pathlib.Path(sys.argv[1]).write_text(json.dumps(health, sort_keys=True) + '\n')
+HEALTH
+    fi
     # An outer deadline prevents a broken Docker daemon from holding cleanup open.
     private_run cleanup bash "$ROOT/scripts/real-e2e-$ROLE.sh" cleanup || status=$?
     if [[ "$ROLE" == controller ]]; then

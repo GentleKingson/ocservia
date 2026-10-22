@@ -98,9 +98,14 @@ def run_business(ready_dir, peer_dir):
     os.environ['T07_NODE'] = node
     def online():
         item = business.api('nodes/' + node)
-        return item if (item['trust_status'] == 'active' and item['connection_state'] == 'online'
-                        and item['freshness'] == 'fresh' and item.get('last_heartbeat_at')
-                        and item.get('ocserv_version') and item.get('agent_version') == '0.0.0') else None
+        checks = {'active': item['trust_status'] == 'active',
+                  'online': item['connection_state'] == 'online',
+                  'fresh': item['freshness'] == 'fresh',
+                  'heartbeat': bool(item.get('last_heartbeat_at')),
+                  'ocserv_version': bool(item.get('ocserv_version')),
+                  'agent_version': item.get('agent_version') == '0.0.0'}
+        print('native_online=' + json.dumps(checks), flush=True)
+        return item if all(checks.values()) else None
     business.wait_for('native Agent online with fresh heartbeat', online, 180)
     assert business.sql(f"SELECT encode(endpoint_id,'hex') FROM node_endpoint_keys WHERE node_id='{node}';") == hex64(STATE / 'agent-endpoint-id')
     owner = business.owner()
