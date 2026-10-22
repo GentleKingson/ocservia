@@ -256,7 +256,9 @@ case "${1:-}" in
   register-privd) python3 "${ROOT}/scripts/real-e2e-business.py" register-privd "${2:-}" ;;
   business) python3 "${ROOT}/scripts/real-e2e-business.py" run "${2:-}" "${3:-}" ;;
   verify-business) python3 "${ROOT}/scripts/real-e2e-business.py" verify "${2:-}" ;;
+  recovery-baseline|recovery-queued|recovery-done|recovery-verify)
+    python3 "${ROOT}/scripts/real-e2e-business.py" "$1" "${2:-}" ;;
   diagnostics) collect_diagnostics ;;
   cleanup) cleanup_controller ;;
-  *) echo "usage: $0 {start|issue-token DIR|verify-enrollment DIR|authority DIR|register-privd DIR|business READY_DIR PEER_DIR|verify-business DIR|diagnostics|cleanup}" >&2; exit 2 ;;
+  *) echo "usage: $0 {start|issue-token DIR|verify-enrollment DIR|authority DIR|register-privd DIR|business READY_DIR PEER_DIR|verify-business DIR|recovery-{baseline,queued,done,verify} [DIR]|diagnostics|cleanup}" >&2; exit 2 ;;
 esac

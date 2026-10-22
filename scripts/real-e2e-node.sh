@@ -191,6 +191,14 @@ start_native() {
   [[ "$(jq -er .node_id "${registered_dir}/ready.json")" == "$(<"${OUTBOX}/enrollment-result/node-id")" ]]
   [[ "$(jq -er .agent_endpoint_id "${registered_dir}/ready.json")" == "$(<"${OUTBOX}/agent-endpoint/agent-endpoint-id")" ]]
   # Root key registration advances authorization; open the first session after it.
+  local uid tool
+  uid="$(id -u ocserv-agent)"
+  printf '%s\n' "$uid" >"${WORK}/relay-udp-uid"
+  for tool in iptables ip6tables; do
+    [[ "$tool" != ip6tables || -n "$(cat /proc/net/if_inet6)" ]] || continue
+    sudo "$tool" -I OUTPUT -m owner --uid-owner "$uid" -p udp ! --dport 53 -j REJECT
+    touch "${WORK}/relay-${tool}-rule"
+  done
   sudo systemctl enable --now ocservia-privd ocservia-agent
   for service in ocserv ocservia-privd ocservia-agent; do
     [[ "$(systemctl is-active "${service}")" == active ]]
@@ -234,6 +242,12 @@ collect_diagnostics() {
 
 cleanup_node() {
   if [[ -f "${WORK}/native-owned" ]]; then
+    local tool
+    for tool in iptables ip6tables; do
+      if [[ -f "${WORK}/relay-${tool}-rule" ]]; then
+        sudo "$tool" -D OUTPUT -m owner --uid-owner "$(<"${WORK}/relay-udp-uid")" -p udp ! --dport 53 -j REJECT
+      fi
+    done
     sudo ip netns pids real-e2e-client 2>/dev/null | xargs -r sudo kill || true
     sudo ip netns del real-e2e-client 2>/dev/null || true
     sudo ip link del real-e2e-host 2>/dev/null || true
@@ -266,8 +280,11 @@ case "${1:-}" in
   enroll) enroll "${2:-}" ;;
   activate) activate_native "${2:-}" ;;
   start-native) start_native "${2:-}" ;;
+  recovery-baseline|recovery-queued|recovery-result)
+    python3 "${ROOT}/scripts/real-e2e-native-business.py" "$1" "${2:?Controller phase directory required}" \
+      "${OUTBOX}/recovery-node-${1#recovery-}/result.json" "${WORK}" ;;
   verify-business) verify_native_business "${2:-}" ;;
   diagnostics) collect_diagnostics ;;
   cleanup) cleanup_node ;;
-  *) echo "usage: $0 {build|prepare CONTROLLER_DIR|enroll TOKEN_DIR|activate AUTHORITY_DIR|start-native REGISTERED_DIR|verify-business DONE_DIR|diagnostics|cleanup}" >&2; exit 2 ;;
+  *) echo "usage: $0 {build|prepare CONTROLLER_DIR|enroll TOKEN_DIR|activate AUTHORITY_DIR|start-native REGISTERED_DIR|verify-business DONE_DIR|recovery-{baseline,queued,result} CONTROLLER_DIR|diagnostics|cleanup}" >&2; exit 2 ;;
 esac

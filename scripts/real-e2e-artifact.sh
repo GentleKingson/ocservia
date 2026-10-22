@@ -8,7 +8,7 @@ validate_name() {
     echo "GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT are required" >&2
     return 2
   }
-  [[ "${name}" =~ ^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result|business-authority|business-authority-registered|business-node-ready|business-controller-done|business-node-result)-[0-9]+-[0-9]+$ ]] || {
+  [[ "${name}" =~ ^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result|business-authority|business-authority-registered|business-node-ready|business-controller-done|business-node-result|recovery-controller-baseline|recovery-node-baseline|recovery-relay-stopped|recovery-controller-queued|recovery-node-queued|recovery-relay-restored|recovery-controller-done|recovery-node-result)-[0-9]+-[0-9]+$ ]] || {
     echo "invalid real E2E artifact name" >&2
     return 2
   }

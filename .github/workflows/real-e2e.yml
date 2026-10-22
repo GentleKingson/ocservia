@@ -129,6 +129,38 @@ jobs:
           path: ${{ runner.temp }}/real-e2e-relay-${{ env.RUN_ID }}/ready
           if-no-files-found: error
           retention-days: 1
+      - name: Wait for B completion and native recovery baseline
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-recovery-node-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          recovery-node-baseline "Cross-VM Agent"
+      - name: Stop the sole Relay
+        run: bash scripts/real-e2e-relay-host.sh stop
+      - name: Publish stopped Relay
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-recovery-relay-stopped-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/real-e2e-relay-${{ env.RUN_ID }}/stopped
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for offline native queue proof
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-recovery-node-queued-${{ github.run_id }}-${{ github.run_attempt }}
+          recovery-node-queued "Cross-VM Agent"
+      - name: Restore the same Relay
+        run: bash scripts/real-e2e-relay-host.sh restore
+      - name: Publish restored Relay
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-recovery-relay-restored-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/real-e2e-relay-${{ env.RUN_ID }}/restored
+          if-no-files-found: error
+          retention-days: 1
       - name: Keep Relay alive until both peer jobs complete
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -274,6 +306,56 @@ jobs:
           business-node-result "Cross-VM Agent"
       - name: Verify Controller DB and Agent native effects
         run: bash scripts/real-e2e-hosted.sh verify-business
+      - name: Create Relay recovery baseline
+        run: bash scripts/real-e2e-hosted.sh recovery-controller-baseline
+      - name: Publish Controller recovery baseline
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-recovery-controller-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/recovery-controller-baseline
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for sole Relay stop
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-recovery-relay-stopped-${{ github.run_id }}-${{ github.run_attempt }}
+          recovery-relay-stopped "Cross-VM Relay"
+      - name: Queue reload during Relay outage
+        run: bash scripts/real-e2e-hosted.sh recovery-controller-queued
+      - name: Publish offline queued operation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-recovery-controller-queued-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/recovery-controller-queued
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for same Relay restoration
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-recovery-relay-restored-${{ github.run_id }}-${{ github.run_attempt }}
+          recovery-relay-restored "Cross-VM Relay"
+      - name: Verify fresh session and same recovered operation
+        run: bash scripts/real-e2e-hosted.sh recovery-controller-done
+      - name: Publish recovered operation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-recovery-controller-done-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/recovery-controller-done
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for native recovery result
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-recovery-node-result-${{ github.run_id }}-${{ github.run_attempt }}
+          recovery-node-result "Cross-VM Agent"
+      - name: Reconcile Relay recovery and exactly one effect
+        run: bash scripts/real-e2e-hosted.sh recovery-controller-verify
       - name: Clean private files and task resources
         if: always()
         timeout-minutes: 5
@@ -413,6 +495,54 @@ jobs:
           path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/business-node-result
           if-no-files-found: error
           retention-days: 1
+      - name: Wait for verified B and Controller recovery baseline
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-recovery-controller-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          recovery-controller-baseline "Cross-VM Controller"
+      - name: Capture same native VPN and identity baseline
+        run: bash scripts/real-e2e-hosted.sh recovery-node-baseline
+      - name: Publish native recovery baseline
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-recovery-node-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/recovery-node-baseline
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for offline queued operation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-recovery-controller-queued-${{ github.run_id }}-${{ github.run_attempt }}
+          recovery-controller-queued "Cross-VM Controller"
+      - name: Verify no offline native effect and live VPN
+        run: bash scripts/real-e2e-hosted.sh recovery-node-queued
+      - name: Publish offline native queue proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-recovery-node-queued-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/recovery-node-queued
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for recovered operation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-recovery-controller-done-${{ github.run_id }}-${{ github.run_attempt }}
+          recovery-controller-done "Cross-VM Controller"
+      - name: Verify exactly one reload and unchanged live VPN
+        run: bash scripts/real-e2e-hosted.sh recovery-node-result
+      - name: Publish native recovery result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-recovery-node-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/recovery-node-result
+          if-no-files-found: error
+          retention-days: 1
       - name: Clean private files and task resources
         if: always()
         timeout-minutes: 5
@@ -445,12 +575,12 @@ jobs:
         run: |
           set -euo pipefail
           ids="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name | test("^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result|business-authority|business-authority-registered|business-node-ready|business-controller-done|business-node-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
+            --jq '.artifacts[] | select(.name | test("^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result|business-authority|business-authority-registered|business-node-ready|business-controller-done|business-node-result|recovery-controller-baseline|recovery-node-baseline|recovery-relay-stopped|recovery-controller-queued|recovery-node-queued|recovery-relay-restored|recovery-controller-done|recovery-node-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
           for id in $ids; do
             gh api --method DELETE "repos/$GH_REPO/actions/artifacts/$id"
           done
           remaining="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name | test("^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result|business-authority|business-authority-registered|business-node-ready|business-controller-done|business-node-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
+            --jq '.artifacts[] | select(.name | test("^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result|business-authority|business-authority-registered|business-node-ready|business-controller-done|business-node-result|recovery-controller-baseline|recovery-node-baseline|recovery-relay-stopped|recovery-controller-queued|recovery-node-queued|recovery-relay-restored|recovery-controller-done|recovery-node-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
           test -z "$remaining"
       - name: Require preflight, three VMs and cleanup to succeed
         env:
@@ -469,7 +599,7 @@ jobs:
           {
             echo 'CROSS_VM_ENROLLMENT=PASS'
             echo 'CROSS_VM_PRIVATE_BUSINESS=PASS'
-            echo 'DEDICATED_RELAY_RECOVERY=NOT_PROVEN'
+            echo 'DEDICATED_RELAY_RECOVERY=PASS'
             echo 'CROSS_WAN_PUBLIC_INGRESS=NOT_TESTED'
             echo 'SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED'
             echo 'CLEANUP=PASS'

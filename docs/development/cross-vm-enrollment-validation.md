@@ -112,7 +112,7 @@ ID. Peers reject stale, mixed-source, same-VM or malformed readiness. They map
 the fixed hostname locally; a test-only Compose overlay also maps it inside
 transportd and endpoint bootstrap. Production Compose networks are unchanged.
 
-The Relay job remains alive, checking its container and verified HTTPS health,
+Outside the controlled recovery interval, the Relay job checks its container and verified HTTPS health,
 until **both full peer jobs complete**, including cleanup and post steps. Failed
 peers fail qualification, and waits have deadlines. The Controller's actual
 transportd container uses an opt-in image target containing the existing iroh
@@ -145,7 +145,7 @@ The Controller registers the root attestation key before confirming native
 startup to the Node: registration advances authorization, so the first Agent
 session must negotiate that revision before business commands are queued.
 
-Verdict deletes all ten run-attempt rendezvous artifact kinds, re-lists them
+Verdict deletes all eighteen run-attempt rendezvous artifact kinds, re-lists them
 and requires zero remaining. Three allowlisted evidence artifacts remain for
 seven days. Any failed, cancelled, unexpectedly skipped, timed-out or cleanup-
 failed dependency prevents PASS; disabled schedules report NOT_RUN, never PASS.
@@ -155,7 +155,7 @@ The final positive markers are only for the exact successful run:
 CROSS_VM_ENROLLMENT=PASS
 CLEANUP=PASS
 CROSS_VM_PRIVATE_BUSINESS=PASS
-DEDICATED_RELAY_RECOVERY=NOT_PROVEN
+DEDICATED_RELAY_RECOVERY=PASS
 CROSS_WAN_PUBLIC_INGRESS=NOT_TESTED
 SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED
 ```
@@ -223,6 +223,9 @@ These manual scripts must also run only on explicitly authorized test hosts.
    `outbox/business-authority` to the node and run
    `scripts/real-e2e-node.sh activate AUTHORITY_DIR`.
 7. Copy the node's `outbox/business-node-ready` to the Controller; run
+   `scripts/real-e2e-controller.sh register-privd NODE_READY_DIR`. Copy its
+   `outbox/business-authority-registered` to the node and run
+   `scripts/real-e2e-node.sh start-native REGISTERED_DIR`. Then run
    `scripts/real-e2e-controller.sh business NODE_READY_DIR AGENT_ENDPOINT_DIR`.
    Copy its `outbox/business-controller-done` to the node and run
    `scripts/real-e2e-node.sh verify-business DONE_DIR`.
@@ -251,9 +254,28 @@ it.
 This profile checks enrollment and private business across separate VMs with a
 persistent Agent identity, native Agent/privd/ocserv units, independent local
 Requester and Approver identities, privileged config and reload operations,
-and an OpenConnect client in a local network namespace. The VPN session is
+and an OpenConnect client in a local network namespace. Only after B01–B05
+reconciliation does the hosted workflow start R01–R05:
+
+- Capture actual Relay path, single custom Relay arguments, native process and
+  identity baselines, and the existing VPN session. Agent-owned outbound UDP
+  except DNS is rejected with IPv4/IPv6 rules; Tailscale's daemon is unaffected.
+- Stop the sole Relay container. Require verified HTTPS unreachability, owner
+  lease invalidation and offline telemetry before submitting one approved reload.
+- Keep the Relay stopped until the Controller proves an unpublished Outbox and
+  no sent attempt, and the Node proves no Journal/root execution, no reload,
+  unchanged identity/processes and a working original VPN session.
+- Start the same container, require a new connection ID and higher owner epoch
+  within a 90-second observation window, and complete the same operation.
+- Reconcile Controller DB, Agent Journal, privd receipt and exactly one native
+  reload, including an idempotent API replay. Preserve the original VPN session,
+  identity and native process starts. A stopped Relay is restored before cleanup
+  even on failure; task UDP rules and the VPN client are removed by Node cleanup.
+
+The observation window is a test bound, not a production RTO. All B and R
+evidence must come from one exact main SHA/run/attempt. The VPN session is
 local to the Agent VM; this profile does not prove WAN ingress, production
-Signer acceptance, dedicated Relay outage/recovery, or production failure domains.
+Signer acceptance or production failure domains.
 
 In an authorized validation environment, you can check script syntax alone:
 
