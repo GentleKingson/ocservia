@@ -100,7 +100,7 @@ def authority(peer_dir):
     (STATE / 'secret-ref-id').write_text(reference['id'] + '\n')
 
 
-def run_business(ready_dir, peer_dir):
+def register_authority(ready_dir):
     node = node_id()
     ready = json.loads((ready_dir / 'ready.json').read_text())
     assert ready['node_id'] == node
@@ -108,6 +108,17 @@ def run_business(ready_dir, peer_dir):
     proof = json.loads((ready_dir / 'proof.json').read_text())
     proof['credential'] = (PRIVATE / 'privd-credential').read_text()
     business.api(f'nodes/{node}/privd-attestation-keys:register', proof, role='anonymous', status=201)
+    target = OUTBOX / 'business-authority-registered'
+    target.mkdir(parents=True, exist_ok=True)
+    (target / 'ready.json').write_text(json.dumps({
+        'node_id': node, 'agent_endpoint_id': ready['agent_endpoint_id']}) + '\n')
+
+
+def run_business(ready_dir, peer_dir):
+    node = node_id()
+    ready = json.loads((ready_dir / 'ready.json').read_text())
+    assert ready['node_id'] == node
+    assert ready['agent_endpoint_id'] == hex64(STATE / 'agent-endpoint-id')
     os.environ['T07_NODE'] = node
     def online():
         item = business.api('nodes/' + node)
@@ -201,6 +212,8 @@ if __name__ == '__main__':
         issue_token(sys.argv[2])
     elif phase == 'authority':
         authority(Path(sys.argv[2]))
+    elif phase == 'register-privd':
+        register_authority(Path(sys.argv[2]))
     elif phase == 'run':
         run_business(Path(sys.argv[2]), Path(sys.argv[3]))
     elif phase == 'verify':

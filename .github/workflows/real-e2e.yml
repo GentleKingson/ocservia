@@ -240,13 +240,22 @@ jobs:
           path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/business-authority
           if-no-files-found: error
           retention-days: 1
-      - name: Wait for native Agent readiness
+      - name: Wait for native authority proof
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           bash scripts/real-e2e-hosted.sh wait-download
           real-e2e-business-node-ready-${{ github.run_id }}-${{ github.run_attempt }}
           business-node-ready "Cross-VM Agent"
+      - name: Register privd authority before Agent session
+        run: bash scripts/real-e2e-hosted.sh register-privd
+      - name: Publish authority registration confirmation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-e2e-business-authority-registered-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/business-authority-registered
+          if-no-files-found: error
+          retention-days: 1
       - name: Apply native business and create VPN user
         run: bash scripts/real-e2e-hosted.sh business
       - name: Publish encrypted VPN input and operation IDs
@@ -370,15 +379,24 @@ jobs:
           bash scripts/real-e2e-hosted.sh wait-download
           real-e2e-business-authority-${{ github.run_id }}-${{ github.run_attempt }}
           business-authority "Cross-VM Controller"
-      - name: Start native Agent and privd
+      - name: Prepare native authority and TLS
         run: bash scripts/real-e2e-hosted.sh activate
-      - name: Publish native Agent readiness
+      - name: Publish native authority proof
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: real-e2e-business-node-ready-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/business-node-ready
           if-no-files-found: error
           retention-days: 1
+      - name: Wait for authority registration
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/real-e2e-hosted.sh wait-download
+          real-e2e-business-authority-registered-${{ github.run_id }}-${{ github.run_attempt }}
+          business-authority-registered "Cross-VM Controller"
+      - name: Start native Agent and privd
+        run: bash scripts/real-e2e-hosted.sh start-native
       - name: Wait for Controller business operations
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -427,12 +445,12 @@ jobs:
         run: |
           set -euo pipefail
           ids="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name | test("^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result|business-authority|business-node-ready|business-controller-done|business-node-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
+            --jq '.artifacts[] | select(.name | test("^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result|business-authority|business-authority-registered|business-node-ready|business-controller-done|business-node-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
           for id in $ids; do
             gh api --method DELETE "repos/$GH_REPO/actions/artifacts/$id"
           done
           remaining="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name | test("^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result|business-authority|business-node-ready|business-controller-done|business-node-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
+            --jq '.artifacts[] | select(.name | test("^real-e2e-(relay-ready|controller-ready|agent-endpoint|enrollment-token|enrollment-result|business-authority|business-authority-registered|business-node-ready|business-controller-done|business-node-result)-" + env.GITHUB_RUN_ID + "-" + env.GITHUB_RUN_ATTEMPT + "$")) | .id')"
           test -z "$remaining"
       - name: Require preflight, three VMs and cleanup to succeed
         env:

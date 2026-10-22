@@ -141,7 +141,11 @@ or loss remains best effort; ephemeral server removal is expected by Tailscale
 but always reported `SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED` without
 independent API evidence.
 
-Verdict deletes all nine run-attempt rendezvous artifact kinds, re-lists them
+The Controller registers the root attestation key before confirming native
+startup to the Node: registration advances authorization, so the first Agent
+session must negotiate that revision before business commands are queued.
+
+Verdict deletes all ten run-attempt rendezvous artifact kinds, re-lists them
 and requires zero remaining. Three allowlisted evidence artifacts remain for
 seven days. Any failed, cancelled, unexpectedly skipped, timed-out or cleanup-
 failed dependency prevents PASS; disabled schedules report NOT_RUN, never PASS.
