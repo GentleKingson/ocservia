@@ -72,6 +72,8 @@ function close(): void {
 }
 onBeforeUnmount(clear);
 useEventListener(defaultWindow, workspaceChangedEvent, close);
+// Full-document navigation can retain the page in the browser back/forward cache.
+useEventListener(defaultWindow, "pagehide", close);
 onMounted(async () => {
   try {
     const selected = await getWorkspace();

@@ -97,12 +97,13 @@ it("issues only on click, once, and clears the token on continuing", async () =>
   expect(view.token).toBe("");
   expect(view.step).toBe(3);
 });
-it.each(["close", "workspace", "unmount"])(
+it.each(["close", "workspace", "unmount", "pagehide"])(
   "clears received secrets on %s",
   async (action) => {
     const view = await mount();
     await view.issue();
-    if (action === "close") view.close();
+    if (action === "pagehide") window.dispatchEvent(new Event("pagehide"));
+    else if (action === "close") view.close();
     else if (action === "workspace")
       window.dispatchEvent(new Event("workspace"));
     else unmount?.();
@@ -110,7 +111,7 @@ it.each(["close", "workspace", "unmount"])(
     expect(view.expires).toBe("");
   },
 );
-it.each(["close", "workspace", "unmount", "generation"])(
+it.each(["close", "workspace", "unmount", "generation", "pagehide"])(
   "discards late success on %s",
   async (action) => {
     let resolve!: (value: ReturnType<typeof result>) => void;
@@ -121,7 +122,8 @@ it.each(["close", "workspace", "unmount", "generation"])(
     );
     const view = await mount();
     const request = view.issue();
-    if (action === "close") view.close();
+    if (action === "pagehide") window.dispatchEvent(new Event("pagehide"));
+    else if (action === "close") view.close();
     else if (action === "workspace") {
       context = { id: "other", generation: 2 };
       window.dispatchEvent(new Event("workspace"));
