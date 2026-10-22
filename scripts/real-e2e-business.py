@@ -39,6 +39,19 @@ def encrypt(source, public, output):
                        stderr=subprocess.DEVNULL, check=True)
 
 
+def plan_result(plan_id):
+    item = business.api('config-plans/' + plan_id)
+    operation = business.api('operations/' + item['operation_id'])
+    states = {'queued', 'dispatched', 'succeeded', 'failed', 'unknown', 'expired', 'cancelled', 'pending', 'valid'}
+    status = {key: value if value in states else 'unclassified' for key, value in (
+        ('state', item['state']), ('validation', item['validation']), ('operation_state', operation['state']))}
+    status.update({key: item.get(key) is True for key in ('current_unchanged', 'staging_cleaned')})
+    (business.EVIDENCE / 'config-plan-status.json').write_text(json.dumps(status) + '\n')
+    if item['state'] in ('failed', 'expired', 'cancelled'):
+        raise RuntimeError('cross-VM configuration plan reached a terminal failure')
+    return item if item['state'] == 'succeeded' else None
+
+
 def issue_token(endpoint):
     assert endpoint == hex64(STATE / 'agent-endpoint-id')
     response = business.api('enrollment-tokens', {
@@ -122,10 +135,7 @@ def run_business(ready_dir, peer_dir):
         'expected_revision': 0, 'template': {'name': 'cross-vm-native', 'directives': directives},
         'ttl_seconds': 900, 'reason': 'cross-VM native configuration'},
         headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
-    def plan_done():
-        item = business.api('config-plans/' + planned['id'])
-        return item if item['state'] == 'succeeded' else None
-    plan = business.wait_for('cross-VM configuration plan', plan_done)
+    plan = business.wait_for('cross-VM configuration plan', lambda: plan_result(planned['id']))
     assert plan['validation'] == 'valid' and re.fullmatch(r'[0-9a-f]{64}', plan['materialized_hash'])
     approval_id = business.approval('config.apply', 'config_plan', plan['id'])
     applied = business.api('config-plans/' + plan['id'] + '/apply', {
