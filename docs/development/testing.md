@@ -69,6 +69,47 @@ targets give faster feedback during local iteration.
 
 ## Choose a broader check when needed
 
+### Ocserv 1.6.0 compatibility
+
+The native I13 fixture also covers the upstream `1.6.0` release dated
+2026-10-16. Run it as root in a disposable Linux environment with TUN and
+`NET_ADMIN`, native `ocserv`, `occtl`, `ocpasswd`, OpenConnect, OpenSSL,
+`ssl-cert`, and the locked Rust toolchain:
+
+```bash
+RUN_ID=I13-ocserv160 ARTIFACT_DIR="$PWD/.cache/i13-ocserv160" \
+  bash scripts/i13-native-ocserv-integration.sh
+```
+
+For a container without Rust, build the adapter libtest ELF on the same
+architecture and set `OCSERVIA_I13_TEST_BINARY` to its absolute mounted path.
+The script verifies that this binary contains the expected ignored test.
+
+On exactly `1.6.0`, the fixture additionally checks malformed per-user and
+per-group files, malformed or missing default files, and recovery after
+restoring valid configuration. These failures must reject the session without
+creating a tunnel. It waits for two TLS 1.3 KeyUpdates with `rekey-method = ssl`
+and verifies that the tunnel was assigned only once before terminating the
+session. These checks supplement the existing password lifecycle, group
+routes, configuration validation, occtl parsing, concurrency, and replay checks.
+All native runs also exercise post-publication parser failure and exact
+configuration rollback: a fixture service controller maps reload to SIGHUP and
+status to the daemon PID, while parsing and session queries use the real
+ocserv binaries. This checks adapter rollback, not systemd integration.
+
+The 1.6.0 compatibility run used Debian 13 `amd64`, GnuTLS 3.8.9, and the
+[upstream source archive](https://www.infradead.org/ocserv/download/ocserv-1.6.0.tar.xz)
+with SHA256 `2d3303a0d9e06eabfa08694b9dca3c558fef36418857bebf1b8de57ece5f9f32`.
+This is native adapter evidence, not full release, package, ARM64, or Controller
+business acceptance. Release workflows remain pinned to the existing 1.5.0
+backport. The managed complete configuration profile continues to use plain
+password authentication; this run does not certify ocserv's new OIDC browser
+flow. Upstream 1.6.0 requires GnuTLS 3.8.2 or newer for OIDC and changes the IPv6
+server tunnel address from network + 1 to the network address. Operators with
+custom OIDC or IPv6 configurations must review those upstream changes.
+
+### Broader validation targets
+
 Manual platform diagnostics reuse the native I13 adapter fixture with the fixed
 ocserv-backport `1.5.0-2` release. See [platform coverage](release-checks.md#native-platform-diagnostics)
 for the opt-in Ubuntu ARM64 and Debian 13 commands and their evidence limits.

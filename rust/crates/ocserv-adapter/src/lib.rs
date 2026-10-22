@@ -4474,7 +4474,8 @@ pub fn parse_version(bytes: &[u8]) -> Result<OcservVersion, AdapterError> {
     if !(version.starts_with("1.2.")
         || version.starts_with("1.3.")
         || version.starts_with("1.4.")
-        || version == "1.5.0")
+        || version == "1.5.0"
+        || version == "1.6.0")
         || version.len() > 32
         || !version
             .bytes()
@@ -4666,7 +4667,30 @@ mod tests {
                 .version,
             "1.5.0"
         );
-        assert!(parse_version(b"ocserv 1.5.1\n").is_err());
+        for prefix in ["ocserv", "OpenConnect VPN Server"] {
+            assert_eq!(
+                parse_version(format!("{prefix} 1.6.0\n").as_bytes())
+                    .expect("1.6.0 fixture")
+                    .version,
+                "1.6.0"
+            );
+            for version in [
+                "1.5.1",
+                "1.6.1",
+                "1.7.0",
+                "2.0.0",
+                "1.6",
+                "1.6.0.1",
+                "1.6.0-rc.1",
+                "1.6.00",
+                "1.06.0",
+            ] {
+                assert!(
+                    parse_version(format!("{prefix} {version}\n").as_bytes()).is_err(),
+                    "unreviewed version {version} accepted"
+                );
+            }
+        }
         assert!(parse_version(b"ocserv development\n").is_err());
         assert!(parse_version(&[0xff]).is_err());
     }
@@ -7078,6 +7102,68 @@ mod tests {
             (records[0].groups.clone(), records[0].hash.to_string())
         };
         match phase.as_str() {
+            "config-rollback" => {
+                // This fixture runs a real daemon without systemd. Map only reload
+                // and status to its PID; configuration parsing and occtl stay native.
+                let systemctl = root.join("systemctl-fixture");
+                write_executable(
+                    &systemctl,
+                    format!(
+                        "#!/bin/sh\nset -e\npid=$(cat '{}/launcher.pid')\nkill -0 \"$pid\"\ncase \"$1\" in\nreload) kill -HUP \"$pid\";;\nshow) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n*) exit 1;;\nesac\n",
+                        root.display()
+                    ),
+                );
+                let occtl = root.join("occtl-fixture");
+                write_executable(
+                    &occtl,
+                    format!(
+                        "#!/bin/sh\nexec /usr/bin/occtl -s '{}/occtl.sock' \"$@\"\n",
+                        root.display()
+                    ),
+                );
+                let config = root.join("ocserv.conf");
+                let resources = FixedResources::new(
+                    systemctl,
+                    PathBuf::from("/usr/sbin/ocserv"),
+                    occtl,
+                    config.clone(),
+                    PathBuf::from("/proc/sys/kernel/random/boot_id"),
+                )
+                .expect("native config resources")
+                .with_effect_store(
+                    root.join("config-state/effects.sqlite3"),
+                    root.join("config-state/effects.key"),
+                )
+                .expect("config effect store");
+                let adapter = Adapter::new(resources, Limits::default());
+                let original = std::fs::read(&config).expect("original config");
+                let mut invalid = original.clone();
+                invalid.extend_from_slice(b"\nauth = \"invalid-auth-backend\"\n");
+                // Exercise post-publication parser failure and exact restoration
+                // using the full native fixture, outside the legacy directive subset.
+                let result = adapter
+                    .apply_validated_config(
+                        &invalid,
+                        &Sha256::digest(&invalid),
+                        &Sha256::digest(&original),
+                        1,
+                        test_effect(),
+                        false,
+                    )
+                    .await
+                    .expect("native rollback outcome");
+                assert!(result.healthy && result.rolled_back && !result.failed_critical);
+                assert_eq!(std::fs::read(&config).expect("restored config"), original);
+                assert_eq!(
+                    adapter
+                        .desired_effect_observe("config_apply", "ocserv.conf", 1, test_effect())
+                        .await
+                        .expect("observe native rollback")
+                        .state,
+                    DesiredEffectState::Absent as i32
+                );
+                assert!(staging_files(&root).is_empty());
+            }
             "occtl" => {
                 adapter.ocserv_version().await.expect("native version");
                 let sessions = parse_sessions(
