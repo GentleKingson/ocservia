@@ -216,6 +216,50 @@ gh workflow run release.yml --ref <candidate-branch> -f version=<X.Y.Z>-rc.1
 
 ## Coverage ownership
 
+### Published installation assets
+
+After the next RC's Release workflow has finished uploading assets, use the
+existing Release Diagnostics entrypoint on a disposable native runner:
+
+```bash
+gh workflow run release-upgrade.yml --ref <harness-ref> \
+  -f purpose=release-assets -f version=<X.Y.Z-rc.N> -f arch=amd64
+```
+
+`harness-ref` must contain the published-asset smoke. `version` is the already
+published version without `v`; `latest`, branch names, and the local `0.0.0`
+fixture are rejected. Select `arch=arm64` for a separate native arm64 run if
+that architecture needs acceptance. No Controller/Relay or three-VM deployment
+is created, and this diagnostic never builds or publishes assets.
+
+[`release-asset-smoke.sh`](../../scripts/release-asset-smoke.sh) downloads the
+exact Release's Agent archive, SHA-256 sidecar, DEB, RPM and managed-node
+bootstrap over HTTPS. It verifies the archive checksum and compares the
+bootstrap with the same-tag raw source used by the Nodes wizard. It runs the
+existing managed-node release contracts against that downloaded script
+(download-failure and staging-digest fault injection), then feeds the actual
+downloaded packages to the existing native installation Smoke, including real
+binary version/architecture checks and corrupted embedded-payload rejection.
+The native packages carry their archive checksum internally; the recorded
+DEB/RPM download hashes are evidence, not separate publisher signatures.
+
+The run retains the requested tag, harness SHA, architecture, exact URLs,
+downloaded hashes, installer contract log and native installation logs for seven
+days. `release-assets-summary.txt` reports `RELEASE_ASSET_DOWNLOAD=PASS` only
+after every check succeeds; download, checksum, source mismatch, skipped
+contracts or installation failure fails the run. Preserve the Actions run URL
+and evidence for the exact RC before closing the release-asset validation gap.
+
+This verifies published downloads and native package installation. Installer
+fault injection uses mocked host commands and is labeled separately; it does
+not repeat browser enrollment, Controller approval or live Relay connectivity.
+The three-VM wizard run's `RELEASE_ASSET_DOWNLOAD=NOT_TESTED` remains accurate
+for its local same-SHA `v0.0.0` inputs. A future smoke entrypoint or an offline
+self-test alone does not close that gap: a successful published-RC run is still
+required.
+
+### Existing checks
+
 | Behavior | Owner |
 | --- | --- |
 | Native bootstrap-token registration and online node, browser login/Workspace/user creation/approval/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke, amd64 and arm64 with the same checkpoint gate |
@@ -226,6 +270,7 @@ gh workflow run release.yml --ref <candidate-branch> -f version=<X.Y.Z>-rc.1
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products (Release Check and Release) |
 | Source/dependency vulnerabilities and repository secrets, within the [tool scope](github-actions.md#independent-security-checks) (Go advisories cover `control-plane` and `signer`) | Security |
 | Tagged-source build and GitHub/GHCR publication | Release |
+| Fixed-tag GitHub Release download, published checksum, native installation and rejection | Release Diagnostics with `purpose=release-assets` after publication |
 
 Business and Quick Install workflows build candidate artifacts locally and
 install from a loopback registry on disposable native runners of the selected

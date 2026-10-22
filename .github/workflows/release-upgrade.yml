@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       arch:
-        description: Native runner architecture for business diagnostics
+        description: Native runner architecture for business or release-asset diagnostics
         type: choice
         options: [amd64, arm64]
         default: amd64
@@ -12,14 +12,14 @@ on:
         type: boolean
         default: false
       version:
-        description: Build-only test version without v
+        description: Version without v (release-assets requires an already published version)
         type: string
         required: true
         default: '0.0.0'
       purpose:
         description: Diagnostic scope
         type: choice
-        options: [smoke, integration, native-ubuntu-arm64, native-debian13]
+        options: [smoke, integration, native-ubuntu-arm64, native-debian13, release-assets]
         default: integration
         required: true
       production_signer:
@@ -42,6 +42,36 @@ concurrency:
   group: release-diagnostics-${{ github.run_id }}
   cancel-in-progress: false
 jobs:
+  release-assets:
+    if: inputs.purpose == 'release-assets'
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Smoke published release assets
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RUN_ID: release-assets-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/release-assets
+        run: bash scripts/release-asset-smoke.sh "v$RELEASE_VERSION"
+      - name: Upload release asset evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-assets-smoke-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/release-assets
+          retention-days: 7
+          if-no-files-found: error
+      - name: Summarize release asset evidence
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/artifacts/release-assets/release-assets-summary.txt" ]]; then
+            cat "$RUNNER_TEMP/artifacts/release-assets/release-assets-summary.txt" >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo 'RELEASE_ASSET_DOWNLOAD=NOT_TESTED' >>"$GITHUB_STEP_SUMMARY"
+          fi
   business:
     if: inputs.purpose == 'smoke' || inputs.purpose == 'integration'
     uses: ./.github/workflows/release-business-diagnostic.yml

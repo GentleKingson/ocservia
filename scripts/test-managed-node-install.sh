@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INSTALL="${ROOT}/deploy/managed-node/install.sh"
+INSTALL="${INSTALLER_UNDER_TEST:-${ROOT}/deploy/managed-node/install.sh}"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 VERSION="${TEST_RELEASE_VERSION:-0.2.1}"
 scope="${1:-full}"
