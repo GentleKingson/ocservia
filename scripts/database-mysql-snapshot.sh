@@ -8,7 +8,7 @@ case "$mode" in check) ;; *) echo 'usage: database-mysql-snapshot.sh [check]' >&
 name="ocservia-mysql-snapshot-$$"
 cleanup() { docker rm -fv "$name" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
-image='mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6'
+image='mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d'
 docker run -d --name "$name" -p 127.0.0.1::3306 -e MYSQL_ROOT_PASSWORD=pr02-isolated-test-root -e MYSQL_DATABASE=ocservia "$image" --log-bin-trust-function-creators=1 >/dev/null
 ready=false
 for ((i=0;i<90;i++)); do

@@ -95,7 +95,7 @@ if [[ "${ENGINE}" == postgres ]]; then
   ENVIRONMENT+=(-e 'OCSERV_TEST_OWNER_DATABASE_URL=postgres://ocservia_owner:test-owner-only@127.0.0.1:5432/ocservia?sslmode=disable' \
     -e 'OCSERV_TEST_DATABASE_URL=postgres://ocservia_app:test-runtime-only@127.0.0.1:5432/ocservia?sslmode=disable')
 else
-  IMAGE=mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+  IMAGE=mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d
   CLIENT=mysql
   docker run -d --name "${NAME}" --network "${NAME}" \
     -e MYSQL_ROOT_PASSWORD=pr02-isolated-test-root -e MYSQL_DATABASE=ocservia \
