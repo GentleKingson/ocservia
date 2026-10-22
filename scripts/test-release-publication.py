@@ -56,7 +56,7 @@ class PublicationTest(unittest.TestCase):
     def api(self, path, *args):
         if '/assets?' in path:
             return [copy.deepcopy(self.remote_assets)]
-        if '/commits/tags/' in path:
+        if path == f'repos/test/repo/commits/refs/tags/{self.release["tag_name"]}':
             return {'sha': 'b' * 40 if self.fault == 'moved-tag' else SHA}
         if path.endswith('/latest'):
             return {'tag_name': 'v0.0.0'}

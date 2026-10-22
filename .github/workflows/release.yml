@@ -117,7 +117,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           source_commit="$(git rev-parse HEAD)"
-          tag_commit="$(gh api "repos/$GH_REPO/commits/tags/$GITHUB_REF_NAME" --jq '.sha')"
+          tag_commit="$(gh api "repos/$GH_REPO/commits/refs/tags/$GITHUB_REF_NAME" --jq '.sha')"
           if [[ "$source_commit" != "$GITHUB_SHA" || "$tag_commit" != "$source_commit" ]]; then
             echo 'Release tag no longer matches the build commit' >&2
             exit 1

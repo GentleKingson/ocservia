@@ -160,7 +160,7 @@ def finish(repo, version, sha, files, images):
     verify_images(expected)
     require(draft(repo, tag, sha, prerelease) == release_id, 'Draft identity changed')
     verify_assets(repo, release_id, files)
-    require(api(f'repos/{repo}/commits/tags/{tag}')['sha'] == sha, 'Release tag moved during publication')
+    require(api(f'repos/{repo}/commits/refs/tags/{tag}')['sha'] == sha, 'Release tag moved during publication')
     command('gh', 'api', f'repos/{repo}/releases/{release_id}', '--method', 'PATCH',
             '-F', 'draft=false', '-f', f'make_latest={"false" if prerelease else "true"}')
     published = api(f'repos/{repo}/releases/{release_id}')
