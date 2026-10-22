@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Controller checks for the disposable cross-VM native business run."""
+from datetime import datetime, timezone
 import importlib.util
 import json
 import os
@@ -131,7 +132,15 @@ def run_business(ready_dir, peer_dir):
                   'agent_version': item.get('agent_version') == '0.0.0'}
         print('native_online=' + json.dumps(checks), flush=True)
         return item if all(checks.values()) else None
-    business.wait_for('native Agent online with fresh heartbeat', online, 180)
+    observed = business.wait_for('native Agent online with fresh heartbeat', online, 180)
+    if os.environ.get('NODE_INSTALL_E2E') == 'true':
+        heartbeat = datetime.fromisoformat(observed['last_heartbeat_at'].replace('Z', '+00:00'))
+        assert 0 <= (datetime.now(timezone.utc) - heartbeat).total_seconds() <= 120
+        (Path(os.environ['RUNNER_TEMP']) / 'real-e2e-evidence-controller/node-install-online.json').write_text(
+            json.dumps({'trust_status': observed['trust_status'],
+                        'connection_state': observed['connection_state'],
+                        'freshness': observed['freshness'], 'last_heartbeat_at': observed['last_heartbeat_at'],
+                        'heartbeat_within_seconds': 120}) + '\n')
     assert business.sql(f"SELECT encode(endpoint_id,'hex') FROM node_endpoint_keys WHERE node_id='{node}';") == hex64(STATE / 'agent-endpoint-id')
     owner = business.owner()
     assert owner and owner['connection_id']

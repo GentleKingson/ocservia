@@ -286,3 +286,56 @@ make real-e2e-check
 This target runs `bash -n` on `real-e2e-controller.sh`, `real-e2e-node.sh`,
 `real-e2e-artifact.sh` and `real-e2e-hosted.sh`. It does not execute `scripts/test-real-e2e-artifact.sh`,
 start any VM, container, or Agent, or verify that enrollment works.
+
+## Nodes installation wizard acceptance
+
+On reviewed, merged `main`, manually dispatch `real-e2e.yml` with the Boolean
+`node-install` input set to `true`. Its default is `false`; scheduled and reusable
+invocations retain their existing behavior and admission restrictions. Record the
+actual run's `head_sha` (main can advance between inspection and dispatch).
+GitHub requires a dispatched workflow to exist on the default branch; the
+[`inputs` context preserves Boolean types](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs).
+The existing protected Environment, main-only workflow/OIDC checks and Tailnet
+Grants still apply. Do not run the candidate from a PR ref or bypass review.
+
+The Controller builds the current Web and mounts its output read-only at `/srv`
+in the existing loopback HTTPS gateway. Production Caddy is unchanged. Playwright
+uses a disposable browser context to log in as the temporary requester, verifies
+the authorized Workspace, fills the install dialog and reads its secret-free
+`install.env`. The fixture has one authorized Workspace, displayed as text;
+multiple-Workspace selection remains covered by the existing Web regressions.
+The local test gateway uses a disposable certificate; the browser accepts this
+certificate without changing the gateway, Controller authentication or APIs.
+
+The configuration travels in the existing controller-ready artifact. The Agent
+validates its exact literal fields and paths, invokes the native installer with an
+explicitly empty bootstrap source, verifies `ENROLLMENT_READY`, persistent
+identity files and stopped Agent/privd, then publishes its endpoint. Only then does
+the Controller reopen the same real UI configuration and click Create bootstrap
+token once. A durable local attempt marker and no retry loop prevent replay after
+failed or unknown issuance. The request must have the matching Workspace header
+and body, TTL 900 and no `expected_endpoint_id`. Existing OAEP exchange carries
+the token; a mode-0600 source feeds the same installer and unchanged configuration.
+The Agent must reach `ENROLLED_LOCAL`, retain both identity files and EndpointID,
+and leave both services stopped. Controller SQL checks `node_bootstrap_tokens`
+using SHA-256 of the complete prefixed token, consumption time, Workspace, name
+and bound EndpointID, plus the pending node. It does not reuse enrollment-token SQL.
+
+Existing independent identities, content-bound approval, `X-Approval-ID`, native
+startup, business checks and Relay recovery remain mandatory. The new mode also
+records active/online/fresh telemetry with a heartbeat no older than 120 seconds.
+Browser execution uses the library API without screenshots, traces, videos,
+storage-state files or a test reporter; errors expose only a fixed message. Its
+temporary profile lives under the Controller's private cleanup tree. Tokens,
+cookies and keys stay out of the allowlisted evidence and rendezvous artifacts
+(except the encrypted token). All existing VM, Tailnet and artifact cleanup steps
+must succeed before the final verdict emits `NODE_INSTALL_E2E=PASS`.
+
+**Release boundary:** the same checked-out SHA supplies a locally built v0.0.0
+native package, preinstalled before the production installer runs. The UI Release
+field and installer version are v0.0.0. This exercises real configuration,
+installation convergence and registration, not published asset retrieval:
+`RELEASE_ASSET_DOWNLOAD=NOT_TESTED`. Local contract tests and Basic CI are not
+three-VM acceptance. The existing limitation
+`SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED` still applies: local Tailscale
+logout and daemon cleanup are checked, server-side device deletion is not.
