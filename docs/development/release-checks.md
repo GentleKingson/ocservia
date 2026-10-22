@@ -52,10 +52,9 @@ DEB and RPM packages, Controller container images, and the bootstrap files
 consumed by the installers. Plain checksums guard against download corruption
 without acting as cryptographic signatures or a trust root, and
 `controller-release.json` is the standard deployment configuration for
-Integrated lifecycle consumers. Rerunning a release replaces GitHub Release
-assets and updates version image tags in place; the pipeline does not maintain
-separate artifact signing, provenance attestations, registry bindings, or
-immutable-release guarantees.
+Integrated lifecycle consumers. Publication is one-shot: an existing Release
+(including a draft) or any exact-version GHCR tag blocks publication. No asset
+upload uses `--clobber`, and a rerun never replaces an existing version.
 
 During SQL artifact builds, the tooling reads the current `schema.sql` headers
 to record PostgreSQL `database_migration` as `{"epoch": N, "revision": R}`, and
@@ -75,6 +74,55 @@ receipts, Unknown outcome reconciliation, semantic payload hashes,
 command/fence/receipt signatures, and durable immutable operation intent. The
 operator-provisioned release catalog continues to supply the authorized upgrade
 package digests.
+
+### Immutable publication and recovery
+
+Before the first publication with this workflow, a repository administrator must
+select **Settings → General → Releases → Enable release immutability** (see
+[GitHub's configuration guide](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes)).
+This protects future releases only; it does not retrofit historical releases.
+The setting API requires Administration permission, which the publishing
+`GITHUB_TOKEN` does not have. Keep the existing job permissions: do not add an
+admin token. Check the setting before approving the `release-publishing`
+environment. The workflow verifies `immutable: true` after publication and fails
+if GitHub does not enforce it. A failure at that final check can leave a public,
+mutable Release; it is not a successful publication and must be investigated.
+
+After the same-SHA Release Check gate and both native product builds, publication:
+
+1. Requires all 14 expected assets and all 16 image archives. Lists all GitHub
+   Releases, including drafts, and probes all 24 GHCR tags (eight roles, each with
+   `vVERSION`, `vVERSION-amd64`, and `vVERSION-arm64`). Only an explicit registry
+   `404 MANIFEST_UNKNOWN` means an absent tag; authentication, rate-limit,
+   transport, malformed-response, and server errors fail closed.
+2. Creates a new Draft with generated notes and the exact build SHA. Note cleanup
+   happens while the Release is still a draft.
+3. Uploads without replacement and verifies the remote asset inventory, uploaded
+   state, size, and GitHub-provided SHA-256 against every local file.
+4. Rechecks each image tag immediately before writing it. Verifies each pushed
+   image's configuration digest against the scanned archive's loaded image ID,
+   then builds the version index from those registry digests and requires both
+   `linux/amd64` and `linux/arm64` entries.
+5. Rechecks assets, all image tag digests, draft identity, and the Git tag SHA,
+   then publishes the Draft. Success requires a published immutable Release,
+   complete verified assets, unchanged image digests, and RC exclusion from Latest.
+
+The per-ref Actions concurrency group serializes same-tag runs without cancelling
+an active publication. GHCR has no atomic create-only tag operation in this flow:
+its checks protect this workflow's writes, but cannot prevent an independent
+writer racing the check or changing tags later. Restrict package write access to
+this publication path. GitHub Release immutability does not protect GHCR tags.
+There is no cross-service transaction: a failure can leave a Draft and some GHCR
+tags. The workflow does not delete, overwrite, or automatically resume those
+objects. Preserve the failed run evidence, inspect the partial state, and use a
+new version with its own qualification. Do not delete and recreate a released
+version to retry. If no Release or version image tags were created, a full rerun
+is safe; rerunning only failed jobs may lack the required current-attempt build
+artifacts and will fail rather than reuse older products.
+
+GitHub automatically creates its platform release attestation for an immutable
+Release. This flow adds no separate signing service, key management, or custom
+attestation system. Plain archive checksums retain their existing role.
 
 ## Database checkpoint release boundary
 
@@ -127,8 +175,9 @@ removes the repeated ` by @GentleKingson` suffix from PR list items while
 leaving external contributor attributions, PR links, category headings, manual
 notes, and the `Full Changelog` link untouched. Because the workflow compares
 the stripped text against the current release body before calling
-`gh release edit --notes-file`, both first-time publication and reruns are
-idempotent. Do not add `GentleKingson` to `changelog.exclude.authors` in
+`gh release edit --notes-file`, cleanup is idempotent within draft preparation.
+Existing releases are rejected before note preparation on reruns. Do not add
+`GentleKingson` to `changelog.exclude.authors` in
 `.github/release.yml`, as GitHub would drop those pull requests from the notes
 altogether. Historical releases that are already published are left as-is.
 
@@ -159,8 +208,8 @@ corresponding checked-in notes ([RC.2](../../.github/release-notes/v2.0.0-rc.2.m
 [RC.4](../../.github/release-notes/v2.0.0-rc.4.md)) using
 GitHub's `--notes` option alongside `--generate-notes`. This preserves the
 generated categories, PR list, contributor credits and comparison link.
-Each supplement applies only to its exact version; existing Release bodies
-are retained on reruns apart from the owner-attribution cleanup above.
+Each supplement applies only to its exact version; reruns leave existing Release
+bodies and assets untouched.
 
 When generating release notes, `rc.1` and final stable releases diff against
 the most recently published non-draft stable Release (ignoring the target
@@ -356,7 +405,12 @@ skipped. For local validation of release changes, run
 `scripts/test-release-workflows.rb`), the package and installer test scripts,
 ShellCheck (`scripts/lint.sh`), any local workflow linter you have installed
 (the repository does not bundle actionlint), and the
-[documentation checks](testing.md). When modifying upgrade or bootstrap paths,
+[documentation checks](testing.md). The release self-tests include
+`scripts/test-release-publication.py`, an offline `0.0.0-rc.1` publication
+rehearsal with GitHub/GHCR doubles. It checks collisions, partial uploads, image
+and index mismatches, API failures, and missing immutability without making
+external writes; it is not evidence of a real registry push or native build.
+When modifying upgrade or bootstrap paths,
 include tests for authorized AgentUpgrade digest acceptance and rejection as
 well as Stage-0 download and checksum failures. Never publish release assets or
 touch production deployments during validation.

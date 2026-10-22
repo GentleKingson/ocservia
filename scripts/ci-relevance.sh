@@ -198,10 +198,10 @@ else
   fi
 fi
 
-matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10"}]}'
+matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.11"}]}'
 if [[ "${database_scope}" == full ]]; then
   # MySQL full acceptance is the critical path; its complementary shards run in parallel.
-  matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10","shard":"mysql-cutover"},{"engine":"mysql","version":"8.4.10","shard":"mysql-core"},{"engine":"mysql","version":"8.4.10","shard":"services"}]}'
+  matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.11","shard":"mysql-cutover"},{"engine":"mysql","version":"8.4.11","shard":"mysql-core"},{"engine":"mysql","version":"8.4.11","shard":"services"}]}'
 fi
 
 {
