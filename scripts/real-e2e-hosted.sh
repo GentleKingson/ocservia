@@ -250,7 +250,7 @@ PATHINFO
     if [[ "$ROLE" == node && -f "$WORK/native-owned" ]]; then
       # Export fixed health categories, never journal text or environment files.
       timeout --kill-after=5s 20s python3 - "$EVIDENCE/native-health.json" <<'HEALTH' || echo 'safe native health unavailable' >&2
-import json, pathlib, subprocess, sys
+import json, pathlib, re, subprocess, sys
 health = {}
 patterns = ('permission denied', 'operation not permitted', 'no such file or directory',
             'privd read-only snapshot failed', 'initial read-only snapshot collected',
@@ -277,8 +277,39 @@ for service in ('ocserv', 'ocservia-agent', 'ocservia-privd'):
         'signals': [value for value in patterns if value in log],
         'failed_reads': [name for name in operations if name + ':' in log],
     }
+    if service == 'ocservia-agent':
+        results = []
+        codes = {'', 'privd_rejected', 'privd_receipt_missing_or_malformed', 'capability_rejected',
+                 'outcome_requires_reconciliation', 'revision_mismatch', 'session_grant_expired',
+                 'command_authorization_capability_mismatch', 'config_plan_invalid'}
+        for line in log.splitlines():
+            try:
+                event = json.loads(line).get('fields', {})
+            except (ValueError, AttributeError):
+                continue
+            if not isinstance(event, dict) or event.get('event_type') != 'command_delivery_result':
+                continue
+            if not isinstance(event.get('command_id'), str) or not re.fullmatch('[0-9a-f]{32}', event['command_id']):
+                continue
+            if type(event.get('state')) is not int or event['state'] not in range(5):
+                continue
+            code = event.get('error_code', '')
+            results.append({'command_id': event['command_id'], 'state': event['state'],
+                            'error_code': code if isinstance(code, str) and code in codes else 'unclassified'})
+        health[service]['command_results'] = results
+    if service == 'ocservia-privd':
+        response = read('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-privd/desired-effects.sqlite3',
+                        'SELECT hex(response) FROM authorized_effects ORDER BY updated_at DESC LIMIT 8;')
+        replies = b''.join(bytes.fromhex(line) for line in response.splitlines()).lower()
+        health[service]['root_reply_signals'] = [value for value in (
+            'fixed resource path invalid', 'fixed read operation failed', 'ocserv output format unsupported',
+            'permission denied', 'operation not permitted', 'command authorization required')
+            if value.encode() in replies]
 pathlib.Path(sys.argv[1]).write_text(json.dumps(health, sort_keys=True) + '\n')
 HEALTH
+    fi
+    if [[ "$ROLE" == controller && -f "$ARTIFACT_DIR/config-plan-status.json" ]]; then
+      cp "$ARTIFACT_DIR/config-plan-status.json" "$EVIDENCE/config-plan-status.json" || status=1
     fi
     # An outer deadline prevents a broken Docker daemon from holding cleanup open.
     private_run cleanup bash "$ROOT/scripts/real-e2e-$ROLE.sh" cleanup || status=$?

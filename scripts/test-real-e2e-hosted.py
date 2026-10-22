@@ -292,7 +292,15 @@ exit 0
     assert (temp / 'ocservia-real-e2e-node-4242-1/exchange.key').exists()
     (temp / 'ocservia-real-e2e-node-4242-1/native-owned').touch()
     (curl_bin / 'systemctl').write_text('#!/bin/bash\nprintf "ActiveState=active\\nSubState=running\\nExecMainStatus=0\\nNRestarts=2\\n"\n')
-    (curl_bin / 'sudo').write_text('#!/bin/bash\necho "private-credential-fixture privd read-only snapshot failed: session_list: permission denied"\n')
+    (curl_bin / 'sudo').write_text('''#!/bin/bash
+if [[ "$1" == sqlite3 ]]; then
+  echo "''' + b'private-credential-fixture fixed resource path invalid'.hex() + '''"
+else
+  echo 'private-credential-fixture privd read-only snapshot failed: session_list: permission denied'
+  echo '{"fields":{"event_type":"command_delivery_result","command_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":3,"error_code":"privd_receipt_missing_or_malformed"}}'
+  echo '{"fields":{"event_type":"command_delivery_result","command_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":2,"error_code":"private-credential-fixture"}}'
+fi
+''')
     for name in ('systemctl', 'sudo'):
         (curl_bin / name).chmod(0o755)
     health_env = {**env, 'PATH':str(curl_bin)+os.pathsep+os.environ['PATH']}
@@ -301,7 +309,10 @@ exit 0
     assert json.loads(health_file.read_text())['ocservia-agent'] == {
         'active':True, 'running':True, 'exit_status':0, 'restarts':2,
         'signals':['permission denied', 'privd read-only snapshot failed'],
-        'failed_reads':['session_list']}
+        'failed_reads':['session_list'], 'command_results':[
+            {'command_id':'a'*32, 'state':3, 'error_code':'privd_receipt_missing_or_malformed'},
+            {'command_id':'b'*32, 'state':2, 'error_code':'unclassified'}]}
+    assert json.loads(health_file.read_text())['ocservia-privd']['root_reply_signals'] == ['fixed resource path invalid']
     assert b'private-credential-fixture' not in health_file.read_bytes()
     assert not (temp / 'real-e2e-evidence-node/cleanup.txt').exists()
     run('bash', wrapper, 'cleanup', env=health_env)

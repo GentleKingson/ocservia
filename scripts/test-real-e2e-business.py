@@ -68,4 +68,18 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
             raise AssertionError('accepted unproven native business evidence')
         assert not (work / 'business.txt').exists()
         assert not (work / 'business.json').exists()
+    for state in ('queued', 'unknown', 'succeeded', 'failed'):
+        plan = {'operation_id': operation, 'state': state, 'validation': 'pending',
+                'current_unchanged': False, 'staging_cleaned': True}
+        def plan_api(path):
+            return plan if path == 'config-plans/test-plan' else {'state': state}
+        harness.business.api = plan_api
+        try:
+            actual = harness.plan_result('test-plan')
+            assert (actual is plan) == (state == 'succeeded')
+        except RuntimeError:
+            assert state == 'failed'
+        status = json.loads((work / 'config-plan-status.json').read_text())
+        assert status == {'state':state, 'operation_state':state, 'validation':'pending',
+                          'current_unchanged':False, 'staging_cleaned':True}
 print('cross-VM business evidence reconciliation and negative controls passed')
