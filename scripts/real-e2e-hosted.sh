@@ -255,7 +255,12 @@ health = {}
 patterns = ('permission denied', 'operation not permitted', 'no such file or directory',
             'privd read-only snapshot failed', 'initial read-only snapshot collected',
             'agent session accepted', 'agent telemetry delivered', 'controller connection ended',
-            'connection refused', 'timed out', 'invalid peer certificate')
+            'connection refused', 'timed out', 'invalid peer certificate',
+            'fixed read operation failed', 'fixed local resource unavailable',
+            'ocserv output format unsupported', 'controller refused agent handshake',
+            'controller session grant is required', 'controller session grant response mismatch',
+            'controller mutation session omitted connection fencing',
+            'controller connection fence epoch is not newer')
 operations = ('service_status', 'ocserv_version', 'session_list', 'ip_ban_list',
               'config_fingerprint', 'user_list', 'group_list')
 for service in ('ocserv', 'ocservia-agent', 'ocservia-privd'):
