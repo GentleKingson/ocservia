@@ -249,7 +249,7 @@ PATHINFO
     status=0
     if [[ "$ROLE" == node && -f "$WORK/native-owned" ]]; then
       # Export fixed health categories, never journal text or environment files.
-      python3 - "$EVIDENCE/native-health.json" <<'HEALTH' || echo 'safe native health unavailable' >&2
+      timeout --kill-after=5s 20s python3 - "$EVIDENCE/native-health.json" <<'HEALTH' || echo 'safe native health unavailable' >&2
 import json, pathlib, subprocess, sys
 health = {}
 patterns = ('permission denied', 'operation not permitted', 'no such file or directory',
