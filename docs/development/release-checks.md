@@ -15,7 +15,8 @@ PR -> Basic CI -> merge main
    -> Release
       - amd64 build + Controller image security + install/image smoke
       - arm64 build + Controller image security + install/image smoke
-      - publish Agent assets and Controller GHCR images only after both pass
+      - require a successful Release Check for the exact tag/build SHA
+      - publish Agent assets and Controller GHCR images only after these gates pass
 ```
 
 On pull requests, `Basic CI Result` remains the required check. Once changes
@@ -28,12 +29,23 @@ candidate. Within Release Check, Full CI refers to the Basic CI Full profile
 [Basic CI](github-actions.md)), not comprehensive acceptance.
 
 Once Release Check succeeds on the target commit, the operator confirms the
-version and pushes the version tag. That operator step carries the CI
-qualification boundary: the tag-triggered Release workflow builds directly from
+version and pushes the version tag. The tag-triggered Release workflow builds directly from
 the tag, scans the built Controller image archives on both native
-architectures, and runs install and image smoke checks before publishing,
-without rerunning Full CI, Security, or Business acceptance or querying
-previous workflow runs.
+architectures, and runs install and image smoke checks before publishing.
+Inside the existing `release-publishing` environment, before any image or Release
+write, `publish` verifies that the current tag resolves to the build SHA and
+queries `release-check.yml` runs for that exact SHA on `main`, triggered by
+`workflow_dispatch`. The latest run must be completed successfully; missing,
+failed, cancelled, or unfinished qualification and API errors block publication,
+including reruns. An older PASS cannot override a newer unsuccessful run. The
+accepted run URL and SHA are recorded in the job summary. Build-only dispatches
+remain exempt, and Release does not rerun Full CI, Security, or Business acceptance.
+
+Three-VM acceptance remains independent of this automated gate. For the next RC,
+the operator must record its run/evidence reference and verified source SHA
+alongside Release Check and the tag commit, and confirm all three SHAs match
+before approving publication. Decide whether to make it a hard gate only after
+the real acceptance runs are stable.
 
 Published release artifacts consist of Agent archives, plain archive checksums,
 DEB and RPM packages, Controller container images, and the bootstrap files
