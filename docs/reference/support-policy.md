@@ -29,12 +29,12 @@ Lifecycle commands operate on explicitly pinned release artifacts without relyin
 | Controller OS/architecture | Linux `amd64` and `arm64` release artifacts | [Production deployment](../operations/production-deployment.md) |
 | Agent native packages | DEB on Ubuntu 22.04/24.04/26.04 and Debian 12/13, RPM on Rocky Linux 9, `amd64`/`arm64` | [Install a managed node](../getting-started/managed-node.md), [Agent lifecycle](../operations/agent-lifecycle.md), [package validation](../development/release-checks.md) |
 | Databases | PostgreSQL 18.x bundled or external; MySQL 8.4 LTS external | [Database support](../operations/production-deployment.md#database-support) |
-| Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` | See note below |
+| Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, `1.5.0`, and `1.6.0` | See note below |
 | Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated Relay](../how-to/dedicated-relay.md) |
 | Authentication | Local only, OIDC only, or Local + OIDC | [Authentication](../operations/authentication.md) |
 | Web console browsers | Chrome 111+, Safari 16.4+, Firefox 128+, Chromium 111+ derivatives; CI runs Chromium plus Playwright Firefox and WebKit on the cross-engine specs | [Supported browsers](../development/web.md#supported-browsers) |
 
-On managed nodes, the ocserv adapter accepts version strings matching `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` from live `ocserv` output. Full release acceptance (native adapter integration plus real-VPN business validation) runs against `1.5.0`, whereas the `1.2.x`, `1.3.x`, and `1.4.x` lines share the same adapter code paths and parser regression fixtures without separate per-line release certification. Future `ocserv` versions require explicit adapter and compatibility review before admission, and new database patch releases or OS distributions are adopted only after artifact and migration verification.
+On managed nodes, the ocserv adapter and Controller configuration planner admit `1.2.x`, `1.3.x`, `1.4.x`, and exactly `1.5.0` and `1.6.0`. Full release acceptance (native adapter integration plus real-VPN business validation) remains pinned to `1.5.0`. The `1.6.0` admission has separate [native compatibility coverage](../development/testing.md#ocserv-160-compatibility), while the older lines have parser regression fixtures without separate per-line release certification. Future versions, including `1.5.1`, `1.6.1`, and `1.7.0`, require explicit compatibility review before admission. New database patch releases or OS distributions are adopted only after artifact and migration verification.
 
 ## Deployment capability distinctions
 

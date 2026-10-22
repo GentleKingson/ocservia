@@ -102,6 +102,21 @@ if ss -H -ltn "sport = :${PORT}" | grep -q .; then
   exit 1
 fi
 
+# Keep version-specific assertions bounded to the reviewed release.
+version_output="$(ocserv --version 2>&1)"
+OCSERV_160=false
+CAPTURE_SECONDS=10
+CLIENT_TIMEOUT=12
+REKEY_TIME=172800
+DEBUG_LEVEL=2
+if [[ "${version_output%%$'\n'*}" == 'OpenConnect VPN Server 1.6.0' ]]; then
+  OCSERV_160=true
+  CAPTURE_SECONDS=60
+  CLIENT_TIMEOUT=65
+  REKEY_TIME=2
+  DEBUG_LEVEL=3
+fi
+
 umask 077
 mkdir -p "${NATIVE_ROOT}/groups"
 chmod 755 "${NATIVE_ROOT}" "${NATIVE_ROOT}/groups"
@@ -171,7 +186,7 @@ if setpriv --reuid="$(id -u "${RUN_AS_USER}")" --regid="$(id -g "${RUN_AS_USER}"
 fi
 echo "native ocpasswd root-only metadata passed"
 
-printf '%s\n' '#!/bin/sh' "env >\"${NATIVE_ROOT}/client.env\"" 'sleep 10' >"${NATIVE_ROOT}/capture.sh"
+printf '%s\n' '#!/bin/sh' "env >\"${NATIVE_ROOT}/client.env\"" "sleep ${CAPTURE_SECONDS}" >"${NATIVE_ROOT}/capture.sh"
 chmod 700 "${NATIVE_ROOT}/capture.sh"
 printf '%s\n' 'route = 203.0.113.0/24' 'banner = I13_STAFF_GROUP_APPLIED' >"${NATIVE_ROOT}/groups/staff"
 printf '%s\n' \
@@ -200,7 +215,7 @@ printf '%s\n' \
   'ban-reset-time = 60' \
   'cookie-timeout = 300' \
   'deny-roaming = false' \
-  'rekey-time = 172800' \
+  "rekey-time = ${REKEY_TIME}" \
   'rekey-method = ssl' \
   'use-occtl = true' \
   'device = vpns-i13' \
@@ -210,6 +225,15 @@ printf '%s\n' \
   "config-per-group = ${NATIVE_ROOT}/groups/" \
   >"${NATIVE_ROOT}/ocserv.conf"
 
+if ${OCSERV_160}; then
+  mkdir -p "${NATIVE_ROOT}/users"
+  chmod 755 "${NATIVE_ROOT}/users"
+  printf '# valid default\n' >"${NATIVE_ROOT}/default-user.conf"
+  printf '# valid default\n' >"${NATIVE_ROOT}/default-group.conf"
+  printf '%s\n' "config-per-user = ${NATIVE_ROOT}/users/" \
+    "default-user-config = ${NATIVE_ROOT}/default-user.conf" \
+    "default-group-config = ${NATIVE_ROOT}/default-group.conf" >>"${NATIVE_ROOT}/ocserv.conf"
+fi
 ocserv --test-config -c "${NATIVE_ROOT}/ocserv.conf"
 cp "${NATIVE_ROOT}/ocserv.conf" "${NATIVE_ROOT}/invalid.conf"
 printf '\nauth = "invalid-auth-backend"\n' >>"${NATIVE_ROOT}/invalid.conf"
@@ -218,7 +242,7 @@ if ocserv --test-config -c "${NATIVE_ROOT}/invalid.conf" >/dev/null 2>&1; then
   exit 1
 fi
 rm "${NATIVE_ROOT}/invalid.conf"
-ocserv -c "${NATIVE_ROOT}/ocserv.conf" -f -d 2 >"${NATIVE_ROOT}/server.log" 2>&1 &
+ocserv -c "${NATIVE_ROOT}/ocserv.conf" -f -d "${DEBUG_LEVEL}" >"${NATIVE_ROOT}/server.log" 2>&1 &
 printf '%s' "$!" >"${NATIVE_ROOT}/launcher.pid"
 for _ in $(seq 1 50); do
   if server_ready; then
@@ -245,7 +269,7 @@ authenticate() {
   server_ready
   server_before="$(wc -l <"${NATIVE_ROOT}/server.log")"
   set +e
-  printf '%s\n' "${password}" | timeout 15 openconnect -v --authenticate --non-inter \
+  printf '%s\n' "${password}" | timeout 15 openconnect --no-proxy -v --authenticate --non-inter \
     --protocol=anyconnect --user=alice --passwd-on-stdin \
     --servercert "pin-sha256:${PIN}" "https://127.0.0.1:${PORT}" \
     >"${output}" 2>"${log}"
@@ -280,9 +304,44 @@ run_native_phase enable
 authenticate enabled-old-p2 "${P2}" failure
 authenticate enabled-current-p3 "${P3}" success
 run_native_phase group-apply
+run_native_phase config-rollback
+
+reject_supplemental_config() {
+  local label=$1 before status
+  before=$(wc -l <"${NATIVE_ROOT}/server.log")
+  rm -f "${NATIVE_ROOT}/client.env"
+  set +e
+  printf '%s\n' "${P3}" | timeout 10 openconnect --no-proxy --non-inter \
+    --protocol=anyconnect --user=alice --passwd-on-stdin \
+    --servercert "pin-sha256:${PIN}" --script-tun --script "${NATIVE_ROOT}/capture.sh" \
+    "https://127.0.0.1:${PORT}" >"${NATIVE_ROOT}/auth-${label}.log" 2>&1
+  status=$?
+  set -e
+  test "$status" -ne 0
+  test "$status" -ne 124
+  test ! -f "${NATIVE_ROOT}/client.env"
+  tail -n "+$((before + 1))" "${NATIVE_ROOT}/server.log" | grep -q 'error reading additional configuration'
+  server_ready
+  echo "${label}=PASS"
+}
+if ${OCSERV_160}; then
+  for kind in user group; do
+    if [[ "$kind" == user ]]; then file="${NATIVE_ROOT}/users/alice"; else file="${NATIVE_ROOT}/groups/staff"; fi
+    if [[ -f "$file" ]]; then cp "$file" "${file}.saved"; fi
+    printf '[unterminated-section\n' >"$file"
+    reject_supplemental_config "malformed-${kind}"
+    rm "$file"
+    printf '[unterminated-section\n' >"${NATIVE_ROOT}/default-${kind}.conf"
+    reject_supplemental_config "malformed-default-${kind}"
+    rm "${NATIVE_ROOT}/default-${kind}.conf"
+    reject_supplemental_config "missing-default-${kind}"
+    printf '# valid default\n' >"${NATIVE_ROOT}/default-${kind}.conf"
+    if [[ -f "${file}.saved" ]]; then mv "${file}.saved" "$file"; fi
+  done
+fi
 
 rm -f "${NATIVE_ROOT}/client.env"
-printf '%s\n' "${P3}" | timeout 12 openconnect \
+printf '%s\n' "${P3}" | timeout "${CLIENT_TIMEOUT}" openconnect --no-proxy \
   --protocol=anyconnect --user=alice --passwd-on-stdin \
   --servercert "pin-sha256:${PIN}" --script-tun \
   --script "${NATIVE_ROOT}/capture.sh" \
@@ -298,6 +357,16 @@ test -f "${NATIVE_ROOT}/client.env"
 grep -q '^CISCO_SPLIT_INC_0_ADDR=203.0.113.0$' "${NATIVE_ROOT}/client.env"
 grep -q '^CISCO_SPLIT_INC_0_MASKLEN=24$' "${NATIVE_ROOT}/client.env"
 grep -q 'Configured as 10.250.0.' "${NATIVE_ROOT}/route.log"
+if ${OCSERV_160}; then
+  # Upstream checks the internal rekey deadline every 30 seconds.
+  for _ in $(seq 1 450); do
+    if [[ $(grep -c 'TLS 1.3 session keys refreshed' "${NATIVE_ROOT}/server.log") -ge 2 ]]; then break; fi
+    sleep 0.1
+  done
+  test "$(grep -c 'TLS 1.3 session keys refreshed' "${NATIVE_ROOT}/server.log")" -ge 2
+  test "$(grep -c 'assigning tun device' "${NATIVE_ROOT}/server.log")" = 1
+  echo 'tls13_keyupdate_without_tunnel_rebuild=PASS'
+fi
 occtl -s "${NATIVE_ROOT}/occtl.sock" --json show users >"${NATIVE_ROOT}/sessions.json"
 occtl -s "${NATIVE_ROOT}/occtl.sock" --json show ip bans >"${NATIVE_ROOT}/bans.json"
 run_native_phase occtl
@@ -320,11 +389,19 @@ printf '%s\n' \
   'group_apply=PASS' \
   'config_per_group=PASS' \
   'invalid_config_rejected=PASS' \
+  'native_parser_failure_rollback=PASS' \
   'occtl_output_parse=PASS' \
   'session_terminate=PASS' \
   'concurrent_user_group_password_replay=PASS' \
   "config_per_group_client_exit=${route_status}" \
   >"${NATIVE_ROOT}/lifecycle-summary.txt"
+if ${OCSERV_160}; then
+  printf '%s\n' 'ocserv_version=1.6.0' \
+    'malformed_user_group_config_rejected=PASS' \
+    'malformed_default_config_rejected=PASS' \
+    'missing_default_config_rejected=PASS' \
+    'tls13_keyupdate_without_tunnel_rebuild=PASS' >>"${NATIVE_ROOT}/lifecycle-summary.txt"
+fi
 persist_artifacts
 scan_artifacts
 echo "native Ocserv P1/P2/P3 authentication lifecycle passed"

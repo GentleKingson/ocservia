@@ -776,7 +776,7 @@ mod tests {
         for version in ["1.2.4", "1.3.0", "1.4.1", "1.4", "1.4.2.1", "", "unknown"] {
             assert!(!supports_session_terminate(version), "{version}");
         }
-        for version in ["1.4.2", "1.4.10", "1.5.0"] {
+        for version in ["1.4.2", "1.4.10", "1.5.0", "1.6.0"] {
             assert!(supports_session_terminate(version), "{version}");
         }
     }

@@ -48,11 +48,19 @@ func TestRenderEnforcesVersionAndCapabilityMatrix(t *testing.T) {
 	if _, err := Render(input); err == nil {
 		t.Fatal("version-incompatible directive accepted")
 	}
-	input.OcservVersion = "1.5.0"
-	if _, err := Render(input); err != nil {
-		t.Fatalf("admitted Ocserv 1.5.0 rejected: %v", err)
+	for _, version := range []string{"1.5.0", "1.6.0"} {
+		input.OcservVersion = version
+		if _, err := Render(input); err != nil {
+			t.Fatalf("admitted Ocserv %s rejected: %v", version, err)
+		}
 	}
-	input.OcservVersion = "1.3.0"
+	for _, version := range []string{"1.5.1", "1.6.1", "1.7.0", "2.0.0", "1.6", "1.6.0.1", "1.6.0-rc.1", "1.6.00", "1.06.0"} {
+		input.OcservVersion = version
+		if _, err := Render(input); err == nil {
+			t.Fatalf("unreviewed Ocserv %s accepted", version)
+		}
+	}
+	input.OcservVersion = "1.6.0"
 	input.Capabilities = nil
 	if _, err := Render(input); err == nil {
 		t.Fatal("missing directive capability accepted")
