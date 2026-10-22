@@ -284,8 +284,11 @@ Qualification rules, coverage ownership, and manual diagnostic commands live in
 [Release policy](release-checks.md). Within the release workflow, only the
 tag-triggered `publish` job receives `contents: write`, `packages: write`, and
 access to the `release-publishing` environment, which acts as an approval and
-protection boundary without creating GitHub Deployment records. Rerunning a tag
-release overwrites assets using `gh release upload --clobber`.
+protection boundary without creating GitHub Deployment records. Publication uses
+Draft → upload and verify → publish, requires GitHub Immutable Releases, and
+rejects existing Releases and GHCR version tags. Setup, failure recovery, and
+the limits of GHCR overwrite checks are documented in
+[Immutable publication and recovery](release-checks.md#immutable-publication-and-recovery).
 
 Release Controller jobs cache their image-security scanner binaries by OS,
 architecture, and tool/bootstrap identity, but they never cache the

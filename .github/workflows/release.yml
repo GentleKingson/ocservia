@@ -88,6 +88,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends rpm cpio
           scripts/validate-release-packages.sh
+          python3 scripts/publish-release.py check-assets
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
@@ -143,6 +144,12 @@ jobs:
         with:
           name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/assets
+      - name: Reject existing Release and image version tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 scripts/publish-release.py preflight
       - name: Select Release notes base
         id: notes
         env:
@@ -161,7 +168,7 @@ jobs:
             [[ "$base" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
           fi
           echo "base=$base" >>"$GITHUB_OUTPUT"
-      - name: Publish version images and Release assets
+      - name: Create new draft Release
         env:
           IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
           NOTES_BASE: ${{ steps.notes.outputs.base }}
@@ -169,32 +176,20 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           GH_REPO: ${{ github.repository }}
         run: |
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          prefix=ghcr.io/gentlekingson/ocservia
-          for name in gateway control transport backup edge relay signer mysql_backup; do
-            for arch in amd64 arm64; do
-              docker load --input "$RUNNER_TEMP/images/$name-linux-$arch.tar"
-              docker tag "$prefix/$name:$VERSION-linux-$arch" "$prefix/$name:v$VERSION-$arch"
-              docker push "$prefix/$name:v$VERSION-$arch"
-            done
-            docker buildx imagetools create --tag "$prefix/$name:v$VERSION" \
-              "$prefix/$name:v$VERSION-amd64" "$prefix/$name:v$VERSION-arm64"
-          done
-          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
-            flags=(--notes-start-tag "$NOTES_BASE")
-            if [[ "$NOTES_BASE" == v1.1.0 ]]; then
-              flags+=(--notes "$(gh api "repos/$GH_REPO/contents/.github/release-notes/v1.1.0-history-rewrite.md?ref=$GITHUB_SHA" \
-                -H 'Accept: application/vnd.github.raw+json')")
-            elif [[ "$VERSION" == 2.0.0-rc.2 || "$VERSION" == 2.0.0-rc.3 || "$VERSION" == 2.0.0-rc.4 ]]; then
-              notes_file=".github/release-notes/v$VERSION.md"
-              test -s "$notes_file"
-              flags+=(--notes "$(cat "$notes_file")")
-            fi
-            if [[ "$IS_PRERELEASE" == true ]]; then
-              flags+=(--prerelease --latest=false)
-            fi
-            gh release create "v$VERSION" --verify-tag --title "v$VERSION" --generate-notes "${flags[@]}"
+          flags=(--notes-start-tag "$NOTES_BASE")
+          if [[ "$NOTES_BASE" == v1.1.0 ]]; then
+            flags+=(--notes "$(gh api "repos/$GH_REPO/contents/.github/release-notes/v1.1.0-history-rewrite.md?ref=$GITHUB_SHA" \
+              -H 'Accept: application/vnd.github.raw+json')")
+          elif [[ "$VERSION" == 2.0.0-rc.2 || "$VERSION" == 2.0.0-rc.3 || "$VERSION" == 2.0.0-rc.4 ]]; then
+            notes_file=".github/release-notes/v$VERSION.md"
+            test -s "$notes_file"
+            flags+=(--notes "$(cat "$notes_file")")
           fi
+          if [[ "$IS_PRERELEASE" == true ]]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release create "v$VERSION" --draft --target "$GITHUB_SHA" --verify-tag --title "v$VERSION" --generate-notes "${flags[@]}"
+
           # Preserve GitHub's category, PR and comparison output; drop repeated owner attribution only.
           notes_before="$RUNNER_TEMP/release-notes-before.md"
           notes_after="$RUNNER_TEMP/release-notes-after.md"
@@ -203,8 +198,9 @@ jobs:
           if ! cmp -s "$notes_before" "$notes_after"; then
             gh release edit "v$VERSION" --notes-file "$notes_after"
           fi
-          gh release upload "v$VERSION" "$RUNNER_TEMP/assets/"* --clobber
-          [[ "$(gh release view "v$VERSION" --json isPrerelease --jq '.isPrerelease')" == "$IS_PRERELEASE" ]]
-          if [[ "$IS_PRERELEASE" == true ]]; then
-            [[ "$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name')" != "v$VERSION" ]]
-          fi
+      - name: Upload, verify and publish immutable Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 scripts/publish-release.py finish
