@@ -172,6 +172,13 @@ activate_native() {
   observed_key="$(sudo bash "${ROOT}/deploy/managed-node/provision-config-tls.sh" \
     "${node}" "${ref}" v1 /etc/ocserv/t07.crt /etc/ocserv/t07.key | jq -r .key)"
   [[ "${observed_key}" == "${expected_key}" ]]
+  # ConfigPlan cannot change TLS startup paths through a reload.
+  sed -e "s|^server-cert = /etc/ocserv/t07.crt$|server-cert = /etc/ocservia-agent/config-tls/${ref}/v1/server-cert.pem|" \
+    -e "s|^server-key = /etc/ocserv/t07.key$|server-key = /etc/ocservia-agent/config-tls/${ref}/v1/server-key.pem|" \
+    "${WORK}/ocserv.conf" >"${WORK}/bound-ocserv.conf"
+  sudo install -m 0600 "${WORK}/bound-ocserv.conf" /etc/ocserv/ocserv.conf
+  sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
+  sudo systemctl restart ocserv
   sudo systemctl enable --now ocservia-privd ocservia-agent
   for service in ocserv ocservia-privd ocservia-agent; do
     [[ "$(systemctl is-active "${service}")" == active ]]
