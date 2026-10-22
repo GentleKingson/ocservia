@@ -98,7 +98,32 @@ EOF
   export RELAY_ACCESS_TOKEN_SOURCE="${WORK}/relay/token"
   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${WORK}/controller-ready/command.pub.pem"
   export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=development
-  bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${SECRETS}/managed-prepare.log"
+  if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+    install -m 0600 "${ready_dir}/install.env" "${WORK}/install.env"
+    # Validate literals before the native loader reads them; never source the file.
+    python3 - "${WORK}" "${controller}" <<'CONFIG'
+import pathlib, sys
+work = pathlib.Path(sys.argv[1])
+expected = (f"# Node: github-hosted-node\n# Workspace: 019d0000-0000-7000-8000-000000000001\n"
+            f"# Release: v0.0.0\nCONTROLLER_ENDPOINT_ID={sys.argv[2]}\n"
+            f"ENROLLMENT_ENVIRONMENT=development\nRELAY_URL_A={(work/'relay/url').read_text().strip()}\n"
+            f"RELAY_URL_B=\nBOOTSTRAP_TOKEN_SOURCE={work}/secrets/bootstrap-token\n"
+            f"RELAY_ACCESS_TOKEN_SOURCE={work}/relay/token\n"
+            f"CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE={work}/controller-ready/command.pub.pem\n")
+assert (work/'install.env').read_text() == expected
+CONFIG
+    # Explicit empty source delays issuance until host preparation is confirmed.
+    (unset CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B RELAY_ACCESS_TOKEN_SOURCE \
+      CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE ENROLLMENT_ENVIRONMENT
+     cd "${WORK}"
+     BOOTSTRAP_TOKEN_SOURCE= bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}") \
+      >"${SECRETS}/managed-prepare.log"
+    assert_not_started
+    sudo sha256sum /var/lib/ocservia-agent/identity/endpoint.key \
+      /var/lib/ocservia-agent/identity/controller.endpoint >"${SECRETS}/identity.sha256"
+  else
+    bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${SECRETS}/managed-prepare.log"
+  fi
   grep -Fxq ENROLLMENT_READY "${SECRETS}/managed-prepare.log"
   endpoint="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
     --controller "${controller}" --prepare-enrollment)"
@@ -116,6 +141,14 @@ EOF
     -out "${OUTBOX}/agent-endpoint/exchange.pub" 2>/dev/null
 }
 
+assert_not_started() {
+  local unit
+  for unit in ocservia-agent ocservia-privd; do
+    [[ "$(systemctl show "$unit" -p ActiveState --value)" == inactive ]]
+    [[ "$(systemctl show "$unit" -p MainPID --value)" == 0 ]]
+  done
+}
+
 build_agent() {
   mkdir -p "${PACKAGE_DIR}"
   VERSION="${VERSION}" PACKAGE_ARCH=amd64 OUTPUT_DIR="${PACKAGE_DIR}" \
@@ -131,12 +164,28 @@ enroll() {
   local -a node_ids
   controller="$(<"${WORK}/controller-endpoint-id")"
   require_endpoint "${controller}"
-  sudo install -o root -g ocserv-agent -m 0640 "${token_dir}/enrollment-token" /etc/ocservia-agent/enrollment-token
+  if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+    install -m 0600 "${token_dir}/enrollment-token" "${SECRETS}/bootstrap-token"
+  else
+    sudo install -o root -g ocserv-agent -m 0640 "${token_dir}/enrollment-token" /etc/ocservia-agent/enrollment-token
+  fi
   export CONTROLLER_ENDPOINT_ID="${controller}" RELAY_URL_A="$(<"${WORK}/relay/url")" RELAY_URL_B=
   export RELAY_ACCESS_TOKEN_SOURCE="${WORK}/relay/token"
   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${WORK}/controller-ready/command.pub.pem"
   export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=development
-  bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${SECRETS}/enrollment-output"
+  if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+    (unset CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B RELAY_ACCESS_TOKEN_SOURCE \
+      CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE ENROLLMENT_ENVIRONMENT BOOTSTRAP_TOKEN_SOURCE
+     cd "${WORK}"
+     bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}") >"${SECRETS}/enrollment-output"
+    sudo sha256sum --check --status "${SECRETS}/identity.sha256"
+    [[ "$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
+      --controller "${controller}" --prepare-enrollment)" == "$(<"${OUTBOX}/agent-endpoint/agent-endpoint-id")" ]]
+    assert_not_started
+    [[ ! -e "${SECRETS}/bootstrap-token" ]]
+  else
+    bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${SECRETS}/enrollment-output"
+  fi
   enrollment_output="$(<"${SECRETS}/enrollment-output")"
   mapfile -t node_ids < <(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' <<<"${enrollment_output}")
   [[ ${#node_ids[@]} -eq 1 ]] || {
@@ -149,6 +198,10 @@ enroll() {
   mkdir -p "${OUTBOX}/enrollment-result"
   printf '%s\n' "${node_id}" >"${OUTBOX}/enrollment-result/node-id"
   runner_instance_id >"${OUTBOX}/enrollment-result/runner-instance"
+  if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+    printf 'ENROLLMENT_READY=PASS\nENROLLED_LOCAL=PASS\nIDENTITY_UNCHANGED=PASS\nSERVICES_NOT_STARTED=PASS\nRELEASE_ASSET_DOWNLOAD=NOT_TESTED\n' \
+      >"${RUNNER_TEMP}/real-e2e-evidence-node/node-install.txt"
+  fi
 }
 
 activate_native() {

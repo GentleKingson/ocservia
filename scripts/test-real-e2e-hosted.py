@@ -34,6 +34,10 @@ for key, value in [('boot_id',local['boot_id']), ('role','controller'),
         raise AssertionError('accepted invalid ' + key)
 
 workflow = yaml.safe_load((ROOT / '.github/workflows/real-e2e.yml').read_text())
+assert workflow[True]['workflow_dispatch']['inputs']['node-install'] == {
+    'description':'Accept the real Nodes installation wizard (local same-SHA v0.0.0 assets)',
+    'type':'boolean', 'default':False, 'required':False}
+assert workflow['env']['NODE_INSTALL_E2E'] == "${{ github.event_name == 'workflow_dispatch' && inputs.node-install && 'true' || 'false' }}"
 assert set(workflow[True]) == {'workflow_dispatch', 'workflow_call', 'schedule'}
 assert workflow[True]['schedule'] == [{'cron':'17 3 * * *'}]
 assert set(workflow[True]['workflow_call']['secrets']) == {
@@ -155,7 +159,7 @@ if [[ "$1" == install ]]; then shift; exec install "$@"; fi
                    'SOURCE_REF':'refs/heads/main', 'SOURCE_SHA':'a'*40,
                    'JOB_CONTEXT':json.dumps({'workflow_ref':'GentleKingson/ocservia/.github/workflows/real-e2e.yml@refs/heads/main', 'workflow_sha':'a'*40}),
                    'EVENT_NAME':'workflow_dispatch',
-                   'SCHEDULE_ENABLED':''}
+                   'SCHEDULE_ENABLED':'', 'NODE_INSTALL_E2E':'false'}
     def trust_check(changes, ok, mode='run'):
         summary = temp / 'trust-summary'
         summary.write_text('')
@@ -185,9 +189,14 @@ if [[ "$1" == install ]]; then shift; exec install "$@"; fi
         assert ('CROSS_VM_PRIVATE_BUSINESS=PASS' in summary.read_text()) == (ok if acceptance is None else acceptance)
         assert ('DEDICATED_RELAY_RECOVERY=PASS' in summary.read_text()) == (ok if acceptance is None else acceptance)
     verdict_check(results, True)
+    verdict_check(results, True, {'NODE_INSTALL_E2E':'true'})
+    assert 'NODE_INSTALL_E2E=PASS' in (temp/'verdict-summary').read_text()
+    assert 'RELEASE_ASSET_DOWNLOAD=NOT_TESTED' in (temp/'verdict-summary').read_text()
     for name in results:
         for status in ('failure', 'cancelled', 'skipped'):
             verdict_check({**results, name:{'result':status}}, False)
+            verdict_check({**results, name:{'result':status}}, False, {'NODE_INSTALL_E2E':'true'})
+            assert 'NODE_INSTALL_E2E=PASS' not in (temp/'verdict-summary').read_text()
         verdict_check({key:value for key,value in results.items() if key != name}, False)
     verdict_check({**results, 'extra':{'result':'success'}}, False)
     disabled = {name:{'result':'skipped'} for name in ('controller', 'node', 'preflight', 'relay')}
@@ -352,6 +361,16 @@ fi
 set -euo pipefail
 case "${!#}" in
   "SELECT n.id"*) printf '%s\\n' "$DB_NODE" ;;
+  "SELECT t.consumed_node_id"*)
+    [[ "${!#}" == *"FROM node_bootstrap_tokens t"* ]]
+    for clause in "encode(t.token_hash,'hex')='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'" \
+      "t.consumed_at BETWEEN t.created_at AND t.expires_at" "n.workspace_id=t.workspace_id" \
+      "n.name=t.expected_node_name" "t.expected_node_name='github-hosted-node'" \
+      "t.expected_environment='development'" "t.expected_endpoint_id IS NULL" \
+      "t.expires_at-t.created_at=interval '900 seconds'" "encode(t.bound_endpoint_id,'hex')"; do
+      [[ "${!#}" == *"$clause"* ]]
+    done
+    printf '%s\\n' "$DB_TOKEN" ;;
   "SELECT consumed_node_id"*) printf '%s\\n' "$DB_TOKEN" ;;
   *) exit 2 ;;
 esac
@@ -368,6 +387,11 @@ esac
                       'DB_NODE':db_node, 'DB_TOKEN':db_token}
         run('bash', str(ROOT / 'scripts/real-e2e-controller.sh'), 'verify-enrollment', str(result),
             env=verify_env, ok=ok)
+        assert (verified / 'result.txt').exists() == ok
+        shutil.rmtree(verified, ignore_errors=True)
+        (state/'bootstrap-token-sha256').write_text('d'*64+'\n')
+        run('bash', str(ROOT / 'scripts/real-e2e-controller.sh'), 'verify-enrollment', str(result),
+            env={**verify_env, 'NODE_INSTALL_E2E':'true'}, ok=ok)
         assert (verified / 'result.txt').exists() == ok
 print('hosted workflow, Relay configuration/negative controls, fail-closed verdict, peer rejection, OAEP, binding and cleanup checks passed (local contracts only)')
 

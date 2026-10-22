@@ -1,6 +1,12 @@
 name: Cross-VM Private Business
 on:
   workflow_dispatch:
+    inputs:
+      node-install:
+        description: Accept the real Nodes installation wizard (local same-SHA v0.0.0 assets)
+        type: boolean
+        default: false
+        required: false
   schedule:
     - cron: '17 3 * * *'
   workflow_call:
@@ -14,6 +20,7 @@ concurrency:
   group: cross-vm-enrollment-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: false
 env:
+  NODE_INSTALL_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.node-install && 'true' || 'false' }}
   RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
   COMPOSE_PROJECT: cross-vm-${{ github.run_id }}-${{ github.run_attempt }}
   CARGO_INCREMENTAL: '0'
@@ -602,5 +609,9 @@ jobs:
             echo 'DEDICATED_RELAY_RECOVERY=PASS'
             echo 'CROSS_WAN_PUBLIC_INGRESS=NOT_TESTED'
             echo 'SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED'
+            if [[ "$NODE_INSTALL_E2E" == true ]]; then
+              echo 'RELEASE_ASSET_DOWNLOAD=NOT_TESTED'
+              echo 'NODE_INSTALL_E2E=PASS'
+            fi
             echo 'CLEANUP=PASS'
           } >>"$GITHUB_STEP_SUMMARY"

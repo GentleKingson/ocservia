@@ -32,6 +32,9 @@ compose() {
   if [[ -f "${REAL_E2E_RELAY_DIR}/compose.json" ]]; then
     overlay=(--file "${REAL_E2E_RELAY_DIR}/compose.json")
   fi
+  if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+    overlay+=(--file "${WORK}/web.compose.json")
+  fi
   docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "${overlay[@]}" "$@"
 }
 
@@ -94,6 +97,19 @@ start_controller() {
   OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})"
   export OCSERV_CONTROLLER_ENDPOINT_ID
 
+  if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+    bash "${ROOT}/scripts/bootstrap.sh" web
+    # shellcheck source=scripts/env.sh
+    source "${ROOT}/scripts/env.sh"
+    (cd "${ROOT}/web" && npm --prefix src/api/generated run build && npm run build && npx --no-install playwright install --with-deps chromium)
+    # The gateway drops all capabilities; public assets must be readable across UIDs.
+    chmod -R a+rX "${ROOT}/web/dist"
+    python3 - "${ROOT}/web/dist" "${WORK}/web.compose.json" <<'WEB'
+import json, sys
+with open(sys.argv[2], 'w') as output:
+    json.dump({'services': {'gateway': {'volumes': [sys.argv[1] + ':/srv:ro']}}}, output)
+WEB
+  fi
   compose build controller-key-init migrate gateway
   compose up --detach controller-key-init transport-runtime-init postgres
   compose run --rm migrate
@@ -153,6 +169,9 @@ start_controller() {
   python3 "${ROOT}/scripts/real-e2e-business.py" login
 
   printf '%s\n' "${endpoint}" >"${OUTBOX}/controller-ready/controller-endpoint-id"
+  if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+    node "${ROOT}/web/test/real-node-install.mjs" prepare
+  fi
   runner_instance_id >"${OUTBOX}/controller-ready/runner-instance"
   printf '%s\n' "${WORKSPACE_ID}" >"${OUTBOX}/controller-ready/workspace-id"
 }
@@ -169,7 +188,13 @@ issue_enrollment_token() {
   }
   printf '%s\n' "${endpoint}" >"${STATE}/agent-endpoint-id"
   printf '%s\n' "${peer_runner}" >"${STATE}/agent-runner-instance"
-  python3 "${ROOT}/scripts/real-e2e-business.py" issue-token "${endpoint}"
+  if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+    # No automatic retry: a failed/unknown POST requires operator reconciliation.
+    source "${ROOT}/scripts/env.sh"
+    node "${ROOT}/web/test/real-node-install.mjs" issue
+  else
+    python3 "${ROOT}/scripts/real-e2e-business.py" issue-token "${endpoint}"
+  fi
 }
 
 verify_enrollment() {
@@ -191,8 +216,16 @@ verify_enrollment() {
     echo "Controller did not persist the expected pending EndpointID binding" >&2
     return 1
   }
-  token_observed="$(compose exec -T postgres psql -At -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+  if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+    local digest
+    digest="$(<"${STATE}/bootstrap-token-sha256")"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+    token_observed="$(compose exec -T postgres psql -At -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+      -c "SELECT t.consumed_node_id || ':' || encode(t.bound_endpoint_id,'hex') FROM node_bootstrap_tokens t JOIN nodes n ON n.id=t.consumed_node_id WHERE t.id='${token_id}' AND encode(t.token_hash,'hex')='${digest}' AND t.consumed_at IS NOT NULL AND t.consumed_at BETWEEN t.created_at AND t.expires_at AND t.workspace_id='${WORKSPACE_ID}' AND n.workspace_id=t.workspace_id AND n.name=t.expected_node_name AND t.expected_node_name='github-hosted-node' AND t.expected_environment='development' AND t.expected_endpoint_id IS NULL AND t.expires_at-t.created_at=interval '900 seconds'")"
+  else
+    token_observed="$(compose exec -T postgres psql -At -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     -c "SELECT consumed_node_id || ':' || encode(expected_endpoint_id,'hex') FROM enrollment_tokens WHERE id='${token_id}' AND consumed_at IS NOT NULL AND workspace_id='${WORKSPACE_ID}' AND expected_environment='development'")"
+  fi
   [[ "$token_observed" == "$node_id:$endpoint" ]]
   printf '%s\n' "${node_id}" >"${STATE}/node-id"
   mkdir -p "$ARTIFACT_DIR"
