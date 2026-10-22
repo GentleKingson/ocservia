@@ -61,6 +61,29 @@ certutil() { :; }
                 assert failed.returncode == 9
                 assert 'checkpoint:real_browser_subset' not in failed.stdout
 
+        # Only the 1.6.0 opt-in adds rollback to Smoke; existing release profiles
+        # keep their stages. Neither failed rollback nor a failed fresh VPN can pass.
+        vpn_stage = driver.split('next_stage business_vpn\n', 1)[1].split('if [[ "$BUSINESS_RUN_RESILIENCE"', 1)[0]
+        vpn_shell = shell + '\npython3() { echo "api:$2"; [[ "$2" != "${FAIL_PHASE:-}" ]]; }\n'
+        for profile, package in [('smoke', 'distribution'), ('smoke', 'backport-1.5.0'),
+                                 ('smoke', 'source-1.6.0'), ('extended', 'backport-1.5.0')]:
+            expected = ['api:vpn_after_config_apply', 'checkpoint:real_vpn_after_config_apply']
+            rollback = profile == 'extended' or package == 'source-1.6.0'
+            if rollback:
+                expected += ['api:configuration', 'checkpoint:config_plan_automatic_rollback',
+                             'api:vpn_after_rollback', 'checkpoint:real_vpn_after_rollback']
+            if profile == 'extended':
+                expected += ['api:business', 'checkpoint:real_vpn_business_and_recovery']
+            result = subprocess.run(['bash', '-c', vpn_shell + vpn_stage, 'vpn-stage', str(root), str(work), profile],
+                                    env={**os.environ, 'OCSERV_PACKAGE': package}, capture_output=True, text=True, check=True)
+            assert result.stdout.splitlines() == expected
+            if rollback:
+                for phase in ('configuration', 'vpn_after_rollback'):
+                    result = subprocess.run(['bash', '-c', vpn_shell + vpn_stage, 'vpn-stage', str(root), str(work), profile],
+                                            env={**os.environ, 'OCSERV_PACKAGE': package, 'FAIL_PHASE': phase},
+                                            capture_output=True, text=True)
+                    assert result.returncode != 0
+                    assert 'checkpoint:real_vpn_after_rollback' not in result.stdout
 
         with patch.object(business, 'sql', side_effect=['f', 'f', 't']) as sql, \
                 patch.object(business.time, 'sleep') as sleep, patch.object(business, 'record') as record:

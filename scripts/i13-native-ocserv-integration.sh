@@ -111,8 +111,8 @@ REKEY_TIME=172800
 DEBUG_LEVEL=2
 if [[ "${version_output%%$'\n'*}" == 'OpenConnect VPN Server 1.6.0' ]]; then
   OCSERV_160=true
-  CAPTURE_SECONDS=60
-  CLIENT_TIMEOUT=65
+  CAPTURE_SECONDS=90
+  CLIENT_TIMEOUT=95
   REKEY_TIME=2
   DEBUG_LEVEL=3
 fi
@@ -358,8 +358,9 @@ grep -q '^CISCO_SPLIT_INC_0_ADDR=203.0.113.0$' "${NATIVE_ROOT}/client.env"
 grep -q '^CISCO_SPLIT_INC_0_MASKLEN=24$' "${NATIVE_ROOT}/client.env"
 grep -q 'Configured as 10.250.0.' "${NATIVE_ROOT}/route.log"
 if ${OCSERV_160}; then
-  # Upstream checks the internal rekey deadline every 30 seconds.
-  for _ in $(seq 1 450); do
+  # Two 30-second upstream deadline checks can take 60 seconds from connect.
+  # Allow scheduling slack while keeping the client alive through both checks.
+  for _ in $(seq 1 750); do
     if [[ $(grep -c 'TLS 1.3 session keys refreshed' "${NATIVE_ROOT}/server.log") -ge 2 ]]; then break; fi
     sleep 0.1
   done

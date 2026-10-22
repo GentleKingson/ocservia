@@ -916,6 +916,8 @@ mod tests {
         write(&key_path, original_key, 0o400);
 
         let cert = fixture.bundle.join("server-cert.pem");
+        // A zero-length validity window is already expired during verification.
+        // OpenSSL 3.5 rejects negative days before the adapter can inspect it.
         let expired = openssl(&[
             "x509",
             "-in",
@@ -923,7 +925,7 @@ mod tests {
             "-signkey",
             key_path.to_str().expect("key"),
             "-days",
-            "-1",
+            "0",
         ]);
         write(&cert, expired, 0o400);
         let digest = Sha256::digest(openssl(&[

@@ -1,0 +1,73 @@
+name: Ocserv 1.6.0 Compatibility
+on:
+  workflow_call:
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: '0'
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-native-packages-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Build native tests and check Controller planning
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          [[ "$(dpkg --print-architecture)" == "$EXPECTED_ARCH" ]]
+          case "$EXPECTED_ARCH" in
+            amd64) [[ "$(uname -m)" == x86_64 ]] ;;
+            arm64) [[ "$(uname -m)" == aarch64 ]] ;;
+          esac
+          bash scripts/bootstrap.sh go-test
+          bash scripts/bootstrap.sh rust-basic
+          source scripts/env.sh
+          (cd control-plane && go test -count=1 ./internal/configplan)
+          cargo test --locked --manifest-path rust/Cargo.toml -p ocservia-agent-protocol
+          cargo test --locked --manifest-path rust/Cargo.toml -p ocservia-ocserv-adapter --lib --no-run --message-format=json >"$RUNNER_TEMP/adapter-build.jsonl"
+          binary="$(jq -rs '[.[] | select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable] | unique | if length == 1 then .[0] else error("expected one native adapter test ELF") end' "$RUNNER_TEMP/adapter-build.jsonl")"
+          echo "I13_TEST_BINARY=$binary" >>"$GITHUB_ENV"
+      - name: Run native adapter regression and I13 on exactly 1.6.0
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ocserv160-evidence"
+          bash scripts/release-upgrade-native.sh "$EXPECTED_ARCH" >"$RUNNER_TEMP/ocserv160-evidence/host.json"
+          git rev-parse HEAD >"$RUNNER_TEMP/ocserv160-evidence/source-sha.txt"
+          docker build -f deploy/test-fixtures/ocserv160.Dockerfile -t ocservia-compat160 .
+          [[ "$(docker image inspect --format '{{.Architecture}}' ocservia-compat160)" == "$EXPECTED_ARCH" ]]
+          docker run --rm --network=none --cap-add=NET_ADMIN --device=/dev/net/tun \
+            -v "$PWD:$PWD:ro" -v "$RUNNER_TEMP/ocserv160-evidence:/evidence" \
+            -e EXPECTED_ARCH -e OCSERVIA_I13_TEST_BINARY="$I13_TEST_BINARY" \
+            ocservia-compat160 bash "$PWD/scripts/ocserv160-native-compat.sh" /evidence
+      - name: Preserve native evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ocserv160-native-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ocserv160-evidence
+          if-no-files-found: warn
+          retention-days: 7
+  business:
+    needs: native
+    uses: ./.github/workflows/release-business-diagnostic.yml
+    with:
+      arch: arm64
+      version: 0.0.0
+      profile: smoke
+      production_signer: true
+      run-resilience: false
+      ocserv_package: source-1.6.0
