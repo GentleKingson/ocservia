@@ -103,6 +103,26 @@ write_exemption "$base" 2999-01-01
 jq 'del(.exemptions[0].installed_version)' "$exemptions" >"$work/invalid.json"
 cp "$work/invalid.json" "$exemptions"
 expect_failure
+# Exercise the two exact Oracle FIPS/BaseOS records with a fixed review date.
+# The production scanner still uses the real date; expiry rejection is tested above.
+(
+  cat >"$work/bin/date" <<'EOF'
+#!/usr/bin/env bash
+[[ "$*" == '-u +%Y-%m-%d' ]] || exit 2
+printf '2026-10-22\n'
+EOF
+  chmod 755 "$work/bin/date"
+  printf 'mysql_backup\tamd64\t%s\nmysql_backup\tarm64\t%s\n' "$work/image.tar" "$work/image.tar" >"$archives"
+  export IMAGE_SCAN_EXEMPTIONS=''
+  reviewed="$(finding openssl 1:3.5.8-2.0.1.el9_8 ELSA-2026-500448 High true),$(finding openssl-libs 1:3.5.8-2.0.1.el9_8 ELSA-2026-500448 High true)"
+  REPORT="$reviewed" run_scan
+  [[ "$(grep -c '"fixable_high_critical":0.*"exempted":2' "$work/scan.log")" == 2 ]]
+  for severity in High Critical; do
+    REPORT="$reviewed,$(finding openssl 1:3.5.8-2.0.1.el9_8 CVE-new "$severity" true)" expect_failure
+  done
+  rm "$work/bin/date"
+)
+printf 'backup\tamd64\t%s\n' "$work/image.tar" >"$archives"
 # Source-controlled exception policy and single-native-architecture scans work.
 IMAGE_SCAN_EXEMPTIONS='' REPORT='' run_scan
 printf '{"exemptions":[]}' >"$exemptions"
