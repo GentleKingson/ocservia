@@ -102,6 +102,8 @@ start_controller() {
     # shellcheck source=scripts/env.sh
     source "${ROOT}/scripts/env.sh"
     (cd "${ROOT}/web" && npm --prefix src/api/generated run build && npm run build && npx --no-install playwright install --with-deps chromium)
+    # The gateway drops all capabilities; public assets must be readable across UIDs.
+    chmod -R a+rX "${ROOT}/web/dist"
     python3 - "${ROOT}/web/dist" "${WORK}/web.compose.json" <<'WEB'
 import json, sys
 with open(sys.argv[2], 'w') as output:
