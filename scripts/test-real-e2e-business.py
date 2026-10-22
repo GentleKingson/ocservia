@@ -68,6 +68,30 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
             raise AssertionError('accepted unproven native business evidence')
         assert not (work / 'business.txt').exists()
         assert not (work / 'business.json').exists()
+    (work / 'state/node-id').write_text(node + '\n')
+    (work / 'state/agent-endpoint-id').write_text('a' * 64 + '\n')
+    (work / 'private').mkdir()
+    (work / 'private/privd-credential').write_text('private-test-credential')
+    (result_dir / 'ready.json').write_text(json.dumps({'node_id':node, 'agent_endpoint_id':'a'*64}))
+    (result_dir / 'proof.json').write_text(json.dumps({'signature':'public-test-proof'}))
+    confirmation = work / 'outbox/business-authority-registered/ready.json'
+    def register_api(path, proof, **kwargs):
+        assert path == f'nodes/{node}/privd-attestation-keys:register'
+        assert proof == {'signature':'public-test-proof', 'credential':'private-test-credential'}
+        assert kwargs == {'role':'anonymous', 'status':201}
+        raise RuntimeError('registration rejected')
+    harness.business.api = register_api
+    try:
+        harness.register_authority(result_dir)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('accepted failed root registration')
+    assert not confirmation.exists()
+    harness.business.api = lambda *args, **kwargs: None
+    harness.register_authority(result_dir)
+    assert json.loads(confirmation.read_text()) == {'node_id':node, 'agent_endpoint_id':'a'*64}
+    assert 'private-test-credential' not in confirmation.read_text()
     for state in ('queued', 'unknown', 'succeeded', 'failed'):
         plan = {'operation_id': operation, 'state': state, 'validation': 'pending',
                 'current_unchanged': False, 'staging_cleaned': True}

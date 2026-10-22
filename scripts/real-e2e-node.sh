@@ -179,16 +179,23 @@ activate_native() {
   sudo install -m 0600 "${WORK}/bound-ocserv.conf" /etc/ocserv/ocserv.conf
   sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
   sudo systemctl restart ocserv
+  mkdir -p "${OUTBOX}/business-node-ready"
+  cp "${WORK}/proof.json" "${OUTBOX}/business-node-ready/proof.json"
+  jq -n --arg node "${node}" --arg endpoint "${endpoint}" \
+    '{node_id:$node,agent_endpoint_id:$endpoint}' \
+    >"${OUTBOX}/business-node-ready/ready.json"
+}
+
+start_native() {
+  local registered_dir="${1:?registered authority directory is required}"
+  [[ "$(jq -er .node_id "${registered_dir}/ready.json")" == "$(<"${OUTBOX}/enrollment-result/node-id")" ]]
+  [[ "$(jq -er .agent_endpoint_id "${registered_dir}/ready.json")" == "$(<"${OUTBOX}/agent-endpoint/agent-endpoint-id")" ]]
+  # Root key registration advances authorization; open the first session after it.
   sudo systemctl enable --now ocservia-privd ocservia-agent
   for service in ocserv ocservia-privd ocservia-agent; do
     [[ "$(systemctl is-active "${service}")" == active ]]
     [[ "$(systemctl show "${service}" -p MainPID --value)" =~ ^[1-9][0-9]*$ ]]
   done
-  mkdir -p "${OUTBOX}/business-node-ready"
-  cp "${WORK}/proof.json" "${OUTBOX}/business-node-ready/proof.json"
-  jq -n --arg node "${node}" --arg endpoint "${endpoint}" \
-    '{node_id:$node,agent_endpoint_id:$endpoint,native_services:["ocserv","ocservia-agent","ocservia-privd"]}' \
-    >"${OUTBOX}/business-node-ready/ready.json"
 }
 
 verify_native_business() {
@@ -258,8 +265,9 @@ case "${1:-}" in
   prepare) prepare_endpoint "${2:-}" ;;
   enroll) enroll "${2:-}" ;;
   activate) activate_native "${2:-}" ;;
+  start-native) start_native "${2:-}" ;;
   verify-business) verify_native_business "${2:-}" ;;
   diagnostics) collect_diagnostics ;;
   cleanup) cleanup_node ;;
-  *) echo "usage: $0 {build|prepare CONTROLLER_DIR|enroll TOKEN_DIR|activate AUTHORITY_DIR|verify-business DONE_DIR|diagnostics|cleanup}" >&2; exit 2 ;;
+  *) echo "usage: $0 {build|prepare CONTROLLER_DIR|enroll TOKEN_DIR|activate AUTHORITY_DIR|start-native REGISTERED_DIR|verify-business DONE_DIR|diagnostics|cleanup}" >&2; exit 2 ;;
 esac

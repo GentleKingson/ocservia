@@ -57,6 +57,12 @@ grep -q 'peer job Real E2E Node failed at step Enroll the isolated node (failure
   echo "artifact wait did not fail promptly after the peer step failed" >&2
   exit 1
 }
+if PATH="${peer_failed}/bin:${PATH}" RUNNER_TEMP="${peer_failed}" "$HELPER" wait-download \
+  "real-e2e-business-authority-registered-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+  "${peer_failed}/registered" 30 "Real E2E Node" >"${peer_failed}/stdout" 2>"${peer_failed}/stderr"; then
+  exit 1
+fi
+grep -q 'peer job Real E2E Node failed at step' "${peer_failed}/stderr"
 
 # Reusable workflows qualify job names; missing and ambiguous matches still fail.
 # shellcheck disable=SC2016

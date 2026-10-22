@@ -69,10 +69,13 @@ for role in ('controller', 'node'):
         token = next(step for step in uploads if step.get('name') == 'Publish enrollment-token')
         assert token['with']['path'].endswith('/encrypted-token')
         required = ['verify', 'Approve node and issue native authority',
+                    'Wait for native authority proof', 'Register privd authority before Agent session',
+                    'Publish authority registration confirmation',
                     'Apply native business and create VPN user',
                     'Verify Controller DB and Agent native effects']
     else:
-        required = ['enroll', 'Start native Agent and privd',
+        required = ['enroll', 'Prepare native authority and TLS', 'Publish native authority proof',
+                    'Wait for authority registration', 'Start native Agent and privd',
                     'Check native effects and OpenConnect VPN', 'Publish native business result']
     positions = [next(i for i, step in enumerate(job['steps']) if step.get('name') == name)
                  for name in required]

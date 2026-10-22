@@ -201,6 +201,12 @@ PATHINFO
   activate)
     private_run activate bash "$ROOT/scripts/real-e2e-node.sh" activate "$PRIVATE/business-authority"
     ;;
+  register-privd)
+    private_run register-privd bash "$ROOT/scripts/real-e2e-controller.sh" register-privd "$PRIVATE/business-node-ready"
+    ;;
+  start-native)
+    private_run start-native bash "$ROOT/scripts/real-e2e-node.sh" start-native "$PRIVATE/business-authority-registered"
+    ;;
   business)
     private_run business bash "$ROOT/scripts/real-e2e-controller.sh" business \
       "$PRIVATE/business-node-ready" "$PRIVATE/agent-endpoint"
