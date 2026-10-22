@@ -36,7 +36,7 @@ Dir.mktmpdir('release-qualification-') do |dir|
     #!/usr/bin/env bash
     set -euo pipefail
     case "$*" in
-      'api repos/test/repo/commits/tags/v1.2.3 --jq .sha')
+      'api repos/test/repo/commits/refs/tags/v1.2.3 --jq .sha')
         [[ "${TAG_API_FAIL:-false}" == false ]] || exit 1
         printf '%s\n' "$TAG_SHA" ;;
       "api --paginate --slurp repos/test/repo/actions/workflows/release-check.yml/runs?head_sha=$BUILD_SHA&branch=main&event=workflow_dispatch&per_page=100")
