@@ -253,6 +253,7 @@ try {
         "test",
         "login.spec.ts",
         "auth-workspace.spec.ts",
+        "node-install.spec.ts",
         ...extraSpecs,
         ...projects.map((project) => `--project=${project}`),
         "--reporter=json",

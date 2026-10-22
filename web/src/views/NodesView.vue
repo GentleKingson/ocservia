@@ -17,6 +17,7 @@ import DataState from "../components/common/DataState.vue";
 import FormField from "../components/common/FormField.vue";
 import OperationDialog from "../components/common/OperationDialog.vue";
 import PageHeader from "../components/common/PageHeader.vue";
+import NodeInstallDialog from "../components/nodes/NodeInstallDialog.vue";
 import NodeTableToolbar from "../components/nodes/NodeTableToolbar.vue";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -105,6 +106,7 @@ const agentBadge: Record<string, "default" | "secondary" | "destructive"> = {
   unsupported: "destructive",
 };
 
+const installDialog = ref(false);
 const selected = ref<string[]>([]);
 const rolloutDialog = ref(false);
 const rolloutBatchSize = ref(5);
@@ -290,6 +292,10 @@ async function submitRollout(): Promise<void> {
         </span>
       </template>
     </PageHeader>
+    <Button type="button" class="mb-4" @click="installDialog = true">{{
+      $t("installNode")
+    }}</Button>
+    <NodeInstallDialog v-if="installDialog" @close="installDialog = false" />
 
     <div v-if="!fleet.initialized && fleet.unavailable && !fleet.loading">
       <DataState kind="error" :message="$t('fleetLoadFailed')" />
