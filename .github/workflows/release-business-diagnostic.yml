@@ -143,6 +143,12 @@ jobs:
               done
             fi
           fi
+          if [[ "$OCSERV_PACKAGE" == source-1.6.0 ]]; then
+            grep -Fx ocserv160_source_binaries "$DIAGNOSTICS/checkpoints.txt"
+            for name in ocserv160_controller_observed complete_config_native_rollback complete_config_durable_restart real_vpn_after_rollback; do
+              jq -se --arg name "$name" 'map(select(.name == $name and .status == "PASS")) | length == 1' "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
+            done
+          fi
           node --input-type=module <<'JS'
           import fs from 'node:fs';
           const result = JSON.parse(fs.readFileSync(`${process.env.DIAGNOSTICS}/result.json`, 'utf8'));

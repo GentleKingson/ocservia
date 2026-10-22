@@ -19,7 +19,7 @@ on:
       purpose:
         description: Diagnostic scope
         type: choice
-        options: [smoke, integration, native-ubuntu-arm64, native-debian13, release-assets]
+        options: [smoke, integration, native-ubuntu-arm64, native-debian13, release-assets, ocserv160]
         default: integration
         required: true
       production_signer:
@@ -42,6 +42,9 @@ concurrency:
   group: release-diagnostics-${{ github.run_id }}
   cancel-in-progress: false
 jobs:
+  ocserv160:
+    if: inputs.purpose == 'ocserv160'
+    uses: ./.github/workflows/ocserv160-compat.yml
   release-assets:
     if: inputs.purpose == 'release-assets'
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}

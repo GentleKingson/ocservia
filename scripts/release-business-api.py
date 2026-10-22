@@ -488,6 +488,10 @@ def smoke_user():
 def configuration():
     node = os.environ['T07_NODE']
     prefix = 'nodes/' + node
+    if os.environ.get('OCSERV_PACKAGE') == 'source-1.6.0':
+        assert ocserv_version() == (1, 6, 0)
+        assert api(prefix)['ocserv_version'] == '1.6.0'
+        record('ocserv160_controller_observed', ocserv_version='1.6.0')
     browser = json.loads((EVIDENCE / 'browser-checkpoints.json').read_text())
     entry = next(item for item in browser if item['name'] == 'browser_complete_config_apply')
     applied = api('operations/' + entry['operation']['id'])

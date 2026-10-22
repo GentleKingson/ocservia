@@ -108,6 +108,52 @@ flow. Upstream 1.6.0 requires GnuTLS 3.8.2 or newer for OIDC and changes the IPv
 server tunnel address from network + 1 to the network address. Operators with
 custom OIDC or IPv6 configurations must review those upstream changes.
 
+The opt-in `ocserv160` diagnostic builds that same checksum-pinned source with
+Meson and runs the existing I13 fixture on native AMD64 and ARM64 GitHub runners
+in Debian 13 containers. It checks the host, image and ELF architectures, and
+runs the complete adapter regression suite (including the expired-certificate
+fixture with OpenSSL 3.5), Agent protocol tests and Controller ConfigPlan tests.
+It does not use QEMU or change version admission. Dispatch from a candidate
+branch through the existing manual workflow:
+
+```bash
+gh workflow run release-upgrade.yml --ref <candidate-branch> -f purpose=ocserv160
+```
+
+After both native jobs pass, the diagnostic reuses Business Smoke on a disposable
+Ubuntu 24.04 ARM64 runner with source-built 1.6.0 binaries and the distribution's
+systemd unit. It requires browser configuration planning, approval and apply,
+VPN user creation, a real OpenConnect tunnel, the existing injected reload-failure
+rollback with exact file-hash restoration and unchanged revision, durable receipts
+after Agent/privd restart, and a fresh working VPN after rollback. A missing or
+failed rollback checkpoint fails the diagnostic. The source fixture disables
+PAM, RADIUS, GSSAPI and ocserv OIDC; plain password authentication is the tested
+profile. This scope is fixed: the other manual workflow inputs do not alter the
+`ocserv160` run.
+
+This entrypoint is separate from release qualification: Release Check and the
+native package diagnostics still use the pinned 1.5.0 backport. Installing source
+binaries over a disposable distribution installation is not ocserv 1.6.0 package
+installation/upgrade/removal acceptance. Native I13 uses a PID/SIGHUP fixture;
+only a passing Business job can establish the tested systemd business behavior.
+ARM64 and Controller business acceptance remain **NOT RUN** until a successful
+candidate workflow run and its artifacts are recorded. The presence of the
+workflow is not evidence that these checks passed. IPv6, custom authentication,
+ocserv's OIDC browser flow, other platforms and full release acceptance remain
+outside this compatibility scope.
+
+The follow-up local AMD64 run on 2026-10-22 used Debian 13, GnuTLS 3.8.9,
+OpenSSL 3.5.7 and OpenConnect 9.12. All 50 adapter regression tests passed
+(three opt-in tests skipped by the default libtest invocation), all four Agent
+protocol tests passed, and Controller ConfigPlan tests passed. I13 then explicitly
+executed its native opt-in test phases and passed the password lifecycle, groups,
+concurrent writes/replay, supplemental-configuration rejection, session termination,
+two TLS 1.3 KeyUpdates and parser-failure exact rollback. This reproduces #542's
+AMD64 coverage with no adapter compatibility defect observed; the only regression
+fixture change replaces negative certificate validity with a zero-length validity
+window accepted by OpenSSL 3.5. These local results are not candidate CI results
+and do not fill the ARM64 or Controller business gaps above.
+
 ### Broader validation targets
 
 Manual platform diagnostics reuse the native I13 adapter fixture with the fixed

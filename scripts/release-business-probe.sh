@@ -131,6 +131,7 @@ cleanup() {
   jq -n --arg version "${VERSION}" --arg start "${started}" \
     --arg end "$(date -u +%FT%TZ)" --arg stage "${failed_stage}" --argjson code "${code}" \
     --arg source "$SOURCE_COMMIT" --arg profile "${BUSINESS_PROFILE}" --arg terminal "$BUSINESS_TERMINAL" \
+    --arg ocserv_fixture "${OCSERV_PACKAGE:-distribution}" \
     --arg resilience "$resilience_result" --argjson resilience_requested "$BUSINESS_RUN_RESILIENCE" \
     --argjson resilience_scenarios "$(if [[ -f "${ARTIFACT_DIR}/api-checkpoints.jsonl" ]]; then jq -s '[.[] | select(.name | startswith("resilience_")) | {name,status,time}]' "${ARTIFACT_DIR}/api-checkpoints.jsonl"; else printf '[]'; fi)" \
     --arg arch "$CONTROLLER_ARCH" \
@@ -139,6 +140,7 @@ cleanup() {
     --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
     --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
     '{source_commit:$source,version:$version,run_id:$run,run_attempt:$attempt,profile:$profile,terminal:$terminal,
+      ocserv_fixture:$ocserv_fixture,
       execution_environment:(if $disposable_container then "BuildServer isolated Docker/systemd" else "GitHub-hosted runner" end),
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
       timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
@@ -207,6 +209,7 @@ next_stage dependency_install
 sudo apt-get update -qq
 case "${OCSERV_PACKAGE:-distribution}" in
   distribution) ocserv_package=ocserv ;;
+  source-1.6.0) ocserv_package=ocserv ;;
   backport-1.5.0)
     # The pinned ocserv-backport release asset brings `occtl terminate` (>= 1.4.2).
     ocserv_version=1.5.0-1~ubuntu24.04.2
@@ -221,10 +224,16 @@ case "${OCSERV_PACKAGE:-distribution}" in
     [[ "$(dpkg-deb -f "${ocserv_package}" Package Version Architecture)" == \
       "$(printf 'Package: ocserv\nVersion: %s\nArchitecture: %s' "${ocserv_version}" "${CONTROLLER_ARCH}")" ]]
     ;;
-  *) echo 'OCSERV_PACKAGE must be distribution or backport-1.5.0' >&2; exit 2 ;;
+  *) echo 'OCSERV_PACKAGE must be distribution, backport-1.5.0 or source-1.6.0' >&2; exit 2 ;;
 esac
 sudo apt-get install -y --no-install-recommends "${ocserv_package}" openconnect vpnc-scripts sqlite3 iputils-ping
 sudo systemctl stop ocserv
+if [[ "${OCSERV_PACKAGE:-distribution}" == source-1.6.0 ]]; then
+  # Keep the distribution unit; this fixture certifies source binaries, not a 1.6.0 package.
+  sudo env OCSERVIA_COMPAT_DISPOSABLE=1 bash "$ROOT/scripts/build-ocserv160-compat.sh" \
+    >"${ARTIFACT_DIR}/ocserv160-build.log" 2>&1
+  record ocserv160_source_binaries
+fi
 if [[ "${OCSERV_PACKAGE:-distribution}" == backport-1.5.0 ]]; then
   [[ "$(dpkg-query -W -f='${Version}' ocserv)" == "${ocserv_version}" ]]
   [[ "$(ocserv --version 2>&1 | head -n1)" == 'OpenConnect VPN Server 1.5.0' ]]
@@ -621,13 +630,15 @@ chmod 700 "${work}/vpn-script"
 next_stage business_vpn
 python3 "${ROOT}/scripts/release-business-api.py" vpn_after_config_apply
 record real_vpn_after_config_apply
-if [[ "${BUSINESS_PROFILE}" == extended ]]; then
+if [[ "${BUSINESS_PROFILE}" == extended || "${OCSERV_PACKAGE:-distribution}" == source-1.6.0 ]]; then
   next_stage configuration_rollback
   python3 "${ROOT}/scripts/release-business-api.py" configuration
   record config_plan_automatic_rollback
   next_stage vpn_after_rollback
   python3 "${ROOT}/scripts/release-business-api.py" vpn_after_rollback
   record real_vpn_after_rollback
+fi
+if [[ "${BUSINESS_PROFILE}" == extended ]]; then
   next_stage supplemental_business
   python3 "${ROOT}/scripts/release-business-api.py" business
   record real_vpn_business_and_recovery
