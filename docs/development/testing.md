@@ -97,11 +97,11 @@ configuration rollback: a fixture service controller maps reload to SIGHUP and
 status to the daemon PID, while parsing and session queries use the real
 ocserv binaries. This checks adapter rollback, not systemd integration.
 
-The 1.6.0 compatibility run used Debian 13 `amd64`, GnuTLS 3.8.9, and the
+The original #542 compatibility run used Debian 13 `amd64`, GnuTLS 3.8.9, and the
 [upstream source archive](https://www.infradead.org/ocserv/download/ocserv-1.6.0.tar.xz)
 with SHA256 `2d3303a0d9e06eabfa08694b9dca3c558fef36418857bebf1b8de57ece5f9f32`.
-This is native adapter evidence, not full release, package, ARM64, or Controller
-business acceptance. Release workflows remain pinned to the existing 1.5.0
+That run established native adapter evidence, not full release, package, ARM64,
+or Controller business acceptance. Release workflows remain pinned to the existing 1.5.0
 backport. The managed complete configuration profile continues to use plain
 password authentication; this run does not certify ocserv's new OIDC browser
 flow. Upstream 1.6.0 requires GnuTLS 3.8.2 or newer for OIDC and changes the IPv6
@@ -136,23 +136,53 @@ native package diagnostics still use the pinned 1.5.0 backport. Installing sourc
 binaries over a disposable distribution installation is not ocserv 1.6.0 package
 installation/upgrade/removal acceptance. Native I13 uses a PID/SIGHUP fixture;
 only a passing Business job can establish the tested systemd business behavior.
-ARM64 and Controller business acceptance remain **NOT RUN** until a successful
-candidate workflow run and its artifacts are recorded. The presence of the
-workflow is not evidence that these checks passed. IPv6, custom authentication,
-ocserv's OIDC browser flow, other platforms and full release acceptance remain
-outside this compatibility scope.
+IPv6, custom authentication, ocserv's OIDC browser flow, other platforms and full
+release acceptance remain outside this compatibility scope.
 
-The follow-up local AMD64 run on 2026-10-22 used Debian 13, GnuTLS 3.8.9,
-OpenSSL 3.5.7 and OpenConnect 9.12. All 50 adapter regression tests passed
-(three opt-in tests skipped by the default libtest invocation), all four Agent
-protocol tests passed, and Controller ConfigPlan tests passed. I13 then explicitly
-executed its native opt-in test phases and passed the password lifecycle, groups,
-concurrent writes/replay, supplemental-configuration rejection, session termination,
-two TLS 1.3 KeyUpdates and parser-failure exact rollback. This reproduces #542's
-AMD64 coverage with no adapter compatibility defect observed; the only regression
-fixture change replaces negative certificate validity with a zero-length validity
-window accepted by OpenSSL 3.5. These local results are not candidate CI results
-and do not fill the ARM64 or Controller business gaps above.
+Follow-up evidence on 2026-10-22 comes from
+[run 39780981426](https://github.com/GentleKingson/ocservia/actions/runs/39780981426),
+candidate `8cf3e6866f296abf1e81fb539a8da124c0666fe0`. Both native jobs used Debian
+13, GnuTLS 3.8.9, OpenSSL 3.5.7 and OpenConnect 9.12, with matching native host,
+Docker and ELF architectures:
+
+| Check | AMD64 | ARM64 |
+| --- | --- | --- |
+| Controller ConfigPlan / Agent protocol | PASS / 4 passed | PASS / 4 passed |
+| Adapter regression | 50 passed, 3 opt-in tests ignored | 50 passed, 3 opt-in tests ignored |
+| Native I13 | PASS | PASS |
+| Core systemd business | NOT RUN | PASS (Ubuntu 24.04) |
+
+I13 explicitly ran its native opt-in test phases: password creation/rotation,
+disable/enable, groups, concurrent writes/replay, supplemental-configuration
+rejection, session termination and parser-failure exact rollback. Both runs
+recorded exactly two TLS 1.3 KeyUpdates and one tunnel assignment; their lifecycle
+summaries match. This reproduces and extends #542's AMD64 coverage.
+
+The ARM64 Business job used Ubuntu 24.04 and GnuTLS 3.8.3. Both the native
+binary and Controller telemetry reported exactly `1.6.0`. Its recorded PASS
+checkpoints include browser ConfigPlan approval/apply, browser and API VPN user
+creation, production Signer password sealing, VPN ICMP after apply, rejection of
+a non-reloadable startup change, automatic rollback after an injected reload
+failure, unchanged configuration hash/revision after Agent/privd restart, and
+fresh VPN ICMP after rollback. The restored hash matches the approved active
+configuration and the revision remains `1`.
+
+This is core Business Smoke plus the existing rollback scenario, not the extended
+business profile. User rotation, disable/enable, groups and session termination
+are covered by native I13, not by Controller business acceptance for 1.6.0.
+Controller OIDC, client-certificate/P12 lifecycle, Agent rollout, the full
+Controller/database/Relay recovery matrix and AMD64 systemd business were not run
+in this diagnostic. The explicit Agent/privd restart check above does not imply
+that the skipped recovery matrix passed.
+
+The [first attempt](https://github.com/GentleKingson/ocservia/actions/runs/39780279989)
+passed on ARM64 but failed on AMD64 after only one KeyUpdate within the original
+45-second wait. Upstream's randomly phased 30-second maintenance checks can need
+60 seconds for two updates. The 1.6.0 fixture now allows 75 seconds and keeps the
+client alive for 90 seconds; the two-update and single-tunnel assertions remain
+mandatory. The other fixture fix replaces negative certificate validity with a
+zero-length validity window accepted by OpenSSL 3.5. No production version
+admission or 1.5.0 release baseline changed.
 
 ### Broader validation targets
 
