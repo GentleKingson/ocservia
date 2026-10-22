@@ -279,7 +279,8 @@ for service in ('ocserv', 'ocservia-agent', 'ocservia-privd'):
     }
     if service == 'ocservia-agent':
         results = []
-        codes = {'', 'privd_rejected', 'privd_receipt_missing_or_malformed', 'capability_rejected',
+        codes = {'', 'privd_rejected', 'privd_receipt_missing_or_malformed', 'privd_outcome_unknown',
+                 'privd_transport_unknown', 'capacity_exceeded', 'capability_rejected',
                  'outcome_requires_reconciliation', 'revision_mismatch', 'session_grant_expired',
                  'command_authorization_capability_mismatch', 'config_plan_invalid'}
         for line in log.splitlines():
@@ -298,6 +299,22 @@ for service in ('ocserv', 'ocservia-agent', 'ocservia-privd'):
                             'error_code': code if isinstance(code, str) and code in codes else 'unclassified'})
         health[service]['command_results'] = results
     if service == 'ocservia-privd':
+        errors = []
+        for line in log.splitlines():
+            try:
+                event = json.loads(line).get('fields', {})
+            except (ValueError, AttributeError):
+                continue
+            if not isinstance(event, dict) or event.get('message') != 'privd operation failed':
+                continue
+            if event.get('operation') not in ('config_plan', 'config_apply', 'service_reload'):
+                continue
+            if type(event.get('error_kind')) is not int or event['error_kind'] not in range(9):
+                continue
+            code = event.get('exit_code')
+            errors.append({'operation':event['operation'], 'error_kind':event['error_kind'],
+                           'exit_code':code if type(code) is int else None})
+        health[service]['operation_errors'] = errors
         response = read('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-privd/desired-effects.sqlite3',
                         'SELECT hex(response) FROM authorized_effects ORDER BY updated_at DESC LIMIT 8;')
         replies = b''.join(bytes.fromhex(line) for line in response.splitlines()).lower()

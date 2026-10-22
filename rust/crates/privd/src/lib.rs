@@ -1754,9 +1754,19 @@ fn finish_operation(
     operation_name: &str,
     result: Result<privd_response::Result, ocservia_ocserv_adapter::AdapterError>,
 ) -> privd_response::Result {
+    let exit_code = match &result {
+        Err(ocservia_ocserv_adapter::AdapterError::CommandFailed { code }) => *code,
+        _ => None,
+    };
     let result =
         result.unwrap_or_else(|failure| privd_response::Result::Error(PrivdError::from(failure)));
     if let privd_response::Result::Error(mut error) = result {
+        tracing::warn!(
+            operation = operation_name,
+            error_kind = error.kind,
+            exit_code,
+            "privd operation failed"
+        );
         error.detail = format!("{operation_name}: {}", error.detail);
         privd_response::Result::Error(error)
     } else {

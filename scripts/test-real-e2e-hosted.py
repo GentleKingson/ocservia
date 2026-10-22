@@ -299,6 +299,7 @@ else
   echo 'private-credential-fixture privd read-only snapshot failed: session_list: permission denied'
   echo '{"fields":{"event_type":"command_delivery_result","command_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":3,"error_code":"privd_receipt_missing_or_malformed"}}'
   echo '{"fields":{"event_type":"command_delivery_result","command_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":2,"error_code":"private-credential-fixture"}}'
+  echo '{"fields":{"message":"privd operation failed","operation":"config_plan","error_kind":4,"exit_code":1,"detail":"private-credential-fixture"}}'
 fi
 ''')
     for name in ('systemctl', 'sudo'):
@@ -313,6 +314,8 @@ fi
             {'command_id':'a'*32, 'state':3, 'error_code':'privd_receipt_missing_or_malformed'},
             {'command_id':'b'*32, 'state':2, 'error_code':'unclassified'}]}
     assert json.loads(health_file.read_text())['ocservia-privd']['root_reply_signals'] == ['fixed resource path invalid']
+    assert json.loads(health_file.read_text())['ocservia-privd']['operation_errors'] == [
+        {'operation':'config_plan', 'error_kind':4, 'exit_code':1}]
     assert b'private-credential-fixture' not in health_file.read_bytes()
     assert not (temp / 'real-e2e-evidence-node/cleanup.txt').exists()
     run('bash', wrapper, 'cleanup', env=health_env)
