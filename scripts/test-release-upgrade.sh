@@ -73,6 +73,7 @@ done
 [[ "$(tail -n 2 "${fixture}/extended-phases" | head -n 1)" == "bash ${ROOT}/scripts/release-business-rollout.sh" ]]
 python3 scripts/test-release-business-smoke.py
 python3 scripts/test-native-platform-package.py
+python3 scripts/test-release-asset-smoke.py
 node scripts/test-release-upgrade.mjs
 bash scripts/test-release-rust-cache.sh
 # Basic CI routes the Release Check-only Quick acceptance script here; its real
