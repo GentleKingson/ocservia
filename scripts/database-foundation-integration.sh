@@ -17,7 +17,7 @@ esac
 if [[ -n "${shard}" && "${scope}" != full ]]; then echo 'DATABASE_SHARD requires DATABASE_TEST_SCOPE=full' >&2; exit 2; fi
 ENGINE="${ENGINE:?ENGINE must be mysql}"
 case "${ENGINE}" in
-  mysql) IMAGE='mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6'; CLIENT=mysql ;;
+  mysql) IMAGE='mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d'; CLIENT=mysql ;;
   *) echo 'ENGINE must be mysql' >&2; exit 2 ;;
 esac
 NAME="ocservia-pr02-${ENGINE}-$$"

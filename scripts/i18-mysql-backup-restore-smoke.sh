@@ -9,7 +9,7 @@ RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
 case "${ENGINE}" in
   mysql)
-    SERVER_IMAGE='mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6'
+    SERVER_IMAGE='mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d'
     DOCKERFILE=deploy/production/backup.mysql.Dockerfile
     CLIENT=mysql
     ;;
