@@ -37,14 +37,17 @@ Open **Nodes → Install node**, including when the inventory is empty. This
 entry prepares the existing installer flow; it does not deploy over SSH or
 change enrollment or approval permissions.
 
-1. Confirm the current authorized Workspace and enter the node name,
+1. Confirm the current authorized Workspace and enter a node name unique
+   within that Workspace (including existing pending nodes),
    environment, a published matching Controller/Agent Release tag (`vX.Y.Z`,
    or `vX.Y.Z-rc.N`), Controller EndpointID, one dedicated HTTPS Relay URL,
    and three distinct protected file paths on the Agent host. The Controller
    EndpointID is not the new Agent's EndpointID. The UI accepts conservative
    literal names and paths and rejects newline injection, credential-bearing
    URLs, query strings and floating versions. It validates the tag format;
-   the administrator must confirm that the matching release exists.
+   the administrator must confirm that the matching release exists. A duplicate
+   name can fail during enrollment even if token issuance succeeds. The name
+   is bound to the token; editing `install.env` cannot rename that binding.
 2. Copy the generated `install.env` into a private working directory on the
    Agent host with mode `0600`. It contains public configuration and file
    paths only. Node name, Workspace and release are comments: the name and
@@ -52,7 +55,22 @@ change enrollment or approval permissions.
    explicitly to `--version`. Do not source the file; the installer's strict
    loader reads it. Existing shell variables take precedence, so check for
    stale values before running the installer.
-3. When ready to install, click **Create bootstrap token**. This sends one
+   The pinned installer commands and host requirements are visible before
+   token issuance. Provision the Relay access token and trusted Controller
+   command verification public key first. For a slow first installation on a
+   fresh, unenrolled host with no existing enrollment-token file:
+
+   - Temporarily set `BOOTSTRAP_TOKEN_SOURCE=` in `install.env` and remove any
+     shell override for that variable. Run the displayed pinned installer to
+     download/install the package, check the host and prepare keys.
+   - Wait for `ENROLLMENT_READY`; Agent/privd are still not started. Restore the
+     configured Bootstrap token file path, then issue and save the token as
+     below and rerun the same installer version with the same identity.
+   - Never remove an existing identity or token file to force this path. If a
+     previous enrollment outcome is unknown, use the existing recovery flow.
+
+3. Only when the host is ready to enroll, click **Create bootstrap token**.
+   Its 900-second lifetime starts at issuance, not at first use. This sends one
    POST with a 900-second TTL and the selected Workspace in both
    `X-Workspace-ID` and the JSON body. Authorization remains enforced by the
    Controller. Transfer the displayed token through a protected channel to
@@ -61,7 +79,7 @@ change enrollment or approval permissions.
    and trusted Controller Ed25519 command verification **public** key PEM at
    the other paths. All three must be non-empty regular files, not symlinks.
    Never transfer the Controller private key or an administrator session.
-4. After saving the token, continue to the fixed-release installer commands.
+4. After saving the token, run or rerun the fixed-release installer commands.
    Download the official `deploy/managed-node/install.sh` from the selected
    tag and run `bash ./install.sh --version vX.Y.Z` in the directory holding
    `install.env`, as a non-root launcher with sudo privileges. The commands

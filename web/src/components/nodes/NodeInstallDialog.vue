@@ -95,7 +95,10 @@ function prepare(): void {
 async function copyConfig(): Promise<void> {
   try {
     await navigator.clipboard.writeText(template.value);
-    if (active) copied.value = true;
+    if (active) {
+      copied.value = true;
+      if (error.value === "installCopyFailed") error.value = "";
+    }
   } catch {
     if (active) error.value = "installCopyFailed";
   }
@@ -216,6 +219,19 @@ function next(): void {
         $t(copied ? "installCopied" : "installCopy")
       }}</Button>
       <p class="m-0 text-sm">{{ $t("installSaveConfig") }}</p>
+      <p class="m-0 text-sm">{{ $t("installFiles") }}</p>
+      <FormField id="install-command" :label="$t('installRun')">
+        <Textarea
+          id="install-command"
+          :model-value="command"
+          readonly
+          rows="5"
+          class="font-mono text-xs"
+        />
+      </FormField>
+      <p v-if="step === 2" class="m-0 text-sm">
+        {{ $t("installPreparation") }}
+      </p>
       <template v-if="step === 2">
         <p class="m-0 text-sm">{{ $t("installTokenNotice") }}</p>
         <Button type="button" :disabled="attempted" @click="issue">{{
@@ -238,16 +254,6 @@ function next(): void {
         </template>
       </template>
       <template v-else>
-        <p class="m-0 text-sm">{{ $t("installFiles") }}</p>
-        <FormField id="install-command" :label="$t('installRun')">
-          <Textarea
-            id="install-command"
-            :model-value="command"
-            readonly
-            rows="5"
-            class="font-mono text-xs"
-          />
-        </FormField>
         <p class="m-0 text-sm">{{ $t("installLocal") }}</p>
         <p class="m-0 text-sm">{{ $t("installApproval") }}</p>
         <a

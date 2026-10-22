@@ -97,6 +97,12 @@ for (const empty of [true, false]) {
     await page.getByLabel("Workspace", { exact: true }).selectOption(beta);
     await prepare(page);
     expect(posts).toBe(0);
+    await expect(
+      page.getByLabel("Run in the directory containing install.env"),
+    ).toHaveValue(/--version v1\.2\.3/);
+    await expect(page.getByText(/For a slow first installation/)).toContainText(
+      "ENROLLMENT_READY",
+    );
     await page
       .getByRole("button", { name: "Create bootstrap token", exact: true })
       .click();

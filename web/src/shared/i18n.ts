@@ -43,7 +43,7 @@ export const i18n = createI18n({
       installIntro:
         "Prepare configuration, issue a short-lived token, then install and complete independent approval.",
       installStep1: "1. Prepare configuration",
-      installStep2: "2. Create bootstrap token",
+      installStep2: "2. Prepare host and create bootstrap token",
       installStep3: "3. Install and verify",
       installField_name: "Node name",
       installField_environment: "Enrollment environment",
@@ -54,7 +54,7 @@ export const i18n = createI18n({
       installField_relayFile: "Relay access token file path",
       installField_commandKeyFile: "Controller command public key file path",
       installHint_name:
-        "1–128 letters, digits, dots, underscores or hyphens; start with a letter or digit.",
+        "Choose a name unique within this Workspace, including existing pending nodes. 1–128 letters, digits, dots, underscores or hyphens; start with a letter or digit. A duplicate can fail at enrollment even if token creation succeeds; changing install.env cannot change the token-bound name.",
       installHint_environment:
         "1–64 letters, digits, dots, underscores or hyphens; start with a letter or digit.",
       installHint_release:
@@ -80,7 +80,7 @@ export const i18n = createI18n({
       installSaveConfig:
         "Save as install.env (0600) in a private working directory on the Agent host. The installer reads it without executing it. Existing shell variables override this file; check for stale values. Name and Workspace are token bindings, recorded as comments only.",
       installTokenNotice:
-        "SecurityAdmin or PlatformAdmin authorization is required. Create only when ready to install: validity is at most 900 seconds. The token is shown once here; transfer it through a protected channel into the Bootstrap token file (0600), never a command, URL, inline script or log. Continuing, closing, changing Workspace or leaving this page clears it. Reopening does not recover it. Before issuing another token, confirm the previous attempt was rejected or expired.",
+        "SecurityAdmin or PlatformAdmin authorization is required. Create only when the host is ready to enroll: validity is at most 900 seconds, starting at issuance. The token is shown once here; transfer it through a protected channel into the Bootstrap token file (0600), never a command, URL, inline script or log. Continuing, closing, changing Workspace or leaving this page clears it. Reopening does not recover it. Before issuing another token, confirm the previous attempt was rejected or expired.",
       installIssue: "Create bootstrap token",
       installIssuing: "Creating token…",
       installToken: "Bootstrap token (shown once)",
@@ -97,7 +97,9 @@ export const i18n = createI18n({
       installExpired:
         "This token has expired and was cleared. Check any installation already attempted before explicitly starting again.",
       installFiles:
-        "Provide the saved Bootstrap token, Relay access token and trusted Controller command verification public key at the configured paths through a protected channel. Never copy an administrator session or Controller private key onto the node. Use a non-root launcher with sudo privileges on a supported Linux/systemd host.",
+        "Prepare the Relay access token and trusted Controller command verification public key at the configured paths before issuing a Bootstrap token. After issuance, save the Bootstrap token at its configured path through a protected channel. Never copy an administrator session or Controller private key onto the node. Use a non-root launcher with sudo privileges on a supported Linux/systemd host.",
+      installPreparation:
+        "For a slow first installation, prepare before starting the 900-second timer: on a fresh, unenrolled host with no existing enrollment-token file, temporarily set BOOTSTRAP_TOKEN_SOURCE= in install.env and remove any shell override for that variable. Run the pinned command above to download the package, run host checks and prepare keys. Wait for ENROLLMENT_READY; Agent/privd do not start. Then restore the configured Bootstrap token file path, click Create bootstrap token, save the token securely and rerun the same installer version with the same identity. Never delete an existing identity or token file to force this preparation path. If an earlier enrollment outcome is unknown, follow recovery instead.",
       installRun: "Run in the directory containing install.env",
       installLocal:
         "ENROLLED_LOCAL means the installer persisted the local Node ID. The Controller node is PENDING_APPROVAL (pending); Agent/privd have not been enabled or started. Record the printed node ID. Local installation is not approval or online telemetry.",

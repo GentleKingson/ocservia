@@ -44,6 +44,7 @@ interface View {
   issue(): Promise<void>;
   next(): void;
   close(): void;
+  copyConfig(): Promise<void>;
 }
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614fa1";
 let context = { id: workspaceId, generation: 1 };
@@ -177,4 +178,20 @@ it("clears an expired token without polling or reissuing", async () => {
   expect(view.token).toBe("");
   expect(view.error).toBe("installExpired");
   expect(mocks.createNodeBootstrapToken).toHaveBeenCalledTimes(1);
+});
+
+it("clears a clipboard failure after successful retry without clearing a token error", async () => {
+  const writeText = vi
+    .fn<(text: string) => Promise<void>>()
+    .mockRejectedValueOnce(new Error("clipboard unavailable"))
+    .mockResolvedValue(undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  const view = await mount();
+  await view.copyConfig();
+  expect(view.error).toBe("installCopyFailed");
+  await view.copyConfig();
+  expect(view.error).toBe("");
+  view.error = "installUnknown";
+  await view.copyConfig();
+  expect(view.error).toBe("installUnknown");
 });
