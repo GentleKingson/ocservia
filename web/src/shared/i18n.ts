@@ -39,6 +39,75 @@ export const i18n = createI18n({
       filters: "Filters",
       clearFilters: "Clear filters",
       removeFilter: "Remove filter {filter}",
+      installNode: "Install node",
+      installIntro:
+        "Prepare configuration, issue a short-lived token, then install and complete independent approval.",
+      installStep1: "1. Prepare configuration",
+      installStep2: "2. Create bootstrap token",
+      installStep3: "3. Install and verify",
+      installField_name: "Node name",
+      installField_environment: "Enrollment environment",
+      installField_release: "Install Release tag",
+      installField_controller: "Controller EndpointID",
+      installField_relay: "Dedicated Relay HTTPS URL",
+      installField_bootstrapFile: "Bootstrap token file path",
+      installField_relayFile: "Relay access token file path",
+      installField_commandKeyFile: "Controller command public key file path",
+      installHint_name:
+        "1–128 letters, digits, dots, underscores or hyphens; start with a letter or digit.",
+      installHint_environment:
+        "1–64 letters, digits, dots, underscores or hyphens; start with a letter or digit.",
+      installHint_release:
+        "Choose a published, matching Controller/Agent release: vX.Y.Z (or vX.Y.Z-rc.N). Never main or latest.",
+      installHint_controller:
+        "64 lowercase hexadecimal characters. This is the Controller identity, not the Agent EndpointID.",
+      installHint_relay:
+        "One dedicated HTTPS Relay. No credentials, query, fragment, whitespace or shell expansion.",
+      installHint_bootstrapFile:
+        "Absolute path on the Agent host to the short-lived token file.",
+      installHint_relayFile:
+        "Absolute path on the Agent host to the Relay access token file.",
+      installHint_commandKeyFile:
+        "Absolute path to the trusted Ed25519 public key PEM, never the Controller private key.",
+      installPaths:
+        "Use three distinct absolute paths with letters, digits, dots, underscores or hyphens; each segment must start with a letter, digit, underscore or hyphen. Provision non-empty regular files, not symlinks, through a protected channel. Tokens must be owner-only (0600) and readable by the installer launcher.",
+      installPrepare: "Prepare install.env",
+      installTemplate: "install.env (no secrets)",
+      installCopy: "Copy install.env",
+      installCopied: "Configuration copied",
+      installCopyFailed:
+        "Clipboard unavailable. Select and copy the configuration manually.",
+      installSaveConfig:
+        "Save as install.env (0600) in a private working directory on the Agent host. The installer reads it without executing it. Existing shell variables override this file; check for stale values. Name and Workspace are token bindings, recorded as comments only.",
+      installTokenNotice:
+        "SecurityAdmin or PlatformAdmin authorization is required. Create only when ready to install: validity is at most 900 seconds. The token is shown once here; transfer it through a protected channel into the Bootstrap token file (0600), never a command, URL, inline script or log. Continuing, closing, changing Workspace or leaving this page clears it. Reopening does not recover it. Before issuing another token, confirm the previous attempt was rejected or expired.",
+      installIssue: "Create bootstrap token",
+      installIssuing: "Creating token…",
+      installToken: "Bootstrap token (shown once)",
+      installExpires: "Expires at {time}",
+      installContinue: "Token saved — installation instructions",
+      installWorkspaceFailed:
+        "Cannot load an authorized Workspace. Close and check your session.",
+      installForbidden:
+        "403: You are not authorized to create a bootstrap token in this Workspace. Ask an authorized administrator; no token was issued by this request.",
+      installBadRequest:
+        "400: The Controller rejected the request. Check the node name, environment and Workspace before starting again.",
+      installUnknown:
+        "The request outcome is unknown (network failure, server failure or unreadable response). It may have issued a token. No retry was sent. Check Controller audit records or wait for expiry before explicitly starting again; do not reset an Agent identity.",
+      installExpired:
+        "This token has expired and was cleared. Check any installation already attempted before explicitly starting again.",
+      installFiles:
+        "Provide the saved Bootstrap token, Relay access token and trusted Controller command verification public key at the configured paths through a protected channel. Never copy an administrator session or Controller private key onto the node. Use a non-root launcher with sudo privileges on a supported Linux/systemd host.",
+      installRun: "Run in the directory containing install.env",
+      installLocal:
+        "ENROLLED_LOCAL means the installer persisted the local Node ID. The Controller node is PENDING_APPROVAL (pending); Agent/privd have not been enabled or started. Record the printed node ID. Local installation is not approval or online telemetry.",
+      installApproval:
+        "Use the existing node.approve workflow: the requester submits labels, policy and capabilities; a second authorized identity independently approves the exact request_hash; the requester activates the node using matching content and X-Approval-ID. Only after confirming active trust, manually start both services:",
+      installApprovalGuide: "Independent approval and activation instructions",
+      installVerify:
+        "In this Workspace, open the node in Controller and check trust_status=active, connection_state=online and freshness=fresh with a recent heartbeat. SERVICES_ACTIVE proves only local systemd state; installer Controller observations remain NOT_OBSERVED.",
+      installRecovery:
+        "If installation or activation has an unknown outcome, reconcile it first. Preserve the existing Agent identity, keys, Relay configuration and original token binding. Follow the enrollment recovery instructions; never delete identity material to register again.",
       nodesDescription: "Manage the ocserv nodes connected to this workspace.",
       nodeActions: "Actions for {name}",
       viewDetails: "View details",

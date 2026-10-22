@@ -12,7 +12,8 @@ decision by a second authorized principal.
 
 ## Before you begin
 
-- The Agent package is installed on the node.
+- The standard installer installs the Agent package. For the advanced manual
+  path, install it beforehand.
 - You have the Controller EndpointID and the target workspace UUIDv7.
 - Sealing keys are ready for your chosen workflow: the standard installer
   generates any missing sealing keys automatically, whereas the advanced manual
@@ -29,6 +30,75 @@ decision by a second authorized principal.
   PlatformAdmin).
 - A second authorized principal is available to review and approve the node
   approval request independently.
+
+## Install from the Nodes page
+
+Open **Nodes → Install node**, including when the inventory is empty. This
+entry prepares the existing installer flow; it does not deploy over SSH or
+change enrollment or approval permissions.
+
+1. Confirm the current authorized Workspace and enter the node name,
+   environment, a published matching Controller/Agent Release tag (`vX.Y.Z`,
+   or `vX.Y.Z-rc.N`), Controller EndpointID, one dedicated HTTPS Relay URL,
+   and three distinct protected file paths on the Agent host. The Controller
+   EndpointID is not the new Agent's EndpointID. The UI accepts conservative
+   literal names and paths and rejects newline injection, credential-bearing
+   URLs, query strings and floating versions. It validates the tag format;
+   the administrator must confirm that the matching release exists.
+2. Copy the generated `install.env` into a private working directory on the
+   Agent host with mode `0600`. It contains public configuration and file
+   paths only. Node name, Workspace and release are comments: the name and
+   Workspace bind the Bootstrap Token request, while the release is passed
+   explicitly to `--version`. Do not source the file; the installer's strict
+   loader reads it. Existing shell variables take precedence, so check for
+   stale values before running the installer.
+3. When ready to install, click **Create bootstrap token**. This sends one
+   POST with a 900-second TTL and the selected Workspace in both
+   `X-Workspace-ID` and the JSON body. Authorization remains enforced by the
+   Controller. Transfer the displayed token through a protected channel to
+   the configured Bootstrap token file, readable only by its owner (`0600`)
+   and accessible to the installer launcher. Provision the Relay access token
+   and trusted Controller Ed25519 command verification **public** key PEM at
+   the other paths. All three must be non-empty regular files, not symlinks.
+   Never transfer the Controller private key or an administrator session.
+4. After saving the token, continue to the fixed-release installer commands.
+   Download the official `deploy/managed-node/install.sh` from the selected
+   tag and run `bash ./install.sh --version vX.Y.Z` in the directory holding
+   `install.env`, as a non-root launcher with sudo privileges. The commands
+   contain no token values. Host requirements and package verification remain
+   those in [Install a managed node](../getting-started/managed-node.md).
+5. Record the printed node ID. `ENROLLED_LOCAL` means the local Node ID is
+   persisted; the Controller registration is `PENDING_APPROVAL` (`pending`
+   in the inventory). It does not mean approved, running or online. Complete
+   [independent approval and activation](#approve-the-node), including the
+   matching content and `X-Approval-ID`, then manually run:
+
+   ```bash
+   sudo systemctl enable --now \
+     ocservia-privd.service \
+     ocservia-agent.service
+   ```
+
+6. In the selected Controller Workspace, open the node and verify
+   `trust_status=active`, `connection_state=online`, and `freshness=fresh`
+   with a recent heartbeat. `SERVICES_ACTIVE` only describes local systemd
+   state; the installer reports Controller observations as `NOT_OBSERVED`.
+
+The Web keeps the token only in the mounted dialog's memory. It clears the
+value on expiry, continuing to instructions, closing, changing Workspace or
+leaving the page, and ignores late responses from abandoned contexts. There
+is no token download, persistence or automatic retry. The browser clipboard
+is outside this lifecycle: if you manually copy the token, clear your
+clipboard after transferring it securely.
+
+A `403` means the caller lacks authorization; `400` means the request was
+rejected. A network failure, server failure or unreadable response may have
+issued a token even when none is displayed. Check Controller audit records or
+wait for expiry before explicitly starting another issuance. Reopening does
+not recover an issued token. For an uncertain **installation** response,
+follow [enrollment recovery](#recover-an-uncertain-enrollment-response) with
+the original identity and token binding; never delete identity material to
+register again.
 
 ## Steps
 
