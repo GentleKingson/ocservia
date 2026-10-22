@@ -106,7 +106,18 @@ request_json() {
     --connect-timeout 5 --max-time 15 "${PUBLIC_URL}${path}"
 }
 
-ready_json="$(request_json /api/v1/readyz)" || fail "public Controller readiness probe failed"
+# Caddy can become healthy before its first ACME certificate is ready. Retry
+# handshake failures only; certificate trust and response checks stay strict.
+for attempt in {1..30}; do
+  if ready_json="$(request_json /api/v1/readyz)"; then
+    break
+  else
+    status=$?
+  fi
+  [[ "${OCSERV_TLS_MODE:-manual}" == acme && "${status}" == 35 && "${attempt}" != 30 ]] ||
+    fail "public Controller readiness probe failed"
+  sleep 2
+done
 jq -e 'type == "object" and .status == "ok"' <<<"${ready_json}" >/dev/null ||
   fail "public Controller readiness response is invalid"
 
