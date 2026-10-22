@@ -38,8 +38,7 @@ assert workflow[True]['workflow_dispatch']['inputs']['node-install'] == {
     'description':'Accept the real Nodes installation wizard (local same-SHA v0.0.0 assets)',
     'type':'boolean', 'default':False, 'required':False}
 assert workflow['env']['NODE_INSTALL_E2E'] == "${{ github.event_name == 'workflow_dispatch' && inputs.node-install && 'true' || 'false' }}"
-assert set(workflow[True]) == {'workflow_dispatch', 'workflow_call', 'schedule'}
-assert workflow[True]['schedule'] == [{'cron':'17 3 * * *'}]
+assert set(workflow[True]) == {'workflow_dispatch', 'workflow_call'}
 assert set(workflow[True]['workflow_call']['secrets']) == {
     'CROSS_VM_RELAY_TOKEN'}
 assert 'secrets: inherit' not in (ROOT / '.github/workflows/real-e2e.yml').read_text()

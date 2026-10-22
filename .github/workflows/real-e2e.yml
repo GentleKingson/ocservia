@@ -7,8 +7,6 @@ on:
         type: boolean
         default: false
         required: false
-  schedule:
-    - cron: '17 3 * * *'
   workflow_call:
     secrets:
       CROSS_VM_RELAY_TOKEN:
