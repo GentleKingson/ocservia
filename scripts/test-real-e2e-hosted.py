@@ -72,11 +72,16 @@ for role in ('controller', 'node'):
                     'Wait for native authority proof', 'Register privd authority before Agent session',
                     'Publish authority registration confirmation',
                     'Apply native business and create VPN user',
-                    'Verify Controller DB and Agent native effects']
+                    'Verify Controller DB and Agent native effects', 'Create Relay recovery baseline',
+                    'Queue reload during Relay outage', 'Verify fresh session and same recovered operation',
+                    'Reconcile Relay recovery and exactly one effect']
     else:
         required = ['enroll', 'Prepare native authority and TLS', 'Publish native authority proof',
                     'Wait for authority registration', 'Start native Agent and privd',
-                    'Check native effects and OpenConnect VPN', 'Publish native business result']
+                    'Check native effects and OpenConnect VPN', 'Publish native business result',
+                    'Capture same native VPN and identity baseline',
+                    'Verify no offline native effect and live VPN',
+                    'Verify exactly one reload and unchanged live VPN', 'Publish native recovery result']
     positions = [next(i for i, step in enumerate(job['steps']) if step.get('name') == name)
                  for name in required]
     assert positions == sorted(positions)
@@ -178,7 +183,7 @@ if [[ "$1" == install ]]; then shift; exec install "$@"; fi
             env={**trusted_env, **(changes or {}), 'RESULTS':json.dumps(items), 'GITHUB_STEP_SUMMARY':str(summary)})
         assert ('CROSS_VM_ENROLLMENT=PASS' in summary.read_text()) == (ok if acceptance is None else acceptance)
         assert ('CROSS_VM_PRIVATE_BUSINESS=PASS' in summary.read_text()) == (ok if acceptance is None else acceptance)
-        assert 'DEDICATED_RELAY_RECOVERY=PASS' not in summary.read_text()
+        assert ('DEDICATED_RELAY_RECOVERY=PASS' in summary.read_text()) == (ok if acceptance is None else acceptance)
     verdict_check(results, True)
     for name in results:
         for status in ('failure', 'cancelled', 'skipped'):
@@ -483,4 +488,42 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-tailnet-test-') as directory:
     assert not (temp/'real-e2e-evidence-relay/cleanup.txt').exists()
     run('bash',relay_host,'cleanup',env=env)
     assert not (temp/'real-e2e-relay-4242-1').exists()
+    relay_steps=[step['name'] for step in workflow['jobs']['relay']['steps'] if 'name' in step]
+    required=['Wait for B completion and native recovery baseline','Stop the sole Relay',
+              'Wait for offline native queue proof','Restore the same Relay',
+              'Keep Relay alive until both peer jobs complete','Clean Relay and private TLS material']
+    assert [relay_steps.index(name) for name in required] == sorted(relay_steps.index(name) for name in required)
+    # The real stop/restore/cleanup functions must retain container identity and
+    # restore before removal, including an unexpected exit while stopped.
+    state=temp/'relay-running'
+    events=temp/'relay-events'
+    present=temp/'relay-present'
+    state.write_text('true\n')
+    present.write_text('true\n')
+    events.write_text('')
+    env={**env,'RELAY_STATE':str(state),'RELAY_EVENTS':str(events),'RELAY_PRESENT':str(present),'RELAY_ID':'a'*64}
+    executable('docker','''case "$1" in
+inspect) if [[ "$3" == '{{.Id}}' ]]; then echo "$RELAY_ID"; else cat "$RELAY_STATE"; fi ;;
+stop) echo false >"$RELAY_STATE"; echo stop >>"$RELAY_EVENTS" ;;
+start) echo true >"$RELAY_STATE"; echo start >>"$RELAY_EVENTS" ;;
+ps) if [[ "$(cat "$RELAY_PRESENT")" == true ]]; then echo "$RELAY_ID"; fi ;;
+rm) echo false >"$RELAY_PRESENT"; echo remove >>"$RELAY_EVENTS" ;;
+esac
+''')
+    executable('curl','[[ "$(cat "$RELAY_STATE")" == true ]] || exit 7\n')
+    ready_dir.mkdir(parents=True)
+    (ready_dir/'ready.json').write_text(json.dumps(ready))
+    (ready_dir.parent/'container-id').write_text('a'*64+'\n')
+    run('bash',relay_host,'stop',env=env)
+    stopped=json.loads((ready_dir.parent/'stopped/result.json').read_text())
+    assert stopped=={'container_id':'a'*64,'running':False,'reachable':False}
+    run('bash',relay_host,'restore',env={**env,'RELAY_ID':'b'*64},ok=False)
+    assert events.read_text()=='stop\n'
+    run('bash',relay_host,'restore',env=env)
+    assert json.loads((ready_dir.parent/'restored/result.json').read_text()) == {
+        'container_id':'a'*64,'running':True,'reachable':True}
+    run('bash',relay_host,'stop',env=env)
+    run('bash',relay_host,'cleanup',env=env)
+    assert events.read_text().splitlines()[-2:]==['start','remove']
+    assert not ready_dir.parent.exists()
 print('three-VM OIDC, readiness, lifetime and cleanup negative contracts passed (no Tailnet credentials used)')

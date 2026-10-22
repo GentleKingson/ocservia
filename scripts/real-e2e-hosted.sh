@@ -48,7 +48,9 @@ pathlib.Path(sys.argv[2]).write_text(json.dumps({
     'python_locations': [{'file': name, 'line': int(line)} for name, line in re.findall(
         r'file "[^"\n]*/scripts/(real-e2e-business\.py|release-business-api\.py|real-e2e-native-business\.py)", line ([0-9]+)', log)],
     'wait_timeouts': [name for name in ('native agent online with fresh heartbeat',
-                                       'cross-vm configuration plan', 'cross-vm configuration apply')
+                                       'cross-vm configuration plan', 'cross-vm configuration apply',
+                                       'single relay owner lease invalidation', 'node offline during relay outage',
+                                       'fresh agent session after relay recovery', 'same operation after relay recovery')
                       if 'timeout: ' + name in log],
     'native_online': online,
 }) + '\n')
@@ -220,6 +222,22 @@ PATHINFO
       "$PRIVATE/business-node-result"
     cp "$ARTIFACT_DIR/business.txt" "$EVIDENCE/business.txt"
     cp "$ARTIFACT_DIR/business.json" "$EVIDENCE/business.json"
+    ;;
+  recovery-controller-baseline|recovery-controller-queued|recovery-controller-done|recovery-controller-verify)
+    phase="${1#recovery-controller-}"
+    private_run "$1" bash "$ROOT/scripts/real-e2e-controller.sh" "recovery-$phase" "$PRIVATE/recovery-node-result"
+    if [[ "$phase" == verify ]]; then
+      cp "$ARTIFACT_DIR/recovery.txt" "$ARTIFACT_DIR/recovery.json" "$EVIDENCE/"
+    else
+      cp "$WORK/outbox/recovery-controller-$phase/result.json" "$EVIDENCE/recovery-$phase.json"
+    fi
+    ;;
+  recovery-node-baseline|recovery-node-queued|recovery-node-result)
+    phase="${1#recovery-node-}"
+    input="$phase"
+    [[ "$phase" != result ]] || input=done
+    private_run "$1" bash "$ROOT/scripts/real-e2e-node.sh" "recovery-$phase" "$PRIVATE/recovery-controller-$input"
+    cp "$WORK/outbox/recovery-node-$phase/result.json" "$EVIDENCE/recovery-$phase.json"
     ;;
   tailnet-cleanup)
     trap 'rm -rf -- "$PRIVATE"' EXIT

@@ -9,6 +9,33 @@ WORK="$RUNNER_TEMP/real-e2e-relay-$RUN_ID"
 EVIDENCE="$RUNNER_TEMP/real-e2e-evidence-relay"
 NAME="real-e2e-relay-$RUN_ID"
 mkdir -p "$WORK" "$EVIDENCE"
+
+restore_relay() {
+  [[ -f "$WORK/stop-requested" ]] || return 0
+  [[ "$(docker inspect --format '{{.Id}}' "$NAME")" == "$(<"$WORK/container-id")" ]] || return 1
+  docker start "$NAME" >"$WORK/restore.log" || return 1
+  local ip
+  ip="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ip"])' "$WORK/ready/ready.json")" || return 1
+  for _ in {1..20}; do
+    if curl --fail --silent --show-error --noproxy '*' --connect-timeout 2 --max-time 4 \
+      --cacert "$WORK/ready/ca.pem" --resolve "relay.ocservia.test:3443:$ip" \
+      https://relay.ocservia.test:3443/ >"$WORK/health.log" 2>&1; then break; fi
+    sleep 1
+  done
+  [[ "$(docker inspect --format '{{.State.Running}}' "$NAME")" == true ]] || return 1
+  curl --fail --silent --show-error --noproxy '*' --connect-timeout 3 --max-time 5 \
+    --cacert "$WORK/ready/ca.pem" --resolve "relay.ocservia.test:3443:$ip" \
+    https://relay.ocservia.test:3443/ >"$WORK/health.log" 2>&1 || return 1
+  mkdir -p "$WORK/restored" || return 1
+  python3 - "$WORK/container-id" "$WORK/restored/result.json" <<'RESTORED' || return 1
+import json,pathlib,re,sys
+container=pathlib.Path(sys.argv[1]).read_text().strip()
+assert re.fullmatch('[0-9a-f]{64}',container)
+pathlib.Path(sys.argv[2]).write_text(json.dumps({'container_id':container,'running':True,'reachable':True})+'\n')
+RESTORED
+  cp "$WORK/restored/result.json" "$EVIDENCE/recovery-restored.json" || return 1
+}
+
 case "${1:-}" in
   start)
     ip="$(tailscale ip -4)"
@@ -62,6 +89,30 @@ item = dict(url='https://relay.ocservia.test:3443', ip=sys.argv[3],
 PY
     cp "$WORK/ready/ready.json" "$EVIDENCE/relay-ready.json"
     ;;
+  stop)
+    [[ "$(docker inspect --format '{{.State.Running}}' "$NAME")" == true ]]
+    touch "$WORK/stop-requested"
+    docker stop "$NAME" >"$WORK/stop.log"
+    [[ "$(docker inspect --format '{{.State.Running}}' "$NAME")" == false ]]
+    ip="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ip"])' "$WORK/ready/ready.json")"
+    status=0
+    curl --fail --silent --show-error --noproxy '*' --connect-timeout 3 --max-time 5 \
+      --cacert "$WORK/ready/ca.pem" --resolve "relay.ocservia.test:3443:$ip" \
+      https://relay.ocservia.test:3443/ >"$WORK/health.log" 2>&1 || status=$?
+    [[ "$status" == 7 || "$status" == 28 ]]
+    mkdir -p "$WORK/stopped"
+    python3 - "$WORK/container-id" "$WORK/stopped/result.json" <<'STOPPED'
+import json,pathlib,re,sys
+container=pathlib.Path(sys.argv[1]).read_text().strip()
+assert re.fullmatch('[0-9a-f]{64}',container)
+pathlib.Path(sys.argv[2]).write_text(json.dumps({'container_id':container,'running':False,'reachable':False})+'\n')
+STOPPED
+    cp "$WORK/stopped/result.json" "$EVIDENCE/recovery-stopped.json"
+    ;;
+  restore)
+    [[ -f "$WORK/stop-requested" ]]
+    restore_relay
+    ;;
   hold)
     # Wait for BOTH full jobs (including their cleanup and Action post steps).
     deadline=$((SECONDS + 6000))
@@ -98,6 +149,8 @@ PY
     ;;
   cleanup)
     status=0
+    # A failed/cancelled recovery restores the same Relay before resource removal.
+    if [[ -f "$WORK/stop-requested" ]]; then restore_relay || status=1; fi
     # Do not hide daemon/API errors as an absent container/image.
     containers="$(docker ps -aq --filter "name=^/$NAME$")" || status=1
     if [[ -n "$containers" ]]; then docker rm -f "$NAME" >/dev/null || status=1; fi
