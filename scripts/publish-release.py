@@ -109,7 +109,11 @@ def verify_assets(repo, release_id, files):
 
 
 def draft(repo, tag, sha, prerelease):
-    release = api(f'repos/{repo}/releases/tags/{tag}')
+    # The by-tag endpoint only returns published releases; listing includes drafts.
+    pages = api(f'repos/{repo}/releases?per_page=100', '--paginate', '--slurp')
+    matches = [release for page in pages for release in page if release['tag_name'] == tag]
+    require(len(matches) == 1, 'Expected a new draft for this exact build SHA')
+    release = matches[0]
     require(release['tag_name'] == tag and release['draft'] is True
             and release['prerelease'] == prerelease and release['target_commitish'] == sha,
             'Expected a new draft for this exact build SHA')
