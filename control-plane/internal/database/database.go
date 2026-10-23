@@ -35,6 +35,9 @@ var (
 	ErrTxClosed      = errors.New("database: transaction closed")
 	ErrTxAborted     = errors.New("database: transaction aborted")
 	ErrUnsupported   = errors.New("database: unsupported operation")
+	// ErrUnavailable describes connection availability, not a known rollback
+	// or permission to replay a transaction callback.
+	ErrUnavailable = errors.New("database: connection unavailable")
 )
 
 type Row interface{ Scan(...any) error }

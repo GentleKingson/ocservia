@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 )
 
@@ -63,8 +64,8 @@ func (s *schedulerLeaderStub) WithSession(ctx context.Context, body func(context
 }
 func (s *schedulerLeaderStub) Stop() { s.stopped = true }
 
-func TestSchedulerLeadershipRetry(t *testing.T) {
-	for _, lost := range []error{coordination.ErrLeadershipLost, coordination.ErrNotLeader, context.Canceled, &useroperations.EnforcementCleanupError{Err: coordination.ErrNotLeader}, &useroperations.EnforcementCleanupError{Err: context.Canceled}} {
+func TestSchedulerRecoverableFailuresRetry(t *testing.T) {
+	for _, lost := range []error{coordination.ErrLeadershipLost, coordination.ErrNotLeader, context.Canceled, &useroperations.EnforcementCleanupError{Err: coordination.ErrNotLeader}, &useroperations.EnforcementCleanupError{Err: context.Canceled}, database.ErrUnavailable, errors.Join(database.ErrUnavailable, errors.New("connection lost"))} {
 		t.Run(lost.Error(), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -90,7 +91,7 @@ func TestSchedulerLeadershipRetry(t *testing.T) {
 			select {
 			case ticks <- time.Now():
 			case err := <-done:
-				t.Fatalf("leadership loss was fatal: %v", err)
+				t.Fatalf("recoverable session failure was fatal: %v", err)
 			case <-time.After(2 * time.Second):
 				t.Fatal("not waiting for next tick")
 			}
@@ -199,5 +200,17 @@ func TestSchedulerCanceledParentPreservesOtherFailure(t *testing.T) {
 	}}
 	if err := runScheduler(ctx, leader, nil, maintenanceWork{}, 1, quietLogger()); !errors.Is(err, failure) || !leader.stopped {
 		t.Fatal("cancellation masked an unrelated fatal maintenance error", err)
+	}
+}
+
+func TestSchedulerCanceledParentPreservesUnavailableFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	leader := &schedulerLeaderStub{session: func(context.Context, func(context.Context, *coordination.Session) error) error {
+		cancel()
+		return database.ErrUnavailable
+	}}
+	if err := runScheduler(ctx, leader, nil, maintenanceWork{}, 1, quietLogger()); !errors.Is(err, database.ErrUnavailable) || !leader.stopped {
+		t.Fatal("cancellation masked database failure", err)
 	}
 }

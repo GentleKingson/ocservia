@@ -5,6 +5,8 @@ package postgres
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/jackc/pgx/v5"
@@ -122,6 +124,13 @@ func classify(err error) error {
 				kind = database.ErrPermission
 			case "25P02":
 				kind = database.ErrTxAborted
+			case "08003", "08006", "57P01", "57P02", "57P03":
+				kind = database.ErrUnavailable
+			}
+		} else {
+			var network net.Error
+			if errors.As(err, &network) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				kind = database.ErrUnavailable
 			}
 		}
 	}
