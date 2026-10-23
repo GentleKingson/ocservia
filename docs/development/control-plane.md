@@ -57,6 +57,12 @@ These commands verify the artifacts without modifying tracked files. PostgreSQL'
 
 The `/readyz` endpoint executes a zero-row read against core tables (workspaces, nodes, operations) and checks event-stream health, without reading `schema_revisions`. Normal Controller startup (without `--migrate-only`) verifies audit authenticity and checks required telemetry objects and runtime privileges, skipping receipt, checksum, and schema-drift validation. A passing `/readyz` response therefore indicates runtime connectivity, while schema identity admission happens only during the owner migration run (or via the test/development-only `ocserv-db-foundation` tool).
 
+PostgreSQL connection loss aborts the current scheduler maintenance pass and is
+logged before the next regular tick; the HTTP server stays running so readiness
+can report the database outage. This does not replay transaction callbacks or
+claim a known commit outcome. Startup checks, permission and schema failures,
+and other unclassified maintenance errors retain their fatal behavior.
+
 Business stores coordinate transaction ownership, atomic audit and domain writes, bounded cleanup, and fencing through `internal/database`. Under the hood, PostgreSQL implements business locks with transaction advisory locks and MySQL uses `business_locks` row locks; MySQL's migration-only `GET_LOCK` is never used for business transactions. Because a commit acknowledgement error leaves the transaction outcome unknown, callers must not blindly replay writes.
 
 Within a single business operation, bind every participating domain Store to the same `database.Tx` inside `database.Within`. Never construct a store from the connection pool inside that callback or split a logical transaction across multiple callbacks. `database.Within` does not retry. For database-only claim, completion, reaping, and lease work, use the opt-in `database.WithinRetry` helper, which makes at most three attempts and retries only when the transaction was a deadlock victim or hit a serialization failure with an acknowledged rollback. Connection loss, lock timeouts, ordinary constraint errors, and unknown commit outcomes return immediately without retry, and callbacks passed to `database.WithinRetry` must never perform transport calls or other external mutations. Store methods translate driver errors into backend-neutral categories such as `database.ErrDeadlock` and `database.ErrSerialization`, keeping driver types and SQLSTATE codes out of business packages.

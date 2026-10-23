@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
@@ -89,6 +90,8 @@ func runScheduler(ctx context.Context, leader schedulerLeader, ticks <-chan time
 				logger.WarnContext(ctx, "maintenance session lost leadership", "alert_kind", "scheduler.leadership_lost", "error", err)
 			} else if cleanupFailed {
 				logger.ErrorContext(ctx, "policy enforcement cleanup failed; remaining maintenance skipped; retry on next tick", "alert_kind", "user_operations.cleanup_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
+			} else if errors.Is(err, database.ErrUnavailable) && ctx.Err() == nil {
+				logger.ErrorContext(ctx, "maintenance database unavailable; remaining maintenance skipped; retry on next tick", "alert_kind", "scheduler.database_unavailable", "error", err, "duration_ms", time.Since(started).Milliseconds())
 			} else {
 				logger.ErrorContext(ctx, "user operations scheduler failed", "alert_kind", "user_operations.scheduler_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
 				return err

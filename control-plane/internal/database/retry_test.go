@@ -38,6 +38,8 @@ func TestCoordinationRetryBoundaries(t *testing.T) {
 		{"serialization-unconfirmed", database.ErrSerialization, nil, connectionLost, 1, false},
 		{"constraint", database.ErrUnique, nil, nil, 1, false},
 		{"statement-disconnect", connectionLost, nil, nil, 1, false},
+		{"unavailable-statement", database.ErrUnavailable, nil, nil, 1, false},
+		{"unavailable-commit", nil, database.ErrUnavailable, database.ErrTxClosed, 1, true},
 		{"unknown-commit", nil, connectionLost, database.ErrTxClosed, 1, true},
 		{"cancelled-commit", nil, context.Canceled, database.ErrTxClosed, 1, true},
 		{"aborted-commit", nil, database.ErrTxAborted, database.ErrTxClosed, 1, false},

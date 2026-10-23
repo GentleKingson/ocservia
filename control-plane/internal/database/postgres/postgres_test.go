@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"syscall"
 	"testing"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -17,6 +20,8 @@ func TestErrorClassification(t *testing.T) {
 		"23502": database.ErrConstraint, "23514": database.ErrConstraint, "23P01": database.ErrConstraint,
 		"40001": database.ErrSerialization, "40P01": database.ErrDeadlock,
 		"42501": database.ErrPermission, "25P02": database.ErrTxAborted,
+		"57P01": database.ErrUnavailable, "57P02": database.ErrUnavailable, "57P03": database.ErrUnavailable,
+		"08003": database.ErrUnavailable, "08006": database.ErrUnavailable,
 	} {
 		t.Run(code, func(t *testing.T) {
 			original := &pgconn.PgError{Code: code}
@@ -38,6 +43,20 @@ func TestErrorClassification(t *testing.T) {
 	unknown := &pgconn.PgError{Code: "57014"}
 	if classify(unknown) != unknown || classify(nil) != nil {
 		t.Fatal("unknown errors must not be guessed or retried")
+	}
+}
+
+func TestUnavailableConnectionClassification(t *testing.T) {
+	for _, original := range []error{io.EOF, io.ErrUnexpectedEOF, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}} {
+		err := classify(fmt.Errorf("wrapped: %w", original))
+		if !errors.Is(err, database.ErrUnavailable) || !errors.Is(err, original) {
+			t.Fatalf("connection availability/original error lost: %v", err)
+		}
+	}
+	for _, original := range []error{context.Canceled, context.DeadlineExceeded, &pgconn.PgError{Code: "42501"}, &pgconn.PgError{Code: "28P01"}, &pgconn.PgError{Code: "42P01"}, &pgconn.PgError{Code: "08P01"}} {
+		if errors.Is(classify(original), database.ErrUnavailable) {
+			t.Fatalf("non-availability failure classified as recoverable: %v", original)
+		}
 	}
 }
 
