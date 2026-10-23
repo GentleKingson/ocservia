@@ -1,4 +1,4 @@
-FROM nginx:1.30.5-alpine@sha256:bf3201ab56f23e5954646379c775d511fc466e9f11376d9725361064ad07ed35 AS runtime
+FROM nginx:1.30.6-alpine@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee17884204677702951 AS runtime
 RUN apk upgrade --no-cache libexpat libx11 pcre2 tiff zlib
 COPY deploy/production/integrated/nginx.conf.template /etc/nginx/ocservia.conf.template
 COPY deploy/production/integrated/edge-entrypoint.sh /usr/local/bin/ocservia-edge
