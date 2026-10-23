@@ -60,7 +60,9 @@ class PublicationTest(unittest.TestCase):
             return {'sha': 'b' * 40 if self.fault == 'moved-tag' else SHA}
         if path.endswith('/latest'):
             return {'tag_name': 'v0.0.0'}
-        if 'releases/tags/' in path or path.endswith('/releases/42'):
+        if path.endswith('/releases?per_page=100'):
+            return [[], [copy.deepcopy(self.release)]]
+        if path.endswith('/releases/42'):
             return copy.deepcopy(self.release)
         raise AssertionError((path, args))
 
@@ -206,7 +208,18 @@ class PublicationTest(unittest.TestCase):
 
     def test_unexpected_or_wrong_draft_is_rejected(self):
         for change in ({'draft': False}, {'target_commitish': 'b' * 40}, {'prerelease': False}):
-            with patch.object(pub, 'api', return_value=self.release | change):
+            with patch.object(pub, 'api', return_value=[[self.release | change]]):
+                with self.assertRaisesRegex(RuntimeError, 'Expected a new draft'):
+                    pub.draft('test/repo', TAG, SHA, True)
+
+    def test_draft_lookup_includes_later_pages_and_avoids_published_only_tag_endpoint(self):
+        with patch.object(pub, 'api', side_effect=self.api) as api:
+            self.assertEqual(pub.draft('test/repo', TAG, SHA, True), 42)
+            api.assert_called_once_with('repos/test/repo/releases?per_page=100', '--paginate', '--slurp')
+
+    def test_missing_duplicate_and_wrong_tag_drafts_are_rejected(self):
+        for pages in ([[]], [[self.release, self.release]], [[self.release | {'tag_name': 'other'}]]):
+            with self.subTest(pages=pages), patch.object(pub, 'api', return_value=pages):
                 with self.assertRaisesRegex(RuntimeError, 'Expected a new draft'):
                     pub.draft('test/repo', TAG, SHA, True)
 
