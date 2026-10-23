@@ -209,7 +209,7 @@ streams; this is not proof of original-IP abuse controls behind Edge.
 
 Run locally in an authorized isolated checkout with Docker and the required
 build dependencies. Development builds are allowed here; current publication qualification uses manual Release Check
-and freshly built local images on disposable native runners. NGINX 1.30.5 and Caddy 2.11.4 are digest-pinned; Relay uses the
+and freshly built local images on disposable native runners. NGINX 1.30.6 and Caddy 2.11.4 are digest-pinned; Relay uses the
 existing locked iroh-relay 1.2.0 build. No upstream Relay changes are made.
 
 ```bash
