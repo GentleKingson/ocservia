@@ -32,7 +32,7 @@ new_case() {
 }
 
 generate() {
-  as_root env PATH="${PATH}" OCSERV_SECRET_DIR="${case_dir}/secrets" OCSERV_SIGNER_SECRET_DIR="${case_dir}/signer" \
+  as_root env PATH="${generator_path:-${PATH}}" OCSERV_SECRET_DIR="${case_dir}/secrets" OCSERV_SIGNER_SECRET_DIR="${case_dir}/signer" \
     OCSERV_SIGNER_STATE_DIR="${case_dir}/signer-state" "${GENERATOR}" \
     --root-ca-export-dir "${case_dir}/export" "$@"
 }
@@ -195,10 +195,8 @@ expect_stat "${case_dir}/signer/issuer-key.pem" 65532:65532:400:1
 new_case norename
 farm="${case_dir}/farm"
 as_root install -d -m 0700 -- "${farm}"
-tools=(bash env openssl jq sha256sum od)
-((EUID == 0)) || tools+=(sudo)
-for tool in "${tools[@]}"; do as_root ln -s -- "$(command -v "${tool}")" "${farm}/${tool}"; done
-if err="$(PATH="${farm}" generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>&1)"; then
+for tool in bash env openssl jq sha256sum od; do as_root ln -s -- "$(command -v "${tool}")" "${farm}/${tool}"; done
+if err="$(generator_path="${farm}" generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>&1)"; then
   die "a missing rename.ul must fail"
 fi
 grep -Fq 'rename.ul is required' <<<"${err}" || die "missing rename.ul was not reported: ${err}"
