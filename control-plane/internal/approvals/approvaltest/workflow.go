@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,5 +135,125 @@ func ExtendedTimes(t *testing.T, b database.Backend, workspace, requester, appro
 		} else if err != nil || approved.Status != "approved" || approved.ExpiresAt != positive {
 			t.Fatal("infinite approval", approved, err)
 		}
+	}
+}
+
+// ExpiryAfterLockWait proves a consumer that waits on a resource or approval
+// row lock is judged by the clock after the wait, not by its transaction start.
+// lockNode and lockApproval take the respective row locks inside tx; set
+// rewrites the approval's clocks through the owner fixture.
+func ExpiryAfterLockWait(t *testing.T, b database.Backend, workspace, requester, approver, session, approverSession uuid.UUID, lockNode func(context.Context, database.Tx) error, lockApproval func(context.Context, database.Tx, uuid.UUID) error, set func(uuid.UUID, value.Timestamp, value.Timestamp)) {
+	t.Helper()
+	ctx := context.Background()
+	s := approvals.NewBackend(b)
+	hash, summary := approvals.GenericBinding("service.reload", "workspace", workspace)
+	approvedApproval := func(ttl time.Duration) (approvals.Approval, time.Time) {
+		t.Helper()
+		pending, err := s.Create(ctx, approvals.Request{WorkspaceID: workspace, RequesterID: requester, ResourceID: workspace, Action: "service.reload", ResourceType: "workspace", Reason: "lock wait", TTL: time.Hour, SessionID: session, RequestID: uuid.NewString(), RequestHash: hash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: workspace, Type: "workspace"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = s.Approve(ctx, approvals.Decision{ApprovalID: pending.ID, ApproverID: approver, SessionID: approverSession, Reason: "reviewed", RequestID: uuid.NewString(), ExpectedRequestHash: pending.RequestHash}); err != nil {
+			t.Fatal(err)
+		}
+		expiry := time.Now().Add(ttl)
+		expires, err := value.FromTime(expiry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		set(pending.ID, pending.CreatedAt, expires)
+		return pending, expiry
+	}
+	// consume holds a competing lock until after the approval's expiry while a
+	// consumer that began earlier queues behind it. mutated reports whether the
+	// consumer's business change after ConsumeBoundTx ran.
+	consume := func(a approvals.Approval, hold time.Duration, contested func(context.Context, database.Tx) error) (mutated bool, started, finished time.Time, err error) {
+		t.Helper()
+		blocker, berr := b.Begin(ctx, database.ReadCommitted)
+		if berr != nil {
+			t.Fatal(berr)
+		}
+		defer blocker.Rollback(ctx)
+		if berr = contested(ctx, blocker); berr != nil {
+			t.Fatal(berr)
+		}
+		release := time.Now().Add(hold)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+				started = time.Now()
+				if err := contested(ctx, tx); err != nil {
+					return err
+				}
+				if err := approvals.ConsumeBoundTx(ctx, tx, a.ID, workspace, requester, a.Action, a.ResourceType, workspace, hash); err != nil {
+					return err
+				}
+				mutated = true
+				return nil
+			})
+			finished = time.Now()
+		}()
+		time.Sleep(time.Until(release))
+		if berr = blocker.Commit(ctx); berr != nil {
+			t.Fatal(berr)
+		}
+		<-done
+		return
+	}
+	for _, contested := range []struct {
+		name string
+		lock func(context.Context, database.Tx, uuid.UUID) error
+	}{
+		{"node lock", func(ctx context.Context, tx database.Tx, _ uuid.UUID) error { return lockNode(ctx, tx) }},
+		{"approval lock", lockApproval},
+	} {
+		name, lock := contested.name, contested.lock
+		a, expiry := approvedApproval(1500 * time.Millisecond)
+		mutated, started, finished, err := consume(a, 2*time.Second, func(ctx context.Context, tx database.Tx) error { return lock(ctx, tx, a.ID) })
+		if !started.Before(expiry) || !finished.After(expiry) {
+			t.Fatalf("%s: consumer did not wait across expiry (started %v finished %v expiry %v)", name, started, finished, expiry)
+		}
+		if !errors.Is(err, approvals.ErrNotReady) || mutated {
+			t.Fatalf("%s: expired approval consumed after lock wait: mutated=%v err=%v", name, mutated, err)
+		}
+		if stored, err := s.Get(ctx, a.ID); err != nil || stored.Status != "approved" {
+			t.Fatalf("%s: rejected consume changed approval: %+v %v", name, stored, err)
+		}
+		fresh, _ := approvedApproval(time.Hour)
+		mutated, _, _, err = consume(fresh, 300*time.Millisecond, func(ctx context.Context, tx database.Tx) error { return lock(ctx, tx, fresh.ID) })
+		if err != nil || !mutated {
+			t.Fatalf("%s: unexpired approval rejected after lock wait: mutated=%v err=%v", name, mutated, err)
+		}
+		if stored, err := s.Get(ctx, fresh.ID); err != nil || stored.Status != "consumed" {
+			t.Fatalf("%s: unexpired approval not consumed: %+v %v", name, stored, err)
+		}
+	}
+	// Concurrent consumers of one approval: exactly one wins.
+	racing, _ := approvedApproval(time.Hour)
+	const consumers = 8
+	results := make(chan error, consumers)
+	var wg sync.WaitGroup
+	for i := 0; i < consumers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+				return approvals.ConsumeBoundTx(ctx, tx, racing.ID, workspace, requester, racing.Action, racing.ResourceType, workspace, hash)
+			})
+		}()
+	}
+	wg.Wait()
+	close(results)
+	wins := 0
+	for err := range results {
+		if err == nil {
+			wins++
+		} else if !errors.Is(err, approvals.ErrNotReady) {
+			t.Fatalf("concurrent consume: %v", err)
+		}
+	}
+	if wins != 1 {
+		t.Fatalf("concurrent consume successes = %d", wins)
 	}
 }
