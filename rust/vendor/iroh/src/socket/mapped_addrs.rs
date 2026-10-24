@@ -377,6 +377,20 @@ where
         }
     }
 
+    /// Removes the mapping in both directions.
+    pub(super) fn remove(&self, key: &K) {
+        let mut inner = self.inner.lock().expect("poisoned");
+        if let Some(addr) = inner.addrs.remove(key) {
+            inner.lookup.remove(&addr);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> (usize, usize) {
+        let inner = self.inner.lock().expect("poisoned");
+        (inner.addrs.len(), inner.lookup.len())
+    }
+
     /// Performs the reverse lookup.
     pub(super) fn lookup(&self, addr: &V) -> Option<K> {
         let inner = self.inner.lock().expect("poisoned");

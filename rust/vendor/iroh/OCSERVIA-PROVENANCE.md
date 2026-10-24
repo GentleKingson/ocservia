@@ -94,6 +94,16 @@ New receive mappings are refused if the retained entries fill the cap. Queued
 incoming handshakes without an actor may need to retry under this pressure;
 established and locally initiated actor-owned paths are preserved.
 
+Endpoint-identity mappings are capped at 65,536 entries. A new remote is refused
+when the cap is full of mappings that have a running remote actor; otherwise
+mappings without an actor are reclaimed first. A remote actor that exits with
+no connection, queued message or resolve request also releases its mapping in
+both directions. Each Relay connection keeps at most 4,096 sender hints: a hint
+is recorded only after the datagram is queued downstream, the smallest id is
+evicted when full without relying on `EndpointGone`, and `EndpointGone` also
+clears the last-sender shortcut so an evicted live peer registers again on its
+next datagram. Both receive loops use the same handler.
+
 To replay provenance, download and verify the archive above, extract it, and
 overlay the nine listed Rust files from the chosen ocservia revision. Add this
 provenance file and the two exact upstream license texts. All remaining files

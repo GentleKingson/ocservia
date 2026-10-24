@@ -58,7 +58,7 @@ use transports::{LocalAddrsWatch, Transport, TransportConfig};
 use url::Url;
 
 use self::{
-    remote_map::{RemoteMap, RemoteStateMessage},
+    remote_map::{MAX_ENDPOINT_ADDRS, RemoteMap, RemoteStateMessage},
     transports::{RelayActorConfig, Transports},
 };
 #[cfg(not(wasm_browser))]
@@ -1348,7 +1348,14 @@ impl EndpointInner {
             .ok();
         let reply = rx.await.map_err(|_| RemoteStateActorStoppedError::new())?;
         match reply {
-            Ok(()) => Ok(Ok(self.mapped_addrs.endpoint_addrs.get(&remote_id))),
+            Ok(()) => self
+                .mapped_addrs
+                .endpoint_addrs
+                .get_bounded(&remote_id, MAX_ENDPOINT_ADDRS, |id| {
+                    self.remote_actors.get(id).is_some()
+                })
+                .map(Ok)
+                .ok_or_else(RemoteStateActorStoppedError::new),
             Err(err) => Ok(Err(err)),
         }
     }
