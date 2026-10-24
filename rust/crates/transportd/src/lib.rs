@@ -20,10 +20,10 @@ use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, ArtifactChunk,
     ArtifactConsumeRequest as AgentArtifactConsumeRequest,
-    ArtifactConsumeResponse as AgentArtifactConsumeResponse, ArtifactFetchRequest, CommandEnvelope,
-    CommandResult, CommandResultState, ConnectionFenceV2, EnrollRequest, EnrollResponse,
-    FenceBindingV2, FenceOperationKind, HandshakeResult, SessionHandshake,
-    SessionHandshakeResponse, TelemetryBatch, command_envelope,
+    ArtifactConsumeResponse as AgentArtifactConsumeResponse, ArtifactFetchRequest, ArtifactGrantV1,
+    CommandEnvelope, CommandResult, CommandResultState, ConnectionFenceV2, EnrollRequest,
+    EnrollResponse, FenceBindingV2, FenceOperationKind, HandshakeResult, SessionHandshake,
+    SessionHandshakeResponse, TelemetryBatch, TelemetryPriority, command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, CloseNodeRequest, CloseNodeResponse,
@@ -64,6 +64,21 @@ const MAX_AGENT_CONNECTIONS: usize = MAX_CONNECTIONS - MAX_ENROLLMENT_CONNECTION
 const MAX_ATTEMPTS_PER_MINUTE: usize = 30;
 const MAX_TRUST_SNAPSHOT_BINDINGS: usize = 8192;
 const MAX_RESPONSE_FRAMES: usize = 128;
+// Per-node telemetry admission. The Agent sends one batch every 30 seconds and
+// drains an offline backlog at most 32 frames per tick, each at most 512 KiB.
+// The bucket therefore holds that 32-frame burst plus 8 frames of slack and
+// refills at 2 frames/s and 1 MiB/s (about twice the fastest legitimate drain,
+// 32 frames per 30 s), so only a misbehaving node is limited.
+const TELEMETRY_BURST_EVENTS: u64 = 40;
+const TELEMETRY_REFILL_EVENTS_PER_SECOND: u64 = 2;
+const TELEMETRY_BURST_BYTES: u64 = 32 * 512 * 1024;
+const TELEMETRY_REFILL_BYTES_PER_MILLI: u64 = 1024;
+/// Telemetry retained for replay never exceeds this many bytes (64 maximum
+/// frames), and never more than half of the retained event slots, so
+/// command, result and connection events keep their own capacity.
+const MAX_RETAINED_TELEMETRY_BYTES: usize = 32 * 1024 * 1024;
+/// QUIC application error code for an artifact stream aborted by this side.
+const ARTIFACT_STREAM_ABORT: VarInt = VarInt::from_u32(0x108);
 
 /// One security domain with capacity that cannot be consumed by another domain.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -811,6 +826,7 @@ struct Inner {
     keyring: Option<Arc<ControllerCommandKeyring>>,
     require_fencing: bool,
     events: Mutex<EventState>,
+    telemetry_budgets: Mutex<HashMap<Vec<u8>, TelemetryBudget>>,
     event_capacity: usize,
     agent_connection_permits: Arc<Semaphore>,
     enrollment_connection_permits: Arc<Semaphore>,
@@ -846,6 +862,43 @@ struct NegotiatedSession {
 struct EventState {
     retained: VecDeque<TransportEvent>,
     subscribers: Vec<mpsc::Sender<Result<TransportEvent, Status>>>,
+    telemetry_retained: usize,
+    telemetry_retained_bytes: usize,
+}
+
+fn is_telemetry(event: &TransportEvent) -> bool {
+    event.r#type == i32::from(TransportEventType::Telemetry)
+}
+
+impl EventState {
+    /// Drops the oldest retained telemetry event; control events are never
+    /// chosen. Returns whether one was removed.
+    fn evict_oldest_telemetry(&mut self) -> bool {
+        let Some(index) = self.retained.iter().position(is_telemetry) else {
+            return false;
+        };
+        if let Some(evicted) = self.retained.remove(index) {
+            self.telemetry_retained -= 1;
+            self.telemetry_retained_bytes -= evicted.payload.len();
+        }
+        true
+    }
+
+    fn pop_oldest(&mut self) {
+        if let Some(evicted) = self.retained.pop_front()
+            && is_telemetry(&evicted)
+        {
+            self.telemetry_retained -= 1;
+            self.telemetry_retained_bytes -= evicted.payload.len();
+        }
+    }
+}
+
+/// Token bucket for one node's telemetry; tokens are milli-events and bytes.
+struct TelemetryBudget {
+    milli_events: u64,
+    bytes: u64,
+    updated: tokio::time::Instant,
 }
 
 impl Shared {
@@ -871,7 +924,10 @@ impl Shared {
                 events: Mutex::new(EventState {
                     retained: VecDeque::with_capacity(capacity),
                     subscribers: Vec::new(),
+                    telemetry_retained: 0,
+                    telemetry_retained_bytes: 0,
                 }),
+                telemetry_budgets: Mutex::new(HashMap::new()),
                 event_capacity: capacity,
                 agent_connection_permits: Arc::new(Semaphore::new(MAX_AGENT_CONNECTIONS)),
                 enrollment_connection_permits: Arc::new(Semaphore::new(MAX_ENROLLMENT_CONNECTIONS)),
@@ -881,17 +937,91 @@ impl Shared {
     }
 
     async fn publish(&self, event: TransportEvent) {
+        self.publish_event(event, false).await;
+    }
+
+    /// Publishes one node telemetry frame. `security` frames carry evidence and
+    /// are delivered with the full subscriber queue; routine frames leave half
+    /// of it for control events.
+    async fn publish_telemetry(&self, event: TransportEvent, security: bool) {
+        self.publish_event(event, !security).await;
+    }
+
+    async fn publish_event(&self, event: TransportEvent, routine_telemetry: bool) {
         if *self.inner.shutdown.borrow() {
             return;
         }
+        let capacity = self.inner.event_capacity;
         let mut state = self.inner.events.lock().await;
-        if state.retained.len() == self.inner.event_capacity {
-            state.retained.pop_front();
+        let retainable = if is_telemetry(&event) {
+            let bytes = event.payload.len();
+            while state.telemetry_retained >= (capacity / 2).max(1)
+                || state.telemetry_retained_bytes + bytes > MAX_RETAINED_TELEMETRY_BYTES
+            {
+                if !state.evict_oldest_telemetry() {
+                    break;
+                }
+            }
+            // A full queue of control events is never displaced by telemetry.
+            state.retained.len() < capacity || state.evict_oldest_telemetry()
+        } else {
+            if state.retained.len() == capacity && !state.evict_oldest_telemetry() {
+                state.pop_oldest();
+            }
+            true
+        };
+        if retainable {
+            if is_telemetry(&event) {
+                state.telemetry_retained += 1;
+                state.telemetry_retained_bytes += event.payload.len();
+            }
+            state.retained.push_back(event.clone());
         }
-        state.retained.push_back(event.clone());
-        state
-            .subscribers
-            .retain(|sender| matches!(sender.try_send(Ok(event.clone())), Ok(())));
+        let reserve = capacity / 2;
+        state.subscribers.retain(|sender| {
+            if routine_telemetry && sender.capacity() <= reserve {
+                // Routine telemetry yields to control events for a slow
+                // consumer instead of evicting it.
+                return !sender.is_closed();
+            }
+            matches!(sender.try_send(Ok(event.clone())), Ok(()))
+        });
+    }
+
+    /// Charges one telemetry frame to the node's bucket. `false` means the
+    /// node exceeded its budget and the frame must not be published.
+    async fn admit_telemetry(&self, node_id: &[u8], bytes: usize) -> bool {
+        let now = tokio::time::Instant::now();
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let mut budgets = self.inner.telemetry_budgets.lock().await;
+        if budgets.len() >= MAX_CONNECTIONS {
+            // An idle bucket is full again, so forgetting it changes nothing.
+            budgets.retain(|_, budget| now.duration_since(budget.updated) < Duration::from_mins(1));
+        }
+        let budget = budgets
+            .entry(node_id.to_vec())
+            .or_insert_with(|| TelemetryBudget {
+                milli_events: TELEMETRY_BURST_EVENTS * 1000,
+                bytes: TELEMETRY_BURST_BYTES,
+                updated: now,
+            });
+        let elapsed =
+            u64::try_from(now.duration_since(budget.updated).as_millis()).unwrap_or(u64::MAX);
+        budget.updated = now;
+        budget.milli_events = budget
+            .milli_events
+            .saturating_add(elapsed.saturating_mul(TELEMETRY_REFILL_EVENTS_PER_SECOND))
+            .min(TELEMETRY_BURST_EVENTS * 1000);
+        budget.bytes = budget
+            .bytes
+            .saturating_add(elapsed.saturating_mul(TELEMETRY_REFILL_BYTES_PER_MILLI))
+            .min(TELEMETRY_BURST_BYTES);
+        if budget.milli_events < 1000 || budget.bytes < bytes {
+            return false;
+        }
+        budget.milli_events -= 1000;
+        budget.bytes -= bytes;
+        true
     }
 
     async fn remove(&self, node_id: &[u8], reason: &[u8]) -> Option<RegisteredConnection> {
@@ -1390,6 +1520,7 @@ impl TransportService for IrohTransportService {
         {
             return Err(Status::invalid_argument("artifact request is invalid"));
         }
+        let stream_deadline = artifact_stream_deadline(grant)?;
         let (connection, session_mode, endpoint_bytes, session_fence) = self
             .shared
             .inner
@@ -1446,6 +1577,7 @@ impl TransportService for IrohTransportService {
             request.artifact_id,
             request.max_bytes,
             sender,
+            stream_deadline,
         ));
         Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
     }
@@ -1823,6 +1955,8 @@ struct SessionHandler {
     policy: IdentityPolicy,
     kind: ProtocolKind,
     trust: Option<TrustAuthority>,
+    /// One absolute budget for the whole pre-registration handshake.
+    handshake_timeout: Duration,
 }
 
 impl std::fmt::Debug for SessionHandler {
@@ -2003,11 +2137,26 @@ impl ProtocolHandler for SessionHandler {
             .clone()
             .try_acquire_owned()
             .map_err(|_| protocol_error("connection capacity reached"))?;
-        let (mut send, mut recv) = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi())
-            .await
-            .map_err(|_| protocol_error("handshake stream timed out"))?
-            .map_err(|_| protocol_error("handshake stream failed"))?;
-        let Some(session) = self.negotiate(&connection, &mut send, &mut recv).await? else {
+        // One deadline covers stream acceptance, request read, trust
+        // authorization, response write and delivery acknowledgement, so a peer
+        // that stalls any step cannot hold this connection slot.
+        // The streams stay owned here so an accepted session keeps them open.
+        let mut streams = None;
+        let negotiated = tokio::time::timeout(self.handshake_timeout, async {
+            let (send, recv) = streams.insert(
+                connection
+                    .accept_bi()
+                    .await
+                    .map_err(|_| protocol_error("handshake stream failed"))?,
+            );
+            self.negotiate(&connection, send, recv).await
+        })
+        .await;
+        let Ok(negotiated) = negotiated else {
+            connection.close(VarInt::from_u32(0x10c), b"handshake timed out");
+            return Err(protocol_error("handshake timed out"));
+        };
+        let Some(session) = negotiated? else {
             drop(permit);
             return Ok(());
         };
@@ -2225,6 +2374,17 @@ fn monitor_telemetry(
                 connection.close(VarInt::from_u32(0x107), b"telemetry frame size invalid");
                 break;
             }
+            // Charge the node before reading the body so a flood never reaches
+            // the shared publish path or the retention buffer.
+            if !shared.admit_telemetry(&node_id, length).await {
+                tracing::warn!(
+                    event_type = "telemetry_budget_exceeded",
+                    node_id = %hex::encode(&node_id),
+                    "closing connection that exceeded its telemetry budget"
+                );
+                connection.close(VarInt::from_u32(0x10d), b"telemetry budget exceeded");
+                break;
+            }
             let mut payload = vec![0_u8; length];
             if !matches!(
                 tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut payload)).await,
@@ -2242,13 +2402,18 @@ fn monitor_telemetry(
                 connection.close(VarInt::from_u32(0x107), b"telemetry identity invalid");
                 break;
             }
+            let security = batch.priority == i32::from(TelemetryPriority::Security)
+                || !batch.security_events.is_empty();
             shared
-                .publish(event(
-                    &node_id,
-                    connection.remote_id().as_bytes(),
-                    TransportEventType::Telemetry,
-                    payload,
-                ))
+                .publish_telemetry(
+                    event(
+                        &node_id,
+                        connection.remote_id().as_bytes(),
+                        TransportEventType::Telemetry,
+                        payload,
+                    ),
+                    security,
+                )
                 .await;
         }
     })
@@ -2468,7 +2633,9 @@ async fn publish_command_unknown(
 fn valid_privileged_result_proof(command: &CommandEnvelope, result: &CommandResult) -> bool {
     let terminal = matches!(
         CommandResultState::try_from(result.state),
-        Ok(CommandResultState::Succeeded | CommandResultState::Failed)
+        Ok(CommandResultState::Succeeded
+            | CommandResultState::Failed
+            | CommandResultState::Rejected)
     );
     let privileged = !matches!(
         command.payload,
@@ -2549,18 +2716,16 @@ async fn read_message<M: Message + Default>(
     kind: &str,
 ) -> Result<M, AcceptError> {
     let mut length = [0_u8; 4];
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut length))
+    recv.read_exact(&mut length)
         .await
-        .map_err(|_| protocol_error(&format!("{kind} length timed out")))?
         .map_err(|_| protocol_error(&format!("{kind} length invalid")))?;
     let length = u32::from_be_bytes(length) as usize;
     if length == 0 || length > MAX_HANDSHAKE_BYTES {
         return Err(protocol_error(&format!("{kind} size invalid")));
     }
     let mut bytes = vec![0_u8; length];
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut bytes))
+    recv.read_exact(&mut bytes)
         .await
-        .map_err(|_| protocol_error(&format!("{kind} body timed out")))?
         .map_err(|_| protocol_error(&format!("{kind} body invalid")))?;
     M::decode(bytes.as_slice()).map_err(|_| protocol_error(&format!("{kind} protobuf invalid")))
 }
@@ -2584,9 +2749,9 @@ async fn write_message(
 }
 
 async fn wait_for_delivery(send: &iroh::endpoint::SendStream) -> Result<(), AcceptError> {
-    let stopped = tokio::time::timeout(HANDSHAKE_TIMEOUT, send.stopped())
+    let stopped = send
+        .stopped()
         .await
-        .map_err(|_| protocol_error("handshake response acknowledgement timed out"))?
         .map_err(|_| protocol_error("handshake response acknowledgement failed"))?;
     if stopped.is_some() {
         return Err(protocol_error("peer rejected handshake response"));
@@ -2985,83 +3150,126 @@ async fn finalize_artifact_consumption(
     Ok(response)
 }
 
+/// Converts the grant expiry into one absolute stream deadline. The grant is
+/// authoritative for how long this export may run; chunks never extend it.
+fn artifact_stream_deadline(grant: &ArtifactGrantV1) -> Result<tokio::time::Instant, Status> {
+    let expires_at = grant
+        .expires_at
+        .as_ref()
+        .and_then(|expires_at| SystemTime::try_from(*expires_at).ok())
+        .ok_or_else(|| Status::invalid_argument("artifact grant expiry is invalid"))?;
+    let remaining = expires_at
+        .duration_since(SystemTime::now())
+        .map_err(|_| Status::deadline_exceeded("artifact grant has expired"))?;
+    Ok(tokio::time::Instant::now() + remaining)
+}
+
 /// Streams one artifact fetch from the Agent to the Controller consumer,
 /// validating every chunk against the exact request carrier before it is
-/// forwarded.
+/// forwarded. Consumer cancellation and the grant deadline bound the whole
+/// forwarding future; the Agent stream is then reset/stopped without closing
+/// the shared Agent connection.
 async fn relay_artifact_stream(
     connection: Connection,
     payload: Vec<u8>,
     artifact_id: Vec<u8>,
     max_bytes: u64,
     sender: mpsc::Sender<Result<ArtifactChunk, Status>>,
+    deadline: tokio::time::Instant,
 ) {
-    let outcome = async {
-        let (mut send, mut recv) = connection
+    let mut streams = None;
+    let outcome = tokio::select! {
+        outcome = forward_artifact_chunks(
+            &connection,
+            &payload,
+            &artifact_id,
+            max_bytes,
+            &sender,
+            &mut streams,
+        ) => outcome,
+        () = sender.closed() => Err(Status::cancelled("artifact consumer disconnected")),
+        () = tokio::time::sleep_until(deadline) => {
+            Err(Status::deadline_exceeded("artifact grant expired"))
+        }
+    };
+    let Err(error) = outcome else { return };
+    if let Some((mut send, mut recv)) = streams {
+        let _ = send.reset(ARTIFACT_STREAM_ABORT);
+        let _ = recv.stop(ARTIFACT_STREAM_ABORT);
+    }
+    // Never wait for a consumer that is not draining the channel.
+    let _ = sender.try_send(Err(error));
+}
+
+async fn forward_artifact_chunks(
+    connection: &Connection,
+    payload: &[u8],
+    artifact_id: &[u8],
+    max_bytes: u64,
+    sender: &mpsc::Sender<Result<ArtifactChunk, Status>>,
+    streams: &mut Option<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
+) -> Result<(), Status> {
+    let (send, recv) = streams.insert(
+        connection
             .open_bi()
             .await
-            .map_err(|_| Status::unavailable("failed to open artifact stream"))?;
-        let length = u32::try_from(payload.len())
-            .map_err(|_| Status::resource_exhausted("artifact request is too large"))?
-            | ARTIFACT_FETCH_FRAME;
-        send.write_all(&length.to_be_bytes())
+            .map_err(|_| Status::unavailable("failed to open artifact stream"))?,
+    );
+    let length = u32::try_from(payload.len())
+        .map_err(|_| Status::resource_exhausted("artifact request is too large"))?
+        | ARTIFACT_FETCH_FRAME;
+    send.write_all(&length.to_be_bytes())
+        .await
+        .map_err(|_| Status::unavailable("failed to write artifact request length"))?;
+    send.write_all(payload)
+        .await
+        .map_err(|_| Status::unavailable("failed to write artifact request"))?;
+    send.finish()
+        .map_err(|_| Status::unavailable("failed to finish artifact request"))?;
+    let mut expected_offset = 0_u64;
+    loop {
+        let mut size = [0_u8; 4];
+        tokio::time::timeout(Duration::from_secs(30), recv.read_exact(&mut size))
             .await
-            .map_err(|_| Status::unavailable("failed to write artifact request length"))?;
-        send.write_all(&payload)
-            .await
-            .map_err(|_| Status::unavailable("failed to write artifact request"))?;
-        send.finish()
-            .map_err(|_| Status::unavailable("failed to finish artifact request"))?;
-        let mut expected_offset = 0_u64;
-        loop {
-            let mut size = [0_u8; 4];
-            tokio::time::timeout(Duration::from_secs(30), recv.read_exact(&mut size))
-                .await
-                .map_err(|_| Status::deadline_exceeded("artifact stream timed out"))?
-                .map_err(|_| Status::unavailable("artifact stream ended"))?;
-            let size = u32::from_be_bytes(size) as usize;
-            if size == 0 || size > MAX_FRAME_BYTES {
-                return Err(Status::resource_exhausted("artifact chunk is invalid"));
-            }
-            let mut bytes = vec![0; size];
-            recv.read_exact(&mut bytes)
-                .await
-                .map_err(|_| Status::unavailable("artifact chunk ended"))?;
-            let chunk = ArtifactChunk::decode(bytes.as_slice())
-                .map_err(|_| Status::data_loss("artifact chunk protobuf is invalid"))?;
-            if chunk.artifact_id != artifact_id
-                || chunk.offset != expected_offset
-                || chunk.data.len() > 256 * 1024
-                || expected_offset.saturating_add(chunk.data.len() as u64) > max_bytes
-                || (!chunk.eof && !chunk.sha256.is_empty())
-                || (chunk.eof && chunk.sha256.len() != 32)
-            {
-                return Err(Status::data_loss("artifact chunk is inconsistent"));
-            }
-            expected_offset = expected_offset.saturating_add(chunk.data.len() as u64);
-            let eof = chunk.eof;
-            if eof {
-                // Consume QUIC FIN before forwarding the terminal chunk. Dropping
-                // an unread stream sends STOP_SENDING and invalidates the Agent's
-                // delivery acknowledgement even when every payload byte arrived.
-                tokio::time::timeout(Duration::from_secs(30), recv.read_to_end(0))
-                    .await
-                    .map_err(|_| {
-                        Status::deadline_exceeded("artifact stream termination timed out")
-                    })?
-                    .map_err(|_| Status::data_loss("artifact stream has invalid trailing data"))?;
-            }
-            sender
-                .send(Ok(chunk))
-                .await
-                .map_err(|_| Status::cancelled("artifact consumer disconnected"))?;
-            if eof {
-                return Ok(());
-            }
+            .map_err(|_| Status::deadline_exceeded("artifact stream timed out"))?
+            .map_err(|_| Status::unavailable("artifact stream ended"))?;
+        let size = u32::from_be_bytes(size) as usize;
+        if size == 0 || size > MAX_FRAME_BYTES {
+            return Err(Status::resource_exhausted("artifact chunk is invalid"));
         }
-    }
-    .await;
-    if let Err(error) = outcome {
-        let _ = sender.send(Err(error)).await;
+        let mut bytes = vec![0; size];
+        recv.read_exact(&mut bytes)
+            .await
+            .map_err(|_| Status::unavailable("artifact chunk ended"))?;
+        let chunk = ArtifactChunk::decode(bytes.as_slice())
+            .map_err(|_| Status::data_loss("artifact chunk protobuf is invalid"))?;
+        if chunk.artifact_id != artifact_id
+            || chunk.offset != expected_offset
+            || chunk.data.len() > 256 * 1024
+            || expected_offset.saturating_add(chunk.data.len() as u64) > max_bytes
+            || (!chunk.eof && !chunk.sha256.is_empty())
+            || (chunk.eof && chunk.sha256.len() != 32)
+        {
+            return Err(Status::data_loss("artifact chunk is inconsistent"));
+        }
+        expected_offset = expected_offset.saturating_add(chunk.data.len() as u64);
+        let eof = chunk.eof;
+        if eof {
+            // Consume QUIC FIN before forwarding the terminal chunk. Dropping
+            // an unread stream sends STOP_SENDING and invalidates the Agent's
+            // delivery acknowledgement even when every payload byte arrived.
+            tokio::time::timeout(Duration::from_secs(30), recv.read_to_end(0))
+                .await
+                .map_err(|_| Status::deadline_exceeded("artifact stream termination timed out"))?
+                .map_err(|_| Status::data_loss("artifact stream has invalid trailing data"))?;
+        }
+        sender
+            .send(Ok(chunk))
+            .await
+            .map_err(|_| Status::cancelled("artifact consumer disconnected"))?;
+        if eof {
+            return Ok(());
+        }
     }
 }
 
@@ -3369,6 +3577,7 @@ async fn build_router_with_direct(
                 policy: policy.clone(),
                 kind: ProtocolKind::Enroll,
                 trust: trust.clone(),
+                handshake_timeout: HANDSHAKE_TIMEOUT,
             },
         )
         .accept(
@@ -3378,6 +3587,7 @@ async fn build_router_with_direct(
                 policy,
                 kind: ProtocolKind::Agent,
                 trust,
+                handshake_timeout: HANDSHAKE_TIMEOUT,
             },
         )
         .spawn())
@@ -3699,6 +3909,23 @@ mod tests {
             .expect("receipt")
             .command_id = Uuid::now_v7().as_bytes().to_vec();
         assert!(!valid_privileged_result_proof(&command, &foreign_receipt));
+
+        // An unsigned Rejected must not end a privileged command; a signed one
+        // and a non-privileged rejection keep their existing handling.
+        let mut rejected = privileged_command_result(&command, false);
+        rejected.state = CommandResultState::Rejected.into();
+        assert!(!valid_privileged_result_proof(&command, &rejected));
+        let mut signed_rejected = privileged_command_result(&command, true);
+        signed_rejected.state = CommandResultState::Rejected.into();
+        assert!(valid_privileged_result_proof(&command, &signed_rejected));
+        let synthetic = CommandEnvelope {
+            payload: Some(command_envelope::Payload::SyntheticNoop(
+                ocservia_contracts::generated::ocserv::platform::agent::v1::SyntheticNoop::default(
+                ),
+            )),
+            ..command.clone()
+        };
+        assert!(valid_privileged_result_proof(&synthetic, &rejected));
     }
 
     async fn end_command_without_response(connection: Connection) {
@@ -4581,6 +4808,196 @@ mod tests {
 
         shutdown(&service, router).await.expect("shutdown router");
         client.close().await;
+    }
+
+    #[tokio::test]
+    async fn stalled_handshake_response_releases_the_connection_slot() {
+        let agent_key = SecretKey::generate();
+        let handshake = handshake(&agent_key);
+        let service = IrohTransportService::new(8);
+        let router = Router::builder(
+            Endpoint::builder(presets::Minimal)
+                .secret_key(SecretKey::generate())
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("build router endpoint"),
+        )
+        .accept(
+            AGENT_ALPN,
+            SessionHandler {
+                shared: service.shared.clone(),
+                policy: identity_policy(&agent_key, &handshake),
+                kind: ProtocolKind::Agent,
+                trust: None,
+                handshake_timeout: Duration::from_millis(500),
+            },
+        )
+        .spawn();
+        // A zero stream window never grants the server credit to write its
+        // handshake response.
+        let client = Endpoint::builder(presets::Minimal)
+            .secret_key(agent_key)
+            .relay_mode(RelayMode::Disabled)
+            .transport_config(
+                QuicTransportConfig::builder()
+                    .stream_receive_window(VarInt::from_u32(0))
+                    .build(),
+            )
+            .bind()
+            .await
+            .expect("build client");
+        let connection = client
+            .connect(router.endpoint().addr(), AGENT_ALPN)
+            .await
+            .expect("connect agent");
+        let bytes = handshake.encode_to_vec();
+        let (mut send, _recv) = connection.open_bi().await.expect("open handshake stream");
+        send.write_all(&u32::try_from(bytes.len()).unwrap().to_be_bytes())
+            .await
+            .expect("write handshake length");
+        send.write_all(&bytes).await.expect("write handshake");
+        send.finish().expect("finish handshake request");
+
+        let permits = &service.shared.inner.agent_connection_permits;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while permits.available_permits() == MAX_AGENT_CONNECTIONS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("handshake holds a connection slot");
+        tokio::time::timeout(Duration::from_secs(5), connection.closed())
+            .await
+            .expect("stalled handshake is closed at the deadline");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while permits.available_permits() != MAX_AGENT_CONNECTIONS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("handshake slot is released");
+        assert!(service.shared.inner.connections.lock().await.is_empty());
+
+        shutdown(&service, router).await.expect("shutdown router");
+        client.close().await;
+    }
+
+    fn telemetry_event(node_id: &[u8], bytes: usize) -> TransportEvent {
+        event(
+            node_id,
+            &[9; 32],
+            TransportEventType::Telemetry,
+            vec![0; bytes],
+        )
+    }
+
+    #[tokio::test]
+    async fn telemetry_flood_does_not_evict_consumers_or_starve_control_events() {
+        let service = IrohTransportService::new(8);
+        let mut events = service
+            .watch_events(Request::new(WatchEventsRequest {
+                after_event_id: Vec::new(),
+            }))
+            .await
+            .expect("watch events")
+            .into_inner();
+        let (node_a, node_b) = (Uuid::now_v7(), Uuid::now_v7());
+        // The consumer is not reading while node A floods.
+        for _ in 0..64 {
+            service
+                .shared
+                .publish_telemetry(telemetry_event(node_a.as_bytes(), 16), false)
+                .await;
+        }
+        service
+            .shared
+            .publish(event(
+                node_b.as_bytes(),
+                &[8; 32],
+                TransportEventType::Connected,
+                Vec::new(),
+            ))
+            .await;
+        {
+            let state = service.shared.inner.events.lock().await;
+            assert_eq!(state.subscribers.len(), 1, "flood evicted the consumer");
+            assert!(state.telemetry_retained <= 4);
+            assert!(state.retained.len() <= 8);
+        }
+        let event = next_event(&mut events, TransportEventType::Connected).await;
+        assert_eq!(event.node_id, node_b.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn retained_telemetry_bytes_are_bounded_and_keep_control_events() {
+        let service = IrohTransportService::new(4096);
+        service
+            .shared
+            .publish(event(
+                Uuid::now_v7().as_bytes(),
+                &[8; 32],
+                TransportEventType::Connected,
+                Vec::new(),
+            ))
+            .await;
+        for _ in 0..200 {
+            service
+                .shared
+                .publish_telemetry(
+                    telemetry_event(Uuid::now_v7().as_bytes(), 512 * 1024),
+                    false,
+                )
+                .await;
+        }
+        let state = service.shared.inner.events.lock().await;
+        assert!(state.telemetry_retained_bytes <= MAX_RETAINED_TELEMETRY_BYTES);
+        assert_eq!(
+            state
+                .retained
+                .iter()
+                .map(|event| event.payload.len())
+                .sum::<usize>(),
+            state.telemetry_retained_bytes
+        );
+        assert!(
+            state
+                .retained
+                .iter()
+                .any(|event| event.r#type == i32::from(TransportEventType::Connected))
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_budget_allows_an_offline_burst_and_limits_one_node() {
+        let service = IrohTransportService::new(8);
+        let (node_a, node_b) = (Uuid::now_v7(), Uuid::now_v7());
+        for frame in 0..32 {
+            assert!(
+                service
+                    .shared
+                    .admit_telemetry(node_a.as_bytes(), 512 * 1024)
+                    .await,
+                "legitimate burst frame {frame} was rejected"
+            );
+        }
+        assert!(
+            !service
+                .shared
+                .admit_telemetry(node_a.as_bytes(), 512 * 1024)
+                .await
+        );
+        assert!(
+            service
+                .shared
+                .admit_telemetry(node_b.as_bytes(), 512 * 1024)
+                .await,
+            "another node shares node A's budget"
+        );
+        for _ in 0..40 {
+            let _ = service.shared.admit_telemetry(node_b.as_bytes(), 1).await;
+        }
+        assert!(!service.shared.admit_telemetry(node_b.as_bytes(), 1).await);
     }
 
     #[tokio::test]
@@ -7568,6 +7985,188 @@ mod tests {
         assert_eq!(event.owner_epoch, term.owner_epoch);
 
         service.begin_shutdown().await;
+    }
+
+    type AgentFetch = (
+        EventStreamOf<ArtifactChunk>,
+        iroh::endpoint::SendStream,
+        iroh::endpoint::RecvStream,
+        [u8; 16],
+        (iroh::protocol::Router, Endpoint, Connection),
+    );
+    type EventStreamOf<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
+
+    /// Starts an artifact fetch whose Agent has read the request and then
+    /// stays silent, so the forwarding worker is blocked on the stream.
+    async fn stalled_artifact_fetch(service: &IrohTransportService, ttl: Duration) -> AgentFetch {
+        let (signing_key, _) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let (_term, fence, router, client, connection) =
+            fenced_agent_session(service, &signing_key, node_id, 61).await;
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+        let artifact_id = *Uuid::now_v7().as_bytes();
+        let binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::Artifact,
+            artifact_id,
+            "ocserv.fencing.v2",
+        );
+        let mut grant = shape_valid_grant(node_id, artifact_id);
+        grant.expires_at = Some((SystemTime::now() + ttl).into());
+        let fetched = service
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                node_id: node_id.to_vec(),
+                artifact_id: artifact_id.to_vec(),
+                purpose: "certificate_p12".to_owned(),
+                max_bytes: 32,
+                grant: Some(grant),
+                fence_binding: Some(binding),
+            }))
+            .await
+            .expect("fenced fetch accepted")
+            .into_inner();
+        let (fetch_send, mut fetch_recv) =
+            tokio::time::timeout(Duration::from_secs(5), connection.accept_bi())
+                .await
+                .expect("artifact fetch stream opened")
+                .expect("accept artifact fetch stream");
+        let mut framed = [0_u8; 4];
+        fetch_recv
+            .read_exact(&mut framed)
+            .await
+            .expect("read artifact fetch length");
+        let mut body = vec![0_u8; (u32::from_be_bytes(framed) & !ARTIFACT_FETCH_FRAME) as usize];
+        fetch_recv
+            .read_exact(&mut body)
+            .await
+            .expect("read artifact fetch request");
+        (
+            fetched,
+            fetch_send,
+            fetch_recv,
+            artifact_id,
+            (router, client, connection),
+        )
+    }
+
+    async fn assert_artifact_stream_aborted(send: &mut iroh::endpoint::SendStream) {
+        let stopped = tokio::time::timeout(Duration::from_secs(5), send.stopped())
+            .await
+            .expect("worker stopped the artifact stream")
+            .expect("stop code is observable");
+        assert_eq!(stopped, Some(ARTIFACT_STREAM_ABORT));
+    }
+
+    #[tokio::test]
+    async fn artifact_cancel_before_first_chunk_stops_the_stalled_stream() {
+        let (_, keyring) = controller_keyring();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (fetched, mut send, _recv, _artifact, (router, client, connection)) =
+            stalled_artifact_fetch(&service, Duration::from_mins(1)).await;
+        drop(fetched);
+        assert_artifact_stream_aborted(&mut send).await;
+        assert!(
+            connection.close_reason().is_none(),
+            "cancelling one artifact must not close the Agent connection"
+        );
+        service.begin_shutdown().await;
+        drop((router, client));
+    }
+
+    #[tokio::test]
+    async fn artifact_cancel_after_first_chunk_stops_the_stalled_stream() {
+        let (_, keyring) = controller_keyring();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (mut fetched, mut send, _recv, artifact_id, (router, client, connection)) =
+            stalled_artifact_fetch(&service, Duration::from_mins(1)).await;
+        let chunk = ArtifactChunk {
+            artifact_id: artifact_id.to_vec(),
+            offset: 0,
+            data: vec![1],
+            eof: false,
+            sha256: Vec::new(),
+        }
+        .encode_to_vec();
+        send.write_all(
+            &u32::try_from(chunk.len())
+                .expect("chunk length")
+                .to_be_bytes(),
+        )
+        .await
+        .expect("write chunk length");
+        send.write_all(&chunk).await.expect("write chunk");
+        fetched
+            .next()
+            .await
+            .expect("first chunk")
+            .expect("first chunk is valid");
+        drop(fetched);
+        assert_artifact_stream_aborted(&mut send).await;
+        assert!(connection.close_reason().is_none());
+        service.begin_shutdown().await;
+        drop((router, client));
+    }
+
+    #[tokio::test]
+    async fn artifact_grant_expiry_stops_the_stalled_stream() {
+        let (_, keyring) = controller_keyring();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (mut fetched, mut send, _recv, _artifact, (router, client, connection)) =
+            stalled_artifact_fetch(&service, Duration::from_secs(1)).await;
+        // The consumer stays connected but sees the bounded failure.
+        let error = tokio::time::timeout(Duration::from_secs(5), fetched.next())
+            .await
+            .expect("grant deadline ends the stream")
+            .expect("terminal error is delivered")
+            .expect_err("expired grant fails the export");
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert_artifact_stream_aborted(&mut send).await;
+        assert!(connection.close_reason().is_none());
+        service.begin_shutdown().await;
+        drop((router, client));
+    }
+
+    #[tokio::test]
+    async fn expired_artifact_grant_fails_before_any_stream_is_opened() {
+        let node_id = *Uuid::now_v7().as_bytes();
+        let artifact_id = *Uuid::now_v7().as_bytes();
+        let mut grant = shape_valid_grant(node_id, artifact_id);
+        grant.expires_at = Some((SystemTime::now() - Duration::from_secs(1)).into());
+        let Err(expired) = IrohTransportService::new(8)
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                node_id: node_id.to_vec(),
+                artifact_id: artifact_id.to_vec(),
+                purpose: "certificate_p12".to_owned(),
+                max_bytes: 32,
+                grant: Some(grant),
+                fence_binding: None,
+            }))
+            .await
+        else {
+            panic!("expired grant must fail");
+        };
+        assert_eq!(expired.code(), tonic::Code::DeadlineExceeded);
     }
 
     fn shape_valid_grant(node_id: [u8; 16], artifact_id: [u8; 16]) -> ArtifactGrantV1 {
