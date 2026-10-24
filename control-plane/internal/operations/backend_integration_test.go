@@ -337,6 +337,26 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				t.Fatal("concurrent recovery exceeded the global limit", claimed.Load(), leases)
 			}
 		})
+		t.Run("sent-recovery-retries-keep-global-capacity", func(t *testing.T) {
+			f, service, seed := newFixture(t)
+			seed(f.node(t), "unknown", false)
+			seed(f.node(t), "unknown", false)
+			jobs, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 10, time.Minute)
+			if err != nil || len(jobs) != 2 {
+				t.Fatal("recovery retries were not claimed", jobs, err)
+			}
+			for _, job := range jobs {
+				if err := service.MarkSent(context.Background(), job); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The retries are sent with no result yet: their leases are gone
+			// and their operations are still Unknown, but they are executing.
+			seed(f.node(t), "queued", false)
+			if jobs, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 10, time.Minute); err != nil || len(jobs) != 0 {
+				t.Fatal("sent recovery retries released global capacity", jobs, err)
+			}
+		})
 		t.Run("recovery-waits-for-executing-commands", func(t *testing.T) {
 			f, service, seed := newFixture(t)
 			seed(f.node(t), "running", true)

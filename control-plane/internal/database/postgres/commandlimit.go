@@ -22,9 +22,12 @@ func (s *commandLimitStore) LockBacklog(ctx context.Context) error {
 	return err
 }
 
+// Active counts executing commands. An executable recovery retry moves only its
+// command out of Unknown, so it counts by command state until a result moves
+// the operation; a quiescent Unknown counts only while it holds a lease.
 func (s *commandLimitStore) Active(ctx context.Context, limit int) (int, error) {
 	var count int
-	err := s.tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id LIMIT $1) active`, limit).Scan(&count)
+	err := s.tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running') OR (operation.state='unknown' AND command.state IN('dispatched','accepted','running')) UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id LIMIT $1) active`, limit).Scan(&count)
 	return count, err
 }
 
