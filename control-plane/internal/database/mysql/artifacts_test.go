@@ -97,11 +97,12 @@ func futureMySQLArtifacts(t *testing.T) ([]byte, []byte) {
 	data, _ := json.Marshal(values)
 	table := artifactStepMetadata{Kind: "table", Object: "artifact_probe", After: after}
 	seed := artifactStepMetadata{Kind: "seed", Object: "artifact_probe", After: digest(data), Columns: []string{"id", "value"}}
-	schema = []byte(strings.Replace(string(schema), "-- ocservia:revision=1", "-- ocservia:revision=2", 1) + artifactStepText(len(base.schema.Baseline.Steps)+1, "probe_table", table, ddl) + artifactStepText(len(base.schema.Baseline.Steps)+2, "probe_seed", seed, "INSERT INTO artifact_probe VALUES(1,2);\n"))
+	next := base.schema.Baseline.Number + 1
+	schema = []byte(strings.Replace(string(schema), fmt.Sprintf("-- ocservia:revision=%d", base.schema.Baseline.Number), fmt.Sprintf("-- ocservia:revision=%d", next), 1) + artifactStepText(len(base.schema.Baseline.Steps)+1, "probe_table", table, ddl) + artifactStepText(len(base.schema.Baseline.Steps)+2, "probe_seed", seed, "INSERT INTO artifact_probe VALUES(1,2);\n"))
 	cp, _ := json.Marshal(schemaartifact.Receipt{Checksum: digest(schema), Steps: len(base.schema.Baseline.Steps) + 2})
 	insert := artifactStepMetadata{Kind: "data", Object: "artifact_probe", After: digest([]byte("valid")), VerifySQL: "SELECT IF(COUNT(*)=1,'valid','invalid') FROM artifact_probe WHERE id=1 AND value=1"}
 	update := artifactStepMetadata{Kind: "data", Object: "artifact_probe", After: digest([]byte("valid")), VerifySQL: "SELECT IF(COUNT(*)=1,'valid','invalid') FROM artifact_probe WHERE id=1 AND value=2"}
-	upgrade = append(upgrade, []byte("\n-- ocservia:revision=2\n-- ocservia:checkpoint="+string(cp)+"\n"+artifactStepText(1, "probe_create", table, ddl)+artifactStepText(2, "probe_insert", insert, "INSERT INTO artifact_probe VALUES(1,1);\n")+artifactStepText(3, "probe_update", update, "UPDATE artifact_probe SET value=value+1 WHERE id=1;\n")+"-- ocservia:end-revision\n")...)
+	upgrade = append(upgrade, []byte(fmt.Sprintf("\n-- ocservia:revision=%d\n", next)+"-- ocservia:checkpoint="+string(cp)+"\n"+artifactStepText(1, "probe_create", table, ddl)+artifactStepText(2, "probe_insert", insert, "INSERT INTO artifact_probe VALUES(1,1);\n")+artifactStepText(3, "probe_update", update, "UPDATE artifact_probe SET value=value+1 WHERE id=1;\n")+"-- ocservia:end-revision\n")...)
 	return pinMySQLFuture(t, schema, upgrade)
 }
 func mysqlArtifactDigest(t *testing.T, b *Backend) string {
@@ -208,7 +209,7 @@ func TestMySQLArtifactUnsupportedNoMutation(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err = b.Exec(ctx, "INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(2,1,?,'verified',?,CURRENT_TIMESTAMP(6))", digest(schema), len(a.schema.Baseline.Steps)); err != nil {
+			if _, err = b.Exec(ctx, "INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(2,?,?,'verified',?,CURRENT_TIMESTAMP(6))", a.schema.Baseline.Number, digest(schema), len(a.schema.Baseline.Steps)); err != nil {
 				t.Fatal(err)
 			}
 			if _, err = b.Exec(ctx, tamper); err != nil {
@@ -238,7 +239,7 @@ func TestMySQLArtifactInterruptedUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = startMySQLRevision(ctx, conn, a.schema.Epoch, 2, fmt.Sprintf("%x", r.Checksum)); err != nil {
+	if err = startMySQLRevision(ctx, conn, a.schema.Epoch, r.Number, fmt.Sprintf("%x", r.Checksum)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = conn.ExecContext(ctx, string(r.Steps[0].SQL)); err != nil {
@@ -276,7 +277,7 @@ func TestMySQLArtifactDataRollback(t *testing.T) {
 		t.Fatal("invalid data verification accepted", err)
 	}
 	var progress, value int
-	if err := b.QueryRow(ctx, "SELECT step FROM schema_revisions WHERE revision=2").Scan(&progress); err != nil || progress != 2 {
+	if err := b.QueryRow(ctx, "SELECT step FROM schema_revisions ORDER BY revision DESC LIMIT 1").Scan(&progress); err != nil || progress != 2 {
 		t.Fatal(progress, err)
 	}
 	if err := b.QueryRow(ctx, "SELECT value FROM artifact_probe").Scan(&value); err != nil || value != 1 {
@@ -390,7 +391,7 @@ func TestMySQLArtifactCatalog(t *testing.T) {
 	if got := a.fingerprint("foreign table definition"); got != digest([]byte("foreign table definition")) {
 		t.Fatal("unknown fingerprint adopted", got)
 	}
-	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 1 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != previousCheckpointRef || a.upgrade.Previous.Receipt.Checksum != previousCheckpointChecksum {
+	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 2 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != previousCheckpointRef || a.upgrade.Previous.Receipt.Checksum != previousCheckpointChecksum {
 		t.Fatal("published checkpoint identity changed")
 	}
 }
@@ -413,7 +414,7 @@ func TestMySQLArtifactForeignRepair(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = startMySQLRevision(ctx, conn, a.schema.Epoch, 2, fmt.Sprintf("%x", rev.Checksum)); err != nil {
+			if err = startMySQLRevision(ctx, conn, a.schema.Epoch, rev.Number, fmt.Sprintf("%x", rev.Checksum)); err != nil {
 				t.Fatal(err)
 			}
 			if partial {

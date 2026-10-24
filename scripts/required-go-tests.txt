@@ -302,6 +302,8 @@ mysql-snapshot internal/database/mysql TestMySQLCutoverCrashRecovery
 mysql-snapshot internal/database/mysql TestMySQLCutoverForeignCleanupRepair
 mysql-snapshot internal/database/mysql TestMySQLCutoverTransitionArtifactTamper
 mysql-snapshot internal/database/mysql TestMySQLCutoverUnsupportedNoMutation
+mysql-snapshot internal/database/mysql TestMySQLForwardRevisionMaintenanceClock
+mysql-snapshot internal/database/mysql TestMySQLFreshMaintenanceClock
 backend-mysql-current internal/database/mysql TestMySQLCutoverArtifactIntegrity
 backend-mysql-current internal/database/mysql TestMySQLCutoverCheckpointEquivalence
 backend-mysql-current internal/database/mysql TestMySQLCutoverCrashRecovery
@@ -316,3 +318,5 @@ backend-mysql-current internal/database/mysql TestMySQLArtifactHistoryMutation
 backend-mysql-current internal/database/mysql TestMySQLArtifactCrashBoundaries
 backend-mysql-current internal/database/mysql TestMySQLArtifactForeignRepair
 backend-mysql-current internal/database/mysql TestSnapshotDumpTableRoundtrip
+backend-mysql-current internal/database/mysql TestMySQLForwardRevisionMaintenanceClock
+backend-mysql-current internal/database/mysql TestMySQLFreshMaintenanceClock

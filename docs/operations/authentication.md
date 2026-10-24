@@ -405,9 +405,10 @@ FROM schema_revisions ORDER BY epoch, revision;
 ```
 
 Every required row must be in the `verified` state and match the installed SQL
-artifacts. A fresh epoch-2 initialization records revision 1, while a
+artifacts. A fresh epoch-2 initialization records revision 2, while a
 checkpoint upgrade verifies revision 0 before applying the journaled cleanup at
-revision 1. Any row left in `running` requires exact artifact repair and must
+revision 1 and the maintenance-clock update at revision 2. Any row left in
+`running` requires exact artifact repair and must
 not be edited manually. Owner migration verifies both the live schema and
 runtime privileges; runtime startup checks telemetry structures and
 permissions; and readiness checks core read queries and stream health. The
