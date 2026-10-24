@@ -231,4 +231,166 @@ func runResultProjectionWorkflows(t *testing.T, owner, backend *Backend, workspa
 			}
 		})
 	}
+	runPrivilegedResultTrust(t, owner, backend, workspace, signer)
+}
+
+// runPrivilegedResultTrust proves that an unsigned Rejected result never settles a root
+// command (undecided or already Unknown), that the Agent's unsigned effect_absent never
+// authorizes a retry of a fixed host action, and that a signed result still settles it.
+func runPrivilegedResultTrust(t *testing.T, owner, backend *Backend, workspace uuid.UUID, signer *commandauth.Signer) {
+	ctx := context.Background()
+	id := func() uuid.UUID { return uuid.Must(uuid.NewV7()) }
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	stamp, expires := fixtureTimestamp(t, now), fixtureTimestamp(t, now.Add(time.Hour))
+	trace := "00-11111111111111111111111111111111-2222222222222222-01"
+	run := func(q string, args ...any) {
+		t.Helper()
+		if _, err := owner.Exec(ctx, q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actor, session, node, credential := id(), id(), id(), id()
+	endpoint := sha256.Sum256(node[:])
+	private := ed25519.NewKeyFromSeed(endpoint[:])
+	public := private.Public().(ed25519.PublicKey)
+	run(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,'trust',?,?,?)`, UUIDBytes(actor), actor.String(), stamp, stamp)
+	run(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES(?,?,?,?)`, UUIDBytes(session), UUIDBytes(actor), expires, stamp)
+	run(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES(?,?,?,'active',?,?)`, UUIDBytes(node), UUIDBytes(workspace), node.String(), stamp, stamp)
+	run(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at)VALUES(?,?,'active',?)`, UUIDBytes(node), endpoint[:], stamp)
+	run(`INSERT INTO privd_attestation_enrollment_credentials(id,node_id,secret_sha256,controller_nonce,credential_context_sha256,expires_at,consumed_at,created_by_identity_id,created_by_session_id,created_at)VALUES(?,?,?,?,?,?,?,?,?,?)`, UUIDBytes(credential), UUIDBytes(node), endpoint[:], endpoint[:], endpoint[:], expires, stamp, UUIDBytes(actor), UUIDBytes(session), stamp)
+	run(`INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,registration_credential_id)VALUES(?,?,'ed25519',?,'active',?,?,?,?)`, UUIDBytes(node), privdattestation.PublicKeyID(public), []byte(public), stamp, stamp, stamp, UUIDBytes(credential))
+	service := localslice.NewBackend(backend, signer)
+	// stage seeds a command whose delivery is already recorded (published outbox).
+	stage := func(state string, mode agentv1.CommandDeliveryMode) (operation, command, outbox uuid.UUID) {
+		t.Helper()
+		operation, command, outbox = id(), id(), id()
+		message, key := id(), id()
+		envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: message[:], CommandId: command[:], OperationId: operation[:], NodeId: node[:], IdempotencyKey: key[:], IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Hour)), Sequence: 1, ExpectedRevision: 1, Traceparent: trace, ActorId: actor.String(), Reason: "privileged result trust", Action: "service.reload", RequiredCapability: "ocserv.service.reload", DeliveryMode: mode, Payload: &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}}
+		if err := semanticpayload.PopulateV1(envelope); err != nil {
+			t.Fatal(err)
+		}
+		if err := signer.Authorize(envelope); err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := proto.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run(`INSERT INTO operations(id,workspace_id,node_id,command_id,state,request_id,trace_id,created_at,updated_at)VALUES(?,?,?,?,?,?,?,?,?)`, UUIDBytes(operation), UUIDBytes(workspace), UUIDBytes(node), UUIDBytes(command), state, operation.String(), trace[3:35], stamp, stamp)
+		run(`INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,sequence,traceparent,expires_at,created_at,updated_at)VALUES(?,?,?,?,?,'service_reload',?,?,1,1,?,?,?,?)`, UUIDBytes(command), UUIDBytes(operation), UUIDBytes(workspace), UUIDBytes(node), state, encoded, key.String(), trace, expires, stamp, stamp)
+		run(`INSERT INTO outbox_events(id,command_id,event_type,payload,available_at,published_at,created_at)VALUES(?,?,'command.dispatch',?,?,?,?)`, UUIDBytes(outbox), UUIDBytes(command), encoded, stamp, stamp, stamp)
+		return
+	}
+	stored := func(command uuid.UUID) *agentv1.CommandEnvelope {
+		t.Helper()
+		var encoded []byte
+		if err := owner.QueryRow(ctx, `SELECT envelope FROM commands WHERE id=?`, UUIDBytes(command)).Scan(&encoded); err != nil {
+			t.Fatal(err)
+		}
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(encoded, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return &envelope
+	}
+	ingest := func(result *agentv1.CommandResult) {
+		t.Helper()
+		payload, err := proto.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eventID := id()
+		if err := service.Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: trace, Payload: payload}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outbox := func(outbox uuid.UUID) (bool, agentv1.CommandDeliveryMode) {
+		t.Helper()
+		var payload []byte
+		var published value.Timestamp
+		if err := owner.QueryRow(ctx, `SELECT payload,published_at FROM outbox_events WHERE id=?`, UUIDBytes(outbox)).Scan(&payload, &published); err != nil {
+			t.Fatal(err)
+		}
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(payload, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return !published.Valid, envelope.GetDeliveryMode()
+	}
+	states := func(operation uuid.UUID) (string, string) {
+		t.Helper()
+		var operationState, commandState string
+		if err := owner.QueryRow(ctx, `SELECT o.state,c.state FROM operations o JOIN commands c ON c.id=o.command_id WHERE o.id=?`, UUIDBytes(operation)).Scan(&operationState, &commandState); err != nil {
+			t.Fatal(err)
+		}
+		return operationState, commandState
+	}
+	signed := func(envelope *agentv1.CommandEnvelope, sequence uint64) *agentv1.CommandResult {
+		t.Helper()
+		hash, err := semanticpayload.HashV1(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := timestamppb.Now()
+		result := &agentv1.CommandResult{CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(), PayloadSha256: hash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, AcceptedAt: at, CompletedAt: at}
+		if err := attestationtest.AttachProof(envelope, result, private, sequence); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for index, start := range []string{"dispatched", "unknown"} {
+		t.Run("unsigned_rejected_from_"+start, func(t *testing.T) {
+			operation, command, outboxID := stage(start, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY)
+			envelope := stored(command)
+			rejected := &agentv1.CommandResult{CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(), State: agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED, ErrorCode: "capability_rejected", CompletedAt: timestamppb.Now()}
+			ingest(rejected)
+			if o, c := states(operation); o != "unknown" || c != "unknown" {
+				t.Fatalf("unsigned rejection settled the command: operation=%s command=%s", o, c)
+			}
+			if unpublished, mode := outbox(outboxID); !unpublished || mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+				t.Fatalf("reconciliation stopped after unsigned rejection: unpublished=%v mode=%s", unpublished, mode)
+			}
+			var status, verification string
+			if err := owner.QueryRow(ctx, `SELECT state,receipt_verification_status FROM agent_command_results WHERE command_id=?`, UUIDBytes(command)).Scan(&status, &verification); err != nil || status != "rejected" || verification != "missing" {
+				t.Fatal("original rejection evidence was not retained", status, verification, err)
+			}
+			ingest(rejected)
+			if o, c := states(operation); o != "unknown" || c != "unknown" {
+				t.Fatalf("repeated rejection settled the command: operation=%s command=%s", o, c)
+			}
+			if unpublished, _ := outbox(outboxID); !unpublished {
+				t.Fatal("repeated unsigned rejection completed the outbox")
+			}
+			ingest(signed(stored(command), uint64(index+1)))
+			if o, c := states(operation); o != "succeeded" || c != "succeeded" {
+				t.Fatalf("signed result did not settle the command: operation=%s command=%s", o, c)
+			}
+			if unpublished, _ := outbox(outboxID); unpublished {
+				t.Fatal("signed result left the outbox open")
+			}
+		})
+	}
+	t.Run("unsigned_effect_absent_never_authorizes_retry", func(t *testing.T) {
+		operation, command, outboxID := stage("unknown", agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY)
+		envelope := stored(command)
+		hash, err := semanticpayload.HashV1(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := timestamppb.Now()
+		ingest(&agentv1.CommandResult{CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(), PayloadSha256: hash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN, ErrorCode: "effect_absent", Replayed: true, AcceptedAt: at, CompletedAt: at})
+		if o, c := states(operation); o != "unknown" || c != "unknown" {
+			t.Fatalf("effect absence changed the state: operation=%s command=%s", o, c)
+		}
+		if unpublished, mode := outbox(outboxID); unpublished || mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+			t.Fatalf("unsigned effect absence scheduled a retry: unpublished=%v mode=%s", unpublished, mode)
+		}
+		if mode := stored(command).GetDeliveryMode(); mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+			t.Fatalf("stored command became executable again: %s", mode)
+		}
+		ingest(signed(envelope, 3))
+		if o, c := states(operation); o != "succeeded" || c != "succeeded" {
+			t.Fatalf("signed recovery did not settle the command: operation=%s command=%s", o, c)
+		}
+	})
 }

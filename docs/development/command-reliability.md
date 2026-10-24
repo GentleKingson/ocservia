@@ -91,6 +91,13 @@ recorded proof that the effect is absent. If reconciliation finds a matching
 completed effect, it returns that result without re-executing the command.
 Uncertain `ServiceReload` outcomes require manual operator reconciliation
 because querying service status cannot prove whether a reload took place.
+`SessionDisconnect`, `SessionTerminate`, `IpBanRemove`, and `ServiceReload`
+are never retried on an unsigned `effect_absent` report: the Controller keeps
+them `unknown` for reconciliation or manual handling, and privd answers a
+`RETRY_IF_EFFECT_ABSENT` grant for these kinds only by replaying an existing
+signed result, never by executing again. A `Rejected` result for a command
+that requires a privd receipt is likewise kept `unknown` unless it carries a
+valid proof.
 Mutating commands execute serially on the node, with inbound command streams
 capped at eight per Agent connection. Delivery mode stays outside the semantic
 hash because it governs recovery flow while leaving the command's target side

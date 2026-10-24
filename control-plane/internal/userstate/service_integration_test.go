@@ -693,7 +693,7 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 		}
 	}
 
-	t.Run("pre-effect rejection permits same-kind slot reuse", func(t *testing.T) {
+	t.Run("unsigned pre-effect rejection stays unknown and keeps the slot", func(t *testing.T) {
 		service, pool, _, nodeID := integrationService(t, "active")
 		seed(t, pool, nodeID)
 		rotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "rejected-rotate", UserPasswordRotate, "alice", 1))
@@ -701,27 +701,17 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 			t.Fatal(err)
 		}
 		ingestResult(t, pool, nodeID, rotate, agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED, "command_expired")
-		states, err := service.List(context.Background(), nodeID)
-		if err != nil || len(states) != 1 || !states[0].RecoveryRequired || states[0].RecoveryMutationKind == nil || *states[0].RecoveryMutationKind != UserPasswordRotate {
-			t.Fatalf("safe rejected metadata=%+v err=%v", states, err)
+		// A root command's Rejected has no trusted proof, so it cannot show that no
+		// effect was accepted: the command stays Unknown and the slot is not reused.
+		var commandState string
+		if err := pool.QueryRow(context.Background(), `SELECT state FROM commands WHERE id=$1`, uuid.MustParse(*rotate.CommandID)).Scan(&commandState); err != nil || commandState != "unknown" {
+			t.Fatalf("unsigned rejection command state=%q err=%v", commandState, err)
 		}
-		replacement, _, err := service.Mutate(context.Background(), mutation(nodeID, "replacement-rotate", UserPasswordRotate, "alice", 2))
-		if err != nil {
-			t.Fatalf("pre-effect replacement: %v", err)
-		}
-		var encoded []byte
-		if err := pool.QueryRow(context.Background(), `SELECT envelope FROM commands WHERE id=$1`, uuid.MustParse(*replacement.CommandID)).Scan(&encoded); err != nil {
-			t.Fatal(err)
-		}
-		var envelope agentv1.CommandEnvelope
-		if err := proto.Unmarshal(encoded, &envelope); err != nil {
-			t.Fatal(err)
-		}
-		if envelope.GetExpectedRevision() != 1 || envelope.GetUserPasswordRotate().GetDesiredRevision() != 2 {
-			t.Fatalf("replacement revisions expected=%d desired=%d", envelope.GetExpectedRevision(), envelope.GetUserPasswordRotate().GetDesiredRevision())
+		if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "replacement-rotate", UserPasswordRotate, "alice", 2)); !errors.Is(err, ErrRevisionPending) {
+			t.Fatalf("unsigned pre-effect rejection allowed replacement: %v", err)
 		}
 		// The runtime test role cannot delete immutable Agent results. Keep the
-		// retained rejected command compatible with migration rollback.
+		// retained command compatible with migration rollback.
 		if _, err := pool.Exec(context.Background(), `UPDATE commands SET payload_type='synthetic_echo',expected_version=1 WHERE workspace_id=(SELECT workspace_id FROM commands WHERE id=$1)`, uuid.MustParse(*rotate.CommandID)); err != nil {
 			t.Fatal(err)
 		}
@@ -737,10 +727,10 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 		ingestResult(t, pool, nodeID, rotate, agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN, "privd_outcome_unknown")
 		ingestResult(t, pool, nodeID, rotate, agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED, "command_expired")
 		states, err := service.List(context.Background(), nodeID)
-		if err != nil || len(states) != 1 || !states[0].RecoveryRequired || states[0].RecoveryMutationKind != nil {
+		if err != nil || len(states) != 1 || states[0].RecoveryRequired || states[0].RecoveryMutationKind != nil {
 			t.Fatalf("ambiguous rejected metadata=%+v err=%v", states, err)
 		}
-		if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "unsafe-replacement", UserPasswordRotate, "alice", 2)); !errors.Is(err, ErrRevisionRecovery) {
+		if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "unsafe-replacement", UserPasswordRotate, "alice", 2)); !errors.Is(err, ErrRevisionPending) {
 			t.Fatalf("ambiguous rejected replacement=%v", err)
 		}
 		if _, err := pool.Exec(context.Background(), `UPDATE commands SET payload_type='synthetic_echo',expected_version=1 WHERE workspace_id=(SELECT workspace_id FROM commands WHERE id=$1)`, uuid.MustParse(*rotate.CommandID)); err != nil {
@@ -775,7 +765,7 @@ func TestGlobalCommandLimitAcrossProducersIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var baseline int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id LEFT JOIN node_command_leases lease ON lease.command_id=command.id AND lease.leased_until>now() WHERE operation.state IN('dispatched','accepted','running','unknown') OR lease.command_id IS NOT NULL`).Scan(&baseline); err != nil {
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id LEFT JOIN node_command_leases lease ON lease.command_id=command.id AND lease.leased_until>now() WHERE operation.state IN('dispatched','accepted','running') OR lease.command_id IS NOT NULL`).Scan(&baseline); err != nil {
 		t.Fatal(err)
 	}
 	start := make(chan struct{})
@@ -829,7 +819,7 @@ func TestOfflineQueueDoesNotConsumeGlobalDispatchCapacityIntegration(t *testing.
 		}
 	}
 	var baseline int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id LEFT JOIN node_command_leases lease ON lease.command_id=command.id AND lease.leased_until>now() WHERE operation.state IN('dispatched','accepted','running','unknown') OR lease.command_id IS NOT NULL`).Scan(&baseline); err != nil {
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id LEFT JOIN node_command_leases lease ON lease.command_id=command.id AND lease.leased_until>now() WHERE operation.state IN('dispatched','accepted','running') OR lease.command_id IS NOT NULL`).Scan(&baseline); err != nil {
 		t.Fatal(err)
 	}
 	dispatches, err := operationstore.NewBackend(postgres.WrapPool(pool), baseline+1, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
@@ -848,7 +838,7 @@ func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var baseline int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running','unknown') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id) active`).Scan(&baseline); err != nil {
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id) active`).Scan(&baseline); err != nil {
 		t.Fatal(err)
 	}
 	service := operationstore.NewBackend(postgres.WrapPool(pool), baseline+1, integrationCommandSigner())
@@ -876,10 +866,9 @@ func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
 	}
 }
 
-func TestUnknownReconciliationBypassesConsumedDispatchSlotIntegration(t *testing.T) {
+func TestUnknownReconciliationConsumesDispatchSlotIntegration(t *testing.T) {
 	_, pool, _, nodeID := integrationService(t, "active")
-	service := operationstore.NewBackend(postgres.WrapPool(pool), 1, integrationCommandSigner())
-	op, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: "unknown-reconcile", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-unknown-reconcile", Traceparent: testTraceparent})
+	op, _, err := operationstore.NewBackend(postgres.WrapPool(pool), 1, integrationCommandSigner()).CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: "unknown-reconcile", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-unknown-reconcile", Traceparent: testTraceparent})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -893,6 +882,15 @@ func TestUnknownReconciliationBypassesConsumedDispatchSlotIntegration(t *testing
 	if _, err := pool.Exec(context.Background(), `UPDATE outbox_events SET available_at='2000-01-01T00:00:00Z' WHERE command_id=(SELECT command_id FROM operations WHERE id=$1)`, operationID); err != nil {
 		t.Fatal(err)
 	}
+	// A quiescent Unknown holds no slot, but its reconciliation lease needs one.
+	var baseline int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id) active`).Scan(&baseline); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, err := operationstore.NewBackend(postgres.WrapPool(pool), baseline, integrationCommandSigner()).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute); err != nil || len(blocked) != 0 {
+		t.Fatalf("unknown reconciliation bypassed a full budget=%+v err=%v", blocked, err)
+	}
+	service := operationstore.NewBackend(postgres.WrapPool(pool), baseline+1, integrationCommandSigner())
 	dispatches, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
 	if err != nil || len(dispatches) != 1 || dispatches[0].OperationID != operationID {
 		t.Fatalf("unknown reconciliation claim=%+v err=%v", dispatches, err)

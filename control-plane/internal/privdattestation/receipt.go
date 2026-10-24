@@ -126,8 +126,11 @@ func transactionKeyLookup(tx database.Tx) keyLookup {
 func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) (verification Verification) {
 	defer func() { recordVerificationMetric(verification) }()
 	commandKind := commandKind(envelope)
+	// A Rejected result of a root-executed command has no receipt form, so it is
+	// never trusted evidence that no effect happened. It is verified like a
+	// terminal result and therefore fails closed instead of becoming terminal.
 	if commandKind == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED ||
-		(result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED && result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED) {
+		(result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED && result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED && result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED) {
 		return Verification{Status: "not_required"}
 	}
 	proof := result.GetPrivilegedResultProof()

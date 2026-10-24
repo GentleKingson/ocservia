@@ -27,10 +27,10 @@ func (s operationStore) DispatchCandidates(ctx context.Context, limit, available
 		 AND prior.resource_key=command.resource_key AND prior.id<>command.id AND prior.expected_version<command.expected_version
 		 AND prior.state IN ('queued','dispatched','accepted','running','unknown')))
 	), unknown_candidates AS (
-		SELECT * FROM ranked WHERE node_rank=1 AND state='unknown' ORDER BY available_at,outbox_id LIMIT $1
+		SELECT * FROM ranked WHERE node_rank=1 AND state='unknown' ORDER BY available_at,outbox_id LIMIT LEAST($1::bigint,$2::bigint)
 	), queued_candidates AS (
 		SELECT * FROM ranked WHERE node_rank=1 AND state='queued' ORDER BY available_at,outbox_id
-		LIMIT LEAST($2,GREATEST(0,$1-(SELECT count(*) FROM unknown_candidates)))
+		LIMIT GREATEST(0,LEAST($1::bigint,$2::bigint)-(SELECT count(*) FROM unknown_candidates))
 	), selected AS (SELECT * FROM unknown_candidates UNION ALL SELECT * FROM queued_candidates)
 	SELECT outbox.id,command.id,command.operation_id,command.node_id,outbox.payload,command.traceparent
 	FROM selected JOIN outbox_events AS outbox ON outbox.id=selected.outbox_id JOIN commands AS command ON command.id=selected.command_id
