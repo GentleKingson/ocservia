@@ -221,6 +221,9 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	// workspace's rollouts.
 	nodeViewerID, foreignViewerID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeViewerBinding, foreignViewerBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	// A node-scoped Operator may submit agent.upgrade requests but must not read
+	// a workspace rollout through an idempotent replay.
+	nodeOperatorID, nodeOperatorBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	allNodes := append([]uuid.UUID{offlineNodeID, incapableNodeID}, nodeIDs...)
 	fixtures := []struct {
 		query string
@@ -232,6 +235,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Operator','workspace',NULL,$2,now())", []any{operatorBinding, operatorID, workspaceID}},
 		{"INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now())", []any{nodeViewerID, nodeViewerID.String(), foreignViewerID, foreignViewerID.String()}},
 		{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Viewer','workspace',NULL,$2,now())", []any{foreignViewerBinding, foreignViewerID, otherWorkspaceID}},
+		{"INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now())", []any{nodeOperatorID, nodeOperatorID.String()}},
 	}
 	for index, nodeID := range allNodes {
 		fixtures = append(fixtures,
@@ -278,6 +282,10 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			query string
 			args  []any
 		}{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Viewer','node',$4,$2,now())", []any{nodeViewerBinding, nodeViewerID, workspaceID, canaryID}},
+		struct {
+			query string
+			args  []any
+		}{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Operator','node',$4,$2,now())", []any{nodeOperatorBinding, nodeOperatorID, workspaceID, canaryID}},
 	)
 	for _, fixture := range fixtures {
 		if _, err := pool.Exec(ctx, fixture.query, fixture.args...); err != nil {
@@ -306,9 +314,9 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			{"DELETE FROM commands WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
 			{"DELETE FROM operations WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
 			{"DELETE FROM approval_requests WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
-			{"DELETE FROM role_bindings WHERE id IN ($1,$2,$3)", []any{operatorBinding, nodeViewerBinding, foreignViewerBinding}},
+			{"DELETE FROM role_bindings WHERE id IN ($1,$2,$3,$4)", []any{operatorBinding, nodeViewerBinding, foreignViewerBinding, nodeOperatorBinding}},
 			{"DELETE FROM auth_sessions WHERE id=$1", []any{operatorSession}},
-			{"DELETE FROM identities WHERE id IN ($1,$2,$3,$4)", []any{operatorID, approverID, nodeViewerID, foreignViewerID}},
+			{"DELETE FROM identities WHERE id IN ($1,$2,$3,$4,$5)", []any{operatorID, approverID, nodeViewerID, foreignViewerID, nodeOperatorID}},
 			{"DELETE FROM node_observed_snapshots WHERE node_id=ANY($3)", []any{nil, nil, allNodes}},
 			{"DELETE FROM node_capabilities WHERE node_id=ANY($3)", []any{nil, nil, allNodes}},
 			{"DELETE FROM node_privd_attestation_keys WHERE node_id=ANY($3)", []any{nil, nil, allNodes}},
@@ -464,6 +472,9 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertExclusions("replayed", replayed)
+	if replayed.ID != rolloutID.String() || replay.Header().Get("Location") != "/api/v1/agent-rollouts/"+rolloutID.String() {
+		t.Fatalf("replay returned a different rollout: %+v location=%q", replayed, replay.Header().Get("Location"))
+	}
 	got := getRollout(rolloutID)
 	if got.Code != http.StatusOK {
 		t.Fatalf("get rollout status=%d body=%s", got.Code, got.Body.String())
@@ -502,6 +513,40 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatalf("idempotency conflict status=%d body=%s", conflict.Code, conflict.Body.String())
 	}
 
+	// Replay re-checks current Workspace-level operation.read: a node-scoped
+	// Operator passes route authorization for agent.upgrade yet must not read
+	// the stored rollout, and a creator whose binding was narrowed after the
+	// first request is refused as well.
+	replayRequest := func(actor auth.Principal) *http.Request {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/agent-rollouts", strings.NewReader(createBody))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", "rollout-create-1")
+		authorized, err := server.authorizeRoute(request, actor)
+		if err != nil {
+			t.Fatalf("authorize rollout replay: %v", err)
+		}
+		return request.WithContext(authorized)
+	}
+	assertReplayDenied := func(label string, request *http.Request) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		server.createAgentRollout(response, request)
+		if response.Code != http.StatusForbidden || response.Header().Get("Location") != "" || response.Header().Get("Idempotency-Replayed") != "" || strings.Contains(response.Body.String(), rolloutID.String()) {
+			t.Fatalf("%s replay status=%d headers=%v body=%s", label, response.Code, response.Header(), response.Body.String())
+		}
+	}
+	nodeOperator := auth.Principal{IdentityID: nodeOperatorID, SessionID: operatorSession, Subject: nodeOperatorID.String(), Issuer: "integration"}
+	nodeOperatorReplay := replayRequest(nodeOperator)
+	assertReplayDenied("node-scoped operator", nodeOperatorReplay)
+	narrowedReplay := replayRequest(operator)
+	if _, err := pool.Exec(ctx, "DELETE FROM role_bindings WHERE id=$1", operatorBinding); err != nil {
+		t.Fatal(err)
+	}
+	assertReplayDenied("narrowed creator", narrowedReplay)
+	if _, err := pool.Exec(ctx, "INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Operator','workspace',NULL,$2,now())", operatorBinding, operatorID, workspaceID); err != nil {
+		t.Fatal(err)
+	}
 	advance := func() error {
 		return server.operations.AdvanceAgentRollouts(ctx)
 	}

@@ -56,6 +56,7 @@ func TestTelemetryHistoryErrors(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			request := httptest.NewRequest(http.MethodGet, "/api/v1/nodes/"+uuid.Must(uuid.NewV7()).String()+"/telemetry?"+tc.query, nil).WithContext(ctx)
+			request.Host = "127.0.0.1:8080"
 			response := httptest.NewRecorder()
 			server.http.Handler.ServeHTTP(response, request)
 			if response.Code != tc.status || !strings.Contains(response.Body.String(), tc.detail) {

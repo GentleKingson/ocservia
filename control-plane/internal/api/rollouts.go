@@ -83,6 +83,9 @@ func (s *Server) createAgentRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if replayed {
+		if !s.authorizeRolloutRead(w, r) {
+			return
+		}
 		w.Header().Set("Idempotency-Replayed", "true")
 	}
 	w.Header().Set("Location", "/api/v1/agent-rollouts/"+rollout.ID)
@@ -105,16 +108,8 @@ func (s *Server) listAgentRollouts(w http.ResponseWriter, r *http.Request) {
 	}
 	// Workspace selection also admits node-scoped bindings, but the list
 	// covers every rollout in the workspace, so it needs workspace-level read.
-	if actor := principal(r); actor.Issuer != "development" {
-		if s.rbac == nil {
-			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
-			return
-		}
-		resource := rbac.Resource{WorkspaceID: workspace(r), Type: "workspace"}
-		if err := s.rbac.Authorize(r.Context(), actor.IdentityID, "operation.read", resource, actor.BreakGlass); err != nil {
-			s.writeAuthorizationError(w, r, err)
-			return
-		}
+	if !s.authorizeRolloutRead(w, r) {
+		return
 	}
 	rollouts, err := s.operations.ListAgentRollouts(r.Context(), workspace(r), limit)
 	if err != nil {
@@ -122,6 +117,26 @@ func (s *Server) listAgentRollouts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rollouts": rollouts})
+}
+
+// authorizeRolloutRead requires the current Workspace-level operation.read
+// that rollout GET and list enforce. Idempotent replays of rollout creation
+// share it because they return the stored rollout, not the new request.
+func (s *Server) authorizeRolloutRead(w http.ResponseWriter, r *http.Request) bool {
+	actor := principal(r)
+	if actor.Issuer == "development" {
+		return true
+	}
+	if s.rbac == nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
+		return false
+	}
+	resource := rbac.Resource{WorkspaceID: workspace(r), Type: "workspace"}
+	if err := s.rbac.Authorize(r.Context(), actor.IdentityID, "operation.read", resource, actor.BreakGlass); err != nil {
+		s.writeAuthorizationError(w, r, err)
+		return false
+	}
+	return true
 }
 
 func (s *Server) getAgentRollout(w http.ResponseWriter, r *http.Request) {

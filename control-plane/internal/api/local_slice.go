@@ -22,20 +22,28 @@ import (
 // allowedHosts list. The default development token is public, so the Host
 // check keeps a DNS-rebound browser page from reaching these routes.
 func (s *Server) allowDevelopmentRequest(w http.ResponseWriter, r *http.Request) bool {
-	if !s.hasOperationPrincipal(r) {
+	if !s.hasOperationCredential(r) {
 		w.Header().Set("WWW-Authenticate", "OIDC")
 		writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "development routes require the development principal")
 		return false
 	}
-	host := r.Host
-	if name, _, err := net.SplitHostPort(host); err == nil {
-		host = name
-	}
-	if ip := net.ParseIP(strings.Trim(host, "[]")); host != "localhost" && host != "web" && (ip == nil || !ip.IsLoopback()) {
+	if !developmentHost(r.Host) {
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "development routes require a loopback Host")
 		return false
 	}
 	return true
+}
+
+// developmentHost reports whether a request Host is one the development
+// principal may be addressed through: localhost, a loopback IP, or the
+// development Compose web service.
+func developmentHost(hostport string) bool {
+	host := hostport
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return host == "localhost" || host == "web" || (ip != nil && ip.IsLoopback())
 }
 
 func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {

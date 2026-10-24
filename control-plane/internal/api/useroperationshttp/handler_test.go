@@ -379,6 +379,52 @@ func TestUserOperationsHTTPAuthorization(t *testing.T) {
 	}
 }
 
+func TestUserOperationsHTTPBatchReplayAuthorization(t *testing.T) {
+	for _, mode := range []string{"creator", "reader", "denied"} {
+		t.Run(mode, func(t *testing.T) {
+			info := fixtureInfo()
+			info.Principal.BreakGlass = false
+			batch := useroperations.Batch{ID: nodeID, WorkspaceID: info.WorkspaceID}
+			if mode == "creator" {
+				batch.ActorIdentityID = &info.Principal.IdentityID
+			}
+			actions := []string{}
+			authorizer := authorizerStub{
+				node: func(_ context.Context, id uuid.UUID) (rbac.Resource, error) {
+					return rbac.Resource{WorkspaceID: info.WorkspaceID, Type: "node", ID: id}, nil
+				},
+				authorize: func(_ context.Context, _ uuid.UUID, action string, r rbac.Resource, _ bool) error {
+					actions = append(actions, action)
+					if action == "operation.read" && (mode == "denied" || r != (rbac.Resource{WorkspaceID: info.WorkspaceID, Type: "workspace"})) {
+						return rbac.ErrForbidden
+					}
+					return nil
+				},
+			}
+			_, mux := module(&info, operationsStub{createBatch: func(context.Context, useroperations.BatchRequest) (useroperations.Batch, bool, error) {
+				return batch, true, nil
+			}}, authorizer)
+			body := fmt.Sprintf(`{"items":[{"node_id":%q,"username":"alice","action":"enable"}]}`, nodeID)
+			w := call(mux, t.Context(), "POST", "/api/v1/user-batches", body, "key")
+			if mode == "denied" {
+				problem(t, w, 403, "forbidden", "the principal is not authorized for this resource and action")
+				if strings.Contains(w.Body.String(), "alice") {
+					t.Fatal("denied replay leaked batch body", w.Body)
+				}
+			} else if w.Code != 202 || w.Header().Get("Idempotency-Replayed") != "true" || w.Header().Get("Location") != batchPath {
+				t.Fatal(w.Code, w.Header(), w.Body)
+			}
+			wantActions := []string{"user.manage"}
+			if mode != "creator" {
+				wantActions = append(wantActions, "operation.read")
+			}
+			if !reflect.DeepEqual(actions, wantActions) {
+				t.Fatal("authorization actions", actions)
+			}
+		})
+	}
+}
+
 func TestUserOperationsHTTPErrors(t *testing.T) {
 	for _, tc := range []struct {
 		err          error

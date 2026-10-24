@@ -59,7 +59,9 @@ func TestLiveAndRequestID(t *testing.T) {
 func TestDevAuthMarker(t *testing.T) {
 	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, true, "")
 	response := httptest.NewRecorder()
-	server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	request := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	request.Host = "127.0.0.1:8080"
+	server.http.Handler.ServeHTTP(response, request)
 	if response.Header().Get("X-Ocservia-Dev-Subject") != "developer" {
 		t.Fatal("development subject was not injected")
 	}
@@ -204,21 +206,43 @@ func TestCreateEnrollmentTokenRejectsUnboundEndpoint(t *testing.T) {
 }
 
 func TestOperationsAcceptConfiguredDevelopmentBearer(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters")
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/operations", nil)
-	request.Header.Set("Authorization", "Bearer wrong")
-	server.http.Handler.ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong token status = %d", response.Code)
+	const token = "local-development-token-32-characters"
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, token)
+	for _, test := range []struct {
+		name, host, bearer string
+		wantUnauthorized   bool
+	}{
+		{"wrong token", "127.0.0.1:8080", "wrong", true},
+		{"rebound host", "attacker.example:8080", token, true},
+		{"loopback", "127.0.0.1:8080", token, false},
+		{"localhost", "localhost:8080", token, false},
+		{"IPv6 loopback", "[::1]:8080", token, false},
+		{"compose web proxy", "web:4173", token, false},
+	} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/operations", nil)
+		request.Host = test.host
+		request.Header.Set("Authorization", "Bearer "+test.bearer)
+		server.http.Handler.ServeHTTP(response, request)
+		if (response.Code == http.StatusUnauthorized) != test.wantUnauthorized {
+			t.Fatalf("%s: status = %d", test.name, response.Code)
+		}
+		if test.wantUnauthorized && response.Header().Get("X-Ocservia-Dev-Subject") != "" {
+			t.Fatalf("%s: development subject was injected", test.name)
+		}
 	}
+}
 
-	response = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/v1/operations", nil)
-	request.Header.Set("Authorization", "Bearer local-development-token-32-characters")
-	server.http.Handler.ServeHTTP(response, request)
-	if response.Code == http.StatusUnauthorized {
-		t.Fatal("configured development bearer was rejected")
+func TestDevAuthRejectsReboundHost(t *testing.T) {
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, true, "")
+	for host, wantUnauthorized := range map[string]bool{"attacker.example:8080": true, "127.0.0.1:8080": false} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/operations", nil)
+		request.Host = host
+		server.http.Handler.ServeHTTP(response, request)
+		if (response.Code == http.StatusUnauthorized) != wantUnauthorized || (wantUnauthorized && response.Header().Get("X-Ocservia-Dev-Subject") != "") {
+			t.Fatalf("%s: status = %d", host, response.Code)
+		}
 	}
 }
 
