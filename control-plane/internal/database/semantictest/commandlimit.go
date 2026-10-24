@@ -52,6 +52,71 @@ func CommandLimits(t *testing.T, h CommandLimitHarness) {
 			}
 		}
 	})
+	t.Run("quiescent_unknown_not_active", func(t *testing.T) {
+		workspace, node := h.Scope(t)
+		other, third := h.Node(t, workspace), h.Node(t, workspace)
+		tx, err := h.Backend.Begin(ctx, database.ReadCommitted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		before, err := commandlimit.Available(ctx, tx, 10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Unknown without a dispatch/probe lease keeps its state but holds no slot.
+		if err = h.Command(ctx, tx, workspace, node, "unknown", false); err != nil {
+			t.Fatal(err)
+		}
+		if after, err := commandlimit.Available(ctx, tx, 10000); err != nil || after != before {
+			t.Fatal("quiescent unknown consumed a global slot", before, after, err)
+		}
+		// The same state under an active lease is the probe in flight and counts once.
+		if err = h.Command(ctx, tx, workspace, other, "unknown", true); err != nil {
+			t.Fatal(err)
+		}
+		if after, err := commandlimit.Available(ctx, tx, 10000); err != nil || after != before-1 {
+			t.Fatal("leased unknown not counted once", before, after, err)
+		}
+		if err = h.Command(ctx, tx, workspace, third, "running", false); err != nil {
+			t.Fatal(err)
+		}
+		if after, err := commandlimit.Available(ctx, tx, 10000); err != nil || after != before-2 {
+			t.Fatal("running command stopped counting as active", before, after, err)
+		}
+	})
+	for _, state := range []string{"dispatched", "accepted", "running", "unknown"} {
+		for _, workspaceLimit := range []bool{false, true} {
+			name, maximum := "backlog_counts_"+state+"_node", commandlimit.MaxNodeBacklog
+			if workspaceLimit {
+				name, maximum = "backlog_counts_"+state+"_workspace", commandlimit.MaxWorkspaceBacklog
+			}
+			t.Run(name, func(t *testing.T) {
+				workspace, node := h.Scope(t)
+				queuedNode := node
+				if workspaceLimit {
+					queuedNode = uuid.Nil
+				}
+				tx, err := h.Backend.Begin(ctx, database.ReadCommitted)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback(ctx)
+				if err = h.Queue(ctx, tx, workspace, queuedNode, maximum-1, "queued"); err != nil {
+					t.Fatal(err)
+				}
+				if err = commandlimit.ReserveBacklog(ctx, tx, workspace, node); err != nil {
+					t.Fatal(err)
+				}
+				if err = h.Queue(ctx, tx, workspace, queuedNode, 1, state); err != nil {
+					t.Fatal(err)
+				}
+				if err = commandlimit.ReserveBacklog(ctx, tx, workspace, node); !errors.Is(err, commandlimit.ErrBacklogExceeded) {
+					t.Fatal("unresolved command escaped the backlog ceiling", err)
+				}
+			})
+		}
+	}
 	for _, workspaceLimit := range []bool{false, true} {
 		name, maximum := "node_backlog", commandlimit.MaxNodeBacklog
 		if workspaceLimit {

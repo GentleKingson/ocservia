@@ -147,8 +147,9 @@ func Controller(t *testing.T, b database.Backend, workspace, actor, target uuid.
 	if err != nil || !verified.Valid || verified.Events != 4 {
 		t.Fatalf("transactional grant audit: %+v %v", verified, err)
 	}
-	// Approval expiration intentionally uses the original transaction-start
-	// clock, including a lock wait that crosses expiration.
+	// Approval expiration is judged by the wall clock read after the approval
+	// row lock is granted, so a wait that crosses expiration rejects the consumer
+	// even though its transaction started earlier.
 	old, err := b.Begin(ctx, database.ReadCommitted)
 	if err != nil {
 		t.Fatal(err)
@@ -189,8 +190,8 @@ func Controller(t *testing.T, b database.Backend, workspace, actor, target uuid.
 	if err = holder.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err = <-done; err != nil {
-		t.Fatal("transaction-start expiration changed", err)
+	if err = <-done; !errors.Is(err, approvals.ErrNotReady) {
+		t.Fatal("approval consumed after lock wait crossed expiration", err)
 	}
 	if err = old.Commit(ctx); err != nil {
 		t.Fatal(err)

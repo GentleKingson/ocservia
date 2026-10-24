@@ -429,7 +429,14 @@ func (s *Server) validateBrowserMutation(r *http.Request, principal auth.Princip
 	return nil
 }
 
+// hasOperationPrincipal admits the development principal only through a
+// development Host, so a DNS-rebound browser page cannot spend the public
+// development token or the unauthenticated DevAuth mode on any API route.
 func (s *Server) hasOperationPrincipal(r *http.Request) bool {
+	return s.hasOperationCredential(r) && developmentHost(r.Host)
+}
+
+func (s *Server) hasOperationCredential(r *http.Request) bool {
 	if s.devAuth {
 		return true
 	}

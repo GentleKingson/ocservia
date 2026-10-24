@@ -10,6 +10,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
@@ -134,6 +135,9 @@ func (h *Handler) createUserBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if replayed {
+		if !h.authorizeBatchRead(w, r, batch, principal) {
+			return
+		}
 		w.Header().Set("Idempotency-Replayed", "true")
 	}
 	w.Header().Set("Location", "/api/v1/user-batches/"+batch.ID.String())
@@ -156,20 +160,30 @@ func (h *Handler) getUserBatch(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested batch does not exist")
 		return
 	}
-	actor := info.Principal
-	creator := batch.ActorIdentityID != nil && *batch.ActorIdentityID == actor.IdentityID
-	if actor.Issuer != "development" && !creator {
-		if h.authorizer == nil {
-			httpx.WriteProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "user operations service is unavailable")
-			return
-		}
-		resource := rbac.Resource{WorkspaceID: batch.WorkspaceID, Type: "workspace"}
-		if err := h.authorizer.Authorize(r.Context(), actor.IdentityID, "operation.read", resource, actor.BreakGlass); err != nil {
-			writeAuthorizationError(w, r, err)
-			return
-		}
+	if !h.authorizeBatchRead(w, r, batch, info.Principal) {
+		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, batch)
+}
+
+// authorizeBatchRead admits the batch creator or a current Workspace
+// operation.read holder. It guards both the batch GET and idempotent replays,
+// which return the stored batch rather than the new request.
+func (h *Handler) authorizeBatchRead(w http.ResponseWriter, r *http.Request, batch useroperations.Batch, actor auth.Principal) bool {
+	creator := batch.ActorIdentityID != nil && *batch.ActorIdentityID == actor.IdentityID
+	if actor.Issuer == "development" || creator {
+		return true
+	}
+	if h.authorizer == nil {
+		httpx.WriteProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "user operations service is unavailable")
+		return false
+	}
+	resource := rbac.Resource{WorkspaceID: batch.WorkspaceID, Type: "workspace"}
+	if err := h.authorizer.Authorize(r.Context(), actor.IdentityID, "operation.read", resource, actor.BreakGlass); err != nil {
+		writeAuthorizationError(w, r, err)
+		return false
+	}
+	return true
 }
 
 func (h *Handler) userOperationMetrics(w http.ResponseWriter, r *http.Request) {

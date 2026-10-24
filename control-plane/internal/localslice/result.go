@@ -443,6 +443,12 @@ func scheduleCommandRecovery(ctx context.Context, store resultstore.ResultStore,
 		if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
 			return invalidCommandResult("effect absence was not observed during reconciliation")
 		}
+		// The Agent's effect_absent is unsigned. These fixed host actions cannot
+		// prove absence cryptographically, so the Unknown outcome stays for
+		// manual reconciliation; only a signed completed result can settle it.
+		if fixedHostEffect(envelope) {
+			return nil
+		}
 		mode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT
 	case "outcome_requires_reconciliation", "result_persistence_failed", "privd_transport_unknown", "privd_outcome_unknown":
 		mode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY
@@ -468,6 +474,15 @@ func scheduleCommandRecovery(ctx context.Context, store resultstore.ResultStore,
 		return err
 	}
 	return store.ScheduleRecovery(ctx, commandID, payload, expiry, at)
+}
+
+func fixedHostEffect(envelope *agentv1.CommandEnvelope) bool {
+	switch envelope.GetPayload().(type) {
+	case *agentv1.CommandEnvelope_SessionDisconnect, *agentv1.CommandEnvelope_SessionTerminate,
+		*agentv1.CommandEnvelope_IpBanRemove, *agentv1.CommandEnvelope_ServiceReload:
+		return true
+	}
+	return false
 }
 
 func resultText(v string) *string {

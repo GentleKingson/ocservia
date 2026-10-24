@@ -129,6 +129,8 @@ func baselineServer(t *testing.T, dev bool) *Server {
 
 func baselineRequest(method, path string, body io.Reader) *http.Request {
 	r := httptest.NewRequest(method, path, body)
+	// Development authentication only admits development Hosts.
+	r.Host = "127.0.0.1:8080"
 	r.Header.Set("X-Request-ID", "baseline-request")
 	// A fixed span makes Problem bodies and log correlation deterministic without
 	// removing trace IDs or other fields from comparisons.

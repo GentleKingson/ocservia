@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -255,6 +256,109 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		if f.count(t, `SELECT count(*) FROM operation_events WHERE state='succeeded'`, `SELECT count(*) FROM operation_events WHERE state='succeeded'`) != 1 {
 			t.Fatal("duplicate projection")
 		}
+	})
+	// Global capacity is 2. A persistent Unknown without a dispatch or probe
+	// lease keeps its state and fence but is not an executing command; a
+	// recovery attempt that takes a lease is, and must use the same budget.
+	t.Run("unknown-capacity", func(t *testing.T) {
+		newFixture := func(t *testing.T) (*outboxFixture, *operations.Service, func(node uuid.UUID, state string, published bool) uuid.UUID) {
+			f := newOutboxFixture(t)
+			service := operations.NewBackend(f.backend, 2, f.signer)
+			// seed creates one operation and moves it to a durable state, either
+			// quiescent (outbox published) or with its recovery outbox pending.
+			seed := func(node uuid.UUID, state string, published bool) uuid.UUID {
+				created, _, err := service.CreateSynthetic(context.Background(), outboxRequest(node))
+				if err != nil {
+					t.Fatal(err)
+				}
+				operation := uuid.MustParse(created.ID)
+				if state != "queued" {
+					f.exec(t, `UPDATE operations SET state=$1 WHERE id=$2`, `UPDATE operations SET state=? WHERE id=?`, state, operation)
+					f.exec(t, `UPDATE commands SET state=$1 WHERE operation_id=$2`, `UPDATE commands SET state=? WHERE operation_id=?`, state, operation)
+				}
+				if published {
+					at := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}
+					f.exec(t, `UPDATE outbox_events SET published_at=$1 WHERE command_id IN (SELECT id FROM commands WHERE operation_id=$2)`,
+						`UPDATE outbox_events SET published_at=? WHERE command_id IN (SELECT id FROM commands WHERE operation_id=?)`, at, operation)
+				}
+				return operation
+			}
+			return f, service, seed
+		}
+		t.Run("quiescent-unknown-does-not-block-other-workspace", func(t *testing.T) {
+			f, service, seed := newFixture(t)
+			otherWorkspace := uuid.Must(uuid.NewV7())
+			at, err := value.FromTime(time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'PR04 other',$2,$3,$4)`,
+				`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'PR04 other',?,?,?)`, otherWorkspace, otherWorkspace.String(), at, at)
+			node := uuid.Must(uuid.NewV7())
+			f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',$4,$5)`,
+				`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, node, otherWorkspace, node.String(), at, at)
+			endpoint := sha256.Sum256(node[:])
+			f.exec(t, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`,
+				`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES(?,?,'active',?)`, node, endpoint[:], at)
+			seed(f.node(t), "unknown", true)
+			seed(f.node(t), "unknown", true)
+			want := seed(node, "queued", false)
+			jobs, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 10, time.Minute)
+			if err != nil || len(jobs) != 1 || jobs[0].OperationID != want {
+				t.Fatal("quiescent Unknown blocked unrelated dispatch", jobs, err)
+			}
+		})
+		t.Run("recovery-leases-share-global-capacity", func(t *testing.T) {
+			f, service, seed := newFixture(t)
+			for range 4 {
+				seed(f.node(t), "unknown", false)
+			}
+			var claimed atomic.Int32
+			var wg sync.WaitGroup
+			failures := make(chan error, 4)
+			for range 4 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					jobs, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 10, time.Minute)
+					claimed.Add(int32(len(jobs)))
+					failures <- err
+				}()
+			}
+			wg.Wait()
+			close(failures)
+			for err := range failures {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			leases := f.count(t, `SELECT count(*) FROM node_command_leases`, `SELECT count(*) FROM node_command_leases`)
+			if claimed.Load() != 2 || leases != 2 {
+				t.Fatal("concurrent recovery exceeded the global limit", claimed.Load(), leases)
+			}
+		})
+		t.Run("recovery-waits-for-executing-commands", func(t *testing.T) {
+			f, service, seed := newFixture(t)
+			seed(f.node(t), "running", true)
+			seed(f.node(t), "running", true)
+			seed(f.node(t), "unknown", false)
+			if jobs, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 10, time.Minute); err != nil || len(jobs) != 0 {
+				t.Fatal("recovery lease bypassed a full execution budget", jobs, err)
+			}
+		})
+		t.Run("same-resource-fence-survives-uncounted-unknown", func(t *testing.T) {
+			f, service, seed := newFixture(t)
+			node := f.node(t)
+			older := seed(node, "unknown", true)
+			newer := seed(node, "queued", false)
+			for index, operation := range []uuid.UUID{older, newer} {
+				f.exec(t, `UPDATE commands SET resource_type='user',resource_key='alice',expected_version=$1 WHERE operation_id=$2`,
+					`UPDATE commands SET resource_type='user',resource_key='alice',expected_version=? WHERE operation_id=?`, index+1, operation)
+			}
+			if jobs, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 10, time.Minute); err != nil || len(jobs) != 0 {
+				t.Fatal("same-resource write passed an Unknown predecessor", jobs, err)
+			}
+		})
 	})
 }
 

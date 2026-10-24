@@ -12,7 +12,7 @@ use n0_future::task::JoinSet;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{Span, error, trace};
+use tracing::{Span, debug, error, trace};
 
 pub(crate) use self::remote_state::PathStateReceiver;
 use self::remote_state::RemoteStateActor;
@@ -70,6 +70,12 @@ pub(crate) struct RemoteMap {
     /// The state kept for spawning new actors and cleaning them up.
     tasks: Tasks,
 }
+
+/// Maximum number of [`EndpointId`] mappings.
+///
+/// Mappings are created for authenticated TLS identities before the application accepts them.
+// shortcut: 65,536 endpoint mappings; revisit if live remotes approach this bound.
+pub(super) const MAX_ENDPOINT_ADDRS: usize = 65_536;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MappedAddrs {
@@ -287,8 +293,10 @@ impl RemoteMap {
         leftover_msgs: Vec<RemoteStateMessage>,
     ) -> bool {
         if leftover_msgs.is_empty() {
-            // the actor shut down cleanly
+            // the actor shut down cleanly: no connection, queued message or resolve request
+            // is left, so the endpoint mapping has no consumer.
             self.senders.remove(&remote_id);
+            self.mapped_addrs.endpoint_addrs.remove(&remote_id);
             trace!(%remote_id, "cleaned up RemoteStateActor");
             true
         } else {
@@ -333,11 +341,28 @@ impl RemoteMap {
             .await
     }
 
+    /// Returns whether `remote_id` may have an endpoint mapping, reclaiming unreachable ones
+    /// (those without a running actor) when `limit` is reached.
+    fn admit_remote(&self, remote_id: EndpointId, limit: usize) -> bool {
+        let senders = self.senders.read_only();
+        senders.get(&remote_id).is_some()
+            || self
+                .mapped_addrs
+                .endpoint_addrs
+                .get_bounded(&remote_id, limit, |id| senders.get(id).is_some())
+                .is_some()
+    }
+
     /// Sends a message to a `RemoteStateActor`, starting it if not running already.
     ///
     /// When sending fails, the actor must be terminating, in which case we wait for its task to
     /// join and then restart the sender.
     async fn send_to_actor(&mut self, remote_id: EndpointId, message: RemoteStateMessage) {
+        if !self.admit_remote(remote_id, MAX_ENDPOINT_ADDRS) {
+            // Dropping the message also drops any reply channel, failing the caller.
+            debug!(%remote_id, "endpoint mapping limit reached, refusing new remote");
+            return;
+        }
         let sender = self.senders.get_or_insert_with(remote_id, || {
             self.tasks
                 .start_remote_state_actor(remote_id, vec![], &self.mapped_addrs)
@@ -609,6 +634,54 @@ mod tests {
         );
         let guards = (watchable, relay_statuses, shutdown_token.clone().drop_guard());
         (remote_map, shutdown_token, guards)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn endpoint_mappings_are_reclaimed_and_bounded() {
+        let (mut remote_map, _shutdown_token, _guards) = make_remote_map();
+        let id = |n: u8| SecretKey::from_bytes(&[n; 32]).public();
+
+        // An actor that idles out without consumers releases both mapping directions.
+        let (tx, rx) = oneshot::channel();
+        let addr = EndpointAddr::from_parts(
+            id(1),
+            [TransportAddr::Ip(SocketAddr::from(([127, 0, 0, 1], 1234)))],
+        );
+        remote_map.resolve_remote(addr, tx).await;
+        assert!(matches!(rx.await, Ok(Ok(()))));
+        let live = remote_map.mapped_addrs.endpoint_addrs.get(&id(1));
+        assert_eq!(
+            remote_map.mapped_addrs.endpoint_addrs.lookup(&live),
+            Some(id(1))
+        );
+        tokio::time::sleep(Duration::from_secs(65)).await;
+        assert_eq!(remote_map.cleanup().await, id(1));
+        assert_eq!(remote_map.mapped_addrs.endpoint_addrs.len(), (0, 0));
+        assert_eq!(remote_map.mapped_addrs.endpoint_addrs.lookup(&live), None);
+
+        // Under pressure, mappings without an actor are reclaimed; the live one is kept.
+        let (tx, rx) = oneshot::channel();
+        let addr = EndpointAddr::from_parts(
+            id(2),
+            [TransportAddr::Ip(SocketAddr::from(([127, 0, 0, 1], 1234)))],
+        );
+        remote_map.resolve_remote(addr, tx).await;
+        assert!(matches!(rx.await, Ok(Ok(()))));
+        let addrs = remote_map.mapped_addrs.endpoint_addrs.clone();
+        let live = addrs.get(&id(2));
+        let stale: Vec<_> = (10..20).map(|n| addrs.get(&id(n))).collect();
+        assert_eq!(addrs.len(), (11, 11));
+        assert!(remote_map.admit_remote(id(3), 4));
+        let admitted = addrs.get(&id(3));
+        assert_eq!(addrs.len(), (2, 2));
+        assert_eq!(addrs.lookup(&live), Some(id(2)));
+        assert_eq!(addrs.lookup(&admitted), Some(id(3)));
+        assert!(stale.iter().all(|mapped| addrs.lookup(mapped).is_none()));
+
+        // When every retained mapping has a running actor, new remotes are refused.
+        assert!(!remote_map.admit_remote(id(4), 1));
+        assert_eq!(addrs.len(), (1, 1));
+        assert_eq!(addrs.lookup(&live), Some(id(2)));
     }
 
     /// Regression test: No new RemoteStateActors may be started before

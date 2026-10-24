@@ -57,8 +57,8 @@ func checkpointFixture(t *testing.T) (*Backend, *Backend, Options) {
 
 func TestMySQLCutoverCheckpointEquivalence(t *testing.T) {
 	ctx := context.Background()
-	old, admin, _ := checkpointFixture(t)
-	fresh, _, _ := migrateFixture(t)
+	old, admin, oldOptions := checkpointFixture(t)
+	fresh, _, freshOptions := migrateFixture(t)
 	for range 2 {
 		if err := old.Migrate(ctx, ""); err != nil {
 			t.Fatal("checkpoint transition", err)
@@ -68,7 +68,7 @@ func TestMySQLCutoverCheckpointEquivalence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 1 || a.upgrade.Previous.Ref != previousCheckpointRef || a.upgrade.Previous.Receipt.Checksum != previousCheckpointChecksum {
+	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 2 || a.upgrade.Previous.Ref != previousCheckpointRef || a.upgrade.Previous.Receipt.Checksum != previousCheckpointChecksum {
 		t.Fatal("checkpoint identity drift")
 	}
 	for _, b := range []*Backend{old, fresh} {
@@ -79,7 +79,7 @@ func TestMySQLCutoverCheckpointEquivalence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = a.validateShape(ctx, conn, shapeOf(a.shapes[1]), true); err != nil {
+		if err = a.validateShape(ctx, conn, shapeOf(a.shapes[len(a.shapes)-1]), true); err != nil {
 			t.Fatal(err)
 		}
 		conn.Close()
@@ -93,6 +93,8 @@ func TestMySQLCutoverCheckpointEquivalence(t *testing.T) {
 	if cutoverGrants(t, admin, old) != cutoverGrants(t, admin, fresh) {
 		t.Fatal("fresh and upgraded runtime ACL differ")
 	}
+	assertMaintenanceClock(t, old, oldOptions)
+	assertMaintenanceClock(t, fresh, freshOptions)
 }
 
 func baselineReceipts(t *testing.T, b *Backend) []string {
@@ -237,6 +239,11 @@ func TestMySQLCutoverCrashRecovery(t *testing.T) {
 	for _, s := range a.upgrade.Revisions[0].Steps {
 		cases = append(cases, boundary{"cleanup-after-ddl-" + s.Name, string(s.SQL), true, 1, false, 1})
 	}
+	// Maintenance routines and the audit trigger cannot be altered in place, so
+	// each is dropped and recreated; every one of those boundaries must repair.
+	for _, s := range a.upgrade.Revisions[1].Steps {
+		cases = append(cases, boundary{"clock-after-ddl-" + s.Name, string(s.SQL), true, 1, false, 2})
+	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			b, _, o := checkpointFixture(t)
@@ -266,7 +273,7 @@ func TestMySQLCutoverCrashRecovery(t *testing.T) {
 			child.Wait()
 			proxy.close()
 			ctx := context.Background()
-			if test.revision == 1 {
+			if test.revision >= 1 {
 				var verified bool
 				if err = b.QueryRow(ctx, "SELECT state='verified' FROM schema_revisions WHERE epoch=2 AND revision=0").Scan(&verified); err != nil || !verified {
 					t.Fatal("legacy cleanup preceded verified new checkpoint", err)

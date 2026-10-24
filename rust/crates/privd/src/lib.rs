@@ -1156,6 +1156,41 @@ fn authorized_effect<'a>(
     }
 }
 
+/// Session, ban-removal and reload effects leave no root-verifiable proof that
+/// they did not happen, and the Agent's absence report is unsigned. A retry
+/// grant for them (including one signed before this rule) therefore never
+/// reaches the executor; it can only return an already attested result.
+fn fixed_host_effect(command: &CommandEnvelope) -> bool {
+    matches!(
+        command.payload.as_ref(),
+        Some(
+            command_envelope::Payload::SessionDisconnect(_)
+                | command_envelope::Payload::SessionTerminate(_)
+                | command_envelope::Payload::IpBanRemove(_)
+                | command_envelope::Payload::ServiceReload(_)
+        )
+    )
+}
+
+fn replay_only_response(
+    adapter: &Adapter,
+    identity: AuthorizedEffectIdentity<'_>,
+) -> PrivdResponse {
+    match adapter.replay_authorized_effect(identity) {
+        Ok(Some(encoded)) => decode_cached_response(&encoded),
+        // Missing, pruned or still-prepared evidence cannot prove absence.
+        Ok(None) => response_error(
+            ErrorKind::Unavailable,
+            "authorized effect outcome requires reconciliation",
+        ),
+        Err(failure) => PrivdResponse {
+            request_id: Vec::new(),
+            privileged_result_proof: None,
+            result: Some(privd_response::Result::Error(PrivdError::from(failure))),
+        },
+    }
+}
+
 async fn execute_command(
     command: &CommandEnvelope,
     claims: &CommandAuthorizationV1,
@@ -1167,7 +1202,11 @@ async fn execute_command(
 ) -> PrivdResponse {
     let binding = effect_binding(command, claims);
     if let Some(binding) = binding.as_ref() {
-        match adapter.prepare_authorized_effect(authorized_effect(command, claims, binding)) {
+        let identity = authorized_effect(command, claims, binding);
+        if identity.retry_if_absent && fixed_host_effect(command) {
+            return replay_only_response(adapter, identity);
+        }
+        match adapter.prepare_authorized_effect(identity) {
             Ok(AuthorizedEffectDecision::Execute) => {}
             Ok(AuthorizedEffectDecision::Replay(encoded)) => {
                 return decode_cached_response(&encoded);
@@ -1995,6 +2034,21 @@ mod tests {
         }
     }
 
+    fn retry_request(mut command: CommandEnvelope, key: &SigningKey) -> PrivdRequest {
+        command.delivery_mode = CommandDeliveryMode::RetryIfEffectAbsent.into();
+        command.message_id = Uuid::now_v7().as_bytes().to_vec();
+        let claims = claims_from_envelope_v1(&command).expect("retry claims");
+        command
+            .authorization
+            .as_mut()
+            .expect("retry authorization")
+            .signature = key
+            .sign(&canonical_v1(&claims).expect("retry canonical bytes"))
+            .to_bytes()
+            .to_vec();
+        command_request(command)
+    }
+
     fn unsigned_request(operation: Option<privd_request::Operation>) -> PrivdRequest {
         PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
@@ -2173,6 +2227,113 @@ mod tests {
             replay.privileged_result_proof
         );
         assert_eq!(duplicate.result, replay.result);
+        assert_eq!(
+            std::fs::read_to_string(counter).expect("effect counter"),
+            "x"
+        );
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    fn assert_requires_reconciliation(response: &PrivdResponse) {
+        assert!(response.privileged_result_proof.is_none());
+        assert!(matches!(
+            response.result,
+            Some(privd_response::Result::Error(ref error))
+                if ErrorKind::try_from(error.kind).ok() == Some(ErrorKind::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn only_fixed_host_effects_lose_the_retry_grant() {
+        let ip = command_envelope::Payload::IpBanRemove(
+            ocservia_contracts::generated::ocserv::platform::agent::v1::IpBanRemove {
+                ip: "192.0.2.1".to_owned(),
+            },
+        );
+        for payload in [
+            command_envelope::Payload::ServiceReload(ServiceReload {}),
+            ip,
+            command_envelope::Payload::SessionDisconnect(
+                ocservia_contracts::generated::ocserv::platform::agent::v1::SessionDisconnect {
+                    session_id: "session".to_owned(),
+                    boot_id: "boot".to_owned(),
+                },
+            ),
+            command_envelope::Payload::SessionTerminate(
+                ocservia_contracts::generated::ocserv::platform::agent::v1::SessionTerminate {
+                    session_id: "session".to_owned(),
+                    boot_id: "boot".to_owned(),
+                },
+            ),
+        ] {
+            let command = CommandEnvelope {
+                payload: Some(payload),
+                ..CommandEnvelope::default()
+            };
+            assert!(fixed_host_effect(&command));
+        }
+        let command = CommandEnvelope {
+            payload: Some(command_envelope::Payload::AgentUpgrade(
+                AgentUpgrade::default(),
+            )),
+            ..CommandEnvelope::default()
+        };
+        assert!(!fixed_host_effect(&command));
+    }
+
+    #[tokio::test]
+    async fn retry_grant_never_reexecutes_fixed_host_effect_without_a_result() {
+        for history in [
+            "original execution still pending",
+            "completed record pruned",
+        ] {
+            let signing = SigningKey::from_bytes(&[43; 32]);
+            let keys = keyring(&signing);
+            let node_id = *Uuid::now_v7().as_bytes();
+            let now = unix_seconds();
+            let command = signed_service_reload(&signing, node_id, now, now + 60);
+            let (adapter, _resources, counter, directory) = test_adapter();
+            if history == "original execution still pending" {
+                let claims = claims_from_envelope_v1(&command).expect("claims");
+                let binding = effect_binding(&command, &claims).expect("binding");
+                assert_eq!(
+                    adapter
+                        .prepare_authorized_effect(authorized_effect(&command, &claims, &binding))
+                        .expect("original reservation"),
+                    AuthorizedEffectDecision::Execute
+                );
+            }
+            for _ in 0..2 {
+                let response = dispatch(
+                    retry_request(command.clone(), &signing),
+                    &node_id,
+                    &keys,
+                    &adapter,
+                )
+                .await;
+                assert_requires_reconciliation(&response);
+                assert!(!counter.exists(), "{history}: retry reached the executor");
+            }
+            std::fs::remove_dir_all(directory).expect("cleanup test directory");
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_grant_replays_an_existing_signed_result_without_reexecution() {
+        let signing = SigningKey::from_bytes(&[44; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let command = signed_service_reload(&signing, node_id, now, now + 60);
+        let (adapter, _resources, counter, directory) = test_adapter();
+        let first = dispatch(command_request(command.clone()), &node_id, &keys, &adapter).await;
+        assert!(first.privileged_result_proof.is_some());
+        let retried = dispatch(retry_request(command, &signing), &node_id, &keys, &adapter).await;
+        assert_eq!(
+            retried.privileged_result_proof,
+            first.privileged_result_proof
+        );
+        assert_eq!(retried.result, first.result);
         assert_eq!(
             std::fs::read_to_string(counter).expect("effect counter"),
             "x"

@@ -67,8 +67,8 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	get := func(path string, scope uuid.UUID, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Host = "127.0.0.1:8080"
 		if strings.HasPrefix(path, "/api/v1/development/") {
-			r.Host = "127.0.0.1:8080"
 			r.Header.Set("Authorization", "Bearer "+server.devAuthToken)
 		}
 		if scope != uuid.Nil {

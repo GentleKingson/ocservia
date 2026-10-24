@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals/approvaltest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
@@ -58,4 +59,20 @@ func TestApprovalControllerWorkflowIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	node := uuid.New()
+	if _, err = pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'approval-node','active',$3,$3)`, node, workspace, now); err != nil {
+		t.Fatal(err)
+	}
+	approvaltest.ExpiryAfterLockWait(t, postgres.WrapPool(pool), workspace, requester, approver, session, approverSession,
+		func(ctx context.Context, tx database.Tx) error {
+			return tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR UPDATE`, node).Scan(new(uuid.UUID))
+		},
+		func(ctx context.Context, tx database.Tx, id uuid.UUID) error {
+			return tx.QueryRow(ctx, `SELECT id FROM approval_requests WHERE id=$1 FOR UPDATE`, id).Scan(new(uuid.UUID))
+		},
+		func(id uuid.UUID, created, expires value.Timestamp) {
+			if _, err := owner.Exec(ctx, `UPDATE approval_requests SET created_at=$2,expires_at=$3 WHERE id=$1`, id, created, expires); err != nil {
+				t.Fatal(err)
+			}
+		})
 }

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals/approvaltest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
@@ -54,4 +55,20 @@ func TestRealApprovalControllerWorkflow(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	node := uuid.New()
+	if _, err := owner.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'approval-node','active',?,?)`, UUIDBytes(node), UUIDBytes(workspace), stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	approvaltest.ExpiryAfterLockWait(t, runtime, workspace, requester, approver, session, approverSession,
+		func(ctx context.Context, tx database.Tx) error {
+			return tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=? FOR UPDATE`, UUIDBytes(node)).Scan(new([]byte))
+		},
+		func(ctx context.Context, tx database.Tx, id uuid.UUID) error {
+			return tx.QueryRow(ctx, `SELECT id FROM approval_requests WHERE id=? FOR UPDATE`, UUIDBytes(id)).Scan(new([]byte))
+		},
+		func(id uuid.UUID, created, expires value.Timestamp) {
+			if _, err := owner.Exec(ctx, `UPDATE approval_requests SET created_at=?,expires_at=? WHERE id=?`, created, expires, UUIDBytes(id)); err != nil {
+				t.Fatal(err)
+			}
+		})
 }

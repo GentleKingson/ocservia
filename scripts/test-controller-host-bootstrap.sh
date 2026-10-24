@@ -84,7 +84,7 @@ link_tool() {
   [[ -n "${path}" ]] || die "required test tool not found: ${tool}"
   ln -s "${path}" "${rootfs_bin}/${tool}"
 }
-for tool in bash stat install mkdir chown dirname cat grep id chmod cp rm realpath env runuser; do
+for tool in bash stat install mkdir chown dirname cat grep id chmod cp rm realpath env runuser rename.ul; do
   link_tool "${tool}"
 done
 
@@ -703,6 +703,130 @@ assert_status 1 "symlink ancestry must fail the host check"
 assert_output "symlink ancestry"
 echo "check rejects symlinked state root ancestry"
 
+# 10f. rename.ul publishes the Quick materials, so a host without it fails the
+# check, and Ubuntu 26.04 needs util-linux-extra for it.
+reset_scenario
+install_docker_mock
+mark_all_tools_installed
+install -d -m 0700 -- "${work}/state-root"
+rm -f -- "${rootfs_bin}/rename.ul"
+capture self check
+link_tool rename.ul
+assert_status 1 "a host without rename.ul must fail the host check"
+assert_output "rename.ul is not available"
+assert_log_empty "${apt_log}"
+echo "check rejects a host without rename.ul"
+
+reset_scenario
+os_release="${fixture}/os/ubuntu-26.04"
+install_docker_mock
+mark_all_tools_installed
+install -d -m 0700 -- "${work}/state-root"
+capture self check
+assert_status 1 "Ubuntu 26.04 without util-linux-extra must fail the host check"
+assert_output "required package 'util-linux-extra' is not installed"
+assert_log_empty "${apt_log}"
+echo "check requires util-linux-extra on Ubuntu 26.04"
+
+# 10g. The backup writer rejects an unprotected backup path before it dumps and
+# never reuses an existing staging or output object.
+writer="${ROOT}/scripts/mysql-backup.sh"
+writer_bin="${fixture}/writer-bin"
+writer_log="${fixture}/writer.log"
+mkdir -m 700 -- "${writer_bin}"
+cat >"${writer_bin}/mysql" <<'EOF'
+#!/usr/bin/env bash
+printf '8.4.11\tMySQL Community Server - GPL\n'
+EOF
+cat >"${writer_bin}/mysqldump" <<'EOF'
+#!/usr/bin/env bash
+echo mysqldump >>"${WRITER_LOG}"
+echo '-- dump'
+EOF
+cat >"${writer_bin}/date" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "-u +%Y%m%dT%H%M%SZ" ]]; then echo 20260101T000000Z; else exec "${WRITER_REAL_DATE}" "$@"; fi
+EOF
+chmod 0755 -- "${writer_bin}/mysql" "${writer_bin}/mysqldump" "${writer_bin}/date"
+printf '[client]\nuser=backup\n' >"${fixture}/writer.cnf"
+chmod 0600 -- "${fixture}/writer.cnf"
+run_writer() {
+  RUN_STATUS=0
+  : >"${writer_log}"
+  RUN_OUTPUT="$(env PATH="${writer_bin}:${PATH}" WRITER_LOG="${writer_log}" WRITER_REAL_DATE="$(command -v date)" BACKUP_ROOT="$1" DATABASE_BACKEND=mysql \
+    MYSQL_DATABASE=ocservia MYSQL_CONFIG_FILE="${fixture}/writer.cnf" RUN_ID=writer-test "${writer}" --once 2>&1)" || RUN_STATUS=$?
+}
+assert_not_dumped() { assert_log_empty "${writer_log}"; }
+
+wroot="${work}/writer"
+install -d -m 0700 -- "${wroot}"
+install -d -m 0755 -- "${wroot}/loose"
+run_writer "${wroot}/loose"
+assert_status 1 "a writer root with a loose mode must fail"
+assert_output "mode 0700"
+assert_not_dumped
+install -d -m 0700 -- "${wroot}/loose-logical" "${wroot}/loose-logical/logical"
+chmod 0750 -- "${wroot}/loose-logical/logical"
+run_writer "${wroot}/loose-logical"
+assert_status 1 "a logical directory with a loose mode must fail"
+assert_not_dumped
+install -d -m 0700 -- "${wroot}/link-target" "${wroot}/link-logical"
+ln -s -- ../link-target "${wroot}/link-logical/logical"
+run_writer "${wroot}/link-logical"
+assert_status 1 "a symlinked logical directory must fail"
+assert_not_dumped
+ln -s -- link-target "${wroot}/link-root"
+run_writer "${wroot}/link-root"
+assert_status 1 "a symlinked writer root must fail"
+assert_not_dumped
+if can_root; then
+  install -d -m 0700 -- "${wroot}/foreign"
+  as_root chown 999:999 -- "${wroot}/foreign"
+  if (( EUID == 0 )); then
+    run_writer "${wroot}/foreign"
+    assert_status 1 "a writer root owned by another user must fail"
+    assert_not_dumped
+  fi
+fi
+echo "the backup writer rejects unprotected paths before dumping"
+
+install -d -m 0700 -- "${wroot}/staging" "${wroot}/staging/logical"
+mkdir -- "${wroot}/staging/logical/.20260101T000000Z-writer-test.tmp"
+printf 'keep\n' >"${wroot}/staging/logical/.20260101T000000Z-writer-test.tmp/sentinel"
+run_writer "${wroot}/staging"
+assert_status 1 "an existing staging directory must be refused"
+assert_not_dumped
+[[ "$(cat -- "${wroot}/staging/logical/.20260101T000000Z-writer-test.tmp/sentinel")" == keep ]] ||
+  die "an existing staging directory was reused or removed"
+[[ ! -e "${wroot}/staging/.backup.lock" ]] || die "a refused backup left its lock"
+install -d -m 0700 -- "${wroot}/staging-link" "${wroot}/staging-link/logical"
+ln -s -- "${wroot}/link-target" "${wroot}/staging-link/logical/.20260101T000000Z-writer-test.tmp"
+run_writer "${wroot}/staging-link"
+assert_status 1 "a symlinked staging path must be refused"
+assert_not_dumped
+[[ -L "${wroot}/staging-link/logical/.20260101T000000Z-writer-test.tmp" ]] || die "a symlinked staging path was removed"
+install -d -m 0700 -- "${wroot}/final" "${wroot}/final/logical"
+ln -s -- "${wroot}/link-target" "${wroot}/final/logical/20260101T000000Z"
+run_writer "${wroot}/final"
+assert_status 1 "an existing output object must be refused"
+assert_not_dumped
+install -d -m 0700 -- "${wroot}/latest" "${wroot}/latest/logical" "${wroot}/latest/LATEST"
+run_writer "${wroot}/latest"
+assert_status 1 "a LATEST directory must be refused"
+assert_not_dumped
+echo "the backup writer never reuses existing staging or output objects"
+
+install -d -m 0700 -- "${wroot}/ok"
+run_writer "${wroot}/ok"
+assert_status 0 "a protected writer root must back up"
+assert_output "backup completed id=20260101T000000Z"
+[[ "$(stat -c '%a' "${wroot}/ok/logical")" == 700 ]] || die "the logical directory must be created with mode 0700"
+[[ "$(cat -- "${wroot}/ok/LATEST")" == 20260101T000000Z ]] || die "the LATEST marker was not published"
+[[ -s "${wroot}/ok/logical/20260101T000000Z/database.sql" && -s "${wroot}/ok/logical/20260101T000000Z/SHA256SUMS" ]] ||
+  die "the backup files were not published"
+[[ -z "$(find "${wroot}/ok" -name '.LATEST.*' -o -name '*.tmp')" ]] || die "the writer left temporary objects"
+echo "the backup writer backs up under a protected path"
+
 # 11. install refuses to run without root.
 if (( EUID != 0 )); then
   reset_scenario
@@ -796,6 +920,7 @@ if can_root; then
   os_release="${fixture}/os/ubuntu-26.04"
   capture sudo install --backup-dir "${work}/backup"
   assert_status 0 "Ubuntu 26.04 bare-host install must succeed"
+  assert_log_contains "${apt_log}" "install -y jq util-linux curl openssl ca-certificates util-linux-extra"
   assert_log_contains "${curl_log}" "https://download.docker.com/linux/ubuntu/gpg"
   expected_source="deb [arch=amd64 signed-by=${work}/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu resolute stable"
   [[ "$(cat -- "${work}/apt/sources/docker.list")" == "${expected_source}" ]] ||
@@ -946,6 +1071,47 @@ if can_root; then
   [[ ! -e "${work}/loose/state-root" ]] ||
     die "install created a state root under unsafe ancestry"
   echo "install refuses to create a state root under unsafe ancestry"
+  # 18b. an unobtainable rename.ul fails the install instead of continuing.
+  reset_scenario
+  rm -f -- "${rootfs_bin}/rename.ul"
+  capture sudo install
+  link_tool rename.ul
+  assert_status 1 "install must fail when rename.ul stays unavailable"
+  assert_output "rename.ul is unavailable"
+  echo "install fails closed when rename.ul cannot be obtained"
+
+  # 18a. a correct 999:999 0700 leaf still needs protected ancestry.
+  reset_scenario
+  install_docker_mock
+  mark_all_tools_installed
+  install -d -m 0700 -- "${work}/state-root"
+  install -d -m 0777 -- "${work}/open-parent"
+  as_root install -d -o 999 -g 999 -m 0700 -- "${work}/open-parent/backup"
+  capture sudo check --backup-dir "${work}/open-parent/backup"
+  assert_status 1 "a writable backup ancestor must fail the check"
+  assert_output "backup directory ancestry must not be group/world writable"
+  as_root install -d -o 999 -g 999 -m 0755 -- "${work}/owned-parent"
+  as_root install -d -o 999 -g 999 -m 0700 -- "${work}/owned-parent/backup"
+  capture sudo check --backup-dir "${work}/owned-parent/backup"
+  assert_status 1 "a low-trust owned backup ancestor must fail the check"
+  assert_output "backup directory ancestry must be root- or launcher-owned"
+  install -d -m 0700 -- "${work}/real-parent"
+  as_root install -d -o 999 -g 999 -m 0700 -- "${work}/real-parent/backup"
+  ln -s -- real-parent "${work}/link-parent"
+  capture sudo check --backup-dir "${work}/link-parent/backup"
+  assert_status 1 "a symlinked backup ancestor must fail the check"
+  assert_output "backup directory ancestry must not contain symlinks"
+  capture sudo install --backup-dir "${work}/open-parent/new-backup"
+  assert_status 1 "install must not create a backup directory below a writable ancestor"
+  [[ ! -e "${work}/open-parent/new-backup" ]] || die "install created a backup directory below a writable ancestor"
+  as_root install -d -o 999 -g 999 -m 0700 -- "${work}/good-backup"
+  capture sudo check --backup-dir "${work}/good-backup"
+  assert_status 0 "a protected backup path must pass the check"
+  assert_output "Controller host prerequisites satisfied"
+  capture sudo install --backup-dir "${work}/good-backup"
+  assert_status 0 "a protected backup path must pass install"
+  assert_output "backup directory validated"
+  echo "backup directory ancestry is enforced for check and install"
 else
   echo "root-path install cases skipped: no passwordless sudo available" >&2
 fi

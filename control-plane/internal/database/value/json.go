@@ -18,7 +18,18 @@ type JSONB struct{ data []byte }
 func (j JSONB) Bytes() []byte { return append([]byte(nil), j.data...) }
 func (j JSONB) Valid() bool   { return j.data != nil }
 
-func ParseJSONB(data []byte) (JSONB, error) {
+// maxJSONBBytes bounds the whole canonical output of one document. The
+// largest accepted input is the 1 MiB default HTTP body (telemetry batches are
+// 512 KiB); canonical escaping grows a byte by at most six, so 8 MiB keeps every
+// such document while capping repeated legal-but-wide numbers (up to ~147 KB
+// each) that a few input bytes could otherwise expand into gigabytes.
+const maxJSONBBytes = 8 << 20
+
+var errJSONBTooLarge = errors.New("database: JSON canonical output too large")
+
+func ParseJSONB(data []byte) (JSONB, error) { return parseJSONB(data, maxJSONBBytes) }
+
+func parseJSONB(data []byte, budget int64) (JSONB, error) {
 	if data == nil {
 		return JSONB{}, nil
 	}
@@ -36,7 +47,7 @@ func ParseJSONB(data []byte) (JSONB, error) {
 			return JSONB{}, errors.New("database: invalid JSON")
 		}
 		if n, ok := token.(json.Number); ok {
-			if _, err := decimal(string(n)); err != nil {
+			if _, err := newDecimal(string(n)); err != nil {
 				return JSONB{}, err
 			}
 		}
@@ -51,11 +62,11 @@ func ParseJSONB(data []byte) (JSONB, error) {
 	if d.Decode(&trailing) != io.EOF {
 		return JSONB{}, errors.New("database: trailing JSON input")
 	}
-	var out bytes.Buffer
+	out := jsonWriter{left: budget}
 	if err := appendJSON(&out, v); err != nil {
 		return JSONB{}, err
 	}
-	return JSONB{data: out.Bytes()}, nil
+	return JSONB{data: out.buf.Bytes()}, nil
 }
 
 // encoding/json intentionally replaces invalid surrogate escapes. PostgreSQL
@@ -99,35 +110,80 @@ func validEscapes(data []byte) bool {
 	return true
 }
 
-func appendJSON(out *bytes.Buffer, v any) error {
+// jsonWriter charges every byte against the remaining output budget before it
+// is allocated or appended.
+type jsonWriter struct {
+	buf  bytes.Buffer
+	left int64
+}
+
+func (w *jsonWriter) reserve(n int64) error {
+	if n > w.left {
+		return errJSONBTooLarge
+	}
+	w.left -= n
+	return nil
+}
+
+func (w *jsonWriter) writeByte(c byte) error {
+	if err := w.reserve(1); err != nil {
+		return err
+	}
+	return w.buf.WriteByte(c)
+}
+
+func appendJSON(out *jsonWriter, v any) error {
 	switch v := v.(type) {
 	case nil:
-		out.WriteString("null")
+		if err := out.reserve(4); err != nil {
+			return err
+		}
+		out.buf.WriteString("null")
 	case bool:
-		out.WriteString(strconv.FormatBool(v))
+		text := strconv.FormatBool(v)
+		if err := out.reserve(int64(len(text))); err != nil {
+			return err
+		}
+		out.buf.WriteString(text)
 	case string:
 		if strings.IndexByte(v, 0) >= 0 {
 			return errors.New("database: JSON NUL")
 		}
+		// Escaping is at least len(v)+2 and at most six bytes per input byte of
+		// a string that is already in memory, so only the lower bound can gate
+		// the allocation; the exact size is charged right after.
+		if int64(len(v))+2 > out.left {
+			return errJSONBTooLarge
+		}
 		encoded, _ := json.Marshal(v)
-		out.Write(encoded)
+		if err := out.reserve(int64(len(encoded))); err != nil {
+			return err
+		}
+		out.buf.Write(encoded)
 	case json.Number:
-		number, err := decimal(string(v))
+		number, err := newDecimal(string(v))
 		if err != nil {
 			return err
 		}
-		out.WriteString(number)
+		if err := out.reserve(number.size); err != nil {
+			return err
+		}
+		out.buf.WriteString(number.String())
 	case []any:
-		out.WriteByte('[')
+		if err := out.writeByte('['); err != nil {
+			return err
+		}
 		for i, item := range v {
 			if i > 0 {
-				out.WriteByte(',')
+				if err := out.writeByte(','); err != nil {
+					return err
+				}
 			}
 			if err := appendJSON(out, item); err != nil {
 				return err
 			}
 		}
-		out.WriteByte(']')
+		return out.writeByte(']')
 	case map[string]any:
 		keys := make([]string, 0, len(v))
 		for key := range v {
@@ -139,61 +195,104 @@ func appendJSON(out *bytes.Buffer, v any) error {
 			}
 			return keys[i] < keys[j]
 		})
-		out.WriteByte('{')
+		if err := out.writeByte('{'); err != nil {
+			return err
+		}
 		for i, key := range keys {
 			if i > 0 {
-				out.WriteByte(',')
+				if err := out.writeByte(','); err != nil {
+					return err
+				}
 			}
 			if err := appendJSON(out, key); err != nil {
 				return err
 			}
-			out.WriteByte(':')
+			if err := out.writeByte(':'); err != nil {
+				return err
+			}
 			if err := appendJSON(out, v[key]); err != nil {
 				return err
 			}
 		}
-		out.WriteByte('}')
+		return out.writeByte('}')
 	default:
 		return errors.New("database: invalid JSON value")
 	}
 	return nil
 }
 
-func decimal(input string) (string, error) {
-	negative := strings.HasPrefix(input, "-")
+// decimalNumber is a validated number whose canonical text has not been built;
+// size is its exact length, known without expanding any exponent.
+type decimalNumber struct {
+	negative             bool
+	digits               string
+	integerDigits, scale int64
+	leading              int
+	zero                 bool
+	size                 int64
+}
+
+func newDecimal(input string) (decimalNumber, error) {
+	n := decimalNumber{negative: strings.HasPrefix(input, "-")}
 	input = strings.TrimPrefix(input, "-")
 	exponent := int64(0)
 	if i := strings.IndexAny(input, "eE"); i >= 0 {
 		var err error
 		exponent, err = strconv.ParseInt(input[i+1:], 10, 32)
 		if err != nil || exponent > 1073741823 || exponent < -1073741823 {
-			return "", errors.New("database: JSON numeric out of range")
+			return n, errors.New("database: JSON numeric out of range")
 		}
 		input = input[:i]
 	}
-	digits := strings.ReplaceAll(input, ".", "")
+	n.digits = strings.ReplaceAll(input, ".", "")
 	fraction := int64(0)
 	if i := strings.IndexByte(input, '.'); i >= 0 {
 		fraction = int64(len(input) - i - 1)
 	}
-	scale := fraction - exponent
-	if scale < 0 {
-		scale = 0
+	n.scale = fraction - exponent
+	if n.scale < 0 {
+		n.scale = 0
 	}
-	integerDigits := int64(len(digits)) - fraction + exponent
-	leading := len(digits) - len(strings.TrimLeft(digits, "0"))
-	if scale > 16383 {
-		return "", errors.New("database: JSON numeric out of range")
+	n.integerDigits = int64(len(n.digits)) - fraction + exponent
+	n.leading = len(n.digits) - len(strings.TrimLeft(n.digits, "0"))
+	if n.scale > 16383 {
+		return n, errors.New("database: JSON numeric out of range")
 	}
-	if leading == len(digits) {
-		if scale == 0 {
-			return "0", nil
+	if n.leading == len(n.digits) {
+		n.zero = true
+		n.size = 1
+		if n.scale > 0 {
+			n.size = 2 + n.scale
 		}
-		return "0." + strings.Repeat("0", int(scale)), nil
+		return n, nil
 	}
-	if integerDigits-int64(leading) > 131072 {
-		return "", errors.New("database: JSON numeric out of range")
+	if n.integerDigits-int64(n.leading) > 131072 {
+		return n, errors.New("database: JSON numeric out of range")
 	}
+	integerLen := int64(1)
+	if n.integerDigits > 0 {
+		if kept := n.integerDigits - min(int64(n.leading), n.integerDigits); kept > 0 {
+			integerLen = kept
+		}
+	}
+	n.size = integerLen
+	if n.scale > 0 {
+		n.size += 1 + n.scale
+	}
+	if n.negative {
+		n.size++
+	}
+	return n, nil
+}
+
+func (n decimalNumber) String() string {
+	if n.zero {
+		if n.scale == 0 {
+			return "0"
+		}
+		return "0." + strings.Repeat("0", int(n.scale))
+	}
+	digits, integerDigits := n.digits, n.integerDigits
 	if integerDigits <= 0 {
 		digits = strings.Repeat("0", int(1-integerDigits)) + digits
 		integerDigits = 1
@@ -206,11 +305,11 @@ func decimal(input string) (string, error) {
 		integer = "0"
 	}
 	result := integer
-	if scale > 0 {
+	if n.scale > 0 {
 		result += "." + digits[integerDigits:]
 	}
-	if negative && strings.Trim(digits, "0") != "" {
+	if n.negative {
 		result = "-" + result
 	}
-	return result, nil
+	return result
 }

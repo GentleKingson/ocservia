@@ -155,6 +155,28 @@ func TestReceiptMissingTransactionFailsClosed(t *testing.T) {
 	}
 }
 
+func TestRejectedPrivilegedResultNeverVerifiesAsTerminalEvidence(t *testing.T) {
+	nodeID, envelope, result, key := receiptVerificationFixture(t)
+	lookup := lookupFor(key.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil)
+	rejected := func() *agentv1.CommandResult {
+		return &agentv1.CommandResult{CommandId: result.CommandId, IdempotencyKey: result.IdempotencyKey, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED, ErrorCode: "rejected", CompletedAt: result.CompletedAt}
+	}
+	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, rejected()); verification.Status != "missing" || verification.Verified() {
+		t.Fatalf("unsigned rejection of a root command = %+v", verification)
+	}
+	// A signed success receipt cannot be reused to vouch for a rejection.
+	reused := rejected()
+	reused.PrivilegedResultProof = result.PrivilegedResultProof
+	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, reused); verification.Verified() || verification.Status != "invalid" {
+		t.Fatalf("receipt reused for a rejection = %+v", verification)
+	}
+	// Commands without a root effect keep their ordinary rejection semantics.
+	envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "x"}}
+	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, rejected()); verification.Status != "not_required" {
+		t.Fatalf("non-privileged rejection = %+v", verification)
+	}
+}
+
 func TestReceiptUnknownVersionAndOversizeFailClosed(t *testing.T) {
 	nodeID, envelope, result, key := receiptVerificationFixture(t)
 	lookup := lookupFor(key.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil)

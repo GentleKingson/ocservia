@@ -2,8 +2,8 @@
 -- ocservia:format=1
 -- ocservia:engine=mysql
 -- ocservia:epoch=2
--- ocservia:revision=1
--- ocservia:history-sha256=417ef6f00d004816f4b9ddbc6ada84bc6929ebc77e9c97a3bbfb7bee59c90290
+-- ocservia:revision=2
+-- ocservia:history-sha256=be6c8aa5cffb5f90c8a16b59c9b35e49c39f9060315eb6e1485192ca5bd8275b
 
 -- ocservia:step=001:table_business_locks
 -- ocservia:metadata={"kind":"table","object":"business_locks","before":"","after":"9f4b1ecbaf1f861998bf97284c47c8374b8877585d5525785b462410bfc1900f"}
@@ -2546,14 +2546,14 @@ BEGIN
 END;
 -- ocservia:end-step
 -- ocservia:step=099:procedure_audit_compact_detail
--- ocservia:metadata={"kind":"procedure","object":"audit_compact_detail","before":"","after":"4b15b21344c4e118d13e5a58743d17c7a416efa70b4576d466c6fe39f09e3cc8"}
+-- ocservia:metadata={"kind":"procedure","object":"audit_compact_detail","before":"","after":"6f21e62edf02a6f863c33d5588e25c82011f59ff2d0ff25a868ef39ded8802fc"}
 CREATE PROCEDURE `audit_compact_detail`(IN p_id VARBINARY(16),IN p_hash VARBINARY(32),IN p_key VARBINARY(128),IN p_mac VARBINARY(32),IN p_at BIGINT)
-BEGIN UPDATE audit_events SET reason=NULL,before_summary=NULL,after_summary=NULL,details_compacted_at=p_at,compaction_key_id=p_key,compaction_mac=p_mac WHERE id=p_id AND event_hash=p_hash AND details_compacted_at IS NULL AND auth_version=1 AND BINARY action<>BINARY 'audit.auth.transition' AND occurred_at<=p_at-7776000000000 AND p_at<=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED); SELECT ROW_COUNT()=1; END;
+BEGIN UPDATE audit_events SET reason=NULL,before_summary=NULL,after_summary=NULL,details_compacted_at=p_at,compaction_key_id=p_key,compaction_mac=p_mac WHERE id=p_id AND event_hash=p_hash AND details_compacted_at IS NULL AND auth_version=1 AND BINARY action<>BINARY 'audit.auth.transition' AND occurred_at<=p_at-7776000000000 AND p_at<=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)); SELECT ROW_COUNT()=1; END;
 -- ocservia:end-step
 -- ocservia:step=100:procedure_security_compact_details
--- ocservia:metadata={"kind":"procedure","object":"security_compact_details","before":"","after":"87a9648de7e89b83a9ab3287a2ef22d67a667a7760d54acee75933488cd07035"}
+-- ocservia:metadata={"kind":"procedure","object":"security_compact_details","before":"","after":"99014ac5fafc53e7415096a4bcc2f26970c7a286a9d8c9215cafe310425ff873"}
 CREATE PROCEDURE `security_compact_details`(IN p_cutoff BIGINT)
-BEGIN UPDATE telemetry_security_events SET detail_sha256=UNHEX(SHA2(detail,256)),detail='{}',details_compacted_at=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED) WHERE details_compacted_at IS NULL AND observed_at<LEAST(p_cutoff,CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED)-7776000000000) ORDER BY observed_at,event_id LIMIT 32; END;
+BEGIN UPDATE telemetry_security_events SET detail_sha256=UNHEX(SHA2(detail,256)),detail='{}',details_compacted_at=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)) WHERE details_compacted_at IS NULL AND observed_at<LEAST(p_cutoff,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))-7776000000000) ORDER BY observed_at,event_id LIMIT 32; END;
 -- ocservia:end-step
 -- ocservia:step=101:procedure_telemetry_prune_rollups
 -- ocservia:metadata={"kind":"procedure","object":"telemetry_prune_rollups","before":"","after":"32318aacdcf8bab5f5ad87689f14f72a3f2109933e6c0420ab6c9671656d8e0d"}
@@ -2778,11 +2778,11 @@ CREATE TRIGGER `audit_checkpoints_reject_update` BEFORE UPDATE ON `audit_checkpo
 CREATE TRIGGER `audit_events_reject_delete` BEFORE DELETE ON `audit_events` FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='append-only audit record';
 -- ocservia:end-step
 -- ocservia:step=108:trigger_audit_events_reject_update
--- ocservia:metadata={"kind":"trigger","object":"audit_events_reject_update","before":"","after":"ba2087afbd4d5fdeffeabade078bd579b78df879f939345e33199d5cfe6817fb"}
+-- ocservia:metadata={"kind":"trigger","object":"audit_events_reject_update","before":"","after":"1e43f2b31535074825154c9d25f81582a19a3790bdeb86587e7d45b28fc584e5"}
 CREATE TRIGGER `audit_events_reject_update` BEFORE UPDATE ON `audit_events` FOR EACH ROW BEGIN IF NOT (
  OLD.details_compacted_at IS NULL AND OLD.auth_version=1 AND BINARY OLD.action<>BINARY 'audit.auth.transition'
  AND NEW.details_compacted_at IS NOT NULL AND OLD.occurred_at<=NEW.details_compacted_at-7776000000000
- AND NEW.details_compacted_at<=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED)
+ AND NEW.details_compacted_at<=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))
  AND NEW.reason IS NULL AND NEW.before_summary IS NULL AND NEW.after_summary IS NULL
  AND (CAST(NEW.`id` AS BINARY)<=>CAST(OLD.`id` AS BINARY)) AND (CAST(NEW.`workspace_id` AS BINARY)<=>CAST(OLD.`workspace_id` AS BINARY)) AND (CAST(NEW.`occurred_at` AS BINARY)<=>CAST(OLD.`occurred_at` AS BINARY)) AND (CAST(NEW.`actor_type` AS BINARY)<=>CAST(OLD.`actor_type` AS BINARY)) AND (CAST(NEW.`actor_id` AS BINARY)<=>CAST(OLD.`actor_id` AS BINARY)) AND (CAST(NEW.`source_session_id` AS BINARY)<=>CAST(OLD.`source_session_id` AS BINARY)) AND (CAST(NEW.`action` AS BINARY)<=>CAST(OLD.`action` AS BINARY)) AND (CAST(NEW.`resource_type` AS BINARY)<=>CAST(OLD.`resource_type` AS BINARY)) AND (CAST(NEW.`resource_id` AS BINARY)<=>CAST(OLD.`resource_id` AS BINARY)) AND (CAST(NEW.`node_id` AS BINARY)<=>CAST(OLD.`node_id` AS BINARY)) AND (CAST(NEW.`request_id` AS BINARY)<=>CAST(OLD.`request_id` AS BINARY)) AND (CAST(NEW.`trace_id` AS BINARY)<=>CAST(OLD.`trace_id` AS BINARY)) AND (CAST(NEW.`command_id` AS BINARY)<=>CAST(OLD.`command_id` AS BINARY)) AND (CAST(NEW.`approval_id` AS BINARY)<=>CAST(OLD.`approval_id` AS BINARY)) AND (CAST(NEW.`result` AS BINARY)<=>CAST(OLD.`result` AS BINARY)) AND (CAST(NEW.`error_type` AS BINARY)<=>CAST(OLD.`error_type` AS BINARY)) AND (CAST(NEW.`previous_event_hash` AS BINARY)<=>CAST(OLD.`previous_event_hash` AS BINARY)) AND (CAST(NEW.`event_hash` AS BINARY)<=>CAST(OLD.`event_hash` AS BINARY)) AND (CAST(NEW.`auth_version` AS BINARY)<=>CAST(OLD.`auth_version` AS BINARY)) AND (CAST(NEW.`event_key_id` AS BINARY)<=>CAST(OLD.`event_key_id` AS BINARY)) AND (CAST(NEW.`event_mac` AS BINARY)<=>CAST(OLD.`event_mac` AS BINARY))) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit permits only authenticated aged detail compaction'; END IF; END;
 -- ocservia:end-step

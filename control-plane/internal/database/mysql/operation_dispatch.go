@@ -50,7 +50,7 @@ func (s operationStore) DispatchCandidates(ctx context.Context, limit, available
 	}
 	var result []operationstore.Dispatch
 	for _, c := range candidates {
-		if c.state == "queued" && available == 0 {
+		if available == 0 {
 			continue
 		}
 		var d operationstore.Dispatch
@@ -77,9 +77,7 @@ func (s operationStore) DispatchCandidates(ctx context.Context, limit, available
 		if err != nil {
 			return nil, err
 		}
-		if c.state == "queued" {
-			available--
-		}
+		available--
 		result = append(result, d)
 	}
 	return result, nil

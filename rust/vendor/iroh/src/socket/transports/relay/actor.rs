@@ -112,6 +112,10 @@ const RELAY_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// live sessions to a dead relay for tens of seconds.
 const HOME_RELAY_FAILOVER_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Maximum number of sender hints kept per relay connection.
+// shortcut: 4,096 sender hints; revisit if live peers behind one relay approach this bound.
+const MAX_ENDPOINTS_PRESENT: usize = 4096;
+
 /// An actor which handles the connection to a single relay server.
 ///
 /// It is responsible for maintaining the connection to the relay server and handling all
@@ -774,28 +778,18 @@ impl ActiveRelayActor {
                 datagrams,
             } => {
                 trace!(len = datagrams.contents.len(), "received msg");
-                // If this is a new sender, register a route for this peer.
-                if state
-                    .last_packet_src
-                    .as_ref()
-                    .map(|p| *p != remote_endpoint_id)
-                    .unwrap_or(true)
-                {
-                    // Avoid map lookup with high throughput single peer.
-                    state.last_packet_src = Some(remote_endpoint_id);
-                    state.endpoints_present.insert(remote_endpoint_id);
-                }
-
-                if let Err(err) = self.relay_datagrams_recv.try_send(RelayRecvDatagram {
+                // Register a route for this sender only if the datagram was queued.
+                match self.relay_datagrams_recv.try_send(RelayRecvDatagram {
                     url: self.url.clone(),
                     src: remote_endpoint_id,
                     datagrams,
                 }) {
-                    warn!("Dropping received relay packet: {err:#}");
+                    Ok(()) => state.learn_sender(remote_endpoint_id),
+                    Err(err) => warn!("Dropping received relay packet: {err:#}"),
                 }
             }
             RelayToClientMsg::EndpointGone(endpoint_id) => {
-                state.endpoints_present.remove(&endpoint_id);
+                state.forget_sender(&endpoint_id);
             }
             RelayToClientMsg::Ping(data) => state.pong_pending = Some(data),
             RelayToClientMsg::Pong(data) => {
@@ -941,6 +935,32 @@ struct ConnectedRelayState {
 }
 
 impl ConnectedRelayState {
+    /// Records that `endpoint_id` is reachable via this relay.
+    ///
+    /// Bounded without relying on the relay sending `EndpointGone`: when full, the smallest
+    /// id is evicted. A live peer that is evicted learns its route again on its next datagram.
+    fn learn_sender(&mut self, endpoint_id: EndpointId) {
+        // Avoid map lookup with high throughput single peer.
+        if self.last_packet_src == Some(endpoint_id) {
+            return;
+        }
+        if self.endpoints_present.len() >= MAX_ENDPOINTS_PRESENT
+            && !self.endpoints_present.contains(&endpoint_id)
+        {
+            self.endpoints_present.pop_first();
+        }
+        self.endpoints_present.insert(endpoint_id);
+        self.last_packet_src = Some(endpoint_id);
+    }
+
+    fn forget_sender(&mut self, endpoint_id: &EndpointId) {
+        self.endpoints_present.remove(endpoint_id);
+        // Otherwise the sender's next datagram would not register its route again.
+        if self.last_packet_src.as_ref() == Some(endpoint_id) {
+            self.last_packet_src = None;
+        }
+    }
+
     fn map_err(&self, error: RunError) -> RelayConnectionError {
         if self.established {
             e!(RelayConnectionError::Established, error)
@@ -2612,5 +2632,129 @@ mod tests {
         let pending = actor.try_send_datagram(send_item(&dead_url)).await;
         let (parked_url, _fut) = pending.expect("connected relay engages back-pressure");
         assert_eq!(parked_url, dead_url);
+    }
+
+    fn relay_state() -> super::ConnectedRelayState {
+        super::ConnectedRelayState {
+            ping_tracker: PingTracker::default(),
+            endpoints_present: Default::default(),
+            last_packet_src: None,
+            pong_pending: None,
+            established: false,
+            rate_limited: false,
+            test_pong: None,
+        }
+    }
+
+    fn relay_endpoint(n: usize) -> EndpointId {
+        let mut seed = [0u8; 32];
+        seed[..8].copy_from_slice(&(n as u64 + 1).to_le_bytes());
+        SecretKey::from_bytes(&seed).public()
+    }
+
+    fn datagram_from(src: EndpointId) -> iroh_relay::protos::relay::RelayToClientMsg {
+        iroh_relay::protos::relay::RelayToClientMsg::Datagrams {
+            remote_endpoint_id: src,
+            datagrams: Datagrams::from(&[0u8][..]),
+        }
+    }
+
+    fn relay_actor_with_recv_queue(
+        capacity: usize,
+    ) -> (ActiveRelayActor, mpsc::Receiver<RelayRecvDatagram>) {
+        let (_prio_tx, prio_rx) = mpsc::channel(1);
+        let (_inbox_tx, inbox_rx) = mpsc::channel(1);
+        let (_send_tx, send_rx) = mpsc::channel(1);
+        let (recv_tx, recv_rx) = mpsc::channel(capacity);
+        let opts = ActiveRelayActorOptions {
+            url: "https://relay.invalid".parse().unwrap(),
+            prio_inbox_: prio_rx,
+            inbox: inbox_rx,
+            relay_datagrams_send: send_rx,
+            relay_datagrams_recv: recv_tx,
+            connection_opts: RelayConnectionOptions {
+                secret_key: SecretKey::from_bytes(&[1u8; 32]),
+                dns_resolver: DnsResolver::new(),
+                proxy_url: None,
+                prefer_ipv6: Arc::new(AtomicBool::new(true)),
+                tls_config: CaTlsConfig::insecure_skip_verify()
+                    .client_config(default_provider())
+                    .expect("infallible"),
+                auth_token: None,
+            },
+            stop_token: CancellationToken::new(),
+            metrics: Default::default(),
+            my_relay: Default::default(),
+            relay_statuses: Default::default(),
+            keep_connected: false,
+            inactive_cleanup_time: RELAY_INACTIVE_CLEANUP_TIME,
+        };
+        (ActiveRelayActor::new(opts), recv_rx)
+    }
+
+    #[tokio::test]
+    async fn relay_sender_hints_are_bounded_and_relearned() {
+        use super::MAX_ENDPOINTS_PRESENT;
+        let (mut actor, mut recv_rx) = relay_actor_with_recv_queue(1);
+        let mut state = relay_state();
+
+        // Distinct senders without any `EndpointGone` stay bounded.
+        for n in 0..MAX_ENDPOINTS_PRESENT + 64 {
+            actor.handle_relay_msg(datagram_from(relay_endpoint(n)), &mut state);
+            recv_rx.try_recv().expect("datagram queued");
+            assert!(state.endpoints_present.len() <= MAX_ENDPOINTS_PRESENT);
+        }
+        assert_eq!(state.endpoints_present.len(), MAX_ENDPOINTS_PRESENT);
+
+        // A full downstream queue records no new sender hint.
+        let queued = relay_endpoint(MAX_ENDPOINTS_PRESENT + 100);
+        let rejected = relay_endpoint(MAX_ENDPOINTS_PRESENT + 101);
+        actor.handle_relay_msg(datagram_from(queued), &mut state);
+        actor.handle_relay_msg(datagram_from(rejected), &mut state);
+        assert!(state.endpoints_present.contains(&queued));
+        assert!(!state.endpoints_present.contains(&rejected));
+        assert_eq!(state.last_packet_src, Some(queued));
+        recv_rx.try_recv().expect("first datagram queued");
+
+        // An evicted legitimate sender registers its route again on its next datagram.
+        let evicted = (0..MAX_ENDPOINTS_PRESENT + 64)
+            .map(relay_endpoint)
+            .find(|id| !state.endpoints_present.contains(id))
+            .expect("some sender was evicted");
+        actor.handle_relay_msg(datagram_from(evicted), &mut state);
+        recv_rx.try_recv().expect("datagram queued");
+        assert!(state.endpoints_present.contains(&evicted));
+        assert!(state.endpoints_present.len() <= MAX_ENDPOINTS_PRESENT);
+
+        // `EndpointGone` also clears the single-peer shortcut, so the peer is relearned.
+        let gone = iroh_relay::protos::relay::RelayToClientMsg::EndpointGone(evicted);
+        actor.handle_relay_msg(gone, &mut state);
+        assert!(!state.endpoints_present.contains(&evicted));
+        assert_eq!(state.last_packet_src, None);
+        actor.handle_relay_msg(datagram_from(evicted), &mut state);
+        assert!(state.endpoints_present.contains(&evicted));
+    }
+
+    /// Both receive loops must route relay messages through the handler tested above.
+    #[test]
+    fn both_relay_receive_loops_use_the_shared_handler() {
+        let src = include_str!("actor.rs");
+        let connected = src.find("async fn run_connected(").unwrap();
+        let handler = src.find("fn handle_relay_msg(").unwrap();
+        let sending = src.find("async fn run_sending<").unwrap();
+        let state = src.find("struct ConnectedRelayState").unwrap();
+        assert!(connected < handler && handler < sending && sending < state);
+        assert_eq!(
+            src[connected..handler]
+                .matches("self.handle_relay_msg(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            src[sending..state]
+                .matches("self.handle_relay_msg(")
+                .count(),
+            1
+        );
     }
 }
