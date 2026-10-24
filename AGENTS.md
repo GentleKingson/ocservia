@@ -72,9 +72,9 @@
 | Go（`control-plane`、`signer`） | `scripts/go-check.sh standard`（与 Basic CI 相同，不含 race） |
 | Rust | `make rust-check` |
 | Web | `scripts/web-check.sh basic`（与 Basic CI 相同；`make web-check` 为 full，另跑浏览器认证套件） |
-| Proto/OpenAPI 契约 | 仅契约变更时：`make generate`，再用 `scripts/generated-clean.sh --skip-generate` 核对生成产物（比较工作树与 Git 索引），`make contracts-breaking` 对比 `origin/main` 检查破坏性变更 |
+| Proto/OpenAPI 契约 | 仅契约变更时：`make generate` 后审阅并提交生成差异；生成一致性由 `make generated-clean` 在已提交的干净工作树上重新生成并要求无差异来证明（`--skip-generate` 只比较工作树与 Git 索引，不能单独证明产物正确）；`make contracts-breaking` 对比 `origin/main` 检查破坏性变更 |
 | 跨模块 | 确有需要时 `make verify`（本地宽基线，不启动数据库，不等于 Basic CI） |
-| 数据库、集成、跨 VM、发布 | 按 [验证指引](docs/development/testing.md#choose-a-broader-check-when-needed) 选专项入口；发布资格以候选 SHA 的 [Release Check](docs/development/release-checks.md) 为准 |
+| 数据库、集成、跨 VM、发布 | 按 [验证指引](docs/development/testing.md#choose-a-broader-check-when-needed) 选专项入口；候选 SHA 的 Release Check 是必要发布门禁，发布前仍须按 [发布策略](docs/development/release-checks.md) 完成三 VM 证据与 SHA 核对、人工确认及其他前置条件 |
 
 - 不直接编辑生成代码（`control-plane/gen/proto`、`rust/crates/contracts/src/generated`、`web/src/api/generated`）。`make generate` 会删除并重建这些产物，运行前检查其中的未提交差异，不覆盖用户工作。
 - 本地检查、`make verify`、Basic CI（PR 必需检查 `Basic CI Result`）、Release Check 与真实跨 VM/原生验收是不同验证层级，不能相互冒充；CI 结论须来自对应候选 SHA 的运行结果。
