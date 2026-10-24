@@ -645,10 +645,16 @@ impl Socket {
                         .inc_by(noq_meta.len as _);
 
                     // Fill in the correct mapped address
-                    let mapped_addr = self
-                        .mapped_addrs
-                        .relay_addrs
-                        .get(&(src_url.clone(), *src_node));
+                    // shortcut: 65,536 receive mappings; revisit if live relay paths approach this bound.
+                    let Some(mapped_addr) = self.mapped_addrs.relay_addrs.get_bounded(
+                        &(src_url.clone(), *src_node),
+                        65_536,
+                        |(_, endpoint)| self.remote_actors.get(endpoint).is_some(),
+                    ) else {
+                        noq_meta.len = 0;
+                        noq_meta.stride = 0;
+                        continue;
+                    };
                     noq_meta.addr = mapped_addr.private_socket_addr();
                 }
                 transports::Addr::Custom(remote) => {

@@ -19,6 +19,12 @@ mod qlog;
 pub async fn assert_relay_receive_progress() {
     crate::socket::transports::assert_receive_progress().await;
 }
+
+/// Checks bounded Relay mappings while preserving actor-owned addresses.
+#[cfg(feature = "test-utils")]
+pub fn assert_relay_mapping_bounds() {
+    crate::socket::mapped_addrs::assert_relay_mapping_bounds();
+}
 #[cfg(feature = "unstable-custom-transports")]
 pub mod test_transport;
 
