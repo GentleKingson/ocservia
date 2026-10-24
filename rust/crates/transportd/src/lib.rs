@@ -1520,7 +1520,6 @@ impl TransportService for IrohTransportService {
         {
             return Err(Status::invalid_argument("artifact request is invalid"));
         }
-        let stream_deadline = artifact_stream_deadline(grant)?;
         let (connection, session_mode, endpoint_bytes, session_fence) = self
             .shared
             .inner
@@ -1559,6 +1558,7 @@ impl TransportService for IrohTransportService {
                 &artifact_id,
             )
             .await?;
+        let stream_deadline = artifact_stream_deadline(grant)?;
         let payload = ArtifactFetchRequest {
             artifact_id,
             purpose: request.purpose,
@@ -8147,26 +8147,18 @@ mod tests {
         drop((router, client));
     }
 
-    #[tokio::test]
-    async fn expired_artifact_grant_fails_before_any_stream_is_opened() {
-        let node_id = *Uuid::now_v7().as_bytes();
-        let artifact_id = *Uuid::now_v7().as_bytes();
-        let mut grant = shape_valid_grant(node_id, artifact_id);
+    #[test]
+    fn expired_artifact_grant_fails_before_any_stream_is_opened() {
+        // fetch_artifact computes this deadline before spawning the worker,
+        // so an expired or missing expiry never opens an Agent stream.
+        let mut grant = shape_valid_grant(*Uuid::now_v7().as_bytes(), *Uuid::now_v7().as_bytes());
+        assert!(artifact_stream_deadline(&grant).is_ok());
         grant.expires_at = Some((SystemTime::now() - Duration::from_secs(1)).into());
-        let Err(expired) = IrohTransportService::new(8)
-            .fetch_artifact(Request::new(FetchArtifactRequest {
-                node_id: node_id.to_vec(),
-                artifact_id: artifact_id.to_vec(),
-                purpose: "certificate_p12".to_owned(),
-                max_bytes: 32,
-                grant: Some(grant),
-                fence_binding: None,
-            }))
-            .await
-        else {
-            panic!("expired grant must fail");
-        };
+        let expired = artifact_stream_deadline(&grant).expect_err("expired grant must fail");
         assert_eq!(expired.code(), tonic::Code::DeadlineExceeded);
+        grant.expires_at = None;
+        let missing = artifact_stream_deadline(&grant).expect_err("missing expiry must fail");
+        assert_eq!(missing.code(), tonic::Code::InvalidArgument);
     }
 
     fn shape_valid_grant(node_id: [u8; 16], artifact_id: [u8; 16]) -> ArtifactGrantV1 {
