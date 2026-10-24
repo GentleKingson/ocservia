@@ -45,9 +45,9 @@ Iroh connections run directly between endpoints when possible, or through the si
 ```mermaid
 flowchart TB
     Browser["Browser<br/>Vue 3 / TypeScript"] -->|"HTTPS API / SSE"| Gateway
-    subgraph ControllerHost["Controller host (single instance, no HA)"]
+    subgraph ControlPlane["Control plane (single Controller instance, no HA)"]
         Gateway["Gateway<br/>TLS, web console, /api proxy"] --> Controller["Controller (Go)"]
-        Controller --> Database[("PostgreSQL / MySQL")]
+        Controller --> Database[("PostgreSQL 18, bundled or external<br/>or MySQL 8.4, external only")]
         Controller <-->|"gRPC over local Unix socket"| Transportd["transportd<br/>Rust / Iroh"]
     end
     Controller -->|"HTTPS"| Signer["Signer<br/>certificates and sealing"]
@@ -61,7 +61,7 @@ flowchart TB
     Client["VPN client"] ==>|"VPN tunnel, bypasses the control plane"| Ocserv
 ```
 
-Signer and Relay run on separate hosts by default (Standalone mode) or on the Controller host in Integrated mode.
+Signer and Relay run on separate hosts by default (Standalone mode) or on the Controller host in Integrated mode, where an SNI-routing Edge on public TCP 443 also fronts the Gateway and the Relay.
 
 Within this pipeline, the Controller serves the HTTP APIs, schedules background jobs, tracks state transitions, and records audit logs in PostgreSQL 18.x (the default) or MySQL 8.4 LTS. On the nodes, agents report periodic health telemetry and hand off approved changes to `privd`. Supported database versions and backup boundaries are documented in the [support policy](docs/reference/support-policy.md), while process boundaries and threat assumptions are detailed in the [architecture and trust model](docs/architecture.md).
 
@@ -154,7 +154,7 @@ Production deployments should be pinned to official [published releases](https:/
 
 ## Security
 
-Administrative commands require cryptographic authorization, and high-risk changes enforce independent approval, replay protection, a command ledger, and signed receipts while restricting root execution on the node to a fixed set of operations. An accepted request (`202 Accepted`), a dispatched command, and an executed command are distinct states: acceptance only commits the operation to the outbox, and a transport acknowledgement does not prove execution. When a command outcome is uncertain, its state remains Unknown until exact durable evidence establishes the result, and operators must pause conflicting changes while reconciliation is in progress; see the [recovery boundary](docs/reference/stable-contracts.md#matched-release-recovery-boundary).
+Administrative commands require cryptographic authorization, and high-risk changes enforce independent approval, replay protection, a command ledger, and signed receipts while restricting root execution on the node to a fixed set of operations. An accepted request (`202 Accepted`), a dispatched command, and an executed command are distinct states: acceptance atomically records the operation, its outbox entry, and audit intent without establishing remote execution, and a transport acknowledgement does not prove execution either. When a command outcome is uncertain, its state remains Unknown until exact durable evidence establishes the result, and operators must pause conflicting changes while reconciliation is in progress; see the [recovery boundary](docs/reference/stable-contracts.md#matched-release-recovery-boundary).
 
 Report suspected vulnerabilities privately following [SECURITY.md](SECURITY.md).
 
