@@ -188,18 +188,28 @@ detect_conflicts() {
   fi
 }
 
+# Base packages. rename.ul (atomic file publication in quick-materials.sh) is in
+# util-linux, except on Ubuntu 26.04 where it moved to util-linux-extra.
+base_packages() {
+  base_package_list=(jq util-linux curl openssl ca-certificates)
+  [[ "${OS_ID} ${OS_VERSION_ID}" != "ubuntu 26.04" ]] || base_package_list+=(util-linux-extra)
+}
+
 install_missing_base_tools() {
-  local package missing=()
-  for package in jq util-linux curl openssl ca-certificates; do
+  local package missing=() base_package_list
+  base_packages
+  for package in "${base_package_list[@]}"; do
     package_installed "${package}" || missing+=("${package}")
   done
   if ((${#missing[@]} == 0)); then
-    echo "base tools present: jq, flock (util-linux), curl, openssl, ca-certificates"
-    return 0
+    echo "base tools present: jq, flock and rename.ul (util-linux), curl, openssl, ca-certificates"
+  else
+    echo "installing missing base tools: ${missing[*]}"
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
   fi
-  echo "installing missing base tools: ${missing[*]}"
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+  command -v rename.ul >/dev/null 2>&1 ||
+    fail "rename.ul is unavailable after installing the base tools; install the package that provides it (util-linux, or util-linux-extra on Ubuntu 26.04)"
 }
 
 setup_docker_apt_repository() {
@@ -303,15 +313,20 @@ verify_launcher_docker_access() {
 }
 
 check_base_tools() {
-  local package any_missing=false
-  for package in jq util-linux curl openssl ca-certificates; do
+  local package any_missing=false base_package_list
+  base_packages
+  for package in "${base_package_list[@]}"; do
     if ! package_installed "${package}"; then
       record_failure "required package '${package}' is not installed; run 'bootstrap-host.sh install' to install missing host prerequisites"
       any_missing=true
     fi
   done
+  if ! command -v rename.ul >/dev/null 2>&1; then
+    record_failure "rename.ul is not available; install the package that provides it (util-linux, or util-linux-extra on Ubuntu 26.04)"
+    any_missing=true
+  fi
   if [[ "${any_missing}" == false ]]; then
-    echo "base tools present: jq, flock (util-linux), curl, openssl, ca-certificates"
+    echo "base tools present: jq, flock and rename.ul (util-linux), curl, openssl, ca-certificates"
   fi
 }
 
@@ -340,21 +355,21 @@ state_root_absolute_canonical() {
 }
 
 validate_lifecycle_ancestry() {
-  local ancestor="$1" stat_line ancestor_uid ancestor_mode
+  local ancestor="$1" label="${2:-state root}" stat_line ancestor_uid ancestor_mode
   while true; do
     if [[ "$(realpath -e -- "${ancestor}" 2>/dev/null)" != "${ancestor}" ]]; then
-      record_failure "state root ancestry must not contain symlinks: ${ancestor}"
+      record_failure "${label} ancestry must not contain symlinks: ${ancestor}"
       return 1
     fi
     stat_line="$(stat -c '%u:%a' "${ancestor}")"
     ancestor_uid="${stat_line%%:*}"
     ancestor_mode="${stat_line##*:}"
     if [[ "${ancestor_uid}" != 0 && "${ancestor_uid}" != "${launcher_uid}" ]]; then
-      record_failure "state root ancestry must be root- or launcher-owned: ${ancestor} (uid ${ancestor_uid})"
+      record_failure "${label} ancestry must be root- or launcher-owned: ${ancestor} (uid ${ancestor_uid})"
       return 1
     fi
     if (( (8#${ancestor_mode} & 8#022) != 0 )); then
-      record_failure "state root ancestry must not be group/world writable: ${ancestor} (mode ${ancestor_mode})"
+      record_failure "${label} ancestry must not be group/world writable: ${ancestor} (mode ${ancestor_mode})"
       return 1
     fi
     [[ "${ancestor}" == "/" ]] && break
@@ -428,8 +443,25 @@ ensure_state_root() {
   echo "state root created: ${STATE_ROOT} (owner ${launcher_user}, mode 0700)"
 }
 
+# The backup leaf is 999:999, so its protection comes from the ancestors: they
+# must be canonical, root- or launcher-owned and not group/world writable.
+validate_backup_dir_ancestry() {
+  local parent
+  parent="$(dirname -- "${BACKUP_DIR}")"
+  if [[ ! -d "${parent}" ]]; then
+    record_failure "backup directory parent ${parent} does not exist; create it first"
+    return 1
+  fi
+  validate_lifecycle_ancestry "${parent}" "backup directory" || return 1
+  if [[ -e "${BACKUP_DIR}" && "$(realpath -e -- "${BACKUP_DIR}")" != "${BACKUP_DIR}" ]]; then
+    record_failure "backup directory ${BACKUP_DIR} must be a canonical path without symlink ancestry"
+    return 1
+  fi
+}
+
 check_backup_dir() {
   local stat_line
+  validate_backup_dir_ancestry || return
   if [[ ! -e "${BACKUP_DIR}" && ! -L "${BACKUP_DIR}" ]]; then
     record_pending "backup directory ${BACKUP_DIR} does not exist yet; 'bootstrap-host.sh install --backup-dir' creates it"
     return
@@ -448,6 +480,7 @@ ensure_backup_dir() {
   if [[ -L "${BACKUP_DIR}" ]]; then
     fail "backup directory ${BACKUP_DIR} must not be a symlink"
   fi
+  validate_backup_dir_ancestry || return 1
   if [[ -e "${BACKUP_DIR}" ]]; then
     [[ -d "${BACKUP_DIR}" ]] || fail "backup directory ${BACKUP_DIR} must be a directory"
     stat_line="$(stat -c '%u:%g:%a' "${BACKUP_DIR}")"
@@ -573,7 +606,11 @@ run_install() {
       exit 1
     }
   if [[ -n "${BACKUP_DIR}" ]]; then
-    ensure_backup_dir
+    ensure_backup_dir ||
+      {
+        echo "controller host bootstrap: the backup directory does not satisfy the compose.sh contract" >&2
+        exit 1
+      }
   fi
   finish
 }

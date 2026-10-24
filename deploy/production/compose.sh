@@ -274,6 +274,21 @@ for argument in "$@"; do
         echo "OCSERV_BACKUP_DIR must be owned by uid:gid 999:999 with mode 0700" >&2
         exit 2
       fi
+      if [[ "${backup_dir}" != /* || "$(realpath -e -- "${backup_dir}")" != "${backup_dir}" ]]; then
+        echo "OCSERV_BACKUP_DIR must be an absolute canonical path without symlink ancestry" >&2
+        exit 2
+      fi
+      ancestor="$(dirname -- "${backup_dir}")"
+      while true; do
+        IFS=: read -r ancestor_uid ancestor_mode < <(stat -c '%u:%a' "${ancestor}")
+        if [[ "${ancestor_uid}" != 0 && "${ancestor_uid}" != "$(id -u)" ]] \
+          || (( (8#${ancestor_mode} & 8#022) != 0 )); then
+          echo "OCSERV_BACKUP_DIR ancestry must be root- or launcher-owned and not group/world writable" >&2
+          exit 2
+        fi
+        [[ "${ancestor}" == / ]] && break
+        ancestor="$(dirname -- "${ancestor}")"
+      done
       if [[ "${argument}" == "up" ]]; then
         prepare_transport_runtime=true
       fi

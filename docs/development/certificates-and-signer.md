@@ -234,6 +234,14 @@ leaving Gateway and Relay TLS identities to their own provisioning paths.
   `--non-interactive`, the script records `root_ca_custody: delegated` and
   leaves off-host removal of `root-ca.key.enc` to the operator.
 
+Staged files and the prepared CA (`.quick-ca`, used to resume an interrupted
+run with the same CA) live under the root-only `OCSERV_SECRET_DIR`, whose
+ancestors must be canonical, root-owned, and not group/world writable; files are
+published by `rename.ul`, with no copy fallback, so a failed publication keeps
+the prepared CA. A `.quick-ca` left by an earlier version inside the
+Signer-owned directory is never trusted: it is preserved, the run refuses to
+continue, and the operator must inspect and deal with it deliberately.
+
 Re-running the script reuses existing files and completes any interrupted
 setup, including an exported root CA awaiting confirmation. Once setup
 succeeds, `quick-install.json` in the Controller secret directory records the

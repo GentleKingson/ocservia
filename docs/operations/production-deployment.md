@@ -242,7 +242,8 @@ equality is not an admission gate.
 
 Create the backup bind mount for the non-root PostgreSQL UID before startup, as
 the launcher rejects missing, symbolic-link, incorrectly owned, or overly
-permissive paths:
+permissive paths, and any path whose ancestors are symbolic links, not root- or
+launcher-owned, or group/world writable:
 
 ```bash
 sudo install -d -o 999 -g 999 -m 0700 "$OCSERV_BACKUP_DIR"
@@ -309,8 +310,9 @@ state and do not need the original download.
 | Ubuntu 20.04 | amd64, arm64 | Existing compatible Docker only; arrange ESM or equivalent maintenance |
 
 Running `bootstrap-host.sh check` performs a read-only inspection, while its
-`install` command uses apt to install missing `jq`, `flock`, `curl`, `openssl`,
-and CA certificates. When Docker is absent on a bootstrappable host, `install`
+`install` command uses apt to install missing `jq`, `flock`, `rename.ul`
+(`util-linux`, or `util-linux-extra` on Ubuntu 26.04), `curl`, `openssl`, and CA
+certificates. When Docker is absent on a bootstrappable host, `install`
 configures Docker's distribution-specific official apt repository; it preserves
 compatible existing Docker installations and aborts without uninstalling
 anything if it finds conflicting runtimes or an unavailable Compose v2 plugin.

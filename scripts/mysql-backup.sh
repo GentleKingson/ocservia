@@ -31,27 +31,43 @@ if ! [[ "${BACKUP_RETENTION_COUNT}" =~ ^[0-9]+$ ]] || (( BACKUP_RETENTION_COUNT 
 fi
 
 umask 077
-mkdir -p "${BACKUP_ROOT}/logical"
-for path in "${BACKUP_ROOT}" "${BACKUP_ROOT}/logical"; do
-  [[ -d "${path}" && ! -L "${path}" ]] || { echo "backup path must be a real directory: ${path}" >&2; exit 1; }
-done
+# The bind mount is provisioned and protected by the host; only logical/ is ours to create.
+require_private_dir() {
+  if [[ ! -d "$1" || -L "$1" || "$(stat -c '%u:%a' "$1")" != "$(id -u):700" ]]; then
+    echo "backup path must be a real directory owned by the backup user with mode 0700: $1" >&2
+    exit 1
+  fi
+}
+require_private_dir "${BACKUP_ROOT}"
+if [[ ! -e "${BACKUP_ROOT}/logical" && ! -L "${BACKUP_ROOT}/logical" ]]; then
+  mkdir -m 0700 -- "${BACKUP_ROOT}/logical"
+fi
+require_private_dir "${BACKUP_ROOT}/logical"
 
 run_backup() {
-  local lock="${BACKUP_ROOT}/.backup.lock" timestamp staging final latest_tmp version dump
+  local lock="${BACKUP_ROOT}/.backup.lock" timestamp staging="" final latest_tmp="" version dump
   local -a dump_options=()
   mkdir "${lock}" 2>/dev/null || { echo "another backup is active or a stale lock needs operator review" >&2; return 1; }
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
   staging="${BACKUP_ROOT}/logical/.${timestamp}-${RUN_ID}.tmp"
   final="${BACKUP_ROOT}/logical/${timestamp}"
-  latest_tmp="${BACKUP_ROOT}/.LATEST-${RUN_ID}.tmp"
   cleanup_backup() {
-    rm -rf -- "${staging}"
-    rm -f -- "${latest_tmp}"
+    [[ -z "${staging}" ]] || rm -rf -- "${staging}"
+    [[ -z "${latest_tmp}" ]] || rm -f -- "${latest_tmp}"
     [[ ! -d "${lock}" ]] || rmdir "${lock}" || true
   }
   trap cleanup_backup RETURN
-  [[ ! -e "${final}" ]] || { echo "backup destination already exists: ${final}" >&2; return 1; }
-  mkdir "${staging}"
+  [[ ! -e "${final}" && ! -L "${final}" ]] || { echo "backup destination already exists: ${final}" >&2; return 1; }
+  if [[ ( -e "${BACKUP_ROOT}/LATEST" || -L "${BACKUP_ROOT}/LATEST" ) && ( ! -f "${BACKUP_ROOT}/LATEST" || -L "${BACKUP_ROOT}/LATEST" ) ]]; then
+    echo "backup LATEST marker must be a regular file: ${BACKUP_ROOT}/LATEST" >&2
+    return 1
+  fi
+  # Only objects created here are cleaned up: an existing staging path is refused, never reused or removed.
+  if [[ -e "${staging}" || -L "${staging}" ]] || ! mkdir "${staging}"; then
+    echo "backup staging already exists: ${staging}" >&2
+    staging=""
+    return 1
+  fi
 
   dump=mysqldump
   dump_options+=(--set-gtid-purged=OFF)
@@ -66,6 +82,7 @@ run_backup() {
     "${DATABASE_BACKEND}" "${version}" "${MYSQL_DATABASE}" "${timestamp}" >"${staging}/metadata"
   (cd "${staging}" && sha256sum database.sql metadata >SHA256SUMS && sha256sum -c SHA256SUMS)
   mv -- "${staging}" "${final}"
+  latest_tmp="$(mktemp "${BACKUP_ROOT}/.LATEST.XXXXXX")"
   printf '%s\n' "${timestamp}" >"${latest_tmp}"
   mv -- "${latest_tmp}" "${BACKUP_ROOT}/LATEST"
 

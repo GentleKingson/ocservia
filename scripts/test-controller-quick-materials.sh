@@ -15,7 +15,11 @@ else
   exit 0
 fi
 
-fixture="$(as_root mktemp -d)"
+# The generator requires root-owned, non-writable ancestry, which /tmp (1777)
+# and a sudo caller's HOME do not provide. /var/lib is also traversable, so the
+# negative cases below are reachable by the Signer UID.
+fixture="$(as_root mktemp -d /var/lib/ocservia-quick-materials-test.XXXXXX)"
+as_root chmod 0755 -- "${fixture}"
 trap 'as_root rm -rf -- "${fixture}"' EXIT
 die() { echo "quick materials tests: $*" >&2; exit 1; }
 
@@ -28,7 +32,7 @@ new_case() {
 }
 
 generate() {
-  as_root env OCSERV_SECRET_DIR="${case_dir}/secrets" OCSERV_SIGNER_SECRET_DIR="${case_dir}/signer" \
+  as_root env PATH="${PATH}" OCSERV_SECRET_DIR="${case_dir}/secrets" OCSERV_SIGNER_SECRET_DIR="${case_dir}/signer" \
     OCSERV_SIGNER_STATE_DIR="${case_dir}/signer-state" "${GENERATOR}" \
     --root-ca-export-dir "${case_dir}/export" "$@"
 }
@@ -62,7 +66,9 @@ for name in issuer-chain.pem issuer-key.pem tls-cert.pem tls-key.pem api-token; 
 done
 expect_stat "${g}/tls-ca.pem" 65532:65532:444:1
 [[ -z "$(as_root ls -A "${case_dir}/signer-state")" ]] || die "Signer state must stay empty"
-[[ ! -e "${g}/.quick-ca" ]] || die "CA staging must be removed"
+for leftover in "${g}/.quick-ca" "${s}/.quick-ca" "${s}/.quick-stage"; do
+  [[ ! -e "${leftover}" ]] || die "${leftover} must be removed"
+done
 as_root cmp -s "${g}/api-token" "${s}/certificate-signer-token" || die "Signer token differs"
 app_password="$(as_root cat "${s}/postgres-app-password")"
 [[ "${app_password}" =~ ^[0-9a-f]{64}$ ]] || die "unexpected password format"
@@ -122,21 +128,78 @@ as_root grep -Fq 'postgres://ocservia_app:known-password@' "${case_dir}/secrets/
   die "existing password was not reused"
 
 # Interactive custody: a failed confirmation commits nothing; the rerun reuses
-# the prepared CA and removes the encrypted key from the host.
+# the prepared CA and removes the encrypted key from the host. The recovery
+# source lives in the root-only secret directory, never in the Signer directory.
 new_case interactive
 if printf 'wrong\n' | generate --root-ca-passphrase-file "${case_dir}/passphrase" 2>/dev/null; then
   die "wrong fingerprint confirmation must fail"
 fi
 [[ ! -e "${case_dir}/signer/issuer-key.pem" && ! -e "${case_dir}/secrets/quick-install.json" ]] ||
   die "unconfirmed custody must not install the issuer"
+[[ ! -e "${case_dir}/signer/.quick-ca" ]] || die "CA recovery source must not be in the Signer directory"
+expect_stat "${case_dir}/secrets/.quick-ca" 0:0:700:2
+as_root test -f "${case_dir}/secrets/.quick-ca/ready" || die "CA recovery source lost its ready marker"
 fingerprint="$(as_root cut -d' ' -f1 "${case_dir}/export/root-ca.sha256")"
+[[ "$(as_root openssl x509 -in "${case_dir}/secrets/.quick-ca/root-ca.crt" -noout -fingerprint -sha256 |
+  sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')" == "${fingerprint}" ]] || die "exported root differs from the prepared root"
 printf '%s\n' "${fingerprint: -8}" | generate 2>/dev/null
 [[ "$(as_root cut -d' ' -f1 "${case_dir}/export/root-ca.sha256")" == "${fingerprint}" ]] || die "root CA was regenerated"
-[[ ! -e "${case_dir}/export/root-ca.key.enc" && ! -e "${case_dir}/signer/.quick-ca" ]] ||
+[[ "$(as_root jq -r .root_ca_sha256 "${case_dir}/secrets/quick-install.json")" == "${fingerprint}" ]] ||
+  die "the recovered CA identity changed"
+expect_stat "${case_dir}/signer/issuer-key.pem" 65532:65532:400:1
+expect_stat "${case_dir}/signer/issuer-chain.pem" 65532:65532:400:1
+expect_stat "${case_dir}/export/root-ca.crt" 0:0:444:1
+[[ ! -e "${case_dir}/export/root-ca.key.enc" && ! -e "${case_dir}/signer/.quick-ca" \
+  && ! -e "${case_dir}/secrets/.quick-ca" && ! -e "${case_dir}/secrets/.quick-stage" ]] ||
   die "root key must be removed from the host"
 if as_root grep -rlq 'ENCRYPTED PRIVATE KEY' "${case_dir}"; then die "root key remains on the host"; fi
 as_root jq -e '.root_ca_custody == "removed-from-host"' "${case_dir}/secrets/quick-install.json" >/dev/null ||
   die "custody was not recorded"
+
+# Publication is a pure rename of one staged file from the root-only staging
+# directory. When it fails the prepared CA is kept and the rerun reuses it.
+new_case publish
+shim="${case_dir}/shim"
+as_root install -d -m 0700 -- "${shim}"
+as_root tee "${shim}/rename.ul" >/dev/null <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${SHIM_LOG}"
+[[ "${3:-}" != */issuer-key.pem ]] || exit 1
+exec "${SHIM_REAL}" "$@"
+EOF
+as_root chmod 0700 -- "${shim}/rename.ul"
+real_rename="$(command -v rename.ul)"
+if PATH="${shim}:${PATH}" SHIM_LOG="${shim}/log" SHIM_REAL="${real_rename}" \
+  generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>/dev/null; then
+  die "a failed publication must fail the run"
+fi
+expect_stat "${case_dir}/secrets/.quick-ca" 0:0:700:2
+as_root test -f "${case_dir}/secrets/.quick-ca/ready" || die "failed publication discarded the CA recovery source"
+[[ ! -e "${case_dir}/signer/issuer-key.pem" && ! -e "${case_dir}/secrets/quick-install.json" ]] ||
+  die "failed publication must not complete the install"
+while IFS= read -r line; do
+  read -r -a argv <<<"${line}"
+  [[ ${#argv[@]} == 4 && "${argv[0]}" == -- && "${argv[1]}" == "${argv[3]}" && "${argv[1]}" != "${argv[2]}" \
+    && "${argv[1]}" == "${case_dir}/secrets/.quick-stage/"* && "${argv[2]}" == /* ]] ||
+    die "unexpected rename.ul invocation: ${line}"
+done < <(as_root cat "${shim}/log")
+fingerprint="$(as_root cut -d' ' -f1 "${case_dir}/export/root-ca.sha256")"
+generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>/dev/null
+[[ "$(as_root jq -r .root_ca_sha256 "${case_dir}/secrets/quick-install.json")" == "${fingerprint}" ]] ||
+  die "the CA identity changed after a failed publication"
+[[ "$(as_root cut -d' ' -f1 "${case_dir}/export/root-ca.sha256")" == "${fingerprint}" ]] || die "root CA was regenerated"
+expect_stat "${case_dir}/signer/issuer-key.pem" 65532:65532:400:1
+
+# Without rename.ul nothing is generated.
+new_case norename
+farm="${case_dir}/farm"
+as_root install -d -m 0700 -- "${farm}"
+for tool in bash env openssl jq sha256sum od; do as_root ln -s -- "$(command -v "${tool}")" "${farm}/${tool}"; done
+if err="$(PATH="${farm}" generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>&1)"; then
+  die "a missing rename.ul must fail"
+fi
+grep -Fq 'rename.ul is required' <<<"${err}" || die "missing rename.ul was not reported: ${err}"
+[[ ! -e "${case_dir}/secrets" ]] || die "materials generated without rename.ul"
 
 # Fail-closed inputs.
 new_case ledger
@@ -168,5 +231,66 @@ if generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive
 fi
 if generate --non-interactive 2>/dev/null; then die "non-interactive mode requires a passphrase file"; fi
 if printf 'first-passphrase\nother-passphrase\n' | generate 2>/dev/null; then die "mismatched passphrases must fail"; fi
+
+# A CA recovery directory left in the Signer-owned directory by an earlier
+# version is preserved and never used. The outer directory is root-owned and
+# traversable so UID 65532 really can reach the Signer directory.
+new_case donor
+if printf 'wrong\n' | generate --root-ca-passphrase-file "${case_dir}/passphrase" 2>/dev/null; then
+  die "donor run must stop before custody confirmation"
+fi
+donor="${case_dir}/secrets/.quick-ca"
+
+new_case legacy
+as_root chmod 0755 -- "${case_dir}"
+as_root install -d -o 65532 -g 65532 -m 0700 -- "${case_dir}/signer"
+as_root setpriv --reuid=65532 --regid=65532 --clear-groups -- test -w "${case_dir}/signer" ||
+  die "fixture does not let UID 65532 write the Signer directory"
+as_root cp -a -- "${donor}" "${case_dir}/signer/.quick-ca"
+as_root chown -R 65532:65532 -- "${case_dir}/signer/.quick-ca"
+printf 'sentinel\n' | as_root tee "${case_dir}/signer/.quick-ca/sentinel" >/dev/null
+before="$(tree_digest)"
+if err="$(generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>&1)"; then
+  die "an untrusted CA recovery directory must be refused"
+fi
+grep -Fq 'cannot be trusted' <<<"${err}" || die "untrusted recovery directory was not reported: ${err}"
+[[ -z "$(as_root ls -A "${case_dir}/secrets")" && ! -e "${case_dir}/export" && ! -e "${case_dir}/signer/issuer-key.pem" ]] ||
+  die "material was copied or generated despite the untrusted recovery directory"
+[[ "$(tree_digest)" == "${before}" ]] || die "the untrusted recovery directory was modified"
+expect_stat "${case_dir}/signer/.quick-ca/ready" 65532:65532:600:1
+
+new_case legacy-link
+as_root chmod 0755 -- "${case_dir}"
+as_root install -d -o 65532 -g 65532 -m 0700 -- "${case_dir}/signer"
+as_root cp -a -- "${donor}" "${case_dir}/victim"
+printf 'sentinel\n' | as_root tee "${case_dir}/victim/sentinel" >/dev/null
+as_root ln -s -- "${case_dir}/victim" "${case_dir}/signer/.quick-ca"
+before="$(tree_digest)"
+if err="$(generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>&1)"; then
+  die "a symlinked CA recovery path must be refused"
+fi
+grep -Fq 'cannot be trusted' <<<"${err}" || die "symlinked recovery path was not reported: ${err}"
+[[ -z "$(as_root ls -A "${case_dir}/secrets")" && ! -e "${case_dir}/export" && ! -e "${case_dir}/signer/issuer-key.pem" ]] ||
+  die "material was copied or generated despite the symlinked recovery path"
+[[ -L "${case_dir}/signer/.quick-ca" && "$(tree_digest)" == "${before}" ]] || die "the symlink target was modified"
+
+# Directories root writes into need a canonical, root-controlled ancestry.
+new_case open-ancestor
+as_root chmod 0777 -- "${case_dir}"
+if err="$(generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>&1)"; then
+  die "a group/world-writable ancestor must be refused"
+fi
+grep -Fq 'not group/world writable' <<<"${err}" || die "writable ancestor was not reported: ${err}"
+[[ ! -e "${case_dir}/secrets" ]] || die "materials created below a writable ancestor"
+
+new_case link-ancestor
+real="${case_dir}"
+case_dir="${fixture}/link-ancestor-link"
+as_root ln -s -- "${real}" "${case_dir}"
+if err="$(generate --root-ca-passphrase-file "${real}/passphrase" --non-interactive 2>&1)"; then
+  die "a symlinked ancestor must be refused"
+fi
+grep -Fq 'canonical' <<<"${err}" || die "symlinked ancestor was not reported: ${err}"
+[[ ! -e "${real}/secrets" ]] || die "materials created below a symlinked ancestor"
 
 echo "quick materials tests passed"

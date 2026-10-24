@@ -10,6 +10,13 @@
 # completion, or the Signer ledger exists, nothing is generated again and any
 # missing file fails closed.
 #
+# Everything root re-opens (staged files and the CA recovery source) lives in
+# directories under the root-only secret directory, whose ancestors must be
+# canonical and root-controlled. Files reach their target by a pure rename, with
+# no copy fallback. A CA recovery directory left by an earlier version inside the
+# Signer-owned directory is never trusted: it is preserved and the run refuses
+# to continue until the operator deals with it.
+#
 # Relay and Gateway TLS identities are not generated here.
 #
 # Usage (environment: OCSERV_SECRET_DIR, OCSERV_SIGNER_SECRET_DIR,
@@ -35,8 +42,8 @@ while (($#)); do
 done
 
 ((EUID == 0)) || fail "must run as root"
-for command in openssl jq sha256sum od; do
-  command -v "${command}" >/dev/null 2>&1 || fail "${command} is required"
+for command in openssl jq sha256sum od rename.ul; do
+  command -v "${command}" >/dev/null 2>&1 || fail "${command} is required (rename.ul: util-linux, or util-linux-extra on Ubuntu 26.04)"
 done
 secret_dir="${OCSERV_SECRET_DIR:-}"
 signer_dir="${OCSERV_SIGNER_SECRET_DIR:-}"
@@ -46,9 +53,26 @@ for path in "${secret_dir}" "${signer_dir}" "${signer_state}" "${export_dir}"; d
 done
 record="${secret_dir}/quick-install.json"
 
+# Require an existing canonical directory whose every ancestor is root-owned and
+# not group/world writable, so nobody else can replace a path component.
+require_protected_ancestry() {
+  local ancestor="$1" ancestor_uid ancestor_mode
+  [[ -d "${ancestor}" && "$(realpath -e -- "${ancestor}")" == "${ancestor}" ]] ||
+    fail "${ancestor} must be an existing canonical directory without symlink ancestry"
+  while true; do
+    IFS=: read -r ancestor_uid ancestor_mode < <(stat -c '%u:%a' "${ancestor}")
+    if [[ "${ancestor_uid}" != 0 ]] || (( (8#${ancestor_mode} & 8#022) != 0 )); then
+      fail "${ancestor} must be root-owned and not group/world writable"
+    fi
+    [[ "${ancestor}" == / ]] && break
+    ancestor="$(dirname -- "${ancestor}")"
+  done
+}
+
 # Create a missing private directory, or require an existing one to match.
 private_dir() {
   local path="$1" owner="$2"
+  require_protected_ancestry "$(dirname -- "${path}")"
   if [[ ! -e "${path}" && ! -L "${path}" ]]; then
     install -d -o "${owner%:*}" -g "${owner#*:}" -m 0700 -- "${path}"
   fi
@@ -60,17 +84,23 @@ private_dir "${secret_dir}" 0:0
 private_dir "${signer_dir}" 65532:65532
 private_dir "${signer_state}" 65532:65532
 
-work="$(mktemp -d)"
-trap 'rm -rf -- "${work}"' EXIT
+# Staged files are prepared with their final owner and mode in a root-only
+# directory, then renamed into place. Neither the staging directory nor the
+# CA recovery source sits in a directory a service user can write.
+stage="${secret_dir}/.quick-stage"
+staging="${secret_dir}/.quick-ca"
+legacy_staging="${signer_dir}/.quick-ca"
 
-# Move a finished temporary file into place with its final owner and mode.
+# Publish a finished file with its final owner and mode by a pure rename. A
+# failure (including a cross-device target) keeps the prepared material.
 place() {
   local source="$1" target="$2" owner="$3" mode="$4" temporary
-  temporary="$(mktemp "$(dirname -- "${target}")/.quick.XXXXXX")"
+  temporary="$(mktemp "${stage}/place.XXXXXX")"
   cat -- "${source}" >"${temporary}"
   chown "${owner}" -- "${temporary}"
   chmod "${mode}" -- "${temporary}"
-  mv -fT -- "${temporary}" "${target}"
+  rename.ul -- "${temporary}" "${target}" "${temporary}" ||
+    fail "atomic publication failed; keep prepared materials"
 }
 
 # Write stdin to a missing target; existing targets are reused.
@@ -117,13 +147,24 @@ if [[ -e "${record}" || -L "${record}" ]]; then
   need "${record}"
   [[ "$(jq -r .phase "${record}")" == materials-complete ]] || fail "${record} is not a completed record"
   require_all
-  rm -rf -- "${signer_dir}/.quick-ca"
+  rm -rf -- "${staging}" "${stage}"
+  if [[ -e "${legacy_staging}" || -L "${legacy_staging}" ]]; then
+    note "left ${legacy_staging} untouched; inspect and remove it deliberately"
+  fi
   note "materials already complete; nothing generated"
   exit 0
 fi
 if [[ -e "${signer_state}/ledger.db" || -L "${signer_state}/ledger.db" ]]; then
   fail "the Signer ledger exists without a quick install record; refusing to generate materials"
 fi
+if [[ -e "${legacy_staging}" || -L "${legacy_staging}" ]]; then
+  fail "${legacy_staging} is a CA recovery directory in the Signer-owned directory and cannot be trusted; it is preserved and not used. Inspect it as root, then remove it or move it deliberately, and rerun"
+fi
+
+rm -rf -- "${stage}"
+install -d -o 0 -g 0 -m 0700 -- "${stage}"
+work="$(mktemp -d "${stage}/work.XXXXXX")"
+trap 'rm -rf -- "${work}"' EXIT
 
 # Controller secrets.
 for name in session-key audit-checkpoint-key certificate-signer-token \
@@ -181,7 +222,10 @@ fi
 # Offline root CA and online issuing intermediate. The staging directory is the
 # commit point: once it holds the "ready" marker the same CA is reused. It is
 # removed only after the completion record is written.
-staging="${signer_dir}/.quick-ca"
+if [[ -e "${staging}" || -L "${staging}" ]]; then
+  [[ -d "${staging}" && ! -L "${staging}" && "$(stat -c '%u:%g:%a' "${staging}")" == 0:0:700 ]] ||
+    fail "${staging} must be a root:root mode-0700 directory"
+fi
 read_passphrase() {
   local first second
   if [[ -n "${passphrase_file}" ]]; then
@@ -273,5 +317,5 @@ root_fingerprint="$(awk '/BEGIN CERTIFICATE/{n++} n==2' "${signer_dir}/issuer-ch
     controller_endpoint_id: $endpoint,
     files: ([inputs | split("\t") | {key: .[0], value: .[1]}] | from_entries)}' >"${work}/record"
 place "${work}/record" "${record}" 0:0 0400
-rm -rf -- "${staging}"
+rm -rf -- "${staging}" "${stage}"
 note "materials complete; record: ${record}"
