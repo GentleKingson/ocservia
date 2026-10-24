@@ -21,7 +21,7 @@ func (s approvalStore) ConsumeBound(ctx context.Context, id, workspace, requeste
 	// Wait for the approval row first: now() is the transaction start and would
 	// predate any lock wait, so expiry is judged against a wall clock read after it.
 	var locked uuid.UUID
-	if err := s.QueryRow(ctx, `SELECT id FROM approval_requests WHERE id=$1 FOR UPDATE`, id).Scan(&locked); errors.Is(err, database.ErrNotFound) {
+	if err := s.QueryRow(ctx, `SELECT id FROM approval_requests WHERE id=$1 AND workspace_id=$2 AND requester_id=$3 FOR UPDATE`, id, workspace, requester).Scan(&locked); errors.Is(err, database.ErrNotFound) {
 		return false, nil
 	} else if err != nil {
 		return false, err

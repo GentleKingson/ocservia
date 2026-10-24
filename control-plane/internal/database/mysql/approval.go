@@ -23,7 +23,7 @@ func (s approvalStore) ConsumeBound(ctx context.Context, id, workspace, requeste
 	// Wait for the approval row first: a time read before the lock wait could
 	// authorize an approval that expired while queued. Read the clock afterwards.
 	var locked []byte
-	if err := s.QueryRow(ctx, `SELECT id FROM approval_requests WHERE id=? FOR UPDATE`, UUIDBytes(id)).Scan(&locked); errors.Is(err, database.ErrNotFound) {
+	if err := s.QueryRow(ctx, `SELECT id FROM approval_requests WHERE id=? AND workspace_id=? AND requester_id=? FOR UPDATE`, UUIDBytes(id), UUIDBytes(workspace), UUIDBytes(requester)).Scan(&locked); errors.Is(err, database.ErrNotFound) {
 		return false, nil
 	} else if err != nil {
 		return false, err

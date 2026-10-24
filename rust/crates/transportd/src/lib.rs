@@ -73,6 +73,14 @@ const TELEMETRY_BURST_EVENTS: u64 = 40;
 const TELEMETRY_REFILL_EVENTS_PER_SECOND: u64 = 2;
 const TELEMETRY_BURST_BYTES: u64 = 32 * 512 * 1024;
 const TELEMETRY_REFILL_BYTES_PER_MILLI: u64 = 1024;
+// Security priority is claimed by the Agent itself and lets a frame use the
+// subscriber capacity kept for control events (overflow then evicts the slow
+// subscriber, which recovers by replaying retained events). Each node may claim
+// it for a burst of 4 frames, refilled at one frame per minute; further claims
+// are published as routine telemetry, so a forged priority cannot keep forcing
+// subscribers to reconnect.
+const SECURITY_TELEMETRY_FRAME_MILLIS: u64 = 60_000;
+const SECURITY_TELEMETRY_BURST_MILLIS: u64 = 4 * SECURITY_TELEMETRY_FRAME_MILLIS;
 /// Telemetry retained for replay never exceeds this many bytes (64 maximum
 /// frames), and never more than half of the retained event slots, so
 /// command, result and connection events keep their own capacity.
@@ -898,6 +906,7 @@ impl EventState {
 struct TelemetryBudget {
     milli_events: u64,
     bytes: u64,
+    security_millis: u64,
     updated: tokio::time::Instant,
 }
 
@@ -1003,6 +1012,7 @@ impl Shared {
             .or_insert_with(|| TelemetryBudget {
                 milli_events: TELEMETRY_BURST_EVENTS * 1000,
                 bytes: TELEMETRY_BURST_BYTES,
+                security_millis: SECURITY_TELEMETRY_BURST_MILLIS,
                 updated: now,
             });
         let elapsed =
@@ -1016,11 +1026,29 @@ impl Shared {
             .bytes
             .saturating_add(elapsed.saturating_mul(TELEMETRY_REFILL_BYTES_PER_MILLI))
             .min(TELEMETRY_BURST_BYTES);
+        budget.security_millis = budget
+            .security_millis
+            .saturating_add(elapsed)
+            .min(SECURITY_TELEMETRY_BURST_MILLIS);
         if budget.milli_events < 1000 || budget.bytes < bytes {
             return false;
         }
         budget.milli_events -= 1000;
         budget.bytes -= bytes;
+        true
+    }
+
+    /// Spends the node's security-priority allowance for one admitted frame.
+    /// `false` means the frame is published as routine telemetry.
+    async fn claim_security_priority(&self, node_id: &[u8]) -> bool {
+        let mut budgets = self.inner.telemetry_budgets.lock().await;
+        let Some(budget) = budgets.get_mut(node_id) else {
+            return false;
+        };
+        if budget.security_millis < SECURITY_TELEMETRY_FRAME_MILLIS {
+            return false;
+        }
+        budget.security_millis -= SECURITY_TELEMETRY_FRAME_MILLIS;
         true
     }
 
@@ -2402,8 +2430,9 @@ fn monitor_telemetry(
                 connection.close(VarInt::from_u32(0x107), b"telemetry identity invalid");
                 break;
             }
-            let security = batch.priority == i32::from(TelemetryPriority::Security)
-                || !batch.security_events.is_empty();
+            let security = (batch.priority == i32::from(TelemetryPriority::Security)
+                || !batch.security_events.is_empty())
+                && shared.claim_security_priority(&node_id).await;
             shared
                 .publish_telemetry(
                     event(
@@ -4927,6 +4956,56 @@ mod tests {
         }
         let event = next_event(&mut events, TransportEventType::Connected).await;
         assert_eq!(event.node_id, node_b.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn forged_security_priority_cannot_keep_evicting_a_slow_consumer() {
+        let service = IrohTransportService::new(8);
+        let _events = service
+            .watch_events(Request::new(WatchEventsRequest {
+                after_event_id: Vec::new(),
+            }))
+            .await
+            .expect("watch events")
+            .into_inner();
+        let (node_a, node_b) = (Uuid::now_v7(), Uuid::now_v7());
+        // Every frame claims security priority while the consumer is not reading.
+        let mut granted = 0;
+        for _ in 0..32 {
+            assert!(service.shared.admit_telemetry(node_a.as_bytes(), 16).await);
+            let security = service
+                .shared
+                .claim_security_priority(node_a.as_bytes())
+                .await;
+            granted += usize::from(security);
+            service
+                .shared
+                .publish_telemetry(telemetry_event(node_a.as_bytes(), 16), security)
+                .await;
+        }
+        assert_eq!(granted, 4, "security priority allowance is not bounded");
+        service
+            .shared
+            .publish(event(
+                node_b.as_bytes(),
+                &[8; 32],
+                TransportEventType::Connected,
+                Vec::new(),
+            ))
+            .await;
+        assert_eq!(
+            service.shared.inner.events.lock().await.subscribers.len(),
+            1,
+            "forged security telemetry evicted the consumer"
+        );
+        // Other nodes keep their own allowance.
+        assert!(service.shared.admit_telemetry(node_b.as_bytes(), 16).await);
+        assert!(
+            service
+                .shared
+                .claim_security_priority(node_b.as_bytes())
+                .await
+        );
     }
 
     #[tokio::test]

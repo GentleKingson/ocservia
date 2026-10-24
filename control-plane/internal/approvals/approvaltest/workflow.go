@@ -44,6 +44,15 @@ func Workflow(t *testing.T, b database.Backend, workspace, requester, approver, 
 	if err = s.ValidateApprovedBound(ctx, pending.ID, workspace, requester, request.Action, request.ResourceType, workspace, hash); err != nil {
 		t.Fatal(err)
 	}
+	// The row lock and consumption are bound to the approval's workspace and requester.
+	for _, wrong := range [][2]uuid.UUID{{uuid.New(), requester}, {workspace, approver}} {
+		err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+			return approvals.ConsumeBoundTx(ctx, tx, pending.ID, wrong[0], wrong[1], request.Action, request.ResourceType, workspace, hash)
+		})
+		if !errors.Is(err, approvals.ErrNotReady) {
+			t.Fatalf("consume with foreign binding: %v", err)
+		}
+	}
 	rollback := errors.New("cancel business mutation")
 	err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
 		if err := approvals.ConsumeBoundTx(ctx, tx, pending.ID, workspace, requester, request.Action, request.ResourceType, workspace, hash); err != nil {
