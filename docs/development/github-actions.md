@@ -132,29 +132,32 @@ Markdown fallback. As a result, Markdown files under `web/`, `rust/`, `proto/`,
 `openapi/`, or the `deploy/` subdirectories (compose, database-e2e,
 test-fixtures, production, managed-node, package, systemd, and bootstrap) match
 their respective subsystem rules and can trigger web, Rust, database,
-installer, or full Quick suites. Markdown elsewhere in the repository,
-including `control-plane/` and `docs/`, selects `docs` alone.
+installer, or full Quick suites; `deploy/production/integrated/README.md` and
+`deploy/production/relay-build.md` are exact docs-only exceptions. Markdown
+elsewhere in the repository, including `control-plane/` and `docs/`, selects
+`docs` alone.
 
 | Paths (first match wins) | Quick checks |
 | --- | --- |
-| Other Markdown, `LICENSE*`, `.claude/settings.json` | docs |
+| Other Markdown, `LICENSE*`, `.claude/settings.json`, the two `deploy/production` docs above | docs |
 | `web/*`, `scripts/web-check.sh` | web; also web-browser for `web/src/{api,shared,components/ui,components/layout,features/operations}/*`, `App.vue`, `main.*`, login/operations/rollout/nodes/node-detail views, `components/{common,nodes}`, configuration/certificate features, `node-workflow.ts`, `user-password.ts`, the user-policy adapter and `upstream/UserPolicyFields.vue`, `web/e2e/*`, Playwright/Vite config, `index.html`, the browser runner and npm manifests |
 | `rust/*` (Dockerfiles aside), `scripts/rust-check.sh` | rust |
 | `control-plane/{cmd,migrations,internal}/*`, Go locks and `go.work*`, `deploy/compose`, `deploy/database-e2e`, database/MySQL/PostgreSQL scripts | go + database smoke on both engines |
 | Other `control-plane/*`, `scripts/go-check.sh`, `signer/*.go`, `signer/go.mod`, `signer/go.sum` | go |
 | Installer implementation/tests (list in the script) | installer self-tests in the `rust` job; `rust-check.sh` runs only if Rust is also selected |
 | Release, package, Controller and Agent-upgrade scripts, release workflows, `deploy/{package,systemd,bootstrap,managed-node,production}` | release contract suite + installer self-tests |
-| Manual-acceptance harness files (`deploy/real-e2e`, `scripts/real-e2e-*`, `scripts/p1-*`, `scripts/security-acceptance-*`) | release contract suite (names matching earlier rules, such as `*controller*`, also select installers); the harnesses themselves are not run |
+| Cross-VM files (`real-e2e.yml`, `deploy/real-e2e`, `scripts/real-e2e-*`, `scripts/test-real-e2e-*`) | `cross-vm` suite: `make real-e2e-check` and the three offline `test-real-e2e-*` contracts; the credentialed three-VM run is not started. `scripts/release-business-api.py` also selects it |
+| Other manual-acceptance harness files (`scripts/p1-*`, `scripts/security-acceptance-*`) | release contract suite; the harnesses themselves are not run |
 | `ci.yml`, `security.yml`, `scripts/ci-*`, `test-ci-*`, required-test selectors, bootstrap tests | CI guard suite |
-| `proto/*`, `openapi/*`, `control-plane/gen/*`, `scripts/bootstrap.sh`, `env.sh`, `checksums.txt`, `toolchains.lock` | all Basic flags and both CI suites at Quick scope |
-| Any other path (for example non-Go `signer/` files, `.dockerignore`) | all Basic flags and both CI suites at Quick scope |
+| `proto/*`, `openapi/*`, `control-plane/gen/*`, `scripts/bootstrap.sh`, `env.sh`, `checksums.txt`, `toolchains.lock` | all Basic flags and every CI suite at Quick scope |
+| Any other path (for example non-Go `signer/` files, `.dockerignore`) | all Basic flags and every CI suite at Quick scope |
 
 When a change touches multiple areas, the router takes the union of their
 flags. Pull requests diff `base...head`, push events diff `before..head`, and
 file renames or deletions evaluate both old and new paths. If a diff is empty,
 invalid, unresolvable, from an unsupported event, or contains an unrecognized
-path, the router fails closed by enabling every Basic flag and both CI tool
-suites while keeping the Quick profile (smoke database scope); path routing
+path, the router fails closed by enabling every Basic flag and every CI tool
+suite while keeping the Quick profile (smoke database scope); path routing
 never escalates a Quick run to Full.
 
 Manual workflow dispatches bypass path routing altogether: docs, go, rust, web,
@@ -169,8 +172,10 @@ Controller cache refresh uses the union of the changed images' Dockerfile
 inputs on both native architectures, rather than rebuilding all eight images
 for every product change. For example, Web changes refresh `gateway`, Signer
 changes refresh `signer`, and shared backup-entrypoint changes refresh both
-backup images. Shared build/cache machinery and unknown paths select all eight.
-The existing Go test-only exclusions remain. Dockerfile/COPY routing contracts
+backup images. Shared build/cache machinery and unknown paths select all eight;
+editing `ci.yml` alone selects none. The existing Go test-only exclusions remain,
+and `web/e2e`, `web/test` and `web/playwright.config.ts` likewise skip the
+`gateway` refresh because `vite build` never reads them. Dockerfile/COPY routing contracts
 guard the input mapping. Missing or empty image selection in the cache builder
 falls back to all images, while invalid names fail before Docker runs. Product
 builds always build all eight images; cache scopes, runtime OS updates, native
@@ -250,9 +255,9 @@ or dedicated Linux hosts:
   two-machine enrollment, including the hosted `real-e2e.yml`; see
   [Cross-VM enrollment validation](cross-vm-enrollment-validation.md).
 
-Running `make real-e2e-check` only checks Bash syntax across the four real-E2E
-scripts; Basic CI does not call it, and it does not inspect workflow files or
-execute live enrollment.
+Running `make real-e2e-check` only checks Bash syntax across the real-E2E
+scripts and does not execute live enrollment. Basic CI runs it with the offline
+`test-real-e2e-*` contracts in the `cross-vm` suite.
 
 ## Reproduction
 

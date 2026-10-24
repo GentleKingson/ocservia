@@ -84,9 +84,12 @@ while read -r path selected; do
     expect "${out}" profile quick
     expect "${out}" database_scope smoke
     if [[ " ${selected} " == *' run_ci_tools '* ]]; then
-      grep -Eq '^ci_suites=(guards|release)( (guards|release))*$' "${out}"
+      grep -Eq '^ci_suites=(guards|release|cross-vm)( (guards|release|cross-vm))*$' "${out}"
       case "${path}" in
-        scripts/ci-tools-check.sh) expect "${out}" ci_suites 'guards release' ;;
+        scripts/ci-tools-check.sh) expect "${out}" ci_suites 'guards release cross-vm' ;;
+        .github/workflows/real-e2e.yml|deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*)
+          expect "${out}" ci_suites cross-vm ;;
+        scripts/release-business-api.py) expect "${out}" ci_suites 'release cross-vm' ;;
         scripts/buildx-cache.sh|.github/actions/build-cache-credentials/index.js)
           expect "${out}" ci_suites 'release' ;;
         .github/workflows/ci.yml|.github/workflows/security.yml|scripts/ci-relevance.sh)
@@ -122,7 +125,10 @@ web/src/features/user-password.ts run_web run_web_browser run_controller_cache
 web/src/views/AuditView.vue run_web run_web_browser run_controller_cache
 web/src/views/ApprovalsView.vue run_web run_web_browser run_controller_cache
 web/src/views/SettingsView.vue run_web run_web_browser run_controller_cache
-web/e2e/login.spec.ts run_web run_web_browser run_controller_cache
+web/e2e/login.spec.ts run_web run_web_browser
+web/playwright.config.ts run_web run_web_browser
+web/test/login.test.ts run_web
+web/vite.config.ts run_web run_web_browser run_controller_cache
 rust/crates/agent/src/lib.rs run_rust run_controller_cache
 rust/vendor/iroh/src/lib.rs run_rust run_controller_cache
 rust/.cargo/config.toml run_rust run_controller_cache
@@ -171,10 +177,16 @@ deploy/production/edge.Dockerfile run_ci_tools run_installers run_controller_cac
 deploy/production/signer.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/future.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/real-e2e/compose.yaml run_ci_tools
+.github/workflows/real-e2e.yml run_ci_tools
+scripts/real-e2e-controller.sh run_ci_tools
+scripts/test-real-e2e-hosted.py run_ci_tools
+scripts/release-business-api.py run_ci_tools run_installers
+deploy/production/integrated/README.md run_docs
+deploy/production/relay-build.md run_docs
 scripts/upgrade-agent.sh run_ci_tools run_installers
 scripts/rollback-agent.sh run_ci_tools run_installers
 scripts/uninstall-agent.sh run_ci_tools run_installers
-.github/workflows/ci.yml run_ci_tools run_controller_cache
+.github/workflows/ci.yml run_ci_tools
 .github/workflows/release.yml run_ci_tools run_installers
 .github/workflows/release-upgrade.yml run_ci_tools run_installers
 .github/workflows/security.yml run_ci_tools
@@ -223,6 +235,7 @@ expect "${out}" profile quick
 check_matrix "${out}" quick
 for flag in "${flags[@]}"; do expect "${out}" "${flag}" true; done
 expect_images "${out}" "${all_images}"
+expect "${out}" ci_suites 'guards release cross-vm'
 # A PR uses the merge base, whereas a push includes both endpoints. Renames
 # are deliberately expanded into deletion + addition, including old domains.
 git -C "${fixture}" checkout -q --detach "${base}"
@@ -252,17 +265,21 @@ for event in pull_request push; do
   expect "${out}" run_web true
   expect_images "${out}" gateway
 done
-# Multiple paths select the union once; a Go test cannot add its image.
+# Multiple paths select the union once; a Go test cannot add its image, and
+# ci.yml or Web test inputs neither widen nor drop production images.
 git -C "${fixture}" checkout -q --detach "${base}"
-mkdir -p "${fixture}/web" "${fixture}/control-plane/internal" "${fixture}/signer"
-for path in web/first.ts web/second.ts control-plane/internal/run.go signer/store_test.go; do
+mkdir -p "${fixture}/web/e2e" "${fixture}/control-plane/internal" "${fixture}/signer" "${fixture}/rust/crates" "${fixture}/.github/workflows"
+for path in web/first.ts web/second.ts web/e2e/new.spec.ts control-plane/internal/run.go signer/store_test.go \
+  rust/crates/lib.rs .github/workflows/ci.yml; do
   printf 'mixed\n' >"${fixture}/${path}"
   git -C "${fixture}" add -f -- "${path}"
 done
 git -C "${fixture}" commit -qm mixed
 out="${fixture}/mixed.output"
 (cd "${fixture}" && bash "${SCRIPT}" push "${base}" "$(git rev-parse HEAD)" "${out}")
-expect_images "${out}" 'gateway control'
+expect_images "${out}" 'gateway control transport'
+for flag in run_web run_web_browser run_go run_database run_rust run_ci_tools; do expect "${out}" "${flag}" true; done
+expect "${out}" ci_suites guards
 # Moving a source between images includes the old and new owners. Deleting it
 # later still refreshes the image which previously copied that source.
 git -C "${fixture}" checkout -q --detach "${ancestor}"

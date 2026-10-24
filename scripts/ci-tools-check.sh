@@ -22,6 +22,12 @@ for suite in ${CI_SUITES}; do
       bash scripts/test-buildx-cache-fallback.sh
       bash scripts/test-secret-scan-config.sh
       ;;
+    cross-vm)
+      make real-e2e-check
+      python3 scripts/test-real-e2e-hosted.py
+      python3 scripts/test-real-e2e-business.py
+      bash scripts/test-real-e2e-artifact.sh
+      ;;
     *) echo "unknown CI tool suite: ${suite}" >&2; exit 2 ;;
   esac
 done

@@ -50,7 +50,7 @@ fail_closed() {
   local flag
   reason="$1"
   for flag in "${flags[@]}"; do printf -v "${flag}" true; done
-  tools_suite guards; tools_suite release
+  tools_suite guards; tools_suite release; tools_suite cross-vm
   select_controller_images "${controller_images[@]}"
 }
 
@@ -61,7 +61,7 @@ classify_path() {
   case "${path}" in
     # Executable/configuration contracts must precede documentation suffixes.
     scripts/ci-tools-check.sh)
-      tools_suite guards; tools_suite release ;;
+      tools_suite guards; tools_suite release; tools_suite cross-vm ;;
     scripts/build-relay.sh)
       run_rust=true; tools_suite release ;;
     scripts/buildx-cache.sh|scripts/test-buildx-cache-fallback.sh|.github/actions/build-cache-credentials/*)
@@ -78,6 +78,13 @@ classify_path() {
     # Run only by Release Check; no installer contract executes it, while
     # test-release-workflows.rb (release suite) asserts that Release Check calls it.
     scripts/release-quick-acceptance.sh) tools_suite release ;;
+    # Offline Cross-VM contracts only; the credentialed three-VM run stays manual.
+    .github/workflows/real-e2e.yml|deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*)
+      tools_suite cross-vm ;;
+    # Also imported by real-e2e-business.py.
+    scripts/release-business-api.py) tools_suite release; run_installers=true; tools_suite cross-vm ;;
+    # Documentation that no installer, image build or release asset reads.
+    deploy/production/integrated/README.md|deploy/production/relay-build.md) run_docs=true ;;
     deploy/managed-node/install.sh|deploy/production/install.sh|deploy/production/controller-bootstrap.sh|\
     deploy/lib/install-env.sh|deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
     deploy/production/systemd/ocservia-agent-relays.conf|scripts/prepare-bootstrap-release-assets.sh|\
@@ -113,7 +120,7 @@ classify_path() {
       tools_suite guards ;;
     scripts/bootstrap.sh|scripts/env.sh|scripts/checksums.txt|toolchains.lock)
       fail_closed shared_toolchain_changed ;;
-    deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*|scripts/p1-*|scripts/test-p1-*|scripts/security-acceptance-*)
+    scripts/p1-*|scripts/test-p1-*|scripts/security-acceptance-*)
       tools_suite release ;;
     *) fail_closed "unknown_path:${path}" ;;
   esac
@@ -124,6 +131,9 @@ classify_path() {
     # Keep their Go/DB checks above, but avoid refreshing eight production images
     # on both architectures. A mixed production change still selects the cache.
     control-plane/*_test.go|signer/*_test.go) ;;
+    # vite build starts at index.html and Tailwind scans only web/src, so these
+    # never change the gateway dist; their Web/Browser checks above still run.
+    web/e2e/*|web/test/*|web/playwright.config.ts|deploy/production/integrated/README.md) ;;
     web/*|deploy/production/gateway.Dockerfile|deploy/production/Caddyfile)
       select_controller_images gateway ;;
     control-plane/*|THIRD_PARTY_NOTICES.md) select_controller_images control ;;
@@ -143,7 +153,7 @@ classify_path() {
     deploy/production/relay.Cargo.lock) select_controller_images relay ;;
     deploy/production/*.Dockerfile|scripts/bootstrap.sh|scripts/env.sh|scripts/checksums.txt|toolchains.lock|\
     .dockerignore|scripts/build-release-controller.sh|scripts/buildx-cache.sh|\
-    .github/actions/build-cache-credentials/*|.github/workflows/ci.yml)
+    .github/actions/build-cache-credentials/*)
       select_controller_images "${controller_images[@]}" ;;
   esac
   # Session/Workspace, routing, rollout and shared UI paths also run the stubbed

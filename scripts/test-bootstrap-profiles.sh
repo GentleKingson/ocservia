@@ -136,16 +136,18 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
               .github/workflows/release-products.yml
               .github/workflows/release-native-platform.yml
               .github/workflows/release-business-diagnostic.yml .github/workflows/release-check.yml
-              rust/agent-build.Dockerfile].map { |path| File.join(root, path) }
+              rust/agent-build.Dockerfile Makefile].map { |path| File.join(root, path) }
   files.each do |source|
     target = File.join(work, source.delete_prefix(root + "/"))
     FileUtils.mkdir_p(File.dirname(target))
     FileUtils.cp(source, target)
   end
-  Dir.glob(File.join(work, "scripts", "test-*.{sh,mjs}")).each do |path|
+  Dir.glob(File.join(work, "scripts", "test-*.{sh,mjs,py}")).each do |path|
     next if %w[test-release-upgrade.sh test-release-upgrade.mjs test-release-workflows.rb].include?(File.basename(path))
     stub = if path.end_with?(".sh")
       "#!/usr/bin/env bash\nprintf '%s\\n' \"${0##*/}\" >> \"${CI_TRACE}\"\n"
+    elsif path.end_with?(".py")
+      "import os, sys\nopen(os.environ['CI_TRACE'], 'a').write(os.path.basename(sys.argv[0]) + '\\n')\n"
     else
       "import fs from 'node:fs'; fs.appendFileSync(process.env.CI_TRACE, #{(File.basename(path) + "\n").to_json});\n"
     end
@@ -207,6 +209,8 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
     reject("#{name} retained retired G6 contract checks") unless calls.grep(/^test-g6-/).empty?
     reject("#{name} lost shared tooling checks") unless
       %w[test-build-cache-credentials.sh test-buildx-cache-fallback.sh test-secret-scan-config.sh].all? { |test| calls.count(test) == 1 }
+    reject("#{name} skipped offline Cross-VM contracts") if name == "shared bootstrap" &&
+      !%w[test-real-e2e-hosted.py test-real-e2e-business.py test-real-e2e-artifact.sh].all? { |test| calls.count(test) == 1 }
     if name == "Release-only"
 
       reject("Release-only must not run unrelated guards") if calls.include?("test-bootstrap-profiles.sh")
