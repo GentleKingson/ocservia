@@ -334,9 +334,34 @@ where
 {
     /// Returns the [`MappedAddr`], generating one if needed.
     pub(super) fn get(&self, key: &K) -> V {
+        self.get_bounded(key, usize::MAX, |_| true)
+            .expect("unbounded address map")
+    }
+
+    /// Reclaims unowned mappings under pressure without changing live addresses.
+    pub(super) fn get_bounded(
+        &self,
+        key: &K,
+        limit: usize,
+        mut retain: impl FnMut(&K) -> bool,
+    ) -> Option<V> {
         let mut inner = self.inner.lock().expect("poisoned");
+        if inner.addrs.len() >= limit && !inner.addrs.contains_key(key) {
+            let AddrMapInner { addrs, lookup } = &mut *inner;
+            addrs.retain(|key, addr| {
+                if retain(key) {
+                    true
+                } else {
+                    lookup.remove(addr);
+                    false
+                }
+            });
+            if addrs.len() >= limit {
+                return None;
+            }
+        }
         match inner.addrs.get(key) {
-            Some(addr) => *addr,
+            Some(addr) => Some(*addr),
             None => {
                 let addr = loop {
                     let candidate = V::generate();
@@ -347,7 +372,7 @@ where
                 inner.addrs.insert(key.clone(), addr);
                 inner.lookup.insert(addr, key.clone());
                 trace!(?addr, ?key, "generated new addr");
-                addr
+                Some(addr)
             }
         }
     }
@@ -356,6 +381,35 @@ where
     pub(super) fn lookup(&self, addr: &V) -> Option<K> {
         let inner = self.inner.lock().expect("poisoned");
         inner.lookup.get(addr).cloned()
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn assert_relay_mapping_bounds() {
+    const LIMIT: usize = 8;
+    let map = AddrMap::<usize, RelayMappedAddr>::default();
+    let live = map.get(&0);
+    let retired = map.get(&1);
+    for key in 2..(LIMIT * 10) {
+        assert!(map.get_bounded(&key, LIMIT, |key| *key == 0).is_some());
+        let inner = map.inner.lock().unwrap();
+        assert!(inner.addrs.len() <= LIMIT);
+        assert_eq!(inner.addrs.len(), inner.lookup.len());
+    }
+    assert_eq!(map.lookup(&live), Some(0));
+    assert_eq!(map.lookup(&retired), None);
+    for key in 0..LIMIT {
+        map.get(&key);
+    }
+    assert!(map.get_bounded(&usize::MAX, LIMIT, |_| true).is_none());
+    assert_eq!(map.get_bounded(&0, LIMIT, |_| true), Some(live));
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn relay_mapping_bounds_preserve_live_addresses() {
+        super::assert_relay_mapping_bounds();
     }
 }
 

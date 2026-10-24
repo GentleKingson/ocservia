@@ -124,12 +124,19 @@ func (h *Hub) Subscribe(ctx context.Context, scope string, after uuid.UUID) (*Su
 	if scope == "" {
 		return nil, errors.New("event watcher scope is required")
 	}
+	requestCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(h.ctx, cancel)
+	defer stop()
+	defer cancel()
 	for attempts := 0; attempts < 2; attempts++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		w, err := h.watcher(scope)
 		if err != nil {
 			return nil, err
 		}
-		request := subscribeRequest{after: after, response: make(chan subscribeResponse, 1)}
+		request := subscribeRequest{ctx: requestCtx, after: after, response: make(chan subscribeResponse)}
 		select {
 		case w.subscribe <- request:
 		case <-w.done:
@@ -217,6 +224,7 @@ func (h *Hub) Snapshot() HubSnapshot {
 }
 
 type subscribeRequest struct {
+	ctx      context.Context
 	after    uuid.UUID
 	response chan subscribeResponse
 }
@@ -294,31 +302,43 @@ func (w *watcher) run() {
 		w.hub.remove(w.scope, w)
 		close(w.done)
 	}()
-	timer := time.NewTimer(time.Hour)
-	if !timer.Stop() {
-		<-timer.C
-	}
+	timer := time.NewTimer(w.hub.config.PollInterval)
 	defer timer.Stop()
-	var poll <-chan time.Time
+	poll := timer.C
 	for {
 		select {
 		case <-w.ctx.Done():
 			return
 		case request := <-w.subscribe:
+			var subscriber *subscriber
+			var err error
 			if !w.backoffUntil.IsZero() && time.Now().Before(w.backoffUntil) {
-				request.response <- subscribeResponse{err: ErrDatabaseBackoff}
-				continue
+				err = ErrDatabaseBackoff
+			} else {
+				subscriber, err = w.add(request)
 			}
-			subscriber, err := w.add(request)
-			if err != nil {
-				request.response <- subscribeResponse{err: err}
-				if len(w.subscribers) == 0 {
-					poll = resetTimer(timer, w.backoff)
+			response := subscribeResponse{err: err}
+			if subscriber != nil {
+				response.subscription = w.subscription(subscriber)
+			}
+			select {
+			case request.response <- response:
+			case <-request.ctx.Done():
+				if subscriber != nil {
+					delete(w.subscribers, subscriber.id)
+					subscriber.finish(nil)
 				}
+			case <-w.ctx.Done():
+				return
+			}
+			if errors.Is(err, ErrDatabaseBackoff) {
 				continue
 			}
-			request.response <- subscribeResponse{subscription: w.subscription(subscriber)}
-			poll = resetTimer(timer, w.hub.config.PollInterval)
+			if len(w.subscribers) == 0 {
+				poll = resetTimer(timer, w.backoff)
+			} else if err == nil {
+				poll = resetTimer(timer, w.hub.config.PollInterval)
+			}
 		case id := <-w.unsubscribe:
 			if subscriber := w.subscribers[id]; subscriber != nil {
 				delete(w.subscribers, id)
@@ -361,8 +381,14 @@ func (w *watcher) run() {
 }
 
 func (w *watcher) add(request subscribeRequest) (*subscriber, error) {
-	sequence, err := w.resolve(request.after)
+	if err := request.ctx.Err(); err != nil {
+		return nil, err
+	}
+	sequence, err := w.resolve(request.ctx, request.after)
 	if err != nil {
+		return nil, err
+	}
+	if err := request.ctx.Err(); err != nil {
 		return nil, err
 	}
 	w.nextID++
@@ -379,7 +405,7 @@ func (w *watcher) add(request subscribeRequest) (*subscriber, error) {
 	return subscriber, nil
 }
 
-func (w *watcher) resolve(cursor uuid.UUID) (uint64, error) {
+func (w *watcher) resolve(ctx context.Context, cursor uuid.UUID) (uint64, error) {
 	if cursor == uuid.Nil {
 		return 0, nil
 	}
@@ -387,7 +413,7 @@ func (w *watcher) resolve(cursor uuid.UUID) (uint64, error) {
 		return sequence, nil
 	}
 	w.hub.metrics.queries.Add(1)
-	sequence, err := w.hub.resolve(w.ctx, w.scope, cursor)
+	sequence, err := w.hub.resolve(ctx, w.scope, cursor)
 	if err != nil {
 		return 0, err
 	}

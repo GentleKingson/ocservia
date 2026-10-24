@@ -26,6 +26,7 @@ The repository-local patch changes only these upstream Rust sources:
 
 - `src/endpoint.rs`
 - `src/socket.rs`
+- `src/socket/mapped_addrs.rs`
 - `src/socket/remote_map.rs`
 - `src/socket/remote_map/remote_state.rs`
 - `src/socket/transports.rs`
@@ -86,8 +87,15 @@ single-Relay configurations. None is removed on the assumption that production
 supports only one Relay. The seven existing focused regression names remain
 stable; no new product support or discovery service is enabled.
 
+Relay receive mappings are capped at 65,536 entries before unauthenticated
+sender metadata reaches QUIC. On pressure, mappings without a remote actor are
+reclaimed in both directions; actor-owned mappings retain their addresses.
+New receive mappings are refused if the retained entries fill the cap. Queued
+incoming handshakes without an actor may need to retry under this pressure;
+established and locally initiated actor-owned paths are preserved.
+
 To replay provenance, download and verify the archive above, extract it, and
-overlay the eight listed Rust files from the chosen ocservia revision. Add this
+overlay the nine listed Rust files from the chosen ocservia revision. Add this
 provenance file and the two exact upstream license texts. All remaining files
 must compare byte-for-byte with the archive. The manifests and vendor lock stay
 upstream originals; `rust/Cargo.lock`, not this archive lock, owns production.

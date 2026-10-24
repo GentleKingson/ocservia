@@ -20,6 +20,86 @@ func rejectNonNilCursor(_ context.Context, _ string, cursor uuid.UUID) (uint64, 
 	return 0, nil
 }
 
+func TestCanceledSubscriptionReclaimsResources(t *testing.T) {
+	config := DefaultConfig()
+	config.PollInterval = 100 * time.Millisecond
+	started, release := make(chan struct{}), make(chan struct{})
+	hub, err := NewHub(config, func(context.Context, string, uuid.UUID, int) ([]Event, error) {
+		return nil, nil
+	}, func(context.Context, string, uuid.UUID) (uint64, error) {
+		close(started)
+		<-release // Return success after cancellation to exercise the ownership handoff.
+		return 1, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+
+	live, err := hub.Subscribe(context.Background(), "workspace", uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		subscription, err := hub.Subscribe(ctx, "workspace", uuid.Must(uuid.NewV7()))
+		if subscription != nil {
+			subscription.Close()
+		}
+		result <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("subscribe error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled subscription did not return")
+	}
+	close(release)
+	// A normal handoff synchronizes with the watcher after the canceled request.
+	control, err := hub.Subscribe(context.Background(), "workspace", uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control.Close()
+	select {
+	case <-live.Done:
+		t.Fatal("canceling one request closed its peer")
+	default:
+	}
+	live.Close()
+	eventually(t, time.Second, func() bool { return hub.Snapshot().Watchers == 0 })
+}
+
+func TestUnclaimedWatcherReleasesBudget(t *testing.T) {
+	config := DefaultConfig()
+	config.PollInterval = 100 * time.Millisecond
+	hub, err := NewHub(config, func(context.Context, string, uuid.UUID, int) ([]Event, error) {
+		return nil, nil
+	}, rejectNonNilCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	if _, err := hub.watcher("canceled-before-handoff"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, time.Second, func() bool { return hub.Snapshot().Watchers == 0 })
+}
+
 func TestSubscribersShareOnePollingWatcher(t *testing.T) {
 	config := DefaultConfig()
 	config.PollInterval = 100 * time.Millisecond

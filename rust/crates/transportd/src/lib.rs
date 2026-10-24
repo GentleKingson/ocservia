@@ -5023,6 +5023,11 @@ mod tests {
         iroh::test_utils::assert_relay_receive_progress().await;
     }
 
+    #[test]
+    fn relay_mapping_bounds_preserve_live_addresses() {
+        iroh::test_utils::assert_relay_mapping_bounds();
+    }
+
     #[tokio::test]
     async fn single_relay_recovers_without_replacing_endpoint() {
         let (_, roots, relay) = private_tls_relay().await;
