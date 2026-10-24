@@ -38,33 +38,30 @@ High-risk operations must be requested and approved by independently authenticat
 <a id="-architecture-at-a-glance"></a>
 ## Architecture
 
-Operators and API clients send commands to the Go Controller over an HTTPS REST API and subscribe to server-sent events (SSE) for state updates. For node communication, the Controller speaks gRPC over a local Unix domain socket to `transportd`, which manages the Iroh endpoint and maintains connections to remote agents.
+Operators and API clients reach the Go Controller through an HTTPS Gateway, which serves the web console and proxies the REST API and server-sent events (SSE) for state updates. For node communication, the Controller speaks gRPC over a local Unix domain socket to `transportd`, which manages the Iroh endpoint and maintains connections to remote agents.
 
-Production deployments use a single dedicated Relay; multi-relay failover is not supported. The Relay forwards Iroh traffic for clients that hold the relay access token. The endpoints verify each other's EndpointID themselves, and commands carry Controller-signed session credentials and payload signatures.
+Iroh connections run directly between endpoints when possible, or through the single dedicated Relay; multi-relay failover is not supported. The Relay forwards encrypted traffic only for clients that hold the relay access token and has no control-plane signing authority. The endpoints verify each other's EndpointID themselves, and commands carry Controller-signed session credentials and payload signatures. Node certificates and secret sealing are handled by a separate Signer service, so the Controller never holds the issuing CA key.
 
-```text
-Browser (Vue 3 / TypeScript)
-  |
-  | HTTPS API / SSE
-  v
-Controller (Go) -----------------> PostgreSQL / MySQL
-  |
-  | gRPC over local Unix socket
-  v
-transportd (Rust / Iroh)
-  |
-  | Iroh connection, with one dedicated Relay
-  v
-Agent (Rust, unprivileged)
-  |
-  | Authenticated local Unix socket
-  v
-privd (Rust, privileged)
-  |
-  | Fixed ocserv-related operations
-  v
-ocserv
+```mermaid
+flowchart TB
+    Browser["Browser<br/>Vue 3 / TypeScript"] -->|"HTTPS API / SSE"| Gateway
+    subgraph ControlPlane["Control plane (single Controller instance, no HA)"]
+        Gateway["Gateway<br/>TLS, web console, /api proxy"] --> Controller["Controller (Go)"]
+        Controller --> Database[("PostgreSQL 18, bundled or external<br/>or MySQL 8.4, external only")]
+        Controller <-->|"gRPC over local Unix socket"| Transportd["transportd<br/>Rust / Iroh"]
+    end
+    Controller -->|"HTTPS"| Signer["Signer<br/>certificates and sealing"]
+    Transportd <-.->|"Iroh, relayed"| Relay["Dedicated Relay<br/>exactly one"]
+    Relay <-.-> Agent
+    Transportd <-->|"Iroh, direct"| Agent
+    subgraph Node["Managed ocserv node"]
+        Agent["Agent<br/>Rust, unprivileged"] -->|"Authenticated Unix socket"| Privd["privd<br/>Rust, root"]
+        Privd -->|"Fixed ocserv operations"| Ocserv["ocserv"]
+    end
+    Client["VPN client"] ==>|"VPN tunnel, bypasses the control plane"| Ocserv
 ```
+
+Signer and Relay run on separate hosts by default (Standalone mode) or on the Controller host in Integrated mode, where an SNI-routing Edge on public TCP 443 also fronts the Gateway and the Relay.
 
 Within this pipeline, the Controller serves the HTTP APIs, schedules background jobs, tracks state transitions, and records audit logs in PostgreSQL 18.x (the default) or MySQL 8.4 LTS. On the nodes, agents report periodic health telemetry and hand off approved changes to `privd`. Supported database versions and backup boundaries are documented in the [support policy](docs/reference/support-policy.md), while process boundaries and threat assumptions are detailed in the [architecture and trust model](docs/architecture.md).
 
@@ -157,7 +154,7 @@ Production deployments should be pinned to official [published releases](https:/
 
 ## Security
 
-Administrative commands require cryptographic authorization, and high-risk changes enforce independent approval, replay protection, a command ledger, and signed receipts while restricting root execution on the node to a fixed set of operations. When a command outcome is uncertain, its state remains Unknown until exact durable evidence establishes the result, and operators must pause conflicting changes while reconciliation is in progress; see the [recovery boundary](docs/reference/stable-contracts.md#matched-release-recovery-boundary).
+Administrative commands require cryptographic authorization, and high-risk changes enforce independent approval, replay protection, a command ledger, and signed receipts while restricting root execution on the node to a fixed set of operations. An accepted request (`202 Accepted`), a dispatched command, and an executed command are distinct states: acceptance atomically records the operation, its outbox entry, and audit intent without establishing remote execution, and a transport acknowledgement does not prove execution either. When a command outcome is uncertain, its state remains Unknown until exact durable evidence establishes the result, and operators must pause conflicting changes while reconciliation is in progress; see the [recovery boundary](docs/reference/stable-contracts.md#matched-release-recovery-boundary).
 
 Report suspected vulnerabilities privately following [SECURITY.md](SECURITY.md).
 
