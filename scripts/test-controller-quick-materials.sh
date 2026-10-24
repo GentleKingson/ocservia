@@ -161,15 +161,16 @@ as_root jq -e '.root_ca_custody == "removed-from-host"' "${case_dir}/secrets/qui
 new_case publish
 shim="${case_dir}/shim"
 as_root install -d -m 0700 -- "${shim}"
-as_root tee "${shim}/rename.ul" >/dev/null <<'EOF'
+real_rename="$(command -v rename.ul)"
+# sudo drops the caller's environment, so the shim carries its paths literally.
+as_root tee "${shim}/rename.ul" >/dev/null <<EOF
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"${SHIM_LOG}"
-[[ "${3:-}" != */issuer-key.pem ]] || exit 1
-exec "${SHIM_REAL}" "$@"
+printf '%s\n' "\$*" >>'${shim}/log'
+[[ "\${3:-}" != */issuer-key.pem ]] || exit 1
+exec '${real_rename}' "\$@"
 EOF
 as_root chmod 0700 -- "${shim}/rename.ul"
-real_rename="$(command -v rename.ul)"
-if PATH="${shim}:${PATH}" SHIM_LOG="${shim}/log" SHIM_REAL="${real_rename}" \
+if PATH="${shim}:${PATH}" \
   generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>/dev/null; then
   die "a failed publication must fail the run"
 fi
@@ -194,7 +195,9 @@ expect_stat "${case_dir}/signer/issuer-key.pem" 65532:65532:400:1
 new_case norename
 farm="${case_dir}/farm"
 as_root install -d -m 0700 -- "${farm}"
-for tool in bash env openssl jq sha256sum od; do as_root ln -s -- "$(command -v "${tool}")" "${farm}/${tool}"; done
+tools=(bash env openssl jq sha256sum od)
+((EUID == 0)) || tools+=(sudo)
+for tool in "${tools[@]}"; do as_root ln -s -- "$(command -v "${tool}")" "${farm}/${tool}"; done
 if err="$(PATH="${farm}" generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>&1)"; then
   die "a missing rename.ul must fail"
 fi
