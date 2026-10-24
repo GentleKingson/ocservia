@@ -273,7 +273,8 @@ fi
 grep -Fq 'cannot be trusted' <<<"${err}" || die "symlinked recovery path was not reported: ${err}"
 [[ -z "$(as_root ls -A "${case_dir}/secrets")" && ! -e "${case_dir}/export" && ! -e "${case_dir}/signer/issuer-key.pem" ]] ||
   die "material was copied or generated despite the symlinked recovery path"
-[[ -L "${case_dir}/signer/.quick-ca" && "$(tree_digest)" == "${before}" ]] || die "the symlink target was modified"
+as_root test -L "${case_dir}/signer/.quick-ca" || die "the legacy recovery symlink was removed"
+[[ "$(tree_digest)" == "${before}" ]] || die "the symlink target was modified"
 
 # Directories root writes into need a canonical, root-controlled ancestry.
 new_case open-ancestor
