@@ -210,6 +210,12 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		VALUES($1,$2,$3,'config.apply','config_plan',$4,'reviewed','approved',$5,'approved',now()+interval '10 minutes',now(),now(),$6,'{}'::jsonb)`, approvalID, workspaceID, requesterID, plan.ID, approverID, hash); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id)VALUES($1,$2,'node',$3)`, approvalID, workspaceID, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at)VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID); err != nil {
+		t.Fatal(err)
+	}
 	applyRequest := ApplyRequest{PlanID: plan.ID, ApprovalID: approvalID, IdempotencyKey: "i16-apply", ActorID: requesterID.String(), ActorIdentityID: requesterID, ActorSessionID: uuid.Must(uuid.NewV7()), RequestID: "request-i16", Traceparent: request.Traceparent, Reason: "apply approved plan"}
 	creator.err = fmt.Errorf("creator: %w", operations.ErrStaleRevision)
 	if _, replay, err := service.Apply(ctx, applyRequest); err != creator.err || !errors.Is(err, ErrStaleRevision) || replay {
@@ -431,6 +437,7 @@ func cleanupConfigPlanIntegration(ctx context.Context, pool *pgxpool.Pool, works
 		`DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
 		`DELETE FROM node_endpoint_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
 		`DELETE FROM nodes WHERE workspace_id=$1`,
+		`DELETE FROM role_bindings WHERE workspace_id=$1`,
 		`DELETE FROM identities WHERE issuer='test' AND subject LIKE 'i16-%'`,
 		`DELETE FROM workspaces WHERE id=$1`,
 	}

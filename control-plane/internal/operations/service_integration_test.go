@@ -259,6 +259,12 @@ func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) 
 	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.upgrade','node',$4,'integration test','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)`, generic.ApprovalID, workspaceID, generic.ActorIdentityID, nodeID, approverID, genericHash, genericSummary); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3)`, generic.ApprovalID, workspaceID, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := service.CreateSynthetic(ctx, generic); !errors.Is(err, approvals.ErrNotReady) {
 		t.Fatalf("action-level approval error = %v", err)
 	}
@@ -813,6 +819,12 @@ func approveOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, r
 			approvalHash, approvalSummary = approvals.GenericBinding(request.Action, "node", request.NodeID)
 		}
 		_, err = pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,$4,'node',$5,'integration test','approved',$6,'independent approval',now()+interval '1 hour',now(),now(),$7,$8)`, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, request.NodeID, approverID, approvalHash, approvalSummary)
+	}
+	if err == nil {
+		_, err = pool.Exec(context.Background(), `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3)`, request.ApprovalID, workspaceID, request.NodeID)
+	}
+	if err == nil {
+		_, err = pool.Exec(context.Background(), `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID)
 	}
 	if err != nil {
 		t.Fatal(err)

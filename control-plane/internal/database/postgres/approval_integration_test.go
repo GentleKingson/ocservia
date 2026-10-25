@@ -44,6 +44,10 @@ func TestApprovalControllerWorkflowIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	approvaltest.Workflow(t, postgres.WrapPool(pool), workspace, requester, approver, session, approverSession)
+	approvaltest.DisabledApprover(t, postgres.WrapPool(pool), workspace, requester, approver, session, approverSession, func(ctx context.Context, tx database.Tx, disabled bool) error {
+		_, err := tx.Exec(ctx, `UPDATE identities SET disabled_at=CASE WHEN $2 THEN now() END WHERE id=$1`, approver, disabled)
+		return err
+	})
 	ownerDSN := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
 	if ownerDSN == "" {
 		ownerDSN = dsn

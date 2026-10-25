@@ -63,6 +63,10 @@ func TestRealRolloutCreation(t *testing.T) {
 	}
 	hash, summary := approvals.AgentRolloutBinding("2.0.0", nodes, 2, true)
 	run(`INSERT INTO approval_requests(id,workspace_id,requester_id,approver_id,action,resource_type,resource_id,reason,status,expires_at,created_at,request_hash,request_summary)VALUES(?,?,?,?,'agent.rollout','batch_operation',?,'rollout test','approved',?,?,?,?)`, UUIDBytes(approval), UUIDBytes(workspace), UUIDBytes(actor), UUIDBytes(approver), UUIDBytes(rollout), infinity, stamp, hash, summary)
+	for _, node := range nodes {
+		run(`INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id)VALUES(?,?,'node',?)`, UUIDBytes(approval), UUIDBytes(workspace), UUIDBytes(node))
+	}
+	run(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_by,created_at)VALUES(?,?,?,'SecurityAdmin','workspace',?,?)`, UUIDBytes(id()), UUIDBytes(approver), UUIDBytes(workspace), UUIDBytes(approver), stamp)
 	if err := owner.GrantTestPrivileges(ctx); err != nil {
 		t.Fatal(err)
 	}

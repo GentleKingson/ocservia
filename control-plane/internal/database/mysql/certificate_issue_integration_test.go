@@ -145,7 +145,9 @@ func TestRealCertificateIssuanceTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	run(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_by,created_at)VALUES(?,?,?,'SecurityAdmin','workspace',?,?)`, UUIDBytes(id()), UUIDBytes(approver), UUIDBytes(workspace), UUIDBytes(approver), stamp)
 	run(`INSERT INTO approval_requests(id,workspace_id,requester_id,approver_id,action,resource_type,resource_id,reason,status,expires_at,created_at,request_hash,request_summary)VALUES(?,?,?,?,'certificate.issue','certificate',?,'isolated issuance','approved',?,?,?,?)`, UUIDBytes(approval), UUIDBytes(workspace), UUIDBytes(actor), UUIDBytes(approver), UUIDBytes(certificate), expires, stamp, hash, jsonSummary)
+	run(`INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id)VALUES(?,?,'node',?)`, UUIDBytes(approval), UUIDBytes(workspace), UUIDBytes(node))
 	request := certificates.IssueRequest{CertificateID: certificate, ApprovalID: approval, ActorIdentityID: actor, ActorSessionID: session, Reason: "isolated issuance", RequestID: "issue-1"}
 	if _, err := service.Issue(ctx, request); !errors.Is(err, certificates.ErrSignerUnavailable) {
 		t.Fatal("signer failure", err)
@@ -219,6 +221,7 @@ func TestRealCertificateIssuanceTransactions(t *testing.T) {
 		t.Fatal(err)
 	}
 	run(`INSERT INTO approval_requests(id,workspace_id,requester_id,approver_id,action,resource_type,resource_id,reason,status,expires_at,created_at,request_hash,request_summary)VALUES(?,?,?,?,'certificate.private_key.export','certificate',?,'isolated export','approved',?,?,?,?)`, UUIDBytes(exportApproval), UUIDBytes(workspace), UUIDBytes(actor), UUIDBytes(approver), UUIDBytes(certificate), expires, stamp, exportHash, exportJSON)
+	run(`INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id)VALUES(?,?,'node',?)`, UUIDBytes(exportApproval), UUIDBytes(workspace), UUIDBytes(node))
 	export := certificates.P12Request{CertificateID: certificate, ApprovalID: exportApproval, ArtifactRequestID: artifact, ActorIdentityID: actor, ActorSessionID: session, CertificateVersion: got.Version, ExpectedVersion: 1, IdempotencyKey: "common-export", Reason: "isolated export", RequestID: "common-export", Traceparent: trace}
 	grant, replayed, err := service.CreateP12(ctx, export)
 	if err != nil || replayed || grant.ArtifactID != artifact || grant.Password == "" || grant.DownloadToken == "" {
@@ -238,6 +241,7 @@ func TestRealCertificateIssuanceTransactions(t *testing.T) {
 	}
 	revokeApproval := id()
 	run(`INSERT INTO approval_requests(id,workspace_id,requester_id,approver_id,action,resource_type,resource_id,reason,status,expires_at,created_at,request_hash,request_summary)VALUES(?,?,?,?,'certificate.revoke','certificate',?,'isolated revoke','approved',?,?,?,?)`, UUIDBytes(revokeApproval), UUIDBytes(workspace), UUIDBytes(actor), UUIDBytes(approver), UUIDBytes(certificate), expires, stamp, revokeHash, revokeJSON)
+	run(`INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id)VALUES(?,?,'node',?)`, UUIDBytes(revokeApproval), UUIDBytes(workspace), UUIDBytes(node))
 	revocation, replayed, err := service.Revoke(ctx, certificates.RevokeRequest{CertificateID: certificate, ApprovalID: revokeApproval, ActorIdentityID: actor, ActorSessionID: session, CertificateVersion: got.Version, ExpectedVersion: 1, IdempotencyKey: "common-revoke", Reason: "isolated revoke", RequestID: "common-revoke", Traceparent: trace})
 	if err != nil || replayed || revocation.State != "queued" {
 		t.Fatal("common revocation", revocation, replayed, err)
