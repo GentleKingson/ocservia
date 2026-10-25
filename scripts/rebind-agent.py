@@ -25,6 +25,7 @@ UPGRADE_STATE = Path('/var/lib/ocservia-upgrade')
 BIN = Path('/usr/libexec/ocservia')
 ACTIVE = CONF / 'active-binding'
 HEX = re.compile(r'[0-9a-f]{64}')
+GRANT_LIMIT = 65536  # ocservia-privd --verify-rebind-session input bound
 
 
 def require(condition, detail):
@@ -316,7 +317,8 @@ def enroll(operation, state, env, account):
     print('Approve this pending node through the existing Controller approval flow, then run commit.')
 
 
-def unresolved(path, queries, missing_blocks):
+def unresolved(path, queries, missing_blocks, optional=()):
+    """optional holds (table, query) pairs for tables older schemas never created."""
     path = Path(path)
     if not path.exists():
         return missing_blocks
@@ -326,9 +328,54 @@ def unresolved(path, queries, missing_blocks):
             database.execute('PRAGMA trusted_schema=OFF')
             database.execute('PRAGMA query_only=ON')
             database.set_progress_handler(lambda: 1, 1000000)
+            tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            queries = list(queries) + [query for table, query in optional if table in tables]
             return any(database.execute(query).fetchone()[0] for query in queries)
     except sqlite3.Error:
         return True  # missing/corrupt recovery evidence never means no work
+
+
+def read_agent_journal(purpose, path):
+    """Runs only as the Agent: root never opens Agent-controlled SQLite paths."""
+    require(os.geteuid() != 0, 'Agent journal reads must be unprivileged')
+    require(purpose in ('unresolved', 'session-grant'), 'unknown Agent journal read')
+    path = Path(path)
+    parent = directory_handle(path.parent, os.geteuid())
+    try:
+        meta = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        require(stat.S_ISREG(meta.st_mode) and meta.st_uid == os.geteuid() and meta.st_nlink == 1
+                and not meta.st_mode & 0o077, 'unsafe Agent journal')
+        # Pin the parent; SQLite opens the database and its sidecars only here.
+        database_path = Path('/proc/self/fd') / str(parent) / path.name
+        with closing(sqlite3.connect(database_path.as_uri() + '?mode=ro', uri=True, timeout=5)) as database:
+            database.execute('PRAGMA trusted_schema=OFF')
+            database.execute('PRAGMA query_only=ON')
+            database.set_progress_handler(lambda: 1, 1000000)
+            if purpose == 'unresolved':
+                pending = database.execute("SELECT EXISTS(SELECT 1 FROM command_journal WHERE state NOT IN ('succeeded','failed') OR error_code LIKE '%reconciliation%')").fetchone()[0]
+                return b'1' if pending else b'0'
+            row = database.execute("SELECT typeof(value)='blob' AND length(value) BETWEEN 1 AND ? FROM agent_metadata WHERE key='verified_session_grant'", (GRANT_LIMIT,)).fetchone()
+            if not row:
+                return b''
+            require(row[0], 'invalid verified session grant')
+            return database.execute("SELECT value FROM agent_metadata WHERE key='verified_session_grant'").fetchone()[0]
+    finally:
+        os.close(parent)
+
+
+def agent_journal(purpose, path, account):
+    result = subprocess.run(['/usr/bin/python3', str(Path(__file__).resolve()), '--read-agent-journal', purpose, str(path)],
+                            user=account.pw_uid, group=account.pw_gid, extra_groups=[],
+                            env={'PATH': '/usr/bin:/bin'}, capture_output=True, timeout=15)
+    require(result.returncode == 0 and len(result.stdout) <= GRANT_LIMIT, 'Agent journal read failed')
+    return result.stdout
+
+
+def journal_unresolved(path, account):
+    try:
+        return agent_journal('unresolved', path, account) != b'0'
+    except (RuntimeError, subprocess.SubprocessError):
+        return True  # unreadable Agent evidence never means no work
 
 
 def unresolved_upgrades(source):
@@ -378,11 +425,11 @@ def commit(operation, state, env, account):
         save(operation, state)
         if not already_committed:
             source = state['source']
-            blocked = source['blocked'] or unresolved_upgrades(source) or unresolved(source['journal'], [
-                "SELECT EXISTS(SELECT 1 FROM command_journal WHERE state NOT IN ('succeeded','failed'))"], True)
+            blocked = source['blocked'] or unresolved_upgrades(source) or journal_unresolved(source['journal'], account)
             blocked = blocked or unresolved(source['effects'], [
                 "SELECT EXISTS(SELECT 1 FROM authorized_effects WHERE state='prepared')",
-                "SELECT EXISTS(SELECT 1 FROM desired_effects WHERE state='prepared')"], False)
+                "SELECT EXISTS(SELECT 1 FROM desired_effects WHERE state='prepared')"], False, [
+                ('certificate_artifacts', "SELECT EXISTS(SELECT 1 FROM certificate_artifacts WHERE state IN ('prepared','leased'))")])
             parent = AGENT_STATE / 'bindings'
             managed_directory(parent, account.pw_uid, account.pw_gid)
             target = parent / state['node']
@@ -409,11 +456,9 @@ def commit(operation, state, env, account):
     journal = AGENT_STATE / 'bindings' / state['node'] / 'agent.db'
     while time.monotonic() < deadline:
         try:
-            with closing(sqlite3.connect(journal.as_uri() + '?mode=ro', uri=True, timeout=1)) as database:
-                database.execute('PRAGMA trusted_schema=OFF')
-                row = database.execute("SELECT value FROM agent_metadata WHERE key='verified_session_grant'").fetchone()
-            if row:
-                result = subprocess.run([str(BIN / 'ocservia-privd'), '--verify-rebind-session'], input=row[0],
+            grant = agent_journal('session-grant', journal, account)
+            if grant:
+                result = subprocess.run([str(BIN / 'ocservia-privd'), '--verify-rebind-session'], input=grant,
                                         capture_output=True, timeout=5)
                 if result.returncode == 0 and int(result.stdout) >= state['commit_started_at'] - 300:
                     state.update(phase='verified', verified_at=int(time.time()), source_state='sealed')
@@ -422,8 +467,8 @@ def commit(operation, state, env, account):
                     if state['mutations_blocked']:
                         print('Mutations are quarantined: preserve and reconcile unresolved source evidence.')
                     return
-        except (sqlite3.Error, ValueError, subprocess.TimeoutExpired):
-            pass
+        except (RuntimeError, ValueError, subprocess.SubprocessError):
+            pass  # an unreadable grant is never verified; keep polling
         time.sleep(1)
     raise RuntimeError('target session not verified; target remains committed, source evidence retained; resolve approval/connectivity and resume commit')
 
@@ -501,7 +546,10 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
-    except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        if len(sys.argv) == 4 and sys.argv[1] == '--read-agent-journal':
+            sys.stdout.buffer.write(read_agent_journal(sys.argv[2], sys.argv[3]))
+        else:
+            main()
+    except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError, sqlite3.Error) as error:
         print('Controller rebind stopped: ' + str(error), file=sys.stderr)
         sys.exit(1)
