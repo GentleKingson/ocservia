@@ -100,7 +100,7 @@ esac
 assert_current_checkpoint() {
   local container=$1 database=$2 expected_checksum
   expected_checksum="$(sha256sum "${ROOT}/control-plane/migrations/schema.sql" | cut -d' ' -f1)"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*)=1 AND bool_and(epoch=2 AND revision=0 AND checksum=decode('${expected_checksum}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions")" = t
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*)=1 AND bool_and(epoch=2 AND revision=1 AND checksum=decode('${expected_checksum}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions")" = t
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('schema_migrations','schema_snapshot_origin')")" = 0
 }
 
@@ -238,7 +238,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     done
     # Deliberate corruption is last, after all current-schema business checks.
     docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-      "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex') WHERE epoch=2 AND revision=0" >/dev/null
+      "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex') WHERE epoch=2 AND revision=1" >/dev/null
     if OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
       "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-checksum-rejected.log" 2>&1; then
       echo 'migration accepted a checksum mismatch' >&2; exit 1

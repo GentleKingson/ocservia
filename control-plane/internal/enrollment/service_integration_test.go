@@ -833,6 +833,12 @@ func approvedMetadata(t *testing.T, pool *pgxpool.Pool, workspaceID, resourceID 
 	if _, err := pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,$4,'node',$5,'integration','approved',$6,'independent',now()+interval '1 hour',now(),now(),$7,$8)`, approvalID, workspaceID, requesterID, action, resourceID, approverID, requestHash, requestSummary); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3)`, approvalID, workspaceID, resourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID); err != nil {
+		t.Fatal(err)
+	}
 	return approvalID, requesterID, sessionID
 }
 

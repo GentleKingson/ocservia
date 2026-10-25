@@ -129,6 +129,8 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 	}
 	approval := uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary)VALUES($1,$2,$3,'config.apply','config_plan',$4,'reviewed','approved',$5,'reviewed',now()+interval '10 minutes',now(),now(),$6,$7::jsonb)`, approval, workspace, requester, planID, approver, binding.RequestHash, binding.RequestSummary)
+	exec(`INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id)VALUES($1,$2,'node',$3)`, approval, workspace, node)
+	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at)VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approver, workspace)
 	request := ApplyRequest{PlanID: planID, ApprovalID: approval, IdempotencyKey: "complete-apply", ActorID: requester.String(), ActorIdentityID: requester, ActorSessionID: uuid.Must(uuid.NewV7()), RequestID: "complete-apply", Traceparent: trace, Reason: "approved complete apply"}
 	// Consuming the approval happens before capability checking, but a rejected
 	// transaction must roll it back together with its command/outbox intent.

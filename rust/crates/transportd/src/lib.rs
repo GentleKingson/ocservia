@@ -63,7 +63,6 @@ const MAX_ENROLLMENT_CONNECTIONS: usize = 64;
 const MAX_AGENT_CONNECTIONS: usize = MAX_CONNECTIONS - MAX_ENROLLMENT_CONNECTIONS;
 const MAX_ATTEMPTS_PER_MINUTE: usize = 30;
 const MAX_TRUST_SNAPSHOT_BINDINGS: usize = 8192;
-const MAX_RESPONSE_FRAMES: usize = 128;
 // Per-node telemetry admission. The Agent sends one batch every 30 seconds and
 // drains an offline backlog at most 32 frames per tick, each at most 512 KiB.
 // The bucket therefore holds that 32-frame burst plus 8 frames of slack and
@@ -2504,116 +2503,100 @@ async fn read_agent_events(
         traceparent.as_str(),
         &connection,
     );
-    for _ in 0..MAX_RESPONSE_FRAMES {
-        let mut length = [0_u8; 4];
-        match tokio::time::timeout_at(response_deadline, recv.read_exact(&mut length)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                publish_command_unknown(
-                    event_context,
-                    &command,
-                    "agent response ended before a terminal event",
-                )
-                .await;
-                return;
-            }
-            Err(_) => {
-                publish_command_unknown(event_context, &command, "agent response timed out").await;
-                return;
-            }
-        }
-        let length = u32::from_be_bytes(length) as usize;
-        if length == 0 || length > max_message_size || length > MAX_FRAME_BYTES {
-            publish_command_unknown(event_context, &command, "agent response size invalid").await;
+    // A command stream carries exactly one terminal frame. Heartbeats belong to
+    // the telemetry path, whose queue quota would otherwise be bypassed here.
+    let mut length = [0_u8; 4];
+    match tokio::time::timeout_at(response_deadline, recv.read_exact(&mut length)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            publish_command_unknown(
+                event_context,
+                &command,
+                "agent response ended before a terminal event",
+            )
+            .await;
             return;
         }
-        let mut bytes = vec![0_u8; length];
-        if !matches!(
-            tokio::time::timeout_at(response_deadline, recv.read_exact(&mut bytes)).await,
-            Ok(Ok(()))
-        ) {
-            publish_command_unknown(event_context, &command, "agent response body invalid").await;
-            return;
-        }
-        let Ok(agent_event) = AgentEvent::decode(bytes.as_slice()) else {
-            publish_command_unknown(event_context, &command, "agent response protobuf invalid")
-                .await;
-            return;
-        };
-        let event_type = match AgentEventType::try_from(agent_event.r#type) {
-            Ok(AgentEventType::CommandResult) => TransportEventType::CommandResult,
-            Ok(AgentEventType::Heartbeat) => TransportEventType::Heartbeat,
-            Ok(AgentEventType::Error) => TransportEventType::Error,
-            _ => {
-                publish_command_unknown(event_context, &command, "agent response type invalid")
-                    .await;
-                return;
-            }
-        };
-        if event_type == TransportEventType::CommandResult {
-            let Ok(result) = CommandResult::decode(agent_event.payload.as_slice()) else {
-                publish_command_unknown(
-                    event_context,
-                    &command,
-                    "Agent command result protobuf invalid",
-                )
-                .await;
-                return;
-            };
-            // A result is only evidence for the command dispatched on this
-            // stream; the Controller still re-checks node and command ownership.
-            if result.command_id != command.command_id {
-                publish_command_unknown(
-                    event_context,
-                    &command,
-                    "Agent command result names a different command",
-                )
-                .await;
-                return;
-            }
-            if !valid_privileged_result_proof(&command, &result) {
-                publish_command_unknown(
-                    event_context,
-                    &command,
-                    "privd result receipt missing or malformed",
-                )
-                .await;
-                return;
-            }
-            tracing::info!(
-                event_type = "command_response_received",
-                message_id = %hex::encode(&command.message_id),
-                command_id = %hex::encode(&result.command_id),
-                node_id = %hex::encode(&node_id),
-                delivery_mode = command.delivery_mode,
-                state = result.state,
-                replayed = result.replayed,
-                "Agent command result received"
-            );
-        }
-        let terminal = matches!(
-            event_type,
-            TransportEventType::CommandResult | TransportEventType::Error
-        );
-        publish_agent_event(
-            event_context,
-            event_with_traceparent(
-                &node_id,
-                connection.remote_id().as_bytes(),
-                event_type,
-                agent_event.payload,
-                &traceparent,
-            ),
-        )
-        .await;
-        if terminal {
+        Err(_) => {
+            publish_command_unknown(event_context, &command, "agent response timed out").await;
             return;
         }
     }
-    publish_command_unknown(
+    let length = u32::from_be_bytes(length) as usize;
+    if length == 0 || length > max_message_size || length > MAX_FRAME_BYTES {
+        publish_command_unknown(event_context, &command, "agent response size invalid").await;
+        return;
+    }
+    let mut bytes = vec![0_u8; length];
+    if !matches!(
+        tokio::time::timeout_at(response_deadline, recv.read_exact(&mut bytes)).await,
+        Ok(Ok(()))
+    ) {
+        publish_command_unknown(event_context, &command, "agent response body invalid").await;
+        return;
+    }
+    let Ok(agent_event) = AgentEvent::decode(bytes.as_slice()) else {
+        publish_command_unknown(event_context, &command, "agent response protobuf invalid").await;
+        return;
+    };
+    let event_type = match AgentEventType::try_from(agent_event.r#type) {
+        Ok(AgentEventType::CommandResult) => TransportEventType::CommandResult,
+        Ok(AgentEventType::Error) => TransportEventType::Error,
+        _ => {
+            publish_command_unknown(event_context, &command, "agent response type invalid").await;
+            return;
+        }
+    };
+    if event_type == TransportEventType::CommandResult {
+        let Ok(result) = CommandResult::decode(agent_event.payload.as_slice()) else {
+            publish_command_unknown(
+                event_context,
+                &command,
+                "Agent command result protobuf invalid",
+            )
+            .await;
+            return;
+        };
+        // A result is only evidence for the command dispatched on this
+        // stream; the Controller still re-checks node and command ownership.
+        if result.command_id != command.command_id {
+            publish_command_unknown(
+                event_context,
+                &command,
+                "Agent command result names a different command",
+            )
+            .await;
+            return;
+        }
+        if !valid_privileged_result_proof(&command, &result) {
+            publish_command_unknown(
+                event_context,
+                &command,
+                "privd result receipt missing or malformed",
+            )
+            .await;
+            return;
+        }
+        tracing::info!(
+            event_type = "command_response_received",
+            message_id = %hex::encode(&command.message_id),
+            command_id = %hex::encode(&result.command_id),
+            node_id = %hex::encode(&node_id),
+            delivery_mode = command.delivery_mode,
+            state = result.state,
+            replayed = result.replayed,
+            "Agent command result received"
+        );
+    }
+    publish_agent_event(
         event_context,
-        &command,
-        "agent response frame limit exceeded",
+        event_with_traceparent(
+            &node_id,
+            connection.remote_id().as_bytes(),
+            event_type,
+            agent_event.payload,
+            &traceparent,
+        ),
     )
     .await;
 }
@@ -3955,6 +3938,38 @@ mod tests {
             ..command.clone()
         };
         assert!(valid_privileged_result_proof(&synthetic, &rejected));
+    }
+
+    /// Answers with a Heartbeat before an otherwise valid result. The first
+    /// frame must end the stream, so a later write may fail.
+    async fn respond_with_heartbeat_first(connection: Connection) {
+        let (mut send, mut recv) = connection.accept_bi().await.expect("accept command");
+        let mut length = [0_u8; 4];
+        recv.read_exact(&mut length)
+            .await
+            .expect("read command length");
+        let mut command = vec![0_u8; u32::from_be_bytes(length) as usize];
+        recv.read_exact(&mut command).await.expect("read command");
+        let decoded = CommandEnvelope::decode(command.as_slice()).expect("decode command");
+        for event in [
+            AgentEvent {
+                r#type: AgentEventType::Heartbeat.into(),
+                payload: Vec::new(),
+            },
+            AgentEvent {
+                r#type: AgentEventType::CommandResult.into(),
+                payload: privileged_command_result(&decoded, true).encode_to_vec(),
+            },
+        ] {
+            let frame = event.encode_to_vec();
+            let frame_len = u32::try_from(frame.len()).expect("frame length fits u32");
+            if send.write_all(&frame_len.to_be_bytes()).await.is_err()
+                || send.write_all(&frame).await.is_err()
+            {
+                return;
+            }
+        }
+        let _ = send.finish();
     }
 
     async fn end_command_without_response(connection: Connection) {
@@ -5409,6 +5424,49 @@ mod tests {
             result.semantic_payload_hash_version,
             eof_command.semantic_payload_hash_version
         );
+
+        // A Heartbeat on a command stream bypasses the telemetry quota, so it
+        // is never published and leaves the command outcome unknown.
+        let heartbeat_traceparent = new_traceparent();
+        let agent = tokio::spawn(respond_with_heartbeat_first(connection.clone()));
+        let heartbeat_command_bytes =
+            command_envelope(&handshake.node_id, &heartbeat_traceparent, String::new());
+        let heartbeat_command = CommandEnvelope::decode(heartbeat_command_bytes.as_slice())
+            .expect("decode heartbeat command");
+        service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: handshake.node_id.clone(),
+                command_envelope: heartbeat_command_bytes,
+            }))
+            .await
+            .expect("send command answered with heartbeat");
+        agent.await.expect("heartbeat response task");
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = events
+                    .next()
+                    .await
+                    .expect("event stream remains open")
+                    .expect("event is valid");
+                assert_ne!(
+                    event.r#type,
+                    i32::from(TransportEventType::Heartbeat),
+                    "command-stream heartbeat published"
+                );
+                if event.r#type == i32::from(TransportEventType::CommandResult) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("event arrives");
+        assert_eq!(event.traceparent, heartbeat_traceparent);
+        let result = CommandResult::decode(event.payload.as_slice()).expect("unknown result");
+        assert_eq!(
+            CommandResultState::try_from(result.state).expect("result state"),
+            CommandResultState::Unknown
+        );
+        assert_eq!(result.command_id, heartbeat_command.command_id);
 
         shutdown(&service, router).await.expect("shutdown router");
         client.close().await;

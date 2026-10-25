@@ -23,12 +23,12 @@ func TestAuditRBACControllerIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	workspace, actor, target := uuid.New(), uuid.New(), uuid.New()
+	workspace, actor, target, approver := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err = pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,$2,$3,$4,$4)`, workspace, "audit", "audit-"+workspace.String(), now); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []uuid.UUID{actor, target} {
+	for _, id := range []uuid.UUID{actor, target, approver} {
 		if _, err = pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$6)`, id, "audit-test", id.String(), "", "audit", now); err != nil {
 			t.Fatal(err)
 		}
@@ -36,8 +36,15 @@ func TestAuditRBACControllerIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, uuid.New(), actor, workspace, now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, uuid.New(), approver, workspace, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	audittest.Controller(t, postgres.WrapPool(pool), workspace, actor, target, func(id, resource uuid.UUID, hash []byte, expiry time.Time) error {
-		_, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'role_binding.elevate','role_binding',$4,'test','approved',$5,'test',$6,$7,$8,$9,$10)`, id, workspace, actor, resource, target, expiry, expiry.Add(-time.Minute), expiry.Add(-time.Hour), hash, `{}`)
+		_, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'role_binding.elevate','role_binding',$4,'test','approved',$5,'test',$6,$7,$8,$9,$10)`, id, workspace, actor, resource, approver, expiry, expiry.Add(-time.Minute), expiry.Add(-time.Hour), hash, `{}`)
+		if err != nil {
+			return err
+		}
+		_, err = pool.Exec(ctx, `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'workspace',$2)`, id, workspace)
 		return err
 	})
 }

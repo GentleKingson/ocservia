@@ -44,6 +44,7 @@ func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
 	workspaceID, operatorID, viewerID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	operatorSession, viewerSession, approverID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeID, operatorBinding, viewerBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	approverBinding := uuid.Must(uuid.NewV7())
 	fixtures := []struct {
 		query string
 		args  []any
@@ -55,6 +56,7 @@ func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
 		{`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, []any{nodeID}}, {`INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at)
 			VALUES($1,now(),'upgrade-api-boot',$2,'1.2.0','1.2.3','Debian GNU/Linux 12','amd64','{}','{}','{}',now())`, []any{nodeID, uuid.Must(uuid.NewV7())}},
 		{`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Operator','node',$4,$2,now()),($5,$6,$3,'Viewer','node',$4,$6,now())`, []any{operatorBinding, operatorID, workspaceID, nodeID, viewerBinding, viewerID}},
+		{`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, []any{approverBinding, approverID, workspaceID}},
 	}
 	for _, fixture := range fixtures {
 		if _, err := pool.Exec(ctx, fixture.query, fixture.args...); err != nil {
@@ -82,7 +84,7 @@ func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
 			{`DELETE FROM commands WHERE workspace_id=$1`, []any{workspace}},
 			{`DELETE FROM operations WHERE workspace_id=$1`, []any{workspace}},
 			{`DELETE FROM approval_requests WHERE workspace_id=$1`, []any{workspace}},
-			{`DELETE FROM role_bindings WHERE id IN($1,$2)`, []any{operatorBinding, viewerBinding}},
+			{`DELETE FROM role_bindings WHERE id IN($1,$2,$3)`, []any{operatorBinding, viewerBinding, approverBinding}},
 			{`DELETE FROM auth_sessions WHERE id IN($1,$2)`, []any{operatorSession, viewerSession}},
 			{`DELETE FROM identities WHERE id IN($1,$2,$3)`, []any{operatorID, viewerID, approverID}},
 			{`DELETE FROM node_observed_snapshots WHERE node_id=$1`, []any{node}},
@@ -163,6 +165,9 @@ func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.upgrade','node',$4,'api integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)`, approvalID, workspaceID, operatorID, nodeID, approverID, approvalHash, approvalSummary); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3)`, approvalID, workspaceID, nodeID); err != nil {
+		t.Fatal(err)
+	}
 	response := post(t, operator, "upgrade-accepted", `"revision-1"`, validBody("2.0.0", approvalID.String()))
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("accepted upgrade status=%d body=%s", response.Code, response.Body.String())
@@ -182,6 +187,9 @@ func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
 	// scheduled must fail on the single-active-upgrade rule.
 	conflictApprovalID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.upgrade','node',$4,'api integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)`, conflictApprovalID, workspaceID, operatorID, nodeID, approverID, approvalHash, approvalSummary); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3)`, conflictApprovalID, workspaceID, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	if conflict := post(t, operator, "upgrade-conflict", `"revision-1"`, validBody("2.0.0", conflictApprovalID.String())); conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "upgrade-already-active") {
@@ -216,7 +224,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	slices.SortFunc(nodeIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
 	canaryID, batchID, otherID := nodeIDs[0], nodeIDs[1], nodeIDs[2]
 	offlineNodeID, incapableNodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	operatorBinding := uuid.Must(uuid.NewV7())
+	operatorBinding, approverBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	// A node-scoped Viewer and a foreign-workspace Viewer must not list the
 	// workspace's rollouts.
 	nodeViewerID, foreignViewerID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -236,6 +244,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		{"INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now())", []any{nodeViewerID, nodeViewerID.String(), foreignViewerID, foreignViewerID.String()}},
 		{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Viewer','workspace',NULL,$2,now())", []any{foreignViewerBinding, foreignViewerID, otherWorkspaceID}},
 		{"INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now())", []any{nodeOperatorID, nodeOperatorID.String()}},
+		{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')", []any{approverBinding, approverID, workspaceID}},
 	}
 	for index, nodeID := range allNodes {
 		fixtures = append(fixtures,
@@ -314,7 +323,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			{"DELETE FROM commands WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
 			{"DELETE FROM operations WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
 			{"DELETE FROM approval_requests WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
-			{"DELETE FROM role_bindings WHERE id IN ($1,$2,$3,$4)", []any{operatorBinding, nodeViewerBinding, foreignViewerBinding, nodeOperatorBinding}},
+			{"DELETE FROM role_bindings WHERE id IN ($1,$2,$3,$4,$5)", []any{operatorBinding, nodeViewerBinding, foreignViewerBinding, nodeOperatorBinding, approverBinding}},
 			{"DELETE FROM auth_sessions WHERE id=$1", []any{operatorSession}},
 			{"DELETE FROM identities WHERE id IN ($1,$2,$3,$4,$5)", []any{operatorID, approverID, nodeViewerID, foreignViewerID, nodeOperatorID}},
 			{"DELETE FROM node_observed_snapshots WHERE node_id=ANY($3)", []any{nil, nil, allNodes}},
@@ -386,6 +395,9 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	requestHash, requestSummary := approvalstore.AgentRolloutBinding("2.0.0", requested, 2, true)
 	approvalID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, "INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.rollout','batch_operation',$4,'fleet rollout integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)", approvalID, workspaceID, operatorID, rolloutID, approverID, requestHash, requestSummary); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) SELECT $1,$2,'node',unnest($3::uuid[])", approvalID, workspaceID, requested); err != nil {
 		t.Fatal(err)
 	}
 
@@ -666,6 +678,9 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		hash, summary := approvalstore.AgentRolloutBinding("2.0.0", nodeIDs, batchSize, true)
 		approvalID := uuid.Must(uuid.NewV7())
 		if _, err := pool.Exec(ctx, "INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.rollout','batch_operation',$4,'fleet rollout integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)", approvalID, workspaceID, operatorID, id, approverID, hash, summary); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, "INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) SELECT $1,$2,'node',unnest($3::uuid[])", approvalID, workspaceID, nodeIDs); err != nil {
 			t.Fatal(err)
 		}
 		response := postRollout(key, rolloutBody(batchSize, approvalID.String(), nodeIDs...))

@@ -266,3 +266,93 @@ func ExpiryAfterLockWait(t *testing.T, b database.Backend, workspace, requester,
 		t.Fatalf("concurrent consume successes = %d", wins)
 	}
 }
+
+// DisabledApprover proves decision, validation and consumption re-check the
+// approver's current identity, and that consumption serializes with a disable
+// still in flight. setDisabled runs inside the given transaction; the fixture
+// re-enables the approver before returning.
+func DisabledApprover(t *testing.T, b database.Backend, workspace, requester, approver, session, approverSession uuid.UUID, setDisabled func(context.Context, database.Tx, bool) error) {
+	t.Helper()
+	ctx := context.Background()
+	s := approvals.NewBackend(b)
+	hash, summary := approvals.GenericBinding("service.reload", "workspace", workspace)
+	create := func() approvals.Approval {
+		t.Helper()
+		request := approvals.Request{WorkspaceID: workspace, RequesterID: requester, ResourceID: workspace, Action: "service.reload", ResourceType: "workspace", Reason: "disabled approver", TTL: time.Hour, SessionID: session, RequestID: uuid.NewString(), RequestHash: hash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: workspace, Type: "workspace"}}}
+		pending, err := s.Create(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pending
+	}
+	approve := func(a approvals.Approval) error {
+		_, err := s.Approve(ctx, approvals.Decision{ApprovalID: a.ID, ApproverID: approver, SessionID: approverSession, Reason: "reviewed", RequestID: uuid.NewString(), ExpectedRequestHash: a.RequestHash})
+		return err
+	}
+	consume := func(tx database.Tx, a approvals.Approval) error {
+		return approvals.ConsumeBoundTx(ctx, tx, a.ID, workspace, requester, a.Action, a.ResourceType, workspace, hash)
+	}
+	set := func(disabled bool) {
+		t.Helper()
+		if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error { return setDisabled(ctx, tx, disabled) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer set(false)
+	used, stale, undecided := create(), create(), create()
+	for _, a := range []approvals.Approval{used, stale} {
+		if err := approve(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error { return consume(tx, used) }); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the disable uncommitted: the consumer must wait for it and then
+	// observe the committed disable instead of accepting the stale approval.
+	disabling, err := b.Begin(ctx, database.ReadCommitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disabling.Rollback(ctx)
+	if err = setDisabled(ctx, disabling, true); err != nil {
+		t.Fatal(err)
+	}
+	mutated := false
+	done := make(chan error, 1)
+	go func() {
+		done <- database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+			if err := consume(tx, stale); err != nil {
+				return err
+			}
+			mutated = true
+			return nil
+		})
+	}()
+	select {
+	case err = <-done:
+		t.Fatalf("consume did not wait for in-flight disable: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err = disabling.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; !errors.Is(err, approvals.ErrNotReady) || mutated {
+		t.Fatalf("approval from disabled approver consumed: mutated=%v err=%v", mutated, err)
+	}
+	if err = s.ValidateApprovedBound(ctx, stale.ID, workspace, requester, stale.Action, stale.ResourceType, workspace, hash); !errors.Is(err, approvals.ErrNotReady) {
+		t.Fatalf("approval from disabled approver validated: %v", err)
+	}
+	if err = approve(undecided); !errors.Is(err, approvals.ErrNotReady) {
+		t.Fatalf("disabled approver decided: %v", err)
+	}
+	if stored, err := s.Get(ctx, stale.ID); err != nil || stored.Status != "approved" {
+		t.Fatalf("rejected consume changed approval: %+v %v", stored, err)
+	}
+	// Completed operations stay verifiable after the approver is disabled.
+	if err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+		return approvals.ValidateConsumedBoundTx(ctx, tx, used.ID, workspace, requester, used.Action, used.ResourceType, workspace, hash)
+	}); err != nil {
+		t.Fatalf("consumed approval history: %v", err)
+	}
+}

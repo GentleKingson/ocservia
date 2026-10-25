@@ -41,16 +41,17 @@ func futurePostgresArtifacts(t *testing.T) (string, []byte, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	schema := strings.Replace(schemaSQL, "-- ocservia:revision=0", "-- ocservia:revision=1", 1)
+	current, next := original.schema.Baseline.Number, original.schema.Baseline.Number+1
+	schema := strings.Replace(schemaSQL, fmt.Sprintf("-- ocservia:revision=%d", current), fmt.Sprintf("-- ocservia:revision=%d", next), 1)
 	schema = strings.Replace(schema, before, after, 1)
 	schema = strings.Replace(schema, "-- ocservia:end-step\n", statement+"-- ocservia:end-step\n", 1)
 	checkpoint, _ := json.Marshal(schemaartifact.Receipt{Checksum: fmt.Sprintf("%x", sha256.Sum256([]byte(schema))), Steps: 1})
-	upgrade := string(upgradeSQL) + "\n-- ocservia:revision=1\n-- ocservia:checkpoint=" + string(checkpoint) + "\n-- ocservia:step=001:probe\n-- ocservia:metadata={\"catalog_sha256\":\"" + after + "\"}\n" + statement + "-- ocservia:end-step\n-- ocservia:end-revision\n"
+	upgrade := string(upgradeSQL) + fmt.Sprintf("\n-- ocservia:revision=%d\n-- ocservia:checkpoint=", next) + string(checkpoint) + "\n-- ocservia:step=001:probe\n-- ocservia:metadata={\"catalog_sha256\":\"" + after + "\"}\n" + statement + "-- ocservia:end-step\n-- ocservia:end-revision\n"
 	parsed, err := schemaartifact.Parse([]byte(upgrade), "postgresql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	history, err := schemaartifact.HistoryChecksum(parsed, 1)
+	history, err := schemaartifact.HistoryChecksum(parsed, next)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,7 @@ func TestPostgreSQLArtifactFreshAndUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(freshRows) != 1 || freshRows[0].revision != 1 || len(upgradeRows) != 2 || upgradeRows[1].revision != 1 {
+	if len(freshRows) != 1 || freshRows[0].revision != 2 || len(upgradeRows) != 2 || upgradeRows[1].revision != 2 {
 		t.Fatal("incorrect checkpoint/execution receipts", freshRows, upgradeRows)
 	}
 }
@@ -157,7 +158,7 @@ func TestPostgreSQLArtifactRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	history, err := schemaartifact.HistoryChecksum(a, 1)
+	history, err := schemaartifact.HistoryChecksum(a, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +215,7 @@ func TestPostgreSQLArtifactCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 0 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != checkpointRef {
+	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 1 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != checkpointRef {
 		t.Fatal("major cutover must use the released immutable checkpoint")
 	}
 	for _, metadata := range []string{`{"catalog_sha256":"` + strings.Repeat("a", 64) + `","unknown":1}`, `{"catalog_sha256":"` + strings.Repeat("a", 64) + `","catalog_sha256":"` + strings.Repeat("a", 64) + `"}`, `{"catalog_sha256":"` + strings.Repeat("A", 64) + `"}`} {

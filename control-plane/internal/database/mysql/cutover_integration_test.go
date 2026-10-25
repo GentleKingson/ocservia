@@ -68,7 +68,7 @@ func TestMySQLCutoverCheckpointEquivalence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 2 || a.upgrade.Previous.Ref != previousCheckpointRef || a.upgrade.Previous.Receipt.Checksum != previousCheckpointChecksum {
+	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 3 || a.upgrade.Previous.Ref != previousCheckpointRef || a.upgrade.Previous.Receipt.Checksum != previousCheckpointChecksum {
 		t.Fatal("checkpoint identity drift")
 	}
 	for _, b := range []*Backend{old, fresh} {

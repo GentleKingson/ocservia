@@ -193,7 +193,7 @@ func TestMySQLArtifactFreshAndUpgrade(t *testing.T) {
 func TestMySQLArtifactUnsupportedNoMutation(t *testing.T) {
 	ctx := context.Background()
 	b, _, _ := migrateFixture(t)
-	for _, tamper := range []string{"UPDATE schema_revisions SET epoch=3", "UPDATE schema_revisions SET revision=42", "UPDATE schema_revisions SET checksum=REPEAT('0',64)", "UPDATE schema_revisions SET step=0", "UPDATE schema_revisions SET state='running',verified_at=NULL", "INSERT INTO schema_revisions SELECT epoch,3,checksum,state,step,started_at,verified_at FROM schema_revisions", "ALTER TABLE schema_revisions COMMENT='ocservia-schema:0000000000000000000000000000000000000000000000000000000000000000'"} {
+	for _, tamper := range []string{"UPDATE schema_revisions SET epoch=3", "UPDATE schema_revisions SET revision=42", "UPDATE schema_revisions SET checksum=REPEAT('0',64)", "UPDATE schema_revisions SET step=0", "UPDATE schema_revisions SET state='running',verified_at=NULL", "INSERT INTO schema_revisions SELECT epoch,4,checksum,state,step,started_at,verified_at FROM schema_revisions", "ALTER TABLE schema_revisions COMMENT='ocservia-schema:0000000000000000000000000000000000000000000000000000000000000000'"} {
 		t.Run(tamper, func(t *testing.T) {
 			// Restore only task-owned test receipts before the next admission case.
 			schema, err := artifactSources.ReadFile("mysql/schema.sql")
@@ -391,7 +391,7 @@ func TestMySQLArtifactCatalog(t *testing.T) {
 	if got := a.fingerprint("foreign table definition"); got != digest([]byte("foreign table definition")) {
 		t.Fatal("unknown fingerprint adopted", got)
 	}
-	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 2 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != previousCheckpointRef || a.upgrade.Previous.Receipt.Checksum != previousCheckpointChecksum {
+	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 3 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != previousCheckpointRef || a.upgrade.Previous.Receipt.Checksum != previousCheckpointChecksum {
 		t.Fatal("published checkpoint identity changed")
 	}
 }

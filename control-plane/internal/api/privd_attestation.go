@@ -69,6 +69,13 @@ func (s *Server) registerPrivdAttestationKey(w http.ResponseWriter, r *http.Requ
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "privd attestation provisioning is not enabled")
 		return
 	}
+	// The one-time credential is only checked after signature verification and
+	// a database transaction, so bound that work independently of OIDC.
+	release := s.admitAuthentication(w, r, s.privdRegisterBudget, false)
+	if release == nil {
+		return
+	}
+	defer release()
 	nodeID, err := parseUUIDv7(r.PathValue("node_id"))
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "node_id must be UUIDv7")

@@ -50,6 +50,10 @@ func TestRealApprovalControllerWorkflow(t *testing.T) {
 	}
 	defer runtime.Close()
 	approvaltest.Workflow(t, runtime, workspace, requester, approver, session, approverSession)
+	approvaltest.DisabledApprover(t, runtime, workspace, requester, approver, session, approverSession, func(ctx context.Context, tx database.Tx, disabled bool) error {
+		_, err := tx.Exec(ctx, `UPDATE identities SET disabled_at=IF(?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),NULL) WHERE id=?`, disabled, UUIDBytes(approver))
+		return err
+	})
 	approvaltest.ExtendedTimes(t, runtime, workspace, requester, approver, session, approverSession, func(id uuid.UUID, created, expires value.Timestamp) {
 		if _, err := owner.Exec(ctx, `UPDATE approval_requests SET created_at=?,expires_at=? WHERE id=?`, created, expires, UUIDBytes(id)); err != nil {
 			t.Fatal(err)

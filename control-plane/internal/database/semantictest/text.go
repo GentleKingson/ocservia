@@ -21,6 +21,7 @@ var Patterns = map[string]string{
 	`^ed25519-sha256:[0-9a-f]{64}$`:              "ed25519-sha256:" + strings.Repeat("a", 64),
 	`(^|/)\.\.(/|$)`:                             "../secret",
 	`^[A-Za-z0-9._-]{1,64}$`:                     "provider-A",
+	`^password-change:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`: "password-change:01234567-89ab-7def-8123-456789abcdef",
 }
 
 func PatternsMatch(t *testing.T, actual map[string]string, match func(string, string) (bool, error)) {

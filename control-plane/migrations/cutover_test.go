@@ -72,12 +72,17 @@ func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		expected, _ := a.catalog(0)
+		expected, _ := a.catalog(1)
 		if err := validateStaticSchema(ctx, pool, expected); err != nil {
 			t.Fatal(err)
 		}
 		rows, err := readRevisionReceipts(ctx, pool)
-		if err != nil || len(rows) != 1 || rows[0].epoch != 2 || rows[0].revision != 0 || !matchesReceipt(rows[0], a.upgrade.Base.Checksum, a.upgrade.Base.Steps) {
+		// The cutover lands on the new baseline; later revisions then execute on
+		// top of it, while a fresh install records only the current checkpoint.
+		if pool == upgraded && (err != nil || len(rows) != 2 || rows[0].epoch != 2 || rows[0].revision != 0 || !matchesReceipt(rows[0], a.upgrade.Base.Checksum, a.upgrade.Base.Steps)) {
+			t.Fatal("new baseline differs from fresh", rows, err)
+		}
+		if err != nil || rows[len(rows)-1].epoch != 2 || rows[len(rows)-1].revision != 1 {
 			t.Fatal("new baseline differs from fresh", rows, err)
 		}
 		var legacy bool

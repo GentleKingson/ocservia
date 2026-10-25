@@ -2,8 +2,8 @@
 -- ocservia:format=1
 -- ocservia:engine=mysql
 -- ocservia:epoch=2
--- ocservia:revision=2
--- ocservia:history-sha256=be6c8aa5cffb5f90c8a16b59c9b35e49c39f9060315eb6e1485192ca5bd8275b
+-- ocservia:revision=3
+-- ocservia:history-sha256=551474f88b64412cce0f39e66bccfdf911b56f7ae2c2adb9c160b8ad94142218
 
 -- ocservia:step=001:table_business_locks
 -- ocservia:metadata={"kind":"table","object":"business_locks","before":"","after":"9f4b1ecbaf1f861998bf97284c47c8374b8877585d5525785b462410bfc1900f"}
@@ -59,7 +59,7 @@ CREATE TABLE `identities` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 -- ocservia:end-step
 -- ocservia:step=005:table_local_auth_attempts
--- ocservia:metadata={"kind":"table","object":"local_auth_attempts","before":"","after":"58101b0338e9d64c7bf1284b3a69470062d7dbec434dd8b434d5d07049fd9e79"}
+-- ocservia:metadata={"kind":"table","object":"local_auth_attempts","before":"","after":"fcc283e984bdaaaaf4608a26c433ae395fc519ed2057e467163d88b000ca3769","roundtrip_hash":"16608d2ce9bff071c4d1fd6c07252ff57c6b660661ee967f7aa7b375d7d84d32"}
 CREATE TABLE `local_auth_attempts` (
   `username` varchar(191) NOT NULL,
   `failures` int NOT NULL DEFAULT '0',
@@ -75,7 +75,7 @@ CREATE TABLE `local_auth_attempts` (
   CONSTRAINT `local_auth_attempts_expires_at_range` CHECK (((`expires_at` is null) or (`expires_at` in (-(9223372036854775808),9223372036854775807)) or ((`expires_at` >= -(211813488000000000)) and (`expires_at` < 9223371331200000000)))),
   CONSTRAINT `local_auth_attempts_lease_until_range` CHECK (((`lease_until` is null) or (`lease_until` in (-(9223372036854775808),9223372036854775807)) or ((`lease_until` >= -(211813488000000000)) and (`lease_until` < 9223371331200000000)))),
   CONSTRAINT `local_auth_attempts_local_auth_attempts_failures_check` CHECK (((`failures` >= 0) and (`failures` <= 14))),
-  CONSTRAINT `local_auth_attempts_local_auth_attempts_username_check` CHECK (((length(`username`) >= 1) and (length(`username`) <= 128) and regexp_like(`username`,_utf8mb4'(?-i)\\A[a-z0-9][a-z0-9._-]*\\z'))),
+  CONSTRAINT `local_auth_attempts_local_auth_attempts_username_check` CHECK (((length(`username`) >= 1) and (length(`username`) <= 128) and (regexp_like(`username`,_utf8mb4'(?-i)\\A[a-z0-9][a-z0-9._-]*\\z') or regexp_like(`username`,_utf8mb4'(?-i)\\Apassword-change:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\z')))),
   CONSTRAINT `local_auth_attempts_text_no_nul` CHECK ((locate(0x00,cast(`username` as char charset binary)) = 0)),
   CONSTRAINT `local_auth_attempts_window_until_range` CHECK (((`window_until` is null) or (`window_until` in (-(9223372036854775808),9223372036854775807)) or ((`window_until` >= -(211813488000000000)) and (`window_until` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;

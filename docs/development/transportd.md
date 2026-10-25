@@ -104,7 +104,9 @@ to the Agent stream and closes the send side, before the Agent accepts or
 executes the command; the Agent's execution outcome is read asynchronously and
 published later as a `command_result` event. If a command stream closes early,
 times out, or yields a malformed frame prior to a terminal event, `transportd`
-emits an `unknown` result that the Controller must reconcile instead of
+emits an `unknown` result. A command stream carries exactly one terminal frame;
+a Heartbeat or any other non-result frame on it is malformed and is never
+published as telemetry. In every such case `transportd` emits the `unknown` result that the Controller must reconcile instead of
 treating it as a clean failure or resending it as a new command. When one to
 eight `--controller-verification-key-file` flags are configured, `transportd`
 also validates the Controller-signed owner-fence carriers on command, artifact,

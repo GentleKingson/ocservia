@@ -13,6 +13,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -191,4 +192,40 @@ func TestBreakGlassEmptyTokenIsRejected(t *testing.T) {
 			t.Fatalf("body=%s status=%d headers=%v", body, response.Code, response.Header())
 		}
 	}
+}
+
+func TestPrivdRegistrationLimitedWithoutOIDCBeforeWork(t *testing.T) {
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	path := "/api/v1/nodes/018f0c2e-7b1a-7c3d-8e9f-0123456789ab/privd-attestation-keys:register"
+	send := func() *httptest.ResponseRecorder {
+		// Invalid encodings stop in the handler, so a 400 proves the request
+		// was admitted and a 429 that it was refused before any decoding work.
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"version":1,"key_id":"k","public_key":"!","controller_nonce":"!","credential_context_sha256":"!","signature":"!","credential":"c"}`))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, request)
+		return response
+	}
+	// Disabled provisioning keeps its 404 and spends no budget.
+	for i := 0; i < 31; i++ {
+		if response := send(); response.Code != http.StatusNotFound {
+			t.Fatalf("disabled attempt=%d status=%d", i, response.Code)
+		}
+	}
+	server.EnablePrivdAttestation(privdattestation.NewBackend(postgres.WrapPool(&pgxpool.Pool{})))
+	for i := 0; i < 31; i++ {
+		response := send()
+		want := http.StatusBadRequest
+		if i == 30 {
+			want = http.StatusTooManyRequests
+		}
+		if response.Code != want || (want == http.StatusTooManyRequests && response.Header().Get("Retry-After") == "") {
+			t.Fatalf("attempt=%d status=%d headers=%v body=%s", i, response.Code, response.Header(), response.Body)
+		}
+	}
+	release, _ := server.localLoginBudget.admit(netip.MustParseAddr("192.0.2.1"), time.Now(), false)
+	if release == nil {
+		t.Fatal("registration saturation consumed the login budget")
+	}
+	release()
 }

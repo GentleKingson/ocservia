@@ -32,6 +32,9 @@ func (s approvalStore) ConsumeBound(ctx context.Context, id, workspace, requeste
 	if err != nil {
 		return false, err
 	}
+	if ok, err := s.approverAuthorized(ctx, id); err != nil || !ok {
+		return false, err
+	}
 	n, err := s.Exec(ctx, `UPDATE approval_requests SET status='consumed',consumed_at=? WHERE id=? AND workspace_id=? AND requester_id=? AND CAST(action AS BINARY)=CAST(? AS BINARY) AND CAST(resource_type AS BINARY)=CAST(? AS BINARY) AND resource_id=? AND status='approved' AND request_hash IS NOT NULL AND request_summary IS NOT NULL AND NOT(approver_id <=> requester_id) AND expires_at>? AND request_hash=?`, now, UUIDBytes(id), UUIDBytes(workspace), UUIDBytes(requester), action, resourceType, UUIDBytes(resource), now, hash)
 	return n == 1, err
 }
@@ -73,7 +76,30 @@ func (s approvalStore) Get(ctx context.Context, id uuid.UUID, lock bool) databas
 	}
 	return s.QueryRow(ctx, q, UUIDBytes(id))
 }
+
+// approverAuthorized re-evaluates the recorded approver's current authority.
+func (s approvalStore) approverAuthorized(ctx context.Context, id uuid.UUID) (bool, error) {
+	var raw []byte
+	if err := s.QueryRow(ctx, `SELECT approver_id FROM approval_requests WHERE id=?`, UUIDBytes(id)).Scan(&raw); errors.Is(err, database.ErrNotFound) || raw == nil {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	approver, err := uuid.FromBytes(raw)
+	if err != nil {
+		return false, err
+	}
+	return s.Authorized(ctx, id, approver)
+}
 func (s approvalStore) Authorized(ctx context.Context, id, actor uuid.UUID) (bool, error) {
+	// The share lock conflicts with the identity lock taken before disabling, so
+	// a disable is either visible here or waits until this transaction ends.
+	var active []byte
+	if err := s.QueryRow(ctx, `SELECT id FROM identities WHERE id=? AND disabled_at IS NULL LOCK IN SHARE MODE`, UUIDBytes(actor)).Scan(&active); errors.Is(err, database.ErrNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
 	var valid bool
 	err := s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM approval_authority_resources WHERE approval_id=?) AND NOT EXISTS (SELECT 1 FROM approval_authority_resources scope WHERE scope.approval_id=? AND NOT EXISTS (SELECT 1 FROM role_bindings binding WHERE binding.identity_id=? AND binding.workspace_id=scope.workspace_id AND binding.created_at <= (SELECT authority_snapshot_at FROM approval_requests WHERE id=?) AND binding.role_name IN ('SecurityAdmin','PlatformAdmin') AND (binding.resource_type='workspace' OR (CAST(binding.resource_type AS BINARY)=CAST(scope.resource_type AS BINARY) AND binding.resource_id=scope.resource_id))))`, UUIDBytes(id), UUIDBytes(id), UUIDBytes(actor), UUIDBytes(id)).Scan(&valid)
 	return valid, err
@@ -93,7 +119,11 @@ func (s approvalStore) ValidBound(ctx context.Context, id, workspace, requester 
 	}
 	var valid bool
 	err := s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM approval_requests WHERE id=? AND workspace_id=? AND requester_id=? AND CAST(action AS BINARY)=CAST(? AS BINARY) AND CAST(resource_type AS BINARY)=CAST(? AS BINARY) AND resource_id=? AND request_hash=? AND status=? AND NOT(approver_id <=> requester_id)`+expiry+`)`, UUIDBytes(id), UUIDBytes(workspace), UUIDBytes(requester), action, kind, UUIDBytes(resource), hash, status).Scan(&valid)
-	return valid, err
+	if err != nil || !valid || consumed {
+		// A consumed approval stays verifiable after its approver is disabled.
+		return valid, err
+	}
+	return s.approverAuthorized(ctx, id)
 }
 func (s approvalStore) AuthorityResources(ctx context.Context, id uuid.UUID) (database.Rows, error) {
 	return s.Query(ctx, `SELECT workspace_id,resource_type,resource_id FROM approval_authority_resources WHERE approval_id=? ORDER BY resource_type,resource_id`, UUIDBytes(id))

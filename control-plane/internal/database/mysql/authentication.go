@@ -108,7 +108,7 @@ func (s authenticationStore) Disable(ctx context.Context, id uuid.UUID, now time
 	return err
 }
 func (s authenticationStore) DeleteIdentityAttempts(ctx context.Context, id uuid.UUID) error {
-	_, err := s.tx.Exec(ctx, `DELETE FROM local_auth_attempts WHERE username=(SELECT username FROM local_credentials WHERE identity_id=?)`, UUIDBytes(id))
+	_, err := s.tx.Exec(ctx, `DELETE FROM local_auth_attempts WHERE username IN ((SELECT username FROM local_credentials WHERE identity_id=?),?)`, UUIDBytes(id), authstore.PasswordChangeAttemptKey(id))
 	return err
 }
 func (s authenticationStore) BreakGlassUsed(ctx context.Context, fingerprint []byte) (bool, error) {

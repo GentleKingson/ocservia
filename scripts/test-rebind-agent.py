@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
 import time
 import types
@@ -15,15 +16,17 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('rebind', Path(__file__).with_name('rebind-agent.py'))
 rebind = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rebind)
+real_run = subprocess.run  # Agent journal reads really drop privileges.
 
 
 class RebindTests(unittest.TestCase):
     def setUp(self):
         if os.geteuid() != 0:
             self.skipTest('requires an isolated root container')
-        Path('/rebind-test-fixtures').mkdir(exist_ok=True, mode=0o700)
+        Path('/rebind-test-fixtures').mkdir(exist_ok=True, mode=0o755)
         self.temporary = tempfile.TemporaryDirectory(dir='/rebind-test-fixtures')
         self.root = Path(self.temporary.name)
+        self.root.chmod(0o755)  # the unprivileged journal reader walks this path
         self.patches = []
         for name, leaf in [('CONF', 'conf'), ('STATE', 'state'), ('AGENT_STATE', 'agent'),
                            ('PRIVD_STATE', 'privd'), ('UPGRADE_STATE', 'upgrade')]:
@@ -36,15 +39,17 @@ class RebindTests(unittest.TestCase):
         replacement.start()
         self.patches.append(replacement)
         self.account = types.SimpleNamespace(pw_uid=1000, pw_gid=1000)
+        os.chown(rebind.AGENT_STATE, 1000, 1000)
         self.source = dict(node='018f0c2e-7b1a-7c3d-8e9f-0123456789ab', controller='11' * 32,
                            endpoint='22' * 32, key='33' * 32, blocked=False,
-                           identity=str(self.root / 'old-identity'), journal=str(self.root / 'old.db'),
+                           identity=str(self.root / 'old-identity'), journal=str(rebind.AGENT_STATE / 'old.db'),
                            effects=str(self.root / 'old-effects.db'))
         Path(self.source['identity']).mkdir(mode=0o700)
         for name, content in [('endpoint.key', b'preserved-private-key'), ('controller.endpoint', b'old-pin')]:
             Path(self.source['identity'], name).write_bytes(content)
-        with closing(sqlite3.connect(self.source['journal'])) as db, db:
-            db.execute('CREATE TABLE command_journal(state TEXT)')
+        self.agent_database(self.source['journal'], 'CREATE TABLE command_journal(state TEXT, error_code TEXT)')
+        self.target_journal = lambda path: self.agent_database(
+            path, "CREATE TABLE agent_metadata(key TEXT, value BLOB); INSERT INTO agent_metadata VALUES('verified_session_grant', x'7369676e6564');")
         self.operation = rebind.STATE / '00000000-0000-4000-8000-000000000001'
         self.operation.mkdir(mode=0o700)
         self.state = dict(id=self.operation.name, phase='enrolled', source=self.source,
@@ -61,14 +66,27 @@ class RebindTests(unittest.TestCase):
             replacement.stop()
         self.temporary.cleanup()
 
+    @staticmethod
+    def agent_database(path, script, wal=True):
+        """An Agent-owned private journal, as the Agent itself creates it."""
+        with closing(sqlite3.connect(path)) as db, db:
+            if wal:
+                db.execute('PRAGMA journal_mode=WAL')
+            db.executescript(script)
+        os.chown(path, 1000, 1000)
+        os.chmod(path, 0o600)
+
     def runner(self, args, **kwargs):
+        if '--read-agent-journal' in args:
+            self.assertEqual((kwargs['user'], kwargs['group'], kwargs['extra_groups']), (1000, 1000, []))
+            return real_run(args, **kwargs)
         if '--verify-rebind-session' in args:
+            self.assertEqual(kwargs['input'], b'signed')
             return types.SimpleNamespace(returncode=0, stdout=str(int(time.time())).encode())
         if 'start' in args:
             journal = rebind.AGENT_STATE / 'bindings' / self.state['node'] / 'agent.db'
-            with closing(sqlite3.connect(journal)) as db, db:
-                db.execute('CREATE TABLE IF NOT EXISTS agent_metadata(key TEXT, value BLOB)')
-                db.execute("INSERT INTO agent_metadata VALUES('verified_session_grant', ?)", (b'signed-fixture',))
+            if not journal.exists():
+                self.target_journal(journal)
         return types.SimpleNamespace(returncode=0, stdout=b'')
 
     def commit(self, **options):
@@ -180,11 +198,108 @@ class RebindTests(unittest.TestCase):
 
     def test_old_unknown_survives_and_quarantines_new_mutations(self):
         with closing(sqlite3.connect(self.source['journal'])) as db, db:
-            db.execute("INSERT INTO command_journal VALUES('unknown')")
+            db.execute("INSERT INTO command_journal VALUES('unknown', NULL)")
         self.commit()
         self.assertTrue(rebind.decode_binding(rebind.secure_read(rebind.ACTIVE))['blocked'])
         with closing(sqlite3.connect(self.source['journal'])) as db, db:
             self.assertEqual(db.execute('SELECT state FROM command_journal').fetchone()[0], 'unknown')
+
+    def test_terminal_reconciliation_and_open_artifacts_quarantine(self):
+        initial = dict(self.state)
+        cases = [('failed', 'manual_reconciliation_required', None, True), ('succeeded', None, 'prepared', True),
+                 ('succeeded', None, 'leased', True), ('succeeded', None, 'consumed', False),
+                 ('failed', 'invalid_payload', None, False)]
+        for state, error, artifact, blocked in cases:
+            with self.subTest(state=state, error=error, artifact=artifact):
+                self.state = dict(initial)
+                for path in (Path(self.source['journal']), Path(self.source['effects'])):
+                    path.unlink(missing_ok=True)
+                self.agent_database(self.source['journal'], 'CREATE TABLE command_journal(state TEXT, error_code TEXT);'
+                                    "INSERT INTO command_journal VALUES(?, ?)".replace('?, ?', repr(state) + ', ' + (repr(error) if error else 'NULL')))
+                with closing(sqlite3.connect(self.source['effects'])) as db, db:
+                    db.executescript('CREATE TABLE authorized_effects(state TEXT); CREATE TABLE desired_effects(state TEXT);'
+                                     + ('CREATE TABLE certificate_artifacts(state TEXT);'
+                                        + "INSERT INTO certificate_artifacts VALUES('" + artifact + "');" if artifact else ''))
+                before = Path(self.source['journal']).read_bytes()
+                self.commit()
+                self.assertEqual(self.state['mutations_blocked'], blocked)
+                self.assertEqual(rebind.decode_binding(rebind.secure_read(rebind.ACTIVE))['blocked'], blocked)
+                self.assertEqual(Path(self.source['journal']).read_bytes(), before)
+
+    def test_agent_journal_is_never_opened_by_root(self):
+        journal = Path(self.source['journal'])
+        with self.assertRaisesRegex(RuntimeError, 'unprivileged'):
+            rebind.read_agent_journal('unresolved', journal)
+        self.assertFalse(rebind.journal_unresolved(journal, self.account))
+        # A root-only database that would report no work and a grant if root opened it.
+        sentinel = self.root / 'root-only.db'
+        with closing(sqlite3.connect(sentinel)) as db, db:
+            db.executescript("CREATE TABLE command_journal(state TEXT, error_code TEXT);"
+                             "CREATE TABLE agent_metadata(key TEXT, value BLOB);"
+                             "INSERT INTO agent_metadata VALUES('verified_session_grant', x'7369676e6564');")
+        sentinel.chmod(0o600)
+        content = sentinel.read_bytes()
+        moved = self.root / 'moved-agent'
+        def symlink():
+            journal.unlink()
+            journal.symlink_to(sentinel)
+        def hardlink():
+            os.link(journal, rebind.AGENT_STATE / 'alias.db')
+        def fifo():
+            journal.unlink()
+            os.mkfifo(journal)
+            os.chown(journal, 1000, 1000)
+        def parent():
+            rebind.AGENT_STATE.rename(moved)
+            rebind.AGENT_STATE.symlink_to(moved, target_is_directory=True)
+        def corrupt():
+            journal.write_bytes(b'not a database' * 100)
+        def root_owned():
+            os.chown(journal, 0, 0)
+        for substitute in (symlink, hardlink, fifo, parent, corrupt, root_owned):
+            with self.subTest(substitute=substitute.__name__):
+                substitute()
+                self.assertTrue(rebind.journal_unresolved(journal, self.account))
+                with self.assertRaises(RuntimeError):
+                    rebind.agent_journal('session-grant', journal, self.account)
+                self.assertEqual(sentinel.read_bytes(), content)
+                # Restore a legitimate journal for the next substitution.
+                if rebind.AGENT_STATE.is_symlink():
+                    rebind.AGENT_STATE.unlink()
+                    moved.rename(rebind.AGENT_STATE)
+                for path in (journal, rebind.AGENT_STATE / 'alias.db'):
+                    if path.is_symlink() or path.exists():
+                        path.unlink()
+                self.agent_database(journal, 'CREATE TABLE command_journal(state TEXT, error_code TEXT)')
+                self.assertFalse(rebind.journal_unresolved(journal, self.account))
+
+    def test_substituted_or_oversized_target_grant_is_never_verified(self):
+        sentinel = self.root / 'root-only.db'
+        with closing(sqlite3.connect(sentinel)) as db, db:
+            db.executescript("CREATE TABLE agent_metadata(key TEXT, value BLOB);"
+                             "INSERT INTO agent_metadata VALUES('verified_session_grant', x'7369676e6564');")
+        sentinel.chmod(0o600)
+        journal = rebind.AGENT_STATE / 'bindings' / self.state['node'] / 'agent.db'
+        legitimate = self.target_journal
+        def substitute(path):
+            path.symlink_to(sentinel)
+        def oversized(path):
+            self.agent_database(path, 'CREATE TABLE agent_metadata(key TEXT, value BLOB);'
+                                      "INSERT INTO agent_metadata VALUES('verified_session_grant', randomblob("
+                                      + str(rebind.GRANT_LIMIT + 1) + '));')
+        for fixture in (substitute, oversized):
+            with self.subTest(fixture=fixture.__name__):
+                self.target_journal = fixture
+                with patch.object(rebind.time, 'monotonic', side_effect=[0, 0, 61]), \
+                     patch.object(rebind.time, 'sleep'):
+                    with self.assertRaisesRegex(RuntimeError, 'target session not verified'):
+                        self.commit()
+                self.assertEqual(self.state['phase'], 'committed')
+                journal.unlink()
+        # Restoring a legitimate Agent journal resumes the signed verification.
+        self.target_journal = legitimate
+        self.commit()
+        self.assertEqual(self.state['phase'], 'verified')
 
     def test_unresolved_root_effect_quarantines_even_with_empty_agent_journal(self):
         with closing(sqlite3.connect(self.source['effects'])) as db, db:

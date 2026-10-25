@@ -113,7 +113,10 @@ delivered exclusively to root provisioning. The operator runs the installed
 root-only helper
 `ocservia-privd attestation-registration <key-path> <node-uuidv7> <controller-nonce-hex> <credential-context-sha256-hex>`
 and submits its public JSON output alongside the one-time credential to the
-Controller registration endpoint. Shipping this helper inside the `ocservia-privd`
+Controller registration endpoint. That unauthenticated endpoint has its own
+per-process budget, independent of OIDC: 30 requests per source and 120 in total
+per minute with at most 4 in flight, refused with `429` and `Retry-After`
+before any body parsing or database work. Shipping this helper inside the `ocservia-privd`
 binary guarantees that verified package installs and rollbacks never lack the
 provisioning tool. Because the Agent cannot read the key or credential, it
 cannot register a self-chosen key. Key rotation provisions a new key path and
