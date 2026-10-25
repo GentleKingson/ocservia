@@ -131,7 +131,7 @@ docker exec -e PGPASSWORD="${password}" "${source_container}" psql -At -U postgr
 provenance_sql="SELECT jsonb_build_object('journal',(SELECT jsonb_agg(to_jsonb(r) ORDER BY epoch,revision) FROM schema_revisions r))"
 expected_receipt="$(sha256sum "${ROOT}/control-plane/migrations/schema.sql" | cut -d' ' -f1)"
 source_coverage="$(docker exec "${source_container}" psql -X -At -v ON_ERROR_STOP=1 -U postgres -d ocservia \
-  -c "SELECT to_regclass('public.schema_snapshot_origin') IS NULL AND to_regclass('public.schema_migrations') IS NULL AND (SELECT count(*)=1 AND bool_and(epoch=2 AND revision=0 AND checksum=decode('${expected_receipt}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions)")"
+  -c "SELECT to_regclass('public.schema_snapshot_origin') IS NULL AND to_regclass('public.schema_migrations') IS NULL AND (SELECT count(*)=1 AND bool_and(epoch=2 AND revision=1 AND checksum=decode('${expected_receipt}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions)")"
 [[ "${source_coverage}" == t ]] || { echo "source was not initialized with a verified journal checkpoint" >&2; exit 1; }
 docker exec "${source_container}" psql -X -At -v ON_ERROR_STOP=1 -U postgres -d ocservia \
   -c "${provenance_sql}" >"${ARTIFACT_DIR}/source-schema-provenance.json"
@@ -198,7 +198,7 @@ docker run --rm --network "${egress_network}" \
   -v "${work}/tls/ca.crt:/run/secrets/database_ca:ro" --entrypoint psql "${backup_image}" \
   "postgres://ocservia_app:${runtime_password}@${gateway}:${restore_port}/ocservia?sslmode=verify-full&sslrootcert=/run/secrets/database_ca" \
   -X -At -v ON_ERROR_STOP=1 \
-  -c "SELECT current_user='ocservia_app' AND EXISTS(SELECT 1 FROM identities WHERE subject='restore-probe') AND EXISTS(SELECT 1 FROM schema_revisions WHERE epoch=2 AND revision=0 AND state='verified') AND NOT has_schema_privilege(current_user,'public','CREATE') AND NOT has_table_privilege(current_user,'schema_revisions','INSERT,UPDATE,DELETE') AND NOT has_function_privilege(current_user,'telemetry_ensure_month_partition(timestamptz)','EXECUTE')" \
+  -c "SELECT current_user='ocservia_app' AND EXISTS(SELECT 1 FROM identities WHERE subject='restore-probe') AND EXISTS(SELECT 1 FROM schema_revisions WHERE epoch=2 AND revision=1 AND state='verified') AND NOT has_schema_privilege(current_user,'public','CREATE') AND NOT has_table_privilege(current_user,'schema_revisions','INSERT,UPDATE,DELETE') AND NOT has_function_privilege(current_user,'telemetry_ensure_month_partition(timestamptz)','EXECUTE')" \
   >"${ARTIFACT_DIR}/restored-runtime-read.log"
 [[ "$(cat "${ARTIFACT_DIR}/restored-runtime-read.log")" == t ]] || { echo "restored runtime read or privilege boundary failed" >&2; exit 1; }
 restored="$(docker exec "${restore_container}" psql -At -U postgres -d ocservia -c "SELECT subject FROM identities WHERE subject='restore-probe'")"

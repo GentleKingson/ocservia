@@ -24,6 +24,10 @@ var upgradeSQL []byte
 const checkpointRef = "v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483"
 const checkpointChecksum = "d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172"
 
+// Revision 0 bound the released cutover through history-sha256; once later
+// revisions take over that header, this pin keeps the transition immutable.
+const transitionChecksum = "970d63e2b1845808d8d49885bf90b2a133b4cf28fa08c336b0a45ff7e51cb5bd"
+
 type postgresArtifacts struct {
 	schema, upgrade schemaartifact.Artifact
 }
@@ -58,6 +62,9 @@ func parsePostgresArtifacts(schema, upgrade []byte) (postgresArtifacts, error) {
 		return a, errors.New("PostgreSQL artifact window mismatch")
 	}
 	if a.schema.Epoch > 1 && a.schema.Baseline.Number == 0 && a.schema.HistoryChecksum != fmt.Sprintf("%x", a.upgrade.Transition.Checksum) {
+		return a, errors.New("PostgreSQL transition checksum mismatch")
+	}
+	if a.schema.Epoch > 1 && a.schema.Baseline.Number > 0 && fmt.Sprintf("%x", a.upgrade.Transition.Checksum) != transitionChecksum {
 		return a, errors.New("PostgreSQL transition checksum mismatch")
 	}
 	if a.schema.Baseline.Number > 0 {

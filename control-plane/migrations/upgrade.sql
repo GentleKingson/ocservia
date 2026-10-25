@@ -18,3 +18,11 @@ DROP TABLE public.schema_migrations, public.schema_snapshot_origin;
 DELETE FROM public.schema_revisions WHERE epoch=1;
 -- ocservia:end-step
 -- ocservia:end-transition
+-- ocservia:revision=1
+-- ocservia:checkpoint={"checksum":"672fe4b774df7ff5145be3a6cc78334aee33894a494de24d7a3162c67647b4c2","steps":1}
+-- ocservia:step=001:local_auth_attempt_purpose_keys
+-- ocservia:metadata={"catalog_sha256":"24b043c5ad24ba23900a65a537b4c6f2c1c769a0a07b8899c2caeb81af43cc69"}
+-- Password changes keep attempt state apart from login names (see authstore).
+ALTER TABLE public.local_auth_attempts DROP CONSTRAINT local_auth_attempts_username_check, ADD CONSTRAINT local_auth_attempts_username_check CHECK (((octet_length(username) >= 1) AND (octet_length(username) <= 128) AND (((username COLLATE "C") ~ '^[a-z0-9][a-z0-9._-]*$'::text) OR ((username COLLATE "C") ~ '^password-change:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text))));
+-- ocservia:end-step
+-- ocservia:end-revision

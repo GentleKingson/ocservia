@@ -13,6 +13,13 @@ import (
 
 var ErrAttemptCapacity = errors.New("Local authentication attempt capacity exhausted")
 
+// PasswordChangeAttemptKey keys an authenticated password change's attempt
+// state apart from anonymous login. The colon is outside the Local username
+// alphabet, so no login name can collide with this namespace.
+func PasswordChangeAttemptKey(identity uuid.UUID) string {
+	return "password-change:" + identity.String()
+}
+
 type Credential struct {
 	ID       uuid.UUID
 	Hash     string

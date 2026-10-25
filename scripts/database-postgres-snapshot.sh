@@ -43,7 +43,10 @@ first,cleanup=transition.split('-- ocservia:step=002:legacy_cleanup\n',1)
 # All SQL comes from the two active artifacts; journal publication precedes
 # the encoded cleanup statement, in the same PostgreSQL transaction.
 receipt="INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(2,0,decode('%s','hex'),'verified',%d,now());\n"%(base['checksum'],base['steps'])
-pathlib.Path(sys.argv[2]).write_text('BEGIN;\n'+first+receipt+cleanup+'COMMIT;\n')
+# Forward revisions follow in file order; their receipts are runtime history,
+# not schema, so only their SQL steps are replayed.
+forward=''.join(re.findall(r'^-- ocservia:step=\d{3}:\w+\n(?:-- ocservia:metadata=[^\n]*\n)?(.*?)^-- ocservia:end-step$',upgrade[upgrade.index('-- ocservia:end-transition'):],re.M|re.S))
+pathlib.Path(sys.argv[2]).write_text('BEGIN;\n'+first+receipt+cleanup+forward+'COMMIT;\n')
 PY_REPLAY
 psql < "$tmp/replay.sql" >/dev/null
 # There are no business rows in this isolated replay. Calendar partitions are
@@ -94,7 +97,12 @@ metadata=json.dumps({'catalog_sha256':catalog},separators=(',',':'))
 upgrade=(root/'upgrade.sql').read_text()
 transition=upgrade[upgrade.index('-- ocservia:step=001:checkpoint'):upgrade.index('-- ocservia:end-transition')]
 history=hashlib.sha256(transition.encode()).hexdigest()
-sql='-- ocservia:artifact=schema\n-- ocservia:format=1\n-- ocservia:engine=postgresql\n-- ocservia:epoch=2\n-- ocservia:revision=0\n-- ocservia:history-sha256='+history+'\n\n-- ocservia:step=001:baseline\n-- ocservia:metadata='+metadata+'\n'+sql+'-- ocservia:end-step\n'
+# A revision block hash excludes its own checkpoint receipt (artifact format 1).
+revisions=re.findall(r'^-- ocservia:revision=\d+\n(?:-- ocservia:checkpoint=[^\n]*\n)?(.*?)^-- ocservia:end-revision$',upgrade,re.M|re.S)
+if revisions:
+ base=json.loads(re.search(r'^-- ocservia:baseline=(.+)$',upgrade,re.M).group(1))
+ history=hashlib.sha256(('postgresql\t2\t'+base['checksum']+'\n'+''.join('%d\t%s\n'%(i+1,hashlib.sha256(block.encode()).hexdigest()) for i,block in enumerate(revisions))).encode()).hexdigest()
+sql='-- ocservia:artifact=schema\n-- ocservia:format=1\n-- ocservia:engine=postgresql\n-- ocservia:epoch=2\n-- ocservia:revision='+str(len(revisions))+'\n-- ocservia:history-sha256='+history+'\n\n-- ocservia:step=001:baseline\n-- ocservia:metadata='+metadata+'\n'+sql+'-- ocservia:end-step\n'
 (tmp/'schema.sql').write_text(sql)
 
 PY
@@ -143,7 +151,16 @@ if [[ "$mode" == generate ]]; then
 import hashlib,pathlib,re,sys
 root=pathlib.Path(sys.argv[1]);upgrade=root/'upgrade.sql'
 digest=hashlib.sha256((root/'schema.sql').read_bytes()).hexdigest()
-upgrade.write_text(re.sub(r'(-- ocservia:baseline=\{"checksum":")[a-f0-9]{64}',r'\g<1>'+digest,upgrade.read_text(),count=1))
+text=upgrade.read_text()
+# The current schema is pinned by the last revision's checkpoint, or by the
+# baseline while no forward revision exists. Earlier receipts stay immutable.
+checkpoints=list(re.finditer(r'(-- ocservia:checkpoint=\{"checksum":")[a-f0-9]{64}',text))
+if checkpoints:
+ last=checkpoints[-1]
+ text=text[:last.start()]+last.group(1)+digest+text[last.end():]
+else:
+ text=re.sub(r'(-- ocservia:baseline=\{"checksum":")[a-f0-9]{64}',r'\g<1>'+digest,text,count=1)
+upgrade.write_text(text)
 PY_BASELINE
 fi
 echo 'PostgreSQL bounded artifacts: pinned v1.2.0 upgrade and fresh schema/ACL/seed equivalence PASS'

@@ -157,7 +157,7 @@ fi
 # A checksum-valid dump with dirty provenance must fail the state summary.
 mkdir "${work}/schema-invalid"
 cp -a "${backup_dir}/." "${work}/schema-invalid/"
-printf "\nUSE ocservia; UPDATE schema_revisions SET state='running',verified_at=NULL WHERE epoch=2 AND revision=2;\n" >>"${work}/schema-invalid/database.sql"
+printf "\nUSE ocservia; UPDATE schema_revisions SET state='running',verified_at=NULL WHERE epoch=2 AND revision=3;\n" >>"${work}/schema-invalid/database.sql"
 (cd "${work}/schema-invalid" && sha256sum database.sql metadata >SHA256SUMS)
 docker exec "${target_container}" "${CLIENT}" -uroot -p"${password}" -e 'DROP DATABASE ocservia'
 set +e
@@ -202,7 +202,7 @@ controller_migrate source >"${ARTIFACT_DIR}/snapshot-initialize.log" 2>&1
 foundation source check >"${ARTIFACT_DIR}/snapshot-source-check.log" 2>&1
 snapshot_checksum="$(foundation source schema-artifact-checksum)"
 source_checksum="$(docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -Nse \
-  "SELECT checksum FROM snapshot_restore.schema_revisions WHERE epoch=2 AND revision=2 AND state='verified'")"
+  "SELECT checksum FROM snapshot_restore.schema_revisions WHERE epoch=2 AND revision=3 AND state='verified'")"
 [[ "${source_checksum}" == "${snapshot_checksum}" ]]
 docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -e \
   "INSERT INTO snapshot_restore.identities(id,issuer,subject,created_at,updated_at) VALUES(UNHEX(REPEAT('11',16)),'backup-test','snapshot-restore-marker',0,0); UPDATE snapshot_restore.scheduler_leadership SET lease_until=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))-1000000 WHERE id=1;"
@@ -246,7 +246,7 @@ cmp "${ARTIFACT_DIR}/snapshot-source-receipts.txt" "${ARTIFACT_DIR}/snapshot-res
   "SELECT subject FROM snapshot_restore.identities WHERE id=UNHEX(REPEAT('11',16))")" == snapshot-restore-marker ]]
 runtime_read="$(docker exec -e MYSQL_PWD=snapshot-test-only "${target_container}" "${CLIENT}" \
   --protocol=TCP -h127.0.0.1 -usnapshot_runtime --database=snapshot_restore -Nse \
-  "SELECT subject FROM identities WHERE id=UNHEX(REPEAT('11',16)); SELECT COUNT(*) FROM schema_revisions WHERE epoch=2 AND revision=2 AND state='verified';")"
+  "SELECT subject FROM identities WHERE id=UNHEX(REPEAT('11',16)); SELECT COUNT(*) FROM schema_revisions WHERE epoch=2 AND revision=3 AND state='verified';")"
 [[ "${runtime_read}" == $'snapshot-restore-marker\n1' ]]
 printf '%s\n' "${runtime_read}" >"${ARTIFACT_DIR}/snapshot-runtime-read.log"
 if docker exec -e MYSQL_PWD=snapshot-test-only "${target_container}" "${CLIENT}" \

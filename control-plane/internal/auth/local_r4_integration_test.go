@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -107,14 +108,27 @@ func TestLocalR4ConcurrencyIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	changeKey := authstore.PasswordChangeAttemptKey(memberID)
 	var blocked bool
-	if err := pool.QueryRow(ctx, `SELECT failures=5 AND blocked_until>clock_timestamp() FROM local_auth_attempts WHERE username=$1`, userName).Scan(&blocked); err != nil || !blocked {
+	if err := pool.QueryRow(ctx, `SELECT failures=5 AND blocked_until>clock_timestamp() FROM local_auth_attempts WHERE username=$1`, changeKey).Scan(&blocked); err != nil || !blocked {
 		t.Fatalf("self change backoff: %v %v", blocked, err)
 	}
-	exec(`UPDATE local_auth_attempts SET blocked_until='-infinity' WHERE username=$1`, userName)
+	// Login and password-change failures are separate budgets in both directions.
+	if _, _, err := s.AuthenticateLocal(ctx, userName, password); err != nil {
+		t.Fatalf("password-change backoff locked login: %v", err)
+	}
+	for range 5 {
+		if _, _, err := s.AuthenticateLocal(ctx, userName, "incorrect-login-secret"); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatal(err)
+		}
+	}
+	if err := pool.QueryRow(ctx, `SELECT failures=5 AND blocked_until>clock_timestamp() FROM local_auth_attempts WHERE username=$1`, userName).Scan(&blocked); err != nil || !blocked {
+		t.Fatalf("anonymous login backoff: %v %v", blocked, err)
+	}
+	exec(`UPDATE local_auth_attempts SET blocked_until='-infinity' WHERE username=$1`, changeKey)
 	exec(`ALTER TABLE audit_events ADD CONSTRAINT r4_fail_password CHECK(action<>'local_user.change-password') NOT VALID`)
-	if err := s.ChangeLocalPassword(ctx, member, password, "r4-new-member-password", uuid.NewString()); err == nil {
-		t.Fatal("audit failure committed password")
+	if err := s.ChangeLocalPassword(ctx, member, password, "r4-new-member-password", uuid.NewString()); err == nil || errors.Is(err, ErrLocalAccountLimited) {
+		t.Fatalf("audit failure committed password or login lockout blocked change: %v", err)
 	}
 	if _, err := s.Authenticate(ctx, cookie); err != nil {
 		t.Fatalf("audit rollback session: %v", err)

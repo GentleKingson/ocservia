@@ -158,6 +158,38 @@ func assertMaintenanceClock(t *testing.T, owner *Backend, options Options) {
 	}
 }
 
+// revisionTwoText reverses revision 3's single username CHECK change. The
+// pinned revision-2 checkpoint proves the bytes are the original file.
+func revisionTwoText(t *testing.T, current mysqlArtifacts) (schema, upgrade string) {
+	t.Helper()
+	currentSchema, _ := artifactSources.ReadFile("mysql/schema.sql")
+	currentUpgrade, _ := artifactSources.ReadFile("mysql/upgrade.sql")
+	upgrade, _, found := strings.Cut(string(currentUpgrade), "-- ocservia:revision=3\n")
+	if !found {
+		t.Fatal("revision 3 missing")
+	}
+	meta := current.meta(current.upgrade.Revisions[2].Steps[0])
+	schema = regexp.MustCompile(`"after":"`+meta.After+`"(,"roundtrip_hash":"[0-9a-f]{64}")?`).ReplaceAllLiteralString(string(currentSchema), `"after":"`+meta.Before+`"`)
+	schema = strings.NewReplacer(
+		"(regexp_like(`username`,_utf8mb4'(?-i)\\\\A[a-z0-9][a-z0-9._-]*\\\\z') or regexp_like(`username`,_utf8mb4'(?-i)\\\\Apassword-change:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\\\z')))),",
+		"regexp_like(`username`,_utf8mb4'(?-i)\\\\A[a-z0-9][a-z0-9._-]*\\\\z'))),",
+		"-- ocservia:revision=3\n", "-- ocservia:revision=2\n",
+	).Replace(schema)
+	parsed, err := schemaartifact.Parse([]byte(upgrade), "mysql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := schemaartifact.HistoryChecksum(parsed, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema = regexp.MustCompile(`(?m)^-- ocservia:history-sha256=.*$`).ReplaceAllString(schema, "-- ocservia:history-sha256="+history)
+	if digest([]byte(schema)) != current.upgrade.Revisions[1].Checkpoint.Checksum {
+		t.Fatal("reconstructed revision-2 schema differs from its pinned checkpoint")
+	}
+	return schema, upgrade
+}
+
 // revisionOneArtifacts reconstructs the last schema/upgrade pair before the
 // logical-clock revision by reversing exactly that revision's three object
 // bodies. The pinned revision-1 checkpoint proves the bytes are the original
@@ -168,16 +200,14 @@ func revisionOneArtifacts(t *testing.T) (schema, upgrade []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(current.upgrade.Revisions) != 2 {
-		t.Fatal("revision-1 reconstruction is only valid while revision 2 is the head")
+	if len(current.upgrade.Revisions) != 3 {
+		t.Fatal("revision-1 reconstruction is only valid while revision 3 is the head")
 	}
-	currentSchema, _ := artifactSources.ReadFile("mysql/schema.sql")
-	currentUpgrade, _ := artifactSources.ReadFile("mysql/upgrade.sql")
-	upgradeText, _, found := strings.Cut(string(currentUpgrade), "-- ocservia:revision=2\n")
+	text, currentUpgrade := revisionTwoText(t, current)
+	upgradeText, _, found := strings.Cut(currentUpgrade, "-- ocservia:revision=2\n")
 	if !found {
 		t.Fatal("revision 2 missing")
 	}
-	text := string(currentSchema)
 	for _, create := range current.upgrade.Revisions[1].Steps {
 		meta := current.meta(create)
 		if meta.Kind == "data" || meta.Before != "" {
@@ -248,12 +278,14 @@ func TestMySQLForwardRevisionMaintenanceClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := baselineReceipts(t, old)
-	head, err := ArtifactChecksum(MySQL, "upgrade", 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(after) != 2 || after[0] != prior[0] || !strings.HasPrefix(after[1], "2:2:"+head+":verified:") {
-		t.Fatal("receipts rewritten or revision 2 missing", prior, after)
+	for revision := int64(2); revision <= 3; revision++ {
+		head, err := ArtifactChecksum(MySQL, "upgrade", revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(after) != 3 || after[0] != prior[0] || !strings.HasPrefix(after[revision-1], fmt.Sprintf("2:%d:%s:verified:", revision, head)) {
+			t.Fatal("receipts rewritten or forward revision missing", prior, after)
+		}
 	}
 
 	fresh, _, _ := migrateFixture(t)
@@ -276,7 +308,7 @@ func TestMySQLFreshMaintenanceClock(t *testing.T) {
 	}
 	assertMaintenanceClock(t, b, options)
 	var count int
-	if err := b.QueryRow(context.Background(), "SELECT COUNT(*) FROM schema_revisions WHERE epoch=2 AND revision=2 AND state='verified'").Scan(&count); err != nil || count != 1 {
-		t.Fatal(fmt.Sprint("fresh revision-2 receipt: ", count, err))
+	if err := b.QueryRow(context.Background(), "SELECT COUNT(*) FROM schema_revisions WHERE epoch=2 AND revision=3 AND state='verified'").Scan(&count); err != nil || count != 1 {
+		t.Fatal(fmt.Sprint("fresh revision-3 receipt: ", count, err))
 	}
 }

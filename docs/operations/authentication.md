@@ -635,7 +635,9 @@ operates independently of the
 Admission tracks attempts in the backend's `local_auth_attempts` table, keyed
 by the normalized Local username (trimmed, lowercased, and validated under the
 existing ASCII and input rules). Known and unknown usernames follow identical
-rules:
+rules. Self-service password changes apply the same policy to a separate
+`password-change:<identity UUID>` row, so login and password-change failures
+never block each other:
 
 | Parameter | Policy |
 | --- | --- |

@@ -2,11 +2,11 @@
 -- ocservia:format=1
 -- ocservia:engine=postgresql
 -- ocservia:epoch=2
--- ocservia:revision=0
--- ocservia:history-sha256=970d63e2b1845808d8d49885bf90b2a133b4cf28fa08c336b0a45ff7e51cb5bd
+-- ocservia:revision=1
+-- ocservia:history-sha256=8e0b43c44948ca4ca559907a6431194858e148d20edc7a796b613354714b8722
 
 -- ocservia:step=001:baseline
--- ocservia:metadata={"catalog_sha256":"096ad0fc5ad94f3d8c93fb94ffb9935b65a40bab31bc15cc84b7961d7755800c"}
+-- ocservia:metadata={"catalog_sha256":"24b043c5ad24ba23900a65a537b4c6f2c1c769a0a07b8899c2caeb81af43cc69"}
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
 SET LOCAL idle_in_transaction_session_timeout = 0;
@@ -784,7 +784,7 @@ CREATE TABLE public.local_auth_attempts (
     lease_until timestamp with time zone DEFAULT '-infinity'::timestamp with time zone CONSTRAINT "local_auth_attempts_lease_until_not_null" NOT NULL,
     expires_at timestamp with time zone CONSTRAINT "local_auth_attempts_expires_at_not_null" NOT NULL,
     CONSTRAINT local_auth_attempts_failures_check CHECK (((failures >= 0) AND (failures <= 14))),
-    CONSTRAINT local_auth_attempts_username_check CHECK (((octet_length(username) >= 1) AND (octet_length(username) <= 128) AND ((username COLLATE "C") ~ '^[a-z0-9][a-z0-9._-]*$'::text)))
+    CONSTRAINT local_auth_attempts_username_check CHECK (((octet_length(username) >= 1) AND (octet_length(username) <= 128) AND (((username COLLATE "C") ~ '^[a-z0-9][a-z0-9._-]*$'::text) OR ((username COLLATE "C") ~ '^password-change:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text))))
 );
 
 CREATE TABLE public.local_auth_bootstrap (

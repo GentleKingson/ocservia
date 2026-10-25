@@ -36,14 +36,17 @@ func (s *Service) ChangeLocalPassword(ctx context.Context, actor Principal, curr
 		}
 		return err
 	}
-	lease, err := s.reserveLocalAttempt(ctx, username)
+	// Anonymous login failures must not block the authenticated owner, so the
+	// current-password guess budget is tracked under its own key.
+	attempt := authstore.PasswordChangeAttemptKey(actor.IdentityID)
+	lease, err := s.reserveLocalAttempt(ctx, attempt)
 	if err != nil {
 		return err
 	}
 	failed, committed := false, false
 	defer func() {
 		if !committed {
-			if err := s.finishLocalAttempt(username, lease, failed); err != nil {
+			if err := s.finishLocalAttempt(attempt, lease, failed); err != nil {
 				resultErr = err
 			}
 		}
@@ -80,12 +83,16 @@ func (s *Service) ChangeLocalPassword(ctx context.Context, actor Principal, curr
 			}
 			return err
 		}
-		cleared, err := store.ClearAttempt(ctx, username, lease)
+		cleared, err := store.ClearAttempt(ctx, attempt, lease)
 		if err != nil {
 			return err
 		}
 		if !cleared {
 			return ErrUnauthenticated
+		}
+		// Fence in-flight login completions for the old credential as well.
+		if err := store.DeleteIdentityAttempts(ctx, id); err != nil {
+			return err
 		}
 		workspaceID, err := store.ManagementWorkspace(ctx)
 		if err != nil {
