@@ -24,7 +24,7 @@ func (s userOperationsStore) ActiveOperations(ctx context.Context) (count int, e
 
 func (s userOperationsStore) ResetCandidates(ctx context.Context, now, month value.Timestamp, limit int) ([]userstore.Candidate, error) {
 	rows, err := s.Query(ctx, `SELECT p.node_id,p.username,p.version,u.version,u.enabled,prior.resulting_user_version
- FROM desired_user_policies p JOIN desired_users u USING(node_id,username)
+ FROM desired_user_policies p JOIN nodes node ON node.id=p.node_id AND node.status IN('active','offline') JOIN desired_users u USING(node_id,username)
  LEFT JOIN observed_user_usage usage ON usage.node_id=p.node_id AND usage.username=p.username AND usage.period='monthly' AND usage.period_start=$1
  JOIN LATERAL (SELECT resulting_user_version FROM user_policy_enforcements prior WHERE prior.node_id=p.node_id AND prior.username=p.username AND prior.policy_version=p.version AND prior.cause='quota' AND prior.period_start<$1 AND prior.operation_id IS NOT NULL ORDER BY prior.period_start DESC LIMIT 1) prior ON true
  WHERE p.quota_period='monthly' AND (p.expires_at IS NULL OR p.expires_at>$2)
@@ -51,7 +51,7 @@ func (s userOperationsStore) EnforcementCandidates(ctx context.Context, now, mon
 	rows, err := s.Query(ctx, `SELECT p.node_id,p.username,p.version,u.version,
  CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END,
  CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END,u.enabled
- FROM desired_user_policies p JOIN desired_users u USING(node_id,username)
+ FROM desired_user_policies p JOIN nodes node ON node.id=p.node_id AND node.status IN('active','offline') JOIN desired_users u USING(node_id,username)
  LEFT JOIN observed_user_usage usage ON usage.node_id=p.node_id AND usage.username=p.username AND usage.period=CASE WHEN p.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND usage.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END
  WHERE ((p.expires_at IS NOT NULL AND p.expires_at<=$1) OR (p.quota_period<>'none' AND CASE p.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=p.quota_bytes::numeric))
  AND (u.enabled=true OR EXISTS(SELECT 1 FROM user_policy_enforcements pending WHERE pending.node_id=p.node_id AND pending.username=p.username AND pending.policy_version=p.version AND pending.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END AND pending.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END AND pending.source_user_version IN(u.version,u.version-1) AND pending.operation_id IS NULL))
