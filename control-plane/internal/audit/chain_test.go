@@ -2,11 +2,63 @@ package audit
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
 )
+
+type verificationBackend struct {
+	database.Backend
+	entered, release chan struct{}
+	calls            atomic.Int32
+	err              error
+}
+
+func (b *verificationBackend) Begin(ctx context.Context, _ database.Isolation) (database.Tx, error) {
+	if b.calls.Add(1) == 1 {
+		close(b.entered)
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, b.err
+}
+
+func TestVerifyAdmissionBeforeDatabase(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	b := &verificationBackend{entered: make(chan struct{}), release: make(chan struct{}), err: errors.New("database begin failure")}
+	first := make(chan error, 1)
+	go func() {
+		_, err := NewBackendManager(b, nil).Verify(ctx, uuid.New())
+		first <- err
+	}()
+	select {
+	case <-b.entered:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	// Different managers and workspaces must share admission before opening SQL.
+	_, concurrentErr := NewBackendManager(b, nil).Verify(ctx, uuid.New())
+	calls := b.calls.Load()
+	close(b.release)
+	if err := <-first; !errors.Is(err, b.err) {
+		t.Fatal("first verification", err)
+	}
+	if concurrentErr == nil || errors.Is(concurrentErr, b.err) || calls != 1 {
+		t.Fatalf("concurrent verification entered database: calls=%d err=%v", calls, concurrentErr)
+	}
+	if _, err := NewBackendManager(b, nil).Verify(ctx, uuid.New()); !errors.Is(err, b.err) || b.calls.Load() != 2 {
+		t.Fatal("failed verification did not release admission", err)
+	}
+}
 
 func TestChainPayloadIsUnambiguous(t *testing.T) {
 	base := ChainRecord{EventID: uuid.Must(uuid.NewV7()), WorkspaceID: uuid.Must(uuid.NewV7()), At: time.Now().UTC(), ActorType: "user", ActorID: "operator", Action: "node.approve", ResourceType: "node", ResourceID: uuid.Must(uuid.NewV7())}
