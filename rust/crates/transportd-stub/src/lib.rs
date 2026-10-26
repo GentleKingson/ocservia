@@ -535,7 +535,11 @@ impl TransportService for StubService {
             ));
         }
         validate_traceparent(&envelope.traceparent)?;
-        validate_command_times(envelope.issued_at.as_ref(), envelope.expires_at.as_ref())?;
+        validate_command_times(
+            envelope.issued_at.as_ref(),
+            envelope.expires_at.as_ref(),
+            envelope.delivery_mode == i32::from(CommandDeliveryMode::ReconcileOnly),
+        )?;
         if CommandDeliveryMode::try_from(envelope.delivery_mode)
             .unwrap_or(CommandDeliveryMode::Unspecified)
             == CommandDeliveryMode::Unspecified
@@ -789,6 +793,7 @@ fn validate_traceparent(value: &str) -> Result<(), Status> {
 fn validate_command_times(
     issued_at: Option<&prost_types::Timestamp>,
     expires_at: Option<&prost_types::Timestamp>,
+    reconcile_only: bool,
 ) -> Result<(), Status> {
     let issued_at = timestamp_duration(
         issued_at.ok_or_else(|| Status::invalid_argument("issued_at is required"))?,
@@ -804,7 +809,7 @@ fn validate_command_times(
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| Status::internal("system time precedes the Unix epoch"))?;
-    if now >= expires_at {
+    if now >= expires_at && !reconcile_only {
         return Err(Status::deadline_exceeded("command envelope expired"));
     }
     Ok(())
