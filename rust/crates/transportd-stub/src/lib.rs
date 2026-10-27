@@ -552,26 +552,35 @@ impl TransportService for StubService {
         let payload = envelope
             .payload
             .ok_or_else(|| Status::invalid_argument("command payload is required"))?;
+        match &payload {
+            command_envelope::Payload::SimulationProbe(probe)
+                if probe.heartbeat_count > MAX_HEARTBEATS
+                    || Duration::from_millis(u64::from(probe.delay_millis)) > MAX_DELAY =>
+            {
+                return Err(Status::invalid_argument("simulation limits exceeded"));
+            }
+            command_envelope::Payload::SyntheticEcho(echo) if echo.message.len() > 4096 => {
+                return Err(Status::invalid_argument(
+                    "synthetic echo exceeds 4096 bytes",
+                ));
+            }
+            command_envelope::Payload::SimulationProbe(_)
+            | command_envelope::Payload::SyntheticNoop(_)
+            | command_envelope::Payload::SyntheticEcho(_) => {}
+            _ => return Err(Status::unimplemented("stub rejects non-synthetic commands")),
+        }
+        if envelope.delivery_mode == i32::from(CommandDeliveryMode::ReconcileOnly) {
+            // This acknowledges delivery, not the existence of a stored result.
+            return Ok(Response::new(SendCommandResponse { accepted: true }));
+        }
         let probe = match payload {
             command_envelope::Payload::SimulationProbe(probe) => probe,
-            command_envelope::Payload::SyntheticNoop(_) => {
-                return self.accept_synthetic(idempotency_key).await;
-            }
-            command_envelope::Payload::SyntheticEcho(echo) => {
-                if echo.message.len() > 4096 {
-                    return Err(Status::invalid_argument(
-                        "synthetic echo exceeds 4096 bytes",
-                    ));
-                }
+            command_envelope::Payload::SyntheticNoop(_)
+            | command_envelope::Payload::SyntheticEcho(_) => {
                 return self.accept_synthetic(idempotency_key).await;
             }
             _ => return Err(Status::unimplemented("stub rejects non-synthetic commands")),
         };
-        if probe.heartbeat_count > MAX_HEARTBEATS
-            || Duration::from_millis(u64::from(probe.delay_millis)) > MAX_DELAY
-        {
-            return Err(Status::invalid_argument("simulation limits exceeded"));
-        }
         let mut accepted = self.state.accepted_commands.lock().await;
         if accepted.keys.contains(&idempotency_key) {
             return Ok(Response::new(SendCommandResponse { accepted: true }));
@@ -869,7 +878,7 @@ fn new_traceparent() -> String {
 mod tests {
     use super::*;
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        CommandEnvelope, SemanticPayloadHashVersion,
+        CommandEnvelope, SemanticPayloadHashVersion, SyntheticEcho, SyntheticNoop,
     };
     use tokio_stream::StreamExt;
 
@@ -965,6 +974,75 @@ mod tests {
             .expect_err("expired command rejected");
         assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
         assert!(service.state.accepted_commands.lock().await.keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_only_observes_without_accepting_or_running_commands() {
+        for expired in [true, false] {
+            for payload in [
+                command_envelope::Payload::SyntheticNoop(SyntheticNoop {}),
+                command_envelope::Payload::SyntheticEcho(SyntheticEcho {
+                    message: "test".to_owned(),
+                }),
+                command_envelope::Payload::SimulationProbe(SimulationProbe {
+                    heartbeat_count: 1,
+                    delay_millis: 0,
+                    duplicate_event: false,
+                    return_error: false,
+                    disconnect_after: false,
+                }),
+            ] {
+                let service = StubService::new(8);
+                let node_id = Uuid::now_v7().as_bytes().to_vec();
+                let key = Uuid::now_v7().as_bytes().to_vec();
+                let mut execute = probe_request(node_id, key);
+                let mut envelope = CommandEnvelope::decode(execute.command_envelope.as_slice())
+                    .expect("valid command envelope");
+                envelope.payload = Some(payload);
+                execute.command_envelope = envelope.encode_to_vec();
+                if expired {
+                    let now = SystemTime::now();
+                    envelope.issued_at = Some((now - Duration::from_mins(2)).into());
+                    envelope.expires_at = Some((now - Duration::from_mins(1)).into());
+                }
+                envelope.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+                let mut request = execute.clone();
+                request.command_envelope = envelope.encode_to_vec();
+                let response = service
+                    .send_command(Request::new(request.clone()))
+                    .await
+                    .expect("observe");
+                assert!(response.into_inner().accepted);
+                tokio::task::yield_now().await;
+                let stats = service.stats().await;
+                assert_eq!(stats.accepted_commands, 0);
+                assert_eq!(stats.active_tasks, 0);
+                assert_eq!(stats.retained_events, 0);
+                assert_eq!(stats.connected_nodes, 0);
+
+                let response = service
+                    .send_command(Request::new(execute))
+                    .await
+                    .expect("ordinary command accepted");
+                assert!(response.into_inner().accepted);
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while service.stats().await.active_tasks != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("ordinary command completed");
+                let before = service.stats().await;
+                assert_eq!(before.accepted_commands, 1);
+                let response = service
+                    .send_command(Request::new(request))
+                    .await
+                    .expect("observe existing command");
+                assert!(response.into_inner().accepted);
+                tokio::task::yield_now().await;
+                assert_eq!(service.stats().await, before);
+            }
+        }
     }
 
     #[test]
