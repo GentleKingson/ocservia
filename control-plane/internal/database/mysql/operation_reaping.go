@@ -60,9 +60,9 @@ func (s operationStore) ExpiredSendingCommands(ctx context.Context, limit int) (
 
 func (s operationStore) LockExpiredSendingCommand(ctx context.Context, id uuid.UUID) (v operationstore.RecoveryCommand, err error) {
 	v.CommandID = id
-	err = s.QueryRow(ctx, `SELECT c.operation_id,c.node_id,c.envelope,o.id,a.id,c.state,p.state,o.attempts
+	err = s.QueryRow(ctx, `SELECT c.operation_id,c.node_id,c.envelope,o.id,a.id,c.state,p.state,o.attempts,c.expires_at
 		FROM outbox_events o JOIN commands c ON c.id=o.command_id`+reapingSendingJoins+` WHERE c.id=? AND `+reapingSendingPredicate+` FOR UPDATE`, UUIDBytes(id)).
-		Scan(&v.OperationID, &v.NodeID, &v.Envelope, &v.OutboxID, &v.AttemptID, &v.CommandState, &v.OperationState, &v.Attempts)
+		Scan(&v.OperationID, &v.NodeID, &v.Envelope, &v.OutboxID, &v.AttemptID, &v.CommandState, &v.OperationState, &v.Attempts, &v.ExpiresAt)
 	return
 }
 

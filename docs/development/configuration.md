@@ -80,9 +80,9 @@ revision is tracked separately from the applied configuration revision, an
 never reuses an earlier number. Privd durably binds
 `config_apply / ocserv.conf / desired_revision` to the command ID, idempotency
 key, and semantic hash so applied and rolled-back evidence remains valid even
-after the command's authorization proof expires. While a refreshed
-authorization signature can extend the window for observation-based
-reconciliation, authorization expiry is only admission metadata; neither
+after the command's authorization proof expires. Recovery can extend the
+database observation window while retaining the original signed execution
+deadline, as described in [command recovery](command-reliability.md). Neither
 matching file contents nor a reconstructed Agent journal can make an expired
 command authorization executable again.
 

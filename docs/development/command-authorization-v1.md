@@ -1,6 +1,6 @@
 # Controller command authorization v1
 
-Under command protocol `1.1`, every command accepted by an Agent must carry an
+Under command protocols `1.1` and `1.2`, every command accepted by an Agent must carry an
 Ed25519 authorization signed by the Controller. When forwarding a command,
 `transportd` checks the bounded Protobuf wire schema, the negotiated session
 mode, capability, revision, and expiry, and uses its pinned Controller public
@@ -46,7 +46,7 @@ the order below:
 | domain | ASCII `ocservia/controller-command/v1`, followed by `0x00` |
 | authorization version | unsigned 32-bit integer, big-endian; v1 is `1` |
 | `key_id` | unsigned 32-bit big-endian UTF-8 byte length, then exact UTF-8 bytes |
-| command protocol version | length-prefixed UTF-8; v1 requires `1.1` |
+| command protocol version | length-prefixed UTF-8; current `1.2`, historical `1.1` |
 | `command_id` | exactly 16 UUID bytes in network order |
 | `idempotency_key` | exactly 16 UUID bytes in network order |
 | `node_id` | exactly 16 UUID bytes in network order |

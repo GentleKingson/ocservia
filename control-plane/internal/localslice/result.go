@@ -456,6 +456,9 @@ func scheduleCommandRecovery(ctx context.Context, store resultstore.ResultStore,
 		return nil
 	}
 	if mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT {
+		if envelope.GetProtocolVersion() != commandauth.ProtocolVersion {
+			return nil
+		}
 		expiresAt := envelope.GetExpiresAt()
 		if expiresAt == nil || expiresAt.CheckValid() != nil || !expiresAt.AsTime().After(observedAt) {
 			return nil
