@@ -101,3 +101,9 @@
 - 默认分支为 `main`，PR 通常面向 `main`；分支名沿用现有 `<type>/<slug>` 或代理前缀（如 `claude/`、`codex/`）习惯。
 - 提交信息和 PR 标题使用现有 `type(scope): summary` 风格（如 `fix(release): ...`、`docs(readme): ...`）。
 - 推送、创建或合并 PR、打 tag 和发布须有第 1 节所述的对应授权；CI 结果须对应实际候选 SHA。
+
+## Cursor Cloud specific instructions
+
+- 锁定的 Go、Node 和 Rust 由 `make bootstrap` 装到仓库内 `.tools`（版本以 `toolchains.lock` 为准）。跑这些工具或仓库检查脚本前先 `source scripts/env.sh`。基础镜像自带的 Node 和 Rust 不是锁定版本。
+- 这个环境没有 systemd。`start` 在 `dockerd` 未就绪时启动它（`/etc/docker/daemon.json` 使用 `fuse-overlayfs`，iptables 使用 legacy），再执行 `deploy/compose/compose.sh up -d --wait`。本地控制台是 `http://127.0.0.1:4173`，Controller 的 `/readyz` 和 `/version` 在 `http://127.0.0.1:8080`。开发请求使用 `deploy/compose/compose.yaml` 里的 `OCSERV_DEV_AUTH_TOKEN`；这个 Compose 栈不创建本地管理员密码。
+- 日常检查用 `scripts/web-check.sh basic` 和 `scripts/go-check.sh standard`。`make verify` 是跨模块宽基线，不启动数据库，也不代替上面的本地栈。
