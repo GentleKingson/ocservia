@@ -17,12 +17,14 @@ use ocservia_agent_protocol::{
 };
 use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
+    FenceBindingClaimsV2, VerifiedConnectionFenceV2,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, CommandDeliveryMode,
-    CommandEnvelope, CommandResultState, FenceOperationKind, PrivdCertificateReceiptBindingV1,
-    PrivdReceiptVersion, PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind,
-    SealedSecretPurpose, SealedSecretVersion, command_envelope,
+    CommandEnvelope, CommandResultState, ConnectionFenceV2, FenceBindingV2, FenceOperationKind,
+    PrivdCertificateReceiptBindingV1, PrivdReceiptVersion, PrivdResultReceiptV1,
+    PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose, SealedSecretVersion,
+    command_envelope,
 };
 use ocservia_ocserv_adapter::{
     Adapter, ArtifactLeaseIdentity, AuthorizedEffectDecision, AuthorizedEffectIdentity,
@@ -40,6 +42,8 @@ use uuid::Uuid;
 
 const MAX_CONCURRENT_CLIENTS: usize = 4;
 const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(30);
+/// Capability every Controller artifact fence binding names (same as the Agent).
+const CONNECTION_FENCING_CAPABILITY: &str = "ocserv.fencing.v2";
 
 /// Privd server configuration.
 #[derive(Clone)]
@@ -506,6 +510,17 @@ fn validate_request<'a>(
                 )
                 .map_err(|failure| authorization_error(&failure))?;
             validate_artifact_claims(&claims)?;
+            verify_artifact_fence(
+                value.connection_fence.as_deref(),
+                value.fence_binding.as_deref(),
+                &claims.artifact_id,
+                node_id,
+                endpoint_id,
+                command_keys,
+                i64::try_from(now.as_secs())
+                    .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
+                now.subsec_nanos(),
+            )?;
             if value.offset > claims.max_bytes {
                 return Err(error(ErrorKind::InvalidRequest, "artifact offset invalid"));
             }
@@ -545,6 +560,17 @@ fn validate_request<'a>(
             }
             .map_err(|failure| authorization_error(&failure))?;
             validate_artifact_claims(&claims)?;
+            verify_artifact_fence(
+                value.connection_fence.as_deref(),
+                value.fence_binding.as_deref(),
+                &claims.grant_id,
+                node_id,
+                endpoint_id,
+                command_keys,
+                i64::try_from(now.as_secs())
+                    .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
+                now.subsec_nanos(),
+            )?;
             if value.sha256.len() != 32 || value.size == 0 || value.size > claims.max_bytes {
                 return Err(error(
                     ErrorKind::InvalidRequest,
@@ -639,10 +665,42 @@ fn verify_execution_fence(
     now_seconds: i64,
     now_nanos: u32,
 ) -> Result<(), PrivdError> {
-    let (Some(fence), Some(binding)) = (
+    let (fence, binding) = verify_fence_carriers(
         command.connection_fence.as_ref(),
         command.fence_binding.as_ref(),
-    ) else {
+        node_id,
+        endpoint_id,
+        command_keys,
+        now_seconds,
+        now_nanos,
+    )?;
+    if binding.operation_kind != FenceOperationKind::Command as u32
+        || binding.operation_id != claims.command_id
+        || binding.capability != claims.required_capability
+        || claims.expected_revision != fence.authorization_revision
+        || !fence.capabilities.contains(&binding.capability)
+        || !binding.matches_fence(&fence)
+    {
+        return Err(error(
+            ErrorKind::PermissionDenied,
+            "connection fence does not authorize this command",
+        ));
+    }
+    Ok(())
+}
+
+/// Verifies the signed owner term and binding carriers against privd's own
+/// clock, pinned node ID and root-provisioned `EndpointID`.
+fn verify_fence_carriers(
+    fence: Option<&ConnectionFenceV2>,
+    binding: Option<&FenceBindingV2>,
+    node_id: &[u8; 16],
+    endpoint_id: &[u8; 32],
+    command_keys: &ControllerCommandKeyring,
+    now_seconds: i64,
+    now_nanos: u32,
+) -> Result<(VerifiedConnectionFenceV2, FenceBindingClaimsV2), PrivdError> {
+    let (Some(fence), Some(binding)) = (fence, binding) else {
         return Err(error(
             ErrorKind::PermissionDenied,
             "signed connection fence and binding required",
@@ -660,16 +718,46 @@ fn verify_execution_fence(
     let binding = command_keys
         .verify_fence_binding_v2_at(binding, node_id, endpoint_id, now_seconds, now_nanos)
         .map_err(|failure| authorization_error(&failure))?;
-    if binding.operation_kind != FenceOperationKind::Command as u32
-        || binding.operation_id != claims.command_id
-        || binding.capability != claims.required_capability
-        || claims.expected_revision != fence.authorization_revision
+    Ok((fence, binding))
+}
+
+/// Artifact reads and consumption are not commands, so the Agent's owner-term
+/// check is re-proven here from the same Controller-signed artifact binding the
+/// Agent verified: fetch binds the artifact ID, consumption binds the grant ID.
+/// ponytail: like `Execute`, an old binding stays usable until its signed owner
+/// lease ends; privd keeps no owner-epoch floor. Each read re-checks the one
+/// dispatch fence, which suffices only while a P12 fits one 256 KiB chunk (the
+/// 256 KiB chain cap with an RSA-4096 key yields ~192 KiB). If artifacts can
+/// span chunks, the Controller must refresh the fence during the transfer.
+#[allow(clippy::too_many_arguments)]
+fn verify_artifact_fence(
+    fence: Option<&ConnectionFenceV2>,
+    binding: Option<&FenceBindingV2>,
+    operation_id: &[u8; 16],
+    node_id: &[u8; 16],
+    endpoint_id: &[u8; 32],
+    command_keys: &ControllerCommandKeyring,
+    now_seconds: i64,
+    now_nanos: u32,
+) -> Result<(), PrivdError> {
+    let (fence, binding) = verify_fence_carriers(
+        fence,
+        binding,
+        node_id,
+        endpoint_id,
+        command_keys,
+        now_seconds,
+        now_nanos,
+    )?;
+    if binding.operation_kind != FenceOperationKind::Artifact as u32
+        || binding.operation_id.as_slice() != operation_id
+        || binding.capability != CONNECTION_FENCING_CAPABILITY
         || !fence.capabilities.contains(&binding.capability)
         || !binding.matches_fence(&fence)
     {
         return Err(error(
             ErrorKind::PermissionDenied,
-            "connection fence does not authorize this command",
+            "connection fence does not authorize this artifact operation",
         ));
     }
     Ok(())
@@ -1949,14 +2037,15 @@ mod tests {
     };
     use ocservia_command_authorization::{
         ConnectionFenceClaimsV2, FENCE_SIGNATURE_VERSION_ED25519_V1, FenceBindingClaimsV2,
-        canonical_connection_fence_v2, canonical_fence_binding_v2, canonical_v1,
-        claims_from_envelope_v1, semantic_payload_hash_v2, verification_key_id,
+        canonical_artifact_grant_v1, canonical_connection_fence_v2, canonical_fence_binding_v2,
+        canonical_v1, claims_from_envelope_v1, semantic_payload_hash_v2, verification_key_id,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        AgentUpgrade, CertificateP12, CommandAuthorizationProof, CommandAuthorizationVersion,
-        CommandDeliveryMode, ConfigApply, ConnectionFenceV2, FenceBindingV2, FenceSignatureVersion,
-        SealedSecretPurpose, SealedSecretV1, SealedSecretVersion, SemanticPayloadHashVersion,
-        ServiceReload, UserCreate, command_envelope,
+        AgentUpgrade, ArtifactGrantV1, ArtifactGrantVersion, CertificateP12,
+        CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode, ConfigApply,
+        ConnectionFenceV2, FenceBindingV2, FenceSignatureVersion, SealedSecretPurpose,
+        SealedSecretV1, SealedSecretVersion, SemanticPayloadHashVersion, ServiceReload, UserCreate,
+        command_envelope,
     };
     use ocservia_ocserv_adapter::{FixedResources, Limits};
     use ocservia_upgrader::UpgradeTrigger;
@@ -2097,6 +2186,7 @@ mod tests {
             key,
             &command,
             &fence,
+            FenceOperationKind::Command,
             &command.command_id,
             &command.required_capability,
         ));
@@ -2167,13 +2257,14 @@ mod tests {
         key: &SigningKey,
         command: &CommandEnvelope,
         fence: &ConnectionFenceV2,
+        operation_kind: FenceOperationKind,
         operation_id: &[u8],
         capability: &str,
     ) -> FenceBindingV2 {
         let claims = FenceBindingClaimsV2 {
             signature_version: FENCE_SIGNATURE_VERSION_ED25519_V1,
             key_id: verification_key_id(&key.verifying_key()),
-            operation_kind: FenceOperationKind::Command as u32,
+            operation_kind: operation_kind as u32,
             operation_id: operation_id.try_into().expect("operation ID"),
             fence_id: fence.fence_id.as_slice().try_into().expect("fence ID"),
             node_id: fence.node_id.as_slice().try_into().expect("node ID"),
@@ -2205,7 +2296,7 @@ mod tests {
         FenceBindingV2 {
             signature_version: FenceSignatureVersion::Ed25519V1.into(),
             key_id: claims.key_id,
-            operation_kind: FenceOperationKind::Command.into(),
+            operation_kind: operation_kind.into(),
             operation_id: claims.operation_id.to_vec(),
             fence_id: claims.fence_id.to_vec(),
             node_id: claims.node_id.to_vec(),
@@ -3297,7 +3388,14 @@ mod tests {
             command_request(changed)
         };
         let bound = |fence: ConnectionFenceV2, operation_id: Vec<u8>, capability: &str| {
-            let binding = signed_binding(&signing, &command, &fence, &operation_id, capability);
+            let binding = signed_binding(
+                &signing,
+                &command,
+                &fence,
+                FenceOperationKind::Command,
+                &operation_id,
+                capability,
+            );
             carried(Some(fence), Some(binding))
         };
         let current = || signed_fence(&signing, &command, [1; 16], TEST_ENDPOINT_ID, (now + 60, 0));
@@ -3308,6 +3406,7 @@ mod tests {
             &signing,
             &command,
             &signed_fence(&signing, &command, [4; 16], TEST_ENDPOINT_ID, (now + 60, 0)),
+            FenceOperationKind::Command,
             &command.command_id,
             &capability,
         );
@@ -3356,6 +3455,118 @@ mod tests {
             std::fs::read_to_string(counter).expect("effect counter"),
             "x"
         );
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn artifact_read_and_consume_require_their_own_unexpired_fence() {
+        let signing = SigningKey::from_bytes(&[12; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let (adapter, _, _, directory) = test_adapter();
+        let claims = ArtifactGrantClaimsV1 {
+            version: 1,
+            key_id: verification_key_id(&signing.verifying_key()),
+            node_id,
+            artifact_id: *Uuid::now_v7().as_bytes(),
+            certificate_id: *Uuid::now_v7().as_bytes(),
+            certificate_version: 1,
+            operation_id: *Uuid::now_v7().as_bytes(),
+            authorized_subject: "user:test".to_owned(),
+            purpose: "certificate_p12".to_owned(),
+            max_bytes: 4096,
+            issued_at_seconds: now - 1,
+            issued_at_nanos: 0,
+            expires_at_seconds: now + 60,
+            expires_at_nanos: 0,
+            grant_id: *Uuid::now_v7().as_bytes(),
+        };
+        let signature = signing.sign(&canonical_artifact_grant_v1(&claims).expect("canonical"));
+        let grant = ArtifactGrantV1 {
+            version: ArtifactGrantVersion::V1.into(),
+            key_id: claims.key_id.clone(),
+            node_id: node_id.to_vec(),
+            artifact_id: claims.artifact_id.to_vec(),
+            certificate_id: claims.certificate_id.to_vec(),
+            certificate_version: claims.certificate_version,
+            operation_id: claims.operation_id.to_vec(),
+            authorized_subject: claims.authorized_subject.clone(),
+            purpose: claims.purpose.clone(),
+            max_bytes: claims.max_bytes,
+            issued_at: Some(Timestamp {
+                seconds: claims.issued_at_seconds,
+                nanos: 0,
+            }),
+            expires_at: Some(Timestamp {
+                seconds: claims.expires_at_seconds,
+                nanos: 0,
+            }),
+            grant_id: claims.grant_id.to_vec(),
+            signature: signature.to_bytes().to_vec(),
+        };
+        // Only the fence-signing fields of this carrier matter.
+        let mut carrier = signed_service_reload(&signing, node_id, now, now + 60);
+        carrier.required_capability = CONNECTION_FENCING_CAPABILITY.to_owned();
+        let fence =
+            |lease_until| signed_fence(&signing, &carrier, [1; 16], TEST_ENDPOINT_ID, lease_until);
+        let bound = |fence: ConnectionFenceV2, operation_id: &[u8]| {
+            let binding = signed_binding(
+                &signing,
+                &carrier,
+                &fence,
+                FenceOperationKind::Artifact,
+                operation_id,
+                CONNECTION_FENCING_CAPABILITY,
+            );
+            (Some(Box::new(fence)), Some(Box::new(binding)))
+        };
+        let read = |(connection_fence, fence_binding)| {
+            unsigned_request(Some(privd_request::Operation::ArtifactRead(
+                ArtifactReadRequest {
+                    grant: Some(grant.clone()),
+                    offset: 0,
+                    connection_fence,
+                    fence_binding,
+                },
+            )))
+        };
+        let consume = |(connection_fence, fence_binding)| {
+            unsigned_request(Some(privd_request::Operation::ArtifactConsume(
+                ArtifactConsumeRequest {
+                    grant: Some(grant.clone()),
+                    sha256: vec![1; 32],
+                    size: claims.max_bytes,
+                    confirm_only: false,
+                    connection_fence,
+                    fence_binding,
+                },
+            )))
+        };
+        let rejected = [
+            read((None, None)),
+            consume((None, None)),
+            read(bound(fence((now, 0)), &claims.artifact_id)),
+            // Fetch binds the artifact ID and consumption binds the grant ID.
+            read(bound(fence((now + 60, 0)), &claims.grant_id)),
+            consume(bound(fence((now + 60, 0)), &claims.artifact_id)),
+        ];
+        for request in rejected {
+            assert_permission_denied(&dispatch(request, &node_id, &keys, &adapter).await);
+        }
+        // The same grant with its own live fence passes authorization and only
+        // then meets the (absent) artifact lease.
+        for request in [
+            read(bound(fence((now + 60, 0)), &claims.artifact_id)),
+            consume(bound(fence((now + 60, 0)), &claims.grant_id)),
+        ] {
+            let response = dispatch(request, &node_id, &keys, &adapter).await;
+            let Some(privd_response::Result::Error(failure)) = response.result else {
+                panic!("absent artifact lease must not succeed")
+            };
+            assert_ne!(failure.kind, i32::from(ErrorKind::PermissionDenied));
+        }
         std::fs::remove_dir_all(directory).expect("cleanup test directory");
     }
 

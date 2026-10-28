@@ -5,7 +5,8 @@
 use std::io;
 
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgradeResultProof, ArtifactGrantV1, CommandEnvelope, PrivilegedResultProof,
+    AgentUpgradeResultProof, ArtifactGrantV1, CommandEnvelope, ConnectionFenceV2, FenceBindingV2,
+    PrivilegedResultProof,
 };
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -280,6 +281,13 @@ pub struct ArtifactReadRequest {
     pub grant: Option<ArtifactGrantV1>,
     #[prost(uint64, tag = "2")]
     pub offset: u64,
+    /// Controller-signed owner term and artifact binding; privd re-verifies
+    /// them instead of trusting the Agent's fence checks. Boxed to keep the
+    /// request enum, and every future holding it, small.
+    #[prost(message, optional, boxed, tag = "3")]
+    pub connection_fence: Option<Box<ConnectionFenceV2>>,
+    #[prost(message, optional, boxed, tag = "4")]
+    pub fence_binding: Option<Box<FenceBindingV2>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -292,6 +300,10 @@ pub struct ArtifactConsumeRequest {
     pub size: u64,
     #[prost(bool, tag = "4")]
     pub confirm_only: bool,
+    #[prost(message, optional, boxed, tag = "5")]
+    pub connection_fence: Option<Box<ConnectionFenceV2>>,
+    #[prost(message, optional, boxed, tag = "6")]
+    pub fence_binding: Option<Box<FenceBindingV2>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
