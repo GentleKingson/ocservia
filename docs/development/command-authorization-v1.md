@@ -107,6 +107,13 @@ durable owner-epoch or revision floor, so a compromised Agent can spend an
 old command only until that command's signed owner lease
 (`OCSERV_OWNER_LEASE_TTL`) ends. `ReconcileOnly` reads stay outside this gate.
 
+Standalone P12 `ArtifactRead` and `ArtifactConsume` requests carry the same
+Controller-signed carriers the Agent verified, and privd applies the same
+fence checks: the binding must be an `Artifact` binding for this artifact ID
+(read) or grant ID (consume), name `ocserv.fencing.v2`, and match a fence
+whose owner lease is unexpired. Confirmation-only consumption is included.
+The Artifact Grant check is unchanged and still required.
+
 Across the local Unix socket, the Agent forwards the original signed
 `CommandEnvelope` intact without supplying separate Agent-chosen mutation
 arguments. Privd pins its own node ID and Controller keyring, repeats strict
