@@ -136,7 +136,7 @@ func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal,
 					return nil, rbac.ErrForbidden
 				}
 				resource = rbac.Resource{WorkspaceID: scope.WorkspaceID, Type: scope.Type, ID: scope.ID}
-				if err := s.rbac.Authorize(r.Context(), principal.IdentityID, action, resource, principal.BreakGlass); err != nil {
+				if err := s.authorizeVisible(r.Context(), principal, action, resource); err != nil {
 					return nil, err
 				}
 			}
@@ -226,17 +226,56 @@ func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal,
 		if parseErr != nil || workspaceID.Version() != 7 {
 			return nil, rbac.ErrForbidden
 		}
+		// Like selectWorkspace, an invisible workspace is refused before the
+		// existence lookup, so existing and missing ones answer alike.
+		visible, visibleErr := s.visibleWorkspace(r.Context(), principal, workspaceID)
+		if visibleErr != nil {
+			return nil, visibleErr
+		}
+		if !visible {
+			return nil, rbac.ErrForbidden
+		}
 		resource, err = s.rbac.Workspace(r.Context(), workspaceID)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := s.rbac.Authorize(r.Context(), principal.IdentityID, action, resource, principal.BreakGlass); err != nil {
+	if err := s.authorizeVisible(r.Context(), principal, action, resource); err != nil {
 		return nil, err
 	}
 	ctx := context.WithValue(r.Context(), principalKey{}, principal)
 	ctx = context.WithValue(ctx, workspaceKey{}, resource.WorkspaceID)
 	return ctx, nil
+}
+
+// authorizeVisible reports a resource in a workspace where the principal
+// holds no role binding as not found, so a 403 never confirms that an
+// invisible resource exists. Inside a visible workspace a missing action
+// keeps its 403.
+func (s *Server) authorizeVisible(ctx context.Context, principal auth.Principal, action string, resource rbac.Resource) error {
+	err := s.rbac.Authorize(ctx, principal.IdentityID, action, resource, principal.BreakGlass)
+	if !errors.Is(err, rbac.ErrForbidden) {
+		return err
+	}
+	visible, visibleErr := s.visibleWorkspace(ctx, principal, resource.WorkspaceID)
+	if visibleErr != nil {
+		return visibleErr
+	}
+	if !visible {
+		return database.ErrNotFound
+	}
+	return err
+}
+
+// visibleWorkspace reports whether the principal holds any role binding in
+// the workspace. Every role grants node.read, so that action's workspace
+// list is exactly the visible set.
+func (s *Server) visibleWorkspace(ctx context.Context, principal auth.Principal, workspaceID uuid.UUID) (bool, error) {
+	visible, err := s.rbac.AuthorizedWorkspaces(ctx, principal.IdentityID, "node.read", principal.BreakGlass)
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(visible, workspaceID), nil
 }
 
 func (s *Server) selectWorkspace(r *http.Request, principal auth.Principal, action string) (uuid.UUID, error) {

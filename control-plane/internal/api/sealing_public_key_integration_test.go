@@ -88,7 +88,7 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 	foreignWorkspace, foreignNode := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Foreign key fixture',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Foreign key fixture',?,?,?)`, foreignWorkspace, foreignWorkspace.String(), at, at)
 	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'Foreign key node','active',$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'Foreign key node','active',?,?)`, foreignNode, foreignWorkspace, at, at)
-	assertApplyHTTPProblem(t, f.call("GET", "/api/v1/nodes/"+foreignNode.String()+"/user-password-sealing-key", "", "", f.requester.cookie, nil), 403, "forbidden")
+	assertApplyHTTPProblem(t, f.call("GET", "/api/v1/nodes/"+foreignNode.String()+"/user-password-sealing-key", "", "", f.requester.cookie, nil), 404, "not-found")
 	set(binding)
 	// The same envelope reaches the existing signed command path for creation
 	// and rotation. Owner fixture completion models an already applied command.

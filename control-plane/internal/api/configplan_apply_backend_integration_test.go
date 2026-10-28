@@ -386,7 +386,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 		foreignApproval := g.approval(foreignPlan, true)
 		foreignBefore := g.counts(foreignPlan.NodeID)
 		g.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, `DELETE FROM role_bindings WHERE identity_id=? AND workspace_id=?`, f.requester.principal.IdentityID, foreign)
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/config-plans/"+foreignPlan.ID.String()+"/apply", applyHTTPBody(foreignApproval.ID), "denied", f.requester.cookie, nil), 403, "forbidden")
+		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/config-plans/"+foreignPlan.ID.String()+"/apply", applyHTTPBody(foreignApproval.ID), "denied", f.requester.cookie, nil), 404, "not-found")
 		g.unchanged(foreignPlan, foreignBefore, foreignApproval)
 		// A misleading header cannot move the authorized Plan to another workspace.
 		key := uuid.NewString()
