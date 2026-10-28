@@ -537,7 +537,7 @@ func TestSentCommandWithoutResultEntersAndContinuesReconciliationIntegration(t *
 		t.Fatal(err)
 	}
 	assertReconciliationEnvelope(t, &normal, &recovered, commandID, operationID, nodeID)
-	if !recovered.GetExpiresAt().AsTime().Equal(recoveredExpiry) || !recoveredExpiry.After(time.Now()) {
+	if !recovered.GetExpiresAt().AsTime().Equal(normal.GetExpiresAt().AsTime()) || !recoveredExpiry.After(time.Now()) {
 		t.Fatalf("initial reconciliation expiry = %v/%v", recovered.GetExpiresAt(), recoveredExpiry)
 	}
 

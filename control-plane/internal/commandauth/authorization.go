@@ -27,10 +27,10 @@ import (
 )
 
 const (
-	// ProtocolVersion is the first command protocol revision that requires an
-	// end-to-end Controller authorization proof.
-	ProtocolVersion = "1.1"
-	keyIDPrefix     = "ed25519-sha256:"
+	// ProtocolVersion keeps the signed execution deadline immutable during recovery.
+	ProtocolVersion       = "1.2"
+	LegacyProtocolVersion = "1.1"
+	keyIDPrefix           = "ed25519-sha256:"
 )
 
 var authorizationV1Domain = []byte("ocservia/controller-command/v1\x00")
@@ -324,7 +324,7 @@ func ClaimsFromEnvelopeV1(envelope *agentv1.CommandEnvelope) (ClaimsV1, error) {
 	if authorization.GetVersion() != agentv1.CommandAuthorizationVersion_COMMAND_AUTHORIZATION_VERSION_V1 {
 		return ClaimsV1{}, errors.New("command authorization version is unsupported")
 	}
-	if envelope.GetProtocolVersion() != ProtocolVersion {
+	if envelope.GetProtocolVersion() != ProtocolVersion && envelope.GetProtocolVersion() != LegacyProtocolVersion {
 		return ClaimsV1{}, errors.New("command protocol version does not require authorization v1")
 	}
 	payloadKind, expectedAction, expectedCapability, err := payloadAuthorization(envelope)

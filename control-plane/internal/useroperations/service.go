@@ -509,7 +509,7 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil
 			}
-			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
+			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) {
 				if err := s.cleanupEnforcement(ctx, item, true); err != nil {
 					return 0, err
 				}
@@ -625,7 +625,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil
 			}
-			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
+			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) {
 				if err := s.cleanupEnforcement(ctx, item, true); err != nil {
 					return 0, err
 				}
