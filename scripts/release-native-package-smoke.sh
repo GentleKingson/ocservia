@@ -297,6 +297,7 @@ provision_upgrade_fixtures() {
   cat >"${work}/upgrade-agent.env" <<EOF
 CONTROLLER_ENDPOINT_ID=${controller_endpoint}
 NODE_ID=00000000-0000-7000-8000-000000000001
+AGENT_ENDPOINT_ID=9999999999999999999999999999999999999999999999999999999999999999
 CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=/etc/ocservia-agent/controller-command-verification-key.pem
 USER_PASSWORD_SEAL_KEY_ID=user-password-v1
 USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}
@@ -779,6 +780,7 @@ install -o root -g root -m 0600 /tmp/p12-password-seal-private.pem \
 cat >/tmp/upgrade-agent.env <<'ENVEOF'
 CONTROLLER_ENDPOINT_ID=${controller_endpoint}
 NODE_ID=00000000-0000-7000-8000-000000000001
+AGENT_ENDPOINT_ID=9999999999999999999999999999999999999999999999999999999999999999
 CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=/etc/ocservia-agent/controller-command-verification-key.pem
 USER_PASSWORD_SEAL_KEY_ID=user-password-v1
 USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}

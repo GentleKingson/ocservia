@@ -185,6 +185,7 @@ fn parse_args_from(
     let mut socket = PathBuf::from("/run/ocserv-platform/privd.sock");
     let mut agent_uid = None;
     let mut node_id = None;
+    let mut endpoint_id = None;
     let mut command_key_files = Vec::new();
     let mut attestation_key_file = PathBuf::from("/var/lib/ocservia-privd/attestation.key");
     let mut user_seal_key_file = None;
@@ -211,6 +212,17 @@ fn parse_args_from(
                     return Err(invalid("node ID must be UUIDv7"));
                 }
                 node_id = Some(*parsed.as_bytes());
+            }
+            "--endpoint-id" => {
+                let value = required(&mut args, "--endpoint-id")?;
+                if value.len() != 64
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(invalid("endpoint ID must be 64 lowercase hex"));
+                }
+                endpoint_id = Some(decode_registration_digest(&value)?);
             }
             "--controller-command-key-file" => {
                 if command_key_files.len() == 8 {
@@ -280,6 +292,7 @@ fn parse_args_from(
     let binding = ocservia_command_authorization::local_binding::LocalBinding::load_active()?;
     let keys = if let Some(binding) = &binding {
         node_id = Some(*binding.node_id.as_bytes());
+        endpoint_id = Some(binding.endpoint);
         upgrade_operations_dir = binding.upgrade_directory();
         vec![binding.command_key]
     } else {
@@ -335,6 +348,7 @@ fn parse_args_from(
             socket,
             agent_uid: agent_uid.ok_or_else(|| invalid("--agent-uid is required"))?,
             node_id: node_id.ok_or_else(|| invalid("--node-id is required"))?,
+            endpoint_id: endpoint_id.ok_or_else(|| invalid("--endpoint-id is required"))?,
             command_keys,
             attestation_key,
             upgrades: UpgradeScheduler::new(upgrade_operations_dir, UpgradeTrigger::Systemd),

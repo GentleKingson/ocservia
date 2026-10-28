@@ -94,7 +94,18 @@ Controller-signed `ConnectionFenceV2` and `FenceBindingV2` carriers attached at
 dispatch time (which remain outside `CommandAuthorizationV1` and the semantic
 hash). If a command arrives with an owner epoch below the Agent's durable
 floor, the Agent rejects it immediately with `stale_owner_epoch` without
-executing it. Privd does not inspect these connection-fence carriers.
+executing it.
+
+Privd does not trust the Agent's fence checks. Before a new `Execute`
+admission it verifies both carriers against its own clock, its pinned node ID
+and the root-provisioned Agent `EndpointID` (`--endpoint-id`, from
+`AGENT_ENDPOINT_ID` in root-owned `agent.env`, or the committed local binding
+after a rebind). The owner lease must be unexpired, the binding must name this
+`command_id` and `required_capability` and match the fence term, and the fence
+must carry the command's `expected_revision` and capability. Privd keeps no
+durable owner-epoch or revision floor, so a compromised Agent can spend an
+old command only until that command's signed owner lease
+(`OCSERV_OWNER_LEASE_TTL`) ends. `ReconcileOnly` reads stay outside this gate.
 
 Across the local Unix socket, the Agent forwards the original signed
 `CommandEnvelope` intact without supplying separate Agent-chosen mutation

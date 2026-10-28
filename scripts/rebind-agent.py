@@ -201,7 +201,7 @@ def managed_units():
               '--user-password-seal-public-key-sha256', '--p12-password-seal-key-id',
               '--p12-password-seal-public-key-sha256'}
     for name, additional in [('agent', {'--controller'}),
-                             ('privd', {'--agent-uid', '--attestation-key-file',
+                             ('privd', {'--agent-uid', '--endpoint-id', '--attestation-key-file',
                                         '--user-password-seal-key-file', '--p12-password-seal-key-file'})]:
         result = subprocess.run(['/usr/bin/systemctl', 'show', 'ocservia-' + name + '.service',
                                  '--property=ExecStart', '--value'],
