@@ -204,7 +204,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	body["credential"] = e2eString(t, credential, "credential")
 	f.api(nil, "POST", nodePath+"/privd-attestation-keys:register", body, nil, http.StatusCreated)
 	f.api(nil, "POST", nodePath+"/privd-attestation-keys:register", body, nil, http.StatusUnauthorized)
-	privdArgs := []string{"--socket", privdSocket, "--agent-uid", "65533", "--node-id", nodeID, "--controller-command-key-file", f.root + "/privd/verification.pem", "--attestation-key-file", attestationKey, "--user-password-seal-key-file", f.root + "/privd/user.key", "--p12-password-seal-key-file", f.root + "/privd/p12.key"}
+	privdArgs := []string{"--socket", privdSocket, "--agent-uid", "65533", "--node-id", nodeID, "--endpoint-id", agentEndpoint, "--controller-command-key-file", f.root + "/privd/verification.pem", "--attestation-key-file", attestationKey, "--user-password-seal-key-file", f.root + "/privd/user.key", "--p12-password-seal-key-file", f.root + "/privd/p12.key"}
 	privdArgs = append(privdArgs, sealArgs...)
 	f.start("privd", 0, 65533, nil, "/usr/local/bin/ocservia-privd", privdArgs...)
 	f.wait("root supervisor socket", func() bool { _, err := os.Stat(privdSocket); return err == nil })

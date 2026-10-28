@@ -164,11 +164,15 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 	})
 	t.Run("resource-and-workspace-boundaries", func(t *testing.T) {
 		before := counts(t)
-		for _, node := range []uuid.UUID{sibling, foreign} {
+		// A node in an invisible workspace answers like a missing one.
+		for node, want := range map[uuid.UUID]struct {
+			status int
+			kind   string
+		}{sibling: {403, "forbidden"}, foreign: {404, "not-found"}} {
 			path := "/api/v1/nodes/" + node.String()
-			assertApplyHTTPProblem(t, f.call("GET", path+"/users/alice/policy", "", "", f.reader.cookie, nil), 403, "forbidden")
-			assertApplyHTTPProblem(t, f.call("PUT", path+"/users/alice/policy", policyBody, uuid.NewString(), manager.cookie, nil), 403, "forbidden")
-			assertApplyHTTPProblem(t, f.call("POST", path+"/config-plans", "{", uuid.NewString(), f.requester.cookie, nil), 403, "forbidden")
+			assertApplyHTTPProblem(t, f.call("GET", path+"/users/alice/policy", "", "", f.reader.cookie, nil), want.status, want.kind)
+			assertApplyHTTPProblem(t, f.call("PUT", path+"/users/alice/policy", policyBody, uuid.NewString(), manager.cookie, nil), want.status, want.kind)
+			assertApplyHTTPProblem(t, f.call("POST", path+"/config-plans", "{", uuid.NewString(), f.requester.cookie, nil), want.status, want.kind)
 		}
 		for _, path := range []string{"/api/v1/nodes/invalid/users/alice/policy", "/api/v1/config-plans/" + uuid.Must(uuid.NewV7()).String()} {
 			assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.reader.cookie, nil), 404, "not-found")
@@ -180,7 +184,7 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 		for _, actor := range []applyHTTPActor{f.reader, manager} {
 			f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, `DELETE FROM role_bindings WHERE identity_id=? AND workspace_id=?`, actor.principal.IdentityID, other)
 		}
-		assertApplyHTTPProblem(t, f.call("GET", "/api/v1/config-plans/"+foreignPlan.ID.String(), "", "", f.reader.cookie, nil), 403, "forbidden")
+		assertApplyHTTPProblem(t, f.call("GET", "/api/v1/config-plans/"+foreignPlan.ID.String(), "", "", f.reader.cookie, nil), 404, "not-found")
 		// A single node-scoped workspace is selectable, but metrics still require
 		// workspace-wide operation.read, unlike the batch entry guard.
 		assertStatus(t, f.call("GET", batchPath, "", "", manager.cookie, noWorkspace), 200)
