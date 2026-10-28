@@ -241,6 +241,36 @@ restrict sign-in at the IdP (application assignment or group policy) to the
 intended operators rather than relying on the Controller to filter them. Treat
 the identity table as growing with that assigned population.
 
+### Revoking an OIDC identity or role
+
+The Controller validates every request against its own database, not the IdP,
+so an IdP-side block alone leaves existing sessions valid until they expire and
+leaves role bindings in place. To revoke a compromised or departed OIDC
+operator, use the externally governed database administration path:
+
+1. Block the subject at the IdP first, so no new SSO login can succeed; a
+   browser logout is not enough.
+2. Identify the target by identity UUID and exact `(issuer, subject)`, never by
+   email, and confirm it is not a Break-glass or Local recovery identity.
+3. In one transaction, lock that identity row, set `disabled_at` and
+   `updated_at`, and set `revoked_at` on every unrevoked `auth_sessions` row of
+   that identity. Use the target backend's own time and UUID encodings; do not
+   copy PostgreSQL statements to MySQL.
+4. To remove only one workspace's access, delete that exact `role_bindings`
+   row instead of disabling the global identity, and confirm it does not
+   remove the Local recovery authority described in
+   [Management protection and recovery](#management-protection-and-recovery).
+5. Record the action in the incident record. Keep the identity row and its
+   audit history; do not delete or rewrite audit records.
+
+Session validation on both backends requires an unrevoked session and an
+identity without `disabled_at`, and an OIDC callback for a disabled identity
+does not re-enable it, so the old sessions stop at the next request and new
+logins fail. Requests already authorized before the commit are not undone, and
+revoking an identity does not cancel commands already signed for nodes.
+Shortening `OCSERV_SESSION_TTL` narrows exposure but replaces none of these
+steps.
+
 ### Correcting a historical issuer configuration
 
 Always configure the provider's authoritative issuer string, including its
