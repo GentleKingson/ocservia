@@ -15,7 +15,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
@@ -96,12 +95,18 @@ func (s *Service) reconcileExpiredSending(ctx context.Context, store operationst
 			return err
 		}
 		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: at, Schedule: command.CommandState == "queued" || command.Attempts < maxAttempts}
-		expires := envelope.GetExpiresAt().AsTime()
+		expires, err := command.ExpiresAt.Time()
+		if err != nil {
+			return err
+		}
 		if update.Schedule {
 			if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
 				update.Envelope, expires, err = PrepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, s.signer)
 			} else {
-				update.Envelope, expires, err = prepareRecoveryContinuationEnvelope(envelope, now, s.signer)
+				update.Schedule = expires.After(now)
+				if update.Schedule {
+					update.Envelope, err = prepareRecoveryContinuationEnvelope(envelope, now, s.signer)
+				}
 			}
 			if err != nil {
 				return err
@@ -141,7 +146,6 @@ func (s *Service) reconcileExpiredApplies(ctx context.Context, store operationst
 		if err != nil {
 			return err
 		}
-		envelope.ExpiresAt = timestamppb.New(now.Add(recoveryCommandTTL))
 		payload, expires, err := PrepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, s.signer)
 		if err != nil {
 			return err
@@ -255,7 +259,7 @@ func (s *Service) continueReconciliations(ctx context.Context, store operationst
 		if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
 			continue
 		}
-		payload, _, err := prepareRecoveryContinuationEnvelope(envelope, now, s.signer)
+		payload, err := prepareRecoveryContinuationEnvelope(envelope, now, s.signer)
 		if err != nil {
 			return err
 		}

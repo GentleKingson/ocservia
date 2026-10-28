@@ -2986,7 +2986,7 @@ impl EffectStore {
         &mut self,
         identity: AuthorizedEffectIdentity<'_>,
     ) -> Result<Option<Vec<u8>>, AdapterError> {
-        let identity = validate_authorized_effect(identity, effect_now()?)?;
+        let identity = validate_authorized_effect(identity, 0)?;
         let Some(record) = query_authorized_effect(&self.connection, identity.command_id)? else {
             return Ok(None);
         };
@@ -3141,8 +3141,7 @@ impl EffectStore {
         current: &[u8],
     ) -> Result<DesiredEffectObservation, AdapterError> {
         let now = effect_now()?;
-        let identity =
-            validate_effect_context(mutation_kind, resource_key, revision, identity, now)?;
+        let identity = validate_effect_context(mutation_kind, resource_key, revision, identity, 0)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -6547,6 +6546,21 @@ mod tests {
             )
             .expect("expire authenticated effect");
 
+        let expired_identity = AuthorizedEffectIdentity {
+            expires_at_unix_seconds: now - 1,
+            ..authorized(0)
+        };
+        assert!(matches!(
+            store.prepare_authorized(expired_identity),
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert_eq!(
+            store
+                .replay_authorized(expired_identity)
+                .expect("read expired exact result"),
+            Some(b"result".to_vec())
+        );
+
         assert_eq!(
             store
                 .prepare_authorized(authorized(1))
@@ -6594,7 +6608,10 @@ mod tests {
                 "user_password_rotate",
                 "alice",
                 2,
-                test_effect(),
+                EffectIdentity {
+                    expires_at_unix_seconds: 1,
+                    ..test_effect()
+                },
                 b"password-two",
             )
             .expect("recover post-commit crash");

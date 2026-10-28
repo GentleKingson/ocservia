@@ -14,16 +14,18 @@ use std::path::{Component, Path};
 use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use ed25519_dalek::{Signature, VerifyingKey};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    ArtifactGrantV1, ArtifactGrantVersion, CommandAuthorizationVersion, CommandEnvelope,
-    ConnectionFenceV2, FenceBindingV2, FenceOperationKind, FenceSignatureVersion,
+    ArtifactGrantV1, ArtifactGrantVersion, CommandAuthorizationVersion, CommandDeliveryMode,
+    CommandEnvelope, ConnectionFenceV2, FenceBindingV2, FenceOperationKind, FenceSignatureVersion,
     SealedSecretPurpose, SealedSecretV1, SealedSecretVersion, SemanticPayloadHashVersion,
     SessionGrantV1, SessionGrantVersion, command_envelope,
 };
 use rustix::fs::{Mode, OFlags};
 use sha2::{Digest as _, Sha256};
 
-/// The command protocol revision that requires authorization v1.
-pub const COMMAND_PROTOCOL_VERSION: &str = "1.1";
+/// The signed command revision with immutable execution deadlines.
+pub const COMMAND_PROTOCOL_VERSION: &str = "1.2";
+/// Legacy recovery grants may have lost their original execution deadline.
+pub const LEGACY_COMMAND_PROTOCOL_VERSION: &str = "1.1";
 const DOMAIN_SEPARATOR: &[u8] = b"ocservia/controller-command/v1\0";
 const SESSION_GRANT_DOMAIN_SEPARATOR: &[u8] = b"ocservia/controller-session-grant/v1\0";
 const ARTIFACT_GRANT_DOMAIN_SEPARATOR: &[u8] = b"ocservia/artifact-grant/v1\0";
@@ -239,7 +241,9 @@ impl ControllerCommandKeyring {
         if claims.expected_revision == 0 {
             return Err(AuthorizationError::ClaimsInvalid("revision_invalid"));
         }
-        if claims.expires_at_seconds <= now_unix_seconds {
+        if claims.expires_at_seconds <= now_unix_seconds
+            && envelope.delivery_mode != i32::from(CommandDeliveryMode::ReconcileOnly)
+        {
             return Err(AuthorizationError::ClaimsInvalid("command_expired"));
         }
         if claims.issued_at_seconds > now_unix_seconds.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
@@ -1244,7 +1248,9 @@ pub fn claims_from_envelope_v1(
     {
         return Err(AuthorizationError::UnsupportedVersion);
     }
-    if envelope.protocol_version != COMMAND_PROTOCOL_VERSION {
+    if envelope.protocol_version != COMMAND_PROTOCOL_VERSION
+        && envelope.protocol_version != LEGACY_COMMAND_PROTOCOL_VERSION
+    {
         return Err(AuthorizationError::ClaimsInvalid(
             "command_protocol_version_unsupported",
         ));

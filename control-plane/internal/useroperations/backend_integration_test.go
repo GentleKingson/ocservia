@@ -204,6 +204,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 			{"version", userstate.ErrVersionConflict, 0, false},
 			{"pending", userstate.ErrRevisionPending, 0, false},
 			{"recovery", userstate.ErrRevisionRecovery, 0, false},
+			{"revoked after selection", userstate.ErrNodeUnavailable, 0, false},
 			{"other", unexpected, 1, true},
 		} {
 			t.Run(test.name, func(t *testing.T) {
@@ -222,6 +223,15 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 		}
 		mutator.err = nil
 		mutator.requests, mutator.contexts = nil, nil
+	}
+	checkRevokedCandidates := func(t *testing.T, run func(context.Context, int) (int, error)) {
+		t.Helper()
+		exec(`UPDATE nodes SET status='revoked' WHERE id=$1`, `UPDATE nodes SET status='revoked' WHERE id=?`, node)
+		defer exec(`UPDATE nodes SET status='active' WHERE id=$1`, `UPDATE nodes SET status='active' WHERE id=?`, node)
+		mutator.requests, mutator.contexts = nil, nil
+		if n, err := run(ctx, 10); err != nil || n != 0 || len(mutator.requests) != 0 {
+			t.Fatalf("revoked policy candidate: processed=%d mutations=%d err=%v", n, len(mutator.requests), err)
+		}
 	}
 	request := PolicyRequest{NodeID: node, Username: "alice", QuotaPeriod: "monthly", QuotaDirection: "rxtx", QuotaBytes: 300, IdempotencyKey: uuid.NewString(), ActorID: "operator", Reason: "ticket", RequestID: uuid.NewString(), Traceparent: testTraceparent}
 	policy, replay, err := s.SetPolicy(ctx, request)
@@ -257,6 +267,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	}
 	key := stableKey("policy", node.String(), "alice", "1", "quota", monthStart(now).Format(time.RFC3339))
 	mutation := userstate.MutationRequest{NodeID: node, Kind: userstate.UserDisable, Name: "alice", ExpectedVersion: 1, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: key, Traceparent: stableTraceparent(key)}
+	t.Run("quota-revoked-node", func(t *testing.T) { checkRevokedCandidates(t, s.enforcePolicies) })
 	t.Run("quota-port-errors", func(t *testing.T) { checkPolicyErrors(t, policyErrors.enforcePolicies, mutation, "quota") })
 	if _, _, err := users.Mutate(ctx, mutation); err != nil {
 		t.Fatal(err)
@@ -279,6 +290,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	now = monthStart(now).AddDate(0, 1, 0).Add(time.Second)
 	resetKey := stableKey("policy-reset", node.String(), "alice", "1", monthStart(now).Format(time.RFC3339))
 	resetRequest := userstate.MutationRequest{NodeID: node, Kind: userstate.UserEnable, Name: "alice", ExpectedVersion: 2, IdempotencyKey: resetKey, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: resetKey, Traceparent: stableTraceparent(resetKey)}
+	t.Run("reset-revoked-node", func(t *testing.T) { checkRevokedCandidates(t, s.resetMonthlyPolicies) })
 	t.Run("reset-port-errors", func(t *testing.T) {
 		checkPolicyErrors(t, policyErrors.resetMonthlyPolicies, resetRequest, "quota_reset")
 	})

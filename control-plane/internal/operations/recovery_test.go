@@ -54,8 +54,8 @@ func TestPrepareRecoveryEnvelopePreservesLogicalCommand(t *testing.T) {
 		t.Fatal("recovery changed the semantic command payload")
 	}
 	wantExpiry := now.Add(2*time.Minute + recoveryCommandTTL)
-	if !expiresAt.Equal(wantExpiry) || !recovered.GetExpiresAt().AsTime().Equal(wantExpiry) {
-		t.Fatalf("recovery expiry = %v/%v, want %v", expiresAt, recovered.GetExpiresAt().AsTime(), wantExpiry)
+	if !expiresAt.Equal(wantExpiry) || !recovered.GetExpiresAt().AsTime().Equal(now.Add(time.Minute)) {
+		t.Fatalf("recovery changed execution deadline: observation=%v execution=%v", expiresAt, recovered.GetExpiresAt().AsTime())
 	}
 	claims, err := commandauth.ClaimsFromEnvelopeV1(&recovered)
 	if err != nil {
@@ -103,6 +103,38 @@ func TestValidateSentEnvelopeAllowsOnlyOwnerProofs(t *testing.T) {
 	}
 	if err := validateSentEnvelope(dispatch, changedBytes); err == nil {
 		t.Fatal("sent envelope carried mismatched owner proofs")
+	}
+}
+
+func TestRecoveryExecutionDeadlineAndLegacyAuthority(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, legacy := range []bool{false, true} {
+		for _, priorMode := range []agentv1.CommandDeliveryMode{agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT} {
+			dispatch, _ := recoveryTestDispatch(t, now, time.Minute)
+			var command agentv1.CommandEnvelope
+			if err := proto.Unmarshal(dispatch.Envelope, &command); err != nil {
+				t.Fatal(err)
+			}
+			if legacy {
+				command.ProtocolVersion = commandauth.LegacyProtocolVersion
+			}
+			command.DeliveryMode = priorMode
+			for _, observed := range []time.Time{now.Add(30 * time.Second), now.Add(2 * time.Minute)} {
+				recovered := proto.Clone(&command).(*agentv1.CommandEnvelope)
+				_, _, err := PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observed, testCommandSigner(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !proto.Equal(command.GetExpiresAt(), recovered.GetExpiresAt()) {
+					t.Fatal("observation renewed execution authority")
+				}
+				_, _, err = PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT, observed, testCommandSigner(t))
+				allowed := observed.Before(now.Add(time.Minute)) && (!legacy || priorMode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY)
+				if (err == nil) != allowed {
+					t.Fatalf("legacy=%v mode=%v observed=%v retry err=%v", legacy, priorMode, observed, err)
+				}
+			}
+		}
 	}
 }
 

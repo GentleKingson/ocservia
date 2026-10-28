@@ -789,6 +789,11 @@ impl CommandExecutor {
         envelope: &CommandEnvelope,
         context: &CommandContext,
     ) -> Result<CommandOutcome, CommandError> {
+        if envelope.protocol_version
+            == ocservia_command_authorization::LEGACY_COMMAND_PROTOCOL_VERSION
+        {
+            return self.reconcile(envelope, context);
+        }
         let validated = validate_command(envelope, context)?;
         let record = self.matching_record(&validated)?;
         if record.state != CommandState::Unknown {
@@ -1112,7 +1117,10 @@ fn validate_command(
     if envelope.encoded_len() == 0 || envelope.encoded_len() > MAX_COMMAND_BYTES {
         return Err(CommandError::Rejected("command_size_invalid"));
     }
-    if envelope.protocol_version != ocservia_command_authorization::COMMAND_PROTOCOL_VERSION {
+    if envelope.protocol_version != ocservia_command_authorization::COMMAND_PROTOCOL_VERSION
+        && envelope.protocol_version
+            != ocservia_command_authorization::LEGACY_COMMAND_PROTOCOL_VERSION
+    {
         return Err(CommandError::Rejected("protocol_version_unsupported"));
     }
     let node_id = fixed::<16>(&envelope.node_id, "node_id_invalid")?;
@@ -1132,7 +1140,9 @@ fn validate_command(
         .as_ref()
         .ok_or(CommandError::Rejected("expires_at_missing"))?
         .seconds;
-    if expires_at <= context.now_unix_seconds {
+    if expires_at <= context.now_unix_seconds
+        && envelope.delivery_mode != i32::from(CommandDeliveryMode::ReconcileOnly)
+    {
         return Err(CommandError::Rejected("command_expired"));
     }
     if issued_at
@@ -2165,6 +2175,29 @@ mod tests {
         let mut command_context = context(node_id, now);
         command_context.capabilities = capabilities(&["ocserv.users.write", "ocserv.groups.write"]);
         command_context
+    }
+
+    #[test]
+    fn expired_signed_commands_only_allow_observation() {
+        let node = *Uuid::now_v7().as_bytes();
+        let mut envelope = command(node, *Uuid::now_v7().as_bytes(), "expiry", 100);
+        let context = context(node, 200);
+        for mode in [
+            CommandDeliveryMode::ExecuteOrReplay,
+            CommandDeliveryMode::ReconcileOnly,
+            CommandDeliveryMode::RetryIfEffectAbsent,
+        ] {
+            envelope.delivery_mode = mode.into();
+            authorize_test_command(&mut envelope);
+            assert_eq!(
+                validate_command(&envelope, &context).is_ok(),
+                mode == CommandDeliveryMode::ReconcileOnly
+            );
+        }
+        envelope.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+        authorize_test_command(&mut envelope);
+        envelope.delivery_mode = CommandDeliveryMode::RetryIfEffectAbsent.into();
+        assert!(validate_command(&envelope, &context).is_err());
     }
 
     #[test]

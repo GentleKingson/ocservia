@@ -34,6 +34,12 @@ const (
 
 var eventKeyIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
+// ErrVerificationBusy rejects overlapping public full-history scans.
+var ErrVerificationBusy = errors.New("audit: verification already running")
+
+// Public full-history scans share one slot across managers and workspaces.
+var verificationAdmission sync.Mutex
+
 type eventAuthenticator struct {
 	keyID string
 	key   [sha256.Size]byte
@@ -291,6 +297,10 @@ type chainVerification struct {
 }
 
 func (m *Manager) Verify(ctx context.Context, workspaceID uuid.UUID) (Verification, error) {
+	if !verificationAdmission.TryLock() {
+		return Verification{}, ErrVerificationBusy
+	}
+	defer verificationAdmission.Unlock()
 	var verified chainVerification
 	err := database.Within(ctx, m.backend, database.RepeatableRead, func(tx database.Tx) error {
 		var err error
@@ -317,7 +327,7 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 	verified := chainVerification{Verification: Verification{WorkspaceID: workspaceID, Valid: true}}
 	var previous []byte
 	var previousID uuid.UUID
-	eventHashes := make(map[uuid.UUID][]byte)
+	var checkpointHash []byte
 	seenAuthenticated := false
 	for rows.Next() {
 		record := ChainRecord{WorkspaceID: workspaceID}
@@ -383,7 +393,9 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 		previousID = record.EventID
 		verified.lastID = record.EventID
 		verified.lastHash = append(verified.lastHash[:0], storedHash...)
-		eventHashes[record.EventID] = append([]byte(nil), storedHash...)
+		if latest != nil && record.EventID == latest.eventID {
+			checkpointHash = append([]byte(nil), storedHash...)
+		}
 		verified.Events++
 	}
 	if err := rows.Err(); err != nil {
@@ -397,8 +409,7 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 		verified.Checkpoint = verified.Events == 0
 	} else {
 		checkpoint, encountered := checkpoints[latest.eventID]
-		storedHash, eventEncountered := eventHashes[latest.eventID]
-		verified.Checkpoint = encountered && eventEncountered && subtle.ConstantTimeCompare(storedHash, checkpoint.eventHash) == 1 && m.validCheckpoint(workspaceID, checkpoint)
+		verified.Checkpoint = encountered && len(checkpointHash) != 0 && subtle.ConstantTimeCompare(checkpointHash, checkpoint.eventHash) == 1 && m.validCheckpoint(workspaceID, checkpoint)
 	}
 	return verified, nil
 }

@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strconv"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 
@@ -59,6 +61,11 @@ func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.audit.Verify(r.Context(), workspace(r))
+	if errors.Is(err, audit.ErrVerificationBusy) {
+		w.Header().Set("Retry-After", "1")
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Audit busy", "audit verification is already running")
+		return
+	}
 	if err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit verification could not complete")
 		return
