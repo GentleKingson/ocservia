@@ -17,7 +17,6 @@ import (
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -140,6 +139,7 @@ func (s *Service) RecoverAmbiguousDispatched(ctx context.Context, tx database.Tx
 // PrepareRecoveryEnvelope preserves the logical command identity and payload,
 // changes only attempt metadata, and strips the previous connection proofs so
 // the outbox worker must bind the next dispatch to its then-current owner term.
+// The returned deadline bounds observation dispatch, not executable authority.
 func PrepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.CommandDeliveryMode, observedAt time.Time, signer *commandauth.Signer) ([]byte, time.Time, error) {
 	return prepareRecoveryEnvelope(envelope, mode, observedAt, signer, true)
 }
@@ -147,11 +147,12 @@ func PrepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.Com
 // prepareRecoveryContinuationEnvelope creates a distinct reconcile-only
 // transport attempt without extending the logical command deadline. It is
 // used only after a sent observation attempt produced no durable result.
-func prepareRecoveryContinuationEnvelope(envelope *agentv1.CommandEnvelope, observedAt time.Time, signer *commandauth.Signer) ([]byte, time.Time, error) {
+func prepareRecoveryContinuationEnvelope(envelope *agentv1.CommandEnvelope, observedAt time.Time, signer *commandauth.Signer) ([]byte, error) {
 	if envelope == nil || envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
-		return nil, time.Time{}, ErrInvalidRequest
+		return nil, ErrInvalidRequest
 	}
-	return prepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observedAt, signer, false)
+	payload, _, err := prepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observedAt, signer, false)
+	return payload, err
 }
 
 func prepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.CommandDeliveryMode, observedAt time.Time, signer *commandauth.Signer, extendReconcileTTL bool) ([]byte, time.Time, error) {
@@ -163,11 +164,18 @@ func prepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.Com
 		return nil, time.Time{}, errors.New("operations: reconciliation command expiry is invalid")
 	}
 	expiresAt := expires.AsTime()
+	// Only an original legacy dispatch still carries its execution deadline.
+	// Legacy recovery envelopes may already have renewed it and stay observation-only.
+	if envelope.GetProtocolVersion() == commandauth.LegacyProtocolVersion && envelope.GetDeliveryMode() == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY {
+		envelope.ProtocolVersion = commandauth.ProtocolVersion
+	}
+	if mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT && envelope.GetProtocolVersion() != commandauth.ProtocolVersion {
+		return nil, time.Time{}, errors.New("operations: legacy recovery cannot authorize execution")
+	}
 	if extendReconcileTTL && mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && expiresAt.Before(observedAt.Add(recoveryCommandTTL)) {
 		expiresAt = observedAt.Add(recoveryCommandTTL)
-		envelope.ExpiresAt = timestamppb.New(expiresAt)
 	}
-	if !expiresAt.After(observedAt) {
+	if mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && !expiresAt.After(observedAt) {
 		return nil, time.Time{}, errors.New("operations: retry command has expired")
 	}
 	messageID, err := uuid.NewV7()

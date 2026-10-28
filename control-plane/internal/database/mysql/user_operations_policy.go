@@ -38,7 +38,7 @@ func (s userOperationsStore) ActiveOperations(ctx context.Context) (count int, e
 
 func (s userOperationsStore) ResetCandidates(ctx context.Context, now, month value.Timestamp, limit int) ([]userstore.Candidate, error) {
 	rows, err := s.Query(ctx, `SELECT p.node_id,p.username,p.version,u.version,u.enabled,prior.resulting_user_version
- FROM desired_user_policies p CROSS JOIN (SELECT ? AS month_start,? AS at) clock JOIN desired_users u ON u.node_id=p.node_id AND BINARY u.username=BINARY p.username
+ FROM desired_user_policies p CROSS JOIN (SELECT ? AS month_start,? AS at) clock JOIN nodes node ON node.id=p.node_id AND node.status IN('active','offline') JOIN desired_users u ON u.node_id=p.node_id AND BINARY u.username=BINARY p.username
  LEFT JOIN observed_user_usage consumption ON consumption.node_id=p.node_id AND BINARY consumption.username=BINARY p.username AND consumption.period='monthly' AND consumption.period_start=clock.month_start
  JOIN user_policy_enforcements prior ON prior.exact_row_id=(SELECT previous.exact_row_id FROM user_policy_enforcements previous WHERE previous.node_id=p.node_id AND BINARY previous.username=BINARY p.username AND previous.policy_version=p.version AND previous.cause='quota' AND previous.period_start<clock.month_start AND previous.operation_id IS NOT NULL ORDER BY previous.period_start DESC LIMIT 1)
  WHERE p.quota_period='monthly' AND (p.expires_at IS NULL OR p.expires_at>clock.at)
@@ -65,7 +65,7 @@ func (s userOperationsStore) EnforcementCandidates(ctx context.Context, now, mon
 	rows, err := s.Query(ctx, `SELECT p.node_id,p.username,p.version,u.version,
  CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=clock.at THEN 'expiry' ELSE 'quota' END,
  CASE WHEN p.quota_period='monthly' THEN clock.month_start ELSE -946684800000000 END,u.enabled
- FROM desired_user_policies p CROSS JOIN (SELECT ? AS at,? AS month_start) clock JOIN desired_users u ON u.node_id=p.node_id AND BINARY u.username=BINARY p.username
+ FROM desired_user_policies p CROSS JOIN (SELECT ? AS at,? AS month_start) clock JOIN nodes node ON node.id=p.node_id AND node.status IN('active','offline') JOIN desired_users u ON u.node_id=p.node_id AND BINARY u.username=BINARY p.username
  LEFT JOIN observed_user_usage consumption ON consumption.node_id=p.node_id AND BINARY consumption.username=BINARY p.username AND consumption.period=CASE WHEN p.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND consumption.period_start=CASE WHEN p.quota_period='monthly' THEN clock.month_start ELSE -946684800000000 END
  WHERE ((p.expires_at IS NOT NULL AND p.expires_at<=clock.at) OR (p.quota_period<>'none' AND CASE p.quota_direction WHEN 'rx' THEN CAST(COALESCE(consumption.rx_bytes,0) AS DECIMAL(65,0)) WHEN 'tx' THEN CAST(COALESCE(consumption.tx_bytes,0) AS DECIMAL(65,0)) ELSE CAST(COALESCE(consumption.rx_bytes,0) AS DECIMAL(65,0))+CAST(COALESCE(consumption.tx_bytes,0) AS DECIMAL(65,0)) END>=p.quota_bytes))
  AND (u.enabled=true OR EXISTS(SELECT 1 FROM user_policy_enforcements pending WHERE pending.node_id=p.node_id AND BINARY pending.username=BINARY p.username AND pending.policy_version=p.version AND pending.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=clock.at THEN 'expiry' ELSE 'quota' END AND pending.period_start=CASE WHEN p.quota_period='monthly' THEN clock.month_start ELSE -946684800000000 END AND pending.source_user_version IN(u.version,u.version-1) AND pending.operation_id IS NULL))

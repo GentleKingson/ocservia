@@ -1203,7 +1203,12 @@ async fn execute_command(
     let binding = effect_binding(command, claims);
     if let Some(binding) = binding.as_ref() {
         let identity = authorized_effect(command, claims, binding);
-        if identity.retry_if_absent && fixed_host_effect(command) {
+        // Legacy recovery grants may have renewed an already expired deadline.
+        if identity.retry_if_absent
+            && (fixed_host_effect(command)
+                || command.protocol_version
+                    == ocservia_command_authorization::LEGACY_COMMAND_PROTOCOL_VERSION)
+        {
             return replay_only_response(adapter, identity);
         }
         match adapter.prepare_authorized_effect(identity) {
@@ -2241,6 +2246,53 @@ mod tests {
             Some(privd_response::Result::Error(ref error))
                 if ErrorKind::try_from(error.kind).ok() == Some(ErrorKind::Unavailable)
         ));
+    }
+
+    #[tokio::test]
+    async fn expired_commands_only_observe_and_legacy_retries_only_replay() {
+        let signing = SigningKey::from_bytes(&[45; 32]);
+        let keys = keyring(&signing);
+        let node = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let expired = signed_service_reload(&signing, node, now - 120, now - 60);
+        assert!(
+            validate_request(&reconcile_request(expired.clone(), &signing), &node, &keys).is_ok()
+        );
+        assert!(validate_request(&retry_request(expired.clone(), &signing), &node, &keys).is_err());
+        assert!(validate_request(&command_request(expired), &node, &keys).is_err());
+
+        let (adapter, _, counter, directory) = test_adapter();
+        let control = signed_service_reload(&signing, node, now, now + 60);
+        let response = dispatch(command_request(control), &node, &keys, &adapter).await;
+        assert!(response.privileged_result_proof.is_some());
+        let mut legacy = signed_command(
+            &signing,
+            node,
+            now,
+            now + 60,
+            "user.create",
+            "ocserv.users.write",
+            command_envelope::Payload::UserCreate(UserCreate {
+                username: "alice".to_owned(),
+                desired_revision: 1,
+                sealed_password_v1: Some(SealedSecretV1 {
+                    version: SealedSecretVersion::V1.into(),
+                    purpose: SealedSecretPurpose::UserPassword.into(),
+                    key_id: "user-key-v1".to_owned(),
+                    ciphertext: vec![0xa5; 256],
+                }),
+                ..UserCreate::default()
+            }),
+        );
+        legacy.protocol_version =
+            ocservia_command_authorization::LEGACY_COMMAND_PROTOCOL_VERSION.to_owned();
+        let result = dispatch(retry_request(legacy, &signing), &node, &keys, &adapter).await;
+        assert_requires_reconciliation(&result);
+        assert_eq!(
+            std::fs::read_to_string(counter).expect("control effect"),
+            "x"
+        );
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
     }
 
     #[test]
