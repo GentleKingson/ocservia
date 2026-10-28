@@ -98,9 +98,9 @@ executing it.
 
 Privd does not trust the Agent's fence checks. Before a new `Execute`
 admission it verifies both carriers against its own clock, its pinned node ID
-and the root-provisioned Agent `EndpointID` (`--endpoint-id`, from
-`AGENT_ENDPOINT_ID` in root-owned `agent.env`, or the committed local binding
-after a rebind). The owner lease must be unexpired, the binding must name this
+and the root-provisioned Agent `EndpointID`. `--endpoint-id`, from
+`AGENT_ENDPOINT_ID` in root-owned `agent.env`, is always required at startup;
+after a rebind the committed local binding's EndpointID replaces it. The owner lease must be unexpired, the binding must name this
 `command_id` and `required_capability` and match the fence term, and the fence
 must carry the command's `expected_revision` and capability. Privd keeps no
 durable owner-epoch or revision floor, so a compromised Agent can spend an

@@ -256,9 +256,12 @@ operator, use the externally governed database administration path:
    `updated_at`, and set `revoked_at` on every unrevoked `auth_sessions` row of
    that identity. Use the target backend's own time and UUID encodings; do not
    copy PostgreSQL statements to MySQL.
-4. To remove only one workspace's access, delete that exact `role_bindings`
-   row instead of disabling the global identity, and confirm it does not
-   remove the Local recovery authority described in
+4. Instead of step 3, to remove only one workspace's access, delete every
+   `role_bindings` row for that identity and `workspace_id` in one transaction
+   (an identity can hold several roles and resource-scoped bindings there, and
+   any remaining row still authorizes), then confirm after commit that none
+   remain. To remove only one role, delete just that exact row. Either way,
+   confirm the change does not remove the Local recovery authority described in
    [Management protection and recovery](#management-protection-and-recovery).
 5. Record the action in the incident record. Keep the identity row and its
    audit history; do not delete or rewrite audit records.
