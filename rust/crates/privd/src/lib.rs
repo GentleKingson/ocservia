@@ -725,7 +725,10 @@ fn verify_fence_carriers(
 /// check is re-proven here from the same Controller-signed artifact binding the
 /// Agent verified: fetch binds the artifact ID, consumption binds the grant ID.
 /// ponytail: like `Execute`, an old binding stays usable until its signed owner
-/// lease ends; privd keeps no owner-epoch floor.
+/// lease ends; privd keeps no owner-epoch floor. Each read re-checks the one
+/// dispatch fence, which suffices only while a P12 fits one 256 KiB chunk (the
+/// 256 KiB chain cap with an RSA-4096 key yields ~192 KiB). If artifacts can
+/// span chunks, the Controller must refresh the fence during the transfer.
 #[allow(clippy::too_many_arguments)]
 fn verify_artifact_fence(
     fence: Option<&ConnectionFenceV2>,
