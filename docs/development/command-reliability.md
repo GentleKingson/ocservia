@@ -41,6 +41,24 @@ follow-up that queries the Agent journal up to the bounded attempt limit. Only
 when reconciliation proves that the effect never occurred may the Controller
 sign and send a `RETRY_IF_EFFECT_ABSENT` command.
 
+Command envelope protocol `1.2` keeps its signed `expires_at` as the immutable
+execution deadline. Recovery renews only the database's observation/outbox
+window; the signed command deadline never changes. An expired, signed
+`RECONCILE_ONLY` command may read authenticated durable evidence under the
+current session, capability and owner fence, with a bounded transport timeout.
+Both Controller retry admission and privd execution still reject an expired
+execution deadline.
+
+The frozen CommandAuthorizationV1 transcript already signs the protocol string,
+so this revision adds no wire fields or signing-layout changes. An original
+`1.1` `EXECUTE_OR_REPLAY` dispatch can be upgraded during its first recovery
+because its deadline has not been renewed. Existing `1.1` recovery envelopes
+may have lost that deadline: they remain observation-only, and old signed
+`RETRY_IF_EFFECT_ABSENT` grants can only replay a retained root result. Missing
+or pruned results remain `unknown` and require operator reconciliation. Deploy
+matched Controller/transportd and Agent/privd packages; older nodes may reject
+the new command revision until upgraded.
+
 Whenever a database commit acknowledgement is uncertain, the service performs a
 bounded readback of the original immutable intent, the specific attempt lease
 or completed attempt, or the exact owner term and deadline, failing closed if

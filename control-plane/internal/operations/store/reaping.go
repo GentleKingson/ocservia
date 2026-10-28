@@ -13,6 +13,7 @@ type RecoveryCommand struct {
 	Envelope                                            []byte
 	CommandState, OperationState                        string
 	Attempts                                            int
+	ExpiresAt                                           value.Timestamp
 }
 
 type RecoveryUpdate struct {

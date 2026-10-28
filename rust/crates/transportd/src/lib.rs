@@ -21,9 +21,10 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, ArtifactChunk,
     ArtifactConsumeRequest as AgentArtifactConsumeRequest,
     ArtifactConsumeResponse as AgentArtifactConsumeResponse, ArtifactFetchRequest, ArtifactGrantV1,
-    CommandEnvelope, CommandResult, CommandResultState, ConnectionFenceV2, EnrollRequest,
-    EnrollResponse, FenceBindingV2, FenceOperationKind, HandshakeResult, SessionHandshake,
-    SessionHandshakeResponse, TelemetryBatch, TelemetryPriority, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, CommandResult, CommandResultState, ConnectionFenceV2,
+    EnrollRequest, EnrollResponse, FenceBindingV2, FenceOperationKind, HandshakeResult,
+    SessionHandshake, SessionHandshakeResponse, TelemetryBatch, TelemetryPriority,
+    command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, CloseNodeRequest, CloseNodeResponse,
@@ -2690,6 +2691,9 @@ fn command_response_deadline(command: &CommandEnvelope) -> Result<tokio::time::I
         .ok_or_else(|| Status::invalid_argument("command expires_at is required"))?;
     let expires_at = SystemTime::try_from(*expires_at)
         .map_err(|_| Status::invalid_argument("command expires_at is invalid"))?;
+    if command.delivery_mode == i32::from(CommandDeliveryMode::ReconcileOnly) {
+        return Ok(tokio::time::Instant::now() + STREAM_TIMEOUT);
+    }
     let remaining = expires_at
         .duration_since(SystemTime::now())
         .map_err(|_| Status::deadline_exceeded("command has expired"))?;
@@ -4499,6 +4503,15 @@ mod tests {
                 .code(),
             tonic::Code::DeadlineExceeded
         );
+        let reconcile = CommandEnvelope {
+            delivery_mode: CommandDeliveryMode::ReconcileOnly.into(),
+            ..expired
+        };
+        let before = tokio::time::Instant::now();
+        let deadline =
+            command_response_deadline(&reconcile).expect("expired read-only observation");
+        assert!(deadline >= before + STREAM_TIMEOUT);
+        assert!(deadline <= tokio::time::Instant::now() + STREAM_TIMEOUT);
     }
 
     #[test]
