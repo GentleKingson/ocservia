@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -298,5 +297,5 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 	if err := runtime.Store.QueryRow(ctx, query, node).Scan(&count); err != nil || count != 0 {
 		t.Fatal("old receipt not cleaned", count, err)
 	}
-	t.Log(fmt.Sprintf("%s: restricted runtime cleanup, old-grant CLI repair twice, next-tick maintenance and cancellation verified", backend))
+	t.Logf("%s: restricted runtime cleanup, old-grant CLI repair twice, next-tick maintenance and cancellation verified", backend)
 }
