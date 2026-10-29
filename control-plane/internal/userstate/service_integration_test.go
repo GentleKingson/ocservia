@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -764,10 +766,7 @@ func TestGlobalCommandLimitAcrossProducersIntegration(t *testing.T) {
 	if _, _, err := operations.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: secondNodeID, IdempotencyKey: "limited-noop", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-limited-noop", Traceparent: testTraceparent}); err != nil {
 		t.Fatal(err)
 	}
-	var baseline int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id LEFT JOIN node_command_leases lease ON lease.command_id=command.id AND lease.leased_until>now() WHERE operation.state IN('dispatched','accepted','running') OR lease.command_id IS NOT NULL`).Scan(&baseline); err != nil {
-		t.Fatal(err)
-	}
+	baseline := activeCommands(t, pool)
 	start := make(chan struct{})
 	results := make(chan int, 2)
 	go func() {
@@ -818,10 +817,7 @@ func TestOfflineQueueDoesNotConsumeGlobalDispatchCapacityIntegration(t *testing.
 			t.Fatal(err)
 		}
 	}
-	var baseline int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id LEFT JOIN node_command_leases lease ON lease.command_id=command.id AND lease.leased_until>now() WHERE operation.state IN('dispatched','accepted','running') OR lease.command_id IS NOT NULL`).Scan(&baseline); err != nil {
-		t.Fatal(err)
-	}
+	baseline := activeCommands(t, pool)
 	dispatches, err := operationstore.NewBackend(postgres.WrapPool(pool), baseline+1, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -1098,6 +1094,22 @@ func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, u
 		pool.Close()
 	})
 	return NewWithSignerBackend(postgres.WrapPool(pool), integrationCommandSigner()), pool, workspaceID, nodeID
+}
+
+// activeCommands reads the global capacity charge through the backend's own
+// count, so the baseline cannot drift from what Claim enforces.
+func activeCommands(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	tx, err := postgres.WrapPool(pool).Begin(context.Background(), database.ReadCommitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	active, err := tx.(commandlimit.Provider).CommandLimitStore().Active(context.Background(), math.MaxInt32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return active
 }
 
 func integrationCommandSigner() *commandauth.Signer {
