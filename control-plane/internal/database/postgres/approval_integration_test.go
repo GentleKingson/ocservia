@@ -58,6 +58,24 @@ func TestApprovalControllerWorkflowIntegration(t *testing.T) {
 	}
 	defer ownerPool.Close()
 	owner := postgres.WrapPool(ownerPool)
+	approvaltest.ExpiryDuringAuthorizationWait(t, postgres.WrapPool(pool), workspace, requester, approver, session, approverSession,
+		func(ctx context.Context, tx database.Tx) error {
+			return tx.QueryRow(ctx, `SELECT id FROM identities WHERE id=$1 FOR UPDATE`, approver).Scan(new(uuid.UUID))
+		},
+		func(ctx context.Context, tx database.Tx) (bool, error) {
+			var pid int
+			if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+				return false, err
+			}
+			var blocked bool
+			err := owner.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))`, pid).Scan(&blocked)
+			return blocked, err
+		},
+		func(id uuid.UUID, created, expires value.Timestamp) {
+			if _, err := owner.Exec(ctx, `UPDATE approval_requests SET created_at=$2,expires_at=$3 WHERE id=$1`, id, created, expires); err != nil {
+				t.Fatal(err)
+			}
+		})
 	approvaltest.ExtendedTimes(t, postgres.WrapPool(pool), workspace, requester, approver, session, approverSession, func(id uuid.UUID, created, expires value.Timestamp) {
 		if _, err := owner.Exec(ctx, `UPDATE approval_requests SET created_at=$2,expires_at=$3 WHERE id=$1`, id, created, expires); err != nil {
 			t.Fatal(err)

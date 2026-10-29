@@ -18,19 +18,19 @@ func (s approvalStore) ConsumeBound(ctx context.Context, id, workspace, requeste
 	if !ok {
 		return false, database.ErrUnsupported
 	}
-	// Wait for the approval row first: now() is the transaction start and would
-	// predate any lock wait, so expiry is judged against a wall clock read after it.
+	// Lock the approval and its approver before reading the wall clock: either
+	// lock wait may outlast the approval's expiry.
 	var locked uuid.UUID
 	if err := s.QueryRow(ctx, `SELECT id FROM approval_requests WHERE id=$1 AND workspace_id=$2 AND requester_id=$3 FOR UPDATE`, id, workspace, requester).Scan(&locked); errors.Is(err, database.ErrNotFound) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
-	now, err := database.WallTime(ctx, tx)
-	if err != nil {
+	if ok, err := s.approverAuthorized(ctx, id); err != nil || !ok {
 		return false, err
 	}
-	if ok, err := s.approverAuthorized(ctx, id); err != nil || !ok {
+	now, err := database.WallTime(ctx, tx)
+	if err != nil {
 		return false, err
 	}
 	n, err := s.Exec(ctx, `UPDATE approval_requests SET status='consumed',consumed_at=$8 WHERE id=$1 AND workspace_id=$2 AND requester_id=$3 AND action=$4 AND resource_type=$5 AND resource_id=$6 AND status='approved' AND request_hash IS NOT NULL AND request_summary IS NOT NULL AND approver_id IS DISTINCT FROM requester_id AND expires_at>$8 AND request_hash=$7`, id, workspace, requester, action, resourceType, resource, hash, now)

@@ -305,7 +305,63 @@ PostgreSQL and MySQL alike:
    Revoking sessions does not replace this step: a principal that can still
    sign in at the IdP regains every role binding the snapshot holds. Keep at
    least one working administrator and an independent approver.
-3. Keep the current Signer ledger; never roll it back to match an older
+3. Invalidate every restored `pending` or `approved` approval before allowing
+   requests or dispatch. A consumed approval can return as approved in the
+   snapshot; consuming it again can create a new command ID, so node receipt
+   deduplication does not replace this step. Through the protected administrative
+   connection, shorten its expiry using the backend-specific statements below.
+   Preserve status, approver, consumption and audit evidence: changing an approved
+   row to `expired` without removing its approver violates the schema, and removing
+   the approver would discard evidence. Record the affected IDs and original
+   expiries in the incident record before updating them.
+
+   PostgreSQL (run the whole block in one connection):
+
+   ```sql
+   BEGIN;
+   UPDATE approval_requests SET expires_at = now()
+   WHERE status IN ('pending', 'approved')
+     AND created_at < now() AND expires_at > now();
+   SELECT count(*) AS approvals_still_live FROM approval_requests
+   WHERE status IN ('pending', 'approved') AND expires_at > now();
+   COMMIT;
+   ```
+
+   MySQL (timestamps are microseconds since 2000; use one connection):
+
+   ```sql
+   START TRANSACTION;
+   SET @recovery_cutoff = TIMESTAMPDIFF(MICROSECOND, '2000-01-01', UTC_TIMESTAMP(6));
+   UPDATE approval_requests SET expires_at = @recovery_cutoff
+   WHERE status IN ('pending', 'approved')
+     AND created_at < @recovery_cutoff AND expires_at > @recovery_cutoff;
+   SELECT count(*) AS approvals_still_live FROM approval_requests
+   WHERE status IN ('pending', 'approved') AND expires_at > @recovery_cutoff;
+   COMMIT;
+   ```
+
+   `approvals_still_live` must be zero. Rows created at or after the cutoff remain
+   untouched to preserve `expires_at > created_at`; keep traffic blocked and
+   reconcile the database clock and snapshot history if any remain. Fresh work
+   requires a new request and independent approval after recovery. Expiring an
+   approval does not undo an already-dispatched command: reconcile its result
+   separately and never replay an Unknown write.
+4. Reapply post-snapshot node and `privd` attestation-key revocations from
+   independent evidence, using the normal node-revocation and key-revocation
+   workflows on the isolated Controller. Reconcile node authorization revisions,
+   endpoint-key state and pending trust convergence, and verify that `transportd`
+   has received the revoked trust state before reconnecting nodes. Updating only
+   `nodes.status` is insufficient. Keep affected nodes and receipt processing
+   isolated when the revocation history cannot be established.
+5. Reconcile `local_auth_bootstrap` completion, administrator/independent-approver
+   identities, and `break_glass_uses` consumption and `rotation_required` markers
+   against records outside the snapshot. Preserve initialization and consumption
+   evidence; do not delete markers or reopen bootstrap to regain access. Rotate
+   any Break-glass credential consumed after the snapshot, or whose usage cannot
+   be established, in the external protected configuration before cutover. Follow
+   [Lost Local administration authority](#lost-local-administration-authority)
+   for recovery and keep Local/Break-glass access closed until reconciled.
+6. Keep the current Signer ledger; never roll it back to match an older
    Controller database. If the ledger itself must be restored, follow the
    [Signer state and recovery](../development/certificates-and-signer.md#state-and-recovery)
    procedure with an independently reconciled `--minimum-revision`, and
@@ -313,9 +369,9 @@ PostgreSQL and MySQL alike:
    snapshot. When the evidence for any of these changes is incomplete, keep the
    affected function closed and reconcile manually; never derive a high-water
    mark from the same old snapshot.
-4. Keep node fence floors, effect receipts and execution history; never lower
+7. Keep node fence floors, effect receipts and execution history; never lower
    a floor or clear a ledger to let the restored Controller connect.
-5. Record the snapshot, the reconciliation cut-off, the changes reapplied and
+8. Record the snapshot, the reconciliation cut-off, the changes reapplied and
    the operator in the incident record.
 
 Never guess the result of an Unknown remote write. Retain logs and scoped

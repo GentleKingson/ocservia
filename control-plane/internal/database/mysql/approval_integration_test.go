@@ -13,7 +13,7 @@ import (
 )
 
 func TestRealApprovalControllerWorkflow(t *testing.T) {
-	owner, _, options := migrateFixture(t)
+	owner, admin, options := migrateFixture(t)
 	ctx := context.Background()
 	workspace, requester, approver, session, approverSession := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -49,6 +49,24 @@ func TestRealApprovalControllerWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
+	approvaltest.ExpiryDuringAuthorizationWait(t, runtime, workspace, requester, approver, session, approverSession,
+		func(ctx context.Context, tx database.Tx) error {
+			return tx.QueryRow(ctx, `SELECT id FROM identities WHERE id=? FOR UPDATE`, UUIDBytes(approver)).Scan(new([]byte))
+		},
+		func(ctx context.Context, tx database.Tx) (bool, error) {
+			var connectionID int64
+			if err := tx.QueryRow(ctx, `SELECT CONNECTION_ID()`).Scan(&connectionID); err != nil {
+				return false, err
+			}
+			var blocked bool
+			err := admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM performance_schema.data_lock_waits w JOIN performance_schema.threads t ON t.THREAD_ID=w.BLOCKING_THREAD_ID WHERE t.PROCESSLIST_ID=?)`, connectionID).Scan(&blocked)
+			return blocked, err
+		},
+		func(id uuid.UUID, created, expires value.Timestamp) {
+			if _, err := owner.Exec(ctx, `UPDATE approval_requests SET created_at=?,expires_at=? WHERE id=?`, created, expires, UUIDBytes(id)); err != nil {
+				t.Fatal(err)
+			}
+		})
 	approvaltest.Workflow(t, runtime, workspace, requester, approver, session, approverSession)
 	approvaltest.DisabledApprover(t, runtime, workspace, requester, approver, session, approverSession, func(ctx context.Context, tx database.Tx, disabled bool) error {
 		_, err := tx.Exec(ctx, `UPDATE identities SET disabled_at=IF(?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),NULL) WHERE id=?`, disabled, UUIDBytes(approver))

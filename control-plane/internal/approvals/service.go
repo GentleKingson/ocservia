@@ -206,11 +206,7 @@ func (s *Service) Approve(ctx context.Context, decision Decision) (Approval, err
 		if approval.RequestHash != "" && decision.ExpectedRequestHash != approval.RequestHash {
 			return ErrNotReady
 		}
-		at, err := value.FromTime(s.now())
-		if err != nil {
-			return err
-		}
-		if approval.Status != "pending" || !approval.ExpiresAt.Valid || approval.ExpiresAt.Micros <= at.Micros {
+		if approval.Status != "pending" {
 			return ErrNotReady
 		}
 		authorized, err := data.Authorized(ctx, approval.ID, decision.ApproverID)
@@ -220,7 +216,16 @@ func (s *Service) Approve(ctx context.Context, decision Decision) (Approval, err
 		if !authorized {
 			return ErrNotReady
 		}
+		// Authorized may wait for the approver's identity lock. Judge expiry
+		// only after that wait, using the same instant for the decision and audit.
 		now := s.now()
+		at, err := value.FromTime(now)
+		if err != nil {
+			return err
+		}
+		if !approval.ExpiresAt.Valid || approval.ExpiresAt.Micros <= at.Micros {
+			return ErrNotReady
+		}
 		if err := data.Approve(ctx, approval.ID, decision.ApproverID, decision.Reason, now); err != nil {
 			return err
 		}
