@@ -280,10 +280,43 @@ command execution blocked on the restored instance. Passing a backup checksum or
 restore verifier check is only the first step: bring up an isolated Controller
 with the production audit keys to validate the schema, runtime database grants,
 and audit chain, then inspect the restored scheduler and owner state and
-reconcile all in-flight operations and commands, including any Unknown outcomes.
+reconcile all in-flight operations and commands, including any Unknown outcomes,
+and complete the [security state reconciliation](#security-state-reconciliation-before-cutover).
 Repoint client traffic and re-enable command dispatch only after every check
 succeeds and a single authoritative instance is established. Keep all original
 incident evidence and initialization markers intact.
+
+### Security state reconciliation before cutover
+
+Any restore from a backup rolls back security changes committed after the
+snapshot: revoked sessions, disabled identities, and removed role bindings come
+back, so a stolen session cookie that has not yet expired is accepted again.
+Before reopening user traffic or command dispatch on any restored database, on
+PostgreSQL and MySQL alike:
+
+1. On the isolated target, through the protected administrative database
+   connection, revoke every unrevoked session with the backend-specific
+   statement shown in [Lost Local administration authority](#lost-local-administration-authority).
+   Keep the rows and their audit links.
+2. Reapply every identity disable, workspace or resource role removal, and
+   security-relevant credential rotation made after the snapshot, using change
+   records, audit evidence and IdP state from outside the restored database, and
+   following [Revoking an OIDC identity or role](authentication.md#revoking-an-oidc-identity-or-role).
+   Revoking sessions does not replace this step: a principal that can still
+   sign in at the IdP regains every role binding the snapshot holds. Keep at
+   least one working administrator and an independent approver.
+3. Keep the current Signer ledger; never roll it back to match an older
+   Controller database. If the ledger itself must be restored, follow the
+   [Signer state and recovery](../development/certificates-and-signer.md#state-and-recovery)
+   procedure with an independently reconciled `--minimum-revision`, and
+   account for every issuance, revocation, import and disable after the
+   snapshot. When the evidence for any of these changes is incomplete, keep the
+   affected function closed and reconcile manually; never derive a high-water
+   mark from the same old snapshot.
+4. Keep node fence floors, effect receipts and execution history; never lower
+   a floor or clear a ledger to let the restored Controller connect.
+5. Record the snapshot, the reconciliation cut-off, the changes reapplied and
+   the operator in the incident record.
 
 Never guess the result of an Unknown remote write. Retain logs and scoped
 diagnostics, rotate any credentials that may have been exposed, and coordinate
