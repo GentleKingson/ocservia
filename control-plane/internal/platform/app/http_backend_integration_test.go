@@ -163,7 +163,8 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, binding)
 	denied := call("GET", "/api/v1/nodes/"+node.String())
 	denied.Body.Close()
-	if denied.StatusCode != 403 {
+	// Without any binding the workspace is invisible, so the node answers 404.
+	if denied.StatusCode != 404 {
 		t.Fatal("permissions were frozen at construction", denied.StatusCode)
 	}
 	// Wait for the bounded revalidation signal (EOF), not a fixed sleep.
