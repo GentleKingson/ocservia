@@ -99,8 +99,8 @@ Check the run's `head_sha` equals that recorded SHA. The graph is
 `admission → preflight → relay/controller/node → verdict`. Admission is
 uncredentialed and checks repository, main ref, defining workflow ref/SHA and
 event before checkout. All three role jobs use the protected Environment and
-job-local `id-token: write`. Tailscale Action v4.1.3 is fixed at
-`780049a30b6ff5c378a9e7b389d15ece7a204888`; it requests ephemeral, preapproved
+job-local `id-token: write`. Tailscale Action v4.3.0 is fixed at
+`99a8333667fff04fdd6cffb46dfd409f8329a7bf`; it requests ephemeral, preapproved
 nodes with in-memory state. No long-lived Tailscale key is supplied.
 
 The Relay generates a one-day CA and DNS-SAN leaf certificate for
@@ -178,7 +178,7 @@ shellcheck -x scripts/real-e2e-{hosted,controller,node,artifact,relay-host}.sh
 ```
 
 Official references checked for this implementation:
-[Tailscale Action at the pinned SHA](https://github.com/tailscale/github-action/tree/780049a30b6ff5c378a9e7b389d15ece7a204888),
+[Tailscale Action at the pinned SHA](https://github.com/tailscale/github-action/tree/99a8333667fff04fdd6cffb46dfd409f8329a7bf),
 [workload identity federation](https://tailscale.com/docs/features/workload-identity-federation),
 [additive Grants/ACL behavior](https://tailscale.com/docs/reference/grants-vs-acls),
 [GitHub OIDC claims and immutable subjects](https://docs.github.com/en/actions/reference/security/oidc).
