@@ -267,6 +267,118 @@ func ExpiryAfterLockWait(t *testing.T, b database.Backend, workspace, requester,
 	}
 }
 
+// ExpiryDuringAuthorizationWait exercises the identity lock taken inside
+// authorization, after the approval row has already been locked. The observer
+// must establish that the operation is blocked before the approval expires.
+func ExpiryDuringAuthorizationWait(t *testing.T, b database.Backend, workspace, requester, approver, session, approverSession uuid.UUID, lockIdentity func(context.Context, database.Tx) error, waiting func(context.Context, database.Tx) (bool, error), set func(uuid.UUID, value.Timestamp, value.Timestamp)) {
+	t.Helper()
+	for _, consume := range []bool{false, true} {
+		for _, expired := range []bool{true, false} {
+			name := "approve"
+			if consume {
+				name = "consume"
+			}
+			if expired {
+				name += " expired"
+			} else {
+				name += " fresh"
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				s := approvals.NewBackend(b)
+				hash, summary := approvals.GenericBinding("service.reload", "workspace", workspace)
+				a, err := s.Create(ctx, approvals.Request{WorkspaceID: workspace, RequesterID: requester, ResourceID: workspace, Action: "service.reload", ResourceType: "workspace", Reason: "identity lock wait", TTL: time.Hour, SessionID: session, RequestID: uuid.NewString(), RequestHash: hash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: workspace, Type: "workspace"}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				decision := approvals.Decision{ApprovalID: a.ID, ApproverID: approver, SessionID: approverSession, Reason: "reviewed", RequestID: uuid.NewString(), ExpectedRequestHash: a.RequestHash}
+				initial, final := "pending", "approved"
+				if consume {
+					if _, err := s.Approve(ctx, decision); err != nil {
+						t.Fatal(err)
+					}
+					initial, final = "approved", "consumed"
+				}
+				blocker, err := b.Begin(ctx, database.ReadCommitted)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer blocker.Rollback(ctx)
+				if err := lockIdentity(ctx, blocker); err != nil {
+					t.Fatal(err)
+				}
+				now, err := database.WallTime(ctx, blocker)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expires := now
+				expires.Micros += int64(time.Hour / time.Microsecond)
+				if expired {
+					expires.Micros = now.Micros + int64(2*time.Second/time.Microsecond)
+				}
+				set(a.ID, a.CreatedAt, expires)
+				type result struct {
+					err     error
+					mutated bool
+				}
+				done := make(chan result, 1)
+				go func() {
+					var r result
+					if consume {
+						r.err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+							if err := approvals.ConsumeBoundTx(ctx, tx, a.ID, workspace, requester, a.Action, a.ResourceType, workspace, hash); err != nil {
+								return err
+							}
+							r.mutated = true
+							return nil
+						})
+					} else {
+						_, r.err = s.Approve(ctx, decision)
+					}
+					done <- r
+				}()
+				for {
+					blocked, err := waiting(ctx, blocker)
+					if err != nil {
+						t.Fatal(err)
+					}
+					now, err = database.WallTime(ctx, blocker)
+					if err != nil || now.Micros >= expires.Micros {
+						t.Fatalf("did not observe identity lock wait before expiry: %v", err)
+					}
+					if blocked {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				for expired && now.Micros < expires.Micros {
+					time.Sleep(10 * time.Millisecond)
+					now, err = database.WallTime(ctx, blocker)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := blocker.Commit(ctx); err != nil {
+					t.Fatal(err)
+				}
+				r := <-done
+				if expired {
+					final = initial
+					if !errors.Is(r.err, approvals.ErrNotReady) || r.mutated {
+						t.Errorf("expired approval accepted after identity lock wait: mutated=%v err=%v", r.mutated, r.err)
+					}
+				} else if r.err != nil || (consume && !r.mutated) {
+					t.Errorf("fresh approval rejected after identity lock wait: mutated=%v err=%v", r.mutated, r.err)
+				}
+				if stored, err := s.Get(ctx, a.ID); err != nil || stored.Status != final {
+					t.Fatalf("approval status after wait: want %s got %+v err=%v", final, stored, err)
+				}
+			})
+		}
+	}
+}
+
 // DisabledApprover proves decision, validation and consumption re-check the
 // approver's current identity, and that consumption serializes with a disable
 // still in flight. setDisabled runs inside the given transaction; the fixture

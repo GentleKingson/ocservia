@@ -20,19 +20,19 @@ func (s approvalStore) ConsumeBound(ctx context.Context, id, workspace, requeste
 	if !ok {
 		return false, database.ErrUnsupported
 	}
-	// Wait for the approval row first: a time read before the lock wait could
-	// authorize an approval that expired while queued. Read the clock afterwards.
+	// Lock the approval and its approver before reading the wall clock: either
+	// lock wait may outlast the approval's expiry.
 	var locked []byte
 	if err := s.QueryRow(ctx, `SELECT id FROM approval_requests WHERE id=? AND workspace_id=? AND requester_id=? FOR UPDATE`, UUIDBytes(id), UUIDBytes(workspace), UUIDBytes(requester)).Scan(&locked); errors.Is(err, database.ErrNotFound) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
-	now, err := database.WallTime(ctx, tx)
-	if err != nil {
+	if ok, err := s.approverAuthorized(ctx, id); err != nil || !ok {
 		return false, err
 	}
-	if ok, err := s.approverAuthorized(ctx, id); err != nil || !ok {
+	now, err := database.WallTime(ctx, tx)
+	if err != nil {
 		return false, err
 	}
 	n, err := s.Exec(ctx, `UPDATE approval_requests SET status='consumed',consumed_at=? WHERE id=? AND workspace_id=? AND requester_id=? AND CAST(action AS BINARY)=CAST(? AS BINARY) AND CAST(resource_type AS BINARY)=CAST(? AS BINARY) AND resource_id=? AND status='approved' AND request_hash IS NOT NULL AND request_summary IS NOT NULL AND NOT(approver_id <=> requester_id) AND expires_at>? AND request_hash=?`, now, UUIDBytes(id), UUIDBytes(workspace), UUIDBytes(requester), action, resourceType, UUIDBytes(resource), now, hash)

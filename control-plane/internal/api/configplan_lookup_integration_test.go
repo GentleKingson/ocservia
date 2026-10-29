@@ -173,7 +173,19 @@ func testConfigPlanLookupBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 		foreign.workspace = uuid.Must(uuid.NewV7())
 		foreign.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'foreign approval',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'foreign approval',?,?,?)`, foreign.workspace, foreign.workspace.String(), value.Timestamp{Valid: true}, value.Timestamp{Valid: true})
 		foreignPlan := foreign.plan(true)
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/approval-requests", body, "", f.requester.cookie, func(r *http.Request) { r.Header.Set("X-Workspace-ID", foreign.workspace.String()) }), 400, "invalid-request")
+		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/approval-requests", body, "", f.requester.cookie, func(r *http.Request) { r.Header.Set("X-Workspace-ID", foreign.workspace.String()) }), 409, "config-plan-not-ready")
+		// Remove fixture roles so the foreign plan is genuinely invisible.
+		foreign.exec(`DELETE FROM role_bindings WHERE workspace_id=$1`, `DELETE FROM role_bindings WHERE workspace_id=?`, foreign.workspace)
+		var hiddenBody string
+		for _, id := range []uuid.UUID{foreignPlan.ID, uuid.Must(uuid.NewV7())} {
+			request := fmt.Sprintf(`{"action":"config.apply","resource_type":"config_plan","resource_id":%q,"reason":"review","ttl_seconds":900}`, id)
+			w := f.call("POST", "/api/v1/approval-requests", request, "", f.requester.cookie, nil)
+			assertApplyHTTPProblem(t, w, 409, "config-plan-not-ready")
+			if hiddenBody != "" && hiddenBody != w.Body.String() {
+				t.Fatalf("foreign and missing plans differ: %s vs %s", hiddenBody, w.Body)
+			}
+			hiddenBody = w.Body.String()
+		}
 		foreign.exec(`UPDATE config_plans SET expires_at=$1 WHERE id=$2`, `UPDATE config_plans SET expires_at=? WHERE id=?`, value.Timestamp{Valid: true}, foreignPlan.ID)
 		foreignBody := fmt.Sprintf(`{"action":"config.apply","resource_type":"config_plan","resource_id":%q,"reason":"review","ttl_seconds":900}`, foreignPlan.ID)
 		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/approval-requests", foreignBody, "", f.requester.cookie, nil), 409, "config-plan-not-ready")
@@ -214,7 +226,7 @@ func testConfigPlanLookupBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 		}
 		lookup.bindingErr = nil
 		lookup.result = &configplan.ApprovalBinding{WorkspaceID: uuid.Must(uuid.NewV7())}
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/approval-requests", body, "", f.requester.cookie, nil), 400, "invalid-request")
+		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/approval-requests", body, "", f.requester.cookie, nil), 409, "config-plan-not-ready")
 		lookup.result = nil
 		f.s.configPlanLookup = nil
 		assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.reader.cookie, nil), 404, "not-found")

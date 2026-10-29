@@ -156,12 +156,8 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		binding, bindingErr := s.configPlanLookup.ApprovalBinding(r.Context(), resourceID)
-		if bindingErr != nil {
+		if bindingErr != nil || binding.WorkspaceID != resource.WorkspaceID {
 			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/config-plan-not-ready", "Configuration plan is not ready", "the plan must be valid and unexpired before approval")
-			return
-		}
-		if binding.WorkspaceID != resource.WorkspaceID {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "the plan is outside the selected workspace")
 			return
 		}
 		node := rbac.Resource{WorkspaceID: binding.WorkspaceID, Type: "node", ID: binding.NodeID}
@@ -322,10 +318,6 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
 			return
 		}
-		if local, err := s.auth.HasLocalCredential(r.Context(), resource.ID); err != nil || !local {
-			s.writeAuthorizationError(w, r, database.ErrNotFound)
-			return
-		}
 		requestHash, requestSummary = approvals.GenericBinding(action, resource.Type, resource.ID)
 		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: managementWorkspace, Type: "workspace", ID: uuid.Nil})
 	} else {
@@ -341,6 +333,14 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 	if !s.devAuth && action != "user.batch.disable" && action != "config.apply" && action != "certificate.issue" && action != "certificate.revoke" && action != "certificate.private_key.export" && action != "node.approve" && action != "role_binding.elevate" && action != "agent.rollout" {
 		if err := s.rbac.Authorize(r.Context(), actor.IdentityID, action, resource, actor.BreakGlass); err != nil {
 			s.writeAuthorizationError(w, r, err)
+			return
+		}
+	}
+	// Check target existence only after authorization so an approval requester
+	// without Local administration rights cannot probe credential membership.
+	if action == "local_user.reset-password" {
+		if local, err := s.auth.HasLocalCredential(r.Context(), resource.ID); err != nil || !local {
+			s.writeAuthorizationError(w, r, database.ErrNotFound)
 			return
 		}
 	}
