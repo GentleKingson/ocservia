@@ -17,12 +17,14 @@ use ocservia_agent_protocol::{
 };
 use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
+    FenceBindingClaimsV2, VerifiedConnectionFenceV2,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, CommandDeliveryMode,
-    CommandEnvelope, CommandResultState, PrivdCertificateReceiptBindingV1, PrivdReceiptVersion,
-    PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose,
-    SealedSecretVersion, command_envelope,
+    CommandEnvelope, CommandResultState, ConnectionFenceV2, FenceBindingV2, FenceOperationKind,
+    PrivdCertificateReceiptBindingV1, PrivdReceiptVersion, PrivdResultReceiptV1,
+    PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose, SealedSecretVersion,
+    command_envelope,
 };
 use ocservia_ocserv_adapter::{
     Adapter, ArtifactLeaseIdentity, AuthorizedEffectDecision, AuthorizedEffectIdentity,
@@ -40,6 +42,8 @@ use uuid::Uuid;
 
 const MAX_CONCURRENT_CLIENTS: usize = 4;
 const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(30);
+/// Capability every Controller artifact fence binding names (same as the Agent).
+const CONNECTION_FENCING_CAPABILITY: &str = "ocserv.fencing.v2";
 
 /// Privd server configuration.
 #[derive(Clone)]
@@ -50,6 +54,9 @@ pub struct ServerConfig {
     pub agent_uid: u32,
     /// Local node UUID pinned independently from the Agent request.
     pub node_id: [u8; 16],
+    /// Enrolled Agent Iroh `EndpointID` pinned by root, never taken from the
+    /// Agent request; signed connection fences must name it.
+    pub endpoint_id: [u8; 32],
     /// Controller verification keys loaded by root at startup.
     pub command_keys: ControllerCommandKeyring,
     /// Root-owned per-node terminal-result attestation key.
@@ -66,6 +73,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("socket", &self.socket)
             .field("agent_uid", &self.agent_uid)
             .field("node_id", &Uuid::from_bytes(self.node_id))
+            .field("endpoint_id", &hex::encode(self.endpoint_id))
             .field("attestation_key", &"[redacted]")
             .field("upgrades", &self.upgrades)
             .finish_non_exhaustive()
@@ -146,6 +154,7 @@ pub async fn serve(
                 let adapter = adapter.clone();
                 let agent_uid = config.agent_uid;
                 let node_id = config.node_id;
+                let endpoint_id = config.endpoint_id;
                 let command_keys = config.command_keys.clone();
                 let attestation_key = Arc::clone(&config.attestation_key);
                 let upgrades = config.upgrades.clone();
@@ -155,6 +164,7 @@ pub async fn serve(
                         stream,
                         agent_uid,
                         node_id,
+                        endpoint_id,
                         command_keys,
                         attestation_key,
                         upgrades,
@@ -170,10 +180,12 @@ pub async fn serve(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_client(
     mut stream: UnixStream,
     agent_uid: u32,
     node_id: [u8; 16],
+    endpoint_id: [u8; 32],
     command_keys: ControllerCommandKeyring,
     attestation_key: Arc<SigningKey>,
     upgrades: UpgradeScheduler,
@@ -192,6 +204,7 @@ async fn handle_client(
     let response = dispatch_attested(
         &request,
         &node_id,
+        &endpoint_id,
         &command_keys,
         &attestation_key,
         &upgrades,
@@ -208,13 +221,14 @@ async fn handle_client(
 async fn dispatch_attested(
     request: &PrivdRequest,
     node_id: &[u8; 16],
+    endpoint_id: &[u8; 32],
     command_keys: &ControllerCommandKeyring,
     attestation_key: &SigningKey,
     upgrades: &UpgradeScheduler,
     adapter: &Adapter,
 ) -> PrivdResponse {
     let request_id = request.request_id.clone();
-    let result = match validate_request(request, node_id, command_keys) {
+    let result = match validate_request(request, node_id, endpoint_id, command_keys) {
         Ok((deadline, ValidatedRequest::Read)) => {
             match tokio::time::timeout(
                 deadline,
@@ -309,6 +323,9 @@ async fn dispatch_attested(
 }
 
 #[cfg(test)]
+const TEST_ENDPOINT_ID: [u8; 32] = [9; 32];
+
+#[cfg(test)]
 async fn dispatch(
     request: PrivdRequest,
     node_id: &[u8; 16],
@@ -319,6 +336,7 @@ async fn dispatch(
     dispatch_attested(
         &request,
         node_id,
+        &TEST_ENDPOINT_ID,
         command_keys,
         &key,
         &UpgradeScheduler::disabled(),
@@ -336,7 +354,16 @@ async fn dispatch_upgrade(
     upgrades: &UpgradeScheduler,
 ) -> PrivdResponse {
     let key = SigningKey::from_bytes(&[41; 32]);
-    dispatch_attested(&request, node_id, command_keys, &key, upgrades, adapter).await
+    dispatch_attested(
+        &request,
+        node_id,
+        &TEST_ENDPOINT_ID,
+        command_keys,
+        &key,
+        upgrades,
+        adapter,
+    )
+    .await
 }
 
 enum ValidatedRequest<'a> {
@@ -355,6 +382,7 @@ enum ValidatedRequest<'a> {
 fn validate_request<'a>(
     request: &'a PrivdRequest,
     node_id: &[u8; 16],
+    endpoint_id: &[u8; 32],
     command_keys: &ControllerCommandKeyring,
 ) -> Result<(Duration, ValidatedRequest<'a>), PrivdError> {
     let id = Uuid::from_slice(&request.request_id)
@@ -420,6 +448,15 @@ fn validate_request<'a>(
                         "journal acceptance timestamp invalid",
                     ));
                 }
+                verify_execution_fence(
+                    command,
+                    &claims,
+                    node_id,
+                    endpoint_id,
+                    command_keys,
+                    now_seconds,
+                    now.subsec_nanos(),
+                )?;
                 ValidatedRequest::Execute(command, claims, accepted)
             }
             (PrivilegedRequestMode::Reconcile, CommandDeliveryMode::ReconcileOnly) => {
@@ -473,6 +510,17 @@ fn validate_request<'a>(
                 )
                 .map_err(|failure| authorization_error(&failure))?;
             validate_artifact_claims(&claims)?;
+            verify_artifact_fence(
+                value.connection_fence.as_deref(),
+                value.fence_binding.as_deref(),
+                &claims.artifact_id,
+                node_id,
+                endpoint_id,
+                command_keys,
+                i64::try_from(now.as_secs())
+                    .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
+                now.subsec_nanos(),
+            )?;
             if value.offset > claims.max_bytes {
                 return Err(error(ErrorKind::InvalidRequest, "artifact offset invalid"));
             }
@@ -512,6 +560,17 @@ fn validate_request<'a>(
             }
             .map_err(|failure| authorization_error(&failure))?;
             validate_artifact_claims(&claims)?;
+            verify_artifact_fence(
+                value.connection_fence.as_deref(),
+                value.fence_binding.as_deref(),
+                &claims.grant_id,
+                node_id,
+                endpoint_id,
+                command_keys,
+                i64::try_from(now.as_secs())
+                    .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
+                now.subsec_nanos(),
+            )?;
             if value.sha256.len() != 32 || value.size == 0 || value.size > claims.max_bytes {
                 return Err(error(
                     ErrorKind::InvalidRequest,
@@ -587,6 +646,121 @@ fn artifact_identity(claims: &ArtifactGrantClaimsV1) -> ArtifactLeaseIdentity<'_
 
 fn authorization_error(failure: &AuthorizationError) -> PrivdError {
     error(ErrorKind::PermissionDenied, failure.code())
+}
+
+/// The Agent's own owner-term checks do not survive an Agent compromise, so
+/// root re-verifies the Controller-signed connection fence and its command
+/// binding at its own clock before any new effect.
+///
+/// ponytail: stale authority is bounded by the signed owner lease
+/// (`OCSERV_OWNER_LEASE_TTL`, 30s by default); privd keeps no durable
+/// owner-epoch/revision floor. Add one to the root effect store if a newer
+/// accepted term must revoke an unexpired lease immediately.
+fn verify_execution_fence(
+    command: &CommandEnvelope,
+    claims: &CommandAuthorizationV1,
+    node_id: &[u8; 16],
+    endpoint_id: &[u8; 32],
+    command_keys: &ControllerCommandKeyring,
+    now_seconds: i64,
+    now_nanos: u32,
+) -> Result<(), PrivdError> {
+    let (fence, binding) = verify_fence_carriers(
+        command.connection_fence.as_ref(),
+        command.fence_binding.as_ref(),
+        node_id,
+        endpoint_id,
+        command_keys,
+        now_seconds,
+        now_nanos,
+    )?;
+    if binding.operation_kind != FenceOperationKind::Command as u32
+        || binding.operation_id != claims.command_id
+        || binding.capability != claims.required_capability
+        || claims.expected_revision != fence.authorization_revision
+        || !fence.capabilities.contains(&binding.capability)
+        || !binding.matches_fence(&fence)
+    {
+        return Err(error(
+            ErrorKind::PermissionDenied,
+            "connection fence does not authorize this command",
+        ));
+    }
+    Ok(())
+}
+
+/// Verifies the signed owner term and binding carriers against privd's own
+/// clock, pinned node ID and root-provisioned `EndpointID`.
+fn verify_fence_carriers(
+    fence: Option<&ConnectionFenceV2>,
+    binding: Option<&FenceBindingV2>,
+    node_id: &[u8; 16],
+    endpoint_id: &[u8; 32],
+    command_keys: &ControllerCommandKeyring,
+    now_seconds: i64,
+    now_nanos: u32,
+) -> Result<(VerifiedConnectionFenceV2, FenceBindingClaimsV2), PrivdError> {
+    let (Some(fence), Some(binding)) = (fence, binding) else {
+        return Err(error(
+            ErrorKind::PermissionDenied,
+            "signed connection fence and binding required",
+        ));
+    };
+    let fence = command_keys
+        .verify_connection_fence_v2_at(fence, node_id, endpoint_id, now_seconds, now_nanos)
+        .map_err(|failure| authorization_error(&failure))?;
+    if fence.lease_expired(now_seconds, now_nanos) {
+        return Err(error(
+            ErrorKind::PermissionDenied,
+            "connection-owner lease expired",
+        ));
+    }
+    let binding = command_keys
+        .verify_fence_binding_v2_at(binding, node_id, endpoint_id, now_seconds, now_nanos)
+        .map_err(|failure| authorization_error(&failure))?;
+    Ok((fence, binding))
+}
+
+/// Artifact reads and consumption are not commands, so the Agent's owner-term
+/// check is re-proven here from the same Controller-signed artifact binding the
+/// Agent verified: fetch binds the artifact ID, consumption binds the grant ID.
+/// ponytail: like `Execute`, an old binding stays usable until its signed owner
+/// lease ends; privd keeps no owner-epoch floor. Each read re-checks the one
+/// dispatch fence, which suffices only while a P12 fits one 256 KiB chunk (the
+/// 256 KiB chain cap with an RSA-4096 key yields ~192 KiB). If artifacts can
+/// span chunks, the Controller must refresh the fence during the transfer.
+#[allow(clippy::too_many_arguments)]
+fn verify_artifact_fence(
+    fence: Option<&ConnectionFenceV2>,
+    binding: Option<&FenceBindingV2>,
+    operation_id: &[u8; 16],
+    node_id: &[u8; 16],
+    endpoint_id: &[u8; 32],
+    command_keys: &ControllerCommandKeyring,
+    now_seconds: i64,
+    now_nanos: u32,
+) -> Result<(), PrivdError> {
+    let (fence, binding) = verify_fence_carriers(
+        fence,
+        binding,
+        node_id,
+        endpoint_id,
+        command_keys,
+        now_seconds,
+        now_nanos,
+    )?;
+    if binding.operation_kind != FenceOperationKind::Artifact as u32
+        || binding.operation_id.as_slice() != operation_id
+        || binding.capability != CONNECTION_FENCING_CAPABILITY
+        || !fence.capabilities.contains(&binding.capability)
+        || !binding.matches_fence(&fence)
+    {
+        return Err(error(
+            ErrorKind::PermissionDenied,
+            "connection fence does not authorize this artifact operation",
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1862,12 +2036,16 @@ mod tests {
         ServiceReloadRequest, SessionMutationRequest, UserSecretRequest, privd_request,
     };
     use ocservia_command_authorization::{
+        ConnectionFenceClaimsV2, FENCE_SIGNATURE_VERSION_ED25519_V1, FenceBindingClaimsV2,
+        canonical_artifact_grant_v1, canonical_connection_fence_v2, canonical_fence_binding_v2,
         canonical_v1, claims_from_envelope_v1, semantic_payload_hash_v2, verification_key_id,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        AgentUpgrade, CertificateP12, CommandAuthorizationProof, CommandAuthorizationVersion,
-        CommandDeliveryMode, ConfigApply, SealedSecretPurpose, SealedSecretV1, SealedSecretVersion,
-        SemanticPayloadHashVersion, ServiceReload, UserCreate, command_envelope,
+        AgentUpgrade, ArtifactGrantV1, ArtifactGrantVersion, CertificateP12,
+        CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode, ConfigApply,
+        ConnectionFenceV2, FenceBindingV2, FenceSignatureVersion, SealedSecretPurpose,
+        SealedSecretV1, SealedSecretVersion, SemanticPayloadHashVersion, ServiceReload, UserCreate,
+        command_envelope,
     };
     use ocservia_ocserv_adapter::{FixedResources, Limits};
     use ocservia_upgrader::UpgradeTrigger;
@@ -2003,7 +2181,142 @@ mod tests {
             .as_mut()
             .expect("authorization")
             .signature = signature.to_bytes().to_vec();
+        let fence = signed_fence(key, &command, [1; 16], TEST_ENDPOINT_ID, (expires_at, 0));
+        command.fence_binding = Some(signed_binding(
+            key,
+            &command,
+            &fence,
+            FenceOperationKind::Command,
+            &command.command_id,
+            &command.required_capability,
+        ));
+        command.connection_fence = Some(fence);
         command
+    }
+
+    /// Signs the Controller connection fence the Agent would forward with
+    /// `command`; fences sit outside the command authorization proof.
+    fn signed_fence(
+        key: &SigningKey,
+        command: &CommandEnvelope,
+        fence_id: [u8; 16],
+        endpoint_id: [u8; 32],
+        lease_until: (i64, u32),
+    ) -> ConnectionFenceV2 {
+        let issued_at = command.issued_at.expect("command issuance").seconds;
+        let expires_at = command.expires_at.expect("command expiry").seconds;
+        let claims = ConnectionFenceClaimsV2 {
+            signature_version: FENCE_SIGNATURE_VERSION_ED25519_V1,
+            key_id: verification_key_id(&key.verifying_key()),
+            fence_id,
+            node_id: command.node_id.as_slice().try_into().expect("node ID"),
+            endpoint_id,
+            owner_instance_id: [2; 16],
+            owner_incarnation: 1,
+            owner_epoch: 1,
+            connection_id: [3; 16],
+            authorization_revision: command.expected_revision,
+            capabilities: vec![command.required_capability.clone()],
+            lease_until_seconds: lease_until.0,
+            lease_until_nanos: lease_until.1,
+            issued_at_seconds: issued_at - 1,
+            issued_at_nanos: 0,
+            expires_at_seconds: expires_at.max(lease_until.0 + 1),
+            expires_at_nanos: 0,
+        };
+        let signature = key.sign(&canonical_connection_fence_v2(&claims).expect("canonical fence"));
+        ConnectionFenceV2 {
+            signature_version: FenceSignatureVersion::Ed25519V1.into(),
+            key_id: claims.key_id,
+            fence_id: claims.fence_id.to_vec(),
+            node_id: claims.node_id.to_vec(),
+            endpoint_id: claims.endpoint_id.to_vec(),
+            owner_instance_id: claims.owner_instance_id.to_vec(),
+            owner_incarnation: claims.owner_incarnation,
+            owner_epoch: claims.owner_epoch,
+            connection_id: claims.connection_id.to_vec(),
+            authorization_revision: claims.authorization_revision,
+            capabilities: claims.capabilities,
+            lease_until: Some(Timestamp {
+                seconds: claims.lease_until_seconds,
+                nanos: i32::try_from(claims.lease_until_nanos).expect("lease nanos"),
+            }),
+            issued_at: Some(Timestamp {
+                seconds: claims.issued_at_seconds,
+                nanos: 0,
+            }),
+            expires_at: Some(Timestamp {
+                seconds: claims.expires_at_seconds,
+                nanos: 0,
+            }),
+            signature: signature.to_bytes().to_vec(),
+        }
+    }
+
+    fn signed_binding(
+        key: &SigningKey,
+        command: &CommandEnvelope,
+        fence: &ConnectionFenceV2,
+        operation_kind: FenceOperationKind,
+        operation_id: &[u8],
+        capability: &str,
+    ) -> FenceBindingV2 {
+        let claims = FenceBindingClaimsV2 {
+            signature_version: FENCE_SIGNATURE_VERSION_ED25519_V1,
+            key_id: verification_key_id(&key.verifying_key()),
+            operation_kind: operation_kind as u32,
+            operation_id: operation_id.try_into().expect("operation ID"),
+            fence_id: fence.fence_id.as_slice().try_into().expect("fence ID"),
+            node_id: fence.node_id.as_slice().try_into().expect("node ID"),
+            endpoint_id: fence
+                .endpoint_id
+                .as_slice()
+                .try_into()
+                .expect("endpoint ID"),
+            owner_instance_id: fence
+                .owner_instance_id
+                .as_slice()
+                .try_into()
+                .expect("owner"),
+            owner_incarnation: fence.owner_incarnation,
+            owner_epoch: fence.owner_epoch,
+            connection_id: fence
+                .connection_id
+                .as_slice()
+                .try_into()
+                .expect("connection"),
+            authorization_revision: fence.authorization_revision,
+            capability: capability.to_owned(),
+            issued_at_seconds: command.issued_at.expect("command issuance").seconds,
+            issued_at_nanos: 0,
+            expires_at_seconds: fence.expires_at.expect("fence expiry").seconds,
+            expires_at_nanos: 0,
+        };
+        let signature = key.sign(&canonical_fence_binding_v2(&claims).expect("canonical binding"));
+        FenceBindingV2 {
+            signature_version: FenceSignatureVersion::Ed25519V1.into(),
+            key_id: claims.key_id,
+            operation_kind: operation_kind.into(),
+            operation_id: claims.operation_id.to_vec(),
+            fence_id: claims.fence_id.to_vec(),
+            node_id: claims.node_id.to_vec(),
+            endpoint_id: claims.endpoint_id.to_vec(),
+            owner_instance_id: claims.owner_instance_id.to_vec(),
+            owner_incarnation: claims.owner_incarnation,
+            owner_epoch: claims.owner_epoch,
+            connection_id: claims.connection_id.to_vec(),
+            authorization_revision: claims.authorization_revision,
+            capability: claims.capability,
+            issued_at: Some(Timestamp {
+                seconds: claims.issued_at_seconds,
+                nanos: 0,
+            }),
+            expires_at: Some(Timestamp {
+                seconds: claims.expires_at_seconds,
+                nanos: 0,
+            }),
+            signature: signature.to_bytes().to_vec(),
+        }
     }
 
     fn command_request(command: CommandEnvelope) -> PrivdRequest {
@@ -2256,10 +2569,26 @@ mod tests {
         let now = unix_seconds();
         let expired = signed_service_reload(&signing, node, now - 120, now - 60);
         assert!(
-            validate_request(&reconcile_request(expired.clone(), &signing), &node, &keys).is_ok()
+            validate_request(
+                &reconcile_request(expired.clone(), &signing),
+                &node,
+                &TEST_ENDPOINT_ID,
+                &keys
+            )
+            .is_ok()
         );
-        assert!(validate_request(&retry_request(expired.clone(), &signing), &node, &keys).is_err());
-        assert!(validate_request(&command_request(expired), &node, &keys).is_err());
+        assert!(
+            validate_request(
+                &retry_request(expired.clone(), &signing),
+                &node,
+                &TEST_ENDPOINT_ID,
+                &keys
+            )
+            .is_err()
+        );
+        assert!(
+            validate_request(&command_request(expired), &node, &TEST_ENDPOINT_ID, &keys).is_err()
+        );
 
         let (adapter, _, counter, directory) = test_adapter();
         let control = signed_service_reload(&signing, node, now, now + 60);
@@ -3044,6 +3373,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn root_execution_requires_the_commands_own_unexpired_fence() {
+        let signing = SigningKey::from_bytes(&[12; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let (adapter, _, counter, directory) = test_adapter();
+        let command = signed_service_reload(&signing, node_id, now, now + 60);
+        let capability = command.required_capability.clone();
+        let carried = |fence: Option<ConnectionFenceV2>, binding: Option<FenceBindingV2>| {
+            let mut changed = command.clone();
+            changed.connection_fence = fence;
+            changed.fence_binding = binding;
+            command_request(changed)
+        };
+        let bound = |fence: ConnectionFenceV2, operation_id: Vec<u8>, capability: &str| {
+            let binding = signed_binding(
+                &signing,
+                &command,
+                &fence,
+                FenceOperationKind::Command,
+                &operation_id,
+                capability,
+            );
+            carried(Some(fence), Some(binding))
+        };
+        let current = || signed_fence(&signing, &command, [1; 16], TEST_ENDPOINT_ID, (now + 60, 0));
+        let mut newer_revision = command.clone();
+        newer_revision.expected_revision += 1;
+        let other_command = signed_service_reload(&signing, node_id, now, now + 60);
+        let mixed_binding = signed_binding(
+            &signing,
+            &command,
+            &signed_fence(&signing, &command, [4; 16], TEST_ENDPOINT_ID, (now + 60, 0)),
+            FenceOperationKind::Command,
+            &command.command_id,
+            &capability,
+        );
+        let rejected = [
+            carried(None, None),
+            carried(command.connection_fence.clone(), None),
+            // The proof is still valid; only the signed owner lease ended.
+            bound(
+                signed_fence(&signing, &command, [1; 16], TEST_ENDPOINT_ID, (now, 0)),
+                command.command_id.clone(),
+                &capability,
+            ),
+            bound(
+                signed_fence(&signing, &command, [1; 16], [8; 32], (now + 60, 0)),
+                command.command_id.clone(),
+                &capability,
+            ),
+            bound(current(), other_command.command_id.clone(), &capability),
+            bound(current(), command.command_id.clone(), "ocserv.users.write"),
+            bound(
+                signed_fence(
+                    &signing,
+                    &newer_revision,
+                    [1; 16],
+                    TEST_ENDPOINT_ID,
+                    (now + 60, 0),
+                ),
+                command.command_id.clone(),
+                &capability,
+            ),
+            carried(Some(current()), Some(mixed_binding)),
+        ];
+        for request in rejected {
+            assert_permission_denied(&dispatch(request, &node_id, &keys, &adapter).await);
+        }
+        assert!(
+            !counter.exists(),
+            "a refused fence must not reach the root effect"
+        );
+        let accepted = dispatch(command_request(command), &node_id, &keys, &adapter).await;
+        assert!(matches!(
+            accepted.result,
+            Some(privd_response::Result::Mutation(ref result)) if result.applied
+        ));
+        assert_eq!(
+            std::fs::read_to_string(counter).expect("effect counter"),
+            "x"
+        );
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn artifact_read_and_consume_require_their_own_unexpired_fence() {
+        let signing = SigningKey::from_bytes(&[12; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let (adapter, _, _, directory) = test_adapter();
+        let claims = ArtifactGrantClaimsV1 {
+            version: 1,
+            key_id: verification_key_id(&signing.verifying_key()),
+            node_id,
+            artifact_id: *Uuid::now_v7().as_bytes(),
+            certificate_id: *Uuid::now_v7().as_bytes(),
+            certificate_version: 1,
+            operation_id: *Uuid::now_v7().as_bytes(),
+            authorized_subject: "user:test".to_owned(),
+            purpose: "certificate_p12".to_owned(),
+            max_bytes: 4096,
+            issued_at_seconds: now - 1,
+            issued_at_nanos: 0,
+            expires_at_seconds: now + 60,
+            expires_at_nanos: 0,
+            grant_id: *Uuid::now_v7().as_bytes(),
+        };
+        let signature = signing.sign(&canonical_artifact_grant_v1(&claims).expect("canonical"));
+        let grant = ArtifactGrantV1 {
+            version: ArtifactGrantVersion::V1.into(),
+            key_id: claims.key_id.clone(),
+            node_id: node_id.to_vec(),
+            artifact_id: claims.artifact_id.to_vec(),
+            certificate_id: claims.certificate_id.to_vec(),
+            certificate_version: claims.certificate_version,
+            operation_id: claims.operation_id.to_vec(),
+            authorized_subject: claims.authorized_subject.clone(),
+            purpose: claims.purpose.clone(),
+            max_bytes: claims.max_bytes,
+            issued_at: Some(Timestamp {
+                seconds: claims.issued_at_seconds,
+                nanos: 0,
+            }),
+            expires_at: Some(Timestamp {
+                seconds: claims.expires_at_seconds,
+                nanos: 0,
+            }),
+            grant_id: claims.grant_id.to_vec(),
+            signature: signature.to_bytes().to_vec(),
+        };
+        // Only the fence-signing fields of this carrier matter.
+        let mut carrier = signed_service_reload(&signing, node_id, now, now + 60);
+        carrier.required_capability = CONNECTION_FENCING_CAPABILITY.to_owned();
+        let fence =
+            |lease_until| signed_fence(&signing, &carrier, [1; 16], TEST_ENDPOINT_ID, lease_until);
+        let bound = |fence: ConnectionFenceV2, operation_id: &[u8]| {
+            let binding = signed_binding(
+                &signing,
+                &carrier,
+                &fence,
+                FenceOperationKind::Artifact,
+                operation_id,
+                CONNECTION_FENCING_CAPABILITY,
+            );
+            (Some(Box::new(fence)), Some(Box::new(binding)))
+        };
+        let read = |(connection_fence, fence_binding)| {
+            unsigned_request(Some(privd_request::Operation::ArtifactRead(
+                ArtifactReadRequest {
+                    grant: Some(grant.clone()),
+                    offset: 0,
+                    connection_fence,
+                    fence_binding,
+                },
+            )))
+        };
+        let consume = |(connection_fence, fence_binding)| {
+            unsigned_request(Some(privd_request::Operation::ArtifactConsume(
+                ArtifactConsumeRequest {
+                    grant: Some(grant.clone()),
+                    sha256: vec![1; 32],
+                    size: claims.max_bytes,
+                    confirm_only: false,
+                    connection_fence,
+                    fence_binding,
+                },
+            )))
+        };
+        let rejected = [
+            read((None, None)),
+            consume((None, None)),
+            read(bound(fence((now, 0)), &claims.artifact_id)),
+            // Fetch binds the artifact ID and consumption binds the grant ID.
+            read(bound(fence((now + 60, 0)), &claims.grant_id)),
+            consume(bound(fence((now + 60, 0)), &claims.artifact_id)),
+        ];
+        for request in rejected {
+            assert_permission_denied(&dispatch(request, &node_id, &keys, &adapter).await);
+        }
+        // The same grant with its own live fence passes authorization and only
+        // then meets the (absent) artifact lease.
+        for request in [
+            read(bound(fence((now + 60, 0)), &claims.artifact_id)),
+            consume(bound(fence((now + 60, 0)), &claims.grant_id)),
+        ] {
+            let response = dispatch(request, &node_id, &keys, &adapter).await;
+            let Some(privd_response::Result::Error(failure)) = response.result else {
+                panic!("absent artifact lease must not succeed")
+            };
+            assert_ne!(failure.kind, i32::from(ErrorKind::PermissionDenied));
+        }
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
     async fn every_unsigned_legacy_mutation_family_fails_closed() {
         let signing = SigningKey::from_bytes(&[12; 32]);
         let keys = keyring(&signing);
@@ -3080,6 +3607,7 @@ mod tests {
             socket: directory.join("privd.sock"),
             agent_uid: rustix_uid(),
             node_id: *Uuid::now_v7().as_bytes(),
+            endpoint_id: TEST_ENDPOINT_ID,
             command_keys: keyring(&signing),
             attestation_key: Arc::new(signing),
             upgrades: UpgradeScheduler::disabled(),
@@ -3143,6 +3671,7 @@ mod tests {
             socket: socket.clone(),
             agent_uid: rustix_uid(),
             node_id,
+            endpoint_id: TEST_ENDPOINT_ID,
             command_keys: keys,
             attestation_key: Arc::new(SigningKey::from_bytes(&[43; 32])),
             upgrades: UpgradeScheduler::disabled(),
@@ -3217,6 +3746,7 @@ mod tests {
             socket: socket.clone(),
             agent_uid: rustix_uid(),
             node_id,
+            endpoint_id: TEST_ENDPOINT_ID,
             command_keys: keys,
             attestation_key: Arc::new(SigningKey::from_bytes(&[41; 32])),
             upgrades: UpgradeScheduler::disabled(),
@@ -3265,6 +3795,7 @@ mod tests {
                 server,
                 peer_uid,
                 node_id,
+                TEST_ENDPOINT_ID,
                 keys.clone(),
                 Arc::new(SigningKey::from_bytes(&[41; 32])),
                 UpgradeScheduler::disabled(),
@@ -3451,6 +3982,7 @@ mod tests {
         let response = dispatch_attested(
             &request,
             &node_id,
+            &TEST_ENDPOINT_ID,
             &keys,
             &SigningKey::from_bytes(&[41; 32]),
             &scheduler,

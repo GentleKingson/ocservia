@@ -57,7 +57,8 @@ To restore a PostgreSQL backup:
 4. Bring PostgreSQL up in isolation to check schema provenance (see
    [Schema provenance after restore](#schema-provenance-after-restore)),
    audit-chain checkpoints, table row counts, and a read-only application smoke test.
-5. Repoint the control plane only after those checks pass, and keep the previous database intact until the rollback window closes.
+5. Complete the [security state reconciliation](incident-recovery.md#security-state-reconciliation-before-cutover).
+6. Repoint the control plane only after those checks pass, and keep the previous database intact until the rollback window closes.
 
 Two smoke scripts exercise these mechanics in CI or disposable environments,
 though neither substitutes for testing an actual production archive, and a
@@ -122,8 +123,9 @@ that this step may also grant privileges and provision telemetry, so it modifies
 state), and then start a Controller with the production audit keys to verify the
 audit chain and runtime privileges (which does not re-check migration receipts).
 Redirect traffic and re-enable commands only after old writers are fenced, both
-Controller checks succeed, pending work is reconciled, and authority ownership
-is unambiguous.
+Controller checks succeed, pending work is reconciled, the
+[security state reconciliation](incident-recovery.md#security-state-reconciliation-before-cutover)
+is complete, and authority ownership is unambiguous.
 
 This logical restore tooling covers recovery of the ocservia schema only; PITR,
 database failover, storage snapshots, and cross-engine migration require

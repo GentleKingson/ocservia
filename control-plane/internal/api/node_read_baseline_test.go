@@ -106,8 +106,10 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		assertBaselineProblem(t, get(path, ws, cookie), path, 503, "telemetry-unavailable", "Telemetry unavailable", "the telemetry read model is unavailable")
 	}
 	assertBaselineProblem(t, get("/api/v1/nodes/invalid", ws, cookie), "/api/v1/nodes/invalid", 404, "not-found", "Resource not found", "the requested resource does not exist")
+	// A resource in a workspace without any role binding answers exactly
+	// like a missing one, so the status cannot confirm that it exists.
 	foreignPath := "/api/v1/nodes/" + ids[51].String()
-	assertBaselineProblem(t, get(foreignPath, ws, cookie), foreignPath, 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
+	assertBaselineProblem(t, get(foreignPath, ws, cookie), foreignPath, 404, "not-found", "Resource not found", "the requested resource does not exist")
 	readService := telemetry.NewBackend(b)
 	s = newTestServer(t, testHTTPConfig(false), b, Modules{Nodes: readService}, authorization)
 	assertBaselineJSON(t, get(nodePath, uuid.Nil, cookie), detailJSON(ids[0], 0))
@@ -187,19 +189,19 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	for _, suffix := range []string{"", "/sessions", "/ip-bans", "/telemetry?metric=cpu_usage_ratio"} {
 		path, _, _ := strings.Cut(nodePath+suffix, "?")
 		assertBaselineProblem(t, get(nodePath+suffix, ws, nil), path, 401, "unauthenticated", "Authentication required", "operation state requires an authenticated principal")
-		for _, id := range []string{"invalid", uuid.Must(uuid.NewV7()).String()} {
+		for _, id := range []string{"invalid", uuid.Must(uuid.NewV7()).String(), ids[51].String()} {
 			missing := "/api/v1/nodes/" + id + suffix
 			path, _, _ := strings.Cut(missing, "?")
 			assertBaselineProblem(t, get(missing, ws, cookie), path, 404, "not-found", "Resource not found", "the requested resource does not exist")
 		}
-		foreign := "/api/v1/nodes/" + ids[51].String() + suffix
-		foreignPath, _, _ := strings.Cut(foreign, "?")
-		assertBaselineProblem(t, get(foreign, ws, cookie), foreignPath, 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
 	}
-	assertBaselineProblem(t, get("/api/v1/nodes", other, cookie), "/api/v1/nodes", 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
+	for _, scope := range []uuid.UUID{other, uuid.Must(uuid.NewV7())} {
+		assertBaselineProblem(t, get("/api/v1/nodes", scope, cookie), "/api/v1/nodes", 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
+	}
 	exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, binding)
-	for _, path := range []string{"/api/v1/nodes", nodePath, nodePath + "/sessions", nodePath + "/ip-bans", nodePath + "/telemetry"} {
-		assertBaselineProblem(t, get(path, ws, cookie), path, 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
+	assertBaselineProblem(t, get("/api/v1/nodes", ws, cookie), "/api/v1/nodes", 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
+	for _, path := range []string{nodePath, nodePath + "/sessions", nodePath + "/ip-bans", nodePath + "/telemetry"} {
+		assertBaselineProblem(t, get(path, ws, cookie), path, 404, "not-found", "Resource not found", "the requested resource does not exist")
 	}
 	if reader.calls.Load() != 0 {
 		t.Fatal("denied request reached Reader")

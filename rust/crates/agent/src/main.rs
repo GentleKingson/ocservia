@@ -1558,6 +1558,8 @@ async fn handle_artifact_stream(
                 ArtifactReadRequest {
                     grant: Some(grant.clone()),
                     offset,
+                    connection_fence: request.connection_fence.clone().map(Box::new),
+                    fence_binding: request.fence_binding.clone().map(Box::new),
                 },
             ))
             .await?;
@@ -1692,6 +1694,8 @@ async fn handle_artifact_consume(
                 sha256: request.sha256,
                 size: request.size,
                 confirm_only: request.confirm_only,
+                connection_fence: request.connection_fence.map(Box::new),
+                fence_binding: request.fence_binding.map(Box::new),
             },
         ))
         .await?;

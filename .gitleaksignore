@@ -17,3 +17,4 @@ ce7e5d6354ccf987f6c3866d4bd7fbf66badc4a3:control-plane/internal/certificates/ser
 60aaad4d885e82c644f96f1723a697f80921bb9f:testdata/g6/artifacts/relay-transitions.jsonl:generic-api-key:3
 60aaad4d885e82c644f96f1723a697f80921bb9f:scripts/generate-g6-test-fixtures.mjs:generic-api-key:719
 60aaad4d885e82c644f96f1723a697f80921bb9f:testdata/g6/artifacts/command-trace.jsonl:generic-api-key:2403
+ba274ab1e1e1715ff33d30954f14d7c9c972c984:control-plane/internal/database/semantictest/text.go:generic-api-key:24

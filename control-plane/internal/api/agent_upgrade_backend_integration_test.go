@@ -107,7 +107,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 		otherWorkspace := authSafetyWorkspace(t, owner)
 		otherNode := uuid.Must(uuid.NewV7())
 		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'other','active',1,$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,'other','active',1,?,?)`, otherNode, otherWorkspace, at, at)
-		problem(f.call("POST", "/api/v1/nodes/"+otherNode.String()+"/agent-upgrade", body("2.0.0", uuid.Must(uuid.NewV7())), "foreign", f.requester.cookie, nil), 403, "forbidden", "")
+		problem(f.call("POST", "/api/v1/nodes/"+otherNode.String()+"/agent-upgrade", body("2.0.0", uuid.Must(uuid.NewV7())), "foreign", f.requester.cookie, nil), 404, "not-found", "")
 		problem(f.call("POST", "/api/v1/approval-requests", fmt.Sprintf(`{"action":"agent.upgrade","resource_type":"node","resource_id":%q,"reason":"review release","ttl_seconds":900,"agent_upgrade":{"target_version":"2.0.0"}}`, otherNode), "", f.requester.cookie, nil), 409, "node-not-ready", "agent upgrade approval requires an observed node in the selected workspace")
 	})
 	t.Run("target-error-order", func(t *testing.T) {

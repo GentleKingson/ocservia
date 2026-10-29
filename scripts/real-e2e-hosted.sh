@@ -245,7 +245,7 @@ PATHINFO
     if command -v tailscale >/dev/null; then
       sudo tailscale logout || status=1
       tailscale status --json | jq -e '.BackendState == "NeedsLogin"' >/dev/null || status=1
-      # v4.1.3 stores the sudo parent PID here; statedir defaults to memory.
+      # v4.3.0 stores the sudo parent PID here; statedir defaults to memory.
       pid_file="${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/tailscaled.pid"
       pid="$(cat "$pid_file")" || status=1
       if [[ "$pid" =~ ^[0-9]+$ ]]; then

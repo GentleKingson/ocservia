@@ -185,6 +185,7 @@ fn parse_args_from(
     let mut socket = PathBuf::from("/run/ocserv-platform/privd.sock");
     let mut agent_uid = None;
     let mut node_id = None;
+    let mut endpoint_id = None;
     let mut command_key_files = Vec::new();
     let mut attestation_key_file = PathBuf::from("/var/lib/ocservia-privd/attestation.key");
     let mut user_seal_key_file = None;
@@ -211,6 +212,17 @@ fn parse_args_from(
                     return Err(invalid("node ID must be UUIDv7"));
                 }
                 node_id = Some(*parsed.as_bytes());
+            }
+            "--endpoint-id" => {
+                let value = required(&mut args, "--endpoint-id")?;
+                if value.len() != 64
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(invalid("endpoint ID must be 64 lowercase hex"));
+                }
+                endpoint_id = Some(decode_registration_digest(&value)?);
             }
             "--controller-command-key-file" => {
                 if command_key_files.len() == 8 {
@@ -275,11 +287,15 @@ fn parse_args_from(
     if command_key_files.is_empty() {
         return Err(invalid("--controller-command-key-file is required"));
     }
+    // Required even after a rebind, whose committed binding then replaces it:
+    // the unit always passes AGENT_ENDPOINT_ID and rebind requires it too.
+    let mut endpoint_id = endpoint_id.ok_or_else(|| invalid("--endpoint-id is required"))?;
     let owner = rustix::process::geteuid().as_raw();
     let group = rustix::process::getegid().as_raw();
     let binding = ocservia_command_authorization::local_binding::LocalBinding::load_active()?;
     let keys = if let Some(binding) = &binding {
         node_id = Some(*binding.node_id.as_bytes());
+        endpoint_id = binding.endpoint;
         upgrade_operations_dir = binding.upgrade_directory();
         vec![binding.command_key]
     } else {
@@ -335,6 +351,7 @@ fn parse_args_from(
             socket,
             agent_uid: agent_uid.ok_or_else(|| invalid("--agent-uid is required"))?,
             node_id: node_id.ok_or_else(|| invalid("--node-id is required"))?,
+            endpoint_id,
             command_keys,
             attestation_key,
             upgrades: UpgradeScheduler::new(upgrade_operations_dir, UpgradeTrigger::Systemd),
@@ -513,6 +530,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn production_startup_rejects_reused_or_mismatched_sealing_keys() {
         let directory = std::env::current_dir()
             .expect("current directory")
@@ -531,16 +549,24 @@ mod tests {
         .expect("write Controller key");
         fs::set_permissions(&command_key, fs::Permissions::from_mode(0o600))
             .expect("Controller key mode");
+        let base = vec![
+            "--agent-uid".to_owned(),
+            "997".to_owned(),
+            "--node-id".to_owned(),
+            Uuid::now_v7().to_string(),
+            "--controller-command-key-file".to_owned(),
+            command_key.display().to_string(),
+        ];
+        let missing_endpoint = parse_args_from(base.clone().into_iter())
+            .expect_err("privd must not start without its EndpointID");
+        assert!(
+            missing_endpoint
+                .to_string()
+                .contains("--endpoint-id is required")
+        );
         let missing_sealing = parse_args_from(
-            [
-                "--agent-uid".to_owned(),
-                "997".to_owned(),
-                "--node-id".to_owned(),
-                Uuid::now_v7().to_string(),
-                "--controller-command-key-file".to_owned(),
-                command_key.display().to_string(),
-            ]
-            .into_iter(),
+            base.into_iter()
+                .chain(["--endpoint-id".to_owned(), hex::encode([9_u8; 32])]),
         )
         .expect_err("privd must not start without both password sealing keys");
         assert!(
@@ -585,6 +611,8 @@ mod tests {
                 Uuid::now_v7().to_string(),
                 "--controller-command-key-file".to_owned(),
                 command_key.display().to_string(),
+                "--endpoint-id".to_owned(),
+                hex::encode([9_u8; 32]),
                 "--user-password-seal-key-file".to_owned(),
                 user_key.display().to_string(),
                 "--user-password-seal-key-id".to_owned(),

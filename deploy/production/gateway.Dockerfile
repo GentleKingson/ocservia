@@ -7,7 +7,7 @@ COPY web/ ./
 RUN npm run build
 
 FROM caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e AS runtime
-RUN apk upgrade --no-cache zlib
+RUN apk upgrade --no-cache brotli-libs curl libcurl zlib
 COPY deploy/production/Caddyfile /etc/caddy/Caddyfile
 COPY --from=web-build /src/web/dist /srv
 # The pinned upstream image runs as root and ships no caddy account, so the
