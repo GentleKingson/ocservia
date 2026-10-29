@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
@@ -154,5 +153,5 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 	assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.requester.cookie, nil), 409, "sealing-key-binding-mismatch")
 	service.EnableUserPasswordPublicKeys(nil)
 	assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.requester.cookie, nil), 503, "sealing-key-unavailable")
-	t.Log(fmt.Sprintf("public key binding and existing create/rotate commands verified with restricted runtime %T", f.b))
+	t.Logf("public key binding and existing create/rotate commands verified with restricted runtime %T", f.b)
 }

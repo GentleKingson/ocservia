@@ -34,10 +34,6 @@ func randomID() string {
 	return hex.EncodeToString(data[:])
 }
 
-func pageSize(r *http.Request, fallback int) (int, bool) {
-	return httpx.PageSize(r, fallback)
-}
-
 func requestTraceparent(r *http.Request) string {
 	span := trace.SpanContextFromContext(r.Context())
 	if span.IsValid() {
@@ -58,8 +54,4 @@ func correlationHex(length int) string {
 		return strings.Repeat("1", length)
 	}
 	return strings.ReplaceAll(id.String(), "-", "")[:length]
-}
-
-func parseEventID(value string) (uuid.UUID, bool) {
-	return httpx.ParseOptionalUUIDv7(value)
 }

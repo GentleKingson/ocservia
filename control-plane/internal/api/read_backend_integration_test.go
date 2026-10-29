@@ -179,7 +179,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	if metrics.Total < 1 || metrics.Acquired < 0 || metrics.Idle < 0 || metrics.Total != metrics.Acquired+metrics.Idle {
 		t.Fatalf("pool metrics: %+v", metrics)
 	}
-	w = get("/readyz", uuid.Nil, nil, http.StatusOK)
+	get("/readyz", uuid.Nil, nil, http.StatusOK)
 	get("/readyz", uuid.Nil, nil, http.StatusOK)
 	exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, bindingID)
 	w = get("/api/v1/workspaces", uuid.Nil, cookie, http.StatusOK)

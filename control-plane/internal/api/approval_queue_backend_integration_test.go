@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -128,5 +127,5 @@ func TestPendingApprovalQueueBackendIntegration(t *testing.T) {
 	// A current role withdrawal removes the row, even though it existed at request time.
 	f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2 AND resource_id=$3`, `DELETE FROM role_bindings WHERE identity_id=? AND workspace_id=? AND resource_id=?`, f.approver.principal.IdentityID, f.workspace, nodeA)
 	assertApplyHTTPProblem(t, f.call("GET", "/api/v1/approval-requests", "", "", f.approver.cookie, nil), 403, "forbidden")
-	t.Log(fmt.Sprintf("bounded pending approval queue passed with runtime credentials (%T)", f.b))
+	t.Logf("bounded pending approval queue passed with runtime credentials (%T)", f.b)
 }
