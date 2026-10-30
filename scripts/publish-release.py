@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -27,7 +28,15 @@ def require(condition, message):
 
 
 def command(*args, **kwargs):
-    return subprocess.check_output(args, text=True, **kwargs).strip()
+    try:
+        result = subprocess.run(args, text=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+    except subprocess.CalledProcessError as error:
+        # Captured push progress must remain visible when publication fails.
+        sys.stderr.write(error.stdout or '')
+        sys.stderr.write(error.stderr or '')
+        raise
+    sys.stderr.write(result.stderr)
+    return result.stdout.strip()
 
 
 def api(path, *args):
@@ -80,6 +89,38 @@ def manifest(name, tag):
 
 def absent(name, tag):
     require(manifest(name, tag) is None, f'Existing image tag must not be overwritten: {PREFIX}/{name}:{tag}')
+
+
+def push_image(name, tag):
+    for attempt in range(3):
+        # A failed command can still have written a manifest. Never overwrite it,
+        # even when a previous push of this same archive reported a blob error.
+        absent(name, tag)
+        try:
+            command('docker', 'push', f'{PREFIX}/{name}:{tag}')
+            return
+        except subprocess.CalledProcessError as error:
+            output = (error.stdout or '') + '\n' + (error.stderr or '')
+            if attempt == 2 or not re.search(r'(?im)^\s*(?:error response from daemon:\s*)?unknown blob\s*$', output):
+                raise
+            delay = (5, 15)[attempt]
+            print(f'Push of {name}:{tag} reported unknown blob; recheck tag and retry in {delay}s', file=sys.stderr)
+            time.sleep(delay)
+
+
+def previous_rc(repo, version):
+    series, number = version.rsplit('-rc.', 1)
+    pattern = re.compile(r'v' + re.escape(series) + r'-rc\.([1-9][0-9]*)')
+    pages = api(f'repos/{repo}/releases?per_page=100', '--paginate', '--slurp')
+    candidates = []
+    for page in pages:
+        for release in page:
+            match = pattern.fullmatch(release['tag_name'])
+            if (match and int(match[1]) < int(number) and release['draft'] is False
+                    and release['prerelease'] is True):
+                candidates.append((int(match[1]), release['tag_name']))
+    require(candidates, f'No published earlier RC for {version}')
+    return max(candidates)[1]
 
 
 def preflight(repo, tag, images):
@@ -144,8 +185,7 @@ def finish(repo, version, sha, files, images):
             local = json.loads(command('docker', 'image', 'inspect', source))[0]
             require(local['Os'] == 'linux' and local['Architecture'] == arch, f'Wrong image platform: {source}')
             command('docker', 'tag', source, target)
-            absent(name, f'{tag}-{arch}')
-            command('docker', 'push', target)
+            push_image(name, f'{tag}-{arch}')
             remote = manifest(name, f'{tag}-{arch}')
             require(remote is not None and remote[1].get('config', {}).get('digest') == local['Id'],
                     f'Pushed image does not match scanned archive: {target}')
@@ -183,6 +223,10 @@ def main():
     phase = sys.argv[1]
     version = os.environ['VERSION']
     require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?', version), 'Invalid version')
+    if phase == 'previous-rc':
+        require('-rc.' in version and int(version.rsplit('.', 1)[1]) > 1, 'Expected RC number greater than one')
+        print(previous_rc(os.environ['GH_REPO'], version))
+        return
     root = Path(os.environ['RUNNER_TEMP'])
     files = asset_files(version, root / 'assets')
     if phase == 'check-assets':

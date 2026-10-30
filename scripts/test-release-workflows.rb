@@ -114,6 +114,20 @@ require_check(preflight_index && finish_index && preflight_index < draft_index &
   require_check(!publish['steps'][i].key?('if') && !publish['steps'][i].key?('continue-on-error'), 'publication failures must propagate')
 end
 require_check(release.dig('jobs', 'assets', 'steps').any? {|s| s.fetch('run', '').include?('python3 scripts/publish-release.py check-assets')}, 'build-only must validate the complete asset inventory')
+# A failed-job rerun retains successful upstream outputs, but increments
+# github.run_attempt. Consume the producer's immutable IDs, never new names.
+{'agent_packages'=>'build-agent-packages', 'controller_images'=>'build-controller-images'}.each do |kind,job|
+  require_check(products.dig(true,'workflow_call','outputs',"#{kind}_artifact_id",'value') == "${{ jobs.#{job}.outputs.artifact_id }}", "#{kind} must expose the producing job's artifact ID")
+  require_check(products.dig('jobs',job,'outputs','artifact_id') == '${{ steps.upload.outputs.artifact-id }}', "#{kind} ID must come from upload-artifact")
+end
+assets = release.dig('jobs','assets')
+require_check(assets.dig('outputs','artifact_id') == '${{ steps.upload.outputs.artifact-id }}' && assets['steps'].any? {|s| s['id'] == 'upload' && s.fetch('uses','').start_with?('actions/upload-artifact@')}, 'prepared assets must expose their upload ID')
+downloads = (assets['steps'] + publish['steps']).select {|s| s.fetch('uses','').start_with?('actions/download-artifact@')}
+expected_ids = %w[agent_packages controller_images].map do |kind|
+  %w[amd64 arm64].map {|arch| "${{ needs.build-#{arch}.outputs.#{kind}_artifact_id || 'missing' }}"}.join(',')
+end + ["${{ needs.assets.outputs.artifact_id || 'missing' }}"]
+require_check(downloads.map {|s| s.dig('with','artifact-ids')} == expected_ids, 'downloads must use exact upstream IDs and reject missing outputs')
+require_check(downloads.all? {|s| s.dig('with','merge-multiple') == true && !s['with'].key?('name') && !s['with'].key?('pattern')}, 'ID downloads must unpack directly without falling back to attempt names or broad patterns')
 require_check(release.fetch('jobs').values.none? {|j| ['./.github/workflows/ci.yml','./.github/workflows/security.yml','./.github/workflows/release-business-diagnostic.yml'].include?(j['uses'])}, 'formal Release must only build, image-scan, smoke and publish')
 %w[amd64 arm64].each do |arch|
   caller = release.fetch('jobs').fetch("build-#{arch}")
@@ -268,6 +282,9 @@ Dir.mktmpdir('release-rc-') do |dir|
     printf '%s\n' "$*" >>"$CALLS"
     case "$1 $2" in
       'release list') echo "${STABLE_BASE-v1.1.0}" ;;
+      'api repos/test/repo/releases?per_page=100')
+        [[ "${RELEASE_API_FAIL:-false}" == false ]] || exit 1
+        cat "$RELEASES_FILE" ;;
       'release view')
         if [[ "$*" == *isDraft* ]]; then echo "${PREVIOUS_RC_VALID:-true}"
         elif [[ "$*" == *'--json body'* ]]; then printf '%s\n' "${NOTES_BODY:-}"
@@ -282,12 +299,14 @@ Dir.mktmpdir('release-rc-') do |dir|
     esac
   SH
   File.chmod(0755,"#{dir}/gh")
-  env={'PATH'=>"#{dir}:#{ENV.fetch('PATH')}",'GITHUB_OUTPUT'=>"#{dir}/outputs",'CALLS'=>"#{dir}/calls",'GH_REPO'=>'test/repo','GH_TOKEN'=>'test','GITHUB_ACTOR'=>'test','RUNNER_TEMP'=>dir,'GITHUB_SHA'=>'test-publish-sha','BRIDGE_FILE'=>File.expand_path('.github/release-notes/v1.1.0-history-rewrite.md'),'CREATE_ARGS'=>"#{dir}/create-args"}
+  env={'PATH'=>"#{dir}:#{ENV.fetch('PATH')}",'GITHUB_OUTPUT'=>"#{dir}/outputs",'CALLS'=>"#{dir}/calls",'GH_REPO'=>'test/repo','GH_TOKEN'=>'test','GITHUB_ACTOR'=>'test','RUNNER_TEMP'=>dir,'GITHUB_SHA'=>'test-publish-sha','BRIDGE_FILE'=>File.expand_path('.github/release-notes/v1.1.0-history-rewrite.md'),'CREATE_ARGS'=>"#{dir}/create-args",'RELEASES_FILE'=>"#{dir}/releases.json"}
   notes = publish['steps'].find {|s| s['id']=='notes'}.fetch('run')
   publication = publish['steps'].find {|s| s['name']=='Create new draft Release'}.fetch('run')
-  [['1.2.3-rc.1','v1.1.0'],['1.2.3-rc.2','v1.2.3-rc.1'],['1.2.3-rc.10','v1.2.3-rc.9'],['1.2.3','v1.1.0'],['1.3.0-rc.1','v1.2.3'],['1.3.0','v1.2.3'],['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0-rc.4','v2.0.0-rc.3'],['2.0.0','v1.1.0']].each do |version,base|
+  [['1.2.3-rc.1','v1.1.0'],['1.2.3-rc.2','v1.2.3-rc.1'],['1.2.3-rc.10','v1.2.3-rc.9'],['1.2.3','v1.1.0'],['1.3.0-rc.1','v1.2.3'],['1.3.0','v1.2.3'],['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0-rc.4','v2.0.0-rc.3'],['2.0.0-rc.7','v2.0.0-rc.5'],['2.0.0','v1.1.0']].each do |version,base|
     File.write("#{dir}/outputs",'')
     File.write("#{dir}/calls",'')
+    File.write(env['RELEASES_FILE'], [[{'tag_name'=>'v2.0.0-rc.6','draft'=>true,'prerelease'=>true}],
+                                     [{'tag_name'=>base,'draft'=>false,'prerelease'=>true}]].to_json)
     current=env.merge('VERSION'=>version,'IS_PRERELEASE'=>version.include?('-rc.') ? 'true' : 'false','STABLE_BASE'=>version.start_with?('1.3.0') ? 'v1.2.3' : 'v1.1.0')
     _,err,status=Open3.capture3(current,'bash','-euo','pipefail','-c',notes)
     require_check(status.success? && File.read("#{dir}/outputs").include?("base=#{base}\n"), "notes base failed #{version}: #{err}")
@@ -333,7 +352,8 @@ Dir.mktmpdir('release-rc-') do |dir|
   failed=env.merge('VERSION'=>'1.2.3-rc.1','IS_PRERELEASE'=>'true','NOTES_BASE'=>'v1.1.0','BRIDGE_FAILURE'=>'true')
   require_check(!Open3.capture3(failed,'bash','-euo','pipefail','-c',publication).last.success?, 'missing history bridge must fail publication')
   require_check(!File.read("#{dir}/calls").include?('release create '), 'bridge fetch failure must not create a partial Release')
-  [['1.2.3-rc.2',{'PREVIOUS_RC_VALID'=>'false'}],['1.2.3-rc.1',{'STABLE_BASE'=>''}]].each do |version,extra|
+  File.write(env['RELEASES_FILE'], [[]].to_json)
+  [['1.2.3-rc.2',{}],['1.2.3-rc.2',{'RELEASE_API_FAIL'=>'true'}],['1.2.3-rc.1',{'STABLE_BASE'=>''}]].each do |version,extra|
     require_check(!Open3.capture3(env.merge('VERSION'=>version).merge(extra),'bash','-euo','pipefail','-c',notes).last.success?, 'missing comparison base accepted')
   end
 end
