@@ -4,17 +4,19 @@
 
 Managed nodes generate certificate private keys locally and never expose them
 to the control plane. The Controller receives a signed CSR and public-key
-digest, and forwards the CSR to a configured external PKI signer only after an
-independent, content-bound approval is recorded. Because the Controller stores
-neither a CA private key nor any node private key, and because a CSR
-self-signature alone does not prove privileged execution on the node, a request
-enters `csr_ready` only after the Controller verifies a root privd receipt that
-binds the certificate ID, CSR and public-key digests, requested-subject digest,
-node, command, operation, idempotency key, and root effect record. Immediately
-before calling the external signer, the Controller locks the certificate row
-and rechecks the exact CSR digest, receipt-bound request and version, node,
-approval hash, and non-revoked key state. P12 export and certificate-key
-revocation enforce the same terminal-result attestation rule.
+digest. It forwards the CSR to a configured external PKI signer only after an
+independent, content-bound approval is recorded.
+
+The Controller stores neither a CA private key nor any node private key, and a
+CSR self-signature alone does not prove privileged execution on the node. A
+request therefore enters `csr_ready` only after the Controller verifies a root
+privd receipt that binds the certificate ID, CSR and public-key digests,
+requested-subject digest, node, command, operation, idempotency key, and root
+effect record. Immediately before calling the external signer, the Controller
+locks the certificate row and rechecks the exact CSR digest, receipt-bound
+request and version, node, approval hash, and non-revoked key state. P12 export
+and certificate-key revocation enforce the same terminal-result attestation
+rule.
 
 Managed-node certificates and secret sealing are distinct from the Controller's
 own HTTPS listener certificate (configured via manual files or ACME in
@@ -24,16 +26,19 @@ The external HTTPS signer client is configured through
 `OCSERV_CERTIFICATE_SIGNER_URL`, `OCSERV_CERTIFICATE_SIGNER_TOKEN`, and
 `OCSERV_CERTIFICATE_SIGNER_TIMEOUT`. The upstream service must treat signing
 and revocation as idempotent by certificate ID and support node-targeted secret
-sealing. When the signer is unreachable, certificate issuance transitions to
+sealing.
+
+When the signer is unreachable, certificate issuance transitions to
 `signer_unavailable` (which can be resumed by retrying under the same approval)
 and revocation transitions to `revocation_unknown` (which a retry may submit
-again); both paths return a service-unavailable problem response without
-marking the operation successful. Setting `OCSERV_CERTIFICATE_SIGNER_CA_FILE`
-to a public PEM CA bundle configures a private trust chain used only by
-this client, leaving the process-wide trust store and other external HTTPS
-connections untouched. See [Production Signer](#production-signer) for the
-bundled implementation, public-key transfer workflow, and offline recovery
-procedures.
+again). Both paths return a service-unavailable problem response without
+marking the operation successful.
+
+Setting `OCSERV_CERTIFICATE_SIGNER_CA_FILE` to a public PEM CA bundle configures
+a private trust chain used only by this client, leaving the process-wide trust
+store and other external HTTPS connections untouched. For the bundled
+implementation, public-key transfer workflow, and offline recovery procedures,
+see [Production Signer](#production-signer).
 
 Requests to `/sign/seal` pass `X-Ocservia-Node-ID` and an exact
 `X-Ocservia-Seal-Purpose` header (`user_password` or
@@ -50,8 +55,8 @@ cannot be decrypted by the separate user-password key. On the node, privd
 decrypts the typed secret locally, writes an encrypted UUID-addressed artifact
 into its fixed root-owned spool, and records the certificate and version,
 operation, digest, byte size, expiry, and state in its authenticated effect
-store. Because the root mapping enters `prepared` before any staging file is
-created and advances to `available` only after the final artifact is published,
+store. The root mapping enters `prepared` before any staging file is created
+and advances to `available` only after the final artifact is published, so
 certificate revocation can clean up both interrupted staging files and
 completed artifacts.
 
@@ -62,17 +67,20 @@ operation, requester, purpose, maximum size, and unique grant ID. Both the
 Agent and privd verify the grant independently. Only one grant may lease an
 artifact at a time, and an interrupted lease remains locked until its bounded
 expiry elapses. The root ledger also tracks the exact chunk offset so a second
-stream cannot replay the same grant from offset zero. Streaming the bytes does
-not itself consume the artifact: once the Control Plane receives the full
-stream and verifies its size and digest, it sends a separate finalize request
-carrying the same signed grant to the Agent and privd, which durably marks the
-grant consumed and deletes the local P12 file. Consumed grants cannot be used
-to fetch the artifact again, though an exact finalize retry may acknowledge the
-already-consumed root record without reopening the file or repeating deletion
-so a dropped network response never strands the Controller lease. Revoking a
-certificate invalidates all outstanding grants and deletes any mapped P12 and
-staging files, leaving time-based cleanup solely as crash recovery for expired
-or orphaned files.
+stream cannot replay the same grant from offset zero.
+
+Streaming the bytes does not itself consume the artifact. Once the Control
+Plane receives the full stream and verifies its size and digest, it sends a
+separate finalize request carrying the same signed grant to the Agent and
+privd, which durably marks the grant consumed and deletes the local P12 file.
+Consumed grants cannot be used to fetch the artifact again. An exact finalize
+retry may still acknowledge the already-consumed root record without reopening
+the file or repeating deletion, so a dropped network response never strands the
+Controller lease.
+
+Revoking a certificate invalidates all outstanding grants and deletes any mapped
+P12 and staging files. Time-based cleanup remains solely as crash recovery for
+expired or orphaned files.
 
 In the control plane, secret provider records store only the provider name,
 opaque key path, version, and lifecycle state while the secret values themselves
@@ -85,9 +93,9 @@ high-severity alert. Revocation calls the external signer idempotently first
 and, once that succeeds, releases the node operation to remove only the
 UUID-derived node-local key. Before running database recovery, stop certificate
 and artifact creation, reconcile all nonterminal certificate commands, and
-preserve terminal command history along with root effect evidence. Because the
-repository does not use database down migrations, recover through a forward fix
-or an explicitly planned
+preserve terminal command history along with root effect evidence. The
+repository does not use database down migrations, so recover through a forward
+fix or an explicitly planned
 [isolated restore](../operations/incident-recovery.md#database-recovery).
 
 ## Production Signer
@@ -178,10 +186,10 @@ issuer, and never initializes a replacement automatically.
 On the Controller, set `OCSERV_CERTIFICATE_SIGNER_URL=https://signer:9443/sign`
 alongside the token-file setting and point `OCSERV_CERTIFICATE_SIGNER_CA_FILE`
 to the mounted public HTTPS CA bundle. The Signer HTTPS leaf certificate must
-include `signer` in its SAN list. Because this custom trust pool applies only
-to the Signer HTTP client, neither `SSL_CERT_FILE` overrides nor TLS
-verification bypasses are needed, and omitting the custom CA setting leaves
-standard external HTTPS trust in place. The TLS CA bundle authenticates the
+include `signer` in its SAN list. This custom trust pool applies only to the
+Signer HTTP client, so neither `SSL_CERT_FILE` overrides nor TLS verification
+bypasses are needed. Omitting the custom CA setting leaves standard external
+HTTPS trust in place. The TLS CA bundle authenticates the
 HTTPS connection only and confers no authority to sign client certificates.
 
 `GET /healthz` returns `204` while the ledger is readable, the issuer
@@ -207,11 +215,11 @@ content.
 
 For an initial integrated installation using bundled PostgreSQL and root-managed
 lifecycle scripts, `deploy/production/quick-install.sh` invokes
-`deploy/production/quick-materials.sh`. Running as root prior to service
-activation with `OCSERV_SECRET_DIR`, `OCSERV_SIGNER_SECRET_DIR`, and
-`OCSERV_SIGNER_STATE_DIR`, the script creates any missing Controller and Signer
-secrets with the exact ownership and file modes verified by `compose.sh`,
-leaving Gateway and Relay TLS identities to their own provisioning paths.
+`deploy/production/quick-materials.sh`. The script runs as root before service
+activation, using `OCSERV_SECRET_DIR`, `OCSERV_SIGNER_SECRET_DIR`, and
+`OCSERV_SIGNER_STATE_DIR`. It creates any missing Controller and Signer secrets
+with the exact ownership and file modes verified by `compose.sh`, and it leaves
+Gateway and Relay TLS identities to their own provisioning paths.
 
 - Random secrets are generated as 32-byte hex strings, with database DSNs and
   `postgres.pgpass` derived from the generated role passwords. Controller
@@ -235,12 +243,14 @@ leaving Gateway and Relay TLS identities to their own provisioning paths.
   leaves off-host removal of `root-ca.key.enc` to the operator.
 
 Staged files and the prepared CA (`.quick-ca`, used to resume an interrupted
-run with the same CA) live under the root-only `OCSERV_SECRET_DIR`, whose
-ancestors must be canonical, root-owned, and not group/world writable; files are
-published by `rename.ul`, with no copy fallback, so a failed publication keeps
-the prepared CA. A `.quick-ca` left by an earlier version inside the
-Signer-owned directory is never trusted: it is preserved, the run refuses to
-continue, and the operator must inspect and deal with it deliberately.
+run with the same CA) live under the root-only `OCSERV_SECRET_DIR`. Its
+ancestors must be canonical, root-owned, and not group/world writable. Files are
+published by `rename.ul` with no copy fallback, so a failed publication keeps
+the prepared CA.
+
+The script never trusts a `.quick-ca` left by an earlier version inside the
+Signer-owned directory. It preserves that file and refuses to continue, and the
+operator must inspect and deal with it deliberately.
 
 Re-running the script reuses existing files and completes any interrupted
 setup, including an exported root CA awaiting confirmation. Once setup
@@ -248,7 +258,7 @@ succeeds, `quick-install.json` in the Controller secret directory records the
 custody mode, root fingerprint, Controller endpoint ID, and file SHA-256
 digests without storing secret values. After `quick-install.json` or a Signer
 ledger exists, the script refuses to regenerate material and fails closed if
-any required file is missing; Signer `init` remains the authority that
+any required file is missing. Signer `init` remains the authority that
 validates the CA chain during startup. You can exercise this workflow in
 isolation by running `scripts/test-controller-quick-materials.sh` as root or
 with passwordless sudo.
@@ -267,24 +277,25 @@ authorization, independent approval, and privd receipt validation remain
 Controller responsibilities, as a CSR self-signature never establishes approval.
 
 Each certificate's unsigned 128-bit UUID is used directly as its positive X.509
-serial number, preventing a single certificate ID from ever receiving multiple
-serials. Before returning a response, a single-writer bbolt transaction binds
-the certificate UUID, exact CSR bytes and digest, issued certificate chain,
-serial number, and audit record. If the process crashes before that transaction
-commits, no certificate is exposed externally; if a response is lost after
+serial number, so a single certificate ID can never receive multiple serials.
+Before returning a response, a single-writer bbolt transaction binds the
+certificate UUID, exact CSR bytes and digest, issued certificate chain, serial
+number, and audit record. If the process crashes before that transaction
+commits, no certificate is exposed externally. If a response is lost after
 commit, replaying the identical CSR returns the stored certificate chain, while
 submitting a different CSR for the same ID conflicts even after revocation.
-Revocation commits the timestamp and exact reason string, rejecting any later
-attempt that alters the serial or reason, and replaying an earlier sign request
+
+Revocation commits the timestamp and exact reason string and rejects any later
+attempt that alters the serial or reason. Replaying an earlier sign request
 never clears a revocation or reissues the certificate.
 
 Running `crl` reads durable revocations from the ledger and writes a signed PEM
 CRL to stdout with a one-hour `nextUpdate` window and the current audit
 revision as the CRL number. Operators run `crl` through the protected
 maintenance workflow and publish the output atomically to the target verifier.
-Because the ledger stores free-form reason text, the X.509 CRL reason code
-extension is omitted. Receiving a `204` from `/sign/revoke` confirms only that
-the ledger recorded the revocation; it does not clean up node files, terminate
+The X.509 CRL reason code extension is omitted because the ledger stores
+free-form reason text. Receiving a `204` from `/sign/revoke` confirms only that
+the ledger recorded the revocation. It does not clean up node files, terminate
 active VPN sessions, or distribute the updated CRL, and the system exposes no
 public CRL endpoint or OCSP responder.
 
@@ -292,7 +303,7 @@ public CRL endpoint or OCSP responder.
 
 Pause affected node mutations before modifying sealing-key mappings. Signer
 provides neither automatic synchronization nor in-place key rotation, and
-exposes no HTTP endpoint for key registration; only a protected operator can
+exposes no HTTP endpoint for key registration. Only a protected operator can
 import or disable node bindings:
 
 1. On the managed node, run `scripts/export-node-sealing-keys.py` as root with
@@ -313,12 +324,12 @@ import or disable node bindings:
    repeatable-read transaction using the domain stores, the command locks the
    node row, verifies that the node is active or offline with an active
    endpoint, reconstructs the approval binding, and confirms its independently
-   approved and consumed state before exporting the persisted key descriptors,
-   rejecting pending or revoked nodes and mismatched identities.
+   approved and consumed state before exporting the persisted key descriptors.
+   It rejects pending or revoked nodes and mismatched identities.
 3. Copy both the Controller export and the node export over an authenticated
    operator channel into owner-only regular files on the Signer host. Never
-   accept an approval JSON file originating from the node itself: because JSON
-   carries no self-authenticating signature, security depends on file
+   accept an approval JSON file originating from the node itself. The JSON
+   carries no self-authenticating signature, so security depends on file
    provenance and the trusted operator transfer channel.
 4. Stop Signer and run `import --approved /path/controller.json
    --public /path/node.json --workspace UUID --node UUID --endpoint HEX` with
@@ -326,14 +337,14 @@ import or disable node bindings:
    minutes old. `import` verifies that both files agree on identities,
    purposes, versions, key IDs, and DER hashes across two distinct RSA keys,
    then atomically commits the provenance record and audit event before you
-   restart Signer. Repeating an identical import is a no-op, whereas attempting
-   to replace an existing binding fails.
+   restart Signer. Repeating an identical import is a no-op. Attempting to
+   replace an existing binding fails.
 5. Before retiring or re-enrolling a node, stop affected mutations, reconcile
    pending work, stop Signer, run `disable --node UUID`, and restart Signer.
    Disabled bindings remain permanently recorded in the ledger and cannot be
    reactivated or overwritten, so a newly enrolled node identity requires a
-   fresh approved import. Because revoking a node in the Controller does not
-   automatically disable Signer's offline key mapping, always complete both
+   fresh approved import. Revoking a node in the Controller does not
+   automatically disable Signer's offline key mapping, so always complete both
    Controller retirement and this Signer disable step following the
    [Integrated maintenance procedure](../../deploy/production/integrated/README.md#operator-lifecycle-and-maintenance).
 
@@ -361,15 +372,15 @@ descriptors. These checksums detect accidental storage corruption; they do not
 defend against deliberate rewriting by an authorized owner of the state volume.
 Never edit or downgrade the ledger file by hand.
 
-Because every administrative CLI subcommand acquires the same exclusive bbolt
-lock as the server, stop `serve` before running `import`, `disable`, `inspect`,
+Every administrative CLI subcommand acquires the same exclusive bbolt lock as
+the server, so stop `serve` before running `import`, `disable`, `inspect`,
 `backup`, `restore`, or `crl`. Running `inspect` prints the state version,
 issuer fingerprint, policy, and latest audit revision; record this audit
 high-water mark outside the state volume alongside your backup manifest and CA
 fingerprint. Running `backup --output /protected/new-snapshot.db` opens a
 consistent read transaction, creates the destination file exclusively, and
 fsyncs both the file and its parent directory without ever overwriting an
-existing snapshot. Because a partial file left by an interrupted backup is unusable,
+existing snapshot. A partial file left by an interrupted backup is unusable, so
 always validate a new snapshot by running `inspect --state` against it.
 
 When recovering, `restore --state /protected/snapshot.db --output /protected/new-ledger.db
@@ -424,13 +435,14 @@ To run end-to-end acceptance on a test branch, dispatch `release-upgrade.yml`
 with `purpose=integration`, `production_signer=true`, and a plain test version
 such as `0.0.0`. The workflow natively builds all eight first-party images on
 the selected `arch` (amd64 by default) and pushes them to a loopback registry
-using standard platform configuration, while the release products jobs in
-Release Check and Release separately scan amd64 and arm64 images prior to
-smoke testing and publishing. The Integrated lifecycle harness
-runs the production Go Signer without granting GHCR publishing permissions to
-test jobs. While manual Release Check runs on `main` always execute Integrated
-Business Smoke with four finite single-instance recoveries, the extended checks
-described below run under manual `purpose=integration` dispatches; see the
+using standard platform configuration. The release products jobs in Release
+Check and Release separately scan amd64 and arm64 images prior to smoke testing
+and publishing. The Integrated lifecycle harness runs the production Go Signer
+without granting GHCR publishing permissions to test jobs.
+
+Manual Release Check runs on `main` always execute Integrated Business Smoke
+with four finite single-instance recoveries. The extended checks described
+below run under manual `purpose=integration` dispatches; see the
 [CI and publication flow](../../deploy/production/integrated/README.md#ci-and-publication).
 
 Those extended native-daemon checks exercise the production Signer with an
@@ -480,11 +492,11 @@ imports or updates bindings.
 In the Web UI, the Create user and Rotate password dialogs accept a plaintext
 password in a secure browser context and use WebCrypto to encrypt its UTF-8
 bytes with RSA-OAEP-SHA256 (MGF1-SHA256, empty label) into a version-1
-`user_password` envelope so only ciphertext is sent to the mutation API. The
+`user_password` envelope, so only ciphertext is sent to the mutation API. The
 browser clears the form input before starting asynchronous requests and zeros
-temporary byte buffers upon completion, failure, or stale cancellation, while
-closing the dialog, switching nodes or workspaces, or unmounting the component
-aborts any in-flight key lookup. Plaintext passwords never enter receipts,
+temporary byte buffers upon completion, failure, or stale cancellation. Closing
+the dialog, switching nodes or workspaces, or unmounting the component aborts
+any in-flight key lookup. Plaintext passwords never enter receipts,
 URLs, logs, analytics, or browser storage, and a failed submission requires the
 operator to type the password again. All existing mutation authorization,
 desired-revision, signed-command, and privd checks still apply on the backend.

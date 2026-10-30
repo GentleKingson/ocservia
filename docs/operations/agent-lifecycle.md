@@ -1,8 +1,5 @@
 # Agent package lifecycle
 
-Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
-(positive N without leading zeros). RCs are not recommended stable releases.
-
 > For day-to-day operator procedures, start with [Install a managed
 > node](../getting-started/managed-node.md), [Upgrade the Agent](../how-to/agent-lifecycle.md#upgrade),
 > or [Roll back the Agent](../how-to/agent-lifecycle.md#rollback). The sections below
@@ -11,10 +8,10 @@ Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
 
 The published v1.1.0 [policy reset](../reference/support-policy.md) drops source
 version windows and target ordering while keeping artifact integrity and current
-trust requirements intact. Because cross-version safety is not guaranteed and
-historical layout or key conversion no longer runs automatically, operators must
-provision the target explicitly or redeploy without overwriting retained
-identity and persistent state.
+trust requirements intact. Cross-version safety is not guaranteed, and
+historical layout or key conversion no longer runs automatically. Operators must
+therefore provision the target explicitly or redeploy without overwriting
+retained identity and persistent state.
 
 Once its external endpoint is deployed and verified, the operator-hosted thin
 first-install chain separates each stage:
@@ -84,8 +81,8 @@ URL argument and replaces itself with the Agent, leaving base development units
 and direct binary invocations unchanged. Archive and native installations,
 upgrades, rollback snapshots, and uninstall all include this launcher. The
 lower-level package installer and upgrades preserve operator configuration and
-identity, whereas uninstall removes the launcher while retaining configuration
-and state unless the existing purge option is used.
+identity. Uninstall removes the launcher but retains configuration and state
+unless the existing purge option is used.
 
 ## Manual trust provisioning
 
@@ -127,7 +124,9 @@ OUTPUT_DIR=dist VERSION="${VERSION}" PACKAGE_ARCH=amd64 \
 
 DEB and RPM use package release `1`; architecture names are `amd64`/`arm64`
 for DEB and `x86_64`/`aarch64` for RPM. Published historical asset names remain
-unchanged. See [release policy](../development/release-checks.md) for RC naming
+unchanged. Release version examples also accept an exact `vX.Y.Z-rc.N`
+candidate tag (positive N without leading zeros). RCs are not recommended stable
+releases. See [release policy](../development/release-checks.md) for RC naming
 and native package validation.
 
 Each release publishes the archive and its plain `.sha256`, plus native DEB
@@ -142,19 +141,21 @@ the verifier under `/usr/share/ocservia-agent`, and depend on `openssl`,
 `python3`, and `util-linux`. Their scriptlets contain no layout logic:
 `postinst` refuses a host-architecture mismatch, verifies the archive into
 trusted staging, and runs the verified `install-agent.sh` on a fresh host or
-`upgrade-agent.sh` on an existing installation. Installing or upgrading a
-package never enables or starts the Agent or privd units; operators must first
-provision `/etc/ocservia-agent/agent.env` and the keys, then enable both units
-manually. The independent history-retention timer is the only exception:
-installation enables it and starts it unless an install is still unfinished. An
-upgrade or an identical-package retry runs `systemctl try-restart` on
-`ocservia-privd` and `ocservia-agent`, restarting units that are already
-running while leaving stopped units stopped. Package removal (`dpkg -r`,
-`rpm -e`) runs the verified `uninstall-agent.sh`, which disables and stops the
-Agent, privd, and retention timer and removes the binaries and units while
-preserving identity, state, and configuration. Neither `dpkg --purge` nor the
-package manager triggers the state purge; only `uninstall-agent.sh --purge-state`
-does so, as described below.
+`upgrade-agent.sh` on an existing installation.
+
+Installing or upgrading a package never enables or starts the Agent or privd
+units. Operators must first provision `/etc/ocservia-agent/agent.env` and the
+keys, then enable both units manually. The independent history-retention timer
+is the only exception: installation enables it and starts it unless an install
+is still unfinished. An upgrade or an identical-package retry runs
+`systemctl try-restart` on `ocservia-privd` and `ocservia-agent`, restarting
+units that are already running while leaving stopped units stopped.
+
+Package removal (`dpkg -r`, `rpm -e`) runs the verified `uninstall-agent.sh`,
+which disables and stops the Agent, privd, and retention timer and removes the
+binaries and units while preserving identity, state, and configuration. Neither
+`dpkg --purge` nor the package manager triggers the state purge; only
+`uninstall-agent.sh --purge-state` does so, as described below.
 
 A production managed node requests the relay contract before invoking the
 package manager by creating `/etc/ocservia/agent-install-production-relays`
@@ -192,10 +193,11 @@ fingerprint from its root-owned private key, and rejects missing, reused,
 mismatched, symlinked, or unsafe key files. A legacy two-line `agent.env` or an
 invalid key therefore halts the upgrade with provisioning instructions before
 installing an Agent that would fail to restart. These checks enforce current
-trust requirements regardless of the source software version. The v1.1.0
-package scripts do not automatically enroll or rebind keys, reset node
-identity, or purge existing certificate artifacts when applying a target, and
-the former upgrade-time enrollment environment variables and marker are no
+trust requirements regardless of the source software version.
+
+The v1.1.0 package scripts do not automatically enroll or rebind keys, reset
+node identity, or purge existing certificate artifacts when applying a target,
+and the former upgrade-time enrollment environment variables and marker are no
 longer used. Operators must provision the target's required trust configuration
 explicitly. Removing historical layout checks does not make arbitrary
 cross-version operations safe or grant an installed binary capabilities it does
@@ -213,11 +215,13 @@ ancestry, symlinks, hard links, ownership, modes, or file replacement. Optional
 files carry explicit `.previous` or `.absent` records that tell rollback
 whether to restore or remove the installed file. Retention depends on its
 matching rebind helper, the retention service depends on the retention
-executable, and the timer depends on the service, whereas a rebind helper
-without retention remains a valid layout. Both upgrade and rollback preserve
-endpoint identity, the durable Agent database, the command journal, and
-configuration. Verify service health and Controller connectivity after an
-upgrade. To roll back the complete matched snapshot, run:
+executable, and the timer depends on the service. A rebind helper without
+retention remains a valid layout.
+
+Both upgrade and rollback preserve endpoint identity, the durable Agent
+database, the command journal, and configuration. Verify service health and
+Controller connectivity after an upgrade. To roll back the complete matched
+snapshot, run:
 
 ```bash
 sudo /usr/libexec/ocservia/ocservia-agent-rollback
@@ -228,12 +232,12 @@ before stopping services. It stops retention before replacing the retention
 executable and imported rebind helper, restores binaries and units together,
 reloads systemd, and starts privd before the Agent. A restored retention timer
 is restarted after the completed lifecycle releases its lock so persistent
-timer catch-up runs against the restored files, whereas an explicitly absent
-timer is disabled and removed. The standalone rollback driver itself remains on
+timer catch-up runs against the restored files. An explicitly absent timer is
+disabled and removed. The standalone rollback driver itself remains on
 disk so it can finish executing and re-read the snapshot if invoked again.
 Restoring binaries without their matching units is unsupported because the CLI
-and local wire contract can change together. Because a rollback also restores
-the previous release's security properties, treat it as a temporary recovery
+and local wire contract can change together. A rollback also restores the
+previous release's security properties, so treat it as a temporary recovery
 measure and move to a fixed release promptly.
 
 By default, `uninstall-agent.sh` preserves node identity and the command
@@ -242,16 +246,15 @@ revoking the node identity on the Controller and archiving required audit
 material. It deletes the Agent and privd state directories,
 `/var/lib/ocservia-upgrade` (including the rollback snapshot, preventing any
 subsequent rollback), and `/etc/ocservia-agent` (`agent.env`, keys, and relay
-token), and then removes the `ocserv-agent` user and group. Because purging
-local state does not update the Controller, revoke the node record there
-separately.
+token), and then removes the `ocserv-agent` user and group. Purging local state
+does not update the Controller, so revoke the node record there separately.
 
 Current snapshots contain 13 fixed records. Older 8- and 9-record snapshots
 remain readable with `ocservia-agent-rollback --verify-only`, but they lack
 prior rebind and retention evidence, and 8-record snapshots also lack launcher
-evidence. Because missing records do not prove that the prior files were absent
-on disk, a mutating rollback refuses incomplete snapshots before stopping
-services. Recovering from an incomplete snapshot requires either a complete
+evidence. A mutating rollback refuses incomplete snapshots before stopping
+services, because missing records do not prove that the prior files were absent
+on disk. Recovering from an incomplete snapshot requires either a complete
 trusted matched snapshot or an independently reviewed manual restoration of the
 missing artifacts; no force or skip flag is provided.
 
@@ -278,9 +281,9 @@ For an explicit local authority transfer, follow
 [Controller rebind and retention contract](../development/controller-rebind.md)
 defines its authority-transfer and cleanup boundaries.
 
-Because the command journal has no automatic retention policy and normal
-authorized commands accumulate durable state over time, monitor journal storage
-independently of Agent connectivity. From a reviewed checkout, run this
+Monitor journal storage independently of Agent connectivity. The command
+journal has no automatic retention policy, and normal authorized commands
+accumulate durable state over time. From a reviewed checkout, run this
 read-only Linux probe as `ocserv-agent` (or another account permitted to stat
 the state directory):
 
@@ -334,10 +337,10 @@ privd accepts a Controller-signed `AgentUpgrade` command, it independently
 re-validates the typed release identity (version, SHA-256 digest, and
 architecture), commits an immutable root-owned intent under
 `/var/lib/ocservia-upgrade/operations/<operation-id>/`, and starts the
-on-demand unit `ocservia-upgrader@<operation-id>.service`. Because the unit
-uses `Type=exec`, privd's handoff returns as soon as the runner binary starts,
-so the upgrade never terminates the process responsible for reporting the
-command result. The unit omits an `[Install]` section because only privd starts
+on-demand unit `ocservia-upgrader@<operation-id>.service`. The unit uses
+`Type=exec`, so privd's handoff returns as soon as the runner binary starts. As
+a result, the upgrade never terminates the process responsible for reporting
+the command result. The unit omits an `[Install]` section because only privd starts
 it, and the runner refuses to execute unless a committed intent exists in the
 active binding's operations namespace.
 
@@ -348,8 +351,8 @@ architecture, and semantic payload hash, all immutable once committed), `state`
 (one of `accepted`, `running`, `succeeded`, `failed`, or `rolled_back`), and
 `result` (terminal evidence written upon completion). Replaying the same
 operation ID with an identical signed identity converges on the committed
-intent, whereas reusing an operation ID with a different identity is rejected.
-Only one active operation may exist per node. If privd loses its effect journal
+intent. Reusing an operation ID with a different identity is rejected. Only one
+active operation may exist per node. If privd loses its effect journal
 between committing the intent and recording journal completion, the durable
 intent store serves as the idempotency authority for this command family.
 
@@ -378,17 +381,17 @@ Rollback coordinates directly with this durable state:
 instance, marks non-terminal operations `rolled_back` so a stale runner cannot
 re-apply the rolled-back release, and restores or removes the upgrader binary,
 the `ocservia-upgrader@.service` unit, and the installed verifier according to
-the matched snapshot (`.previous` restored, `.absent` removed). Because
+the matched snapshot (`.previous` restored, `.absent` removed). All native DEB
+and RPM packages (`amd64` and `arm64`) include the durable runner:
 `install-agent.sh` installs those three files, every package carries them, and
-`uninstall-agent.sh` removes them, all native DEB and RPM packages (`amd64` and
-`arm64`) include the durable runner.
+`uninstall-agent.sh` removes them.
 
 Command protocol `1.1` fails closed: provision the Controller command
 verification public key before upgrading the Agent and privd pair. Both
-services load the key independently, and privd also pins `NODE_ID`. Because new
-binaries reject unsigned legacy mutations at both the command journal and
-root-effect boundaries, schedule the binary rollout and Controller signing-key
-enablement within a single maintenance window. During a signing-key rotation,
+services load the key independently, and privd also pins `NODE_ID`. Schedule the
+binary rollout and Controller signing-key enablement within a single maintenance
+window, because new binaries reject unsigned legacy mutations at both the
+command journal and root-effect boundaries. During a signing-key rotation,
 keep both the old and new public keys pinned until old authorizations expire
 and all Unknown outcomes are reconciled.
 
@@ -402,11 +405,11 @@ URL, file path, or package digest; the Controller looks up the digest in the
 operator-provisioned release catalog pointed to by
 `OCSERV_AGENT_RELEASE_MANIFEST` (an absolute path with no default). When that
 environment variable is unset, the Controller starts without a catalog and
-returns `503` on the agent-upgrade and agent-rollout endpoints. Because the
-shipped production Compose neither sets nor mounts
-`OCSERV_AGENT_RELEASE_MANIFEST`, enabling Controller-driven AgentUpgrade and
-rollouts requires a deployment-specific override that mounts the catalog file
-read-only into the control-plane container:
+returns `503` on the agent-upgrade and agent-rollout endpoints. Enabling
+Controller-driven AgentUpgrade and rollouts requires a deployment-specific
+override that mounts the catalog file read-only into the control-plane
+container, because the shipped production Compose neither sets nor mounts
+`OCSERV_AGENT_RELEASE_MANIFEST`. The catalog file has this form:
 
 ```json
 {
@@ -439,9 +442,9 @@ capability on the node (`ocserv.agent.upgrade.v2` or `ocserv.agent.upgrade.v1`,
 preferring v2 when both are approved) and binds that exact capability name into
 the signed command. Nodes advertising only v1 remain eligible despite lacking
 the former software downgrade fence; the Controller never fabricates
-capabilities or converts historical payloads. Because the already-installed
-runner executes the command, previously installed code retains its own runtime
-behavior, and advertising a command capability does not guarantee cross-version
+capabilities or converts historical payloads. The already-installed runner
+executes the command, so previously installed code retains its own runtime
+behavior. Advertising a command capability does not guarantee cross-version
 safety or certify historical version combinations.
 
 New upgrade operations start in the `queued` state and move to the non-terminal
@@ -488,19 +491,21 @@ Fleet version badges in the console and the recommended version displayed in
 Settings come from the operator-pinned `OCSERV_RECOMMENDED_AGENT_VERSION`
 (SemVer), which classifies observed versions without scheduling any upgrades on
 its own. Configure it in the Controller section of `install.env` or export it
-in the invoking shell before running the production installer or bootstrap so
+in the invoking shell before running the production installer or bootstrap, so
 the root lifecycle forwards the resolved value to the migrate and control-plane
-containers; an explicitly empty export overrides `install.env` and clears the
-recommendation. When updating this setting on an existing installation,
-recreate the control-plane through the documented Controller lifecycle (see
-[production deployment](production-deployment.md)): use `controller.sh start`
+containers. An explicitly empty export overrides `install.env` and clears the
+recommendation.
+
+When updating this setting on an existing installation, recreate the
+control-plane through the documented Controller lifecycle (see
+[production deployment](production-deployment.md)). Use `controller.sh start`
 to re-apply the current release's Compose project with the exported environment
-(whereas `controller.sh upgrade` switches to a different release file), and
-export the variable in that invocation as well because `controller.sh` does not
-read `install.env`. Check Settings afterward to confirm the update took effect,
-since a Compose recreate run without the export silently retains or clears the
-prior value. When no recommendation is configured, observed versions remain
-visible without target comparison; invalid nonempty SemVer strings fail
+(`controller.sh upgrade`, by contrast, switches to a different release file),
+and export the variable in that invocation as well because `controller.sh` does
+not read `install.env`. Check Settings afterward to confirm the update took
+effect, since a Compose recreate run without the export silently retains or
+clears the prior value. When no recommendation is configured, observed versions
+remain visible without target comparison; invalid nonempty SemVer strings fail
 Controller configuration validation.
 
 Batch 0 always runs as a mandatory single-node canary, and subsequent batches
@@ -518,10 +523,10 @@ another upgrade active, or lacks a manifest entry), the Controller marks it
 `skipped` with a reason code and pauses the rollout. Resuming a paused rollout
 requeues the current batch's `failed`, `unknown`, `rolled_back`, and
 skipped-canary nodes for a fresh eligibility check, while skipped non-canary
-nodes remain `skipped` with their recorded reason. Because the rollout detail
-view tracks succeeded, failed, and skipped nodes per batch alongside the
-remaining count, an overall rollout status of `succeeded` does not imply that
-every originally selected node was upgraded.
+nodes remain `skipped` with their recorded reason. The rollout detail view
+tracks succeeded, failed, and skipped nodes per batch alongside the remaining
+count, so an overall rollout status of `succeeded` does not imply that every
+originally selected node was upgraded.
 
 Rollout state persists across Controller restarts and console sessions.
 Viewing a rollout requires `operation.read`, and listing a workspace's rollouts

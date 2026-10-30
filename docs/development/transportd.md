@@ -5,17 +5,17 @@
 gRPC service to the Go Controller over a mode `0660` Unix domain socket so Go
 packages never import Iroh types directly. The daemon holds neither a database
 client nor database credentials. Both its administrative socket and the trust
-socket enforce exact configured peer UIDs: while the transport and
-control-plane containers share the numeric `ocservia` group (GID `65532`) under
-distinct non-root UIDs so only group members can traverse the runtime directory
-and reach the socket path, group membership grants only filesystem traversal
-and never substitutes for peer UID authentication.
+socket enforce exact configured peer UIDs. The transport and control-plane
+containers share the numeric `ocservia` group (GID `65532`) under distinct
+non-root UIDs, so only group members can traverse the runtime directory and
+reach the socket path. Group membership grants only filesystem traversal and
+never substitutes for peer UID authentication.
 
 Pass the Controller identity key via `--key-file`, pointing to an absolute,
 non-symlink regular file owned by the service user with zero group or world
 permission bits and containing either 32 raw bytes or 64 lowercase hexadecimal
 characters. Keep this key file out of container images, the source tree,
-command-line flags, and logs; at startup, the daemon logs only the derived
+command-line flags, and logs. At startup, the daemon logs only the derived
 public endpoint identifier.
 
 In the normal database-backed lifecycle, start `ocservia-transportd` with
@@ -27,19 +27,21 @@ values). Under this configuration, the Iroh connection hook admits known Agent
 fail-closed until the initial snapshot synchronization completes. Unknown
 enrollment `EndpointID`s are constrained by a dedicated local pre-auth class
 that never triggers a Controller database query before application-layer frame
-validation. Both sides of the trust socket verify peer and filesystem identity:
-the trust client checks the socket file and server UID, the Controller trust
-server independently verifies `transportd`'s UID, and both require a
-non-symlink Unix socket with exact UID, GID, and mode beneath trusted,
-non-writable parent directories while rejecting any pathname identity change
-during connection setup.
+validation.
+
+Both sides of the trust socket verify peer and filesystem identity. The trust
+client checks the socket file and server UID, and the Controller trust server
+independently verifies `transportd`'s UID. Both require a non-symlink Unix
+socket with exact UID, GID, and mode beneath trusted, non-writable parent
+directories, and both reject any pathname identity change during connection
+setup.
 
 For isolated testing or observation-only rollback, the startup flags
 `--approved-binding NODE_UUID=ENDPOINT_ID` and `--revoked-endpoint ENDPOINT_ID`
 configure static bindings without a trust socket. Static bindings negotiate
 protocol `1.0` without a session grant, enabling only the status, version,
 session, IP-ban, and configuration-fingerprint read capabilities advertised by
-the Agent. Although telemetry ingestion continues under static bindings,
+the Agent. Telemetry ingestion continues under static bindings, but
 `transportd` blocks command dispatch, configuration and certificate mutations,
 and artifact fetches or finalization before opening an Agent stream. Resuming
 management mutations requires reconnecting `--trust-socket` and obtaining a
@@ -66,9 +68,9 @@ timeout, connection rate, event retention, and UDS subscribers. Trust admission
 is divided into five independent classes: known-Agent handshake, Agent
 authorization, Agent registration recheck, unknown-enrollment pre-auth, and
 enrollment completion. Each class maintains its own rolling rate window,
-concurrency semaphore, bounded metrics, and rejection reason so unknown
-enrollment traffic can never consume capacity reserved for enrolled Agents, and
-when the bounded identity table fills, new unknown identities are shed without
+concurrency semaphore, bounded metrics, and rejection reason, so unknown
+enrollment traffic can never consume capacity reserved for enrolled Agents.
+When the bounded identity table fills, new unknown identities are shed without
 evicting existing entries. Each class keeps in-process counters for accepted
 attempts, rate and capacity rejections, and checks in flight, keyed only by the
 fixed class name and never by raw `EndpointID`s or tokens. `transportd` does
@@ -84,7 +86,7 @@ call locks and atomically consumes the token alongside the durable node write,
 rejecting any concurrent or subsequent replay. Node approval, revocation, and
 endpoint rotation advance the synchronized trust snapshot, and revoked
 identities remain fail-closed even if the Controller becomes unreachable.
-Direct and Relay connections share the same internal admission classes; Relay
+Direct and Relay connections share the same internal admission classes. Relay
 authentication acts only as defense in depth and neither establishes an
 Agent principal nor taps reserved Controller capacity.
 
@@ -92,8 +94,8 @@ Connection status queries return the Agent instance ID, active direct or relay
 path with path details, RTT, connection establishment timestamp, and last-seen
 timestamp, together with the negotiated capability set, authorization revision,
 and signed-session expiration time. Static read-only sessions report revision
-zero and no expiration, whereas database-backed sessions accept a nonzero
-revision and expiry only from the Controller handshake response. Before
+zero and no expiration. Database-backed sessions accept a nonzero revision and
+expiry only from the Controller handshake response. Before
 opening an Agent stream for command dispatch or artifact transfer, `transportd`
 verifies the session mode, negotiated capability, authorization revision, and
 grant expiry, and closes any connection whose retained session grant is
@@ -101,14 +103,16 @@ superseded by a higher authoritative trust revision.
 
 Calling `SendCommand` returns as soon as `transportd` writes the command frame
 to the Agent stream and closes the send side, before the Agent accepts or
-executes the command; the Agent's execution outcome is read asynchronously and
+executes the command. The Agent's execution outcome is read asynchronously and
 published later as a `command_result` event. If a command stream closes early,
 times out, or yields a malformed frame prior to a terminal event, `transportd`
 emits an `unknown` result. A command stream carries exactly one terminal frame;
 a Heartbeat or any other non-result frame on it is malformed and is never
-published as telemetry. In every such case `transportd` emits the `unknown` result that the Controller must reconcile instead of
-treating it as a clean failure or resending it as a new command. When one to
-eight `--controller-verification-key-file` flags are configured, `transportd`
+published as telemetry. In every such case `transportd` emits the `unknown`
+result that the Controller must reconcile instead of treating it as a clean
+failure or resending it as a new command.
+
+When one to eight `--controller-verification-key-file` flags are configured, `transportd`
 also validates the Controller-signed owner-fence carriers on command, artifact,
 and trust-update requests. Once a node registers a fence, those carriers are
 mandatory on every subsequent call, and adding `--require-fencing` (which
@@ -127,15 +131,17 @@ provenance-bound patch of that exact `crates.io` release, with the full
 dependency graph locked in `Cargo.lock`. Production Agent and `transportd`
 launchers accept only a single dedicated Relay URL (although the underlying
 `--relay-url` CLI parsers accept between one and eight URLs, the product
-launchers enforce the single-relay limit). In the lower-level transport library
-and its test suite, configuring a custom dedicated relay set with two or more
-relays (an unsupported configuration in production) maintains persistent
-standby connections to all members while publishing a single preferred home
-relay, allowing incoming Agents to reach the live Controller endpoint if the
-home relay drops; default, disabled, and single-relay modes keep upstream
-idle-connection handling. Because internal transport or relay behavior can shift
-across patch releases without altering the Go gRPC contract, any Iroh patch
-update must still pass direct, relay, ALPN-rejection, path-event, shutdown,
+launchers enforce the single-relay limit).
+
+In the lower-level transport library and its test suite, configuring a custom
+dedicated relay set with two or more relays (an unsupported configuration in
+production) maintains persistent standby connections to all members while
+publishing a single preferred home relay, allowing incoming Agents to reach the
+live Controller endpoint if the home relay drops. Default, disabled, and
+single-relay modes keep upstream idle-connection handling.
+
+Internal transport or relay behavior can shift across patch releases without
+altering the Go gRPC contract, so any Iroh patch update must still pass direct, relay, ALPN-rejection, path-event, shutdown,
 dependency, audit, and license checks.
 
 The [standalone `iroh-relay` build](../../deploy/production/relay-build.md) is
@@ -170,7 +176,7 @@ default and must never be used for production recovery. During incident
 recovery, preserve enrollment tokens, endpoint bindings, capability approvals,
 and the Controller identity key, and use a forward fix or a planned
 [isolated restore](../operations/incident-recovery.md#database-recovery) since
-no database down migrations exist. Because static startup bindings provide
-read-only visibility without the ability to dispatch commands or advance
-configuration, certificate, or artifact state, restore live Controller trust
-authority and a valid signed session before resuming management operations.
+no database down migrations exist. Static startup bindings provide read-only
+visibility without the ability to dispatch commands or advance configuration,
+certificate, or artifact state, so restore live Controller trust authority and
+a valid signed session before resuming management operations.

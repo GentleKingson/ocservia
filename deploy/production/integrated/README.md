@@ -1,17 +1,15 @@
 # Integrated deployment
 
-Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
-(positive N without leading zeros). RCs are not recommended stable releases.
-
-The P1 network prototype was developed against source baseline
-[`e861b72130d4d409883f68d01805566f26cbafbc`](https://github.com/GentleKingson/ocservia/commit/e861b72130d4d409883f68d01805566f26cbafbc),
-and initial P1 and P3-P5 rollout and main acceptance records
-([`368906c65d23bc7abff088dc4bbbdbf160012b32`](https://github.com/GentleKingson/ocservia/commit/368906c65d23bc7abff088dc4bbbdbf160012b32))
-are archived at
-[`af40cd3684269f7e31a3c8d6981775411a8172ec`](https://github.com/GentleKingson/ocservia/blob/af40cd3684269f7e31a3c8d6981775411a8172ec/deploy/production/integrated/README.md).
 Read the
 [Integrated deployment contract](../../../docs/development/integrated-deployment-contract.md).
 Do not bypass the deployment-configuration checks in `controller.sh` for deployment.
+
+The P1 network prototype was developed against source baseline
+[`e861b72130d4d409883f68d01805566f26cbafbc`](https://github.com/GentleKingson/ocservia/commit/e861b72130d4d409883f68d01805566f26cbafbc).
+Initial P1 and P3-P5 rollout and main acceptance records
+([`368906c65d23bc7abff088dc4bbbdbf160012b32`](https://github.com/GentleKingson/ocservia/commit/368906c65d23bc7abff088dc4bbbdbf160012b32))
+are archived at
+[`af40cd3684269f7e31a3c8d6981775411a8172ec`](https://github.com/GentleKingson/ocservia/blob/af40cd3684269f7e31a3c8d6981775411a8172ec/deploy/production/integrated/README.md).
 
 ## Lifecycle configuration
 
@@ -19,10 +17,12 @@ Use the existing bootstrap, `install.sh`, `controller.sh` and `compose.sh`,
 not a second installer. Standalone remains the default. Integrated requires a
 v2 platform manifest, Compose >= 2.24.4, and these additional `install.env`
 settings alongside the normal database, authentication and Controller Secrets.
-This section is the **manual** path: you write `install.env` and prepare every
-file below. Quick (`controller-bootstrap.sh --quick`, see [Quick
+This section is the manual path: you write `install.env` and prepare every
+file below.
+
+Quick (`controller-bootstrap.sh --quick`, see [Quick
 mode](../../../docs/operations/bootstrap-hosting.md#quick-mode)) is a preset
-over the same installer for a new host: it generates this configuration in
+over the same installer for a new host. It generates this configuration in
 `/etc/ocservia/install.env` (Integrated, bundled PostgreSQL, ACME, Local
 authentication) and the protected Controller and Signer material (see [Quick
 install materials](../../../docs/development/certificates-and-signer.md#quick-install-materials)),
@@ -48,14 +48,16 @@ Set `OCSERV_PUBLIC_HOST` to a distinct lowercase Controller DNS name. Omit
 `OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` and `OCSERV_CERTIFICATE_SIGNER_URL`:
 the launcher derives one Relay URL and `https://signer:9443/sign`. Conflicting
 values are rejected, and `OCSERV_RELAY_URL_B` must be empty: exactly one Relay is
-supported, not a redundant pair. Controller's trusted proxy must remain the Gateway's
-application `/32`, not Edge or an entire subnet. By default (`OCSERV_TLS_MODE=manual`)
-certificates are provisioned externally; see [ACME certificates](#acme-certificates)
-for the alternative. In a manual installation the operator supplies the Signer's
-CA chain, issuing key and TLS identity: neither the lifecycle nor `compose.sh`
-generates CAs. Only Quick generates them (`quick-materials.sh`: offline root CA,
-online issuing intermediate and Signer HTTPS identity); it creates no Gateway or
-Relay TLS identity either, ACME obtains those.
+supported, not a redundant pair. Controller's trusted proxy must remain the
+Gateway's application `/32`, not Edge or an entire subnet.
+
+By default (`OCSERV_TLS_MODE=manual`) certificates are provisioned externally;
+see [ACME certificates](#acme-certificates) for the alternative. In a manual
+installation the operator supplies the Signer's CA chain, issuing key and TLS
+identity. Neither the lifecycle nor `compose.sh` generates CAs. Only Quick
+generates them (`quick-materials.sh`: offline root CA, online issuing
+intermediate and Signer HTTPS identity). Quick creates no Gateway or Relay TLS
+identity either; ACME obtains those.
 
 The Relay secret directory is launcher-owned mode 0700 and contains nonempty
 single-link `tls.crt` and `tls.key` (manual mode only), launcher-owned mode 0444. Its access token
@@ -176,8 +178,8 @@ docker compose -f deploy/production/compose.yaml \
 
 Both lowercase DNS names must be distinct; Edge validates labels before
 restricted environment substitution. Caddy's pinned standard build includes
-`caddy.listeners.proxy_protocol` without a custom module: Gateway allows the
-Controller Host with no port or `:443`, executes an explicit `route` block to
+`caddy.listeners.proxy_protocol` without a custom module. Gateway allows the
+Controller Host with no port or `:443`. It executes an explicit `route` block to
 reject authority mismatches before any API or static handler, preserves
 API/static fallback/security headers and enables only HTTP/1.1 and HTTP/2, not
 HTTP/3. Gateway accepts PROXY metadata only from Edge's dedicated `/32`
@@ -208,9 +210,11 @@ streams; this is not proof of original-IP abuse controls behind Edge.
 ## Reproduce the bounded check
 
 Run locally in an authorized isolated checkout with Docker and the required
-build dependencies. Development builds are allowed here; current publication qualification uses manual Release Check
-and freshly built local images on disposable native runners. NGINX 1.30.6 and Caddy 2.11.4 are digest-pinned; Relay uses the
-existing locked iroh-relay 1.2.0 build. No upstream Relay changes are made.
+build dependencies. Development builds are allowed here. Current publication
+qualification uses manual Release Check and freshly built local images on
+disposable native runners. NGINX 1.30.6 and Caddy 2.11.4 are digest-pinned;
+Relay uses the existing locked iroh-relay 1.2.0 build. No upstream Relay
+changes are made.
 
 ```bash
 docker build -f deploy/production/edge.Dockerfile -t p1-edge .
@@ -281,13 +285,18 @@ are retired.
 ## Operator lifecycle and maintenance
 
 Choose `standalone` for separately operated Relay/Signer endpoints, or
-`integrated` for this single-host topology. Integrated is not HA. Use the
+`integrated` for this single-host topology. Integrated is not HA.
+
+Use the
 [pinned release installation](../../../docs/getting-started/production.md)
-with `--version vX.Y.Z --root-lifecycle` only after that exact stable or RC Release
-exists; on a new host, `--quick` (which implies `--root-lifecycle`) is the
-alternative preset, available only in a Release that ships
-`deploy/production/quick-install.sh`. For authorized nonproduction diagnostics, use the matching source
-checkout and ordinary platform configuration with `controller.sh` instead.
+with `--version vX.Y.Z --root-lifecycle` only after that exact stable or RC
+Release exists. Release version examples also accept an exact `vX.Y.Z-rc.N`
+candidate tag (positive N without leading zeros). RCs are not recommended
+stable releases. On a new host, `--quick` (which implies `--root-lifecycle`) is
+the alternative preset, available only in a Release that ships
+`deploy/production/quick-install.sh`. For authorized nonproduction diagnostics,
+use the matching source checkout and ordinary platform configuration with
+`controller.sh` instead.
 
 `install.env` is data parsed by the installer's strict allowlist, not a shell
 script. Do not `source` it. Direct lifecycle commands require the same explicit

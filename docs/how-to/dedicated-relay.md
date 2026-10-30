@@ -6,9 +6,9 @@ command verification checks. The instructions below cover a Standalone Relay on
 its own host; in an Integrated deployment, the Relay runs on the Controller
 host and derives its URL from `OCSERV_RELAY_PUBLIC_HOST` (see the
 [Integrated lifecycle configuration](../../deploy/production/integrated/README.md#lifecycle-configuration)).
-Public or default relays are never used as a production fallback. Because
-normal direct connectivity remains active alongside the Relay, any Relay
-recovery test must prove that traffic actually depends on the Relay path.
+Public or default relays are never used as a production fallback. Any Relay
+recovery test must prove that traffic actually depends on the Relay path,
+because normal direct connectivity remains active alongside the Relay.
 
 Agent enrollment, Agent sessions, and transportd disable public endpoint address
 publishing and lookup. They use the configured Relay addresses; an EndpointID
@@ -35,12 +35,11 @@ host's own DNS configuration remain an operator dependency.
 1. On the Relay host, create `OCSERV_RELAY_SECRET_DIR` as a launcher-owned
    directory with mode `0700` containing `tls.crt`, `tls.key`, and
    `relay-access-token`. Both TLS files must be owned by the launcher user with
-   mode `0444`, while `relay-access-token` must be owned by UID/GID 65532 with
-   mode `0400`. Export `OCSERV_RELAY_IMAGE` with an explicit version tag or
-   SHA-256 reference, assign a DNS name to the host with its matching
-   certificate and key, and use the checked-in
-   `deploy/production/relay/relay.toml` configuration. The standalone Relay
-   publishes TCP 80/443 and UDP 7842.
+   mode `0444`. `relay-access-token` must be owned by UID/GID 65532 with mode
+   `0400`. Export `OCSERV_RELAY_IMAGE` with an explicit version tag or SHA-256
+   reference. Assign a DNS name to the host with its matching certificate and
+   key, and use the checked-in `deploy/production/relay/relay.toml`
+   configuration. The standalone Relay publishes TCP 80/443 and UDP 7842.
 2. On the Relay host, validate and start the relay:
 
    ```bash
@@ -57,9 +56,9 @@ host's own DNS configuration remain an operator dependency.
    ```
 
    You can also define these variables in the Controller's protected
-   `install.env`. `OCSERV_RELAY_URL_A` is required, whereas
-   `OCSERV_RELAY_URL_B` must be absent or empty (a non-empty B value causes
-   validation to fail before any side effects occur). Exporting an explicitly
+   `install.env`. `OCSERV_RELAY_URL_A` is required.
+   `OCSERV_RELAY_URL_B` must be absent or empty; a non-empty B value causes
+   validation to fail before any side effects occur. Exporting an explicitly
    empty `OCSERV_RELAY_URL_B` in the shell overrides any B entry present in
    `install.env`.
 
@@ -81,10 +80,9 @@ host's own DNS configuration remain an operator dependency.
 ## Verify
 
 Confirm that the Controller and every Agent use the same single Relay URL.
-Because an outage on that Relay interrupts Relay-dependent traffic, recovery
-requires restoring the Relay with the same address, certificate, and
-credentials, then verifying reconnection, fresh heartbeats, and command
-results. Preserve pending command state and reconcile any Unknown outcomes
+An outage on that Relay interrupts Relay-dependent traffic. Recovery requires
+restoring the Relay with the same address, certificate, and credentials, then
+verifying reconnection, fresh heartbeats, and command results. Preserve pending command state and reconcile any Unknown outcomes
 before performing an explicit safe retry.
 
 ## Migrate an existing A/B deployment
@@ -92,7 +90,7 @@ before performing an explicit safe retry.
 During a planned maintenance window, clear the B entry in both the Controller
 and Agent configurations before running the new installers or starting the new
 launchers, while keeping A and all identity, enrollment, token, and journal
-material intact. Because services do not hot-reload the Relay list, restart the
+material intact. Services do not hot-reload the Relay list, so restart the
 affected services and verify A-only traffic before retiring B. Rerunning the
 installer on an already-enrolled node validates the existing configuration and
 refuses any persisted non-empty B entry without rewriting topology or replacing
@@ -109,8 +107,8 @@ single-host deployment, use Integrated mode instead.
 ## Troubleshooting
 
 If the Relay becomes unavailable, do not rotate endpoint identity keys or switch
-to public relays. Because operating a single Relay means maintenance and token
-rotation can briefly interrupt communication, schedule a recovery window
+to public relays. Operating a single Relay means maintenance and token
+rotation can briefly interrupt communication, so schedule a recovery window
 instead of attempting a two-path zero-interruption rotation. Preserve identity,
 enrollment, and pending command journals, and verify authenticated traffic once
 service is restored.

@@ -1,7 +1,7 @@
 # Enroll a node
 
 Enrolling a managed node binds its persistent EndpointID to a node record on
-the Controller in a pending state. Enrollment does not activate the node; an
+the Controller in a pending state. Enrollment does not activate the node. An
 operator must complete the separate approval workflow afterward.
 
 A Bootstrap Token authorizes a single narrowly scoped enrollment transaction
@@ -16,7 +16,7 @@ decision by a second authorized principal.
   path, install it beforehand.
 - You have the Controller EndpointID and the target workspace UUIDv7.
 - Sealing keys are ready for your chosen workflow: the standard installer
-  generates any missing sealing keys automatically, whereas the advanced manual
+  generates any missing sealing keys automatically. The advanced manual
   path requires two distinct sealing private keys already provisioned on the
   node along with their key IDs and public-key SHA-256 descriptors.
 - For production deployments, the dedicated relay drop-in and launcher are
@@ -37,12 +37,18 @@ Open **Nodes → Install node**, including when the inventory is empty. This
 entry prepares the existing installer flow; it does not deploy over SSH or
 change enrollment or approval permissions.
 
-1. Confirm the current authorized Workspace and enter a node name unique
-   within that Workspace (including existing pending nodes),
-   environment, a published matching Controller/Agent Release tag (`vX.Y.Z`,
-   or `vX.Y.Z-rc.N`), Controller EndpointID, one dedicated HTTPS Relay URL,
-   and three distinct protected file paths on the Agent host. The Controller
-   EndpointID is not the new Agent's EndpointID. The UI accepts conservative
+1. Confirm the current authorized Workspace, then enter:
+
+   - A node name unique within that Workspace (including existing pending
+     nodes).
+   - The environment.
+   - A published matching Controller/Agent Release tag (`vX.Y.Z`, or
+     `vX.Y.Z-rc.N`).
+   - The Controller EndpointID.
+   - One dedicated HTTPS Relay URL.
+   - Three distinct protected file paths on the Agent host.
+
+   The Controller EndpointID is not the new Agent's EndpointID. The UI accepts conservative
    literal names and paths and rejects newline injection, credential-bearing
    URLs, query strings and floating versions. It validates the tag format;
    the administrator must confirm that the matching release exists. A duplicate
@@ -50,8 +56,8 @@ change enrollment or approval permissions.
    is bound to the token; editing `install.env` cannot rename that binding.
 2. Copy the generated `install.env` into a private working directory on the
    Agent host with mode `0600`. It contains public configuration and file
-   paths only. Node name, Workspace and release are comments: the name and
-   Workspace bind the Bootstrap Token request, while the release is passed
+   paths only. Node name, Workspace and release are comments. The name and
+   Workspace bind the Bootstrap Token request, and the release is passed
    explicitly to `--version`. Do not source the file; the installer's strict
    loader reads it. Existing shell variables take precedence, so check for
    stale values before running the installer.
@@ -230,7 +236,7 @@ endpoint-bound enrollment flow.
    During enrollment, the Agent signs and persists both sealing public-key
    descriptors. Record the UUIDv7 node ID printed by the command and remove
    `/etc/ocservia-agent/enrollment-token`. The key descriptors are enrollment
-   inputs; in `agent.env`, record the returned `NODE_ID` alongside the
+   inputs. In `agent.env`, record the returned `NODE_ID` alongside the
    `AGENT_ENDPOINT_ID` binding from step 1.
 
    Before proceeding to approval, complete the remaining host configuration in
@@ -261,9 +267,9 @@ endpoint-bound enrollment flow.
    ```
 
    Record the returned UUIDv7 `id` as `APPROVAL_ID` and its `request_hash` as
-   `APPROVAL_REQUEST_HASH`. Because the independent approver reviews the exact
-   `labels`, `policy`, and `capabilities` in this payload, request only the
-   capabilities required by the node's policy.
+   `APPROVAL_REQUEST_HASH`. Request only the capabilities required by the node's
+   policy, because the independent approver reviews the exact `labels`,
+   `policy`, and `capabilities` in this payload.
 
 2. Have a second authorized principal review the request content and approve it
    by binding the decision to the returned `request_hash`:
@@ -295,7 +301,7 @@ endpoint-bound enrollment flow.
    ```
 
    The `labels`, `policy`, and `capabilities` in this activation payload must
-   match the approved `node.approve` request exactly, and keeping the same
+   match the approved `node.approve` request exactly. Keeping the same
    `reason` string makes the audit trail easier to follow. Node activation
    always requires a valid approved request UUIDv7 in `X-Approval-ID`;
    independent approval cannot be bypassed by policy.
@@ -304,12 +310,13 @@ endpoint-bound enrollment flow.
 
 A completed activation returns `status: active`. If the API responds with `503`
 ("Trust update pending"), the approval has already been committed in the
-database while transport trust synchronization is still catching up; either
+database while transport trust synchronization is still catching up. Either
 wait for background convergence or repeat the identical request with the same
-`X-Approval-ID` (which is idempotent once activated) without creating a second
-approval request. Because neither the bootstrap installer nor manual enrollment
-enables or starts systemd units, enable and start both services as shown in
-step 4 of
+`X-Approval-ID` (which is idempotent once activated), without creating a second
+approval request.
+
+Neither the bootstrap installer nor manual enrollment enables or starts systemd
+units, so enable and start both services as shown in step 4 of
 [Install a managed node](../getting-started/managed-node.md#4-approve-and-start-services),
 then confirm that the node appears online with a fresh observation in the
 Controller inventory.
@@ -402,8 +409,8 @@ requires a new node identity.
 
 Local installer states track only host-side progress: `ENROLLED_LOCAL` confirms
 that the local Node ID has been persisted to disk, and `SERVICES_ACTIVE`
-confirms only that both local systemd units are enabled and active. Because the
-installer has no administrator API session, it reports Controller trust,
+confirms only that both local systemd units are enabled and active. The
+installer has no administrator API session, so it reports Controller trust,
 connection state, and telemetry freshness as `NOT_OBSERVED`. To check those
 fields, query `GET /api/v1/nodes/{node_id}` from an authorized workspace
 session on the Controller and inspect `trust_status`, `connection_state`, and
@@ -412,9 +419,9 @@ a different state transition). Never copy that administrator session onto the
 managed node.
 
 Once local enrollment is confirmed, the installer deletes only its fixed
-internal copy of the enrollment token (which stays `root:ocserv-agent` with
-mode `0640` so the Agent can read it, instead of being converted to a root-only
-file). If power loss, `SIGKILL`, or another interruption stops the process
+internal copy of the enrollment token. The installer does not convert that copy
+to a root-only file: it stays `root:ocserv-agent` with mode `0640` so the Agent
+can read it. If power loss, `SIGKILL`, or another interruption stops the process
 between configuration commit and cleanup, rerunning the installer validates the
 existing identity and binding (failing closed on unsafe file metadata),
 completes any pending token cleanup, and prints the local summary. The external

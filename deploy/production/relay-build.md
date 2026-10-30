@@ -6,7 +6,7 @@ crates.io `iroh-relay` CLI. `toolchains.lock` selects the Relay version, while
 means the stand-alone `iroh-relay` binary, not the Standalone deployment mode.
 The production Relay image build (`deploy/production/relay.Dockerfile`, which the
 Integrated Relay service reuses) uses this entry point. It builds the Relay binary
-only; exactly one Relay is supported per deployment, see
+only. Exactly one Relay is supported per deployment; see
 [dedicated Relay](../../docs/how-to/dedicated-relay.md).
 
 For 1.4.0, the archive SHA-256 is

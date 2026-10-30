@@ -1,18 +1,14 @@
 # Production deployment
 
-Release version examples throughout this reference also accept an exact
-`vX.Y.Z-rc.N` candidate tag (positive N without leading zeros), though release
-candidates are not recommended for stable production use.
-
 > For a step-by-step first deployment, start with [Deploy the
 > Controller](../getting-started/production.md). The sections below specify the
 > production contracts for releases, host filesystems, secrets, lifecycle
 > transitions, rollback, and recovery.
 
-Once its external HTTPS endpoint is deployed and verified, the operator-hosted
-thin bootstrap chain for a manual installation (where the operator prepares
-`install.env` and all protected secret material) delegates authority along the
-same lifecycle boundaries:
+In a manual installation, the operator prepares `install.env` and all protected
+secret material. Once the external HTTPS endpoint is deployed and verified, the
+operator-hosted thin bootstrap chain delegates authority along the same
+lifecycle boundaries:
 
 ```text
 Stage-0 -> exact vX.Y.Z Stage-1 -> install.env -> durable clean checkout
@@ -20,35 +16,46 @@ Stage-0 -> exact vX.Y.Z Stage-1 -> install.env -> durable clean checkout
         -> smoke/readiness
 ```
 
-In this sequence, Stage-0 acts only as a convenience wrapper whose initial
-bytes come from the static HTTPS endpoint and fetch the versioned Stage-1
-script over HTTPS. Stage-1 then prepares a durable release checkout, leaving
-`install.env` in the operator's configuration directory outside that checkout,
-and hands off to controller.sh to validate the deployment configuration and
-protected local state before activating any services. Until that static
-bootstrap host has operational ownership and byte-verification evidence, the
-public first-install guide obtains Stage-1 directly from a clean, exact-release
+In this sequence, Stage-0 is only a convenience wrapper. Its initial bytes come
+from the static HTTPS endpoint, and it fetches the versioned Stage-1 script over
+HTTPS. Stage-1 prepares a durable release checkout and leaves `install.env` in
+the operator's configuration directory outside that checkout. It then hands off
+to controller.sh, which validates the deployment configuration and protected
+local state before activating any services. Until that static bootstrap host
+has operational ownership and byte-verification evidence, the public
+first-install guide obtains Stage-1 directly from a clean, exact-release
 checkout.
 
-Quick mode (`controller-bootstrap.sh --quick`, which requires a Release that
-ships `deploy/production/quick-install.sh`) layers a single-host preset over
-this same installer. It ignores `./install.env`, implies `--root-lifecycle`, and
-opens with a read-only preflight verifying that `getent`, `ip`, and `ss` exist,
-both configured DNS names resolve to the same IPv4 addresses, any AAAA record
-belongs to the local host, and TCP 443 and UDP 7842 are free (unless retrying
-an interrupted Quick run). Once preflight passes, `quick-install.sh` prepares
-the host, invokes `quick-materials.sh` to generate the protected material,
-writes `/etc/ocservia/install.env` (configuring Integrated mode, bundled
-PostgreSQL, ACME, and Local authentication), runs `install.sh --root-lifecycle`,
-provisions the management workspace, and creates the Local administrators
-`initial-admin` and `initial-approver`. Quick mode installs new hosts only: it
-refuses an existing deployment, a `/etc/ocservia/install.env` file it did not
-generate, or changed domain or email values on a rerun. Subsequent
-`controller.sh` and `compose.sh` invocations do not read that file
-automatically, so operators must export the same effective settings as in any
-other installation. See [Quick mode](bootstrap-hosting.md#quick-mode) and
+Quick mode (`controller-bootstrap.sh --quick`) layers a single-host preset over
+this same installer. It requires a Release that ships
+`deploy/production/quick-install.sh`, ignores `./install.env`, and implies
+`--root-lifecycle`.
+
+Quick mode opens with a read-only preflight that verifies:
+
+- `getent`, `ip`, and `ss` exist.
+- Both configured DNS names resolve to the same IPv4 addresses.
+- Any AAAA record belongs to the local host.
+- TCP 443 and UDP 7842 are free (unless retrying an interrupted Quick run).
+
+Once preflight passes, `quick-install.sh`:
+
+1. Prepares the host.
+2. Invokes `quick-materials.sh` to generate the protected material.
+3. Writes `/etc/ocservia/install.env` (configuring Integrated mode, bundled
+   PostgreSQL, ACME, and Local authentication).
+4. Runs `install.sh --root-lifecycle`.
+5. Provisions the management workspace.
+6. Creates the Local administrators `initial-admin` and `initial-approver`.
+
+Quick mode installs new hosts only. It refuses an existing deployment, a
+`/etc/ocservia/install.env` file it did not generate, or changed domain or email
+values on a rerun. Subsequent `controller.sh` and `compose.sh` invocations do
+not read that file automatically, so operators must export the same effective
+settings as in any other installation. See
+[Quick mode](bootstrap-hosting.md#quick-mode) and
 [Quick install materials](../development/certificates-and-signer.md#quick-install-materials)
-for details; every other deployment combination below follows the manual path.
+for details. Every other deployment combination below follows the manual path.
 
 ## Deployment combinations
 
@@ -68,10 +75,10 @@ Both Standalone and Integrated deployments support only one dedicated Relay and
 require `OCSERV_RELAY_URL_B` to be empty. In a manual installation, the
 database backend (bundled or external PostgreSQL 18, or external MySQL 8.4 LTS)
 and the login mode (Local only, OIDC only, or Local + OIDC) can be chosen
-independently of the deployment mode, whereas Quick mode fixes bundled
-PostgreSQL and Local-only login. At first install, the chosen deployment mode,
-database backend, and TLS mode are recorded in `deployment-profile.json` and
-cannot be changed on an existing installation.
+independently of the deployment mode. Quick mode fixes bundled PostgreSQL and
+Local-only login. At first install, the chosen deployment mode, database
+backend, and TLS mode are recorded in `deployment-profile.json` and cannot be
+changed on an existing installation.
 
 ## Database support
 
@@ -80,15 +87,18 @@ a single database descriptor. The default bundled PostgreSQL 18 configuration
 runs the HTTPS gateway, control plane, transport service, PostgreSQL server,
 and backup worker together, keeping database, application, and observability
 traffic on internal Docker networks. Its Compose descriptor sets
-`OCSERV_DATABASE_BUNDLED_POSTGRES=true`, the only declaration under which a
-production PostgreSQL URL without `OCSERV_DATABASE_TLS_CA_FILE` may target the
-`postgres` service (otherwise only loopback is accepted). External database deployments attach
-database client containers to the dedicated non-internal `database-egress`
-network without publishing any database port from ocservia: external PostgreSQL
-18 requires `sslmode=verify-full` with `database-ca.pem` across owner, runtime,
-and backup connections, while external MySQL 8.4 LTS requires verified TLS and
-uses backend-specific logical backups. Bundled MySQL is rejected. On the host
-side, Standalone mode publishes only TCP 443, whereas Integrated mode also
+`OCSERV_DATABASE_BUNDLED_POSTGRES=true`. This is the only declaration under
+which a production PostgreSQL URL without `OCSERV_DATABASE_TLS_CA_FILE` may
+target the `postgres` service (otherwise only loopback is accepted).
+
+External database deployments attach database client containers to the
+dedicated non-internal `database-egress` network, and ocservia publishes no
+database port. External PostgreSQL 18 requires `sslmode=verify-full` with
+`database-ca.pem` across owner, runtime, and backup connections. External MySQL
+8.4 LTS requires verified TLS and uses backend-specific logical backups. Bundled
+MySQL is rejected.
+
+On the host side, Standalone mode publishes only TCP 443. Integrated mode also
 publishes UDP 7842 for its bundled Relay (see the
 [integrated topology](../../deploy/production/integrated/README.md)).
 
@@ -98,13 +108,13 @@ publishes UDP 7842 for its bundled Relay (see the
 | MySQL 8.4 LTS | external only | Yes |
 | MySQL | bundled | No |
 
-Support for PostgreSQL 17 and MariaDB has been removed. Because application
-schema migrations never upgrade the database engine or its physical data format,
+Support for PostgreSQL 17 and MariaDB has been removed. Application schema
+migrations never upgrade the database engine or its physical data format, so
 operators running PostgreSQL 17 must complete a controlled major upgrade via
 `pg_upgrade` or dump/reload before starting this Controller, preserving a
 verified backup and rollback copy throughout. PostgreSQL 18 containers mount
 their named volume at `/var/lib/postgresql` with
-`PGDATA=/var/lib/postgresql/18/docker`; never mount an existing PostgreSQL 17
+`PGDATA=/var/lib/postgresql/18/docker`. Never mount an existing PostgreSQL 17
 volume into a PostgreSQL 18 container as if it were empty, and keep the old
 volume intact for recovery until the operator-led upgrade is verified. MariaDB
 deployments cannot be switched in place by setting `OCSERV_DATABASE_BACKEND` to
@@ -142,41 +152,41 @@ selected backend image field in v2 deployment configurations. Snapshot restore,
 PITR, failover, and cross-engine migration remain separate procedures, and no
 PostgreSQL HA or PITR claim applies to MySQL.
 
-Details on Local only, OIDC only, and Local + OIDC configuration, login
-behavior, and one-shot first-admin creation live in
-[Production authentication](authentication.md). Every mode requires a protected
-session-key file; OIDC remains optional when Local login is enabled, and
-`compose.sh` selects the OIDC overlay only when configured. Manual
-installations may use any of the three login modes, whereas Quick mode
-configures Local only.
+[Production authentication](authentication.md) covers Local only, OIDC only, and
+Local + OIDC configuration, login behavior, and one-shot first-admin creation.
+Every mode requires a protected session-key file. OIDC remains optional when
+Local login is enabled, and `compose.sh` selects the OIDC overlay only when
+configured. Manual installations may use any of the three login modes. Quick
+mode configures Local only.
 
 ## Optional observability
 
 Leaving `OCSERV_OTEL_BACKEND_ENDPOINT` unset or empty disables OTLP export and
-omits the OpenTelemetry Collector, keeping the default topology of gateway ->
-control plane -> PostgreSQL and transportd -> managed nodes alongside a
+omits the OpenTelemetry Collector. The default topology is then gateway ->
+control plane -> PostgreSQL and transportd -> managed nodes, alongside a
 separate backup worker. Setting a nonempty endpoint activates the
 `observability` Compose profile and adds control plane -> Collector (OTLP 4317)
--> operator backend (mTLS). Before enabling that endpoint, provision
-`otel-client.crt`, `otel-client.key`, and `otel-ca.crt` inside
-`OCSERV_SECRET_DIR` with launcher ownership and mode `0444`; missing files or
-invalid permissions fail closed before startup, whereas disabled OTEL does not
-require them.
+-> operator backend (mTLS).
+
+Before enabling that endpoint, provision `otel-client.crt`, `otel-client.key`,
+and `otel-ca.crt` inside `OCSERV_SECRET_DIR` with launcher ownership and mode
+`0444`. Missing files or invalid permissions fail closed before startup.
+Disabled OTEL does not require these files.
 
 If OTEL is later disabled, the next activation stops and removes any existing
 Collector container in the same project, and `down` also includes the optional
-Collector. Because the launcher ignores inherited `COMPOSE_PROFILES`,
-`COMPOSE_ENV_FILES`, and automatic Compose `.env` files in favor of the
-exported lifecycle configuration, enable observability through the endpoint
-setting and never by selecting a Compose profile manually. Both release
-manifest schemas include `otel` for later opt-in; their image inventories are
-listed under [Release manifests](#release-manifests).
+Collector. Enable observability through the endpoint setting and never by
+selecting a Compose profile manually, because the launcher ignores inherited
+`COMPOSE_PROFILES`, `COMPOSE_ENV_FILES`, and automatic Compose `.env` files in
+favor of the exported lifecycle configuration. Both release manifest schemas
+include `otel` for later opt-in; their image inventories are listed under
+[Release manifests](#release-manifests).
 
 The optional OTEL layout lives inside the target release's production
 deployment files. During lifecycle transitions, the runner resolves the
 verified target source directly without requiring its descriptor to equal the
-currently active one, though this neither converts historical layouts nor
-guarantees that an arbitrary target can run against existing state.
+currently active one. This neither converts historical layouts nor guarantees
+that an arbitrary target can run against existing state.
 
 ## Production secrets
 
@@ -184,8 +194,8 @@ All prebuilt `OCSERV_*_IMAGE` settings must use explicit `vX.Y.Z` /
 `vX.Y.Z-rc.N` tags or SHA-256 references. Store secrets outside the checkout in
 a canonical absolute `OCSERV_SECRET_DIR` whose ancestor directories are owned by
 root or the launcher user without group or world write permission. The launcher
-rejects missing files, symlinks, and ownership or mode mismatches, and
-credentials must never be placed in Compose environment values.
+rejects missing files, symlinks, and ownership or mode mismatches. Credentials
+must never be placed in Compose environment values.
 
 | Path or file class | Host owner | Mode / additional checks |
 | --- | --- | --- |
@@ -197,8 +207,8 @@ credentials must never be placed in Compose environment values.
 | Optional `relay-ca.pem` | `0:0` | `0444`, nonempty one-link regular file |
 | `OCSERV_BACKUP_DIR` | `999:999` | `0700`, no symlinks |
 
-Because file-backed Compose secrets are host bind mounts, host file ownership
-matters even when the Compose descriptor declares a target container owner.
+Host file ownership matters even when the Compose descriptor declares a target
+container owner, because file-backed Compose secrets are host bind mounts.
 Provision `audit-event-key` as an independent 32-byte key encoded in lowercase
 hex, never reusing the audit checkpoint key, and set `OCSERV_AUDIT_EVENT_KEY_ID`
 to its stable, non-secret identifier stored with events. The gateway files
@@ -207,19 +217,19 @@ to its stable, non-secret identifier stored with events. The gateway files
 Integrated Relay and Signer files have additional
 [secret/state requirements](../../deploy/production/integrated/README.md#lifecycle-configuration).
 Manual installations must prepare the files in this table before running the
-installer, whereas Quick mode generates the Controller files above with these
-owners and modes (except the TLS pair obtained by ACME) along with the Signer
-files, while leaving OIDC and OTEL unconfigured.
+installer. Quick mode generates the Controller files above with these owners and
+modes (except the TLS pair obtained by ACME) along with the Signer files, and
+leaves OIDC and OTEL unconfigured.
 
 When the Relay uses a private CA, provision the public PEM bundle at
 `${OCSERV_SECRET_DIR}/relay-ca.pem` as a nonempty, one-link `root:root` regular
 file with mode `0444` and the same safe directory ancestry. `compose.sh`
-includes the shipped `compose.relay-ca.yaml` overlay only when this file exists
-and mounts it into transportd alone; unsafe files fail closed in the launcher,
-and invalid PEM causes transportd to refuse startup. Omitting `relay-ca.pem`
-keeps the existing public root trust (TLS is never disabled), and providing it
-adds trust roots without enabling certificate pinning. Distribute the same CA
-to nodes through the
+includes the shipped `compose.relay-ca.yaml` overlay only when this file exists,
+and it mounts the file into transportd alone. Unsafe files fail closed in the
+launcher, and invalid PEM causes transportd to refuse startup. Omitting
+`relay-ca.pem` keeps the existing public root trust (TLS is never disabled).
+Providing it adds trust roots without enabling certificate pinning. Distribute
+the same CA to nodes through the
 [managed-node trust path](../getting-started/managed-node.md#1-prepare-the-node-configuration)
 for enrollment and the Agent service without patching launchers or rendered
 descriptors. Rotating or removing `relay-ca.pem` is an explicit operator trust
@@ -237,13 +247,13 @@ same public key to Agents through the node provisioning channel in
 [command authorization](../development/command-authorization-v1.md). Missing,
 unreadable, or mismatched verification keys fail closed, and fencing must never
 be removed to force a node connection. During rollback, the deployment must
-satisfy the target release's actual secret and mount requirements, as descriptor
-equality is not an admission gate.
+satisfy the target release's actual secret and mount requirements, because
+descriptor equality is not an admission gate.
 
-Create the backup bind mount for the non-root PostgreSQL UID before startup, as
-the launcher rejects missing, symbolic-link, incorrectly owned, or overly
-permissive paths, and any path whose ancestors are symbolic links, not root- or
-launcher-owned, or group/world writable:
+The launcher rejects missing, symbolic-link, incorrectly owned, or overly
+permissive backup paths, and any path whose ancestors are symbolic links, not
+root- or launcher-owned, or group/world writable. Create the backup bind mount
+for the non-root PostgreSQL UID before startup:
 
 ```bash
 sudo install -d -o 999 -g 999 -m 0700 "$OCSERV_BACKUP_DIR"
@@ -276,11 +286,19 @@ configuration instead of reading `OCSERV_DATABASE_BACKUP_IMAGE`. Across both
 schemas, eight first-party GHCR images use explicit `vX.Y.Z` tags, while
 PostgreSQL and OpenTelemetry retain pinned third-party references.
 
-Formal GitHub Releases publish the architecture-specific Controller manifests
-`controller-release-amd64.json` and `controller-release-arm64.json` alongside
-the Agent assets, a byte-identical `controller-release.json` alias of the amd64
-manifest for existing operators, and the versioned Stage-1 entrypoints
-`controller-bootstrap.sh` and `managed-node-bootstrap.sh` for HTTPS download.
+Release version examples throughout this reference also accept an exact
+`vX.Y.Z-rc.N` candidate tag (positive N without leading zeros), though release
+candidates are not recommended for stable production use.
+
+Formal GitHub Releases publish:
+
+- The architecture-specific Controller manifests `controller-release-amd64.json`
+  and `controller-release-arm64.json`, alongside the Agent assets.
+- A byte-identical `controller-release.json` alias of the amd64 manifest for
+  existing operators.
+- The versioned Stage-1 entrypoints `controller-bootstrap.sh` and
+  `managed-node-bootstrap.sh` for HTTPS download.
+
 Native builds and assembled version images cover `linux/amd64` and
 `linux/arm64`, with each manifest recording its target platform and image map.
 First-party packages must remain public so installations can pull them without
@@ -309,7 +327,7 @@ state and do not need the original download.
 | Debian 11 | amd64, arm64 | Bootstrappable; regular LTS ended 2026-08-31, arrange ELTS or equivalent maintenance |
 | Ubuntu 20.04 | amd64, arm64 | Existing compatible Docker only; arrange ESM or equivalent maintenance |
 
-Running `bootstrap-host.sh check` performs a read-only inspection, while its
+Running `bootstrap-host.sh check` performs a read-only inspection. Its
 `install` command uses apt to install missing `jq`, `flock`, `rename.ul`
 (`util-linux`, or `util-linux-extra` on Ubuntu 26.04), `curl`, `openssl`, and CA
 certificates. When Docker is absent on a bootstrappable host, `install`
@@ -320,59 +338,66 @@ The Docker engine must support `docker compose up --wait`.
 
 The lifecycle launcher user is either the bootstrap's sudo-invoking user or
 root for a root lifecycle, and that account must already be able to reach the
-Docker daemon. Because bootstrap never alters group membership, socket
-permissions, firewall rules, or Docker TCP listeners, fresh hosts without
-Docker require passing `--root-lifecycle` to the installer or preparing Docker
-access beforehand. The root lifecycle path forwards only allowlisted settings
-and strips `SUDO_USER`; never substitute `sudo -E`.
+Docker daemon. Bootstrap never alters group membership, socket permissions,
+firewall rules, or Docker TCP listeners. On a fresh host without Docker, pass
+`--root-lifecycle` to the installer or prepare Docker access beforehand. The
+root lifecycle path forwards only allowlisted settings and strips `SUDO_USER`;
+never substitute `sudo -E`.
 
 By default, the state root is `/var/lib/ocservia-controller`, which must be a
 canonical absolute path with mode `0700`, owned by the launcher user, under
 root- or launcher-owned parent directories without group or world write
 permission. Bootstrap can also create `OCSERV_BACKUP_DIR` with owner `999:999`
-and mode `0700`, but if existing paths have wrong ownership or permissions,
+and mode `0700`. If existing paths have wrong ownership or permissions,
 bootstrap reports them and exits without repairing them in place. Secrets,
 trust material, and ongoing host security maintenance remain
 operator-provisioned.
 
 During a manual installation, the installer loads `./install.env` from its
-working directory, while explicit exported settings (including empty values)
-override that file; Quick mode ignores `./install.env` and writes its own
+working directory. Explicit exported settings (including empty values) override
+that file. Quick mode ignores `./install.env` and writes its own
 `/etc/ocservia/install.env`. Subsequent lifecycle and Compose commands do not
-reload that file and require the same effective exported environment, while
+reload that file and require the same effective exported environment, and
 lifecycle commands restore image settings from their selected manifest. See the
 complete [first-install procedure](../getting-started/production.md) for
 configuration, secrets, host preparation, and activation.
 
 ## Lifecycle state and failure recovery
 
-Command examples live in
-[Controller lifecycle](../how-to/controller-lifecycle.md). Use `controller.sh`
-(implemented in [controller.sh](../../deploy/production/controller.sh) and
+[Controller lifecycle](../how-to/controller-lifecycle.md) has command examples.
+Use `controller.sh` (implemented in
+[controller.sh](../../deploy/production/controller.sh) and
 [compose.sh](../../deploy/production/compose.sh)) for install, upgrade,
-rollback, start, and uninstall; the versioned bootstrap script is only a
+rollback, start, and uninstall. The versioned bootstrap script is only a
 first-install entrypoint, and rerunning an unpinned Stage-0 script is not an
 upgrade procedure.
 
 Running `install` requires Docker Compose v2 with `docker compose up --wait`
-support. After acquiring an exclusive local lock in
-`/var/lib/ocservia-controller` and rejecting any existing
-`current-release.json`, `install` verifies that the checkout HEAD and clean
-working tree match the manifest's `source_commit`, runs the guarded Compose
-preflight, and atomically records the target and lifecycle phase in
-`pending-release.json` before activation. It then pulls the version-tagged or
-SHA-256 image references, starts the dependency graph with `up -d --wait`, and
-runs `deploy/production/controller-release-smoke.sh`, which checks Compose
-health, probes the public HTTPS `/api/v1/readyz` and `/api/v1/version` routes
-to confirm the target version and source commit, and verifies the transport
-socket and backup freshness health boundaries. Only after that smoke check
-passes does the lifecycle commit the manifest as `current-release.json` (and,
-for upgrades, `previous-release.json`), all with mode `0600`. If an install or
-upgrade fails, `pending-release.json` remains on disk with failure evidence and
-permits only a retry against the identical target; during an upgrade, the
-pending file also records the pre-activation current manifest so recovery can
-populate `previous-release.json` before clearing completed evidence. Lifecycle
-commands never create or rotate secrets, certificates, or identity keys.
+support. `install` runs these steps in order:
+
+1. Acquires an exclusive local lock in `/var/lib/ocservia-controller`.
+2. Rejects any existing `current-release.json`.
+3. Verifies that the checkout HEAD and clean working tree match the manifest's
+   `source_commit`.
+4. Runs the guarded Compose preflight.
+5. Atomically records the target and lifecycle phase in `pending-release.json`
+   before activation.
+6. Pulls the version-tagged or SHA-256 image references.
+7. Starts the dependency graph with `up -d --wait`.
+8. Runs `deploy/production/controller-release-smoke.sh`, which checks Compose
+   health, probes the public HTTPS `/api/v1/readyz` and `/api/v1/version`
+   routes to confirm the target version and source commit, and verifies the
+   transport socket and backup freshness health boundaries.
+9. Only after that smoke check passes, commits the manifest as
+   `current-release.json` (and, for upgrades, `previous-release.json`), all with
+   mode `0600`.
+
+If an install or upgrade fails, `pending-release.json` remains on disk with
+failure evidence and permits only a retry against the identical target. During
+an upgrade, the pending file also records the pre-activation current manifest so
+recovery can populate `previous-release.json` before clearing completed
+evidence. Lifecycle commands never create or rotate secrets, certificates, or
+identity keys.
 
 Run every lifecycle command with the validated target configuration and ensure
 its `source_commit` is available locally (fetching the exact commit from the
@@ -390,8 +415,8 @@ Compose operation, and verifies the current deployment's dependency and backup
 health. While the current release stays online, `upgrade` renders the target
 Compose configuration and pulls the target images, then executes the forward
 database migration and starts the `up -d --wait` dependency graph. Passing an
-identical manifest is a no-op, whereas any different artifact (whether its
-version string is lower, equal, or higher) follows the full execution path.
+identical manifest is a no-op. Any different artifact (whether its version
+string is lower, equal, or higher) follows the full execution path.
 Once the release smoke check passes, `upgrade` atomically rolls the complete
 manifests into `previous-release.json` and `current-release.json`. Any failure
 after activation returns non-zero without redeploying old images, running down
@@ -404,9 +429,9 @@ database compatibility preflight, so rollback does not guarantee that an
 arbitrary previous release can operate against the existing database state.
 Provided the exact target source and images remain available and satisfy the
 deployment's requirements, `rollback` renders and pulls the previous image
-references, starts the normal target Compose graph with `up -d --wait`
+references and starts the normal target Compose graph with `up -d --wait`
 (including required forward initialization, never a database down migration or
-restore), and swaps the confirmed state files only after the functional release
+restore). It swaps the confirmed state files only after the functional release
 smoke check confirms the previous version and source commit. If rollback fails
 after activation, confirmed state remains unchanged and pending failure
 evidence is retained for a same-target retry without automatically redeploying
@@ -430,16 +455,19 @@ mode removes the production project volumes and local release state after a
 clean shutdown (Integrated mode rejects `--purge-data`), while keeping the
 lock, secrets, backup directory, external databases, off-host backups, source
 checkouts, container images, and unrelated volumes intact. Volume purge is
-neither a secure erase nor a database recovery mechanism. Both uninstall modes
-refuse to run while a pending transaction exists, leave confirmed state and
-data untouched if shutdown fails, retain lifecycle state if volume purge fails,
-report residual paths if state cleanup fails, and never re-enter Stage-0.
+neither a secure erase nor a database recovery mechanism. Both uninstall modes:
+
+- Refuse to run while a pending transaction exists.
+- Leave confirmed state and data untouched if shutdown fails.
+- Retain lifecycle state if volume purge fails.
+- Report residual paths if state cleanup fails.
+- Never re-enter Stage-0.
 
 During startup, the target's owner-only database initialization validates
 supported SQL artifact checksums and execution receipts, serializes migrations,
-and propagates any SQL or partial-execution failure. Although there is no
-software-version or schema-range admission gate, unsupported epochs, unknown or
-noncontiguous receipts, and invalid SQL content still fail closed. Readiness
+and propagates any SQL or partial-execution failure. There is no
+software-version or schema-range admission gate, but unsupported epochs, unknown
+or noncontiguous receipts, and invalid SQL content still fail closed. Readiness
 probes verify current core reads, database permissions, and event streams
 without certifying historical database compatibility; follow
 [SQL artifact contracts](../development/control-plane.md#current-sql-artifacts-and-bounded-upgrades)
@@ -447,21 +475,23 @@ and [backend recovery](incident-recovery.md#database-recovery), and never edit
 receipts to force startup.
 
 Across the lifecycle, five acceptance boundaries are tracked with separate
-evidence, and passing one does not establish the others: Compose container
-health and dependency readiness, functional release identity from the smoke
-check, explicit target application and failure-state handling, current database
-initialization, permissions, and business behavior, and disaster recovery
-through the selected backend's documented procedure.
+evidence, and passing one does not establish the others:
+
+- Compose container health and dependency readiness.
+- Functional release identity from the smoke check.
+- Explicit target application and failure-state handling.
+- Current database initialization, permissions, and business behavior.
+- Disaster recovery through the selected backend's documented procedure.
 
 ## Backup and credential operations
 
-Retention rules, backup-role connection files, off-host copies, and isolated
-restore verification are documented in
-[database backup and restore](database-backup-restore.md). Because neither
-replacing a container image nor updating a secret file on disk changes a
-password stored inside the database, follow
+[Database backup and restore](database-backup-restore.md) covers retention rules,
+backup-role connection files, off-host copies, and isolated restore
+verification. Follow
 [PostgreSQL credential rotation](incident-recovery.md#postgresql-credential-rotation)
-to update database password verifiers and Compose secret files together.
+to update database password verifiers and Compose secret files together,
+because neither replacing a container image nor updating a secret file on disk
+changes a password stored inside the database.
 
 ## Relay and application networking
 
@@ -472,11 +502,11 @@ export OCSERV_RELAY_URL_A=https://relay.example.com
 export OCSERV_RELAY_URL_B=
 ```
 
-Here A is required and B must be absent or empty; `install.sh`, `compose.sh`,
+Here A is required and B must be absent or empty. `install.sh`, `compose.sh`,
 and the transportd wrapper all reject a nonempty B before installation or
-process startup. Because exactly one dedicated Relay is supported without
-Relay failover, B does not provide optional redundancy, and recovering from a
-Relay loss requires restoring that original Relay at the same address with its
+process startup. Exactly one dedicated Relay is supported, without Relay
+failover, so B does not provide optional redundancy. Recovering from a Relay
+loss requires restoring that original Relay at the same address with its
 existing trust material. In Standalone mode, set these variables in
 `install.env` without editing release files. Integrated mode derives its Relay
 URL from its public host and rejects a conflicting A or any nonempty B; use
@@ -490,9 +520,9 @@ Only transportd joins the non-internal `relay-egress` network, using it for DNS
 and outbound HTTPS to the Relay by its HTTPS hostname (the independent Relay in
 Standalone mode, or the same-host Relay via its public name in Integrated
 mode). The application, database, and observability networks remain internal
-and add no published Controller ports. Because the local socket healthcheck
-does not test relay reachability, validate TLS, token-authenticated relay
-traffic, and fresh Agent observations separately. Normal production direct
+and add no published Controller ports. The local socket healthcheck does not
+test relay reachability, so validate TLS, token-authenticated relay traffic, and
+fresh Agent observations separately. Normal production direct
 connectivity remains unchanged.
 
 The control plane runs with `--role=all`. Public TLS terminates at the gateway
@@ -514,9 +544,9 @@ Both gateway configurations, [`Caddyfile`](../../deploy/production/Caddyfile)
 'none'; form-action 'self'`) on every response. No report endpoint is
 configured, so blocked loads appear only in the browser console, and passing
 browser specs on exercised paths does not prove the absence of XSS across the
-application. Because responses generated directly by Caddy for handler errors
-(such as a 502 when the control plane is unreachable) skip the site's deferred
-`header` block, each file repeats the headers inside `handle_errors`. Keep all
+application. Responses generated directly by Caddy for handler errors (such as
+a 502 when the control plane is unreachable) skip the site's deferred `header`
+block, so each file repeats the headers inside `handle_errors`. Keep all
 four header blocks identical;
 [`test-controller-gateway-headers.py`](../../scripts/test-controller-gateway-headers.py)
 verifies both static and 502 responses across both configurations.
@@ -533,8 +563,8 @@ all four blocks while keeping the remaining headers intact.
 <a id="authentication-request-budgets"></a>
 ### Gateway addressing and proxy trust
 
-Request rate budgets and trusted-client-IP handling are documented in
-[authentication](authentication.md#authentication-request-budgets-and-proxy-trust).
+[Authentication](authentication.md#authentication-request-budgets-and-proxy-trust)
+covers request rate budgets and trusted-client-IP handling.
 Production Compose configures the application network as `172.30.240.0/24` with
 dynamic container allocations restricted to `172.30.240.128/25`, assigns the
 gateway the static address `172.30.240.2`, and defaults
@@ -570,11 +600,11 @@ The reference Controller bounds shared SSE fan-out to 128 global connections, 8
 per identity, 4 per session, 32 per workspace, 16 per resource, and 64 active
 watchers, reserving PostgreSQL and HTTP capacity for non-streaming API work in
 the P1 single-VM profile; raising any of these limits requires rerunning
-`make p1-full`. Because the gateway serves only as defense in depth, do not
-remove application admission checks, session revalidation, bounded queues, or
-watcher backoff. While an active durable-event watcher is in database backoff,
-`/readyz` reports unavailable; alert on `sse_unhealthy_watchers` and verify
-cursor catch-up instead of repeatedly restarting a healthy fan-out loop.
+`make p1-full`. Do not remove application admission checks, session
+revalidation, bounded queues, or watcher backoff, because the gateway serves
+only as defense in depth. While an active durable-event watcher is in database
+backoff, `/readyz` reports unavailable; alert on `sse_unhealthy_watchers` and
+verify cursor catch-up instead of repeatedly restarting a healthy fan-out loop.
 
 Privileged node commands require root-authenticated privd key enrollment, key
 rotation state, receipt evidence, and certificate receipt bindings. Deploy

@@ -5,18 +5,19 @@ Start with [Validate a change](testing.md).
 A single workflow file, `.github/workflows/ci.yml`, handles pull requests,
 pushes to main, and manual dispatches. Manual Release Check also invokes this
 workflow as `full-ci` with `profile: full`. Automatic triggers run the Quick
-profile, while manual dispatch accepts `quick|full` and defaults to Full. Here,
-Full runs current-candidate checks across all supported units without serving
-as comprehensive release acceptance, and it leaves the product's database
-support scope unchanged.
+profile, while manual dispatch accepts `quick|full` and defaults to Full. Full
+runs current-candidate checks across all supported units. It is not
+comprehensive release acceptance, and it leaves the product's database support
+scope unchanged.
 
 Target warm-cache wall times (excluding runner queue time) are 3 to 5 minutes
 for Quick and 8 to 10 minutes for Full. Those numbers are operational targets,
-not measured results or grounds to relax failure criteria; when recording
+not measured results or grounds to relax failure criteria. When recording
 timings, track queue wait, cold setup, execution wall time, and total job
-runner-minutes separately. On a given PR or branch, a new Quick run cancels
-older Quick runs, whereas Full uses its own concurrency group and never cancels
-Quick.
+runner-minutes separately.
+
+On a given PR or branch, a new Quick run cancels older Quick runs. Full uses its
+own concurrency group and never cancels Quick.
 
 ## Basic checks
 
@@ -80,7 +81,7 @@ cover release workflows, Controller manifest/smoke/image-security, the Stage-0
 installer, build-cache contracts, and secret-scan configuration) triggers only
 on release or cache-contract paths, and installer self-tests trigger only on
 installer changes. Unknown paths and shared-contract changes enable all of
-these suites, whereas manual workflow dispatches omit them. Moving from Quick
+these suites. Manual workflow dispatches omit them. Moving from Quick
 to Full does not pull in retired role-lifecycle matrices, restart suites,
 outbox/fencing/disconnect harnesses, exhaustive auth/API/policy matrices,
 checksum/drift/invalid-config matrices, or historical repair suites.
@@ -102,8 +103,8 @@ checksum/drift/invalid-config matrices, or historical repair suites.
 ## Independent security checks
 
 `security.yml` runs on Mondays at 03:23 UTC, on manual dispatch, and as part of
-manual Release Check on main. Using pinned bootstrap profiles, its four
-read-only scan jobs run without production secrets:
+manual Release Check on main. Its four read-only scan jobs use pinned bootstrap
+profiles and run without production secrets:
 
 - full-history `scripts/security-check.sh`, including its Gitleaks rule
   regression check
@@ -115,11 +116,11 @@ read-only scan jobs run without production secrets:
   development dependencies
 
 Any scan failure fails the Security workflow and, when called from Release
-Check, blocks the Release Check result. Because `release.yml` neither invokes
-nor queries `security.yml`, tag publication relies on the operator verifying a
+Check, blocks the Release Check result. `release.yml` neither invokes nor
+queries `security.yml`, so tag publication relies on the operator verifying a
 passing Release Check beforehand. This workflow does not widen Basic CI or run
-live security acceptance, and a passing run reflects only what those scanners
-and their current advisory databases can detect in the repository tree, not the
+live security acceptance. A passing run reflects only what those scanners and
+their current advisory databases can detect in the repository tree, not the
 security posture of a deployed environment.
 
 ## Path routing
@@ -157,16 +158,16 @@ flags. Pull requests diff `base...head`, push events diff `before..head`, and
 file renames or deletions evaluate both old and new paths. If a diff is empty,
 invalid, unresolvable, from an unsupported event, or contains an unrecognized
 path, the router fails closed by enabling every Basic flag and every CI tool
-suite while keeping the Quick profile (smoke database scope); path routing
+suite while keeping the Quick profile (smoke database scope). Path routing
 never escalates a Quick run to Full.
 
 Manual workflow dispatches bypass path routing altogether: docs, go, rust, web,
 web-browser, and database jobs always run, while the CI-tool suites, installer
 self-tests, and Controller cache refresh stay off. A manual Full run expands
 the database matrix to four legs (PostgreSQL plus the three MySQL shards) and
-adds `database-recovery-full`, whereas a manual Quick run uses two database
-legs (PostgreSQL and a single MySQL smoke leg). Controller cache refresh runs
-only on pushes to main when routing sets `run_controller_cache`.
+adds `database-recovery-full`. A manual Quick run uses two database legs
+(PostgreSQL and a single MySQL smoke leg). Controller cache refresh runs only on
+pushes to main when routing sets `run_controller_cache`.
 
 Controller cache refresh uses the union of the changed images' Dockerfile
 inputs on both native architectures, rather than rebuilding all eight images
@@ -193,9 +194,9 @@ them. Restoring a build cache never skips executing the real database tests.
 
 ## Manual deep checks
 
-You can still run the standalone deep-validation scripts directly in an
-authorized, isolated environment that has their required dependencies, though
-these entrypoints are distinct from Full CI:
+You can run the standalone deep-validation scripts directly in an authorized,
+isolated environment that has their required dependencies. These entrypoints
+are distinct from Full CI:
 
 ```bash
 # In an authorized isolated environment with the required dependencies; expensive opt-in checks:
@@ -206,7 +207,7 @@ scripts/web-check.sh full
 ```
 
 Invoking the database scripts without a scope defaults to current-candidate
-`full` (whereas CI passes `smoke` for Quick and `full` for Full). Historical
+`full`; CI passes `smoke` for Quick and `full` for Full. Historical
 upgrade matrices and the old MySQL history shard have been removed, leaving
 current schema initialization, artifact integrity, and interrupted-SQL recovery
 in the full suite; `regression` remains manual. Running browser checks locally
@@ -227,10 +228,10 @@ editing workflow YAML does not update branch protection settings.
 ## Separate acceptance
 
 Single-node recovery runs inside Business Smoke or Integration when invoked
-with `run-resilience=true`; Release Check runs this Smoke recovery suite
+with `run-resilience=true`. Release Check runs this Smoke recovery suite
 against one Controller, one database, one dedicated Relay, and the production
-Signer. The older G6 workflows and evidence framework have been retired, while
-runtime, security, and capacity acceptance scripts and cross-VM enrollment keep
+Signer. The older G6 workflows and evidence framework have been retired.
+Runtime, security, and capacity acceptance scripts and cross-VM enrollment keep
 their manual entrypoints.
 
 Passing Basic CI does not certify production readiness, capacity, native
@@ -291,16 +292,16 @@ tag-triggered `publish` job receives `contents: write`, `packages: write`, and
 access to the `release-publishing` environment, which acts as an approval and
 protection boundary without creating GitHub Deployment records. Publication uses
 Draft → upload and verify → publish, requires GitHub Immutable Releases, and
-rejects existing Releases and GHCR version tags. Setup, failure recovery, and
-the limits of GHCR overwrite checks are documented in
-[Immutable publication and recovery](release-checks.md#immutable-publication-and-recovery).
+rejects existing Releases and GHCR version tags.
+[Immutable publication and recovery](release-checks.md#immutable-publication-and-recovery)
+covers setup, failure recovery, and the limits of GHCR overwrite checks.
 
 Release Controller jobs cache their image-security scanner binaries by OS,
 architecture, and tool/bootstrap identity, but they never cache the
 vulnerability database itself: each run fetches fresh advisory data and fails
 if the feed is unavailable or invalid. Image scans inspect the built image
-archives before smoke tests and registry uploads, whereas Business diagnostic
-runs do not perform container image vulnerability scans.
+archives before smoke tests and registry uploads. Business diagnostic runs do
+not perform container image vulnerability scans.
 
 ## Optional build caches
 
@@ -320,6 +321,6 @@ artifacts.
 Business and Release workflows keep their tool caches separate from the Agent
 compilation cache, while sharing the `rust/target/agent-<arch>-<builder-hash>`
 directory and cache identity to rebuild and verify the requested Agent version
-on each run. None of the workflows cache runtime state or credentials. Image builds use
-per-image, per-architecture BuildKit GitHub Actions caches (`mode=max` with
-bounded cold fallback).
+on each run. None of the workflows cache runtime state or credentials. Image
+builds use per-image, per-architecture BuildKit GitHub Actions caches
+(`mode=max` with bounded cold fallback).

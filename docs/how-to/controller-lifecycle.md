@@ -18,8 +18,8 @@ Before starting an upgrade, verify current service health, confirm that you
 have a fresh backup you can restore, and review the target release's
 persistent-state requirements and the
 [backend recovery procedure](../operations/incident-recovery.md#database-recovery).
-Because the lifecycle script checks only that the database backup service (along
-with PostgreSQL in bundled deployments) is running and healthy, you must verify
+The lifecycle script checks only that the database backup service (along with
+PostgreSQL in bundled deployments) is running and healthy, so you must verify
 on your own that a recent backup file exists and is restorable. Run the upgrade
 from a clean Git clone with no staged, unstaged, or untracked changes, using a
 protected release bundle that matches the Docker daemon architecture. When the
@@ -32,21 +32,21 @@ deploy/production/controller.sh upgrade \
   --release-file /protected/release/controller-release-<arch>.json
 ```
 
-While the script validates the target manifest and records the pending state,
-the current release stays running. Always deploy the exact images declared in
+The current release stays running while the script validates the target
+manifest and records the pending state. Always deploy the exact images declared in
 the release manifest instead of substituting caller-selected tags. Running
 `upgrade` with a release file identical to the active release is a no-op. Once
 image pulling and container activation start, a failure can leave the host with
-partially replaced containers: the confirmed release state on disk stays
-unchanged, even though the running services are no longer guaranteed to match
-it (see [Verify and recover](#verify-and-recover)).
+partially replaced containers. The confirmed release state on disk stays
+unchanged, but the running services are no longer guaranteed to match it (see
+[Verify and recover](#verify-and-recover)).
 
 ### Runtime database grants
 
 Before starting the Controller, the upgrade workflow runs the target release's
 one-shot `migrate` service with `--migrate-only`, mounted database owner
 credentials, and `OCSERV_RUNTIME_DATABASE_ROLE`. That step reapplies runtime
-grants even when no new schema migration is needed, while the long-running
+grants even when no new schema migration is needed. The long-running
 Controller containers retain only runtime credentials. Keep your
 authentication configuration, session and audit keys, database TLS files, and
 backend/role settings intact across upgrades.
@@ -61,23 +61,23 @@ checksums to force startup past those checks.
 
 Policy cleanup requires `DELETE` privilege on `user_policy_enforcements`,
 granted to the configured role on PostgreSQL or to the explicit `user@host`
-account on MySQL. Although the grant itself is at the table level, store
-predicates restrict deletion to eligible unfinished records, and other table or
+account on MySQL. The grant itself is at the table level, but store
+predicates restrict deletion to eligible unfinished records. Other table or
 DDL privileges remain unchanged. Replacing binaries without running the
 migration step will not repair missing grants.
 
 After the upgrade completes, confirm that migrations and background maintenance
-run without logging `user_operations.cleanup_failed`. When that error occurs,
-the maintenance worker halts the remaining steps for that pass while the
-Controller process stays alive and retries on its normal tick. Fix any
-persistent permission or storage failures, noting that this maintenance pass
-does not perform a full historical cleanup of the table.
+run without logging `user_operations.cleanup_failed`. If that error occurs,
+the maintenance worker halts the remaining steps for that pass. The Controller
+process stays alive and retries on its normal tick. Fix any persistent
+permission or storage failures. This maintenance pass does not perform a full
+historical cleanup of the table.
 
 ## Rollback
 
 Rolling back reverts only the Controller application package (container images
-and the Compose project). Because rollback never restores database contents or
-downgrades the schema, reverting after an upgrade that applied forward
+and the Compose project). Rollback never restores database contents or
+downgrades the schema. Reverting after an upgrade that applied forward
 migrations leaves the older images running against the already-migrated
 database, which may not be compatible. Reverting database state requires the
 separate [database restore](../operations/incident-recovery.md#database-recovery)
@@ -166,13 +166,14 @@ recovered afterwards without an off-host backup) and the lifecycle state files
 (`current-release.json`, `previous-release.json`, `pending-release.json`, and
 the deployment profile). External databases, protected secrets, off-host
 backups, source checkouts (including retained source clones under the state
-root), and unrelated Docker volumes are left untouched. If Docker fails to
-remove a volume, the purge remains partial and the lifecycle state files are
-kept; if volume removal succeeds and only state-file cleanup fails, the script
-reports the leftover paths and exits non-zero. Note that `--purge-data` does
-not perform a cryptographic secure erase or a restore, and Integrated mode
-refuses the operation because disposing of Signer and identity material
-requires separate reconciliation.
+root), and unrelated Docker volumes are left untouched.
+
+If Docker fails to remove a volume, the purge remains partial and the lifecycle
+state files are kept. If volume removal succeeds and only state-file cleanup
+fails, the script reports the leftover paths and exits non-zero.
+`--purge-data` does not perform a cryptographic secure erase or a restore.
+Integrated mode refuses the operation because disposing of Signer and identity
+material requires separate reconciliation.
 
 Verify that the uninstall command exits zero. After a data-retaining uninstall,
 confirm that the project containers are gone and that `start` restores the

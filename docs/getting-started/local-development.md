@@ -1,8 +1,8 @@
 # Try ocservia locally
 
-The local Compose stack runs the Controller, Web console, database, and simulated agent nodes on a single machine so you can explore the interface without connecting to a live VPN server.
+The local Compose stack runs the Controller, the Web console, a database, and simulated agent nodes on one machine. Use it to explore the interface without a live VPN server.
 
-Because the stack uses fixed development credentials, a development-only authentication token, and the bounded agent simulator (`OCSERV_LOCAL_SIMULATOR=true`) without managing a real ocserv daemon, it is only for local evaluation and testing. Keep it bound to the loopback ports below and do not reuse it for a production Controller, relay, or managed-node deployment; production hosts follow the [managed-node](managed-node.md) and production installation guides.
+The stack is for local evaluation and testing only. It uses fixed development credentials, a development-only authentication token, and the bounded agent simulator (`OCSERV_LOCAL_SIMULATOR=true`), and it does not manage a real ocserv daemon. Keep it bound to the loopback ports listed below, and do not reuse it for a production Controller, relay, or managed node. Production hosts follow the [managed-node](managed-node.md) and production installation guides.
 
 ## Requirements
 
@@ -18,16 +18,16 @@ cd ocservia
 deploy/compose/compose.sh up --build -d
 ```
 
-PostgreSQL is used by default. To run against the pinned MySQL 8.4 LTS development database instead, set `OCSERV_DATABASE_BACKEND=mysql` before calling the launcher; the script selects the matching Compose descriptor and rejects unknown backend values. Pass the same `OCSERV_DATABASE_BACKEND` value to every subsequent `compose.sh` invocation (including `down`) for that stack.
+The first run builds the container images locally and needs network access. When the `web` service is healthy, open `http://127.0.0.1:4173` in a browser. The Controller serves `/livez`, `/readyz`, and `/version` on `http://127.0.0.1:8080`.
 
-The initial run builds the container images locally and requires network access. Once the `web` service is healthy, open `http://127.0.0.1:4173` in a browser; the Controller serves `/livez`, `/readyz`, and `/version` on `http://127.0.0.1:8080`.
+The stack uses PostgreSQL by default. To use the pinned MySQL 8.4 LTS development database instead, set `OCSERV_DATABASE_BACKEND=mysql` before you run the launcher. The script picks the matching Compose descriptor and rejects unknown backend values. Pass the same `OCSERV_DATABASE_BACKEND` value to every later `compose.sh` command for that stack, including `down`.
 
 ## Stop the stack
 
-To tear down a disposable local stack and delete its database volume (permanently removing all simulator and database state):
+To tear down the stack and delete its database volume, run the command below. This permanently removes all simulator and database state.
 
 ```bash
 deploy/compose/compose.sh down --volumes
 ```
 
-Log inspection, simulator controls, persistent volume behavior, and browser test workflows are covered in [Control-plane development](../development/control-plane.md).
+[Control-plane development](../development/control-plane.md) covers log inspection, simulator controls, persistent volume behavior, and browser test workflows.

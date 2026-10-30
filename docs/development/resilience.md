@@ -1,18 +1,17 @@
 # Single-instance resilience
 
 Supported deployments run a single Controller, a single database instance, and
-one dedicated Relay, with PostgreSQL and MySQL version and deployment support
-defined in
-[production deployment](../operations/production-deployment.md#database-support).
-Both Integrated and standalone topologies as well as bundled and external
-databases remain supported, and a deployment can manage multiple Agents whether
-the components share a host or run on separate machines.
+one dedicated Relay. [Production deployment](../operations/production-deployment.md#database-support)
+defines the supported PostgreSQL and MySQL versions and deployments. Both
+Integrated and standalone topologies remain supported, as do bundled and
+external databases. A deployment can manage multiple Agents whether the
+components share a host or run on separate machines.
 
 Out of scope are Controller high availability, multi-Relay failover, database
 replication clusters, PostgreSQL automatic failover, and point-in-time recovery
 (PITR) readiness. Standard backups, backup verification, and isolated restores
-remain supported, and Controller Rebind transfers authority between two
-independent Controller deployments without providing live HA failover.
+remain supported. Controller Rebind transfers authority between two independent
+Controller deployments; it does not provide live HA failover.
 
 ## Recovery coverage and ownership
 
@@ -32,19 +31,21 @@ When running the extended manual integration profile, deeper variants replace
 R1 through R4: separate Controller and transport restarts, mutations submitted
 during the outage, unsent offline queueing, idempotent replay, exact native
 reload counts, and cross-checks across the API, database, Agent journal, and
-root receipts. Release Smoke does not require those extended variants. Full CI
-separately runs the full database suite alongside the PostgreSQL and MySQL
-backup/restore smoke scripts, which validate database-level recovery without
-covering Controller, Agent, or Relay restarts.
+root receipts. Release Smoke does not require those extended variants.
+
+Full CI separately runs the full database suite and the PostgreSQL and MySQL
+backup/restore smoke scripts. These validate database-level recovery and do not
+cover Controller, Agent, or Relay restarts.
 
 Acceptance relies on the Business job status together with the scenario
-checkpoints recorded in `result.json`, while sanitized failure diagnostics are
-retained as seven-day GitHub Actions artifacts. When resilience is enabled,
-only `controller`, `agent`, `database`, and `relay` are required scenario
-checkpoints (there is no synthetic overall checkpoint or standalone transport
-scenario), and each of the four must finish and pass; missing fields, failures,
-cancellations, or unexpected skips block acceptance. Runs that do not select
-resilience record `SKIPPED`.
+checkpoints recorded in `result.json`. Sanitized failure diagnostics are
+retained as seven-day GitHub Actions artifacts.
+
+When resilience is enabled, only `controller`, `agent`, `database`, and `relay`
+are required scenario checkpoints. There is no synthetic overall checkpoint or
+standalone transport scenario. Each of the four must finish and pass, and
+missing fields, failures, cancellations, or unexpected skips block acceptance.
+Runs that do not select resilience record `SKIPPED`.
 
 ## Recovery boundaries
 
@@ -62,9 +63,10 @@ trust state.
 Across all recovery scenarios, the command pipeline still enforces
 owner/epoch/fence/lease validation, the transactional outbox, authorization,
 independent two-principal approvals, cryptographic signatures, idempotent command IDs,
-the Agent SQLite journal, and privd receipts. Operations that end in an Unknown
-state rely on read-only reconciliation followed by the existing explicit retry
-once absence of effect is confirmed, whereas a queued offline command that was
-provably never sent must never be treated as expected Unknown if it fails.
-Passing these checks does not imply general exactly-once execution or
-production RTO/RPO guarantees.
+the Agent SQLite journal, and privd receipts.
+
+An operation that ends in an Unknown state relies on read-only reconciliation,
+followed by the existing explicit retry once absence of effect is confirmed. A
+queued offline command that was provably never sent must never be treated as
+expected Unknown if it fails. Passing these checks does not imply general
+exactly-once execution or production RTO/RPO guarantees.

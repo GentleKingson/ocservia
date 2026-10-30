@@ -5,15 +5,15 @@ Ed25519 authorization signed by the Controller. When forwarding a command,
 `transportd` checks the bounded Protobuf wire schema, the negotiated session
 mode, capability, revision, and expiry, and uses its pinned Controller public
 keys to verify the owner-fence carriers before relaying the command bytes.
-Because `transportd` never holds a Controller signing key, it cannot mint or
-modify an executable command, leaving command authorization itself to the Agent
-and privd.
+`transportd` never holds a Controller signing key, so it cannot mint or modify
+an executable command. Command authorization itself stays with the Agent and
+privd.
 
 The Controller signs a command only after finalizing RBAC checks, approval
 consumption, operation identity, required capability, revision, delivery mode,
-and the semantic payload hash. Although the Controller signs semantic hash v2
-for all newly issued commands, the Agent, privd, and the Controller result
-handler also accept v1 for historical compatibility. Both the Agent and privd
+and the semantic payload hash. The Controller signs semantic hash v2 for all
+newly issued commands. The Agent, privd, and the Controller result handler also
+accept v1 for historical compatibility. Both the Agent and privd
 pin Controller public keys independently: the Agent verifies the proof before
 recording the command in its local journal, and privd verifies the original
 proof again before reserving or executing any root effect, with no unsigned
@@ -86,7 +86,7 @@ protocol version, bounded typed payload, target node ID, validity window,
 active-session authorization revision, required capability, UUIDs, semantic
 hash version, and recomputed semantic hash. It then rebuilds the canonical
 authorization preimage, looks up the pinned public key for `key_id`, and runs
-strict Ed25519 signature verification; any mismatch aborts processing before
+strict Ed25519 signature verification. Any mismatch aborts processing before
 journal persistence or privilege escalation.
 
 Within a mutation-capable `1.1` session, the Agent also requires the
@@ -99,8 +99,10 @@ executing it.
 Privd does not trust the Agent's fence checks. Before a new `Execute`
 admission it verifies both carriers against its own clock, its pinned node ID
 and the root-provisioned Agent `EndpointID`. `--endpoint-id`, from
-`AGENT_ENDPOINT_ID` in root-owned `agent.env`, is always required at startup;
-after a rebind the committed local binding's EndpointID replaces it. The owner lease must be unexpired, the binding must name this
+`AGENT_ENDPOINT_ID` in root-owned `agent.env`, is always required at startup.
+After a rebind, the committed local binding's EndpointID replaces it.
+
+The owner lease must be unexpired, the binding must name this
 `command_id` and `required_capability` and match the fence term, and the fence
 must carry the command's `expected_revision` and capability. Privd keeps no
 durable owner-epoch or revision floor, so a compromised Agent can spend an
@@ -122,9 +124,9 @@ semantic hash, and derives the fixed adapter invocation and effect identity
 from the signed typed payload. Its authenticated durable effect ledger binds
 the node, command, operation, idempotency key, action, revisions, semantic
 hash, effect kind, and target resource. Replaying an exact match of a succeeded
-command returns the stored typed result without repeating the root effect,
-whereas a prepared record in an unknown state stays fail-closed until an
-explicitly Controller-signed retry-after-absence flow resolves it.
+command returns the stored typed result without repeating the root effect. A
+prepared record in an unknown state stays fail-closed until an explicitly
+Controller-signed retry-after-absence flow resolves it.
 
 Shared Go and Rust test vectors live in `testdata/command-authorization-v1.json`,
 which pairs exact canonical preimage bytes with deterministic Go-generated
@@ -135,10 +137,10 @@ signatures verified by the Rust test suite.
 During a protocol `1.1` handshake, the Agent advertises its supported
 capabilities and the Controller replies with the sorted intersection against
 the node's approved capability set, accompanied by a signed `SessionGrantV1`.
-While `transportd` relays this grant and caches its negotiated metadata, it has
-no signing key of its own, and the Agent refuses to enter a mutation-capable
-session until it verifies `SessionGrantV1` against the same pinned Controller
-keyring used for command verification.
+`transportd` relays this grant and caches its negotiated metadata, but it has no
+signing key of its own. The Agent refuses to enter a mutation-capable session
+until it verifies `SessionGrantV1` against the same pinned Controller keyring
+used for command verification.
 
 Like command proofs, the session grant is signed over a fixed canonical byte
 layout independent of Protobuf serialization, with fields ordered as follows:
@@ -165,8 +167,8 @@ expiration time. Every subsequent command on that session must carry the same
 nonzero authorization revision and request a capability from the verified set.
 Before opening an Agent command stream, `transportd` independently rejects any
 command whose revision mismatches the session, whose session has expired, or
-whose required capability was not negotiated, and advancing the authoritative
-trust revision closes any connection still holding an older grant.
+whose required capability was not negotiated. Advancing the authoritative trust
+revision closes any connection still holding an older grant.
 
 Protocol `1.0` handshakes remain read-only: they receive no session grant, can
 negotiate only approved capabilities ending in `.read`, and cannot establish a
@@ -203,8 +205,7 @@ and any pending reconciliation has finished, after which the old public key can
 be removed. Rolling back during rotation switches the Controller back to
 the previous private key while both public keys remain pinned on the nodes.
 
-Because protocol `1.1` enforces a strict mutation compatibility boundary,
-upgrade and provision Agents before enabling `1.1` command issuance on the
-Controller. During a mixed-version rollout, unsupported or unsigned mutations
+Protocol `1.1` enforces a strict mutation compatibility boundary, so upgrade
+and provision Agents before enabling `1.1` command issuance on the Controller. During a mixed-version rollout, unsupported or unsigned mutations
 are rejected outright without a downgrade fallback, while health checks and
 local read-only probes continue on their separate paths.

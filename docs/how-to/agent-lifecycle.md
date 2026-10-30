@@ -9,8 +9,8 @@ binaries. It does not enroll, approve, or authorize the node, and it cannot
 recover state left behind by a failed upgrade (use [Rollback](#rollback) for
 recovery).
 
-Although the v1.1.0 scripts remove source-version windows and target-version
-ordering checks, cross-version operation is still not guaranteed to be safe.
+The v1.1.0 scripts remove source-version windows and target-version ordering
+checks, but cross-version operation is still not guaranteed to be safe.
 Previously installed older scripts retain their original checks, and the
 lifecycle does not convert historical deployments; see the
 [support policy](../reference/support-policy.md).
@@ -22,19 +22,19 @@ lifecycle does not convert historical deployments; see the
   GitHub Release in accordance with the
   [native package trust contract](../operations/agent-lifecycle.md#native-installer-packages).
   During installation, the native scriptlets verify the plain checksum of their
-  embedded archive in protected staging, whereas a Controller-driven
-  AgentUpgrade verifies `package_sha256` directly from its already-authorized
+  embedded archive in protected staging. A Controller-driven AgentUpgrade
+  instead verifies `package_sha256` directly from its already-authorized
   command.
 - Check that `/etc/ocservia-agent/agent.env` and its trust and sealing keys are
   valid.
 - Schedule a current recovery window so you can verify the node after restart.
   Upgrading restarts both a running Agent and `privd`, which briefly interrupts
   the node's Relay session and any in-flight operation.
-- Make sure no earlier install attempt on the node was left unfinished. When an
-  interrupted install leaves an `installing-package` record under
-  `/var/lib/ocservia-upgrade`, the lifecycle refuses any different package
-  until you run a verified [rollback](#rollback), though retrying the exact
-  same verified package clears the record.
+- Make sure no earlier install attempt on the node was left unfinished. An
+  interrupted install can leave an `installing-package` record under
+  `/var/lib/ocservia-upgrade`. While it exists, the lifecycle refuses any
+  different package until you run a verified [rollback](#rollback). Retrying
+  the exact same verified package clears the record.
 
 ### Command
 
@@ -81,9 +81,9 @@ modifying the installation. Fix the reported prerequisite and retry the same
 package. If the new binaries have already been installed and must be reverted,
 run the [Agent rollback](#rollback) command.
 
-Details on verified staging, explicit trust provisioning, and Controller-driven
-rollout behavior are covered in the
-[Agent lifecycle reference](../operations/agent-lifecycle.md).
+The [Agent lifecycle reference](../operations/agent-lifecycle.md) covers
+verified staging, explicit trust provisioning, and Controller-driven rollout
+behavior.
 
 ## Rollback
 
@@ -150,9 +150,9 @@ prove that the Controller accepts the node.
 
 If rollback fails, stop immediately and preserve both the snapshot and host
 diagnostics instead of repeatedly rerunning the upgrade or rollback commands.
-Because rollback validates the entire snapshot before changing any files, an
-error reported during validation leaves the installed files untouched, whereas
-a failure after services have been stopped can leave the node offline. Never
+Rollback validates the entire snapshot before changing any files, so an error
+reported during validation leaves the installed files untouched. A failure
+after services have been stopped can leave the node offline. Never
 replace the snapshot with files from an arbitrary download directory. See the
 [Agent lifecycle reference](../operations/agent-lifecycle.md) for snapshot
 validation and recovery semantics.
