@@ -133,7 +133,7 @@ bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-userstate --select -race -timeout=10m)
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-useroperations --select -race -timeout=10m)
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-api --select -race -timeout=10m)
-(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-auth -race -timeout=10m ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety|Legacy)Integration$')
+(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-auth -race -timeout=10m ./internal/api -run '^Test(AuthenticationBackend(HTTP|Safety|Legacy)|LocalResetApprovalPrecheckBackendHTTP)Integration$')
 (cd "${ROOT}/control-plane" && go test -count=1 -race -timeout=5m -v ./internal/telemetry -run '^TestTelemetryBackendWorkflowIntegration$')
 fi
 fi
