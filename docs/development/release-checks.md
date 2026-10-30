@@ -102,7 +102,12 @@ After the same-SHA Release Check gate and both native product builds, publicatio
 4. Rechecks each image tag immediately before writing it. Verifies each pushed
    image's configuration digest against the scanned archive's loaded image ID,
    then builds the version index from those registry digests and requires both
-   `linux/amd64` and `linux/arm64` entries.
+   `linux/amd64` and `linux/arm64` entries. A Docker push reporting `unknown blob`
+   gets at most two retries, after 5 and 15 seconds, against the same loaded
+   image. Each retry first requires the tag to remain absent; a written tag or
+   registry lookup error stops publication. Other push errors are not retried.
+   Failed commands retain both output streams for diagnosis, and the publishing
+   job records the Docker, storage-driver and Buildx versions.
 5. Rechecks assets, all image tag digests, draft identity, and the Git tag SHA,
    then publishes the Draft. Success requires a published immutable Release,
    complete verified assets, unchanged image digests, and RC exclusion from Latest.
@@ -116,9 +121,18 @@ There is no cross-service transaction: a failure can leave a Draft and some GHCR
 tags. The workflow does not delete, overwrite, or automatically resume those
 objects. Preserve the failed run evidence, inspect the partial state, and use a
 new version with its own qualification. Do not delete and recreate a released
-version to retry. If no Release or version image tags were created, a full rerun
-is safe; rerunning only failed jobs may lack the required current-attempt build
-artifacts and will fail rather than reuse older products.
+version to retry. The next RC compares against the highest-numbered earlier
+published RC of the same version series, skipping failed drafts and unused
+numbers. For example, if RC.6 failed after creating a draft, RC.7 uses published
+RC.5 as its notes base; RC.6 remains untouched.
+
+If no Release or version image tags were created, rerunning failed jobs is safe
+while the required artifacts remain available. Consumers download the immutable
+artifact IDs returned by the successful upstream jobs, including jobs retained
+from an earlier attempt of this same run. They do not reconstruct names using
+the consumer's incremented attempt number. Missing IDs fail closed; expired
+artifacts require a full rerun. Once a draft or version image tag exists, even
+a full rerun is blocked by the one-shot preflight and requires a new version.
 
 GitHub automatically creates its platform release attestation for an immutable
 Release. This flow adds no separate signing service, key management, or custom
@@ -213,9 +227,11 @@ bodies and assets untouched.
 
 When generating release notes, `rc.1` and final stable releases diff against
 the most recently published non-draft stable Release (ignoring the target
-release itself on reruns). For `rc.N` with N > 1, the immediately preceding RC
-must already exist as a published prerelease; skipping RC numbers is unsupported
-and a missing base fails the workflow before image publication. This model
+release itself on reruns). For `rc.N` with N > 1, the highest-numbered lower RC
+in the same `X.Y.Z` series must exist as a published prerelease. Drafts, the
+current or later RC, and other series are excluded, with all release pages
+searched. Failed or unused numbers may be skipped; no published earlier RC or
+an API error fails the workflow before image publication. This model
 follows a single linear release train instead of sorting semantic versions
 across parallel maintenance branches. Keep published RC releases in history,
 create a dedicated commit and tag for the final release so installers observe a

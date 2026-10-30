@@ -8,6 +8,11 @@ on:
       arch:
         type: string
         required: true
+    outputs:
+      agent_packages_artifact_id:
+        value: ${{ jobs.build-agent-packages.outputs.artifact_id }}
+      controller_images_artifact_id:
+        value: ${{ jobs.build-controller-images.outputs.artifact_id }}
 permissions:
   contents: read
 env:
@@ -15,6 +20,8 @@ env:
 jobs:
   build-agent-packages:
     name: Build & Smoke Agent Packages (${{ inputs.arch }})
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     steps:
@@ -121,6 +128,8 @@ jobs:
           if-no-files-found: warn
   build-controller-images:
     name: Build Controller Images (${{ inputs.arch }})
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     permissions:

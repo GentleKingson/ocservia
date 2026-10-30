@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -48,6 +49,7 @@ class PublicationTest(unittest.TestCase):
         self.calls = []
         self.published = False
         self.fault = None
+        self.push_failures = 0
         self.env = patch.dict(os.environ, {'GH_TOKEN': 'test', 'GITHUB_ACTOR': 'test',
                                           'GITHUB_STEP_SUMMARY': str(self.root / 'summary')})
         self.env.start()
@@ -90,6 +92,9 @@ class PublicationTest(unittest.TestCase):
             return json.dumps([{'Os': 'linux', 'Architecture': 'arm64' if self.fault == 'platform' else arch,
                                 'Id': 'sha256:config-' + arch}])
         elif args[:2] == ('docker', 'push'):
+            if self.push_failures:
+                self.push_failures -= 1
+                raise subprocess.CalledProcessError(1, args, output='layer: Pushed\n', stderr='unknown blob\n')
             if self.fault == 'push':
                 raise subprocess.CalledProcessError(1, args)
             name, tag = args[2].rsplit('/', 1)[1].split(':')
@@ -127,6 +132,25 @@ class PublicationTest(unittest.TestCase):
         self.finish()
         self.assertTrue(self.published)
         self.assertIn('14 assets, 24 verified image tags', (self.root / 'summary').read_text())
+
+    def test_blob_error_retries_the_same_image_before_publication(self):
+        self.push_failures = 1
+        with patch('time.sleep') as sleep:
+            self.finish()
+        pushes = [args for args in self.calls if args[:2] == ('docker', 'push')]
+        self.assertEqual(len(pushes), 17)
+        self.assertEqual(pushes[0], pushes[1])
+        sleep.assert_called_once_with(5)
+        self.assertTrue(self.published)
+
+    def test_persistent_blob_error_is_bounded_and_leaves_draft_unpublished(self):
+        self.push_failures = 10
+        with patch('time.sleep') as sleep, self.assertRaises(subprocess.CalledProcessError):
+            self.finish()
+        self.assertEqual(len([args for args in self.calls if args[:2] == ('docker', 'push')]), 3)
+        self.assertEqual([call.args for call in sleep.call_args_list], [(5,), (15,)])
+        self.assertFalse(self.published)
+        self.assertFalse((self.root / 'summary').exists())
 
     def test_stable_publication_sets_latest(self):
         self.release.update(tag_name='v0.0.0', prerelease=False)
@@ -222,6 +246,67 @@ class PublicationTest(unittest.TestCase):
             with self.subTest(pages=pages), patch.object(pub, 'api', return_value=pages):
                 with self.assertRaisesRegex(RuntimeError, 'Expected a new draft'):
                     pub.draft('test/repo', TAG, SHA, True)
+
+
+class PushTest(unittest.TestCase):
+    def test_failed_commands_preserve_stdout_and_stderr(self):
+        with patch.object(sys, 'stderr', new_callable=io.StringIO) as output:
+            with self.assertRaises(subprocess.CalledProcessError) as caught:
+                pub.command(sys.executable, '-c',
+                            'import sys; print("layer: Pushed"); print("unknown blob", file=sys.stderr); sys.exit(1)')
+        self.assertIn('layer: Pushed', output.getvalue())
+        self.assertIn('unknown blob', output.getvalue())
+        self.assertIn('unknown blob', caught.exception.stderr)
+
+    def test_json_stdout_is_not_mixed_with_stderr(self):
+        with patch.object(sys, 'stderr', new_callable=io.StringIO) as output:
+            result = pub.command(sys.executable, '-c', 'import sys; print("{}"); print("warning", file=sys.stderr)')
+        self.assertEqual(json.loads(result), {})
+        self.assertIn('warning', output.getvalue())
+
+    def test_other_push_errors_are_not_retried(self):
+        for message in ('denied', 'unauthorized', 'timeout', 'manifest unknown', ''):
+            error = subprocess.CalledProcessError(1, ['docker', 'push'], stderr=message)
+            with self.subTest(message=message), patch.object(pub, 'manifest', return_value=None), \
+                    patch.object(pub, 'command', side_effect=error) as push, patch('time.sleep') as sleep:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    pub.push_image('gateway', TAG)
+                self.assertEqual(push.call_count, 1)
+                sleep.assert_not_called()
+
+    def test_retry_never_overwrites_a_manifest_or_ignores_registry_failure(self):
+        error = subprocess.CalledProcessError(1, ['docker', 'push'], stderr='unknown blob\n')
+        for next_result in (('sha256:existing', {}), URLError('registry unavailable')):
+            with self.subTest(next_result=next_result), patch.object(pub, 'manifest', side_effect=[None, next_result]), \
+                    patch.object(pub, 'command', side_effect=error) as push, patch('time.sleep'):
+                with self.assertRaises((RuntimeError, URLError)):
+                    pub.push_image('gateway', TAG)
+                self.assertEqual(push.call_count, 1)
+
+
+class NotesBaseTest(unittest.TestCase):
+    def release(self, number, **changes):
+        return {'tag_name': f'v2.0.0-rc.{number}', 'draft': False, 'prerelease': True} | changes
+
+    def test_skips_failed_drafts_and_selects_numeric_predecessor_across_pages(self):
+        pages = [[self.release(6, draft=True), self.release(4)], [self.release(5)]]
+        with patch.object(pub, 'api', return_value=pages) as api:
+            self.assertEqual(pub.previous_rc('test/repo', '2.0.0-rc.7'), 'v2.0.0-rc.5')
+        api.assert_called_once_with('repos/test/repo/releases?per_page=100', '--paginate', '--slurp')
+        with patch.object(pub, 'api', return_value=[[self.release(9), self.release(10), self.release(2)]]):
+            self.assertEqual(pub.previous_rc('test/repo', '2.0.0-rc.11'), 'v2.0.0-rc.10')
+
+    def test_wrong_series_current_future_non_rc_and_unpublished_are_not_bases(self):
+        invalid = [self.release(6, draft=True), self.release(5, prerelease=False), self.release(7),
+                   self.release(8), self.release(4, tag_name='v2.1.0-rc.4'),
+                   self.release(4, tag_name='v2.0.0'), self.release(4, tag_name='v2.0.0-rc.04')]
+        for pages in ([invalid], [[]]):
+            with patch.object(pub, 'api', return_value=pages), self.assertRaisesRegex(RuntimeError, 'No published earlier RC'):
+                pub.previous_rc('test/repo', '2.0.0-rc.7')
+
+    def test_release_api_failure_is_not_a_fallback_to_older_history(self):
+        with patch.object(pub, 'api', side_effect=URLError('unavailable')), self.assertRaises(URLError):
+            pub.previous_rc('test/repo', '2.0.0-rc.7')
 
 
 class RegistryTest(unittest.TestCase):
