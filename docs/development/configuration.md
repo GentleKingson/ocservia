@@ -38,8 +38,8 @@ reloads Ocserv.
 Calling `GET /config-plans/{plan_id}` returns the candidate hash, operation
 state, validation status, warnings, and a secret-safe diff that omits both
 `SecretRef` keys and active secret values. Operators can request a production
-apply approval only after a plan has validated cleanly and remains unexpired;
-the resulting independent approval record is bound to the candidate hash, node
+apply approval only after a plan has validated cleanly and remains unexpired.
+The resulting independent approval record is bound to the candidate hash, node
 ID, expected revision, and expiration time. Neither planning nor apply ever
 masks a stale caller revision by re-reading and substituting the current
 revision.
@@ -53,17 +53,22 @@ configuration revision, validation fingerprint, negotiated capability, and
 automation lock, consumes the approval, and commits the Operation, signed
 command, outbox entry, audit intent, and apply record. When using the complete
 profile, the apply command also pins the plan ID, logical and materialized
-hashes, previous file hash, revision, and expiry, and root revalidates both the
-immutable TLS bundle and the full native configuration while keeping legacy
-command and receipt formats unchanged.
+hashes, previous file hash, revision, and expiry. Root revalidates both the
+immutable TLS bundle and the full native configuration, and legacy command and
+receipt formats stay unchanged.
 
 On the node, privd never accepts a caller-supplied file path or executable
-name. Holding the fixed configuration lock, it verifies the active file's
-fingerprint, writes backup and staging files in the same directory with
-preserved permissions and ownership, fsyncs the staged file, atomically
-renames it into place, and fsyncs the parent directory. It then reloads the
-fixed Ocserv service and verifies the parser check, systemd unit status, and an
-`occtl` session query, retaining up to ten successful backup files per node.
+name. Holding the fixed configuration lock, it:
+
+1. Verifies the active file's fingerprint.
+2. Writes backup and staging files in the same directory with preserved
+   permissions and ownership.
+3. Fsyncs the staged file, atomically renames it into place, and fsyncs the
+   parent directory.
+4. Reloads the fixed Ocserv service.
+5. Verifies the parser check, systemd unit status, and an `occtl` session query.
+
+Privd retains up to ten successful backup files per node.
 
 If the reload or post-reload health check fails, privd restores the exact
 backup bytes, reloads the service, and re-verifies the fingerprint and health
@@ -74,8 +79,8 @@ alert. An operator must repair and verify the node locally before a recovery
 workflow can clear the automation lock.
 
 Every queued apply increments a monotonic desired effect revision, including
-attempts that end in `rolled_back` or `Unknown`. Because this desired effect
-revision is tracked separately from the applied configuration revision, an
+attempts that end in `rolled_back` or `Unknown`. This desired effect revision is
+tracked separately from the applied configuration revision, so an
 `A -> B -> A` configuration rollback still advances the effect revision and
 never reuses an earlier number. Privd durably binds
 `config_apply / ocserv.conf / desired_revision` to the command ID, idempotency
@@ -91,7 +96,7 @@ command authorization executable again.
 Before recovering a database or rolling back binaries, stop new plan and apply
 requests, reconcile or expire pending plans, and reconcile every nonterminal
 `config_apply` operation while preserving terminal command history and root
-effect records. Because the repository provides no database down migrations,
+effect records. The repository provides no database down migrations, so
 recover via a forward fix or a planned
 [isolated restore](../operations/incident-recovery.md#database-recovery).
 
@@ -99,8 +104,8 @@ recover via a forward fix or a planned
 
 The complete configuration profile is gated by dedicated capabilities and typed
 Protobuf payloads. Older nodes reject complete-profile commands without falling
-back to v1, existing v1 payloads, hashes, and receipts remain untouched, and
-advertising a capability at handshake time does not bypass runtime validation
+back to v1. Existing v1 payloads, hashes, and receipts remain untouched.
+Advertising a capability at handshake time does not bypass runtime validation
 when a command executes.
 
 Within the finite grammar of the complete profile, configurations may use plain
@@ -128,8 +133,8 @@ semantic hash. Approval records bind the plan ID, both configuration hashes,
 the expected current revision, and the expiration timestamp, and are consumed
 in the same database transaction that creates the command and outbox rows.
 Replaying an apply request with the same HTTP idempotency key returns the
-existing operation, whereas submitting a new idempotency key cannot reuse an
-already consumed approval. Requester and approver separation follows the
+existing operation. Submitting a new idempotency key cannot reuse an already
+consumed approval. Requester and approver separation follows the
 [approval boundary](../reference/stable-contracts.md#approval-principal-boundary).
 
 Wire messages are generated from the Protobuf and OpenAPI contracts, backed by
@@ -143,8 +148,8 @@ Release acceptance requires passing focused protocol, Controller transaction,
 root path, and TLS unit tests together with end-to-end native parser, apply,
 reload, exact byte-level rollback, maintenance restart, and browser checks.
 [Release policy](release-checks.md) defines the required exact-candidate
-business and native package gates across both supported CPU architectures;
-contract review, unit tests, or checks from earlier candidates do not satisfy
+business and native package gates across both supported CPU architectures.
+Contract review, unit tests, or checks from earlier candidates do not satisfy
 release acceptance.
 
 ## Node-local TLS provisioning
@@ -164,7 +169,7 @@ Server TLS certificates and private keys remain on the managed node under
 root-owned regular single-link files with non-writable directory ancestry and
 no symlinks. The private key requires mode `0600` and the public certificate
 requires `0600` or `0644`. The leaf certificate must specify `CA:FALSE`, carry
-valid server-authentication usage, and match the private key; when an optional
+valid server-authentication usage, and match the private key. When an optional
 CA bundle is supplied, it must be a valid `CA:TRUE` certificate. All
 certificate and SPKI digests recorded in metadata are computed over public DER
 bytes only.
@@ -196,10 +201,11 @@ and never edit or delete version directories by hand.
 
 Before starting a newly installed `ocserv` instance, write an initial
 `/etc/ocserv/ocserv.conf` (`0600 root:root`) that conforms to the finite
-profile, pointing to the bundle's `server-cert.pem`, `server-key.pem`, and
-optional `ca-cert.pem` paths alongside the `ocservia-vpn` worker account,
-plain `/etc/ocserv/ocpasswd` authentication, and the target listener ports, then
-verify it with `ocserv -t -c /etc/ocserv/ocserv.conf`. On a server that is
+profile. Point it to the bundle's `server-cert.pem`, `server-key.pem`, and
+optional `ca-cert.pem` paths, and configure the `ocservia-vpn` worker account,
+plain `/etc/ocserv/ocpasswd` authentication, and the target listener ports.
+Then verify it with
+`ocserv -t -c /etc/ocserv/ocserv.conf`. On a server that is
 already running, initial activation of the complete profile or any change to
 the TLS reference or version requires a separately authorized maintenance
 restart, because `SIGHUP` does not reload startup-only bindings and no Agent or
@@ -216,8 +222,8 @@ plan, the Controller resolves the reference's current version and pins it in
 the signed command so a subsequent `SecretRef` rotation does not alter an
 existing plan. Both planning and apply reject any candidate that changes the
 TLS path or version, listener ports, authentication method, worker account, or
-control socket path relative to the active `/etc/ocserv/ocserv.conf`, and fail
-closed if the active file contains `include` directives, virtual hosts,
+control socket path relative to the active `/etc/ocserv/ocserv.conf`. They also
+fail closed if the active file contains `include` directives, virtual hosts,
 duplicate directives, or settings outside the finite grammar. If an operator
 changes any startup-only setting during maintenance, `ocserv` must be restarted
 and verified locally before automated configuration plans resume.
@@ -226,14 +232,14 @@ Every complete-profile template must specify `auth`, `cookie-timeout`,
 `device`, `dns`, `ipv4-network`, `max-clients`, `max-same-clients`,
 `server-cert`, `server-key`, `socket-file`, `tcp-port`, and `udp-port`, and may
 optionally include a single `route` directive set to one canonical IPv4 CIDR or
-`default`. While `auth` and `socket-file` are locked to their fixed production
-paths, callers cannot supply custom TLS file paths, `include` directives, or
-hook scripts.
+`default`. The `auth` and `socket-file` directives are locked to their fixed
+production paths, and callers cannot supply custom TLS file paths, `include`
+directives, or hook scripts.
 
 The node detail page in the Web UI submits complete-profile plans. Once a plan
 validates without warnings, it records the logical candidate hash, exact
 materialized file hash, previous file hash, revision, and expiry for review by
-a second principal prior to apply; replaying an apply request cannot authorize
+a second principal prior to apply. Replaying an apply request cannot authorize
 a different operation. During apply, privd re-verifies the TLS bundle and runs
 the native `ocserv` parser over the complete file before atomically replacing
 `/etc/ocserv/ocserv.conf` and reloading the daemon, restoring the exact

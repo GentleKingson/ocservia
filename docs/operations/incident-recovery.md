@@ -120,8 +120,8 @@ reinitialization.
 Before editing OIDC settings, confirm the provider's authoritative issuer string
 and inspect existing records in `identities`. Failed Discovery or token
 validation never creates an identity row, so there is nothing to migrate from
-failed login attempts alone. Because each identity is keyed by `(issuer, subject)`,
-changing the issuer string alters that unique key; an issuer with a trailing
+failed login attempts alone. Each identity is keyed by `(issuer, subject)`,
+so changing the issuer string alters that unique key. An issuer with a trailing
 slash and one without it represent distinct accounts that the application never
 merges or migrates during login.
 
@@ -149,8 +149,8 @@ When an existing deployment requires a separately approved issuer migration:
    whose current issuer and subject still match the manifest. Assert that the
    affected row count equals the approved manifest count, and roll back on any
    mismatch. Leave identity IDs, subjects, disabled flags, and role bindings
-   unchanged, revoke active sessions for the migrated users so they must sign in
-   again, and log the committed before-and-after mapping through the operational
+   unchanged. Revoke active sessions for the migrated users so they must sign in
+   again. Log the committed before-and-after mapping through the operational
    audit process without altering historical audit rows. Roll out the new issuer
    setting through normal change control.
 5. Before reopening login traffic, confirm fresh Discovery and token validation,
@@ -230,16 +230,21 @@ deploy/production/rotate-postgres-credentials.sh
 ```
 
 For the duration of the rotation, the script holds an exclusive mode-`0600` lock
-inside the private secret directory; any concurrent invocation waits for that
-lock before reading its baseline state. Once locked, the workflow checks the
-existing credentials, runs `ALTER ROLE` over the local administrative
-connection, verifies that new connections succeed with the new passwords and
-fail with the old ones, atomically updates all four Compose secret files, and
-recreates the Control Plane and backup containers to verify their fresh
-connections. If an error triggers rollback, the script restores the prior
-verifiers and secret files only if the database and on-disk files still match
-either the initial baseline or the values written during that run, never
-overwriting unexpected concurrent changes. Keep any reported recovery snapshot
+inside the private secret directory. Any concurrent invocation waits for that
+lock before reading its baseline state. Once locked, the workflow:
+
+1. Checks the existing credentials.
+2. Runs `ALTER ROLE` over the local administrative connection.
+3. Verifies that new connections succeed with the new passwords and fail with
+   the old ones.
+4. Atomically updates all four Compose secret files.
+5. Recreates the Control Plane and backup containers to verify their fresh
+   connections.
+
+If an error triggers rollback, the script restores the prior verifiers and
+secret files only if the database and on-disk files still match either the
+initial baseline or the values written during that run. It never overwrites
+unexpected concurrent changes. Keep any reported recovery snapshot
 protected and leave services stopped until recovery finishes. Passwords are read
 only from files and are never accepted on the command line or printed to logs.
 
@@ -252,7 +257,7 @@ target release's protocol, configuration, and persistent-state requirements. In
 v1.1.0, version ordering, schema ranges, and descriptor equality are not
 enforced as admission gates and do not guarantee cross-version safety. Rolling
 back the Controller swaps only the installed images and Compose project without
-running down migrations or restoring database state; rolling back an Agent
+running down migrations or restoring database state. Rolling back an Agent
 similarly restores only local node files without modifying the Controller.
 Neither action substitutes for the other or for a database restore. When
 same-target upgrade recovery and package rollback cannot bring the deployment
@@ -271,17 +276,21 @@ the active configuration against the
   supported single-instance deployment.
 - MySQL: follow the [logical backup and isolated restore](database-backup-restore.md#mysql)
   procedure for external MySQL. This workflow does not provide PITR, failover,
-  storage snapshots, or cross-engine migration, and PostgreSQL recovery or
-  credential-rotation scripts must never be run against MySQL backends.
+  storage snapshots, or cross-engine migration. Never run PostgreSQL recovery or
+  credential-rotation scripts against MySQL backends.
 
 Always restore into a separate, isolated target instance without overwriting the
 remaining copy of the damaged database. Fence old writers immediately and keep
 command execution blocked on the restored instance. Passing a backup checksum or
-restore verifier check is only the first step: bring up an isolated Controller
-with the production audit keys to validate the schema, runtime database grants,
-and audit chain, then inspect the restored scheduler and owner state and
-reconcile all in-flight operations and commands, including any Unknown outcomes,
-and complete the [security state reconciliation](#security-state-reconciliation-before-cutover).
+restore verifier check is only the first step. After it:
+
+1. Bring up an isolated Controller with the production audit keys to validate
+   the schema, runtime database grants, and audit chain.
+2. Inspect the restored scheduler and owner state.
+3. Reconcile all in-flight operations and commands, including any Unknown
+   outcomes.
+4. Complete the [security state reconciliation](#security-state-reconciliation-before-cutover).
+
 Repoint client traffic and re-enable command dispatch only after every check
 succeeds and a single authoritative instance is established. Keep all original
 incident evidence and initialization markers intact.

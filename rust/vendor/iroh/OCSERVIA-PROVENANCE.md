@@ -44,9 +44,8 @@ to an already-connected standby. Concurrent per-relay status publishers update
 one mutex-serialized authoritative map before publishing immutable snapshots,
 so a healthy relay cannot disappear through a lost read-modify-write. Path
 selection excludes disconnected relay paths, reacts immediately to relay-state
-changes, and never blocks global
-datagram routing on a full queue belonging to an unconnected relay. A
-`test-utils`-gated builder hook shortens the non-home idle timeout for
+changes, and never blocks global datagram routing on a full queue belonging to
+an unconnected relay. A `test-utils`-gated builder hook shortens the non-home idle timeout for
 production-graph lifecycle regressions; the production default remains 60
 seconds. Persistent connections are disabled by default. Ocservia transportd
 and Agent endpoints enable them only for custom relay maps containing at least
@@ -113,13 +112,13 @@ upstream originals; `rust/Cargo.lock`, not this archive lock, owns production.
 The complete upstream test and example suite is not added to the ocservia
 workspace. Production relay lifecycle regressions run through the transportd
 and Agent crates using `rust/Cargo.lock`, including
-`malformed_relay_batches_preserve_receive_progress`. Focused actor/path tests instead use
-the preserved archive lockfile at `vendor/iroh/Cargo.lock`; this is a different
+`malformed_relay_batches_preserve_receive_progress`. Focused actor/path tests
+instead use the preserved archive lockfile at `vendor/iroh/Cargo.lock`; this is a different
 dependency graph, not production-graph evidence. Its preserved archive versions
 of `rustls-webpki` (0.103.15), `webpki-roots` and `webpki-root-certs` (1.0.9)
 precede the certificate distrust updates in both production locks (0.103.16
-and 1.0.10 respectively); do not use the vendor test graph for deployment. From `rust/`, run each focused
-test with:
+and 1.0.10 respectively). Do not use the vendor test graph for deployment.
+From `rust/`, run each focused test with:
 
 ```sh
 cargo test --locked --manifest-path vendor/iroh/Cargo.toml \
@@ -129,7 +128,7 @@ cargo test --locked --manifest-path vendor/iroh/Cargo.toml \
 The focused names are `concurrent_relay_status_transitions_preserve_every_actor`,
 `datagrams_for_disconnected_relays_are_dropped_not_queued`,
 `relay_paths_offered_only_for_connected_relays`,
-`home_relay_failover_only_picks_connected_configured_standbys`, and
+`home_relay_failover_only_picks_connected_configured_standbys`,
 `persistent_relay_retry_sleep_stays_inside_recovery_budget`,
 `test_prio_inbox_answered_during_backoff`, and
 `close_all_active_relays_survives_a_cancelled_task`. These tests are not

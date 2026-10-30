@@ -21,25 +21,29 @@ PR -> Basic CI -> merge main
 
 On pull requests, `Basic CI Result` remains the required check. Once changes
 merge to `main`, an operator triggers Release Check manually via
-`workflow_dispatch`. Every required job in that workflow must pass; a failure,
-cancellation, or unexpected skip blocks qualification, and each run executes
-from scratch without inheriting earlier results or nominating a persistent
-candidate. Within Release Check, Full CI refers to the Basic CI Full profile
+`workflow_dispatch`. Every required job in that workflow must pass. A failure,
+cancellation, or unexpected skip blocks qualification. Each run executes from
+scratch, without inheriting earlier results or nominating a persistent
+candidate.
+
+Within Release Check, Full CI refers to the Basic CI Full profile
 (current-candidate checks across supported units; see
 [Basic CI](github-actions.md)), not comprehensive acceptance.
 
 Once Release Check succeeds on the target commit, the operator confirms the
-version and pushes the version tag. The tag-triggered Release workflow builds directly from
-the tag, scans the built Controller image archives on both native
+version and pushes the version tag. The tag-triggered Release workflow builds
+directly from the tag, scans the built Controller image archives on both native
 architectures, and runs install and image smoke checks before publishing.
-Inside the existing `release-publishing` environment, before any image or Release
-write, `publish` verifies that the current tag resolves to the build SHA and
-queries `release-check.yml` runs for that exact SHA on `main`, triggered by
-`workflow_dispatch`. The latest run must be completed successfully; missing,
+
+Inside the existing `release-publishing` environment, before any image or
+Release write, `publish` verifies that the current tag resolves to the build SHA
+and queries `release-check.yml` runs for that exact SHA on `main`, triggered by
+`workflow_dispatch`. The latest run must be completed successfully. Missing,
 failed, cancelled, or unfinished qualification and API errors block publication,
 including reruns. An older PASS cannot override a newer unsuccessful run. The
 accepted run URL and SHA are recorded in the job summary. Build-only dispatches
-remain exempt, and Release does not rerun Full CI, Security, or Business acceptance.
+remain exempt, and Release does not rerun Full CI, Security, or Business
+acceptance.
 
 Three-VM acceptance remains independent of this automated gate. For the next RC,
 the operator must record its run/evidence reference and verified source SHA
@@ -49,12 +53,13 @@ the real acceptance runs are stable.
 
 Published release artifacts consist of Agent archives, plain archive checksums,
 DEB and RPM packages, Controller container images, and the bootstrap files
-consumed by the installers. Plain checksums guard against download corruption
-without acting as cryptographic signatures or a trust root, and
-`controller-release.json` is the standard deployment configuration for
-Integrated lifecycle consumers. Publication is one-shot: an existing Release
-(including a draft) or any exact-version GHCR tag blocks publication. No asset
-upload uses `--clobber`, and a rerun never replaces an existing version.
+consumed by the installers. Plain checksums guard against download corruption.
+They are not cryptographic signatures or a trust root. `controller-release.json`
+is the standard deployment configuration for Integrated lifecycle consumers.
+
+Publication is one-shot: an existing Release (including a draft) or any
+exact-version GHCR tag blocks publication. No asset upload uses `--clobber`, and
+a rerun never replaces an existing version.
 
 During SQL artifact builds, the tooling reads the current `schema.sql` headers
 to record PostgreSQL `database_migration` as `{"epoch": N, "revision": R}`, and
@@ -149,16 +154,16 @@ and commits landing on main do not shift that checkpoint.
 Any major database change must pass the
 [SQL artifact acceptance checks](testing.md#sql-artifact-acceptance),
 including fresh-install versus checkpoint-upgrade equivalence and both
-backup/restore smoke paths. While a build-only Release run can validate package
-construction ahead of time, a major release still requires a passing Release
-Check on the exact merged main commit before the operator tags the release;
-branch diagnostic runs and earlier release results do not satisfy that gate.
+backup/restore smoke paths. A build-only Release run can validate package
+construction ahead of time, but a major release still requires a passing Release
+Check on the exact merged main commit before the operator tags the release.
+Branch diagnostic runs and earlier release results do not satisfy that gate.
 
 ## Release notes and changelog
 
-GitHub Releases serve as the primary user-facing record for each version,
-bringing together change summaries, merged pull requests, downloadable assets,
-upgrade notes, and known issues. The Release workflow generates notes through
+GitHub Releases are the primary user-facing record for each version. They bring
+together change summaries, merged pull requests, downloadable assets, upgrade
+notes, and known issues. The Release workflow generates notes through
 `gh release create --generate-notes` using the category rules in
 [`.github/release.yml`](../../.github/release.yml):
 
@@ -187,20 +192,20 @@ After GitHub generates the initial notes body (`gh release create
 [`scripts/strip-release-owner-attribution.py`](../../scripts/strip-release-owner-attribution.py)
 removes the repeated ` by @GentleKingson` suffix from PR list items while
 leaving external contributor attributions, PR links, category headings, manual
-notes, and the `Full Changelog` link untouched. Because the workflow compares
-the stripped text against the current release body before calling
-`gh release edit --notes-file`, cleanup is idempotent within draft preparation.
+notes, and the `Full Changelog` link untouched. Cleanup is idempotent within
+draft preparation, because the workflow compares the stripped text against the
+current release body before calling `gh release edit --notes-file`.
 Existing releases are rejected before note preparation on reruns. Do not add
 `GentleKingson` to `changelog.exclude.authors` in
 `.github/release.yml`, as GitHub would drop those pull requests from the notes
 altogether. Historical releases that are already published are left as-is.
 
 Pull requests also include an optional one-sentence release note field in the
-[PR template](../../.github/PULL_REQUEST_TEMPLATE.md). Because GitHub's
-automatic generator reads PR titles and labels instead of the PR body, write
-clear user-facing PR titles and use the template field when drafting manual
-highlights or upgrade guidance. Leaving the field blank is fine, and no custom
-parser or label-check job enforces it in CI.
+[PR template](../../.github/PULL_REQUEST_TEMPLATE.md). Write clear user-facing
+PR titles and use the template field when drafting manual highlights or upgrade
+guidance, because GitHub's automatic generator reads PR titles and labels
+instead of the PR body. Leaving the field blank is fine, and no custom parser or
+label-check job enforces it in CI.
 
 [`CHANGELOG.md`](../../CHANGELOG.md) tracks concise, durable summaries of
 stable releases while keeping older entries intact. For new releases, omit
@@ -238,7 +243,7 @@ create a dedicated commit and tag for the final release so installers observe a
 single release identity at HEAD, and run a fresh Release Check on the exact
 commit for every RC and final tag.
 
-While archive filenames and compiled binaries report `X.Y.Z-rc.N`, nFPM maps
+Archive filenames and compiled binaries report `X.Y.Z-rc.N`, but nFPM maps
 native package versions to `X.Y.Z~rc.N-1` for DEB and Version `X.Y.Z~rc.N`,
 Release `1` for RPM. Package validation separates three distinct scopes:
 
@@ -257,9 +262,9 @@ Release `1` for RPM. Package validation separates three distinct scopes:
    Use `STUB_BINARIES=false` to exercise real compiled binaries;
    `STUB_BINARIES=true` is reserved for fast scriptlet checks in PR CI. Running
    the fixed `1.2.0` sequence verifies DEB and RPM `~rc.N` version sorting,
-   upgrade and rollback state snapshots, and package scriptlet transitions,
-   though relabeling a single source tree does not prove cross-release binary
-   upgrade compatibility for an upcoming RC.
+   upgrade and rollback state snapshots, and package scriptlet transitions.
+   Relabeling a single source tree does not prove cross-release binary upgrade
+   compatibility for an upcoming RC.
 2. Current candidate product build and install smoke: inside
    [`.github/workflows/release-products.yml`](../../.github/workflows/release-products.yml),
    passing `PRODUCTS_DIR` and `VERSION` feeds the candidate packages built for
@@ -339,11 +344,11 @@ required.
 
 Business and Quick Install workflows build candidate artifacts locally and
 install from a loopback registry on disposable native runners of the selected
-architecture; they first require the runner, kernel, dpkg and Docker
-architectures to match and check every loaded Controller image's platform. Native package checks require
-the host kernel, Docker daemon, container image, and executed ELF binaries to
-share the same architecture, so cross-compilation alone never counts as native
-acceptance. Those checks enforce architecture and version matching, root-owned
+architecture. They first require the runner, kernel, dpkg and Docker
+architectures to match and check every loaded Controller image's platform.
+Native package checks require the host kernel, Docker daemon, container image,
+and executed ELF binaries to share the same architecture, so cross-compilation
+alone never counts as native acceptance. Those checks enforce architecture and version matching, root-owned
 staging permissions, and SHA-256 verification. Never install test packages on a
 shared machine or clear its binfmt handlers. Passing the current suites does
 not certify upgrades from historical releases or mixed-version clusters.
@@ -398,9 +403,9 @@ gh workflow run release-upgrade.yml --ref <branch> \
 ```
 
 `arch` (default `amd64`) selects the native `ubuntu-24.04` or
-`ubuntu-24.04-arm` runner. Setting `purpose=smoke` narrows the run to the Smoke scope regardless of Signer
-mode, while `production_signer=false` switches to the standalone topology.
-The default `ocserv_package=distribution` keeps the runner's Ubuntu ocserv;
+`ubuntu-24.04-arm` runner. Setting `purpose=smoke` narrows the run to the Smoke
+scope regardless of Signer mode. Setting `production_signer=false` switches to
+the standalone topology. The default `ocserv_package=distribution` keeps the runner's Ubuntu ocserv;
 `ocserv_package=backport-1.5.0` installs the pinned, SHA256-checked
 [ocserv-backport](https://github.com/GentleKingson/ocserv-backport/releases/tag/1.5.0-2)
 1.5.0 package instead, and the run then also requires the session terminate
@@ -426,10 +431,11 @@ ShellCheck (`scripts/lint.sh`), any local workflow linter you have installed
 rehearsal with GitHub/GHCR doubles. It checks collisions, partial uploads, image
 and index mismatches, API failures, and missing immutability without making
 external writes; it is not evidence of a real registry push or native build.
-When modifying upgrade or bootstrap paths,
-include tests for authorized AgentUpgrade digest acceptance and rejection as
-well as Stage-0 download and checksum failures. Never publish release assets or
-touch production deployments during validation.
+
+When modifying upgrade or bootstrap paths, include tests for authorized
+AgentUpgrade digest acceptance and rejection as well as Stage-0 download and
+checksum failures. Never publish release assets or touch production deployments
+during validation.
 
 If a validation suite fails, rerun its owning workflow with the full set of
 checks (for recovery failures, rerun the entire Business job). Failed,

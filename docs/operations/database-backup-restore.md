@@ -28,7 +28,7 @@ storage, and verify the remote copy before lowering local retention.
 
 Connection credentials live in `postgres.pgpass`. On bundled PostgreSQL, set
 this file to `postgres:5432:*:ocservia_backup:<password>` with the protected
-backup-role password from initialization; the wildcard database field covers
+backup-role password from initialization. The wildcard database field covers
 both the server-major check and the replication stream. External PostgreSQL
 deployments must specify the actual server hostname and port, with entries for
 both `ocservia` (used by the server-major preflight) and `replication` (used by
@@ -38,14 +38,14 @@ the read-only Compose secret into a private mode-0600 passfile.
 ### Deployment boundaries
 
 Bundled PostgreSQL 18 enables `archive_mode` with an `archive_command` that
-writes continuous WAL into the backup mount. While those archive and retention
-settings remain active, they do not certify PITR readiness.
+writes continuous WAL into the backup mount. These archive and retention
+settings do not certify PITR readiness, even while they remain active.
 
 External PostgreSQL support is restricted to major version 18, and all owner,
 runtime, and backup connections must use `sslmode=verify-full` against the
 launcher-validated `database-ca.pem`. The backup worker checks the server major
 version before taking a snapshot and guarantees only a verified base backup.
-Because ocservia does not manage the external server configuration, continuous
+ocservia does not manage the external server configuration, so continuous
 WAL archiving, PITR, replication failover, and retention policy remain with the
 external database operator and require separate verification.
 
@@ -53,25 +53,27 @@ To restore a PostgreSQL backup:
 
 1. Stop all application writers and log the incident timestamp.
 2. Choose a verified base backup along with the streamed WAL required for consistency.
-3. Extract the backup into a fresh, empty PostgreSQL 18 data directory without overwriting the existing copy. On the official container layout, mount the volume at `/var/lib/postgresql` and restore into `/var/lib/postgresql/18/docker`, as the parent mount point is not `PGDATA`.
+3. Extract the backup into a fresh, empty PostgreSQL 18 data directory without overwriting the existing copy. On the official container layout, mount the volume at `/var/lib/postgresql` and restore into `/var/lib/postgresql/18/docker`, because the parent mount point is not `PGDATA`.
 4. Bring PostgreSQL up in isolation to check schema provenance (see
    [Schema provenance after restore](#schema-provenance-after-restore)),
    audit-chain checkpoints, table row counts, and a read-only application smoke test.
 5. Complete the [security state reconciliation](incident-recovery.md#security-state-reconciliation-before-cutover).
 6. Repoint the control plane only after those checks pass, and keep the previous database intact until the rollback window closes.
 
-Two smoke scripts exercise these mechanics in CI or disposable environments,
-though neither substitutes for testing an actual production archive, and a
-completed backup job alone is never recovery proof without a verified restore.
-`scripts/i18-backup-restore-smoke.sh` exercises bundled base backup and
-restore by confirming that a marker row survives recovery, without checking
-schema receipts. For the external PostgreSQL contract,
-`scripts/i18-external-postgres-backup-restore-smoke.sh` runs a TLS server
-outside the Controller network, verifies routing and hostname rejection, applies
-migrations prior to backup, confirms that `pg_verifybackup` catches corruption,
-restores into an isolated server, compares the `schema_revisions` journal across
-a repeat owner migration, and tests the restored runtime account's read and
-privilege boundaries.
+Two smoke scripts exercise these mechanics in CI or disposable environments.
+Neither substitutes for testing an actual production archive, and a completed
+backup job alone is never recovery proof without a verified restore.
+
+- `scripts/i18-backup-restore-smoke.sh` exercises bundled base backup and
+  restore by confirming that a marker row survives recovery, without checking
+  schema receipts.
+- `scripts/i18-external-postgres-backup-restore-smoke.sh` covers the external
+  PostgreSQL contract. It runs a TLS server outside the Controller network,
+  verifies routing and hostname rejection, applies migrations prior to backup,
+  confirms that `pg_verifybackup` catches corruption, restores into an isolated
+  server, compares the `schema_revisions` journal across a repeat owner
+  migration, and tests the restored runtime account's read and privilege
+  boundaries.
 
 ## MySQL
 
@@ -85,7 +87,7 @@ events, binary data, and explicit database creation, without copying a database
 volume. Along with the dump, the worker records the backend and server version
 in metadata, writes SHA-256 checksums, atomically advances `LATEST`, and prunes
 old backups. Database accounts and server-global grants belong to provisioning
-state and do not travel in a schema dump, so operators must recreate them from
+state and do not travel in a schema dump. Operators must recreate them from
 the protected provisioning source and re-run least-privilege checks prior to
 cutover.
 
@@ -97,31 +99,34 @@ the client. Grant the backup account only the privileges needed to read tables
 and views and to dump triggers, routines, and events; it must never own the
 schema or migration tables. On the pinned client versions, grant `SELECT`,
 `SHOW VIEW`, `TRIGGER`, and `EVENT` on `ocservia.*`, plus the global
-`SHOW_ROUTINE` dynamic privilege required by MySQL 8.4. Because the dump runs
-with `--no-tablespaces`, the `PROCESS` privilege is unnecessary.
+`SHOW_ROUTINE` dynamic privilege required by MySQL 8.4. The `PROCESS` privilege
+is unnecessary because the dump runs with `--no-tablespaces`.
 
 Always restore into a new, isolated MySQL server by running the matching backup
 image with `scripts/mysql-restore-verify.sh`, an absolute path to a completed
 backup directory, and a mode-`0600` target administrator client file. After
 rejecting checksum mismatches, wrong backends, unsafe dump artifacts, or an
 existing target database, the verifier loads the dump and prints a summary of
-the restored state: it checks that `schema_revisions` contains only verified
-rows (including an epoch-2 entry) and that no legacy migration tables exist, and
-it reports the audit authentication shape, identity counts, scheduler epoch,
+the restored state. It checks that `schema_revisions` contains only verified
+rows (including an epoch-2 entry) and that no legacy migration tables exist. It
+also reports the audit authentication shape, identity counts, scheduler epoch,
 idempotency records, and unfinished operations or commands. Passing this script
-alone does not prove the restored database is ready for service, because the
-verifier neither compares receipt checksums against the build's SQL artifacts
-nor validates the cryptographic audit chain.
+alone does not prove the restored database is ready for service. The verifier
+neither compares receipt checksums against the build's SQL artifacts nor
+validates the cryptographic audit chain.
 
 Traffic redirection and command authority remain manual operator gates. Unless
 `--old-writers-fenced` is passed, the restore script exits with status 3 after
-verification, and even with that flag it rejects an active restored scheduler
+verification. Even with that flag, it rejects an active restored scheduler
 lease and leaves command execution blocked. Before cutover, validate the
-restored instance against the matching Controller build: run the owner
-`--migrate-only` step to verify receipts, checksums, and schema admission (note
-that this step may also grant privileges and provision telemetry, so it modifies
-state), and then start a Controller with the production audit keys to verify the
-audit chain and runtime privileges (which does not re-check migration receipts).
+restored instance against the matching Controller build:
+
+1. Run the owner `--migrate-only` step to verify receipts, checksums, and schema
+   admission. This step may also grant privileges and provision telemetry, so it
+   modifies state.
+2. Start a Controller with the production audit keys to verify the audit chain
+   and runtime privileges. This does not re-check migration receipts.
+
 Redirect traffic and re-enable commands only after old writers are fenced, both
 Controller checks succeed, pending work is reconciled, the
 [security state reconciliation](incident-recovery.md#security-state-reconciliation-before-cutover)
@@ -134,13 +139,13 @@ separate procedures and independent verification evidence.
 ## Schema provenance after restore
 
 Every backup must preserve the full `schema_revisions` table, including
-checksums, state, step progress, and timestamps. Because the runtime Controller
-and `/readyz` do not re-evaluate migration receipts, a restored database is
+checksums, state, step progress, and timestamps. The runtime Controller and
+`/readyz` do not re-evaluate migration receipts, so a restored database is
 admitted only when the matching build's owner migration run validates it and
 confirms there are no unknown epochs, revisions, checksums, or schema drift. On
 a restored database, owner migration runs only supported forward SQL without
-replaying `schema.sql`, whereas a fresh initialization records its actual
-baseline execution. Checkpoint upgrades leave backend-specific journal histories:
+replaying `schema.sql`. A fresh initialization records its actual baseline
+execution. Checkpoint upgrades leave backend-specific journal histories:
 MySQL retains the epoch-1 receipt alongside the verified transition and cleanup
 receipts in the same table, while PostgreSQL deletes the epoch-1 row inside the
 transition transaction and leaves a single epoch-2 / revision-0 receipt. Freshly
@@ -156,8 +161,8 @@ backup does not allow adopting or force-cleaning the schema. Likewise, any
 PostgreSQL or MySQL instance that already contains user tables or data without a
 trusted receipt is rejected outright instead of being initialized in place.
 Rolling back across a schema change requires restoring a compatible backup paired
-with the matching binary, as reverse SQL migrations are never run against an
-upgraded database.
+with the matching binary, because reverse SQL migrations are never run against
+an upgraded database.
 
 When a MySQL migration artifact is interrupted, normal migration runs will
 refuse to proceed. Inside a controlled `test` or `development` recovery
@@ -169,14 +174,14 @@ revision zero targets the previous-checkpoint transition). Once reviewed, pass
 that value to `--mode repair --repair-checksum <checksum>`. An interrupted fresh
 installation must finish recovery against its original schema bytes before any
 newer upgrade artifacts are applied. During repair, data changes and journal
-progress commit together in a single InnoDB transaction, while DDL steps accept
+progress commit together in a single InnoDB transaction. DDL steps accept
 only pinned before-and-after schema fingerprints (including cleanup DROP steps,
-which follow the same protocol); any unexpected objects or partial
+which follow the same protocol). Any unexpected objects or partial
 postconditions require manual inspection.
 
-Because `ocserv-db-foundation` is experimental and refuses to run outside `test`
-or `development`, those repair flags are not a production recovery path, and
-this guide defines no in-place production schema repair. At runtime, the
+`ocserv-db-foundation` is experimental and refuses to run outside `test` or
+`development`, so those repair flags are not a production recovery path. This
+guide defines no in-place production schema repair. At runtime, the
 application database account can read receipts but lacks permission to modify the
 journal or run arbitrary DDL. Never manually update `schema_revisions` to mark
 in-flight work as verified. Legacy manifest or snapshot repair modes and their

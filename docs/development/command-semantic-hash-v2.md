@@ -19,7 +19,7 @@ ASCII("ocservia.command.semantic-hash.v2") || 0x00
 Here `node_id` is the 16-byte raw UUID, `authorization_revision` is the nonzero
 epoch from the verified `SessionGrantV1`, and all integer fields use unsigned
 big-endian encoding. Aside from `ConfigPlan`, payload kind numbers and payload
-encodings match v1, with the addition of `CompleteConfigPlan` (129) and
+encodings match v1. Version 2 adds `CompleteConfigPlan` (129) and
 `CompleteConfigApply` (130), which exist only in v2 and are rejected under v1.
 Their canonical layouts live in the Go `semanticpayload` package and the Rust
 `command-authorization` crate, verified against
@@ -41,11 +41,11 @@ against which the plan was built. `ConfigApply` continues to bind its 32-byte
 candidate hash, 32-byte expected current hash, and unsigned 64-bit desired
 effect revision.
 
-The Controller issues only v2, but both the Agent and privd recompute
-whichever supported version a command carries, and the Agent validates the
-digest before recording acceptance in its journal. Stored commands replay only
-under their original hash version, command results preserve that exact version,
-and backend stores validate v2 explicitly without an unknown-version fallback.
+The Controller issues only v2. Both the Agent and privd recompute whichever
+supported version a command carries, and the Agent validates the digest before
+recording acceptance in its journal. Stored commands replay only under their
+original hash version, command results preserve that exact version, and backend
+stores validate v2 explicitly without an unknown-version fallback.
 
 Cross-language Go and Rust test vectors for `ConfigPlan` live in
 `testdata/semantic-payload-hash-v2.json`, and `AgentUpgrade` vectors live in

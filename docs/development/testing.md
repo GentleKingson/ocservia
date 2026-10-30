@@ -4,7 +4,7 @@ Pick the smallest validation target that covers the code or documentation you
 touched, and run compilation, linters, static checks, and tests inside an
 authorized, task-isolated environment that has the required dependencies. If
 that environment is unavailable, report which checks were blocked. GitHub
-Actions remains authoritative for the pull request commit itself; local test
+Actions remains authoritative for the pull request commit itself, and local test
 runs do not substitute for CI results.
 
 ## Choose the validation scope
@@ -31,13 +31,15 @@ and checks a small set of bootstrap text rules (the README reference to
 `docs/getting-started/production.md` and the absence of `| bash -s` across
 three entry pages). For agent instructions, the script checks that `AGENTS.md`
 exists, that `CLAUDE.md` imports it, and that relative links and heading
-anchors inside `AGENTS.md` resolve. Links or anchors in other files, along with
-SQL syntax, authentication modes, database support claims, and other prose
-facts, are not checked by `docs-check.sh`. `make policy-check` separately
-rejects tracked local implementation-control paths and private disclosures. In
-Basic CI, the `docs` job runs `docs-check.sh` on its own without `policy-check`
-or `git diff --check`. If you edit executable command examples in the docs,
-validate them in an authorized isolated environment.
+anchors inside `AGENTS.md` resolve. `docs-check.sh` does not check links or
+anchors in other files, SQL syntax, authentication modes, database support
+claims, or other prose facts.
+
+`make policy-check` separately rejects tracked local implementation-control
+paths and private disclosures. In Basic CI, the `docs` job runs `docs-check.sh`
+on its own without `policy-check` or `git diff --check`. If you edit executable
+command examples in the docs, validate them in an authorized isolated
+environment.
 
 When setting up a workspace for the first time, run the supported bootstrap
 profile that matches your target check and host platform; tool versions come
@@ -46,8 +48,9 @@ which is unnecessary for most single-module edits and is not supported on every
 architecture (consult
 [Linux ARM64 dependencies and supported profiles](#linux-arm64-go-validation)
 before bootstrapping a Linux ARM64 host). Once an environment is prepared,
-reuse it across changes instead of reinstalling tools on each edit. On a
-supported macOS arm64 or Linux x86-64 machine, `make bootstrap` requires
+reuse it across changes instead of reinstalling tools on each edit.
+
+On a supported macOS arm64 or Linux x86-64 machine, `make bootstrap` requires
 `curl`, `tar`, `unzip`, `xz`, Java 17, `jq`, and ShellCheck on the host; it
 reads runtime and code-generator versions from
 [`toolchains.lock`](../../toolchains.lock) and verifies every downloaded
@@ -57,15 +60,18 @@ For day-to-day work inside a single module, use `make test-go`,
 `make test-rust`, or `make test-web`. `make test-go` runs
 `go test ./...` inside `control-plane` alone, skipping the `signer` module as
 well as `gofmt`, `go vet`, `-count=1`, and race runs.
+
 `make go-check` (`scripts/go-check.sh`, which defaults to mode `full`) covers
 both `control-plane` and `signer` with `gofmt`, `go vet`, `go test -count=1`,
 and (except in `standard` mode) `go test -race`, using a private `TMPDIR` under
 `.cache/` because the signer store refuses state directories beneath a group-
 or world-writable parent such as `/tmp`. Basic CI invokes
-`go-check.sh standard` without the race detector. The top-level `make test`
-target (`scripts/test.sh`) runs `control-plane` Go tests, Rust workspace tests,
-and Web `npm test` without covering signer, linters, or race runs, so module
-targets give faster feedback during local iteration.
+`go-check.sh standard` without the race detector.
+
+The top-level `make test` target (`scripts/test.sh`) runs `control-plane` Go
+tests, Rust workspace tests, and Web `npm test` without covering signer,
+linters, or race runs, so module targets give faster feedback during local
+iteration.
 
 ## Choose a broader check when needed
 
@@ -202,10 +208,12 @@ consistency self-tests, `security-check.sh` (Gitleaks), `license-check.sh`, the
 generated-code checks, and the P1 harness bounds self-test, deduplicating the
 vet, Clippy, and Web format/lint/typecheck passes so each runs once.
 Running standalone `make lint` still executes all lint steps, though its
-`go vet` pass covers only `control-plane`. `make verify` does not
-start database containers or run `make integration`, `make e2e`, the CI
-router/selector/bootstrap self-tests, the installer or release self-tests, or
-manual acceptance harnesses, and it is distinct from Basic CI.
+`go vet` pass covers only `control-plane`.
+
+`make verify` does not start database containers or run `make integration`,
+`make e2e`, the CI router/selector/bootstrap self-tests, the installer or
+release self-tests, or manual acceptance harnesses. It is distinct from Basic
+CI.
 
 In `scripts/web-check.sh`, the script builds the generated API client once and
 then runs `npm --ignore-scripts run lint` and `npx --no-install vue-tsc --noEmit`
@@ -213,7 +221,7 @@ from `web` (the hook override applies only to that lint invocation; running
 `npm run lint` or `npm run typecheck` directly still builds the generated
 client first). Locally, `make web-check` uses `full` mode, which adds the
 Playwright Chromium browser authentication suite
-(`web/test/run-auth-browser.mjs`), whereas Basic CI runs `basic` mode.
+(`web/test/run-auth-browser.mjs`). Basic CI runs `basic` mode.
 
 For subsystem-specific and integration checks, pick the entrypoint that matches
 the behavior under test:
@@ -230,8 +238,8 @@ the behavior under test:
   (splitting MySQL across three `DATABASE_SHARD` legs). Both CI profiles also
   run `database-artifact-policy.sh` and `database-<engine>-snapshot.sh check`
   to compare current SQL against the fixed v1.2.0 checkpoint, which the local
-  smoke commands above do not invoke. Because the MySQL crash and rejection
-  cases run only in Full, a passing Quick MySQL run does not cover them.
+  smoke commands above do not invoke. The MySQL crash and rejection cases
+  run only in Full, so a passing Quick MySQL run does not cover them.
 - For full database migrations and failure scenarios, `make database-integration`
   calls `scripts/database-integration.sh` against PostgreSQL (`PG_MAJOR=all`
   and `18` both target PostgreSQL 18), while MySQL uses
@@ -321,9 +329,8 @@ last of which installs pinned Node and npm for native Business configuration
 helpers). Requesting any other profile on Linux ARM64 (such as `all`, `native`,
 Web, quality, or combined security) fails up front because sccache and
 quality-tool binary mappings are not provided for that architecture. Linux
-AMD64 and Darwin ARM64 retain their full profile mappings, though running the
-ARM64 Go procedure below does not validate those platforms or execute Rust
-acceptance.
+AMD64 and Darwin ARM64 retain their full profile mappings. Running the ARM64 Go
+procedure below does not validate those platforms or execute Rust acceptance.
 
 When you run `scripts/bootstrap.sh go-test` on Linux ARM64, the script fetches
 `go<VERSION>.linux-arm64.tar.gz` for the version locked in `toolchains.lock`
@@ -343,9 +350,9 @@ at the front of `PATH`, and directs Go caches to
 `.cache/go-build`, `.cache/gopath`, and `.cache/go-mod`, with downloaded
 archives stored in `.cache/downloads`. It never falls back to a system Go
 installation, downloads Go toolchains on the fly, touches `/usr/local/go`, or
-edits your shell profile. While bootstrap checks that host jq is
-present, it does not check for Docker, Ruby, or a C compiler, so a
-passing bootstrap alone does not mean the host is ready for every test suite.
+edits your shell profile. Bootstrap checks that host jq is present but does not
+check for Docker, Ruby, or a C compiler, so a passing bootstrap alone does not
+mean the host is ready for every test suite.
 
 ### Dependencies by entrypoint
 
@@ -380,11 +387,11 @@ For database runs, the scripts spin up disposable loopback-bound containers
 with generated test-only owner and runtime credentials; never pass production
 credentials or print DSNs to logs. If you invoke the `database-*` required-test
 groups directly, you must still set both `OCSERV_TEST_DATABASE_URL` and
-`OCSERV_TEST_OWNER_DATABASE_URL`, whereas the MySQL wrapper scripts populate
-their `PR02_*` environment variables automatically. Only the required-case
-summaries count as acceptance evidence (synthetic selector JSON does not), and
-passing the PostgreSQL 18 and MySQL smoke suites below does not certify the
-full database scope or overall release readiness.
+`OCSERV_TEST_OWNER_DATABASE_URL`. The MySQL wrapper scripts populate their
+`PR02_*` environment variables automatically. Only the required-case summaries
+count as acceptance evidence (synthetic selector JSON does not). Passing the
+PostgreSQL 18 and MySQL smoke suites below does not certify the full database
+scope or overall release readiness.
 
 ### Native preparation and execution
 
@@ -417,9 +424,9 @@ go env GOVERSION GOHOSTOS GOHOSTARCH GOOS GOARCH CGO_ENABLED CC
 If the host already has Ruby, a working C toolchain for race checks, and Docker,
 you can run the selector and bootstrap profile self-tests, race checks, and
 database smoke scripts directly on the host. When any of those host packages
-are missing, use the isolated container environment below, since passing native
-bootstrap and ordinary Go checks does not verify that Ruby,
-race, or database prerequisites are present.
+are missing, use the isolated container environment below. Passing native
+bootstrap and ordinary Go checks does not verify that Ruby, race, or database
+prerequisites are present.
 
 ### Isolated ARM64 execution environment
 
@@ -428,12 +435,12 @@ ARM64 helper container and mount the workspace into it. This environment was
 validated against the native toolchain when written; rerun it for each
 candidate and retain that candidate's own evidence. The container
 image deliberately omits Go so that every command inside the container runs the
-same native `.tools/go/bin/go` binary installed on the host. System
-packages stay confined to this disposable image: the Debian base image is
-pinned by SHA-256 digest while APT resolves maintained Bookworm packages at
-build time, so save the build log, image ID, and installed package versions
-with the candidate's validation evidence instead of assuming `toolchains.lock`
-freezes system-package versions.
+same native `.tools/go/bin/go` binary installed on the host.
+System packages stay confined to this disposable image. The Debian base image is
+pinned by SHA-256 digest, but APT resolves maintained Bookworm packages at build
+time. Save the build log, image ID, and installed package versions with the
+candidate's validation evidence instead of assuming `toolchains.lock` freezes
+system-package versions.
 
 ```bash
 image="ocservia-go-validation:$(basename "$task")"
@@ -469,15 +476,17 @@ Run the entire validation sequence inside a single `--init` container so the
 init process reaps child processes and shell exports (including the `GOWORK=off`
 fixtures) stay intact, instead of wrapping `go` in a per-invocation container
 script. If you need to pass outer environment variables into the run, pass them
-with explicit Docker `--env` flags. Sharing the host network lets the container
-reach the loopback database ports started by the scripts, and mounting the task
-directory at the identical absolute path on both host and container ensures that
-temporary files and TLS fixtures are visible to the local host Docker daemon (a
-remote Docker context will not work because it cannot see host paths). Docker
-socket access grants elevated host privileges and is appropriate only within a
-trusted, nonproduction validation environment. Matching the host and container
-UID:GID keeps file ownership consistent across the bind mount without altering
-runtime permission checks, SQL assertions, timeouts, or race flags.
+with explicit Docker `--env` flags.
+
+Sharing the host network lets the container reach the loopback database ports
+started by the scripts. Mounting the task directory at the identical absolute
+path on both host and container makes temporary files and TLS fixtures visible
+to the local host Docker daemon. A remote Docker context will not work because
+it cannot see host paths. Docker socket access grants elevated host privileges
+and is appropriate only within a trusted, nonproduction validation environment.
+Matching the host and container UID:GID keeps file ownership consistent across
+the bind mount without altering runtime permission checks, SQL assertions,
+timeouts, or race flags.
 
 Record the command exit codes and logs alongside the candidate SHA. Each test
 script tears down its own temporary fixtures and database containers, and
@@ -498,10 +507,9 @@ regardless of newer commits on main.
 
 In `scripts/required-go-tests.txt`, both the `postgres-snapshot` and
 `mysql-snapshot` test inventories require live database execution where every
-listed test runs and passes with zero skips. While `postgres-snapshot` runs in
-both PostgreSQL smoke and Full CI, `mysql-snapshot` belongs to
-`backend-mysql-full` (`mysql-cutover` shard) and runs only in Full CI. As a
-result, any change to MySQL `schema.sql`, `upgrade.sql`, or the migration
+listed test runs and passes with zero skips. `postgres-snapshot` runs in both
+PostgreSQL smoke and Full CI. `mysql-snapshot` belongs to `backend-mysql-full`
+(`mysql-cutover` shard) and runs only in Full CI. As a result, any change to MySQL `schema.sql`, `upgrade.sql`, or the migration
 runner requires a Full run before merge. Together, the snapshot suites verify
 schema, ACL, and seed equivalence between a fresh install and an upgrade from
 the v1.2.0 checkpoint, forward-only upgrades, zero-mutation rejection of
@@ -520,9 +528,10 @@ logical MySQL backup/restore smoke scripts
 (`i18-external-postgres-backup-restore-smoke.sh` and
 `i18-mysql-backup-restore-smoke.sh`), confirming that migration receipts
 survive backup, restore, and repeated migration and that restored PostgreSQL
-instances enforce runtime read access and owner-only DDL boundaries. Across
-these suites, PostgreSQL covers cleanup rollback, concurrent migration locking,
-and runtime privilege separation, while MySQL Full covers every cleanup DDL
+instances enforce runtime read access and owner-only DDL boundaries.
+
+Across these suites, PostgreSQL covers cleanup rollback, concurrent migration
+locking, and runtime privilege separation. MySQL Full covers every cleanup DDL
 interruption point, exact repair, refusal of foreign schema replacements, and
 data rollback. Audit log authenticity, checkpointed-tail transitions, and
 compaction remain required business checks following the removal of legacy
@@ -570,8 +579,8 @@ channel is free of credentials; document this boundary alongside saved test
 results. Record the candidate commit SHA, script digest, container image
 digest, exit status, and JSON report for each execution without reusing logs
 from an earlier commit. The script removes its task-owned container, network,
-and temporary directory on exit, and because this privileged regression is
-manual-only, a passing workspace CI run does not mean it was executed.
+and temporary directory on exit. This privileged regression is manual-only, so a
+passing workspace CI run does not mean it was executed.
 
 ## Authoritative references
 

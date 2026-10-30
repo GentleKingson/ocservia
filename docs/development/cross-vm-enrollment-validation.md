@@ -17,7 +17,7 @@ no new Release Check gate.
    `tag:ocservia-ci-relay`, owned only by authorized administrators. Configure
    two separate OIDC federated identities, with writable `auth_keys` scope and
    only their respective tag. No persistent auth key or OAuth secret is needed.
-2. For **both** identities, use issuer
+2. For both identities, use issuer
    `https://token.actions.githubusercontent.com`, and the exact subject:
    `repo:GentleKingson@72605370/ocservia@1319465232:environment:cross-vm-test-relay`.
    The repository's OIDC customization API currently reports `use_default=true`,
@@ -113,12 +113,12 @@ the fixed hostname locally; a test-only Compose overlay also maps it inside
 transportd and endpoint bootstrap. Production Compose networks are unchanged.
 
 Outside the controlled recovery interval, the Relay job checks its container and verified HTTPS health,
-until **both full peer jobs complete**, including cleanup and post steps. Failed
+until both full peer jobs complete, including cleanup and post steps. Failed
 peers fail qualification, and waits have deadlines. The Controller's actual
 transportd container uses an opt-in image target containing the existing iroh
 probe. Its real authenticated connection and typed wrong-token denial must pass
 before controller-ready is published. The Agent checks the correct CA and token,
-requires curl error **60** for the unrelated CA (timeouts/DNS errors fail), and
+requires curl error 60 for the unrelated CA (timeouts/DNS errors fail), and
 requires typed `ServerDeniedAuth` for the wrong token before real enrollment.
 TLS/hostname verification remains enabled everywhere.
 
@@ -132,14 +132,15 @@ Tailscale transport (direct/DERP/peer relay) is separate from application iroh
 Relay use. `tailscale ping` is not used as enrollment evidence.
 
 Cleanup steps run with `always()`: Controller services/volumes/networks, Agent
-native units/package/process/build/private files, Relay container/image/TLS/token files, local hosts
-mapping, Tailscale logout, daemon shutdown and in-memory credentials. Explicit
-cleanup failures fail their job, even though the upstream Action's post hook
-only warns on cleanup errors. That post hook may warn that an explicitly stopped
-daemon is absent; the checked cleanup step owns the result. Runner cancellation
-or loss remains best effort; ephemeral server removal is expected by Tailscale
-but always reported `SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED` without
-independent API evidence.
+native units/package/process/build/private files, Relay
+container/image/TLS/token files, local hosts mapping, Tailscale logout, daemon
+shutdown and in-memory credentials. Explicit cleanup failures fail their job,
+even though the upstream Action's post hook only warns on cleanup errors. That
+post hook may warn that an explicitly stopped daemon is absent; the checked
+cleanup step owns the result. Runner cancellation or loss remains best effort.
+Tailscale expects ephemeral server removal, but the run always reports
+`SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED` without independent API
+evidence.
 
 The Controller registers the root attestation key before confirming native
 startup to the Node: registration advances authorization, so the first Agent
@@ -238,10 +239,10 @@ These manual scripts must also run only on explicitly authorized test hosts.
    unredacted logs private.
 
 Each `outbox` path above is relative to that role's working directory under
-`RUNNER_TEMP`, whereas the directory arguments passed to the scripts point to
-the copies placed on the receiving VM. Transfer those directories over a secure
-channel such as SSH or SCP; the scripts do not automate file exchange, artifact
-uploads, retention, or workflow cleanup.
+`RUNNER_TEMP`. The directory arguments passed to the scripts point to the copies
+placed on the receiving VM. Transfer those directories over a secure channel
+such as SSH or SCP. The scripts do not automate file exchange, artifact uploads,
+retention, or workflow cleanup.
 
 The repository retains `scripts/real-e2e-artifact.sh` for GitHub Actions
 artifact operations. Its download mode expects a live workflow run with
@@ -284,8 +285,9 @@ make real-e2e-check
 ```
 
 This target runs `bash -n` on `real-e2e-controller.sh`, `real-e2e-node.sh`,
-`real-e2e-artifact.sh` and `real-e2e-hosted.sh`. It does not execute `scripts/test-real-e2e-artifact.sh`,
-start any VM, container, or Agent, or verify that enrollment works.
+`real-e2e-artifact.sh` and `real-e2e-hosted.sh`. It does not execute
+`scripts/test-real-e2e-artifact.sh`, start any VM, container, or Agent, or
+verify that enrollment works.
 
 ## Nodes installation wizard acceptance
 
@@ -331,7 +333,7 @@ cookies and keys stay out of the allowlisted evidence and rendezvous artifacts
 (except the encrypted token). All existing VM, Tailnet and artifact cleanup steps
 must succeed before the final verdict emits `NODE_INSTALL_E2E=PASS`.
 
-**Release boundary:** the same checked-out SHA supplies a locally built v0.0.0
+Release boundary: the same checked-out SHA supplies a locally built v0.0.0
 native package, preinstalled before the production installer runs. The UI Release
 field and installer version are v0.0.0. This exercises real configuration,
 installation convergence and registration, not published asset retrieval:

@@ -6,16 +6,16 @@ The repository maintains two Stage-0 bootstrap scripts:
 - `deploy/bootstrap/install-node`
 
 When an operator hosts the public bootstrap endpoints, `install-node` is served
-byte-for-byte from Git at `https://get.ocservia.example/install-node`, and
+byte-for-byte from Git at `https://get.ocservia.example/install-node`.
 `install-controller` is served byte-for-byte from the `install-controller`
 asset of the latest stable Release at
-`https://get.ocservia.example/install-controller` (that Release asset matches
+`https://get.ocservia.example/install-controller`. That Release asset matches
 the Git source except for its stamped default version; see
-[Quick mode](#quick-mode)). The public first-install guide also expects the
+[Quick mode](#quick-mode). The public first-install guide also expects the
 non-executable configuration template `install.env.example` to be served
-byte-for-byte at `https://get.ocservia.example/install.env.example`. Because
-external static-hosting infrastructure lives outside this repository, those
-example endpoints are active only when deployed by an operator.
+byte-for-byte at `https://get.ocservia.example/install.env.example`. External
+static-hosting infrastructure lives outside this repository, so those example
+endpoints are active only when deployed by an operator.
 
 ## Hosting requirements
 
@@ -63,8 +63,8 @@ During the handoff, Stage-0 fetches the Stage-1 script over HTTPS with TLS
 verification enabled, rejects download errors or empty responses, and runs the
 downloaded file from a private temporary directory. Download authenticity in
 this phase relies on the HTTPS endpoint and its PKI without separate release
-keys, fingerprints, signed checksum manifests, or detached signatures, and
-Stage-0 imposes no additional OpenSSL version requirement.
+keys, fingerprints, signed checksum manifests, or detached signatures. Stage-0
+imposes no additional OpenSSL version requirement.
 
 Operators should download Stage-0 locally, inspect its contents, and invoke it
 with an explicit version tag. Never resolve the version dynamically from
@@ -107,14 +107,14 @@ to calling automation:
 Beyond `--version`, Stage-0 accepts only `--root-lifecycle` and, on the
 Controller entrypoint, `--check` and the [Quick mode](#quick-mode) flags. Pass
 all configuration and secrets through the environment or protected host paths
-consumed by Stage-1, as Stage-0 neither parses nor prints secret material. On a
+consumed by Stage-1. Stage-0 neither parses nor prints secret material. On a
 managed node, automated bootstrap stops at `ENROLLED_LOCAL` with the node
 pending approval on the Controller, leaving approval and service activation as
 explicit post-enrollment steps.
 
 Stage-0 is only a first-install bootstrapper. Subsequent Controller upgrades
-and rollbacks run through `controller.sh` and its protected lifecycle state,
-while managed-node upgrades and removals run through the authorized upgrader or
+and rollbacks run through `controller.sh` and its protected lifecycle state.
+Managed-node upgrades and removals run through the authorized upgrader or
 native package manager. Persist long-lived settings in `install.env` or the
 installed service configuration so they do not depend on re-running the
 bootstrap wrapper with CLI flags.
@@ -164,18 +164,23 @@ when invoked with `--check`):
   ports.
 
 After the preflight succeeds, Stage-1 invokes the release's
-`deploy/production/quick-install.sh`, which prepares the host, generates
-protected secret material via `quick-materials.sh`, writes
-`/etc/ocservia/install.env` (configured for Integrated mode, bundled
-PostgreSQL, ACME TLS, and Local authentication), runs
-`install.sh --root-lifecycle`, provisions the management workspace, and creates
-the initial Local administrators `initial-admin` and `initial-approver`. Their
-generated passwords are written only to root-owned files under
-`/root/ocservia-initial-credentials`; distribute the two accounts to different
+`deploy/production/quick-install.sh`, which:
+
+- Prepares the host.
+- Generates protected secret material via `quick-materials.sh`.
+- Writes `/etc/ocservia/install.env` (configured for Integrated mode, bundled
+  PostgreSQL, ACME TLS, and Local authentication).
+- Runs `install.sh --root-lifecycle`.
+- Provisions the management workspace.
+- Creates the initial Local administrators `initial-admin` and
+  `initial-approver`.
+
+The generated passwords are written only to root-owned files under
+`/root/ocservia-initial-credentials`. Distribute the two accounts to different
 operators and change both passwords after first login.
 
-Re-running the same Quick command resumes an interrupted Quick installation,
-whereas running it against an existing non-Quick `/etc/ocservia/install.env`,
+Re-running the same Quick command resumes an interrupted Quick installation.
+Running it against an existing non-Quick `/etc/ocservia/install.env`,
 mismatched domain or email arguments, or an already-running Controller
-deployment fails closed (use the manual installation workflow or
-`controller.sh upgrade` for those hosts).
+deployment fails closed. Use the manual installation workflow or
+`controller.sh upgrade` for those hosts.

@@ -9,8 +9,8 @@ and the shared golden test vectors.
 Protobuf binary serialization is not canonical across languages, runtimes, or
 schema revisions: field ordering and unknown-field retention can vary, and a
 runtime's "deterministic" marshal option only stabilizes output within a single
-binary build. Because re-serializing Protobuf messages can produce different
-byte sequences between Go and Rust or after a schema extension, hashing wire
+binary build. Re-serializing Protobuf messages can produce different byte
+sequences between Go and Rust or after a schema extension, so hashing wire
 bytes cannot provide a durable command identity.
 
 Instead, the semantic payload hash operates over a fixed, hand-specified
@@ -139,12 +139,12 @@ canonical_payload = candidate_hash
 ```
 
 `candidate_hash` is a 32-byte digest verified independently against the bounded
-configuration candidate prior to validation. Because the candidate content is
-immutable for a given digest, delivery metadata and the temporary staging
-filename are omitted from the hash. Version 1 does not bind the `ConfigPlan`
-expected desired-state revision; the Controller now signs all newly issued
-commands with semantic hash v2, while keeping v1 frozen and accepted by the
-Agent, privd, and Controller result path for historical command records.
+configuration candidate prior to validation. The candidate content is immutable
+for a given digest, so delivery metadata and the temporary staging filename are
+omitted from the hash. Version 1 does not bind the `ConfigPlan` expected
+desired-state revision. The Controller now signs all newly issued commands with
+semantic hash v2, while v1 stays frozen and accepted by the Agent, privd, and
+Controller result path for historical command records.
 
 ### IpBanRemove
 
