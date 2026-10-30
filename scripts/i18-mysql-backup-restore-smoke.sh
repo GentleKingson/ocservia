@@ -157,7 +157,7 @@ fi
 # A checksum-valid dump with dirty provenance must fail the state summary.
 mkdir "${work}/schema-invalid"
 cp -a "${backup_dir}/." "${work}/schema-invalid/"
-printf "\nUSE ocservia; UPDATE schema_revisions SET state='running',verified_at=NULL WHERE epoch=2 AND revision=3;\n" >>"${work}/schema-invalid/database.sql"
+printf "\nUSE ocservia; UPDATE schema_revisions SET state='running',verified_at=NULL WHERE epoch=2 AND revision=1;\n" >>"${work}/schema-invalid/database.sql"
 (cd "${work}/schema-invalid" && sha256sum database.sql metadata >SHA256SUMS)
 docker exec "${target_container}" "${CLIENT}" -uroot -p"${password}" -e 'DROP DATABASE ocservia'
 set +e

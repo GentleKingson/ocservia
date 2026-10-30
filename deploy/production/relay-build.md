@@ -20,6 +20,7 @@ Both production locks additionally update `rustls-webpki` to 0.103.16,
 `webpki-roots` to 1.0.10 and `webpki-root-certs` to 1.0.10 for
 RUSTSEC-2026-0382, RUSTSEC-2026-0381 and RUSTSEC-2026-0383. These
 certificate distrust updates were published after the upstream archive.
+Both production locks also select `tokio` 1.53.3 for RUSTSEC-2026-0386.
 The vendor test lock remains the original archive graph and is not used for
 production builds.
 
