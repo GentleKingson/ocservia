@@ -14,8 +14,8 @@ if [[ "${MODE}" == "full" ]]; then
   (cd "${ROOT}/control-plane" && go test ./internal/useroperations ./internal/api ./internal/api/useroperationshttp ./internal/api/httpx ./internal/telemetry -count=1)
 fi
 
-grep -Fq 'b8f59026c4d879f40c1da43dc00d97e34f9790bc' "${ROOT}/docs/upstream/v4.9-post1.md"
-grep -Fq '4d25478580d899b77460bdf0cf0a590cfdd26030' "${ROOT}/docs/upstream/v4.9-post1.md"
+grep -Fq 'b8f59026c4d879f40c1da43dc00d97e34f9790bc' "${ROOT}/THIRD_PARTY_NOTICES.md"
+grep -Fq '4d25478580d899b77460bdf0cf0a590cfdd26030' "${ROOT}/THIRD_PARTY_NOTICES.md"
 grep -Fq 'mmtaee/ocserv-dashboard' "${ROOT}/THIRD_PARTY_NOTICES.md"
 grep -Fq '/user-batches' "${ROOT}/openapi/openapi.yaml"
 grep -Fq 'DefaultGlobalConcurrency = 50' "${ROOT}/control-plane/internal/useroperations/service.go"

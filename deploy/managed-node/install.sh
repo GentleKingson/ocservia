@@ -80,7 +80,7 @@
 #   # Without BOOTSTRAP_TOKEN_SOURCE, this stops at ENROLLMENT_READY instead;
 #   # create an endpoint-bound token for the printed EndpointID, install it as
 #   # /etc/ocservia-agent/enrollment-token root:ocserv-agent 0640, and rerun.
-#   # approve the node (docs/how-to/enroll-node.md#approve-the-node), then:
+#   # approve the node (docs/operations/agent-lifecycle.md#approve-the-node), then:
 #   sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
 #   deploy/managed-node/install.sh --version vX.Y.Z   # -> SERVICES_ACTIVE (read-only verification)
 #
@@ -867,22 +867,22 @@ validate_enrolled_identity() {
   local file output endpoint_id enrolled_endpoint_id
   for file in "${IDENTITY_DIR}/endpoint.key" "${IDENTITY_DIR}/controller.endpoint"; do
     if ! path_exists "${file}" || ! priv test -f "${file}" || priv test -L "${file}"; then
-      fail "the enrolled node is missing its persistent identity file ${file}; regenerating the identity would break the Controller enrollment binding — restore ${IDENTITY_DIR} from protected backups or re-enroll as a new node deliberately (docs/how-to/enroll-node.md)"
+      fail "the enrolled node is missing its persistent identity file ${file}; regenerating the identity would break the Controller enrollment binding — restore ${IDENTITY_DIR} from protected backups or re-enroll as a new node deliberately (docs/operations/agent-lifecycle.md#enroll-the-node)"
     fi
   done
   enrolled_endpoint_id="$(priv sed -n 's/^AGENT_ENDPOINT_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
   [[ "${enrolled_endpoint_id}" =~ ^[0-9a-f]{64}$ ]] ||
-    fail "the enrolled ${AGENT_ENV_FILE} has no valid AGENT_ENDPOINT_ID enrollment binding; resolve it deliberately instead of trusting an unbound enrolled identity (docs/how-to/enroll-node.md)"
+    fail "the enrolled ${AGENT_ENV_FILE} has no valid AGENT_ENDPOINT_ID enrollment binding; resolve it deliberately instead of trusting an unbound enrolled identity (docs/operations/agent-lifecycle.md#enroll-the-node)"
   output="$(as_agent "${AGENT_BINARY}" \
     --identity-dir "${IDENTITY_DIR}" \
     --controller "${CONTROLLER_ENDPOINT_ID}" \
     --prepare-enrollment)" ||
-    fail "the enrolled persistent identity in ${IDENTITY_DIR} did not pass the Agent identity validation; the bootstrap never regenerates an enrolled identity — restore the identity material or re-enroll deliberately (docs/how-to/enroll-node.md)"
+    fail "the enrolled persistent identity in ${IDENTITY_DIR} did not pass the Agent identity validation; the bootstrap never regenerates an enrolled identity — restore the identity material or re-enroll deliberately (docs/operations/agent-lifecycle.md#enroll-the-node)"
   endpoint_id="$(printf '%s\n' "${output}" | awk 'NF {last=$0} END {print last}')"
   [[ "${endpoint_id}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "the Agent did not print a valid EndpointID while validating the enrolled identity"
   [[ "${endpoint_id}" == "${enrolled_endpoint_id}" ]] ||
-    fail "the enrolled identity now presents EndpointID ${endpoint_id} but the enrolled ${AGENT_ENV_FILE} pins ${enrolled_endpoint_id}; a replaced endpoint secret key cannot silently take the Controller enrollment binding — restore the identity material or re-enroll as a new node deliberately (docs/how-to/enroll-node.md)"
+    fail "the enrolled identity now presents EndpointID ${endpoint_id} but the enrolled ${AGENT_ENV_FILE} pins ${enrolled_endpoint_id}; a replaced endpoint secret key cannot silently take the Controller enrollment binding — restore the identity material or re-enroll as a new node deliberately (docs/operations/agent-lifecycle.md#enroll-the-node)"
   echo "enrolled persistent identity validated; EndpointID: ${endpoint_id}"
 }
 
@@ -892,7 +892,7 @@ validate_enrolled_relays() {
   # relays; a validation-only rerun never writes it.
   local metadata existing_a existing_b
   if ! path_exists "${RELAYS_ENV_FILE}"; then
-    fail "the enrolled node is missing its relay configuration ${RELAYS_ENV_FILE}; restoring it is a deliberate recovery operation, not a bootstrap rerun (docs/getting-started/managed-node.md)"
+    fail "the enrolled node is missing its relay configuration ${RELAYS_ENV_FILE}; restoring it is a deliberate recovery operation, not a bootstrap rerun (docs/operations/agent-lifecycle.md#install-a-managed-node)"
   fi
   if ! priv test -f "${RELAYS_ENV_FILE}" || priv test -L "${RELAYS_ENV_FILE}"; then
     fail "the enrolled relay configuration ${RELAYS_ENV_FILE} is not a regular file"
@@ -1017,7 +1017,7 @@ prepare_identity() {
     --identity-dir "${IDENTITY_DIR}" \
     --controller "${CONTROLLER_ENDPOINT_ID}" \
     --prepare-enrollment)" ||
-    fail "the Agent could not prepare the persistent identity; a changed controller pin or replaced identity directory is a new trust decision (see docs/how-to/enroll-node.md)"
+    fail "the Agent could not prepare the persistent identity; a changed controller pin or replaced identity directory is a new trust decision (see docs/operations/agent-lifecycle.md#enroll-the-node)"
   ENDPOINT_ID="$(printf '%s\n' "${output}" | awk 'NF {last=$0} END {print last}')"
   [[ "${ENDPOINT_ID}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "the Agent did not print a valid EndpointID"
@@ -1054,7 +1054,7 @@ print_enrolled_local() {
   echo "NODE_ID: ${1}"
   echo "SERVICES: ${2:-NOT_OBSERVED}"
   print_controller_unobserved "${1}"
-  echo "next: verify approval in the Controller (docs/how-to/enroll-node.md#approve-the-node), then deliberately enable ocservia-privd.service and ocservia-agent.service; the bootstrap never initially starts or enables Agent/privd"
+  echo "next: verify approval in the Controller (docs/operations/agent-lifecycle.md#approve-the-node), then deliberately enable ocservia-privd.service and ocservia-agent.service; the bootstrap never initially starts or enables Agent/privd"
 }
 
 print_services_active() {
@@ -1110,7 +1110,7 @@ converge_enrollment() {
   fi
   if ! path_exists "${ENROLLMENT_TOKEN_FILE}"; then
     echo "ENROLLMENT_READY"
-    echo "next: create a short-lived one-time enrollment token with expected_endpoint_id=${ENDPOINT_ID} (docs/how-to/enroll-node.md), install it as ${ENROLLMENT_TOKEN_FILE} (root:ocserv-agent 0640), and ${rerun_instruction}"
+    echo "next: create a short-lived one-time enrollment token with expected_endpoint_id=${ENDPOINT_ID} (docs/operations/agent-lifecycle.md#enroll-the-node), install it as ${ENROLLMENT_TOKEN_FILE} (root:ocserv-agent 0640), and ${rerun_instruction}"
     return
   fi
   metadata="$(stat_string "${ENROLLMENT_TOKEN_FILE}")"
@@ -1134,7 +1134,7 @@ converge_enrollment() {
       if [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]]; then
         fail "enrollment failed or its response is unknown; preserve the original EndpointID, identity and bootstrap binding; rerun with the same bootstrap source to recover the committed result. Do not request a new token before checking the Controller"
       fi
-      fail "enrollment failed or its response is unknown; preserve the original EndpointID and token copy. Endpoint-bound tokens do not provide bootstrap replay recovery: first query the Controller by that EndpointID, then follow docs/how-to/enroll-node.md before creating any new authorization"
+      fail "enrollment failed or its response is unknown; preserve the original EndpointID and token copy. Endpoint-bound tokens do not provide bootstrap replay recovery: first query the Controller by that EndpointID, then follow docs/operations/agent-lifecycle.md#recover-an-uncertain-enrollment-response before creating any new authorization"
     }
   node_id="$(printf '%s\n' "${node_id}" | awk 'NF {last=$0} END {print last}')"
   is_final_node_id "${node_id}" ||

@@ -2,7 +2,7 @@
 
 Production deployments support three authentication modes: Local only, OIDC
 only, and Local + OIDC (OIDC is optional when Local authentication is enabled).
-Follow the standard [Controller installation](../getting-started/production.md)
+Follow the standard [Controller installation](production-deployment.md#install-the-controller)
 and [production secret permissions](production-deployment.md#production-secrets)
 for all three modes. The snippets below replace only the authentication section
 of `install.env`, leaving the database, TLS, relay, signer, backup, and release
@@ -369,15 +369,12 @@ a Quick host, because Quick reruns accept an already-initialized database.
      control-plane --bootstrap-local-admin
    ```
 
-   Both passwords must meet the Local new-password policy below; the secret
-   reader strips at most one trailing LF (and preceding CR) while preserving
-   all other whitespace and letter case. The command connects under the
-   application's database role and grants workspace-scoped `PlatformAdmin` to
-   the administrator and workspace-scoped `SecurityAdmin` to the approver in the
-   management workspace. It commits both identities, credentials, role
-   bindings, the completion marker, and audit events in a single transaction,
-   then exits without starting network listeners, background workers, or IdP
-   connections.
+   Both passwords must meet the Local new-password policy below. The command
+   connects under the application's database role and grants workspace-scoped
+   `PlatformAdmin` to the administrator and workspace-scoped `SecurityAdmin` to
+   the approver in the management workspace. The secret reader, the single
+   transaction and the exit behavior are described in
+   [Local initialization and lifecycle](../reference/stable-contracts.md#local-initialization-and-lifecycle).
 4. Once the command succeeds (`--rm` removes the container and its mounts),
    delete both temporary host password files according to your
    secret-management procedure and verify that both accounts can log in with
@@ -386,12 +383,9 @@ a Quick host, because Quick reruns accept an already-initialized database.
    grant `PlatformAdmin` on its own, and instead provides independent approval
    for the administrator's content-bound role grants and password resets.
 
-Any concurrent or subsequent bootstrap attempt is rejected, as is bootstrapping
-when a Local `SecurityAdmin` or `PlatformAdmin` already exists. Restarting the
-Controller never reads bootstrap password files or resets existing passwords,
-and disabling the initial administrator or resetting its password does not
-re-enable bootstrap. Always retain the initialization marker in backups, and
-never delete the marker or roll back its migration to recover an account.
+The bootstrap guarantees (repeat attempts, restarts, the initialization marker
+and backups) are in
+[Local initialization and lifecycle](../reference/stable-contracts.md#local-initialization-and-lifecycle).
 
 ### Database preparation
 
@@ -543,23 +537,14 @@ for that identity (including the current cookie), requiring the user to log in
 again. Failed current-password checks share the account's login failure
 backoff, returning `401` on invalid or stale credentials or an active cooldown
 and `400` on password-policy violations; OIDC and Break-glass sessions cannot
-call this endpoint. An administrator-initiated `:reset-password` call requires
-an independent, single-use `local_user.reset-password` approval passed via
-`X-Approval-ID` and leaves disabled accounts disabled.
+call this endpoint.
 
 ### Management protection and recovery
 
-The Controller refuses to disable an account (`409 Conflict`) if doing so would
-remove the last active Local `PlatformAdmin` or leave fewer than two distinct
-active Local identities holding workspace-wide approval authority in the fixed
-management workspace. Only active Local identities with valid Local credentials
-and workspace-wide bindings in that management workspace satisfy this invariant;
-bindings in other workspaces, narrower or historical bindings, OIDC accounts,
-and Break-glass credentials do not count toward Local recovery authority. The
-invariant check and the disable update execute in a single serialized
-transaction, so two administrators cannot concurrently disable one another. The
-API exposes no endpoint to delete role bindings or identities, and direct
-database administration remains an externally governed boundary.
+The Controller refuses with `409 Conflict` to disable an account if doing so
+would break the Local recovery authority. Which accounts count, and how the
+check is serialized, are in
+[Local initialization and lifecycle](../reference/stable-contracts.md#local-initialization-and-lifecycle).
 
 To retire a protected Local account, first create its replacement via the Local
 API, complete an independent elevated-role approval, and verify that the new
@@ -633,7 +618,7 @@ In production Compose deployments, the shipped Caddy gateway overwrites
 `X-Ocservia-Client-IP` with the client IP it observes: the direct TCP peer in
 Standalone mode, or the client address extracted from Edge's PROXY header in
 Integrated mode (accepted exclusively from Edge's dedicated address; see the
-[Integrated contract](../development/integrated-deployment-contract.md#network-and-trust)).
+[Integrated deployment](../architecture.md#integrated-deployment)).
 The Controller API trusts `X-Ocservia-Client-IP` only when the connection comes
 from a configured trusted proxy peer and always ignores client-supplied
 `X-Forwarded-For` headers. Never mark the entire shared application network as
@@ -657,7 +642,7 @@ responses via HTTP telemetry. Application rate limiting complements external
 DDoS mitigation and does not protect a compromised emergency credential.
 
 For gateway addresses and subnet overrides, see
-[deployment networking](production-deployment.md#authentication-request-budgets).
+[deployment networking](production-deployment.md#relay-and-networking).
 
 <a id="local-account-failure-backoff-r2"></a>
 ## Local account failure backoff
@@ -694,19 +679,15 @@ to return `429` with `Retry-After`. Only one 30-second verification lease is
 permitted per username at a time, so a legitimate login submitted concurrently
 with another attempt for the same username will also receive `401`.
 
-Database errors or corrupt password hashes do not increment the incorrect-password
-counter, and a valid password for a disabled identity still cannot establish a
-session. When `local_auth_attempts` reaches its 16,384-row capacity, requests
+When `local_auth_attempts` reaches its 16,384-row capacity, requests
 for untracked usernames fail closed with a generic `503` while already-tracked
 usernames retain their backoff state (live rows are never evicted to admit new
 keys); database or infrastructure failures likewise return `503`. Abandoned
-verification leases expire after at most 30 seconds, and administrative
-password resets or account disables clear the account's backoff row within the
-same transaction. Before replacing Local login instances, stop the affected
+verification leases expire after at most 30 seconds. Before replacing Local login instances, stop the affected
 instances, preserve the database backoff state, and verify authentication
 before returning to service (binary rollback does not clear database backoff
 rows). See
-[attempt completion and expiry](../development/identity-authorization-audit.md#attempt-completion-and-expiry)
+[identity, approval and audit](../reference/stable-contracts.md#identity-approval-and-audit)
 for request cancellation, lease fencing, and database-clock details.
 
 This mechanism bounds password-guessing throughput per account while keeping
@@ -798,35 +779,40 @@ rules follow the
 
 ## Local identity and sessions
 
-Local passwords are stored as Argon2id hashes under identities with
-`issuer=local`. Local and OIDC identities never merge automatically, even when
-their usernames or email addresses match, and neither self-registration nor
-automatic account linking is supported. These identities govern platform
-console and API access and are completely separate from VPN user accounts on
-managed nodes.
+The identity model, session revocation and Local user lifecycle rules are in
+[Local authentication core](../reference/stable-contracts.md#local-authentication-core)
+and [Local initialization and lifecycle](../reference/stable-contracts.md#local-initialization-and-lifecycle).
+The endpoints are listed below.
 
-Administrators manage Local users through the existing `local_user.manage` RBAC
-permission within the fixed management workspace. Creating a Local user grants
-no roles, and resetting a user's password requires the standard independent
-approval workflow; see
-[identity administration](../development/identity-authorization-audit.md#local-initialization-and-lifecycle-r4)
-for endpoint and permission specifications.
+### Local user lifecycle endpoints
 
-Disabling a Local user or resetting its password revokes all active sessions
-for that identity in the same database transaction. A disabled user cannot
-authenticate, and resetting a password does not re-enable a disabled account.
-Once the transaction commits, any concurrent login attempt in flight cannot
-issue a usable stale session, although already-authorized requests that are
-currently executing are not retroactively aborted.
+Lifecycle endpoints live under `/api/v1` and use `Content-Type: application/json`:
+
+| Endpoint | Body | Success |
+| --- | --- | --- |
+| `POST /local-users` | `{"username":"operator1","password":"..."}` | 201, `identity_id` |
+| `POST /local-users/{identity_id}:disable` | `{}` | 204 |
+| `POST /local-users/{identity_id}:reset-password` | `{"password":"..."}` | 204 |
+| `POST /auth/change-password` | `{"current_password":"...","new_password":"..."}` | 204, all old sessions revoked; re-login required |
+
+The permission, `Origin`, session and error rules for these endpoints are in
+[Local initialization and lifecycle](../reference/stable-contracts.md#local-initialization-and-lifecycle).
+
+Administrator password resets also require `X-Approval-ID`. First submit `POST /approval-requests` in the management workspace with `action: local_user.reset-password`, `resource_type: local_user`, the target `resource_id`, `reason`, and `ttl_seconds`, then have a different authorized SecurityAdmin or PlatformAdmin principal approve the resulting request hash through the standard approval decision endpoint.
 
 ## Break-glass and deployment checks
 
-Local authentication complements Break-glass and does not replace it.
-Break-glass remains a separate offline emergency access path with mandatory
-credential rotation, a critical security alert, a transactional audit event,
-and a 15-minute session lifetime. Store the Break-glass credential and its
-incident runbook separately from Local administrator passwords; see the
-[Break-glass contract](../development/identity-authorization-audit.md#break-glass).
+Break-glass stays disabled unless `OCSERV_BREAK_GLASS_ENABLED=true` and
+`OCSERV_BREAK_GLASS_TOKEN_SHA256` holds the SHA-256 digest of a high-entropy
+offline secret. Generate the secret from at least 32 random bytes (for example
+`openssl rand -hex 32`), never derive it from a password or passphrase, keep it
+offline apart from Local administrator credentials, and record who holds
+custody. Store the Break-glass credential and its incident runbook separately
+from Local administrator passwords. The session rules, alerting and the
+unsalted digest caveat are in
+[Break-glass](../reference/stable-contracts.md#break-glass), and use after an
+incident is in
+[Break-glass credential after use](incident-recovery.md#break-glass-credential-after-use).
 
 Before activating a deployment, export the effective configuration and validate
 the rendered Compose specification and secret file metadata:
@@ -841,6 +827,19 @@ authentication validation runs at Controller startup. After installation,
 verify the login page options over HTTPS along with login, logout, RBAC
 enforcement, and session revocation, without printing secret contents during
 troubleshooting. When validating documentation or code changes in an isolated
-test environment, follow [Validate a change](../development/testing.md) and run
+test environment, follow [Choose the validation scope](../development/release-checks.md#choose-the-validation-scope) and run
 the focused configuration regression script
 `scripts/test-production-auth-config.sh`.
+
+## Rollout and rollback
+
+Run the installed release's full backend migrations before enabling OIDC.
+Provision at least two distinct SecurityAdmin principal bindings and verify the
+end-to-end independent two-principal approval flow before turning off
+development authentication. Keep human two-person credential custody in your
+organizational security procedures, because the system verifies principal and
+session separation only. In the target environment, also test audit checkpoint
+verification, simulated IdP outage behavior, and Break-glass token rotation.
+
+To roll back the Controller binary, follow
+[Deployment rollback](incident-recovery.md#deployment-rollback).

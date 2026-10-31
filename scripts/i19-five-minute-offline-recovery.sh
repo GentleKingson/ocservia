@@ -16,7 +16,7 @@ grep -Fq 'OFFLINE_RECOVERY_RETENTION_SECONDS: u64 = 300' \
   "${ROOT}/rust/crates/command-journal/src/lib.rs"
 grep -Fq 'now+OFFLINE_RECOVERY_RETENTION_SECONDS' \
   "${ROOT}/rust/crates/agent/src/main.rs"
-grep -Fq 'recovery for at most five minutes' "${ROOT}/docs/development/telemetry.md"
+grep -Fq 'recovery for at most five minutes' "${ROOT}/docs/reference/stable-contracts.md"
 if grep -R -n -i -E --include='*.md' --include='*.go' --include='*.rs' --include='*.sh' \
   --exclude-dir=target --exclude-dir=node_modules \
   'Agent.{0,80}(offline|离线).{0,80}(24h|24 hours|24 小时|86400)|(24h|24 hours|24 小时|86400).{0,80}Agent.{0,80}(offline|离线|recover|恢复)' \

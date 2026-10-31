@@ -94,15 +94,6 @@ expected_categories = {
   'Other changes'=>'*'
 }
 require_check(categories.map {|c| [c['title'], c['labels']]} == expected_categories.map {|title,label| [title,[label]]}, 'release-note categories, labels or catch-all order changed')
-# Frozen exceptions from the v1.1.0 history-rewrite audit, not a second notes generator.
-bridge = File.read('.github/release-notes/v1.1.0-history-rewrite.md')
-bridge_prs = bridge.scan(/\(#(\d+)\)/).flatten.map(&:to_i)
-expected_bridge_prs = [299,302,303,304,305,306,307,308,309,310,311,312,313,314,317,318,319,320,321,322,323,324,326,328,334,335,336,337,338,339,341,349,352,355,356,359]
-require_check(bridge_prs.sort == expected_bridge_prs, 'history bridge must contain exactly the 36 omitted user-visible PRs, once each')
-{'Breaking changes'=>[317,320,321,322,326,339,352], 'Security'=>[341,355,356]}.each do |heading, expected|
-  section = bridge.split("### #{heading}\n", 2).last.to_s.split("\n### ", 2).first
-  require_check(section.scan(/\(#(\d+)\)/).flatten.map(&:to_i).sort == expected, "history bridge lost #{heading} entries")
-end
 require_check(!File.read('.github/workflows/release.yml').include?('--clobber'), 'asset replacement must not be enabled')
 require_check(release.dig('concurrency', 'group') == 'release-${{ github.ref }}' && release.dig('concurrency', 'cancel-in-progress') == false, 'same-tag releases must serialize without cancelling publication')
 publication_steps = publish['steps'].map {|s| s.fetch('run', '')}
@@ -290,16 +281,13 @@ Dir.mktmpdir('release-rc-') do |dir|
         elif [[ "$*" == *'--json body'* ]]; then printf '%s\n' "${NOTES_BODY:-}"
         else exit 1
         fi ;;
-      'api repos/test/repo/contents/.github/release-notes/v1.1.0-history-rewrite.md?ref=test-publish-sha')
-        [[ "$*" == *'Accept: application/vnd.github.raw+json'* && "${BRIDGE_FAILURE:-false}" != true ]] || exit 1
-        cat "$BRIDGE_FILE" ;;
       'release create') printf '%s\0' "$@" >"$CREATE_ARGS" ;;
       'release edit') cp "$5" "$RUNNER_TEMP/edited-notes" ;;
       *) exit 2 ;;
     esac
   SH
   File.chmod(0755,"#{dir}/gh")
-  env={'PATH'=>"#{dir}:#{ENV.fetch('PATH')}",'GITHUB_OUTPUT'=>"#{dir}/outputs",'CALLS'=>"#{dir}/calls",'GH_REPO'=>'test/repo','GH_TOKEN'=>'test','GITHUB_ACTOR'=>'test','RUNNER_TEMP'=>dir,'GITHUB_SHA'=>'test-publish-sha','BRIDGE_FILE'=>File.expand_path('.github/release-notes/v1.1.0-history-rewrite.md'),'CREATE_ARGS'=>"#{dir}/create-args",'RELEASES_FILE'=>"#{dir}/releases.json"}
+  env={'PATH'=>"#{dir}:#{ENV.fetch('PATH')}",'GITHUB_OUTPUT'=>"#{dir}/outputs",'CALLS'=>"#{dir}/calls",'GH_REPO'=>'test/repo','GH_TOKEN'=>'test','GITHUB_ACTOR'=>'test','RUNNER_TEMP'=>dir,'GITHUB_SHA'=>'test-publish-sha','CREATE_ARGS'=>"#{dir}/create-args",'RELEASES_FILE'=>"#{dir}/releases.json"}
   notes = publish['steps'].find {|s| s['id']=='notes'}.fetch('run')
   publication = publish['steps'].find {|s| s['name']=='Create new draft Release'}.fetch('run')
   [['1.2.3-rc.1','v1.1.0'],['1.2.3-rc.2','v1.2.3-rc.1'],['1.2.3-rc.10','v1.2.3-rc.9'],['1.2.3','v1.1.0'],['1.3.0-rc.1','v1.2.3'],['1.3.0','v1.2.3'],['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0-rc.4','v2.0.0-rc.3'],['2.0.0-rc.7','v2.0.0-rc.5'],['2.0.0','v1.1.0']].each do |version,base|
@@ -314,18 +302,7 @@ Dir.mktmpdir('release-rc-') do |dir|
     require_check(status.success?, "publication failed: #{err}")
     create=File.binread("#{dir}/create-args").split("\0")
     require_check(create[create.index('--notes-start-tag')+1] == base && create.include?('--verify-tag') && create.include?('--generate-notes') && create.include?('--draft') && create[create.index('--target')+1] == 'test-publish-sha', 'publication lost native notes, explicit base or tag verification')
-    require_check(create.include?('--notes') == (base == 'v1.1.0' || %w[2.0.0-rc.2 2.0.0-rc.3 2.0.0-rc.4].include?(version)), 'supplement must only apply to its selected version or history base')
-    if base == 'v1.1.0'
-      require_check(create[create.index('--notes')+1] == File.read(env['BRIDGE_FILE']).rstrip, 'history bridge content changed in CLI arguments')
-    else
-      require_check(!File.read("#{dir}/calls").include?('/contents/'), 'other bases must not fetch the history bridge')
-    end
-    if %w[2.0.0-rc.2 2.0.0-rc.3 2.0.0-rc.4].include?(version)
-      supplement = File.read(".github/release-notes/v#{version}.md").rstrip
-      require_check(create[create.index('--notes')+1] == supplement, "#{version} supplement content changed in CLI arguments")
-      combined, error, status = Open3.capture3('python3', filter, stdin_data: supplement + "\n\n" + original)
-      require_check(status.success? && combined == supplement + "\n\n" + expected, "cleanup changed supplement, contributor or comparison: #{error}")
-    end
+    require_check(!create.include?('--notes') && !File.read("#{dir}/calls").include?('/contents/'), 'publication must not add checked-in notes')
     require_check(create.include?('--prerelease') == version.include?('-rc.') && create.include?('--latest=false') == version.include?('-rc.'), 'wrong publication flags')
   end
   [['1.3.0','v1.2.3'],['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0-rc.4','v2.0.0-rc.3']].each do |version,base|
@@ -340,18 +317,6 @@ Dir.mktmpdir('release-rc-') do |dir|
       require_check(File.read("#{dir}/edited-notes") == expected + "\n", 'publication changed other release notes') if body != expected
     end
   end
-  [['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0-rc.4','v2.0.0-rc.3']].each do |version,base|
-    File.write("#{dir}/calls", '')
-    failed=env.merge('VERSION'=>version,'IS_PRERELEASE'=>'true','NOTES_BASE'=>base)
-    Dir.chdir(dir) do
-      require_check(!Open3.capture3(failed,'bash','-euo','pipefail','-c',publication).last.success?, "missing #{version} supplement must fail publication")
-    end
-    require_check(!File.read("#{dir}/calls").include?('release create '), "missing #{version} supplement must not create a partial Release")
-  end
-  File.write("#{dir}/calls", '')
-  failed=env.merge('VERSION'=>'1.2.3-rc.1','IS_PRERELEASE'=>'true','NOTES_BASE'=>'v1.1.0','BRIDGE_FAILURE'=>'true')
-  require_check(!Open3.capture3(failed,'bash','-euo','pipefail','-c',publication).last.success?, 'missing history bridge must fail publication')
-  require_check(!File.read("#{dir}/calls").include?('release create '), 'bridge fetch failure must not create a partial Release')
   File.write(env['RELEASES_FILE'], [[]].to_json)
   [['1.2.3-rc.2',{}],['1.2.3-rc.2',{'RELEASE_API_FAIL'=>'true'}],['1.2.3-rc.1',{'STABLE_BASE'=>''}]].each do |version,extra|
     require_check(!Open3.capture3(env.merge('VERSION'=>version).merge(extra),'bash','-euo','pipefail','-c',notes).last.success?, 'missing comparison base accepted')

@@ -100,7 +100,7 @@ classify_path() {
     deploy/compose/*|deploy/database-e2e/*|scripts/*database*|scripts/*mysql*|scripts/*postgres*|\
     scripts/i18-*-backup-restore-smoke.sh)
       run_go=true; run_database=true ;;
-    # test-release-workflows.rb (release suite) reads the Release notes config and bridge.
+    # test-release-workflows.rb (release suite) reads the Release notes config.
     .github/release.yml) tools_suite release ;;
     .github/release-notes/*.md) run_docs=true; tools_suite release ;;
     # Shared Claude Code settings never reach CI or images; docs-check enforces its audited keys.
@@ -157,7 +157,7 @@ classify_path() {
       select_controller_images "${controller_images[@]}" ;;
   esac
   # Session/Workspace, routing, rollout and shared UI paths also run the stubbed
-  # browser regressions (docs/development/web.md#validation).
+  # browser regressions (docs/development/release-checks.md#web-validation).
   case "${path}" in
     web/src/api/*|web/src/shared/*|web/src/App.vue|web/src/main.ts|web/src/main.css|web/index.html|\
     web/src/components/ui/*|web/src/components/layout/*|web/src/components/overview/*|web/src/features/operations/*|\

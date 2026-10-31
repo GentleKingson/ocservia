@@ -105,7 +105,7 @@ while read -r path selected; do
   done
 done <<'CASES'
 README.md run_docs
-docs/development/testing.md run_docs
+docs/development/release-checks.md run_docs
 CLAUDE.md run_docs
 .claude/agents/sonnet-implementer.md run_docs
 .claude/settings.json run_docs
@@ -314,11 +314,11 @@ expect_images "${out}" "${all_images}"
 # Settings routed to Docs alone must still be rejected by docs-check when they
 # carry unaudited keys that run code or widen authority.
 docs="${fixture}/docs-check"
-mkdir -p "${docs}/scripts" "${docs}/.claude" "${docs}/docs/getting-started"
+mkdir -p "${docs}/scripts" "${docs}/.claude" "${docs}/docs/operations"
 cp "${ROOT}/scripts/docs-check.sh" "${ROOT}/scripts/env.sh" "${docs}/scripts/"
-printf '# Docs\n\ndocs/getting-started/production.md\n' >"${docs}/README.md"
-for page in production managed-node; do printf '# Page\n' >"${docs}/docs/getting-started/${page}.md"; done
-printf '# Rules\n\n[Install](docs/getting-started/production.md#page)\n' >"${docs}/AGENTS.md"
+printf '# Docs\n\ndocs/operations/production-deployment.md\ndocs/operations/agent-lifecycle.md\n' >"${docs}/README.md"
+for page in production-deployment agent-lifecycle; do printf '# Page\n' >"${docs}/docs/operations/${page}.md"; done
+printf '# Rules\n\n[Install](docs/operations/production-deployment.md#page)\n' >"${docs}/AGENTS.md"
 printf '# Claude\n\n@AGENTS.md\n' >"${docs}/CLAUDE.md"
 git -C "${docs}" init -q
 git -C "${docs}" add .
@@ -347,7 +347,7 @@ for claude in '# Claude\n\nRules live in AGENTS.md.\n' '# Claude\n\n```\n@AGENTS
   if bash "${docs}/scripts/docs-check.sh" 2>/dev/null; then echo "docs-check accepted CLAUDE.md without an import" >&2; exit 1; fi
 done
 printf '# Claude\n\n@AGENTS.md\n' >"${docs}/CLAUDE.md"
-for link in docs/missing.md docs/getting-started/production.md#missing; do
+for link in docs/missing.md docs/operations/production-deployment.md#missing; do
   printf '# Rules\n\n[Broken](%s)\n' "${link}" >"${docs}/AGENTS.md"
   if bash "${docs}/scripts/docs-check.sh" 2>/dev/null; then echo "docs-check accepted AGENTS.md link ${link}" >&2; exit 1; fi
 done

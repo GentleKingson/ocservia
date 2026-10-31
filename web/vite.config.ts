@@ -23,7 +23,7 @@ export default defineConfig({
     },
   ],
   build: {
-    // Supported browsers: docs/development/web.md#supported-browsers.
+    // Supported browsers: docs/architecture.md#web-client.
     target: ["chrome111", "edge111", "firefox128", "safari16.4"],
   },
   resolve: {

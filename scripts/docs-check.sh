@@ -76,7 +76,8 @@ while IFS= read -r link; do
     "${ROOT}/${path}" || { echo "AGENTS.md links to a missing heading: ${link}" >&2; exit 1; }
 done < <(grep -oE '\]\([^)]+\)' "${ROOT}/AGENTS.md" | sed -E 's/^\]\((.*)\)$/\1/' | grep -vE '^[a-z]+:' || true)
 
-require_text README.md 'docs/getting-started/production.md'
+require_text README.md 'docs/operations/production-deployment.md'
+require_text README.md 'docs/operations/agent-lifecycle.md'
 reject_text README.md '| bash -s'
-reject_text docs/getting-started/production.md '| bash -s'
-reject_text docs/getting-started/managed-node.md '| bash -s'
+reject_text docs/operations/production-deployment.md '| bash -s'
+reject_text docs/operations/agent-lifecycle.md '| bash -s'
