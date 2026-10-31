@@ -1,5 +1,27 @@
 # Production incident recovery
 
+This is the single backup and recovery manual for database, Signer, identity,
+credential and Unknown command incidents. Supported deployments run a single
+Controller, a single database instance, and one dedicated Relay. The supported
+PostgreSQL and MySQL versions and deployments are defined in
+[Database support](production-deployment.md#database-support). Both Integrated
+and standalone topologies remain supported, as do bundled and external
+databases.
+
+Out of scope are Controller high availability, multi-Relay failover, database
+replication clusters, PostgreSQL automatic failover, and point-in-time recovery
+(PITR) readiness. Standard backups, backup verification, and isolated restores
+remain supported. Across all recovery scenarios, the command pipeline still
+enforces owner/epoch/fence/lease validation, the transactional outbox,
+authorization, independent two-principal approvals, cryptographic signatures,
+idempotent command IDs, the Agent SQLite journal, and privd receipts. Passing
+recovery checks does not imply general exactly-once execution or production
+RTO/RPO guarantees.
+
+The Signer ledger, its CA and its revision floor are recovered independently of
+the Controller database. Application rollback never runs reverse database
+migrations.
+
 ## Authentication outage
 
 Incident handling depends on the configured [authentication mode](authentication.md#choose-a-mode):
@@ -115,6 +137,16 @@ generic account-unlock CLI or unauthenticated HTTP recovery endpoint, and
 operators must never delete or edit the Bootstrap marker to force
 reinitialization.
 
+### Break-glass credential after use
+
+A break-glass login consumes the configured token digest, so the credential
+cannot be used again until the operator rotates the offline secret and updates
+the digest. The session rules are in
+[Break-glass](../reference/stable-contracts.md#break-glass). Generate the
+replacement secret and configure its digest as described in
+[Break-glass and deployment checks](authentication.md#break-glass-and-deployment-checks),
+and record who holds custody.
+
 ## OIDC issuer correction
 
 Before editing OIDC settings, confirm the provider's authoritative issuer string
@@ -176,12 +208,167 @@ the process restarts. This is deliberate; do not bypass it.
    on `ledger.db`, and the health of the underlying disk.
 3. Restart the Signer. Never run `init` or replace `ledger.db` to clear the
    fault; startup refuses a missing, corrupt or foreign ledger, and that refusal
-   means a [ledger restore](../development/certificates-and-signer.md#state-and-recovery),
-   not a re-initialization.
+   means a [ledger restore](#signer-backup-and-restore), not a
+   re-initialization.
 4. Confirm `health --url https://signer:9443/healthz` succeeds, then retry the
    affected Controller operations. Signer writes are idempotent by certificate
    ID, so a retry returns the original result for any request that had already
-   committed.
+   committed. While the Signer is unreachable, certificate issuance moves to
+   `signer_unavailable` (resumed by retrying under the same approval) and
+   revocation moves to `revocation_unknown` (a retry may submit it again). Both
+   return a service-unavailable problem response without marking the operation
+   successful.
+
+## Signer backup and restore
+
+The Signer ledger, its issuer CA and its audit revision floor are backed up and
+restored independently of the Controller database. Recovery across the two
+services is still coupled: restoring the Signer ledger without the matching
+issuer CA, or without reconciling Controller certificate state and all
+subsequent issuances, revocations, key imports, and key disables, leaves the
+deployment inconsistent. Restoring the Controller database and the Signer ledger
+independently does not by itself prove a consistent recovery point.
+
+### Ledger state
+
+The ledger format, startup checks and `init` refusal rules are in
+[Signer custody and idempotency](../reference/stable-contracts.md#signer-custody-and-idempotency)
+and [Policy and durable effects](../reference/stable-contracts.md#policy-and-durable-effects).
+First-time `init`, the offline root CA custody export and the Quick materials
+checks are in
+[Signer runtime contract](production-deployment.md#signer-runtime-contract) and
+[Quick install materials](production-deployment.md#quick-install-materials).
+
+### Back up the ledger
+
+Every administrative CLI subcommand acquires the same exclusive bbolt lock as
+the server, so stop `serve` before running `import`, `disable`, `inspect`,
+`backup`, `restore`, or `crl`. Running `inspect` prints the state version,
+issuer fingerprint, policy, and latest audit revision; record this audit
+high-water mark outside the state volume alongside your backup manifest and CA
+fingerprint. Running `backup --output /protected/new-snapshot.db` opens a
+consistent read transaction, creates the destination file exclusively, and
+fsyncs both the file and its parent directory without ever overwriting an
+existing snapshot. A partial file left by an interrupted backup is unusable, so
+always validate a new snapshot by running `inspect --state` against it.
+
+For exclusive Signer maintenance in an Integrated deployment, quiesce mutations
+and reconcile in-flight results first. The existing non-purging uninstall is a
+full maintenance stop; it preserves database volumes, Secrets, ledger and
+lifecycle evidence. This also interrupts the public Controller and Relay, not
+just signing. The snapshot commands below use the same `backup` and `inspect`
+subcommands for a standalone Signer, with the CA and state flags configured for
+that Signer.
+
+```bash
+deploy/production/controller.sh uninstall
+SIGNER_IMAGE="$(jq -er '.images.signer' \
+  "$OCSERV_CONTROLLER_STATE_ROOT/current-release.json")"
+# BACKUP_DIR is a new, canonical, protected directory, owned 65532:65532 mode 0700.
+signer_admin() {
+  docker run --rm --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    -v "$OCSERV_SIGNER_SECRET_DIR:/run/secrets:ro" \
+    -v "$OCSERV_SIGNER_STATE_DIR:/var/lib/ocservia-signer" \
+    -v "$BACKUP_DIR:/backup" "$SIGNER_IMAGE" "$@"
+}
+umask 077
+signer_admin inspect > "$BACKUP_DIR/ledger-inspect.json"
+signer_admin backup --output /backup/snapshot.db
+signer_admin inspect --state /backup/snapshot.db > "$BACKUP_DIR/snapshot-inspect.json"
+```
+
+The image reference above comes from the already verified protected lifecycle
+manifest; do not replace it with a mutable tag. Keep the CA fingerprint,
+snapshot checksum and inspection record outside the ledger volume. Back up
+the issuing key separately under its existing custody policy, and take the
+corresponding supported [database backup](#database-backup-and-restore). Never
+upload private material as CI evidence. Failed or uninspected snapshots are not
+accepted backups.
+
+### Restore the ledger
+
+When recovering, `restore --state /protected/snapshot.db --output /protected/new-ledger.db
+--minimum-revision N` verifies the snapshot and refuses to write if its audit
+revision falls below the independently reconciled high-water mark `N` or if the
+output path already exists. Place the restored ledger in a mode `0700`
+directory with runtime ownership and permissions, paired with the original
+issuer CA (whose private key custody and backup are managed separately). Put
+the restored ledger into service only after reconciling Controller state and
+accounting for all certificate issuances, revocations, imports, and disables
+that occurred after the snapshot. Never take `--minimum-revision` solely from
+the old snapshot itself. If both the ledger and independent audit evidence are
+lost, no local CLI can prove state freshness; halt automated recovery and
+reconcile manually instead of passing a zero floor, wiping state, swapping CAs,
+or rolling back container images automatically.
+
+To rehearse recovery while still stopped, set `MINIMUM_REVISION` from the
+independently reconciled live high-water mark and later issuance/revocation,
+import and disable evidence, not merely from the snapshot being restored:
+
+```bash
+signer_admin restore --state /backup/snapshot.db \
+  --output /var/lib/ocservia-signer/restored.db \
+  --minimum-revision "$MINIMUM_REVISION"
+signer_admin inspect --state /var/lib/ocservia-signer/restored.db \
+  > "$BACKUP_DIR/restored-inspect.json"
+```
+
+All destination files must be new. Compare issuer, policy, state version and
+revision with independent evidence before activating the restored file. Keep
+the original ledger intact until verification succeeds. Preserve UID/GID
+65532:65532 and mode 0600, and the same issuer CA and node identities. Do not
+lower `signer-checkpoint.json` to make an old snapshot start. If freshness
+cannot be established, leave the deployment recoverably stopped.
+
+Only after those comparisons succeed, activate within the same stopped state
+directory, keeping the original under a new, non-overwriting recovery name:
+
+```bash
+test ! -e "$OCSERV_SIGNER_STATE_DIR/ledger.before-restore.db"
+test "$(stat -c '%u:%g:%a' "$OCSERV_SIGNER_STATE_DIR/restored.db")" = 65532:65532:600
+mv -T --no-clobber "$OCSERV_SIGNER_STATE_DIR/ledger.db" \
+  "$OCSERV_SIGNER_STATE_DIR/ledger.before-restore.db"
+mv -T --no-clobber "$OCSERV_SIGNER_STATE_DIR/restored.db" \
+  "$OCSERV_SIGNER_STATE_DIR/ledger.db"
+sync -f "$OCSERV_SIGNER_STATE_DIR"
+signer_admin inspect > "$BACKUP_DIR/activated-inspect.json"
+```
+
+An interruption between these moves leaves the original recoverable; do not
+run `init`. Retain the old ledger under the backup custody policy, not as a
+second live replica.
+
+After backup/restore or CRL maintenance, run
+`deploy/production/controller.sh start` with the unchanged
+configuration and current exact source. Check readiness/version, real login,
+node reconnect and a newly approved operation. Missing/incompatible ledger or
+lower revision must fail closed.
+
+### Sealing key bindings
+
+The ledger holds the node sealing-key bindings, so a restored ledger can lack
+imports made after the snapshot and can show a retired node as bound if the
+disable came later. Reconcile both against Controller state before activation,
+and repeat the missing import or disable with the procedure in
+[Trusted public-key transfer](production-deployment.md#trusted-public-key-transfer).
+The sealing handler uses only mappings created by `import`; see
+[Sealing contract](../reference/stable-contracts.md#sealing-contract).
+
+### CRL refresh
+
+Operators run `crl` through the protected maintenance workflow and publish the
+output atomically to the target verifier. The CRL format and what a revoke
+response does and does not do are in
+[Policy and durable effects](../reference/stable-contracts.md#policy-and-durable-effects).
+
+While stopped, `signer_admin crl > "$BACKUP_DIR/issuer.crl.pem"` creates a new
+signed CRL and advances its number. Verify its issuer/signature, number and
+next-update, transfer only this public CRL to the intended ocserv node, install
+it atomically at that node's configured CRL path and send SIGHUP to the correct
+ocserv service. Prove a revoked certificate can no longer establish a login
+and an unrevoked control still can. Distribution and refresh remain explicit
+operator responsibilities.
 
 ## Transport and credentials
 
@@ -193,7 +380,10 @@ credentials, then confirming fresh Agent heartbeats and reconciled command
 outcomes. Nodes that depend on the Relay remain unreachable for management
 until the original path returns. Do not point production traffic at public
 relays, reset node identities, or re-enroll nodes to work around a Relay outage.
-During testing, direct peer connectivity can mask a broken Relay path.
+During testing, direct peer connectivity can mask a broken Relay path. Upgrading
+an older A/B deployment requires the operator to switch the configuration to a
+single Relay explicitly, after which installer reruns preserve existing node
+identity and trust state.
 
 To recover a lost Controller endpoint key, restore the encrypted offline backup
 to `controller-iroh.key` inside `OCSERV_SECRET_DIR` with owner `65532:65532` and
@@ -203,6 +393,12 @@ unavailable or fails the EndpointID check, leave transport offline, revoke trust
 in the old EndpointID, generate a new protected key, and re-enroll every node
 through the standard approval workflow. Record both the old and new EndpointIDs
 along with the trust transition in the incident record.
+
+The session encryption key, audit checkpoint key, and audit event key (paired
+with its stable key ID) are protected secret files. Keep them in separate
+protected backups, and verify a restored database with the production audit keys. An
+unknown signing key halts audit compaction for the whole batch, so never
+replace an audit key silently.
 
 ### PostgreSQL credential rotation
 
@@ -248,21 +444,268 @@ unexpected concurrent changes. Keep any reported recovery snapshot
 protected and leave services stopped until recovery finishes. Passwords are read
 only from files and are never accepted on the command line or printed to logs.
 
+## Unknown command reconciliation
+
+The rules for `Unknown` operations are in the
+[Matched-release recovery boundary](../reference/stable-contracts.md#matched-release-recovery-boundary)
+and [Controlled session and service operations](../reference/stable-contracts.md#controlled-session-and-service-operations).
+Use them with the steps below.
+
+1. Stop affected writers and command dispatch, and pause conflicting writes to
+   the affected node or resource while an operation is `Unknown`. Stop new
+   configuration plan and apply requests, reconcile or expire pending plans,
+   and reconcile every nonterminal `config_apply` operation. Find open
+   operations through `/api/v1/operations/queue-metrics`, or follow one
+   operation over REST or its resumable
+   `/api/v1/operations/{operation_id}/events` SSE stream (see
+   [Controller delivery](../reference/stable-contracts.md#controller-delivery)).
+2. Preserve the Agent's SQLite journal, privd's root effect store, and the
+   Controller's operation, command, and result tables. Never delete the local
+   journal or clear replay protection to force an older binary to start.
+3. Let reconciliation run read-only. The Controller issues a re-signed
+   `RECONCILE_ONLY` follow-up that queries the Agent journal, as described in
+   [Controller delivery](../reference/stable-contracts.md#controller-delivery).
+4. Accept only authenticated durable evidence, as listed in the
+   [Matched-release recovery boundary](../reference/stable-contracts.md#matched-release-recovery-boundary).
+   Telemetry, a fresh session, a healthy `ocserv` process, missing error logs
+   and an unsigned `effect_absent` report are not evidence.
+5. Permit `RETRY_IF_EFFECT_ABSENT` only after reconciliation has durably recorded
+   proof that the effect is absent, as described in
+   [Agent journal](../reference/stable-contracts.md#agent-journal). The
+   session and service commands listed there are never retried on that path and
+   need manual reconciliation.
+6. Expect the signed `expires_at` of a command envelope to stay the immutable
+   execution deadline, as described in
+   [Controller delivery](../reference/stable-contracts.md#controller-delivery).
+   Deploy matched Controller/transportd and Agent/privd packages, because
+   upgrading the node package does not reconcile pending commands.
+
+An Unknown write is never replayed after a restore either; see
+[Security state reconciliation before cutover](#security-state-reconciliation-before-cutover).
+
 ## Deployment rollback
 
 Before rolling back, stop new writes and reconcile any operation in the Unknown
-state. Run the guarded [Controller rollback](../how-to/controller-lifecycle.md#rollback)
-or [Agent rollback](../how-to/agent-lifecycle.md#rollback) while satisfying the
-target release's protocol, configuration, and persistent-state requirements. In
-v1.1.0, version ordering, schema ranges, and descriptor equality are not
+state (see [Unknown command reconciliation](#unknown-command-reconciliation)).
+Run the guarded [Controller rollback](production-deployment.md#rollback)
+or [Agent rollback](agent-lifecycle.md#rollback) while satisfying the
+target release's protocol, configuration, and persistent-state requirements.
+Version ordering, schema ranges, and descriptor equality are not
 enforced as admission gates and do not guarantee cross-version safety. Rolling
 back the Controller swaps only the installed images and Compose project without
 running down migrations or restoring database state. Rolling back an Agent
 similarly restores only local node files without modifying the Controller.
 Neither action substitutes for the other or for a database restore. When
 same-target upgrade recovery and package rollback cannot bring the deployment
-back, proceed to database recovery below, and record the exact release tag,
-source SHA, migration state, backup identifier, and audit checkpoint.
+back, proceed to [database recovery](#database-recovery), and record the exact
+release tag, source SHA, migration state, backup identifier, and audit
+checkpoint.
+
+Before rolling back the Controller binary, stop new API writes first and keep the
+audit, identity, session, approval, and alert tables intact. Deploy the older
+binary only after active OIDC sessions have been revoked or allowed to expire.
+Retain all database records. The limits on rolling back across a schema change
+are in [Database and recovery matrix](../reference/stable-contracts.md#database-and-recovery-matrix).
+
+Rolling back to the previous slot requires state that the target binaries can
+read under the same Signer identity and a monotonic ledger revision. Lifecycle
+scripts never automatically reverse schema or state after a partial activation,
+reset node or Signer identity, or lower a recorded checkpoint to make an older
+binary start. A failed activation retains current and pending evidence. Diagnose
+the failure before retrying the same verified target; do not delete pending
+state, replay an Unknown operation, initialize another ledger, or automatically
+roll back potentially committed effects. A changed database or deployment
+contract, or insufficient backup or recovery state, can refuse rollback.
+
+Enrollment possession proofs, purpose-separated keys, ALPNs, and real command
+capability checks remain mandatory across upgrades and rollbacks. Unresolved
+Unknown effects block conflicting work on the affected resource and require
+reconciliation. No high availability, process merger, HSM/KMS integration,
+automatic CRL distribution, cross-version rollback safety, or guaranteed
+automatic recovery of every Unknown mutation is promised.
+
+## Database backup and restore
+
+Every backup must preserve the full `schema_revisions` table (see
+[Schema provenance after restore](#schema-provenance-after-restore)) and the
+Local bootstrap marker table. The PostgreSQL 18 base backup and the external MySQL 8.4
+logical restore are separate procedures with different tooling. Never run
+PostgreSQL recovery or credential-rotation scripts against MySQL backends. A
+completed backup job alone is never recovery proof without a verified restore.
+The checks that must pass before cutover are the same for both backends and are
+listed once in [Database recovery](#database-recovery).
+
+### PostgreSQL
+
+The production backup worker runs `scripts/postgres-backup.sh` to take a
+checksummed `pg_basebackup` and stream the WAL segments needed to make that
+snapshot consistent. Once `pg_verifybackup` succeeds, the script atomically
+updates `LATEST` and prunes older base backups to the configured retention
+bound. Mount `OCSERV_BACKUP_DIR` from separately protected storage; copying the
+database volume directly does not produce a usable backup.
+
+During initialization, the production setup creates a dedicated
+`ocservia_backup` login granted replication permission, distinct from both the
+database owner and the application role. Encrypt the backup storage and monitor
+backup age as well as verification failures. Completed backups must also be
+copied off the application host under the deployment retention policy.
+
+#### Retention and connection credentials
+
+Bundled PostgreSQL deployments keep the configured number of verified base
+backups on disk. WAL cleanup is anchored to the oldest retained base backup,
+preserving the archived WAL stream from that point forward while bounding local
+disk growth. Keeping those WAL files does not establish point-in-time recovery
+(PITR) readiness, and no PITR procedure is documented or exercised here.
+Operators should monitor backup-worker health and the `LATEST` timestamp, copy
+each finished base backup with its required WAL range to protected off-host
+storage, and verify the remote copy before lowering local retention.
+
+Connection credentials live in `postgres.pgpass`. On bundled PostgreSQL, set
+this file to `postgres:5432:*:ocservia_backup:<password>` with the protected
+backup-role password from initialization. The wildcard database field covers
+both the server-major check and the replication stream. External PostgreSQL
+deployments must specify the actual server hostname and port, with entries for
+both `ocservia` (used by the server-major preflight) and `replication` (used by
+`pg_basebackup`). Before invoking libpq tools, the backup entrypoint copies
+the read-only Compose secret into a private mode-0600 passfile. To change these
+passwords, see [PostgreSQL credential rotation](#postgresql-credential-rotation).
+
+#### Deployment boundaries
+
+Bundled PostgreSQL 18 enables `archive_mode` with an `archive_command` that
+writes continuous WAL into the backup mount. These archive and retention
+settings do not certify PITR readiness, even while they remain active.
+
+External PostgreSQL support is restricted to major version 18, and all owner,
+runtime, and backup connections must use `sslmode=verify-full` against the
+launcher-validated `database-ca.pem`. The backup worker checks the server major
+version before taking a snapshot and guarantees only a verified base backup.
+ocservia does not manage the external server configuration, so continuous
+WAL archiving, PITR, replication failover, and retention policy remain with the
+external database operator and require separate verification.
+
+#### Restore a PostgreSQL backup
+
+1. Stop all application writers and log the incident timestamp.
+2. Choose a verified base backup along with the streamed WAL required for consistency.
+3. Extract the backup into a fresh, empty PostgreSQL 18 data directory without overwriting the existing copy. On the official container layout, mount the volume at `/var/lib/postgresql` and restore into `/var/lib/postgresql/18/docker`, because the parent mount point is not `PGDATA`.
+4. Bring PostgreSQL up in isolation. Check schema provenance (see
+   [Schema provenance after restore](#schema-provenance-after-restore)),
+   audit-chain checkpoints, table row counts, and a read-only application smoke test.
+5. Complete the checks in [Database recovery](#database-recovery) before
+   repointing the control plane, and keep the previous database intact until the
+   rollback window closes.
+
+Two smoke scripts exercise these mechanics in CI or disposable environments.
+Neither substitutes for testing an actual production archive.
+
+- `scripts/i18-backup-restore-smoke.sh` exercises bundled base backup and
+  restore by confirming that a marker row survives recovery, without checking
+  schema receipts.
+- `scripts/i18-external-postgres-backup-restore-smoke.sh` covers the external
+  PostgreSQL contract. It runs a TLS server outside the Controller network,
+  verifies routing and hostname rejection, applies migrations prior to backup,
+  confirms that `pg_verifybackup` catches corruption, restores into an isolated
+  server, compares the `schema_revisions` journal across a repeat owner
+  migration, and tests the restored runtime account's read and privilege
+  boundaries.
+
+### MySQL
+
+Production MySQL operations apply only to external MySQL 8.4 LTS. Bundled
+deployments, other server versions, HA, PITR, storage snapshots, and
+cross-engine migration are not supported under this contract.
+
+Built from `backup.mysql.Dockerfile`, the backup image uses the native MySQL
+client to produce a single-transaction logical dump covering triggers, routines,
+events, binary data, and explicit database creation, without copying a database
+volume. Along with the dump, the worker records the backend and server version
+in metadata, writes SHA-256 checksums, atomically advances `LATEST`, and prunes
+old backups. Database accounts and server-global grants belong to provisioning
+state and do not travel in a schema dump. Operators must recreate them from
+the protected provisioning source and re-run least-privilege checks prior to
+cutover.
+
+Connection settings come from `database-backup.cnf`, a mode-`0444` Compose
+secret in the private launcher-owned secret directory whose `[client]` section
+holds only the dedicated backup user, TLS parameters, and external endpoint.
+The entrypoint copies this file to a mode-`0600` temporary path before calling
+the client. Grant the backup account only the privileges needed to read tables
+and views and to dump triggers, routines, and events; it must never own the
+schema or migration tables. On the pinned client versions, grant `SELECT`,
+`SHOW VIEW`, `TRIGGER`, and `EVENT` on `ocservia.*`, plus the global
+`SHOW_ROUTINE` dynamic privilege required by MySQL 8.4. The `PROCESS` privilege
+is unnecessary because the dump runs with `--no-tablespaces`.
+
+Always restore into a new, isolated MySQL server by running the matching backup
+image with `scripts/mysql-restore-verify.sh`, an absolute path to a completed
+backup directory, and a mode-`0600` target administrator client file. After
+rejecting checksum mismatches, wrong backends, unsafe dump artifacts, or an
+existing target database, the verifier loads the dump and prints a summary of
+the restored state. It checks that `schema_revisions` contains only verified
+rows (including an epoch-2 entry) and that no legacy migration tables exist. It
+also reports the audit authentication shape, identity counts, scheduler epoch,
+idempotency records, and unfinished operations or commands. Passing this script
+alone does not prove the restored database is ready for service. The verifier
+neither compares receipt checksums against the build's SQL artifacts nor
+validates the cryptographic audit chain.
+
+Traffic redirection and command authority remain manual operator gates. Unless
+`--old-writers-fenced` is passed, the restore script exits with status 3 after
+verification. Even with that flag, it rejects an active restored scheduler
+lease and leaves command execution blocked. Then run the matching-build checks
+and the reconciliation in [Database recovery](#database-recovery). This logical
+restore tooling covers recovery of the ocservia schema only; PITR, database
+failover, storage snapshots, and cross-engine migration require separate
+procedures and independent verification evidence.
+
+### Schema provenance after restore
+
+Every backup must preserve the full `schema_revisions` table, including
+checksums, state, step progress, and timestamps. The runtime Controller and
+`/readyz` do not re-evaluate migration receipts, so a restored database is
+admitted only when the matching build's owner migration run (`--migrate-only`)
+validates it and confirms there are no unknown epochs, revisions, checksums, or
+schema drift. On a restored database, owner migration runs only supported
+forward SQL without replaying `schema.sql`. The receipt histories of fresh and
+checkpoint-upgraded databases, and where to read each backend's current schema
+revision, are in [Upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint)
+and [Database](../reference/stable-contracts.md#database).
+
+The only supported prior upgrade checkpoint is defined in
+[Upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint).
+Restoring a pre-checkpoint backup does not allow adopting or force-cleaning the
+schema. Likewise, any
+PostgreSQL or MySQL instance that already contains user tables or data without a
+trusted receipt is rejected outright instead of being initialized in place.
+Rolling back across a schema change requires restoring a compatible backup paired
+with the matching binary, because reverse SQL migrations are never run against
+an upgraded database.
+
+When a MySQL migration artifact is interrupted, normal migration runs will
+refuse to proceed. Inside a controlled `test` or `development` recovery
+environment, extract the expected checksum from the exact matching build by
+running `ocserv-db-foundation --mode schema-artifact-checksum` for an
+interrupted initial install or `--mode upgrade-artifact-checksum` for an
+in-flight upgrade, passing `--revision N` to select the logical block (where
+revision zero targets the previous-checkpoint transition). Once reviewed, pass
+that value to `--mode repair --repair-checksum <checksum>`. An interrupted fresh
+installation must finish recovery against its original schema bytes before any
+newer upgrade artifacts are applied. During repair, data changes and journal
+progress commit together in a single InnoDB transaction. DDL steps accept
+only pinned before-and-after schema fingerprints (including cleanup DROP steps,
+which follow the same protocol). Any unexpected objects or partial
+postconditions require manual inspection.
+
+`ocserv-db-foundation` is experimental and refuses to run outside `test` or
+`development`, so those repair flags are not a production recovery path. This
+guide defines no in-place production schema repair. At runtime, the
+application database account can read receipts but lacks permission to modify the
+journal or run arbitrary DDL. Never manually update `schema_revisions` to mark
+in-flight work as verified. Legacy manifest or snapshot repair modes and their
+journals no longer exist and cannot replace the current artifact checksum
+verification.
 
 ## Database recovery
 
@@ -271,29 +714,39 @@ the active configuration against the
 [production support matrix](production-deployment.md#database-support):
 
 - PostgreSQL: for a transient outage, restart the existing instance; after data
-  loss, follow [verified backup and isolated restore](database-backup-restore.md#postgresql).
+  loss, follow [verified backup and isolated restore](#restore-a-postgresql-backup).
   Clustered databases, automatic failover, and PITR readiness fall outside the
   supported single-instance deployment.
-- MySQL: follow the [logical backup and isolated restore](database-backup-restore.md#mysql)
+- MySQL: follow the [logical backup and isolated restore](#mysql)
   procedure for external MySQL. This workflow does not provide PITR, failover,
-  storage snapshots, or cross-engine migration. Never run PostgreSQL recovery or
-  credential-rotation scripts against MySQL backends.
+  storage snapshots, or cross-engine migration.
+
+Before running database recovery, stop certificate and artifact creation,
+reconcile all nonterminal certificate commands, and preserve terminal command
+history along with root effect evidence.
 
 Always restore into a separate, isolated target instance without overwriting the
 remaining copy of the damaged database. Fence old writers immediately and keep
 command execution blocked on the restored instance. Passing a backup checksum or
-restore verifier check is only the first step. After it:
+restore verifier check is only the first step. After it, on the isolated
+instance:
 
-1. Bring up an isolated Controller with the production audit keys to validate
-   the schema, runtime database grants, and audit chain.
-2. Inspect the restored scheduler and owner state.
-3. Reconcile all in-flight operations and commands, including any Unknown
-   outcomes.
-4. Complete the [security state reconciliation](#security-state-reconciliation-before-cutover).
+1. Run the matching Controller build's owner `--migrate-only` step to verify
+   receipts, checksums, and schema admission (see
+   [Schema provenance after restore](#schema-provenance-after-restore)). This
+   step may also grant privileges and provision telemetry, so it modifies state.
+2. Start an isolated Controller with the production audit keys to validate the
+   audit chain and runtime database grants. This does not re-check migration
+   receipts.
+3. Inspect the restored scheduler and owner state.
+4. Reconcile all in-flight operations and commands, including any Unknown
+   outcomes (see [Unknown command reconciliation](#unknown-command-reconciliation)).
+5. Complete the [security state reconciliation](#security-state-reconciliation-before-cutover).
 
-Repoint client traffic and re-enable command dispatch only after every check
-succeeds and a single authoritative instance is established. Keep all original
-incident evidence and initialization markers intact.
+Repoint client traffic and re-enable command dispatch only after old writers are
+fenced, every check succeeds, and a single authoritative instance is
+established, so authority ownership is unambiguous. Keep all original incident
+evidence and initialization markers intact.
 
 ### Security state reconciliation before cutover
 
@@ -372,7 +825,7 @@ PostgreSQL and MySQL alike:
    for recovery and keep Local/Break-glass access closed until reconciled.
 6. Keep the current Signer ledger; never roll it back to match an older
    Controller database. If the ledger itself must be restored, follow the
-   [Signer state and recovery](../development/certificates-and-signer.md#state-and-recovery)
+   [Signer backup and restore](#signer-backup-and-restore)
    procedure with an independently reconciled `--minimum-revision`, and
    account for every issuance, revocation, import and disable after the
    snapshot. When the evidence for any of these changes is incomplete, keep the
@@ -387,3 +840,23 @@ Never guess the result of an Unknown remote write. Retain logs and scoped
 diagnostics, rotate any credentials that may have been exposed, and coordinate
 with the external OIDC, PKI/HSM, relay, or telemetry operators whenever a failure
 crosses an external trust boundary.
+
+## Rebind and retention limits
+
+The steps for moving a node to another Controller are in
+[Rebind to another Controller](agent-lifecycle.md#rebind-to-another-controller),
+and the retention settings are in
+[Independent local retention](agent-lifecycle.md#independent-local-retention).
+The invariants are in [Controller rebind](../reference/stable-contracts.md#controller-rebind).
+This section lists what rebind does not recover.
+
+Rebinding is not a database recovery path: restore a lost Controller database
+with the [database procedure](#database-recovery). Recovery never resets node
+identity, the Agent journal, the root effect store, or keys to make a rebind or
+restore succeed.
+
+When `commit` publishes the new binding with privileged mutations quarantined,
+reconcile the underlying records through
+[Unknown command reconciliation](#unknown-command-reconciliation). The
+quarantine limits are in
+[Resume and inspect](agent-lifecycle.md#resume-and-inspect).

@@ -6,7 +6,7 @@ Security fixes are provided for the latest published release line only. The
 latest published release line is the most recent formally published minor
 release line, not the default branch, unreleased commits, pull requests,
 release candidates, or draft releases. The supported platform set and retained
-safety contracts follow the [current support policy](docs/reference/support-policy.md).
+safety contracts follow the [current support scope](docs/operations/production-deployment.md#support-scope).
 
 The `v1` line is end of life. No further `v1` patch releases are planned and
 security fixes are not backported to `v1`; the only `v1` artifact still

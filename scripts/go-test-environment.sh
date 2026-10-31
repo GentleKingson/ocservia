@@ -5,7 +5,7 @@ require_test_commands() {
   local command missing=0
   for command in "$@"; do
     if ! command -v "${command}" >/dev/null 2>&1; then
-      echo "${0##*/}: required test command is missing: ${command} (see docs/development/testing.md)" >&2
+      echo "${0##*/}: required test command is missing: ${command} (see docs/development/release-checks.md)" >&2
       missing=1
     fi
   done

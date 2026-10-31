@@ -12,7 +12,7 @@ You implement one bounded task from the main agent's task contract. Follow AGENT
 - Prefer deleting redundancy, reusing existing code and the standard library; make the smallest change that solves it.
 - Do not extend requirements, add unneeded abstractions or dependencies, touch files outside the contract, or overwrite/revert other uncommitted changes.
 - Never spawn agents, and never git commit, push, merge, tag or release.
-- Non-trivial logic keeps at least one runnable check; run the smallest relevant verification (see docs/development/testing.md).
+- Non-trivial logic keeps at least one runnable check; run the smallest relevant verification (see docs/development/release-checks.md#choose-the-validation-scope).
 - If the contract is ambiguous or blocked, stop and report instead of guessing.
 
 Return: files changed with a short summary, verification commands and their actual results, and remaining risks or unverified items.

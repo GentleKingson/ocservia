@@ -28,10 +28,10 @@
 ## 3. ocservia 关键事实与不变量
 
 - 模块化 Monorepo；Controller 是领域包主导的模块化单体，`control-plane/internal/platform/app` 负责装配，领域服务拥有业务不变量和事务。职责、例外和演进条件以 [Development architecture](docs/architecture.md#development-architecture) 为准，不按图形美观或包数量拆服务。
-- 支持范围以 [支持政策](docs/reference/support-policy.md) 和 [生产部署参考](docs/operations/production-deployment.md) 为准：单 Controller 实例、一个关系数据库（PostgreSQL 18.x 或 MySQL 8.4 LTS）、只支持一个专用 Relay（非空第二 Relay 被拒绝），不提供 HA。角色、租约、开发夹具或测试集群的存在不增加生产承诺；手工安装与 Quick 预设的前提和能力不同，不互相推广。
+- 支持范围以 [生产部署参考](docs/operations/production-deployment.md#support-scope) 为准：单 Controller 实例、一个关系数据库（PostgreSQL 18.x 或 MySQL 8.4 LTS）、只支持一个专用 Relay（非空第二 Relay 被拒绝），不提供 HA。角色、租约、开发夹具或测试集群的存在不增加生产承诺；手工安装与 Quick 预设的前提和能力不同，不互相推广。
 - Controller、transportd、Agent、privd、upgrader 和 Signer 的隔离承担不同权限或生命周期责任。HTTP 验权、事务内复验和节点验签/所有权 fence 保护不同边界，不能因表面重复删除。命令被接受、派发、执行和取得结果证明是不同状态；unknown 结果先对账，不盲目重放。
-- 数据库结构以当前 SQL artifacts 和后端实现为准。新库初始化与已有库 forward-only 升级分开；保持 schema 来源与内容校验、迁移串行化、owner/runtime 权限分离和真实 receipts。移除软件版本准入不等于移除数据身份校验；不自动降级数据库、重置身份或改写执行历史。详见 [数据库生命周期](docs/development/control-plane.md)。
-- Proto/OpenAPI 是协议字段来源，按 [契约与生成导航](docs/reference/stable-contracts.md) 使用既有生成入口，不直接编辑生成物，不另建人工字段清单。命令签名和 semantic hash 遵守具体版本的 canonical 输入契约，不以 Protobuf 序列化字节替代。
+- 数据库结构以当前 SQL artifacts 和后端实现为准。新库初始化与已有库 forward-only 升级分开；保持 schema 来源与内容校验、迁移串行化、owner/runtime 权限分离和真实 receipts。移除软件版本准入不等于移除数据身份校验；不自动降级数据库、重置身份或改写执行历史。详见 [数据库契约](docs/reference/stable-contracts.md#database)。
+- Proto/OpenAPI 是协议字段来源，按 [契约与生成导航](docs/reference/stable-contracts.md#schema-sources-and-generation) 使用既有生成入口，不直接编辑生成物，不另建人工字段清单。命令签名和 semantic hash 遵守具体版本的 canonical 输入契约，不以 Protobuf 序列化字节替代。
 
 ## 4. 按任务读取
 
@@ -39,15 +39,15 @@
 
 | 工作内容 | 首先查阅 |
 | --- | --- |
-| 项目入口与职责导航 | [文档首页](docs/README.md)、[职责与任务导航](docs/architecture.md#ownership-and-task-navigation) |
-| Controller 服务、事务与 HTTP | [领域服务边界](docs/development/domain-service-boundaries.md)、[HTTP 基线](docs/development/http-baseline.md) |
-| Web API、认证协调与 Workspace | [Web API 边界](docs/development/web.md#api-boundaries)、[节点详情工作流](docs/development/web.md#node-detail-workflows)、[身份与授权](docs/development/identity-authorization-audit.md) |
-| 配置、命令、Agent/privd 与传输 | [配置](docs/development/configuration.md)、[命令可靠性](docs/development/command-reliability.md)、[Agent/privd](docs/development/agent-privd.md)、[transportd](docs/development/transportd.md) |
-| 数据库、证书与重绑定 | [数据库](docs/development/control-plane.md)、[Signer](docs/development/certificates-and-signer.md)、[Rebind](docs/development/controller-rebind.md) |
-| 安装、运行与恢复 | [生产安装](docs/getting-started/production.md)、[生产部署参考](docs/operations/production-deployment.md)、[故障恢复](docs/operations/incident-recovery.md) |
-| 验证、CI 与发布 | [验证指引](docs/development/testing.md)、[GitHub Actions](docs/development/github-actions.md)、[Release Check](docs/development/release-checks.md) |
+| 项目入口与职责导航 | [文档导航](README.md#documentation)、[职责与任务导航](docs/architecture.md#ownership-and-task-navigation) |
+| Controller 服务、事务与 HTTP | [组件职责](docs/architecture.md#component-responsibilities)、[HTTP 契约](docs/reference/stable-contracts.md#http-contracts) |
+| Web API、认证协调与 Workspace | [Web 客户端](docs/architecture.md#web-client)、[身份、审批与审计](docs/reference/stable-contracts.md#identity-approval-and-audit)、[认证运维](docs/operations/authentication.md) |
+| 配置、命令、Agent/privd 与传输 | [命令与恢复](docs/reference/stable-contracts.md#commands-and-recovery)、[配置与节点 TLS](docs/reference/stable-contracts.md#configuration-and-node-tls)、[Agent/privd](docs/architecture.md#agent-privd-and-upgrader)、[入网与传输](docs/reference/stable-contracts.md#enrollment-and-transport) |
+| 数据库、证书与重绑定 | [数据库](docs/reference/stable-contracts.md#database)、[Signer](docs/reference/stable-contracts.md#certificates-and-signer)、[Rebind](docs/reference/stable-contracts.md#controller-rebind) |
+| 安装、运行与恢复 | [生产部署](docs/operations/production-deployment.md)、[节点生命周期](docs/operations/agent-lifecycle.md)、[故障恢复](docs/operations/incident-recovery.md) |
+| 验证、CI 与发布 | [验证与发布](docs/development/release-checks.md) |
 
-文档与代码不一致时，先辨别实际行为、支持政策、历史说明或实现缺陷，再在当前授权内纠正；不为让代码符合旧说明而改实现，也不把实现缺陷写成产品承诺。每个主题保留一个权威位置，其他位置用摘要和链接。公共文档不保存私有机器信息、内部任务控制资料或原始执行日志，遵循现有公共仓库检查，不为提交材料放宽它。
+文档与代码不一致时，先辨别实际行为、支持政策、历史说明或实现缺陷，再在当前授权内纠正；不为让代码符合旧说明而改实现，也不把实现缺陷写成产品承诺。每个主题保留一个权威位置，其他位置用摘要和链接。新增 Markdown 前先确认能否放进既有权威小节；只有内容有独立读者、稳定职责或工具/来源要求时才拆出新文件。公共文档不保存私有机器信息、内部任务控制资料或原始执行日志，遵循现有公共仓库检查，不为提交材料放宽它。
 
 ## 5. 计划、验证与结束
 
@@ -64,7 +64,7 @@
 
 ### 适度验证
 
-- 优先使用已有测试、lint、typecheck、build 或仓库验证入口，按变更范围选择与风险匹配的最小充分组合；下表不是每次修改的必选清单，环境前提见 [验证指引](docs/development/testing.md#choose-the-validation-scope)。锁定工具链（版本以 `toolchains.lock` 为准）由 `scripts/bootstrap.sh <profile>` 装到仓库内 `.tools`（`make bootstrap` 即 `all`）；仓库脚本自行加载 `scripts/env.sh`，直接运行 go、cargo、npm 前先 `source scripts/env.sh`，系统自带版本不是锁定版本。
+- 优先使用已有测试、lint、typecheck、build 或仓库验证入口，按变更范围选择与风险匹配的最小充分组合；下表不是每次修改的必选清单，环境前提见 [验证指引](docs/development/release-checks.md#choose-the-validation-scope)。锁定工具链（版本以 `toolchains.lock` 为准）由 `scripts/bootstrap.sh <profile>` 装到仓库内 `.tools`（`make bootstrap` 即 `all`）；仓库脚本自行加载 `scripts/env.sh`，直接运行 go、cargo、npm 前先 `source scripts/env.sh`，系统自带版本不是锁定版本。
 
 | 变更范围 | 推荐入口 |
 | --- | --- |
@@ -74,7 +74,7 @@
 | Web | `scripts/web-check.sh basic`（与 Basic CI 相同；`make web-check` 为 full，另跑浏览器认证套件） |
 | Proto/OpenAPI 契约 | 仅契约变更时：`make generate` 后审阅并提交生成差异；生成一致性由 `make generated-clean` 在已提交的干净工作树上重新生成并要求无差异来证明（`scripts/generated-clean.sh --skip-generate` 只比较工作树与 Git 索引，不能单独证明产物正确）；`make contracts-breaking` 对比 `origin/main` 检查破坏性变更 |
 | 跨模块 | 确有需要时 `make verify`（本地宽基线，不启动数据库，不等于 Basic CI） |
-| 数据库、集成、跨 VM、发布 | 按 [验证指引](docs/development/testing.md#choose-a-broader-check-when-needed) 选专项入口；候选 SHA 的 Release Check 是必要发布门禁，发布前仍须按 [发布策略](docs/development/release-checks.md) 完成三 VM 证据与 SHA 核对、人工确认及其他前置条件 |
+| 数据库、集成、跨 VM、发布 | 按 [验证指引](docs/development/release-checks.md#choose-a-broader-check-when-needed) 选专项入口；候选 SHA 的 Release Check 是必要发布门禁，发布前仍须按 [发布策略](docs/development/release-checks.md) 完成三 VM 证据与 SHA 核对、人工确认及其他前置条件 |
 
 - 不直接编辑生成代码（`control-plane/gen/proto`、`rust/crates/contracts/src/generated`、`web/src/api/generated`）。`make generate` 会删除并重建这些产物，运行前检查其中的未提交差异，不覆盖用户工作。
 - 本地检查、`make verify`、Basic CI（PR 必需检查 `Basic CI Result`）、Release Check 与真实跨 VM/原生验收是不同验证层级，不能相互冒充；CI 结论须来自对应候选 SHA 的运行结果。

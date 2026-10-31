@@ -38,7 +38,7 @@ compatibility-policy reset in v1.1.0 described below.
   replay the removed migration history. Retain a verified backup and the
   existing audit keys before upgrading. There is no reverse SQL migration or
   general historical binary rollback guarantee. See the
-  [database migration contract](docs/development/control-plane.md#current-sql-artifacts-and-bounded-upgrades).
+  [database migration contract](docs/reference/stable-contracts.md#database).
 - Require `OCSERV_CONTROLLER_ENDPOINT_ID` for normal production Controller
   startup; database-only one-shot commands remain exempt.
 
@@ -123,7 +123,7 @@ compatibility-policy reset in v1.1.0 described below.
 - Current standalone and integrated deployment boundaries, native Linux amd64 and
   arm64 products, supported OS/runtime requirements, PostgreSQL 17/18, MySQL 8.4,
   and MariaDB 12.3 validation. No automatic deployment-mode or database-backend
-  conversion is introduced. See the [current support policy](docs/reference/support-policy.md).
+  conversion is introduced. See the [current support policy](https://github.com/GentleKingson/ocservia/blob/v1.1.0/docs/reference/support-policy.md).
 
 ### Operational Risk
 
@@ -139,7 +139,7 @@ compatibility-policy reset in v1.1.0 described below.
 Designated as the first recommended stable production baseline once published.
 `v1.0.0` remains a supported in-place upgrade source; pre-1.0 installations
 must be redeployed to enter `1.x`. See the
-[1.0 support and versioning policy](docs/reference/support-policy.md).
+[1.0 support and versioning policy](https://github.com/GentleKingson/ocservia/blob/v1.0.1/docs/reference/support-policy.md).
 
 ### Added
 

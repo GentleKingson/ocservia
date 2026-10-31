@@ -258,7 +258,7 @@ function next(): void {
         <p class="m-0 text-sm">{{ $t("installApproval") }}</p>
         <a
           class="text-primary underline"
-          href="https://github.com/GentleKingson/ocservia/blob/main/docs/how-to/enroll-node.md#approve-the-node"
+          href="https://github.com/GentleKingson/ocservia/blob/main/docs/operations/agent-lifecycle.md#approve-the-node"
           target="_blank"
           rel="noopener noreferrer"
           >{{ $t("installApprovalGuide") }}</a
