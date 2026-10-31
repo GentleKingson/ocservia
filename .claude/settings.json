@@ -1,6 +1,6 @@
 {
   "model": "claude-opus-5-5",
-  "effortLevel": "medium",
+  "effortLevel": "high",
   "autoCompactWindow": 400000,
   "language": "simplified chinese",
   "attribution": {
