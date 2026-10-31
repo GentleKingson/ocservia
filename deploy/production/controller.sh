@@ -148,6 +148,32 @@ normalize_release_file_path() {
 select_release_source() {
   local manifest="${1:-${STAGED_RELEASE}}" manifest_commit current_commit dirty source_root
   manifest_commit="$(jq -er -s '.[0].source_commit' "${manifest}")"
+  if [[ -f "${ROOT}/RELEASE" ]]; then
+    local manifest_tag
+    manifest_tag="$(jq -er -s '.[0].release_tag' "${manifest}")"
+    # shellcheck source=deploy/lib/controller-runtime.sh
+    source "${ROOT}/deploy/lib/controller-runtime.sh"
+    source_root="${STATE_ROOT}/runtime-${manifest_tag}"
+    if [[ ! -e "${source_root}" && ! -L "${source_root}" ]] &&
+       [[ "$(cat "${ROOT}/RELEASE")" == "${manifest_tag} ${manifest_commit}" ]]; then
+      runtime_validate "${ROOT}" "${manifest_tag}" "${manifest_commit}"
+      SOURCE_CHECKOUT_TMP="$(mktemp -d "${STATE_ROOT}/.runtime.XXXXXX")"
+      # A root lifecycle may start from a launcher-owned downloaded bundle.
+      # Retained state belongs to the lifecycle user, never the source owner.
+      cp -R --preserve=mode,timestamps "${ROOT}/." "${SOURCE_CHECKOUT_TMP}/"
+      mv -T -- "${SOURCE_CHECKOUT_TMP}" "${source_root}"
+      SOURCE_CHECKOUT_TMP=""
+    else
+      runtime_fetch "${source_root}" "${manifest_tag}" "${manifest_commit}"
+    fi
+    require_absolute_canonical_path "release runtime" "${source_root}"
+    validate_ancestor "${source_root}"
+    runtime_validate "${source_root}" "${manifest_tag}" "${manifest_commit}"
+    COMPOSE_LAUNCHER="${OCSERV_CONTROLLER_COMPOSE_SH:-${source_root}/deploy/production/compose.sh}"
+    SMOKE_SCRIPT="${OCSERV_CONTROLLER_SMOKE_SH:-${source_root}/deploy/production/controller-release-smoke.sh}"
+    return
+  fi
+  # Legacy checkout invocation remains available; new releases use bundles.
   if ! current_commit="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)"; then
     fail "Controller release must be installed from a Git checkout"
   fi

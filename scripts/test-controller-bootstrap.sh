@@ -1,720 +1,178 @@
 #!/usr/bin/env bash
+# Exercise the released single-file entrypoint and runtime, with no Git on PATH.
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOOTSTRAP_SOURCE="${ROOT}/deploy/production/controller-bootstrap.sh"
-PREPARE_BOOTSTRAPS="${ROOT}/scripts/prepare-bootstrap-release-assets.sh"
-REPOSITORY_URL="https://github.com/GentleKingson/ocservia"
-
-# The bootstrap fixture asserts file modes with GNU stat; skip on hosts
-# without the GNU userland (mirrors the guard in test-controller-install.sh).
-stat -c '%u' . >/dev/null 2>&1 || {
-  echo "Controller bootstrap tests skipped: GNU stat is unavailable" >&2
-  exit 0
-}
-command -v git >/dev/null 2>&1 || {
-  echo "Controller bootstrap tests skipped: git is unavailable" >&2
-  exit 0
-}
-[[ -x "${BOOTSTRAP_SOURCE}" ]] || {
-  echo "Controller bootstrap tests require an executable bootstrap script" >&2
-  exit 1
-}
-umask 022
-
-fixture="$(mktemp -d "${HOME}/.ocservia-controller-bootstrap-test.XXXXXX")"
-cleanup() {
-  local status=$?
-  trap - EXIT INT TERM
-  rm -rf -- "${fixture}"
-  exit "${status}"
-}
-trap cleanup EXIT INT TERM
-
-# Exercise the exact flat Release asset with no repository siblings. This is
-# the real versioned installer entry shape, not the source path inside this checkout.
-release_assets="${fixture}/release-assets"
-mkdir -m 700 -- "${release_assets}"
-"${PREPARE_BOOTSTRAPS}" "${release_assets}"
-BOOTSTRAP="${release_assets}/controller-bootstrap.sh"
-[[ -x "${BOOTSTRAP}" && ! -e "${release_assets}/deploy" ]] || {
-  echo "Controller bootstrap tests require an isolated executable Release asset" >&2
-  exit 1
-}
-
-origin_work="${fixture}/origin-work"
-origin="${fixture}/origin.git"
-config="${fixture}/config"
-source_root="${fixture}/source-root"
+fixture="$(mktemp -d "${TMPDIR:-${HOME}}/.ocservia-controller-bootstrap-test.XXXXXX")"
+trap 'rm -rf -- "${fixture}"' EXIT
+mkdir -m 700 "${fixture}/assets" "${fixture}/bin" "${fixture}/config" "${fixture}/secrets"
+"${ROOT}/scripts/prepare-bootstrap-release-assets.sh" "${fixture}/assets" v4.5.6
+bootstrap="${fixture}/assets/controller-bootstrap.sh"
 bin="${fixture}/bin"
-logs="${fixture}/logs"
-git_log="${logs}/git.log"
-install_log="${logs}/install.log"
-EXTRA_ENV=()
-RUN_STATUS=0
-RUN_OUTPUT=""
-
-die() {
-  echo "Controller bootstrap tests: $1" >&2
-  [[ -n "${RUN_OUTPUT:-}" ]] && printf '%s\n' "${RUN_OUTPUT}" >&2
-  exit 1
-}
-
-mkdir -m 700 -- "${bin}" "${logs}" "${config}"
-
-mkdir -p -- "${origin_work}"
-git -C "${origin_work}" init -q
-git -C "${origin_work}" config user.name test
-git -C "${origin_work}" config user.email test@example.invalid
-# v0.1.0 predates the production installer; v0.1.2 ships a mocked installer
-# that records how it was handed off to (the bootstrap must exec exactly
-# this entrypoint from the operator's configuration directory, never a
-# sibling lifecycle script); v0.1.3 is a later release on another commit.
-# The mock models the v0.4.0-style environment-only installer contract: it
-# never reads install.env itself, so a successful handoff proves the
-# bootstrap exported the effective configuration from ${CONFIG_ROOT}.
-mkdir -p -- "${origin_work}/docs"
-printf 'old release\n' >"${origin_work}/docs/readme.md"
-git -C "${origin_work}" add -A
-git -C "${origin_work}" commit -qm base
-git -C "${origin_work}" tag v0.1.0
-mkdir -p -- "${origin_work}/deploy/production"
-mkdir -p -- "${origin_work}/deploy/production/postgres-init"
-printf '#!/bin/sh\nexit 0\n' >"${origin_work}/deploy/production/postgres-init/001-runtime-role.sh"
-chmod 0755 -- "${origin_work}/deploy/production/postgres-init/001-runtime-role.sh"
-printf 'receivers: {}\n' >"${origin_work}/deploy/production/otel-collector.yaml"
-cat >"${origin_work}/deploy/production/install.sh" <<'EOF'
+# Only release construction above uses Git. Installation cannot find it.
+for tool in bash env dirname uname tar gzip sha256sum find diff sort uniq awk sed mktemp rm cp mv mkdir stat realpath id chmod grep cut tr cat sleep; do
+  ln -s "$(command -v "${tool}")" "${bin}/${tool}"
+done
+cat >"${bin}/curl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$(umask)" == 0077 ]] || {
-  echo "bootstrap must restore the protected installer umask" >&2
-  exit 1
-}
-[[ -n "${OCSERV_PUBLIC_HOST:-}" ]] || {
-  echo "env-only installer received no public host" >&2
-  exit 1
-}
-log="${BOOTSTRAP_TEST_INSTALL_LOG:?}"
-printf 'invoked-as:%s\n' "$0" >>"${log}"
-printf 'pwd:%s\n' "$(pwd -P)" >>"${log}"
-printf 'args:%s\n' "$*" >>"${log}"
-printf 'env-resolved-marker:%s\n' "${OCSERV_INSTALL_ENV_RESOLVED:-<unset>}" >>"${log}"
-printf 'proxy-network:%s,%s,%s\n' "${OCSERV_APPLICATION_SUBNET:-}" "${OCSERV_APPLICATION_IP_RANGE:-}" "${OCSERV_GATEWAY_APPLICATION_IP:-}" >>"${log}"
-printf 'recommended:%s\n' "${OCSERV_RECOMMENDED_AGENT_VERSION-<unset>}" >>"${log}"
-exit "${MOCK_INSTALL_EXIT:-0}"
-EOF
-chmod 0755 -- "${origin_work}/deploy/production/install.sh"
-git -C "${origin_work}" add -A
-git -C "${origin_work}" commit -qm installer
-git -C "${origin_work}" tag v0.1.2
-git -C "${origin_work}" commit -q --allow-empty -m next
-git -C "${origin_work}" tag v0.1.3
-git clone -q --bare "${origin_work}" "${origin}"
-v012_commit="$(git -C "${origin}" rev-parse 'v0.1.2^{commit}')"
-
-# The git wrapper rewrites the production repository URL to the fixture
-# origin for the two network-facing subcommands (clone and ls-remote) and
-# logs them. After a successful clone it restores the production URL as the
-# recorded origin, so the bootstrap's origin-identity validation runs against
-# exactly the state a production clone would have. Every other git call
-# passes through untouched.
-REAL_GIT="$(command -v git)"
-cat >"${bin}/git" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-args=()
-for arg in "\$@"; do
-  if [[ "\${arg}" == "${REPOSITORY_URL}" ]]; then
-    arg="${origin}"
-  fi
-  args+=("\${arg}")
-done
-case "\${1:-}" in
-  clone)
-    printf 'clone\n' >>"\${BOOTSTRAP_TEST_GIT_LOG:?}"
-    clone_target="\${args[\${#args[@]}-1]}"
-    if "${REAL_GIT}" "\${args[@]}"; then
-      "${REAL_GIT}" -C "\${clone_target}" remote set-url origin "${REPOSITORY_URL}"
-    else
-      exit \$?
-    fi
-    exit 0
-    ;;
-  ls-remote)
-    printf 'ls-remote\n' >>"\${BOOTSTRAP_TEST_GIT_LOG:?}"
-    ;;
-esac
-exec "${REAL_GIT}" "\${args[@]}"
-EOF
-
-cat >"${bin}/sudo" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >>"${BOOTSTRAP_TEST_SUDO_LOG:?}"
-exec "$@"
-EOF
-
-chmod 0755 -- "${bin}/git" "${bin}/sudo"
-
-# The bootstrap subprocesses run with PATH="${bin}" only: a self-contained
-# toolset with no Docker client by default, so the Docker-absent scenarios
-# stay deterministic even on hosts (and CI runners) that have Docker.
-link_tool() {
-  local tool="$1" path
-  path="$(command -v "${tool}" || true)"
-  [[ -n "${path}" ]] || die "required test tool not found: ${tool}"
-  ln -s "${path}" "${bin}/${tool}"
-}
-for tool in bash env stat realpath mkdir id dirname rm; do
-  link_tool "${tool}"
-done
-
-# The curl mock answers the --check installer-presence probe from the
-# fixture origin's real git state (a release ships deploy/production/
-# install.sh or quick-install.sh exactly when the tagged tree has it) and
-# delegates everything else to the real curl.
-REAL_CURL="$(command -v curl)"
-cat >"${bin}/curl" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-for arg in "\$@"; do
-  case "\${arg}" in
-    https://raw.githubusercontent.com/GentleKingson/ocservia/*/deploy/production/*.sh)
-      probe_version="\${arg#https://raw.githubusercontent.com/GentleKingson/ocservia/}"
-      probe_path="\${probe_version#*/}"
-      probe_version="\${probe_version%%/*}"
-      if "${REAL_GIT}" -C "${origin}" cat-file -e "\${probe_version}:\${probe_path}" 2>/dev/null; then
-        exit 0
-      fi
-      echo "curl mock: 404 not found" >&2
-      exit 22
-      ;;
-  esac
-done
-exec "${REAL_CURL}" "\$@"
-EOF
-chmod 0755 -- "${bin}/curl"
-
-install_docker_client() {
-  cat >"${bin}/docker" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-  chmod 0755 -- "${bin}/docker"
-}
-
-install_docker_denied() {
-  cat >"${bin}/docker" <<'EOF'
-#!/usr/bin/env bash
-if [[ "${1:-}" == info ]]; then
-  echo "Got permission denied while trying to connect to the Docker daemon socket" >&2
-  exit 1
-fi
-exit 0
-EOF
-  chmod 0755 -- "${bin}/docker"
-}
-
-reset_state() {
-  rm -rf -- "${source_root}" "${fixture}/source-root-b"
-  : >"${git_log}"
-  : >"${install_log}"
-  rm -f -- "${bin}/docker" "${config}/install.env"
-  EXTRA_ENV=()
-}
-
-write_install_env() {
-  cat >"${config}/install.env" <<EOF
-OCSERV_PUBLIC_HOST=controller-bootstrap.example.test
-OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
-OCSERV_APPLICATION_SUBNET=198.18.80.0/24
-OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25
-OCSERV_GATEWAY_APPLICATION_IP=198.18.80.2
-EOF
-}
-
-run_bootstrap() {
-  BOOTSTRAP_TEST_INSTALL_LOG="${install_log}" \
-    BOOTSTRAP_TEST_GIT_LOG="${git_log}" \
-    PATH="${bin}" \
-    OCSERV_CONTROLLER_SOURCE_ROOT="${source_root}" \
-    env "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${BOOTSTRAP}" "$@"
-}
-
-capture() {
-  RUN_STATUS=0
-  RUN_OUTPUT="$(run_bootstrap "$@" 2>&1)" || RUN_STATUS=$?
-}
-
-capture_from() {
-  local directory="$1"
+output="" url=""
+while (($#)); do
+  case "$1" in --output) output="$2"; shift ;; https://*) url="$1" ;; esac
   shift
-  RUN_STATUS=0
-  RUN_OUTPUT="$( (cd -- "${directory}" && run_bootstrap "$@") 2>&1)" || RUN_STATUS=$?
-}
-
-assert_status() {
-  (( RUN_STATUS == "$1" )) ||
-    die "expected exit status $1 but got ${RUN_STATUS}"
-}
-
-assert_output() {
-  grep -q -- "$1" <<<"${RUN_OUTPUT}" ||
-    die "expected output to contain '$1'"
-}
-
-assert_log_contains() {
-  grep -qF -- "$2" "$1" || die "expected $1 to contain '$2'"
-}
-
-assert_log_empty() {
-  [[ ! -s "$1" ]] || die "expected $1 to stay empty, got: $(cat -- "$1")"
-}
-
-git_calls() {
-  grep -c "^$1$" "${git_log}" || true
-}
-
-# 1. usage errors.
-reset_state
-capture
-assert_status 2 "no arguments must be a usage error"
-capture --version
-assert_status 2 "a valueless --version must be a usage error"
-capture --nonsense
-assert_status 2 "an unknown flag must be a usage error"
-capture --version v0.1.2 --version v0.1.3
-assert_status 2 "a repeated --version must be a usage error"
-assert_log_empty "${git_log}"
-echo "usage errors fail with status 2"
-
-# 2. only exact vX.Y.Z versions are accepted.
-reset_state
-for bad_version in latest main 0.1.2 v0.1 v0.1.2-rc1 v0.1.2.3; do
-  capture --version "${bad_version}"
-  assert_status 1 "version '${bad_version}' must fail closed"
-  assert_output "exact vX.Y.Z or vX.Y.Z-rc.N release tag"
 done
-assert_log_empty "${git_log}"
-[[ ! -e "${source_root}" ]] ||
-  die "an invalid version must not create the source root"
-echo "non-exact versions are rejected before any action"
-
-# 3. a non-existent release tag fails closed and leaves no target.
-reset_state
-write_install_env
-capture_from "${config}" --version v9.9.9
-assert_status 1 "a non-existent version must fail closed"
-assert_output "release tag may not exist"
-assert_log_contains "${git_log}" "clone"
-[[ ! -e "${source_root}/v9.9.9" ]] ||
-  die "a failed clone must not leave a target behind"
-assert_log_empty "${install_log}"
-echo "a non-existent release tag fails closed without leaving a target"
-
-# 4. --check rejects an invalid install.env before anything else.
-reset_state
-printf 'OCSERV_NOT_A_SETTING=x\n' >"${config}/install.env"
-capture_from "${config}" --version v0.1.2 --check
-assert_status 1 "an invalid install.env must fail the check"
-assert_output "unknown configuration variable OCSERV_NOT_A_SETTING"
-assert_log_empty "${git_log}"
-[[ ! -e "${source_root}" ]] ||
-  die "the check must not create the source root"
-echo "an invalid install.env fails the check"
-
-# 4a. the run path resolves install.env too, failing before any mutation.
-reset_state
-printf 'OCSERV_NOT_A_SETTING=x\n' >"${config}/install.env"
-capture_from "${config}" --version v0.1.2
-assert_status 1 "an invalid install.env must fail the run before cloning"
-assert_output "unknown configuration variable OCSERV_NOT_A_SETTING"
-assert_log_empty "${git_log}"
-[[ ! -e "${source_root}" ]] ||
-  die "an invalid install.env must not create the source root"
-echo "an invalid install.env fails the run path before cloning"
-
-# 6. --check passes read-only for the launcher lifecycle.
-reset_state
-write_install_env
-install_docker_client
-capture_from "${config}" --version v0.1.2 --check
-assert_status 0 "the launcher check must pass"
-assert_output "lifecycle: launcher"
-assert_output "check passed"
-[[ "$(git_calls clone)" == 0 ]] ||
-  die "the check must not clone"
-[[ "$(git_calls ls-remote)" == 1 ]] ||
-  die "the check must probe the release tag read-only exactly once"
-[[ ! -e "${source_root}" ]] ||
-  die "the check must not create the source root"
-assert_log_empty "${install_log}"
-echo "check passes for the launcher lifecycle without mutation"
-
-# 6a. The isolated Release asset also loads pure exported configuration when
-# no install.env or repository sibling exists.
-reset_state
-install_docker_client
-EXTRA_ENV=(
-  "OCSERV_PUBLIC_HOST=controller-bootstrap.example.test"
-)
-capture_from "${config}" --version v0.1.2 --check
-assert_status 0 "the environment-only launcher check must pass"
-assert_output "lifecycle: launcher"
-assert_output "check passed"
-[[ ! -e "${config}/install.env" ]] ||
-  die "the environment-only check must not create install.env"
-echo "the isolated Release asset accepts pure exported configuration"
-
-# 6b. --check fails for a reachable tag that ships no installer.
-reset_state
-write_install_env
-capture_from "${config}" --version v0.1.0 --check
-assert_status 1 "a reachable tag without the installer must fail the check"
-assert_output "does not appear to ship deploy/production/install.sh"
-[[ "$(git_calls ls-remote)" == 1 ]] ||
-  die "the check must still probe the release tag read-only"
-[[ ! -e "${source_root}" ]] ||
-  die "the check must not create the source root"
-echo "check fails for a reachable tag that ships no installer"
-
-# 7. --check reports the fresh-host root lifecycle when no Docker exists.
-reset_state
-write_install_env
-capture_from "${config}" --version v0.1.2 --check
-assert_status 0 "the Docker-less check must pass"
-assert_output "lifecycle: root (no Docker client installed"
-assert_output "check passed"
-[[ "$(git_calls clone)" == 0 ]] ||
-  die "the check must not clone"
-echo "check reports the fresh-host root lifecycle"
-
-# 8. --check fails closed when the Docker client is unusable.
-reset_state
-write_install_env
-install_docker_denied
-capture_from "${config}" --version v0.1.2 --check
-assert_status 1 "an unusable Docker client must fail the check"
-assert_output "cannot use the Docker daemon"
-assert_output "--root-lifecycle"
-assert_log_empty "${install_log}"
-echo "check predicts the Docker fail-closed path"
-
-# 9. a fresh clone selects the root lifecycle and hands off from the
-# configuration directory.
-reset_state
-write_install_env
-capture_from "${config}" --version v0.1.2
-assert_status 0 "the Docker-less bootstrap must succeed"
-assert_output "lifecycle: root (no Docker client installed"
-assert_output "cloned and verified clean v0.1.2 checkout"
-target="${source_root}/v0.1.2"
-[[ -d "${target}" ]] || die "the durable checkout is missing"
-[[ "$(git -C "${target}" rev-parse HEAD)" == "${v012_commit}" ]] ||
-  die "the checkout HEAD must be the v0.1.2 release commit"
-[[ "$(git -C "${target}" tag --points-at HEAD)" == "v0.1.2" ]] ||
-  die "the checkout must carry the v0.1.2 tag at HEAD"
-[[ -z "$(git -C "${target}" status --porcelain --untracked-files=all)" ]] ||
-  die "the cloned checkout must be clean"
-[[ "$(stat -c '%a' "${source_root}")" == 700 && "$(stat -c '%a' "${target}")" == 700 ]] ||
-  die "the source root and claimed checkout must remain private"
-[[ "$(stat -c '%a' "${target}/deploy/production/postgres-init")" == 755 ]] ||
-  die "container-mounted public directories must be traversable by non-root container users"
-[[ "$(stat -c '%a' "${target}/deploy/production/postgres-init/001-runtime-role.sh")" == 755 ]] ||
-  die "container-mounted public executables must remain readable and executable"
-[[ "$(stat -c '%a' "${target}/deploy/production/otel-collector.yaml")" == 644 ]] ||
-  die "container-mounted public configuration must remain readable"
-[[ "$(git_calls clone)" == 1 ]] ||
-  die "exactly one clone was expected"
-assert_log_contains "${install_log}" "invoked-as:${target}/deploy/production/install.sh"
-assert_log_contains "${install_log}" "pwd:${config}"
-assert_log_contains "${install_log}" "args:--root-lifecycle"
-assert_log_contains "${install_log}" "env-resolved-marker:<unset>"
-assert_log_contains "${install_log}" "proxy-network:198.18.80.0/24,198.18.80.128/25,198.18.80.2"
-assert_log_contains "${install_log}" "recommended:0.2.0"
-echo "a fresh clone hands off to the installer with the root lifecycle"
-
-# 9a. negative control for the configuration handoff: with no install.env
-# and no exported configuration the same environment-only installer
-# refuses to run, proving the handoff above really exported the install.env
-# values instead of the mock succeeding on its own.
-reset_state
-capture_from "${config}" --version v0.1.2
-assert_status 1 "an environment-only installer must fail without configuration"
-assert_output "env-only installer received no public host"
-[[ -d "${source_root}/v0.1.2" ]] ||
-  die "the clone itself must still succeed without configuration"
-assert_log_empty "${install_log}"
-echo "the handoff really carries install.env values to env-only installers"
-
-# 10. an existing verified checkout is reused without recloning.
-reset_state
-write_install_env
-capture_from "${config}" --version v0.1.2
-assert_status 0 "the initial clone must succeed"
-capture_from "${config}" --version v0.1.2
-assert_status 0 "the rerun must succeed"
-assert_output "reusing verified clean v0.1.2 checkout"
-[[ "$(git_calls clone)" == 1 ]] ||
-  die "the rerun must not clone again"
-[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 12 ]] ||
-  die "the installer must have been handed off to exactly twice"
-echo "an existing clean checkout is reused without recloning"
-
-# 11. a dirty checkout is refused, never recloned or deleted.
-reset_state
-write_install_env
-capture_from "${config}" --version v0.1.2
-assert_status 0 "the initial clone must succeed"
-printf 'local operator edit\n' >"${target}/local-note.txt"
-capture_from "${config}" --version v0.1.2
-assert_status 1 "a dirty checkout must fail closed"
-assert_output "dirty"
-[[ "$(git_calls clone)" == 1 ]] ||
-  die "a dirty checkout must not trigger a reclone"
-[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 6 ]] ||
-  die "a dirty checkout must not hand off to the installer"
-[[ -d "${target}" ]] ||
-  die "a dirty pre-existing checkout must never be deleted"
-echo "a dirty checkout is refused without recloning or deleting"
-
-# 12. a checkout from a different origin is refused.
-git -C "${target}" remote set-url origin https://example.invalid/other.git
-capture_from "${config}" --version v0.1.2
-assert_status 1 "a foreign-origin checkout must fail closed"
-assert_output "instead of ${REPOSITORY_URL}"
-[[ -d "${target}" ]] || die "a foreign-origin checkout must never be deleted"
-[[ "$(git_calls clone)" == 1 ]] ||
-  die "a foreign-origin checkout must not trigger a reclone"
-echo "a checkout tracking another origin is refused"
-
-# 13. a checkout at a different release tag is refused.
-reset_state
-write_install_env
-source_root_b="${fixture}/source-root-b"
-mkdir -p -- "${source_root_b}"
-git clone -q --branch v0.1.3 --single-branch "${origin}" "${source_root_b}/v0.1.2"
-git -C "${source_root_b}/v0.1.2" remote set-url origin "${REPOSITORY_URL}"
-EXTRA_ENV=("OCSERV_CONTROLLER_SOURCE_ROOT=${source_root_b}")
-capture_from "${config}" --version v0.1.2
-assert_status 1 "a wrong-tag checkout must fail closed"
-assert_output "not exactly at the requested tag v0.1.2"
-echo "a checkout at a different release tag is refused"
-
-# 14. a symlinked target path is refused.
-reset_state
-write_install_env
-mkdir -p -- "${source_root}"
-ln -s -- "${config}" "${source_root}/v0.1.2"
-capture_from "${config}" --version v0.1.2
-assert_status 1 "a symlinked target must fail closed"
-assert_output "not a regular directory"
-[[ -L "${source_root}/v0.1.2" ]] ||
-  die "the bootstrap must not follow or replace the symlink"
-echo "a symlinked target path is refused"
-
-# 15. symlinked source-root ancestry is refused.
-reset_state
-write_install_env
-mkdir -m 700 -- "${fixture}/real-root"
-ln -s -- "${fixture}/real-root" "${fixture}/link-root"
-EXTRA_ENV=("OCSERV_CONTROLLER_SOURCE_ROOT=${fixture}/link-root/releases")
-capture_from "${config}" --version v0.1.2
-assert_status 1 "symlinked source-root ancestry must fail closed"
-assert_output "symlink"
-echo "symlinked source-root ancestry is refused"
-
-# 16. a group/world-writable source-root ancestor is refused.
-reset_state
-write_install_env
-mkdir -m 0777 -- "${fixture}/loose-parent"
-EXTRA_ENV=("OCSERV_CONTROLLER_SOURCE_ROOT=${fixture}/loose-parent/releases")
-capture_from "${config}" --version v0.1.2
-assert_status 1 "a world-writable ancestor must fail closed"
-assert_output "group/world-writable"
-echo "a world-writable source-root ancestor is refused"
-
-# 17. a usable Docker daemon selects the launcher lifecycle.
-reset_state
-write_install_env
-install_docker_client
-capture_from "${config}" --version v0.1.2
-assert_status 0 "the launcher bootstrap must succeed"
-assert_output "lifecycle: launcher"
-assert_log_contains "${install_log}" "args:"
-if grep -q -- "--root-lifecycle" "${install_log}"; then
-  die "the launcher lifecycle must not pass --root-lifecycle: $(cat -- "${install_log}")"
-fi
-assert_log_contains "${install_log}" "pwd:${config}"
-echo "a usable Docker daemon selects the launcher lifecycle"
-
-# 18. a Docker client without daemon access fails closed before mutation.
-reset_state
-write_install_env
-install_docker_denied
-capture_from "${config}" --version v0.1.2
-assert_status 1 "an unusable Docker client must fail closed"
-assert_output "cannot use the Docker daemon"
-assert_output "--root-lifecycle"
-assert_log_empty "${install_log}"
-[[ ! -e "${source_root}" ]] ||
-  die "the Docker fail-closed path must not create the source root"
-echo "a Docker client without daemon access fails closed before mutation"
-
-# 18a. an explicit --root-lifecycle overrides the Docker probe.
-capture_from "${config}" --version v0.1.2 --root-lifecycle
-assert_status 0 "an explicit root lifecycle must ignore broken Docker"
-assert_output "lifecycle: root (explicit"
-assert_log_contains "${install_log}" "args:--root-lifecycle"
-echo "an explicit --root-lifecycle overrides the Docker probe"
-
-# 19. a release without the production installer fails closed after cloning.
-reset_state
-write_install_env
-capture_from "${config}" --version v0.1.0
-assert_status 1 "a release without the installer must fail closed"
-assert_output "does not ship the production installer"
-[[ -d "${source_root}/v0.1.0" ]] ||
-  die "a clean checkout of an old release must be kept for inspection"
-assert_log_empty "${install_log}"
-echo "a release without the installer is refused but keeps the checkout"
-
-reset_state
-write_install_env
-git -C "${origin_work}" commit -qm rc --allow-empty
-git -C "${origin_work}" tag v0.1.4-rc.1
-git -C "${origin_work}" push -q "${origin}" v0.1.4-rc.1
-capture_from "${config}" --version v0.1.4-rc.1 --root-lifecycle
-assert_status 0 "an exact RC checkout must install"
-[[ "$(git -C "${source_root}/v0.1.4-rc.1" describe --tags --exact-match)" == v0.1.4-rc.1 ]] || die "wrong RC checkout"
-# Quick: v0.1.5 ships a mocked quick-install.sh that records its handoff.
-mkdir -p -- "${origin_work}/deploy/production"
-cat >"${origin_work}/deploy/production/quick-install.sh" <<'EOF'
+[[ "${url}" == https://github.com/GentleKingson/ocservia/releases/download/v4.5.6/* ]] || exit 22
+printf '%s\n' "${url}" >>"${TEST_ROOT}/downloads"
+cp "${TEST_ROOT}/assets/${url##*/}" "${output}"
+MOCK
+cat >"${bin}/docker" <<'MOCK'
 #!/usr/bin/env bash
-log="${BOOTSTRAP_TEST_INSTALL_LOG:?}"
-printf 'quick-args:%s\n' "$*" >>"${log}"
-printf 'quick-public-host:%s\n' "${OCSERV_PUBLIC_HOST:-<unset>}" >>"${log}"
-EOF
-chmod 0755 -- "${origin_work}/deploy/production/quick-install.sh"
-git -C "${origin_work}" add -A
-git -C "${origin_work}" commit -qm quick
-git -C "${origin_work}" tag v0.1.5
-git -C "${origin_work}" push -q "${origin}" v0.1.5
-
-# The preflight tools answer from fixture state: getent from ${dns}/<family>/
-# <name>, ip from QUICK_TEST_LOCAL_V4, and ss reports a listener when
-# ${fixture}/ss-tcp or ss-udp exists.
-for tool in awk sort tr grep cut; do
-  link_tool "${tool}"
-done
-dns="${fixture}/dns"
-cat >"${bin}/getent" <<EOF
+exit "${DOCKER_EXIT:-0}"
+MOCK
+cat >"${bin}/sudo" <<'MOCK'
 #!/usr/bin/env bash
-[[ -f "${dns}/\$1/\$2" ]] || exit 2
-while read -r address; do printf '%s STREAM %s\n' "\${address}" "\$2"; done <"${dns}/\$1/\$2"
-EOF
-cat >"${bin}/ip" <<'EOF'
+exit 99
+MOCK
+cat >"${bin}/getent" <<'MOCK'
 #!/usr/bin/env bash
-[[ "$2" != -4 || -z "${QUICK_TEST_LOCAL_V4:-}" ]] ||
-  printf '2: eth0    inet %s/24 brd 0.0.0.0 scope global eth0\n' "${QUICK_TEST_LOCAL_V4}"
-EOF
-cat >"${bin}/ss" <<EOF
+[[ "$1" == ahostsv4 ]] || exit 0
+[[ "${DNS_FAIL:-false}" != true ]] || exit 2
+echo '192.0.2.10 STREAM test'
+MOCK
+cat >"${bin}/ip" <<'MOCK'
 #!/usr/bin/env bash
-case "\$1" in
-  -Hltn) [[ ! -e "${fixture}/ss-tcp" ]] || echo "LISTEN 0 4096 0.0.0.0:443 0.0.0.0:*" ;;
-  -Hlun) [[ ! -e "${fixture}/ss-udp" ]] || echo "UNCONN 0 0 0.0.0.0:7842 0.0.0.0:*" ;;
-esac
-EOF
-chmod 0755 -- "${bin}/getent" "${bin}/ip" "${bin}/ss"
-
-set_dns() {
-  rm -rf -- "${dns}" "${fixture}/ss-tcp" "${fixture}/ss-udp"
-  mkdir -p -- "${dns}/ahostsv4" "${dns}/ahostsv6"
-  echo 203.0.113.10 >"${dns}/ahostsv4/vpn.example.test"
-  echo 203.0.113.10 >"${dns}/ahostsv4/relay.example.test"
+[[ "$*" == '-o -4 addr show' ]] || exit 0
+echo '1: eth0 inet 192.0.2.10/24'
+MOCK
+cat >"${bin}/ss" <<'MOCK'
+#!/usr/bin/env bash
+[[ "${PORT_BUSY:-false}" != true ]] || echo occupied
+MOCK
+chmod 755 "${bin}"/{curl,docker,sudo,getent,ip,ss}
+export TEST_ROOT="${fixture}"
+export OCSERV_CONTROLLER_SOURCE_ROOT="${fixture}/releases"
+export OCSERV_PUBLIC_HOST=vpn.example.test OCSERV_CONTROLLER_ENDPOINT_ID
+OCSERV_CONTROLLER_ENDPOINT_ID="$(printf 'a%.0s' {1..64})"
+export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1 OCSERV_LOCAL_AUTH_ENABLED=true
+export OCSERV_RELAY_URL_A=https://relay.example.test OCSERV_CERTIFICATE_SIGNER_URL=https://signer.example.test/sign
+export OCSERV_SECRET_DIR="${fixture}/secrets" OCSERV_BACKUP_DIR="${fixture}/backups"
+run() { (cd "${fixture}/config" && PATH="${bin}" bash "${bootstrap}" "$@"); }
+reject() {
+  local message="$1"; shift
+  if run "$@" >"${fixture}/output" 2>&1; then echo "unexpected success: $*" >&2; exit 1; fi
+  grep -Fq "${message}" "${fixture}/output"
 }
+reject 'requires a TTY'
+reject 'exact vX.Y.Z' --version latest
+printf '# protected configuration\n' >"${fixture}/settings.env"
+ln -s "${fixture}/settings.env" "${fixture}/config-link"
+reject 'not a symlink' --non-interactive --config "${fixture}/config-link"
+# Missing configuration must fail before any downloads, not prompt or mutate.
+if OCSERV_PUBLIC_HOST="" run --non-interactive >"${fixture}/output" 2>&1; then exit 1; fi
+grep -Fq 'OCSERV_PUBLIC_HOST is required' "${fixture}/output"
+[[ ! -e "${fixture}/downloads" ]]
+run --non-interactive --check
+[[ ! -e "${fixture}/releases" ]]
+# Replace only the final installers with recording stubs; archive validation and
+# handoff still run through the real released bootstrap and runtime helper.
+mkdir "${fixture}/payload"
+tar -xzf "${fixture}/assets/controller-runtime-v4.5.6.tar.gz" -C "${fixture}/payload"
+# All checked-in relative Compose bind mounts and extends files must exist in
+# the extracted runtime. No container daemon or YAML dependency is needed.
+python3 - "${fixture}/payload" <<'DEPENDENCIES'
+from pathlib import Path
+import re, sys
+root = Path(sys.argv[1])
+production = root / 'deploy/production'
+for compose in production.rglob('compose*.yaml'):
+    base = compose.parent if compose.parent.name == 'relay' else production
+    for line in compose.read_text().splitlines():
+        match = re.match(r'\s*(?:- (\.\.?/[^:]+):|file: (\./\S+))', line)
+        if match:
+            target = base / (match[1] or match[2])
+            assert target.exists(), f'{compose}: missing {target}'
+assert not (root / '.git').exists()
+assert not (root / 'control-plane').exists()
+DEPENDENCIES
+for entry in install.sh quick-install.sh; do
+  cat >"${fixture}/payload/deploy/production/${entry}" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"${TEST_ROOT}/handoff"
+printf '%s\n' "${OCSERV_PUBLIC_HOST:-}" "${OCSERV_DATABASE_BACKEND:-}" >"${TEST_ROOT}/environment"
+MOCK
+  chmod 755 "${fixture}/payload/deploy/production/${entry}"
+done
+pack() {
+  (cd "${fixture}/payload" && find deploy install.env.example RELEASE -type f | sort | xargs sha256sum >SHA256SUMS)
+  (cd "${fixture}/payload" && find deploy install.env.example RELEASE SHA256SUMS -type f | sort | tar -czf "${fixture}/assets/controller-runtime-v4.5.6.tar.gz" -T -)
+  (cd "${fixture}/assets" && sha256sum controller-runtime-v4.5.6.tar.gz >controller-runtime-v4.5.6.tar.gz.sha256)
+}
+pack
+run --non-interactive
+[[ -f "${fixture}/releases/v4.5.6/RELEASE" && ! -e "${fixture}/releases/v4.5.6/.git" ]]
+grep -Fq -- '--non-interactive --config' "${fixture}/handoff"
+# Reuse the validated runtime offline; changed contents never get overwritten.
+: >"${fixture}/downloads"
+run --version v4.5.6
+[[ ! -s "${fixture}/downloads" ]]
+printf '\n# drift\n' >>"${fixture}/releases/v4.5.6/deploy/production/compose.sh"
+reject 'runtime content changed' --non-interactive
+[[ -f "${fixture}/releases/v4.5.6/deploy/production/compose.sh" ]]
+export OCSERV_CONTROLLER_SOURCE_ROOT="${fixture}/fresh-releases"
+printf 'corrupt' >>"${fixture}/assets/controller-runtime-v4.5.6.tar.gz"
+reject 'runtime archive checksum mismatch' --non-interactive
+[[ ! -e "${fixture}/fresh-releases/v4.5.6" ]]
+pack
+# Existing target and symlink ancestry fail closed.
+mkdir -p "${fixture}/fresh-releases/v4.5.6"
+reject 'metadata is missing' --non-interactive
+ln -s "${fixture}/config" "${fixture}/linked"
+if OCSERV_CONTROLLER_SOURCE_ROOT="${fixture}/linked/releases" run --non-interactive >"${fixture}/output" 2>&1; then exit 1; fi
+grep -Fq 'symlinks' "${fixture}/output"
+export OCSERV_CONTROLLER_SOURCE_ROOT="${fixture}/quick-releases"
 quick=(--quick --controller-domain vpn.example.test --relay-domain relay.example.test --acme-email ops@example.test)
-
-reset_state
-set_dns
-capture --version v0.1.5 --quick
-assert_status 2 "--quick without the domains must be a usage error"
-capture --version v0.1.5 --controller-domain vpn.example.test
-assert_status 2 "Quick options without --quick must be a usage error"
-capture --version v0.1.5 "${quick[@]}" --relay-domain other.example.test
-assert_status 2 "a repeated Quick option must be a usage error"
-capture --version v0.1.5 --quick --controller-domain Vpn.example.test --relay-domain relay.example.test --acme-email ops@example.test
-assert_status 1 "an uppercase domain must fail"
-assert_output "lowercase DNS name"
-capture --version v0.1.5 --quick --controller-domain vpn.example.test --relay-domain vpn.example.test --acme-email ops@example.test
-assert_status 1 "equal domains must fail"
-assert_output "must differ"
-capture --version v0.1.5 --quick --controller-domain vpn.example.test --relay-domain relay.example.test --acme-email 'ops@bad host'
-assert_status 1 "an invalid email must fail"
-assert_output "plain email address"
-capture --version v0.1.5 "${quick[@]}" --root-ca-export-dir relative/dir
-assert_status 1 "a relative root CA path must fail"
-assert_output "must be absolute"
-assert_log_empty "${git_log}"
-echo "Quick usage and inputs are validated before any action"
-
-reset_state
-set_dns
-printf 'OCSERV_NOT_A_SETTING=x\n' >"${config}/install.env"
-capture_from "${config}" --version v0.1.5 "${quick[@]}" --check
-assert_status 0 "the Quick check must pass and ignore ./install.env"
-assert_output "lifecycle: root (explicit"
-assert_output "warning: vpn.example.test resolves to 203.0.113.10, which is not on this host"
-assert_output "DNS: vpn.example.test and relay.example.test resolve to 203.0.113.10"
-assert_output "ports: TCP443 and UDP7842 are free"
-assert_output "release installer: deploy/production/quick-install.sh is published for v0.1.5"
-[[ ! -e "${source_root}" ]] || die "the Quick check must not create the source root"
-EXTRA_ENV=(QUICK_TEST_LOCAL_V4=203.0.113.10)
-capture --version v0.1.5 "${quick[@]}" --check
-assert_status 0 "the Quick check with a local address must pass"
-if grep -q -- "warning:" <<<"${RUN_OUTPUT}"; then
-  die "a local A record must not warn"
-fi
-EXTRA_ENV=()
-capture --version v0.1.2 "${quick[@]}" --check
-assert_status 1 "a release without quick-install.sh must fail the Quick check"
-assert_output "does not appear to ship deploy/production/quick-install.sh"
-echo "the Quick check validates DNS, ports and the release read-only"
-
-quick_preflight_fails() {
-  local message="$1"
-  capture --version v0.1.5 "${quick[@]}"
-  assert_status 1 "the Quick preflight must fail: ${message}"
-  assert_output "${message}"
-  [[ ! -e "${source_root}" ]] || die "a failed Quick preflight must not create the source root"
-  assert_log_empty "${install_log}"
-}
-reset_state
-set_dns
-rm -f -- "${dns}/ahostsv4/relay.example.test"
-quick_preflight_fails "relay.example.test has no IPv4 address"
-set_dns
-echo 203.0.113.11 >"${dns}/ahostsv4/relay.example.test"
-quick_preflight_fails "must resolve to the same IPv4 addresses"
-set_dns
-echo 2001:db8::10 >"${dns}/ahostsv6/vpn.example.test"
-quick_preflight_fails "AAAA address 2001:db8::10, which is not on this host"
-set_dns
-: >"${fixture}/ss-tcp"
-quick_preflight_fails "TCP port 443 is already in use"
-set_dns
-: >"${fixture}/ss-udp"
-quick_preflight_fails "UDP port 7842 is already in use"
-echo "the Quick preflight fails closed before cloning"
-
-reset_state
-set_dns
-capture --version v0.1.5 "${quick[@]}" --root-ca-export-dir /media/offline
-assert_status 0 "the Quick handoff must succeed"
-assert_output "handing off to the Quick installer"
-assert_log_contains "${install_log}" "quick-args:--controller-domain vpn.example.test --relay-domain relay.example.test --acme-email ops@example.test --root-ca-export-dir /media/offline"
-assert_log_contains "${install_log}" "quick-public-host:<unset>"
-capture --version v0.1.2 "${quick[@]}"
-assert_status 1 "a release without quick-install.sh must be refused"
-assert_output "does not support --quick"
-echo "--quick hands off to the release's Quick installer"
-echo "Controller bootstrap tests passed"
+reject 'requires --root-ca-passphrase-file' --non-interactive "${quick[@]}"
+if DNS_FAIL=true run "${quick[@]}" >"${fixture}/output" 2>&1; then exit 1; fi
+grep -Fq 'has no IPv4' "${fixture}/output"
+if PORT_BUSY=true run "${quick[@]}" >"${fixture}/output" 2>&1; then exit 1; fi
+grep -Fq 'already in use' "${fixture}/output"
+[[ ! -e "${fixture}/quick-releases" ]]
+# Actual pseudo-terminal: defaults, cancellation and equivalent Quick handoff.
+python3 - "${bootstrap}" "${bin}" "${fixture}" <<'PTY'
+import os, pty, select, subprocess, sys, time
+script, bindir, root = sys.argv[1:]
+def wizard(confirmation, preset="quick"):
+    master, slave = pty.openpty()
+    env = dict(os.environ, PATH=bindir, OCSERV_CONTROLLER_SOURCE_ROOT=root+'/wizard-releases')
+    child = subprocess.Popen(['bash', script], stdin=slave, stdout=slave, stderr=slave, cwd=root+'/config', env=env)
+    os.close(slave)
+    answers = ('\nvpn.example.test\nrelay.example.test\nops@example.test\n\n\n' if preset == 'quick' else 'manual\n'+'\n'*14)
+    os.write(master, (answers+confirmation+'\n').encode())
+    output = b''
+    deadline = time.monotonic()+20
+    try:
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], .1)[0]:
+                try: output += os.read(master, 65536)
+                except OSError: break
+            if child.poll() is not None: break
+        assert child.wait(timeout=1) == (0 if confirmation == 'y' else 1), output.decode()
+    finally:
+        if child.poll() is None: child.kill(); child.wait()
+        os.close(master)
+    return output.decode()
+assert 'installation cancelled' in wizard('n')
+assert not os.path.exists(root+'/wizard-releases')
+assert 'Proceed with installation?' in wizard('y')
+with open(root+'/quick-handoff', 'w') as file:
+    file.write(open(root+'/handoff').read())
+assert 'saved configuration:' in wizard('y', 'manual')
+assert os.stat(root+'/config/install.env').st_mode & 0o777 == 0o600
+with open(root+'/manual-environment', 'w') as file:
+    file.write(open(root+'/environment').read())
+PTY
+run --non-interactive --config "${fixture}/config/install.env"
+cmp "${fixture}/environment" "${fixture}/manual-environment"
+cp "${fixture}/quick-handoff" "${fixture}/interactive-handoff"
+run "${quick[@]}" --root-ca-export-dir /root/ocservia-root-ca
+cmp "${fixture}/handoff" "${fixture}/interactive-handoff"
+echo 'Controller Release bootstrap: no Git, CLI/wizard equivalence, cancellation, checksum, drift and preflight checks passed'

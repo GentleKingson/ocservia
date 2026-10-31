@@ -1623,7 +1623,8 @@ before approving publication. Whether to make it a hard gate waits until the rea
 acceptance runs are stable.
 
 Published release artifacts are Agent archives, plain archive checksums, DEB and
-RPM packages, Controller container images, and the bootstrap files consumed by
+RPM packages, Controller container images, minimal Controller runtime bundles
+with published checksums, and the version-stamped bootstrap files consumed by
 the installers. Plain checksums guard against download corruption; they are not
 cryptographic signatures or a trust root. `controller-release.json` is the
 standard deployment configuration for Integrated lifecycle consumers.
@@ -1837,8 +1838,8 @@ builds or publishes assets.
 
 [`release-asset-smoke.sh`](../../scripts/release-asset-smoke.sh) downloads the
 exact Release's Agent archive, SHA-256 sidecar, DEB, RPM and managed-node
-bootstrap over HTTPS, verifies the archive checksum, and compares the bootstrap
-with the same-tag raw source used by the Nodes wizard. It runs the managed-node
+bootstrap over HTTPS, verifies the archive checksum, and checks the bootstrap's
+embedded Release version. The Nodes wizard downloads that same Release asset. It runs the managed-node
 release contracts against the downloaded script (download-failure and
 staging-digest fault injection), then feeds the downloaded packages to the native
 installation Smoke, including real binary version and architecture checks and

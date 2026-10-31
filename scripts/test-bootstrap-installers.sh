@@ -10,8 +10,8 @@ trap 'rm -rf -- "${fixture}"' EXIT
 # Published versioned installer copies must be the actual executable sources.
 mkdir "$fixture/prepared"
 "$ROOT/scripts/prepare-bootstrap-release-assets.sh" "$fixture/prepared"
-cmp "$fixture/prepared/controller-bootstrap.sh" "$ROOT/deploy/production/controller-bootstrap.sh"
-cmp "$fixture/prepared/managed-node-bootstrap.sh" "$ROOT/deploy/managed-node/install.sh"
+bash -n "$fixture/prepared/controller-bootstrap.sh"
+bash -n "$fixture/prepared/managed-node-bootstrap.sh"
 [[ -x "$fixture/prepared/controller-bootstrap.sh" && -x "$fixture/prepared/managed-node-bootstrap.sh" ]]
 
 fail() {
@@ -304,9 +304,43 @@ grep -qx 'https://github.com/GentleKingson/ocservia/releases/download/v4.5.6/con
   fail "stamped quick mode did not use its default release"
 run_installer "${fixture}/stamped/install-controller" "${quick[@]}" --version v4.5.7 >"${fixture}/output" 2>&1
 grep -q '/download/v4.5.7/' "${fixture}/downloads.log" || fail "explicit --version did not override the default release"
-if run_installer "${fixture}/stamped/install-controller" --root-lifecycle >"${fixture}/output" 2>&1; then
-  fail "stamped bootstrap launcher used its default release outside quick mode"
-fi
+run_installer "${fixture}/stamped/install-controller" --non-interactive --root-lifecycle >"${fixture}/output" 2>&1
+grep -q '/download/v4.5.6/' "${fixture}/downloads.log" || fail "manual mode did not use embedded version"
+run_installer "${fixture}/stamped/install-node" --non-interactive >"${fixture}/output" 2>&1
+grep -q '/download/v4.5.6/' "${fixture}/downloads.log" || fail "Agent did not use embedded version"
+
+# Check the arguments received by the downloaded installer, not just its URL.
+touch "${fixture}/custom config.env"
+for installer in install-controller install-node; do
+  run_installer "${fixture}/stamped/${installer}" --non-interactive --config "./custom config.env" >"${fixture}/output" 2>&1
+  [[ "$(<"${fixture}/args.log")" == $'--version\nv4.5.6\n--non-interactive\n--config\n./custom config.env' ]] ||
+    fail "${installer} did not forward unattended mode and the exact configuration path"
+  if run_installer "${fixture}/stamped/${installer}" </dev/null >"${fixture}/output" 2>&1; then
+    fail "${installer} accepted a no-argument invocation without a TTY"
+  fi
+  grep -q 'requires a TTY' "${fixture}/output" || fail "missing TTY diagnostic"
+  [[ ! -s "${fixture}/downloads.log" ]] || fail "non-TTY invocation downloaded an installer"
+done
+
+# A real TTY must select the wizard across the executable handoff.
+python3 - "${fixture}" <<'PTY'
+import os, pty, subprocess, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+env = dict(os.environ, PATH=str(root/'bin')+os.pathsep+os.environ['PATH'],
+           TMPDIR=str(root/'tmp'), TEST_RELEASE_DIR=str(root/'release'),
+           TEST_DOWNLOAD_LOG=str(root/'downloads.log'), TEST_EXEC_LOG=str(root/'exec.log'),
+           TEST_ARGS_LOG=str(root/'args.log'), TEST_TEMP_LOG=str(root/'temp.log'))
+for name in ('install-controller', 'install-node'):
+    master, slave = pty.openpty()
+    try:
+        subprocess.run(['bash', str(root/'stamped'/name)], cwd=root, env=env,
+                       stdin=slave, stdout=slave, stderr=slave, check=True, timeout=10)
+        assert (root/'args.log').read_text().splitlines() == ['--version', 'v4.5.6', '--interactive'], name
+    finally:
+        os.close(slave)
+        os.close(master)
+PTY
 
 for installer in "${CONTROLLER}" "${NODE}"; do
   [[ "$(tail -n 1 "${installer}")" == 'main "$@"' ]] || fail "main invocation is not the final line"

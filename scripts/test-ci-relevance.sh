@@ -169,6 +169,8 @@ deploy/managed-node/install.sh run_installers run_ci_tools
 deploy/production/install.sh run_installers run_ci_tools
 deploy/production/controller-bootstrap.sh run_installers run_ci_tools
 deploy/lib/install-env.sh run_installers run_ci_tools
+deploy/lib/install-ui.sh run_installers run_ci_tools
+deploy/lib/controller-runtime.sh run_installers run_ci_tools
 deploy/production/transportd-relays.sh run_installers run_controller_cache run_ci_tools
 deploy/production/systemd/agent-relays.sh run_installers run_ci_tools
 deploy/production/systemd/ocservia-agent-relays.conf run_installers

@@ -31,7 +31,8 @@ class PublicationTest(unittest.TestCase):
         self.images = self.root / 'images'
         self.assets.mkdir()
         self.images.mkdir()
-        names = ['install-controller', 'controller-bootstrap.sh', 'managed-node-bootstrap.sh',
+        names = ['install-controller', 'install-node', 'install.env.example',
+                 f'controller-runtime-{TAG}.tar.gz', f'controller-runtime-{TAG}.tar.gz.sha256', 'controller-bootstrap.sh', 'managed-node-bootstrap.sh',
                  'controller-release.json', 'controller-release-amd64.json', 'controller-release-arm64.json']
         for arch, rpm in [('amd64', 'x86_64'), ('arm64', 'aarch64')]:
             archive = f'ocservia-agent-{VERSION}-linux-{arch}.tar.gz'
@@ -113,7 +114,7 @@ class PublicationTest(unittest.TestCase):
         elif args[:2] == ('gh', 'api'):
             self.assertIn('draft=false', args)
             self.assertIn('make_latest=' + ('false' if self.release['prerelease'] else 'true'), args)
-            self.assertEqual(len(self.remote_assets), 14)
+            self.assertEqual(len(self.remote_assets), 18)
             self.assertEqual(len(self.remote_images), 24)
             if self.fault == 'publish':
                 raise subprocess.CalledProcessError(1, args)
@@ -131,7 +132,7 @@ class PublicationTest(unittest.TestCase):
     def test_complete_draft_to_immutable_release(self):
         self.finish()
         self.assertTrue(self.published)
-        self.assertIn('14 assets, 24 verified image tags', (self.root / 'summary').read_text())
+        self.assertIn('18 assets, 24 verified image tags', (self.root / 'summary').read_text())
 
     def test_blob_error_retries_the_same_image_before_publication(self):
         self.push_failures = 1
@@ -221,7 +222,7 @@ class PublicationTest(unittest.TestCase):
             registry.assert_not_called()
 
     def test_asset_inventory(self):
-        self.assertEqual(len(self.files), 14)
+        self.assertEqual(len(self.files), 18)
         path = self.files[0]
         path.write_bytes(b'')
         with self.assertRaisesRegex(RuntimeError, 'empty'):

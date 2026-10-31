@@ -38,7 +38,7 @@ umask 022
 # expected EndpointID is that derivation of those bytes.
 MOCK_ENDPOINT_ID="$(printf '%032d' 7 | sha256sum | awk '{print $1}')"
 
-fixture="$(mktemp -d "${HOME}/.ocservia-managed-node-test.XXXXXX")"
+fixture="$(mktemp -d "${TMPDIR:-${HOME}}/.ocservia-managed-node-test.XXXXXX")"
 
 can_root() {
   ((EUID == 0)) || sudo -n true >/dev/null 2>&1
@@ -295,7 +295,12 @@ printf '%s\n' "$*" >>"${root}/logs/sudo.log"
 args=()
 while (($# > 0)); do
   case "$1" in
+    -n) shift ;;
     -u) shift 2 ;;
+    mktemp)
+      args+=(mktemp); shift
+      while (($#)); do args+=("${1/\/var\/tmp\//${root}/}"); shift; done
+      break ;;
     install)
       args+=(install)
       shift
@@ -500,6 +505,11 @@ build_serve
 # repository's real .gitignore is committed too: the installer must treat a
 # present /install.env as ignored, not as a dirty release checkout.
 cp -- "${INSTALL}" "${repo}/deploy/managed-node/install.sh"
+# Legacy checkout identity cases clear only the Release default marker. Keep
+# the downloaded installer's entire implementation under test; the flat copy
+# below retains its actual stamp and exercises the normal Release path.
+sed -i '/^readonly DEFAULT_VERSION=/c\readonly DEFAULT_VERSION=""' "${repo}/deploy/managed-node/install.sh"
+cp -- "${ROOT}/deploy/lib/install-ui.sh" "${repo}/deploy/lib/install-ui.sh"
 cp -- "${ROOT}/deploy/lib/install-env.sh" "${repo}/deploy/lib/install-env.sh"
 cp -- "${ROOT}/.gitignore" "${repo}/.gitignore"
 git -C "${repo}" init -q
@@ -514,7 +524,12 @@ git -C "${repo}" tag "v${VERSION}"
 # consult. The package-first --version mode must run from exactly this.
 standalone="${fixture}/standalone"
 mkdir -m 700 -- "${standalone}"
-cp -- "${INSTALL}" "${standalone}/install.sh"
+if [[ -n "${INSTALLER_UNDER_TEST:-}" ]]; then
+  cp -- "${INSTALL}" "${standalone}/install.sh"
+else
+  "${ROOT}/scripts/prepare-bootstrap-release-assets.sh" "${standalone}"
+  mv "${standalone}/managed-node-bootstrap.sh" "${standalone}/install.sh"
+fi
 
 # Root scenarios perform real privileged file operations; they need the
 # package's system group to exist exactly like a real host.
@@ -590,7 +605,7 @@ capture() {
   build_env
   RUN_STATUS=0
   RUN_OUTPUT="$(env "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-    "${SCRIPT_UNDER_TEST}" "$@" 2>&1)" || RUN_STATUS=$?
+    "${SCRIPT_UNDER_TEST}" --non-interactive "$@" 2>&1)" || RUN_STATUS=$?
 }
 
 # The install.env contract is bound to the invocation directory, so its
@@ -603,7 +618,7 @@ capture_from() {
   RUN_OUTPUT="$(
     cd -- "${directory}"
     env "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-      "${SCRIPT_UNDER_TEST}" "$@" 2>&1
+      "${SCRIPT_UNDER_TEST}" --non-interactive "$@" 2>&1
   )" || RUN_STATUS=$?
 }
 
@@ -612,10 +627,10 @@ capture_root() {
   RUN_STATUS=0
   if ((EUID == 0)); then
     RUN_OUTPUT="$(env -u SUDO_USER "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-      "${SCRIPT_UNDER_TEST}" "$@" 2>&1)" || RUN_STATUS=$?
+      "${SCRIPT_UNDER_TEST}" --non-interactive "$@" 2>&1)" || RUN_STATUS=$?
   else
     RUN_OUTPUT="$(sudo -n env -u SUDO_USER "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-      "${SCRIPT_UNDER_TEST}" "$@" 2>&1)" || RUN_STATUS=$?
+      "${SCRIPT_UNDER_TEST}" --non-interactive "$@" 2>&1)" || RUN_STATUS=$?
   fi
 }
 
@@ -776,21 +791,94 @@ else
 fi
 echo "install.env works in the single-file --version mode"
 
-# 2h. the single-file mode requires the version pin: without --version the
-# installer falls back to the legacy checkout identity and fails closed in
-# a directory with no usable Git checkout. The ENROLLMENT_READY rerun
-# instruction ("the same --version argument") is load-bearing for exactly
-# this reason. The failure message depends on whether the fixture root
-# happens to sit inside an unrelated Git work tree, so either identity
-# failure satisfies the scenario.
+# Exercise the downloaded, non-executable file through the real re-exec path.
+# This probe does not elevate: append --help at the sudo boundary so the second
+# invocation exits before installation instead of recursively requesting sudo.
+if ((EUID != 0)); then
+  scenario
+  mkdir -m 700 "${fixture}/reexec-bin"
+  cat >"${fixture}/reexec-bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$(dirname "${OCSERV_MANAGED_NODE_SYSROOT}")/logs/root-sudo.log"
+[[ "$1" == -n ]]
+shift
+exec "$@" --help
+EOF
+  chmod 0755 "${fixture}/reexec-bin/sudo"
+  chmod 0644 "${standalone}/install.sh"
+  TEST_PATH_PREFIX="${fixture}/reexec-bin:${bin}:${PATH}" build_env
+  RUN_STATUS=0
+  RUN_OUTPUT="$(env "${ROOT_ENV[@]}" bash "${standalone}/install.sh" \
+    --non-interactive --version "v${VERSION}" --root-lifecycle 2>&1)" || RUN_STATUS=$?
+  assert_status 2
+  assert_output "usage: deploy/managed-node/install.sh"
+  assert_log_contains "${root_sudo_log}" "bash ${standalone}/install.sh --root-lifecycle --non-interactive --version v${VERSION}"
+  assert_log_empty "${curl_log}"
+  chmod 0755 "${standalone}/install.sh"
+  echo "a mode-0644 downloaded installer re-executes via Bash without sudo prompts"
+fi
+
+# A released single file uses its embedded default, while source-only copies
+# require an explicit tag or the deliberate legacy checkout CLI path.
 scenario
 SCRIPT_UNDER_TEST="${standalone}/install.sh"
+if grep -q '^readonly DEFAULT_VERSION=""' "${SCRIPT_UNDER_TEST}"; then
+  capture_from "${standalone}"
+  assert_status 1
+  assert_output "not a Git checkout\|exactly one exact vX.Y.Z release tag\|dirty"
+  assert_log_empty "${curl_log}"
+else
+  capture_from "${standalone}"
+  assert_output "release identity: v${VERSION}"
+  assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/"
+fi
+
+# The real terminal wizard uses the same package path as the CLI, persists
+# public configuration, and cancellation cannot download or install a package.
+scenario
+sed 's/^readonly DEFAULT_VERSION=""$/readonly DEFAULT_VERSION="v'"${VERSION}"'"/' \
+  "${standalone}/install.sh" >"${standalone}/wizard.sh"
+chmod 755 "${standalone}/wizard.sh"
+build_env
+env "${ROOT_ENV[@]}" python3 - "${standalone}" <<'PTY'
+import os, pty, select, subprocess, sys, time
+root = sys.argv[1]
+def run(answer):
+    master, slave = pty.openpty()
+    child = subprocess.Popen(['bash', root+'/wizard.sh'], stdin=slave, stdout=slave, stderr=slave, cwd=root)
+    os.close(slave)
+    os.write(master, ('\n'*8+answer+'\n').encode())
+    output = b''
+    try:
+        deadline = time.monotonic()+30
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], .1)[0]:
+                try: output += os.read(master, 65536)
+                except OSError: break
+            if child.poll() is not None: break
+        code = child.wait(timeout=1)
+    finally:
+        if child.poll() is None: child.kill(); child.wait()
+        os.close(master)
+    return code, output.decode()
+code, output = run('n')
+assert code == 1 and 'installation cancelled' in output, output
+assert not os.path.exists(root+'/install.env')
+fixture = os.path.dirname(root)
+assert os.path.getsize(fixture+'/logs/curl.log') == 0
+assert os.path.getsize(fixture+'/logs/dpkg.log') == 0
+code, output = run('y')
+assert 'Proceed with installation?' in output and 'native package installed' in output, output
+assert code == (0 if os.geteuid() == 0 else 1), output
+assert os.stat(root+'/install.env').st_mode & 0o777 == 0o600
+PTY
+cp "${curl_log}" "${fixture}/wizard-downloads"
+scenario
+SCRIPT_UNDER_TEST="${standalone}/wizard.sh"
 capture_from "${standalone}"
-assert_status 1 "the single file without --version must fail closed"
-assert_output "not a Git checkout\|exactly one exact vX.Y.Z release tag\|dirty"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "the single file without --version fails closed on the legacy identity"
+cmp "${curl_log}" "${fixture}/wizard-downloads"
+echo "Agent terminal wizard and CLI select the same native package; cancellation and configuration persistence verified"
 
 # 3. an unsupported architecture is rejected before any host mutation.
 scenario
@@ -1707,7 +1795,7 @@ scenario
 build_env
 RUN_STATUS=0
 RUN_OUTPUT="$(sudo -n env "${ROOT_ENV[@]}" SUDO_USER=ocservia-operator \
-  "${repo}/deploy/managed-node/install.sh" 2>&1)" || RUN_STATUS=$?
+  "${repo}/deploy/managed-node/install.sh" --non-interactive 2>&1)" || RUN_STATUS=$?
 assert_status 1 "whole-script sudo must fail closed"
 assert_output "launcher user"
 assert_output "--root-lifecycle"
@@ -1832,6 +1920,7 @@ RELAY_URL_A=https://relay-root-file-a.example.test
 RELAY_URL_B=
 EOF
   ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B)
+  chmod 0644 "${standalone}/install.sh"
   RUN_STATUS=0
   # Each fixture intentionally isolates its PATH and exported settings.
   # shellcheck disable=SC2030,SC2031
@@ -1839,16 +1928,17 @@ EOF
     export PATH="${root_lifecycle_bin}"
     TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env
     cd -- "${standalone}"
-    env "${ROOT_ENV[@]}" "${standalone}/install.sh" --version "v${VERSION}" --root-lifecycle 2>&1
+    env "${ROOT_ENV[@]}" bash "${standalone}/install.sh" --version "v${VERSION}" --root-lifecycle 2>&1
   )" || RUN_STATUS=$?
   assert_status 0 "the single-file root-lifecycle command must succeed"
   assert_output "ENROLLMENT_READY"
   assert_output "rerun this installer with the same --version v${VERSION} argument"
-  assert_log_contains "${root_sudo_log}" "${standalone}/install.sh --root-lifecycle --version v${VERSION}"
+  assert_log_contains "${root_sudo_log}" "bash ${standalone}/install.sh --root-lifecycle --version v${VERSION}"
   as_root grep -qx "RELAY_URL_A=https://relay-root-file-a.example.test" \
     "${sysroot}/etc/ocservia-agent/relays.env" ||
     die "relays.env must carry the launcher-resolved relay URL A"
-  echo "the root lifecycle re-execs the single file with the pinned version"
+  chmod 0755 "${standalone}/install.sh"
+  echo "the root lifecycle re-execs the mode-0644 single file with the pinned version"
   for single_b in unset empty override; do
     scenario
     ROOT_ENV_OMIT=(RELAY_URL_A RELAY_URL_B)

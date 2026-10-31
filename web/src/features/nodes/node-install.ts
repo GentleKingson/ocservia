@@ -75,5 +75,5 @@ export function installEnv(
 
 export function installCommand(release: string): string {
   if (!validInstallField("release", release)) return "";
-  return `curl --fail --show-error --location --proto '=https' --proto-redir '=https' \\\n  https://raw.githubusercontent.com/GentleKingson/ocservia/${release}/deploy/managed-node/install.sh \\\n  --output install.sh\nbash ./install.sh --version ${release}`;
+  return `wget --https-only --secure-protocol=TLSv1_2 \\\n  https://github.com/GentleKingson/ocservia/releases/download/${release}/managed-node-bootstrap.sh \\\n  --output-document=install.sh\nbash ./install.sh --non-interactive --version ${release}`;
 }

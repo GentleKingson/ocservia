@@ -1,59 +1,21 @@
 #!/usr/bin/env bash
-# Versioned Controller installer: prepare a durable, clean checkout
-# of an exact vX.Y.Z release tag and hand off to the existing production
-# installer.
-#
-# Scope: the operator runs this script from any directory holding the
-# production configuration (./install.env and/or exported OCSERV_*
-# variables). The script resolves that configuration once under the
-# operator's own privileges and exports the effective allowlisted values,
-# clones the requested exact release tag into a launcher-owned durable
-# source root (the later lifecycle commands — upgrade, rollback, start,
-# uninstall — keep operating on that checkout), verifies the checkout
-# satisfies the production installer's clean exact-tag contract, selects
-# the Docker lifecycle per the documented rules, and execs
-# <checkout>/deploy/production/install.sh without changing the working
-# directory. Because the effective configuration crosses the handoff as
-# exported environment variables, releases whose installer predates the
-# install.env loader (environment-only installers, e.g. v0.4.0) receive
-# it exactly like install.env-aware installers, for which the explicit
-# shell environment keeps its priority over the file.
-#
-# Boundaries (the existing authorities are unchanged):
-# - No deployment activation, no docker compose, no Docker installation,
-#   and no modification of the Docker permission model (the host
-#   bootstrap keeps that authority). This script itself never crosses a
-#   privilege boundary and never calls sudo -E.
-# - An existing target checkout is only reused when it is clean, exactly
-#   at the requested release tag, and cloned from the expected
-#   repository; anything else fails closed without rm -rf or overwrites
-#   of pre-existing content.
-# - The root lifecycle keeps relying on sudo's SUDO_UID semantics for
-#   git's ownership trust of the launcher-owned checkout (install.sh
-#   preserves SUDO_UID/SUDO_GID across its controlled re-exec); git's
-#   safe.directory is never relaxed.
-#
-# Usage model:
-#   cd <directory holding install.env>
-#   ./controller-bootstrap.sh --version vX.Y.Z
-#   ./controller-bootstrap.sh --version vX.Y.Z --root-lifecycle
-#   ./controller-bootstrap.sh --version vX.Y.Z --check
-#   ./controller-bootstrap.sh --version vX.Y.Z --quick --controller-domain NAME \
-#     --relay-domain NAME --acme-email ADDRESS [--root-ca-passphrase-file PATH]
-#     [--root-ca-export-dir PATH] [--check]
-#
-# --quick ignores ./install.env, implies --root-lifecycle, checks DNS and the
-# public ports read-only, and hands off to the release's
-# deploy/production/quick-install.sh, which generates the configuration.
-#
-# The version must be an explicit exact vX.Y.Z release tag; latest,
-# branches, commits, and pre-releases are not accepted.
+# Self-contained Release entrypoint. Collect inputs, retain a minimal verified
+# runtime bundle, then delegate to the existing Quick/Manual installer.
 set -euo pipefail
 umask 077
 
-REPOSITORY_URL="https://github.com/GentleKingson/ocservia"
+readonly DEFAULT_VERSION=""
+SCRIPT_LIB="$(dirname "${BASH_SOURCE[0]}")/../lib"
+# shellcheck source=deploy/lib/controller-runtime.sh
+source "${SCRIPT_LIB}/controller-runtime.sh" # release-embed
+# shellcheck source=deploy/lib/install-ui.sh
+source "${SCRIPT_LIB}/install-ui.sh" # release-embed
+INTERACTIVE=false
+NON_INTERACTIVE=false
+(($# != 0)) || INTERACTIVE=true
+CONFIG_FILE="${PWD}/install.env"
 CONFIG_ROOT="${PWD}"
-VERSION=""
+VERSION="${DEFAULT_VERSION}"
 ROOT_LIFECYCLE=false
 CHECK_ONLY=false
 QUICK=false
@@ -119,7 +81,7 @@ INSTALL_ENV_NAMES=(
 # Embedded install.env loader: the versioned installer contract copy of
 # deploy/lib/install-env.sh, kept functionally identical to it. This bootstrap
 # is a single self-contained Release asset, so it cannot source repository
-# siblings before it clones the requested release; any loader contract change
+# siblings before it downloads the requested runtime; any loader contract change
 # is made in all embedded and shared copies.
 install_env_die() {
   echo "install.env: $1" >&2
@@ -221,6 +183,8 @@ fail() {
 }
 
 usage() {
+  echo "No arguments: interactive wizard (TTY required). --non-interactive: unattended, no prompts." >&2
+  echo "Options: --config PATH (default ./install.env), --version vX.Y.Z (Release default embedded)." >&2
   echo "usage: controller-bootstrap.sh --version vX.Y.Z [--root-lifecycle] [--check]" >&2
   echo "       controller-bootstrap.sh --version vX.Y.Z --quick --controller-domain NAME --relay-domain NAME" >&2
   echo "         --acme-email ADDRESS [--root-ca-passphrase-file PATH] [--root-ca-export-dir PATH] [--root-lifecycle] [--check]" >&2
@@ -240,6 +204,13 @@ valid_domain() {
 version_seen=false
 while (($# > 0)); do
   case "$1" in
+    --interactive) INTERACTIVE=true; shift ;;
+    --non-interactive) NON_INTERACTIVE=true; shift ;;
+    --config)
+      (($# >= 2)) || fail "--config requires an existing file"
+      [[ -f "$2" && ! -L "$2" ]] || fail "--config requires a regular file, not a symlink"
+      CONFIG_FILE="$(realpath -- "$2")"; shift 2 ;;
+    --help|-h) usage ;;
     --version)
       [[ "${version_seen}" == false && $# -ge 2 ]] || usage
       VERSION="$2"
@@ -281,22 +252,8 @@ while (($# > 0)); do
       ;;
   esac
 done
-[[ "${version_seen}" == true ]] || usage
-if [[ "${QUICK}" == true ]]; then
-  [[ -n "${CONTROLLER_DOMAIN}" && -n "${RELAY_DOMAIN}" && -n "${ACME_EMAIL}" ]] || usage
-  valid_domain "${CONTROLLER_DOMAIN}" || fail "--controller-domain must be a lowercase DNS name"
-  valid_domain "${RELAY_DOMAIN}" || fail "--relay-domain must be a lowercase DNS name"
-  [[ "${CONTROLLER_DOMAIN}" != "${RELAY_DOMAIN}" ]] || fail "the Controller and Relay domains must differ"
-  if [[ ${#ACME_EMAIL} -gt 254 || ! "${ACME_EMAIL}" =~ ^[A-Za-z0-9._%+-]+@(.+)$ ]] || ! valid_domain "${BASH_REMATCH[1]}"; then
-    fail "--acme-email must be a plain email address"
-  fi
-  # Integrated deployment requires the explicit root lifecycle.
-  ROOT_LIFECYCLE=true
-elif ((${#QUICK_ARGS[@]} > 0)); then
-  usage
-fi
-[[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
-  fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
+[[ "${NON_INTERACTIVE}" == false || "${INTERACTIVE}" == false ]] || fail "conflicting installation modes"
+[[ "${INTERACTIVE}" == false ]] || install_ui_require_tty
 
 resolve_source_root() {
   if [[ -n "${OCSERV_CONTROLLER_SOURCE_ROOT:-}" ]]; then
@@ -334,7 +291,7 @@ validate_source_component() {
 load_config() {
   # Quick generates its own configuration and never reads ./install.env.
   [[ "${QUICK}" == false ]] || return 0
-  install_env_load "${CONFIG_ROOT}/install.env" "${INSTALL_ENV_NAMES[@]}"
+  install_env_load "${CONFIG_FILE}" "${INSTALL_ENV_NAMES[@]}"
 }
 
 # Read-only Quick preflight. Both names must have the same IPv4 addresses;
@@ -378,7 +335,7 @@ quick_preflight() {
 # Walk the source root path top-down. Existing components are validated
 # (canonical, root/launcher-owned, not group/world-writable); with
 # create=true the missing tail is created component by component with
-# mode 0700, so the durable checkout root is launcher-owned and private
+# mode 0700, so the durable runtime root is launcher-owned and private
 # without ever relaxing an existing directory's permissions.
 walk_source_root() {
   local create="$1" component="" part
@@ -430,56 +387,9 @@ select_lifecycle() {
   fail "the Docker client is installed but this user cannot use the Docker daemon; the Docker permission model is never modified here — grant this user Docker daemon access per Docker's official post-install steps and rerun, or pass --root-lifecycle explicitly"
 }
 
-validate_checkout() {
-  local label="$1" origin_url head tag
-  local -a matching=()
-  [[ -d "${TARGET}" && ! -L "${TARGET}" ]] ||
-    fail "refusing ${label} target ${TARGET}: it exists but is not a regular directory; move it aside deliberately"
-  [[ "$(git -C "${TARGET}" rev-parse --is-inside-work-tree 2>/dev/null)" == "true" ]] ||
-    fail "${label} ${TARGET} is not a Git repository"
-  origin_url="$(git -C "${TARGET}" config --get remote.origin.url 2>/dev/null)" || origin_url=""
-  [[ "${origin_url}" == "${REPOSITORY_URL}" ]] ||
-    fail "${label} at ${TARGET} tracks origin '${origin_url:-<none>}' instead of ${REPOSITORY_URL}; refusing to reuse or overwrite it"
-  head="$(git -C "${TARGET}" rev-parse HEAD 2>/dev/null)" ||
-    fail "cannot resolve HEAD in ${label} ${TARGET}"
-  while IFS= read -r tag; do
-    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] && matching+=("${tag}")
-  done < <(git -C "${TARGET}" tag --points-at "${head}")
-  if (( ${#matching[@]} != 1 )) || [[ "${matching[0]:-}" != "${VERSION}" ]]; then
-    fail "${label} at ${TARGET} is not exactly at the requested tag ${VERSION} (release tags at HEAD: ${matching[*]:-none}); refusing to reuse or overwrite it"
-  fi
-  git -C "${TARGET}" diff --quiet --exit-code -- . ||
-    fail "${label} at ${TARGET} is dirty (unstaged changes); refusing to reuse or overwrite it"
-  git -C "${TARGET}" diff --cached --quiet --exit-code -- . ||
-    fail "${label} at ${TARGET} is dirty (staged changes); refusing to reuse or overwrite it"
-  [[ -z "$(git -C "${TARGET}" status --porcelain --untracked-files=all)" ]] ||
-    fail "${label} at ${TARGET} is dirty (untracked files); refusing to reuse or overwrite it"
-}
-
-prepare_checkout() {
-  if [[ -e "${TARGET}" || -L "${TARGET}" ]]; then
-    validate_checkout "existing"
-    echo "reusing verified clean ${VERSION} checkout: ${TARGET}"
-    return
-  fi
-  # mkdir claims the target atomically against a concurrent bootstrap;
-  # git clone accepts an existing empty directory. Anything under the
-  # claimed directory was created by this invocation, so the failure path
-  # may remove exactly that directory and never pre-existing content.
-  mkdir -m 0700 -- "${TARGET}" || fail "cannot create ${TARGET}"
-  echo "cloning ${REPOSITORY_URL} at ${VERSION} into ${TARGET}"
-  # Public checkout files are bind-mounted into non-root containers. Keep the
-  # claimed root private and limit the readable umask to the clone itself.
-  if ! (umask 022; git clone --quiet --branch "${VERSION}" --single-branch --depth 1 \
-    "${REPOSITORY_URL}" "${TARGET}"); then
-    rm -rf -- "${TARGET}"
-    fail "cloning ${REPOSITORY_URL} at ${VERSION} failed; the release tag may not exist — check the published releases"
-  fi
-  if ! (validate_checkout "cloned"); then
-    rm -rf -- "${TARGET}"
-    fail "the cloned checkout at ${TARGET} did not satisfy the exact-${VERSION} clean-checkout contract"
-  fi
-  echo "cloned and verified clean ${VERSION} checkout: ${TARGET}"
+prepare_runtime() {
+  runtime_fetch "${TARGET}" "${VERSION}"
+  echo "verified runtime: ${TARGET}"
 }
 
 check_release_installer() {
@@ -490,59 +400,136 @@ check_release_installer() {
 }
 
 require_run_tools() {
-  command -v git >/dev/null 2>&1 ||
-    fail "git is required to prepare the release checkout"
+  local tool VERSION ID VERSION_ID
+  for tool in tar gzip sha256sum find diff sort uniq awk sed mktemp; do
+    command -v "${tool}" >/dev/null 2>&1 || fail "${tool} is required"
+  done
+  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || fail "curl or wget is required"
   if (( EUID != 0 )); then
-    command -v sudo >/dev/null 2>&1 ||
-      fail "sudo is required for a non-root launcher (the production installer invokes it for the host bootstrap and the root lifecycle)"
+    command -v sudo >/dev/null 2>&1 || fail "sudo is required for host preparation"
   fi
+  [[ "$(uname -s)" == Linux ]] || fail "Linux is required"
+  case "$(uname -m)" in x86_64|aarch64) ;; *) fail "unsupported architecture: $(uname -m)" ;; esac
+  # Read OS metadata before any installation or downloads.
+  . /etc/os-release
+  case "${ID}:${VERSION_ID}" in
+    ubuntu:20.04|ubuntu:22.04|ubuntu:24.04|ubuntu:26.04|debian:11|debian:12|debian:13) ;;
+    *) fail "unsupported Controller OS: ${ID} ${VERSION_ID}" ;;
+  esac
+  echo "platform: ${ID} ${VERSION_ID}, $(uname -m)"
 }
 
-# --check-only, read-only presence probe: a reachable tag alone does not
-# make a release installable through this bootstrap — it must also ship
-# deploy/production/install.sh. A HEAD request against the tagged raw
-# content answers that without cloning (the executed installer still comes
-# from the verified clone, never from this probe).
-check_release_installer_published() {
-  local url path=deploy/production/install.sh
-  [[ "${QUICK}" == false ]] || path=deploy/production/quick-install.sh
-  [[ "${REPOSITORY_URL}" == https://github.com/* ]] ||
-    fail "cannot probe release content for repository ${REPOSITORY_URL}"
-  url="https://raw.githubusercontent.com/${REPOSITORY_URL#https://github.com/}/${VERSION}/${path}"
-  if ! curl -fsSLI -o /dev/null --proto '=https' --tlsv1.2 "${url}" 2>/dev/null; then
-    fail "release ${VERSION} does not appear to ship ${path}; this bootstrap hands off only to releases that do"
-  fi
-  echo "release installer: ${path} is published for ${VERSION}"
+collect_inputs() {
+  local mode=quick auth=local passphrase_file="" export_dir=""
+  [[ ! -e "${CONFIG_FILE}" ]] || mode=manual
+  install_ui_prompt mode 'Installation preset (quick/manual)' "${mode}"
+  case "${mode}" in
+    quick)
+      QUICK=true
+      echo 'Quick: Integrated, bundled PostgreSQL, ACME TLS, Local authentication, root lifecycle.'
+      echo 'Manual supports external databases, Standalone and OIDC with operator-provisioned secrets.'
+      install_ui_prompt CONTROLLER_DOMAIN 'Controller DNS name'
+      install_ui_prompt RELAY_DOMAIN 'Relay DNS name (distinct from Controller)'
+      install_ui_prompt ACME_EMAIL 'ACME contact email'
+      install_ui_prompt passphrase_file 'Root CA passphrase file (empty: secure prompt during CA generation)'
+      install_ui_prompt export_dir 'Root CA encrypted export directory' /root/ocservia-root-ca
+      QUICK_ARGS=(--controller-domain "${CONTROLLER_DOMAIN}" --relay-domain "${RELAY_DOMAIN}" --acme-email "${ACME_EMAIL}" --root-ca-export-dir "${export_dir}")
+      [[ -z "${passphrase_file}" ]] || QUICK_ARGS+=(--root-ca-passphrase-file "${passphrase_file}")
+      ;;
+    manual)
+      load_config
+      install_ui_prompt OCSERV_DEPLOYMENT_MODE 'Deployment (standalone/integrated)' standalone
+      install_ui_prompt OCSERV_PUBLIC_HOST 'Controller DNS name'
+      install_ui_prompt OCSERV_CONTROLLER_PUBLIC_URL 'Controller HTTPS URL' "https://${OCSERV_PUBLIC_HOST}"
+      install_ui_prompt OCSERV_PUBLIC_ORIGIN 'Authentication public origin' "https://${OCSERV_PUBLIC_HOST}"
+      install_ui_prompt OCSERV_DATABASE_BACKEND 'Database (postgres/mysql)' postgres
+      install_ui_prompt OCSERV_DATABASE_DEPLOYMENT 'Database location (bundled/external)' "$([[ "${OCSERV_DATABASE_BACKEND}" == mysql ]] && echo external || echo bundled)"
+      if [[ "${OCSERV_DATABASE_DEPLOYMENT}" == external ]]; then
+        install_ui_prompt OCSERV_DATABASE_BACKUP_HOST 'Database backup host'
+        install_ui_prompt OCSERV_DATABASE_BACKUP_PORT 'Database backup port' "$([[ "${OCSERV_DATABASE_BACKEND}" == mysql ]] && echo 3306 || echo 5432)"
+        install_ui_prompt OCSERV_DATABASE_BACKUP_NAME 'Database name' ocservia
+        install_ui_prompt OCSERV_DATABASE_BACKUP_USER 'Database backup user' ocservia_backup
+      fi
+      if [[ "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; then
+        ROOT_LIFECYCLE=true
+        install_ui_prompt OCSERV_RELAY_PUBLIC_HOST 'Relay DNS name'
+        install_ui_prompt OCSERV_TLS_MODE 'TLS (manual/acme)' manual
+        [[ "${OCSERV_TLS_MODE}" != acme ]] || install_ui_prompt OCSERV_ACME_EMAIL 'ACME contact email'
+        install_ui_prompt OCSERV_RELAY_SECRET_DIR 'Protected Relay secret directory'
+        install_ui_prompt OCSERV_SIGNER_SECRET_DIR 'Protected Signer secret directory'
+        install_ui_prompt OCSERV_SIGNER_STATE_DIR 'Signer state directory'
+      else
+        install_ui_prompt OCSERV_RELAY_URL_A 'Dedicated Relay HTTPS URL'
+        install_ui_prompt OCSERV_CERTIFICATE_SIGNER_URL 'Signer HTTPS URL'
+      fi
+      [[ -z "${OCSERV_OIDC_ISSUER:-}" ]] || auth=oidc
+      [[ -z "${OCSERV_OIDC_ISSUER:-}" || "${OCSERV_LOCAL_AUTH_ENABLED:-false}" != true ]] || auth=both
+      install_ui_prompt auth 'Authentication (local/oidc/both)' "${auth}"
+      case "${auth}" in
+        local) export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_OIDC_ISSUER="" OCSERV_OIDC_CLIENT_ID="" OCSERV_OIDC_REDIRECT_URL="" ;;
+        oidc|both)
+          export OCSERV_LOCAL_AUTH_ENABLED=false
+          [[ "${auth}" != both ]] || export OCSERV_LOCAL_AUTH_ENABLED=true
+          install_ui_prompt OCSERV_OIDC_ISSUER 'OIDC issuer HTTPS URL'
+          install_ui_prompt OCSERV_OIDC_CLIENT_ID 'OIDC client ID'
+          install_ui_prompt OCSERV_OIDC_REDIRECT_URL 'OIDC redirect URL' "https://${OCSERV_PUBLIC_HOST}/api/v1/auth/callback"
+          ;;
+        *) fail "authentication must be local, oidc or both" ;;
+      esac
+      install_ui_prompt OCSERV_CONTROLLER_ENDPOINT_ID 'Controller EndpointID (64 lowercase hex)'
+      install_ui_prompt OCSERV_AUDIT_EVENT_KEY_ID 'Audit event key ID' audit-event-v1
+      install_ui_prompt OCSERV_SECRET_DIR 'Prepared production secret directory'
+      install_ui_prompt OCSERV_BACKUP_DIR 'Protected backup directory' /var/backups/ocservia
+      install_ui_prompt OCSERV_CONTROLLER_STATE_ROOT 'Controller persistent state directory' /var/lib/ocservia-controller
+      echo 'Manual uses existing protected files; it never generates credentials or identities.'
+      ;;
+    *) fail "preset must be quick or manual" ;;
+  esac
 }
 
-run_check() {
-  local tag_ref
-  command -v git >/dev/null 2>&1 || fail "git is required to inspect the release tag"
-  command -v curl >/dev/null 2>&1 ||
-    fail "curl is required to check the release and download the release bundle"
-  if (( EUID != 0 )); then
-    command -v sudo >/dev/null 2>&1 ||
-      fail "sudo is required for a non-root launcher (the production installer invokes it for the host bootstrap and the root lifecycle)"
+validate_manual_inputs() {
+  local variable
+  [[ "${QUICK}" == false ]] || return 0
+  for variable in OCSERV_PUBLIC_HOST OCSERV_CONTROLLER_ENDPOINT_ID OCSERV_AUDIT_EVENT_KEY_ID OCSERV_SECRET_DIR OCSERV_BACKUP_DIR; do
+    [[ -n "${!variable:-}" ]] || fail "${variable} is required; provide install.env or export it"
+  done
+  valid_domain "${OCSERV_PUBLIC_HOST}" || fail "OCSERV_PUBLIC_HOST must be a lowercase DNS name"
+  [[ "${OCSERV_CONTROLLER_ENDPOINT_ID}" =~ ^[0-9a-f]{64}$ ]] || fail "Controller EndpointID must be 64 lowercase hex characters"
+  [[ -z "${OCSERV_RELAY_URL_B:-}" ]] || fail "only one dedicated Relay is supported"
+  case "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
+    postgres:bundled|postgres:external|mysql:external) ;; *) fail "unsupported database topology" ;;
+  esac
+  if [[ "${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == external ]]; then
+    [[ -n "${OCSERV_DATABASE_BACKUP_HOST:-}" ]] || fail "OCSERV_DATABASE_BACKUP_HOST is required"
   fi
-  load_config
-  walk_source_root false
-  echo "version: ${VERSION} (exact vX.Y.Z release tag)"
-  echo "configuration directory: ${CONFIG_ROOT}"
-  echo "source root: ${SOURCE_ROOT}"
-  select_lifecycle
-  [[ "${QUICK}" == false ]] || quick_preflight
-  tag_ref="$(git ls-remote "${REPOSITORY_URL}" "refs/tags/${VERSION}")"
-  [[ -n "${tag_ref}" ]] ||
-    fail "release tag ${VERSION} was not found on ${REPOSITORY_URL}; check the published releases"
-  echo "release tag: ${VERSION} is reachable on ${REPOSITORY_URL}"
-  check_release_installer_published
-  echo "check passed: no host state was modified; rerun without --check to bootstrap"
+  case "${OCSERV_DEPLOYMENT_MODE:-standalone}" in
+    standalone)
+      [[ "${OCSERV_RELAY_URL_A:-}" == https://* && "${OCSERV_CERTIFICATE_SIGNER_URL:-}" == https://* ]] || fail "HTTPS Relay and Signer URLs are required" ;;
+    integrated)
+      valid_domain "${OCSERV_RELAY_PUBLIC_HOST:-}" || fail "Integrated requires a Relay DNS name"
+      [[ "${OCSERV_RELAY_PUBLIC_HOST}" != "${OCSERV_PUBLIC_HOST}" ]] || fail "Integrated requires distinct Controller and Relay DNS names"
+      for variable in OCSERV_RELAY_SECRET_DIR OCSERV_SIGNER_SECRET_DIR OCSERV_SIGNER_STATE_DIR; do
+        [[ "${!variable:-}" == /* ]] || fail "${variable} must be an absolute directory"
+      done ;;
+    *) fail "deployment must be standalone or integrated" ;;
+  esac
+  if [[ -n "${OCSERV_OIDC_ISSUER:-}${OCSERV_OIDC_CLIENT_ID:-}${OCSERV_OIDC_REDIRECT_URL:-}" ]]; then
+    [[ "${OCSERV_OIDC_ISSUER:-}" == https://* && -n "${OCSERV_OIDC_CLIENT_ID:-}" && "${OCSERV_OIDC_REDIRECT_URL:-}" == https://* ]] || fail "complete OIDC configuration is required"
+  else
+    [[ "${OCSERV_LOCAL_AUTH_ENABLED:-false}" == true ]] || fail "enable Local authentication or configure OIDC"
+  fi
+  [[ "${OCSERV_SECRET_DIR}" == /* && -d "${OCSERV_SECRET_DIR}" && ! -L "${OCSERV_SECRET_DIR}" && "${OCSERV_BACKUP_DIR}" == /* ]] || fail "prepare an absolute secret directory and backup path"
 }
 
 hand_off() {
   local installer="${TARGET}/deploy/production/install.sh"
+  local -a install_args=()
+  [[ "${NON_INTERACTIVE}" == false ]] || install_args+=(--non-interactive)
+  # Values already loaded under the invoking user's privileges.
+  install_args+=(--config "${CONFIG_FILE}")
   if [[ "${QUICK}" == true ]]; then
     echo "handing off to the Quick installer: ${TARGET}/deploy/production/quick-install.sh"
+    [[ "${NON_INTERACTIVE}" == false ]] || QUICK_ARGS+=(--non-interactive)
     exec "${TARGET}/deploy/production/quick-install.sh" "${QUICK_ARGS[@]}"
   fi
   if [[ "${ROOT_LIFECYCLE}" == true ]]; then
@@ -554,25 +541,62 @@ hand_off() {
     # install.env resolution marker: it would suppress the launcher-side
     # install.env parsing this bootstrap hands off to.
     unset OCSERV_INSTALL_ENV_RESOLVED
-    exec "${installer}" --root-lifecycle
+    exec "${installer}" "${install_args[@]}" --root-lifecycle
   fi
   echo "handing off to the production installer: ${installer} (configuration stays in ${CONFIG_ROOT})"
   unset OCSERV_INSTALL_ENV_RESOLVED
-  exec "${installer}"
+  exec "${installer}" "${install_args[@]}"
 }
 
 require_run_tools
-resolve_source_root
+[[ "${INTERACTIVE}" == false ]] || collect_inputs
 
-if [[ "${CHECK_ONLY}" == true ]]; then
-  run_check
-  exit 0
+if [[ "${QUICK}" == true ]]; then
+  [[ -n "${CONTROLLER_DOMAIN}" && -n "${RELAY_DOMAIN}" && -n "${ACME_EMAIL}" ]] || usage
+  valid_domain "${CONTROLLER_DOMAIN}" || fail "--controller-domain must be a lowercase DNS name"
+  valid_domain "${RELAY_DOMAIN}" || fail "--relay-domain must be a lowercase DNS name"
+  [[ "${CONTROLLER_DOMAIN}" != "${RELAY_DOMAIN}" ]] || fail "the Controller and Relay domains must differ"
+  if [[ ${#ACME_EMAIL} -gt 254 || ! "${ACME_EMAIL}" =~ ^[A-Za-z0-9._%+-]+@(.+)$ ]] || ! valid_domain "${BASH_REMATCH[1]}"; then
+    fail "--acme-email must be a plain email address"
+  fi
+  # Integrated deployment requires the explicit root lifecycle.
+  ROOT_LIFECYCLE=true
+elif ((${#QUICK_ARGS[@]} > 0)); then
+  usage
 fi
+[[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
+  fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
 
 load_config
+validate_manual_inputs
+if [[ "${QUICK}" == true && "${NON_INTERACTIVE}" == true && " ${QUICK_ARGS[*]} " != *" --root-ca-passphrase-file "* ]]; then
+  fail "--non-interactive Quick requires --root-ca-passphrase-file"
+fi
+resolve_source_root
 select_lifecycle
 [[ "${QUICK}" == false ]] || quick_preflight
+walk_source_root false
+if [[ "${CHECK_ONLY}" == true ]]; then
+  check_root="$(mktemp -d)"
+  trap 'rm -rf -- "${check_root}"' EXIT
+  runtime_fetch "${check_root}/runtime" "${VERSION}"
+  TARGET="${check_root}/runtime"
+  check_release_installer
+  echo "check passed: inputs, platform and published runtime verified; no host state modified"
+  exit 0
+fi
+if [[ "${INTERACTIVE}" == true ]]; then
+  echo "Release: ${VERSION}; runtime: ${TARGET}; root lifecycle: ${ROOT_LIFECYCLE}; Quick: ${QUICK}"
+  if [[ "${QUICK}" == false ]]; then
+    echo "Controller: ${OCSERV_PUBLIC_HOST}; deployment: ${OCSERV_DEPLOYMENT_MODE:-standalone}; database: ${OCSERV_DATABASE_BACKEND:-postgres}/${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
+    echo "Local login: ${OCSERV_LOCAL_AUTH_ENABLED:-false}; OIDC: ${OCSERV_OIDC_ISSUER:-disabled}"
+    echo "Configuration will be saved to ${CONFIG_FILE} (protected file paths only)."
+  fi
+  echo 'Existing deployments are never upgraded by this installer.'
+  install_ui_confirm
+  [[ "${QUICK}" == true ]] || install_ui_save "${CONFIG_FILE}" "${INSTALL_ENV_NAMES[@]}"
+fi
 walk_source_root true
-prepare_checkout
+prepare_runtime
 check_release_installer
 hand_off

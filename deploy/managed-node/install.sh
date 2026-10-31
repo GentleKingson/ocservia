@@ -4,9 +4,9 @@
 # Scope: install an exact vX.Y.Z release package-first. With --version the
 # release is pinned on the command line and this script is a self-contained
 # Versioned installer: one file, no Git checkout, and no repository sibling files.
-# Without --version it must run from a clean checkout of the exact release
-# tag and derives the release identity from the Git tag (the compatibility
-# path). Either way the script runs the platform preflight, downloads the
+# Released copies embed their exact tag. Unstamped source copies retain
+# the explicit legacy CLI Git-tag compatibility path. Both paths run the
+# platform preflight, download the
 # matching native package over HTTPS and freezes it in root-owned staging
 # BEFORE any package manager runs as root, installs the native package with
 # the production relay request marker, prepares the production node state (sealing keys, relay
@@ -108,6 +108,14 @@
 # configuration.
 set -euo pipefail
 umask 077
+readonly DEFAULT_VERSION=""
+SCRIPT_LIB="$(dirname "${BASH_SOURCE[0]}")/../lib"
+# shellcheck source=deploy/lib/install-ui.sh
+source "${SCRIPT_LIB}/install-ui.sh" # release-embed
+INTERACTIVE=false
+NON_INTERACTIVE=false
+(($# != 0)) || INTERACTIVE=true
+CONFIG_FILE="${PWD}/install.env"
 
 # The installer's own absolute path (the --root-lifecycle re-exec target, so
 # the deliberate root lifecycle never depends on living inside a checkout)
@@ -138,7 +146,7 @@ PLACEHOLDER_RELAY_URL_A="https://relay-a.example.com"
 PLACEHOLDER_RELAY_URL_B=""
 PLACEHOLDER_NODE_ID="00000000-0000-7000-8000-000000000000"
 SUPPORTED_HOSTS="Ubuntu 22.04/24.04/26.04 and Debian 12/13 (dpkg), Rocky Linux 9 (rpm), x86_64/aarch64, systemd"
-VERSION=""
+VERSION="${DEFAULT_VERSION}"
 VERSION_PINNED=false
 RELEASE_TAG=""
 RELEASE_COMMIT=""
@@ -183,6 +191,8 @@ fail() {
 }
 
 usage() {
+  echo "No arguments: interactive wizard (TTY required). --non-interactive: unattended, no prompts." >&2
+  echo "Options: --config PATH (default ./install.env), --version vX.Y.Z (Release default embedded)." >&2
   echo "usage: deploy/managed-node/install.sh [--version vX.Y.Z] [--root-lifecycle] (the node configuration comes from the operator session or ./install.env)" >&2
   exit 2
 }
@@ -195,6 +205,13 @@ usage() {
 version_seen=false
 while (($# > 0)); do
   case "$1" in
+    --interactive) INTERACTIVE=true; shift ;;
+    --non-interactive) NON_INTERACTIVE=true; shift ;;
+    --config)
+      (($# >= 2)) || fail "--config requires an existing file"
+      [[ -f "$2" && ! -L "$2" ]] || fail "--config requires a regular file, not a symlink"
+      CONFIG_FILE="$(realpath -- "$2")"; shift 2 ;;
+    --help|-h) usage ;;
     --version)
       [[ "${version_seen}" == false && $# -ge 2 ]] || usage
       VERSION="$2"
@@ -210,12 +227,23 @@ while (($# > 0)); do
       ;;
   esac
 done
-if [[ "${version_seen}" == true ]]; then
+[[ "${NON_INTERACTIVE}" == false || "${INTERACTIVE}" == false ]] || fail "conflicting installation modes"
+[[ "${INTERACTIVE}" == false ]] || install_ui_require_tty
+if [[ -n "${VERSION}" ]]; then
   [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
     fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
   RELEASE_TAG="${VERSION}"
   RELEASE_VERSION="${VERSION#v}"
   VERSION_PINNED=true
+fi
+
+if ((EUID == 0)) && [[ "${ROOT_LIFECYCLE}" == false ]]; then
+  case "${SUDO_USER:-}" in
+    "" | root) ;;
+    *)
+      fail "run install.sh as the operator launcher user; the installer invokes sudo only for scoped privileged steps (whole-script sudo from '${SUDO_USER}' would hand the entire operator environment to root); for a deliberate root lifecycle run 'deploy/managed-node/install.sh --root-lifecycle'"
+      ;;
+  esac
 fi
 
 # Operator configuration comes from the invoking shell environment and, for
@@ -360,7 +388,7 @@ install_env_load() {
 }
 
 if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
-  install_env_load "${PWD}/install.env" \
+  install_env_load "${CONFIG_FILE}" \
     BOOTSTRAP_TOKEN_SOURCE \
     CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
     CONTROLLER_ENDPOINT_ID \
@@ -390,7 +418,7 @@ priv() {
   if ((EUID == 0)); then
     "$@"
   else
-    sudo "$@"
+    if [[ "${NON_INTERACTIVE}" == true ]]; then sudo -n "$@"; else sudo "$@"; fi
   fi
 }
 
@@ -400,7 +428,7 @@ as_agent() {
   if ((EUID == 0)); then
     runuser -u ocserv-agent -- "$@"
   else
-    sudo -u ocserv-agent "$@"
+    if [[ "${NON_INTERACTIVE}" == true ]]; then sudo -n -u ocserv-agent "$@"; else sudo -u ocserv-agent "$@"; fi
   fi
 }
 
@@ -416,6 +444,7 @@ forward_root_lifecycle() {
   local variable allowed
   local -a forwarded_environment=()
   local -a reexec_arguments=(--root-lifecycle)
+  [[ "${NON_INTERACTIVE}" == false ]] || reexec_arguments+=(--non-interactive)
   # The --version pin is operator-chosen public release identity, not node
   # configuration: it re-crosses the privilege boundary as the same explicit
   # command-line argument instead of an environment variable.
@@ -432,27 +461,14 @@ forward_root_lifecycle() {
   # OCSERV_INSTALL_ENV_RESOLVED tells the root re-exec that install.env was
   # already resolved by the launcher user: root must not re-read a file that
   # may have been replaced across the privilege transition. The re-exec
-  # targets this script's own path, never a repository sibling.
-  exec sudo env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
+  # targets this script's own path via Bash, so a downloaded mode-0644 file
+  # works just like the documented 'bash install.sh' invocation.
+  local -a sudo_args=()
+  [[ "${NON_INTERACTIVE}" == false ]] || sudo_args+=(-n)
+  exec sudo "${sudo_args[@]}" env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
     OCSERV_INSTALL_ENV_RESOLVED=1 \
-    "${INSTALLER_PATH}" "${reexec_arguments[@]}"
+    bash "${INSTALLER_PATH}" "${reexec_arguments[@]}"
 }
-
-if [[ "${ROOT_LIFECYCLE}" == true ]]; then
-  ((EUID == 0)) || forward_root_lifecycle
-  # sudo retains SUDO_USER through env; strip it so the deliberate root
-  # lifecycle is not misread as a whole-script sudo invocation below.
-  unset SUDO_USER
-fi
-
-if ((EUID == 0)) && [[ "${ROOT_LIFECYCLE}" == false ]]; then
-  case "${SUDO_USER:-}" in
-    "" | root) ;;
-    *)
-      fail "run install.sh as the operator launcher user; the installer invokes sudo only for scoped privileged steps (whole-script sudo from '${SUDO_USER}' would hand the entire operator environment to root); for a deliberate root lifecycle run 'deploy/managed-node/install.sh --root-lifecycle'"
-      ;;
-  esac
-fi
 
 resolve_release_identity() {
   local tag matching=()
@@ -1153,12 +1169,44 @@ converge_enrollment() {
   print_enrolled_local "${node_id}"
 }
 
+# Preserve CLI root-lifecycle validation of root-readable protected inputs.
+# A wizard crosses this boundary only after the operator's confirmation.
+if [[ "${ROOT_LIFECYCLE}" == true && "${INTERACTIVE}" == false ]]; then
+  ((EUID == 0)) || forward_root_lifecycle
+  unset SUDO_USER
+fi
 validate_sysroot
 resolve_release_identity
 resolve_architecture
 detect_platform
 require_commands
+if [[ "${INTERACTIVE}" == true ]]; then
+  echo 'Agent installation preserves existing identity; approval and initial service activation remain separate.'
+  install_ui_prompt CONTROLLER_ENDPOINT_ID 'Controller EndpointID (64 lowercase hex)'
+  install_ui_prompt RELAY_URL_A 'Dedicated Relay HTTPS URL'
+  install_ui_prompt RELAY_ACCESS_TOKEN_SOURCE 'Protected Relay access token file'
+  install_ui_prompt CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE 'Controller command verification public key file'
+  install_ui_prompt BOOTSTRAP_TOKEN_SOURCE 'Enrollment token file (empty: stop at ENROLLMENT_READY)'
+  install_ui_prompt ENROLLMENT_ENVIRONMENT 'Enrollment environment' production
+  install_ui_prompt USER_PASSWORD_SEAL_KEY_ID 'User password sealing key ID' user-password-v1
+  install_ui_prompt P12_PASSWORD_SEAL_KEY_ID 'PKCS#12 password sealing key ID' p12-password-v1
+fi
 validate_operator_inputs
+if [[ "${INTERACTIVE}" == true ]]; then
+  echo "Release: ${RELEASE_TAG}; platform: ${PACKAGE_FAMILY}/${ARCH_WORD}; Relay: ${RELAY_URL_A}"
+  echo "Configuration will be saved to ${CONFIG_FILE} (protected file paths only)."
+  install_ui_confirm
+  install_ui_save "${CONFIG_FILE}" BOOTSTRAP_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
+    CONTROLLER_ENDPOINT_ID ENROLLMENT_ENVIRONMENT P12_PASSWORD_SEAL_KEY_ID RELAY_ACCESS_TOKEN_SOURCE \
+    RELAY_URL_A RELAY_URL_B USER_PASSWORD_SEAL_KEY_ID
+fi
+if [[ "${ROOT_LIFECYCLE}" == true && "${INTERACTIVE}" == true ]]; then
+  ((EUID == 0)) || forward_root_lifecycle
+  # sudo retains SUDO_USER through env; strip it so the deliberate root
+  # lifecycle is not misread as a whole-script sudo invocation below.
+  unset SUDO_USER
+fi
+
 if path_exists "${RELAYS_ENV_FILE}"; then
   if ! priv test -f "${RELAYS_ENV_FILE}" || priv test -L "${RELAYS_ENV_FILE}"; then
     fail "the existing relay configuration is not a regular file"

@@ -32,19 +32,27 @@ This section covers the standard package-first installation. Use published node 
 - Protected local files containing the Relay access token and the Controller command verification key.
 - An optional bootstrap token file if you want the installer to complete local enrollment in the same run.
 - A non-root launcher account with `sudo` privileges. The installer elevates individual commands with `sudo`; pass `--root-lifecycle` only when you intend to run the whole script as root.
-- `curl`, `openssl`, `sha256sum`, `awk`, `git`, and outbound HTTPS access to GitHub Releases.
+- `curl`, `openssl`, `sha256sum`, `awk`, and outbound HTTPS access to GitHub Releases.
 - An authenticated requester API client with permission to create a node bootstrap token and request node approval (SecurityAdmin or PlatformAdmin), and a second authorized principal who can review and approve the request independently.
 - Sealing keys for your chosen workflow: the standard installer generates any missing sealing keys automatically. The advanced manual path requires two distinct sealing private keys already provisioned on the node along with their key IDs and public-key SHA-256 descriptors.
 
 ### Prepare the node configuration
 
-Check out the exact release tag and create a working directory for node configuration outside the repository tree:
+Download the exact Release installer into a private working directory:
 
 ```bash
-git clone --branch vX.Y.Z --single-branch --depth 1 \
-  https://github.com/GentleKingson/ocservia.git ocservia-vX.Y.Z
 mkdir ocservia-node-install && cd ocservia-node-install
-cp ../ocservia-vX.Y.Z/install.env.example install.env
+wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/managed-node-bootstrap.sh -O install.sh
+bash install.sh
+```
+
+The no-argument wizard detects the platform and asks for endpoint, Relay and protected key/token paths, validates inputs and requests confirmation. It saves public configuration and file paths in mode-0600 `install.env`. It requires a TTY; without one it fails before installation. The Release embeds the fixed version and needs no Git.
+
+For unattended configuration, download the matching template:
+
+```bash
+wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/install.env.example -O install.env
+chmod 0600 install.env
 editor install.env
 ```
 
@@ -80,17 +88,19 @@ The production drop-in executes the packaged fixed launcher `/usr/libexec/ocserv
 
 ### Run the installer
 
-Invoke the managed-node installer from the pinned release checkout:
+For unattended installation, invoke the downloaded installer with the prepared configuration:
 
 ```bash
-../ocservia-vX.Y.Z/deploy/managed-node/install.sh
+bash install.sh --non-interactive --config ./install.env
 ```
 
 To run the entire installation lifecycle directly as `root`, pass `--root-lifecycle`:
 
 ```bash
-../ocservia-vX.Y.Z/deploy/managed-node/install.sh --root-lifecycle
+bash install.sh --non-interactive --config ./install.env --root-lifecycle
 ```
+
+`--config` defaults to `./install.env`. Exported settings override file values. Explicit legacy arguments remain CLI calls; `--version` overrides the embedded tag. `--non-interactive` fails for missing inputs and uses sudo without password prompts. Both modes call the same package and enrollment workflow.
 
 The script then:
 
@@ -114,7 +124,7 @@ bootstrap launcher -> exact vX.Y.Z versioned installer -> HTTPS native package
         -> independent approval -> service activation
 ```
 
-The bootstrap launcher and the initial versioned installer and native package downloads rely on HTTPS. Before invoking the package manager, the installer copies the downloaded native package into root-owned staging and verifies that its bytes remain unchanged. That transport check applies only to initial installation; an AgentUpgrade instead verifies against the SHA256 carried in the already-authorized Controller command. Likewise, a Bootstrap Token can create or recover only the same pending node and cannot approve it, keeping package installation, enrollment, approval, and service activation across separate authority boundaries. Until external hosting has operational ownership and byte-verification evidence, the first-install procedure above obtains the installer from a clean exact-release checkout. Once installed, the native package has no runtime dependency on Git. The bootstrap launcher plays no role in ongoing lifecycle operations.
+The bootstrap launcher and the initial versioned installer and native package downloads rely on HTTPS. Before invoking the package manager, the installer copies the downloaded native package into root-owned staging and verifies that its bytes remain unchanged. That transport check applies only to initial installation; an AgentUpgrade instead verifies against the SHA256 carried in the already-authorized Controller command. Likewise, a Bootstrap Token can create or recover only the same pending node and cannot approve it, keeping package installation, enrollment, approval, and service activation across separate authority boundaries. The fixed Release installer and native package need no source checkout or Git. The bootstrap launcher plays no role in ongoing lifecycle operations.
 
 The verifier copies only the archive into a unique `root:root` mode `0700` directory below `/var/lib/ocservia-upgrade/package-staging`, compares the copied archive SHA256 with the caller-supplied expected digest, rejects unsafe archive paths and member types, and extracts that root-owned copy. Install and upgrade scripts accept only the verified directory printed by the verifier; never extract or run installers from a download directory, and remove the verified staging directory after the lifecycle operation succeeds. `PACKAGE_ARCH` pins the package architecture (`amd64` or `arm64`), which the MANIFEST records as `arch=`. On a real host install (no `DESTDIR`), the verifier also checks host architecture equivalence (`x86_64` for `amd64`, `aarch64` for `arm64`) and rejects a foreign-architecture package before anything is staged.
 
@@ -200,7 +210,7 @@ Open Nodes, then Install node, including when the inventory is empty. This entry
    - Never remove an existing identity or token file to force this path. If a previous enrollment outcome is unknown, use the [recovery flow](#recover-an-uncertain-enrollment-response).
 
 3. Only when the host is ready to enroll, click Create bootstrap token. Its 900-second lifetime starts at issuance, not at first use. This sends one POST with a 900-second TTL and the selected Workspace in both `X-Workspace-ID` and the JSON body. Authorization remains enforced by the Controller. Transfer the displayed token through a protected channel to the configured Bootstrap token file, readable only by its owner (`0600`) and accessible to the installer launcher. Provision the Relay access token and trusted Controller Ed25519 command verification public key PEM at the other paths. All three must be non-empty regular files, not symlinks. Never transfer the Controller private key or an administrator session.
-4. After saving the token, run or rerun the fixed-release installer commands. Download the official `deploy/managed-node/install.sh` from the selected tag and run `bash ./install.sh --version vX.Y.Z` in the directory holding `install.env`, as a non-root launcher with sudo privileges. The commands contain no token values. Host requirements and package verification remain those in [Install a managed node](#install-a-managed-node).
+4. After saving the token, run or rerun the fixed-release installer commands. Download the official `managed-node-bootstrap.sh` Release asset and run `bash ./install.sh --non-interactive --version vX.Y.Z` in the directory holding `install.env`, as a non-root launcher with sudo privileges. The commands contain no token values. Host requirements and package verification remain those in [Install a managed node](#install-a-managed-node).
 5. Record the printed node ID. `ENROLLED_LOCAL` does not mean approved, running or online. Continue with [independent approval](#approve-the-node), then [start and verify the node](#start-and-verify-the-node).
 
 The Web keeps the token only in the mounted dialog's memory. It clears the value on expiry, continuing to instructions, closing, changing Workspace or leaving the page, and ignores late responses from abandoned contexts. There is no token download, persistence or automatic retry. The browser clipboard is outside this lifecycle: if you manually copy the token, clear your clipboard after transferring it securely.
@@ -415,7 +425,7 @@ Local `systemctl` status shows only that the units run on the host. Confirm the 
 Once the node is approved and its services are running, you can rerun the same release installer with the original `install.env` and source paths. The rerun is idempotent and works as a convergence check:
 
 ```bash
-../ocservia-vX.Y.Z/deploy/managed-node/install.sh
+bash install.sh --non-interactive --config ./install.env
 ```
 
 On an active node, the script reports `SERVICES_ACTIVE`. It does not reinstall the package, overwrite the identity, keys, relay configuration, or `agent.env`, re-approve the node, or restart the services. It does rerun the host preflight, verify the enrolled identity and trust files (failing closed on any discrepancy), and remove any leftover enrollment token file. You still need to check approval, connection state, and telemetry freshness on the Controller. After the Agent has been upgraded or rolled back to a different version, do not run an older release's installer on the host. It stops on the version mismatch.
