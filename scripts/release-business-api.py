@@ -3,7 +3,6 @@
 import base64
 import http.cookiejar
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -19,9 +18,9 @@ import urllib.parse
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-WORK = Path(os.environ['T07_WORK'])
+WORK = Path(os.environ['OCSERVIA_BUSINESS_TEST_WORK_DIR'])
 EVIDENCE = Path(os.environ['ARTIFACT_DIR'])
-WORKSPACE = os.environ['T07_WORKSPACE']
+WORKSPACE = os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID']
 ORIGIN = os.environ.get('OCSERV_CONTROLLER_PUBLIC_URL', 'https://localhost')
 CONTEXT = ssl.create_default_context(cafile=str(WORK / 'ca.crt'))
 CLIENTS = {}
@@ -101,9 +100,9 @@ def wait_for_relay_outage(node):
 
 def approval(action, resource_type, resource_id, extra=None):
     request = api('approval-requests', {'action': action, 'resource_type': resource_type,
-                                      'resource_id': resource_id, 'reason': 'T07 isolated validation',
+                                      'resource_id': resource_id, 'reason': 'Business test: isolated validation',
                                       'ttl_seconds': 600, **(extra or {})}, status=201)
-    decision = {'reason': 'T07 independent identity', 'expected_request_hash': request['request_hash']}
+    decision = {'reason': 'Business test: independent identity', 'expected_request_hash': request['request_hash']}
     api(f"approval-requests/{request['id']}:approve", decision, status=403)
     if request['request_hash']:
         invalid_hash = ('0' if request['request_hash'][0] != '0' else '1') + request['request_hash'][1:]
@@ -120,12 +119,12 @@ def approval(action, resource_type, resource_id, extra=None):
 
 def local():
     for role in ('requester', 'approver'):
-        api('auth/login', {'username': 't07-' + role,
+        api('auth/login', {'username': 'business-test-' + role,
                            'password': (WORK / 'private' / f'{role}-password').read_text().strip()},
             role=role, status=204)
         cookies = list(client(role)[1])
         assert any(c.name == '__Host-ocservia_session' and c.secure and c.path == '/' for c in cookies)
-    api('auth/login', {'username': 't07-requester', 'password': 'incorrect-T07-password'}, role='wrong', status=401)
+    api('auth/login', {'username': 'business-test-requester', 'password': 'incorrect-business-test-password'}, role='wrong', status=401)
     api('nodes', role='anonymous', status=401)
     api('nodes', headers={'X-Workspace-ID': '00000000-0000-7000-8000-000000000072'}, status=403)
     api('nodes')
@@ -152,9 +151,9 @@ def trust_controller():
     container = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'control-plane').strip()
     pid = run('docker', 'inspect', '--format', '{{.State.Pid}}', container).strip()
     run('docker', 'exec', '--user', '0', '-i', container, 'sh', '-c',
-        'cat > /tmp/t07-ca.crt; chmod 444 /tmp/t07-ca.crt', data=(WORK / 'ca.crt').read_bytes())
+        'cat > /tmp/ocservia-business-test-ca.crt; chmod 444 /tmp/ocservia-business-test-ca.crt', data=(WORK / 'ca.crt').read_bytes())
     run('sudo', 'nsenter', '--target', pid, '--mount', '--root', '--wd=/',
-        'mount', '--bind', '/tmp/t07-ca.crt', '/etc/ssl/certs/ca-certificates.crt')
+        'mount', '--bind', '/tmp/ocservia-business-test-ca.crt', '/etc/ssl/certs/ca-certificates.crt')
 
 
 def oidc():
@@ -189,7 +188,7 @@ def oidc():
         if fault in ('code', 'state'):
             parts = urllib.parse.urlparse(callback)
             values = urllib.parse.parse_qs(parts.query)
-            values[fault] = ['invalid-t07-value']
+            values[fault] = ['invalid-business-test-value']
             callback = parts._replace(query=urllib.parse.urlencode(values, doseq=True)).geturl()
         response = request(callback)
         assert response.status == (401 if fault else 302)
@@ -206,7 +205,7 @@ def oidc():
     if not local_enabled:
         login('oidc-only')
         api('nodes', role='oidc-only')
-        api('auth/login', {'username': 't07-requester', 'password': 'disabled'}, role='disabled-local', status=404)
+        api('auth/login', {'username': 'business-test-requester', 'password': 'disabled'}, role='disabled-local', status=404)
         record('external_oidc_only_and_local_disabled')
         return
     for fault in ('issuer', 'signature', 'nonce', 'code', 'state'):
@@ -218,7 +217,7 @@ def oidc():
     identity = sql("SELECT id FROM identities WHERE issuer='" + issuer + "' AND subject='upgrade-operator';")
     uuid.UUID(identity)
     api('role-bindings', {'identity_id': identity, 'workspace_id': WORKSPACE, 'role': 'Viewer',
-                          'resource_type': 'workspace', 'reason': 'T07 OIDC scope'}, status=201)
+                          'resource_type': 'workspace', 'reason': 'Business test: OIDC scope'}, status=201)
     api('nodes', role='oidc')
     api('nodes', role='oidc', headers={'X-Workspace-ID': '00000000-0000-7000-8000-000000000072'}, status=403)
     run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'control-plane')
@@ -237,17 +236,17 @@ def oidc():
 
 def token():
     result = api('enrollment-tokens', {'workspace_id': WORKSPACE, 'environment': 'production',
-                                      'expected_node_name': 't07-native',
-                                      'expected_endpoint_id': os.environ['T07_ENDPOINT'],
-                                      'reason': 'T07 isolated native node'}, status=201)
+                                      'expected_node_name': 'business-test-agent',
+                                      'expected_endpoint_id': os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID'],
+                                      'reason': 'Business test: isolated native node'}, status=201)
     (WORK / 'private' / 'enrollment-token').write_text(result['token'])
 
 
 def bootstrap_token():
     # Standard registration: no EndpointID until the Agent's possession proof.
     result = api('node-bootstrap-tokens', {'workspace_id': WORKSPACE, 'environment': 'production',
-                                          'expected_node_name': 't07-native',
-                                          'reason': 'T07 isolated native bootstrap'}, status=201)
+                                          'expected_node_name': 'business-test-agent',
+                                          'reason': 'Business test: isolated native bootstrap'}, status=201)
     assert result['token'].startswith('obt1_')
     # The private copy is redaction input only; the installer consumes the source.
     (WORK / 'private' / 'bootstrap-token').write_text(result['token'])
@@ -261,7 +260,7 @@ def bootstrap_token():
 
 
 def bootstrap_verify():
-    node, endpoint = os.environ['T07_NODE'], os.environ['T07_ENDPOINT']
+    node, endpoint = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'], os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID']
     token_id = (WORK / 'bootstrap-token-id').read_text()
     digest = hashlib.sha256((WORK / 'private' / 'bootstrap-token').read_text().encode()).hexdigest()
     row = json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(token_hash,'hex') token_hash,"
@@ -276,17 +275,17 @@ def bootstrap_verify():
 
 
 def approve():
-    node = os.environ['T07_NODE']
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'pending'
     caps = json.loads(sql(f"SELECT json_agg(capability ORDER BY capability) FROM node_capabilities WHERE node_id='{node}';"))
     binding = {'labels': {}, 'policy': 'standard', 'capabilities': caps}
-    api(f'nodes/{node}/approval', {**binding, 'reason': 'T07 isolated validation'}, status=400)
+    api(f'nodes/{node}/approval', {**binding, 'reason': 'Business test: isolated validation'}, status=400)
     decision = approval('node.approve', 'node', node, {'node_approval': binding})
-    api(f'nodes/{node}/approval', {**binding, 'reason': 'T07 isolated validation'}, headers={'X-Approval-ID': decision})
+    api(f'nodes/{node}/approval', {**binding, 'reason': 'Business test: isolated validation'}, headers={'X-Approval-ID': decision})
     (WORK / 'node-approval').write_text(decision)
     assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'active'
     credential = api(f'nodes/{node}/privd-attestation-credentials',
-                     {'ttl_seconds': 300, 'reason': 'T07 receipt authority'}, status=201)
+                     {'ttl_seconds': 300, 'reason': 'Business test: receipt authority'}, status=201)
     proof = json.loads(run('sudo', '/usr/libexec/ocservia/ocservia-privd', 'attestation-registration',
                           '/var/lib/ocservia-privd/attestation.key', node,
                           credential['controller_nonce_hex'], credential['credential_context_sha256_hex']))
@@ -325,7 +324,7 @@ def cross_check(operation):
 
 
 def certificate():
-    node = os.environ['T07_NODE']
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     node_path = 'nodes/' + node
 
     def restart_node():
@@ -345,8 +344,8 @@ def certificate():
         record('certificate_restart_new_owner', before=before, after=after)
 
     wait_for('online before PKI', lambda: api(node_path)['connection_state'] == 'online')
-    body = {'expected_version': api(node_path)['version'], 'common_name': 't07-client',
-            'dns_names': ['client.example.test'], 'key_bits': 2048, 'reason': 'T07 node-local CSR'}
+    body = {'expected_version': api(node_path)['version'], 'common_name': 'business-test-client',
+            'dns_names': ['client.example.test'], 'key_bits': 2048, 'reason': 'Business test: node-local CSR'}
     headers = {'Idempotency-Key': secrets.token_hex(16)}
     cert = api(node_path + '/certificates', body, headers=headers, status=202)
     assert api(node_path + '/certificates', body, headers=headers, status=202)['id'] == cert['id']
@@ -363,7 +362,7 @@ def certificate():
     restart_node()
     assert public_before == run('sudo', 'openssl', 'pkey', '-in', key_path, '-pubout')
     issue_approval = approval('certificate.issue', 'certificate', cert['id'])
-    cert = api(cert_path + ':issue', {'approval_id': issue_approval, 'reason': 'T07 signed CSR'})
+    cert = api(cert_path + ':issue', {'approval_id': issue_approval, 'reason': 'Business test: signed CSR'})
     assert cert['state'] == 'issued'
     record('certificate_issued', certificate_id=cert['id'], version=cert['version'])
     # The one-day fixture leaf enters expiring through normal maintenance.
@@ -371,7 +370,7 @@ def certificate():
     cert = wait_for('short-lived certificate maintenance',
                     lambda: (value if (value := api(cert_path))['state'] == 'expiring' else None))
     record('certificate_expiring_revision', certificate_id=cert['id'], version=cert['version'])
-    reason = 'T07 one-use P12 export'
+    reason = 'Business test: one-use P12 export'
     artifact = str(uuid.UUID(int=(int(time.time() * 1000) << 80) | (7 << 76) |
                             (secrets.randbits(12) << 64) | (2 << 62) | secrets.randbits(62)))
     export_approval = approval('certificate.private_key.export', 'certificate', cert['id'],
@@ -407,7 +406,7 @@ def certificate():
     api('artifacts/' + grant['artifact_id'], headers=download_headers, status=403, raw=True)
     if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
         subprocess.run(['python3', str(ROOT / 'scripts/release-production-signer.py'), 'before'], check=True)
-    reason = 'T07 revoke issued certificate'
+    reason = 'Business test: revoke issued certificate'
     revoke_approval = approval('certificate.revoke', 'certificate', cert['id'],
                               {'certificate': {'expected_version': cert['version'], 'reason': reason}})
     revoked = api(cert_path + ':revoke', {'expected_version': api(node_path)['version'],
@@ -431,35 +430,35 @@ def certificate():
 
 
 def browser_prepare():
-    (WORK / 'browser-approval').write_text(approval('service.reload', 'node', os.environ['T07_NODE']))
+    (WORK / 'browser-approval').write_text(approval('service.reload', 'node', os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']))
 
 
 def config_prepare():
-    node = os.environ['T07_NODE']
-    certificate = subprocess.run(['openssl', 'x509', '-in', '/etc/ocserv/t07.crt', '-outform', 'DER'],
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
+    certificate = subprocess.run(['openssl', 'x509', '-in', '/etc/ocserv/business-test.crt', '-outform', 'DER'],
                                  capture_output=True, check=True).stdout
-    public_pem = subprocess.run(['openssl', 'x509', '-in', '/etc/ocserv/t07.crt', '-pubkey', '-noout'],
+    public_pem = subprocess.run(['openssl', 'x509', '-in', '/etc/ocserv/business-test.crt', '-pubkey', '-noout'],
                                 capture_output=True, check=True).stdout
     public_der = subprocess.run(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=public_pem,
                                 capture_output=True, check=True).stdout
     binding = node + '/' + hashlib.sha256(certificate).hexdigest() + '/' + hashlib.sha256(public_der).hexdigest() + '/none'
     reference = api('secret-provider-refs', {'provider': 'node-local-tls-v1', 'key_path': binding,
-                                            'version': 'v1', 'reason': 'T07 operator-provisioned TLS'}, status=201)
+                                            'version': 'v1', 'reason': 'Business test: operator-provisioned TLS'}, status=201)
     output = json.loads(run('sudo', 'bash', str(ROOT / 'deploy/managed-node/provision-config-tls.sh'),
-                            node, reference['id'], 'v1', '/etc/ocserv/t07.crt', '/etc/ocserv/t07.key'))
+                            node, reference['id'], 'v1', '/etc/ocserv/business-test.crt', '/etc/ocserv/business-test.key'))
     assert output['key'] == binding and output['secret_ref_id'] == reference['id']
     bundle = '/etc/ocservia-agent/config-tls/' + reference['id'] + '/v1'
     for name in ('server-cert.pem', 'server-key.pem', 'manifest.json'):
         assert run('sudo', 'stat', '-c', '%u:%g:%a:%h', bundle + '/' + name).strip() == '0:0:400:1'
     duplicate = subprocess.run(['sudo', 'bash', str(ROOT / 'deploy/managed-node/provision-config-tls.sh'),
-                                node, reference['id'], 'v1', '/etc/ocserv/t07.crt', '/etc/ocserv/t07.key'], capture_output=True)
+                                node, reference['id'], 'v1', '/etc/ocserv/business-test.crt', '/etc/ocserv/business-test.key'], capture_output=True)
     assert duplicate.returncode != 0
     (WORK / 'config-reference.json').write_text(json.dumps(reference))
     record('complete_config_tls_provisioned', reference_id=reference['id'], version='v1', file_identity='0:0:400:1', overwrite_rejected=True)
 
 
 def smoke_user():
-    node = os.environ['T07_NODE']
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     password = secrets.token_hex(24)
     (WORK / 'private/smoke-vpn-password').write_text(password)
     if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
@@ -470,10 +469,10 @@ def smoke_user():
         encrypted = subprocess.run(['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(WORK / 'user.pub.pem'),
                                     '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
                                    input=password.encode(), capture_output=True, check=True).stdout
-        sealed = {'version': 1, 'purpose': 'user_password', 'key_id': 't07-user',
+        sealed = {'version': 1, 'purpose': 'user_password', 'key_id': 'business-test-user-seal',
                   'ciphertext': base64.b64encode(encrypted).decode()}
-    operation = api(f'nodes/{node}/users', {'name': 't07-smoke', 'sealed_password': sealed,
-                                           'reason': 'T07 Release Business Smoke'},
+    operation = api(f'nodes/{node}/users', {'name': 'business-test-smoke-user', 'sealed_password': sealed,
+                                           'reason': 'Business test: Release Business Smoke'},
                     headers={'Idempotency-Key': secrets.token_hex(16), 'If-Match': '"revision-0"'}, status=202)
     def user_ready():
         state = api('operations/' + operation['id'])['state']
@@ -486,7 +485,7 @@ def smoke_user():
 
 
 def configuration():
-    node = os.environ['T07_NODE']
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     prefix = 'nodes/' + node
     if os.environ.get('OCSERV_PACKAGE') == 'source-1.6.0':
         assert ocserv_version() == (1, 6, 0)
@@ -509,7 +508,7 @@ def configuration():
     directives += [{'name': name, 'secret_ref': {'secret_ref_id': reference}} for name in ('server-cert', 'server-key')]
     changed_port = [{**item, 'value': '44444'} if item['name'] == 'tcp-port' else item for item in directives]
     rejected = api(prefix + '/config-plans', {'expected_revision': 1, 'template': {'name': 'reject-startup-change', 'directives': changed_port},
-                                            'ttl_seconds': 900, 'reason': 'T07 nonreloadable directive rejection'},
+                                            'ttl_seconds': 900, 'reason': 'Business test: nonreloadable directive rejection'},
                    headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
     wait_for('reject nonreloadable change', lambda: api('operations/' + rejected['operation_id'])['state'] == 'failed')
     assert api('config-plans/' + rejected['id'])['validation'] == 'failed'
@@ -517,7 +516,7 @@ def configuration():
     assert api(prefix)['config_revision'] == 1
     record('complete_config_startup_binding_rejected', plan_id=rejected['id'], unchanged_hash=physical_before)
     planned = api(prefix + '/config-plans', {'expected_revision': 1, 'template': {'name': 'complete-rollback', 'directives': directives},
-                                           'ttl_seconds': 900, 'reason': 'T07 native rollback'},
+                                           'ttl_seconds': 900, 'reason': 'Business test: native rollback'},
                   headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
     plan = wait_for('complete rollback plan', lambda: (value if (value := api('config-plans/' + planned['id']))['state'] == 'succeeded' else None))
     assert plan['validation'] == 'valid' and plan['materialized_hash'] != physical_before
@@ -525,13 +524,13 @@ def configuration():
     script = WORK / 'reject-new-config-reload'
     script.write_text('#!/bin/sh\nif grep -qx "max-clients = 129" /etc/ocserv/ocserv.conf; then exit 9; fi\nexec /bin/kill -HUP "$1"\n')
     dropin = WORK / 'config-reload-fault.conf'
-    dropin.write_text('[Service]\nExecReload=\nExecReload=/usr/local/sbin/t07-config-reload $MAINPID\n')
-    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '700', str(script), '/usr/local/sbin/t07-config-reload')
+    dropin.write_text('[Service]\nExecReload=\nExecReload=/usr/local/sbin/ocservia-business-test-config-reload $MAINPID\n')
+    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '700', str(script), '/usr/local/sbin/ocservia-business-test-config-reload')
     run('sudo', 'mkdir', '-p', '/etc/systemd/system/ocserv.service.d')
-    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '644', str(dropin), '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf')
+    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '644', str(dropin), '/etc/systemd/system/ocserv.service.d/business-test-config-reload.conf')
     try:
         run('sudo', 'systemctl', 'daemon-reload')
-        operation = api('config-plans/' + plan['id'] + '/apply', {'approval_id': approval_id, 'reason': 'T07 native rollback'},
+        operation = api('config-plans/' + plan['id'] + '/apply', {'approval_id': approval_id, 'reason': 'Business test: native rollback'},
                         headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
         result = wait_for('exact configuration rollback', lambda: (value if (value := api('operations/' + operation['id'])).get('config_apply_state') == 'rolled_back' else None))
         assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
@@ -540,14 +539,14 @@ def configuration():
         assert snapshot['root_count_state_response'] == '1|applied|1'
         record('complete_config_native_rollback', operation_id=operation['id'], state=result['config_apply_state'], restored_hash=physical_before)
     finally:
-        run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf', '/usr/local/sbin/t07-config-reload')
+        run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/business-test-config-reload.conf', '/usr/local/sbin/ocservia-business-test-config-reload')
         run('sudo', 'systemctl', 'daemon-reload')
     agent_privd_recovery([applied, operation], physical_before)
     record('complete_config_durable_restart', materialized_hash=physical_before, config_revision=1)
 
 
 def owner():
-    node = os.environ['T07_NODE'].replace('-', '')
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'].replace('-', '')
     return json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
                           "owner_epoch FROM connection_owner_fencing "
                           f"WHERE node_id=decode('{node}','hex')) s;"))
@@ -557,7 +556,7 @@ def fresh_owner(before):
     current = owner()
     return current if (current and current['owner_epoch'] > before['owner_epoch'] and
                        current['connection_id'] != before['connection_id'] and
-                       api('nodes/' + os.environ['T07_NODE'])['connection_state'] == 'online') else None
+                       api('nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])['connection_state'] == 'online') else None
 
 
 def ready():
@@ -610,8 +609,8 @@ def agent_privd_recovery(operations, config_hash):
 
 
 def authorized_reload(name):
-    node = 'nodes/' + os.environ['T07_NODE']
-    approval_id = approval('service.reload', 'node', os.environ['T07_NODE'])
+    node = 'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
+    approval_id = approval('service.reload', 'node', os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])
     deep = os.environ.get('BUSINESS_PROFILE') == 'extended'
     if deep:
         before = run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
@@ -645,10 +644,10 @@ def agent_stack_recovery():
 def smoke_relay_recovery(ping):
     single_relay_argv()
     before = owner()
-    relay = os.environ['T07_RELAY_CONTAINER']
+    relay = os.environ['OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER']
     try:
         run('docker', 'stop', relay)
-        wait_for_relay_outage(os.environ['T07_NODE'])
+        wait_for_relay_outage(os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])
     finally:
         run('docker', 'start', relay)
     wait_for('fresh Agent session after Relay recovery', lambda: fresh_owner(before))
@@ -677,7 +676,7 @@ def resilience():
         run(str(ROOT / 'deploy/production/compose.sh'), 'start', 'postgres')
     wait_for('database readiness recovered', ready)
     wait_for('Agent online after database recovery', lambda: api(
-        'nodes/' + os.environ['T07_NODE'])['connection_state'] == 'online')
+        'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])['connection_state'] == 'online')
     authorized_reload('database reconnect business')
     record('resilience_database', backend='postgres')
     vpn_smoke('relay_recovery', relay_recovery=True)
@@ -708,9 +707,9 @@ def deep_resilience():
     record('deep_transport_recovery')
 
     # The original Controller and its pool stay running throughout the outage.
-    approval_id = approval('service.reload', 'node', os.environ['T07_NODE'])
+    approval_id = approval('service.reload', 'node', os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])
     key = secrets.token_hex(16)
-    node = 'nodes/' + os.environ['T07_NODE']
+    node = 'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(node)["version"]}"', 'X-Approval-ID': approval_id}
     try:
         run(str(ROOT / 'deploy/production/compose.sh'), 'stop', 'postgres')
@@ -771,7 +770,7 @@ def browser_verify():
     operation_id = applied['operation']['id']
     assert api('operations/' + operation_id)['config_apply_state'] == 'succeeded'
     assert api('config-plans/' + applied['plan_id'])['materialized_hash'] == applied['materialized_hash']
-    assert api(f"nodes/{os.environ['T07_NODE']}")['config_revision'] == 1
+    assert api(f"nodes/{os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']}")['config_revision'] == 1
     assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == applied['materialized_hash']
     if os.environ.get('BUSINESS_PROFILE', 'smoke') == 'smoke':
         (WORK / 'smoke-applied.json').write_text(json.dumps({
@@ -784,7 +783,7 @@ def rollout_ready():
     # trust and wait until the node is offered for the rolling upgrade.
     wait_for('Controller readiness', ready)
     trust_controller()
-    node = os.environ['T07_NODE']
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     wait_for('rollout-eligible node', lambda: api('nodes/' + node).get('agent_upgrade_eligible') is True, seconds=300)
     assert api('nodes/' + node)['recommended_agent_version'] == os.environ['ROLLOUT_VERSION']
 
@@ -795,7 +794,7 @@ def rollout_verify():
         assert sum(entry['name'] == name for entry in entries) == 1, 'missing or duplicate rollout checkpoint: ' + name
     assert next(entry for entry in entries if entry['name'] == 'browser_bound_approval')['action'] == 'agent.rollout'
     assert_browser_csp(entries, 'browser-rollout-csp.json')
-    node, target = os.environ['T07_NODE'], os.environ['ROLLOUT_VERSION']
+    node, target = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'], os.environ['ROLLOUT_VERSION']
     created = next(entry for entry in entries if entry['name'] == 'browser_agent_rollout')['rollout']
     rollout = api('agent-rollouts/' + created['id'])
     assert rollout['state'] == 'succeeded' and rollout['target_version'] == target
@@ -859,7 +858,7 @@ def assert_uninstalled(native, paths):
 def uninstall():
     # Only the disposable Business environment may call this terminal phase.
     run('bash', str(ROOT / 'scripts/release-business-environment.sh'))
-    node = os.environ['T07_NODE']
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     prefix = 'nodes/' + node
     before = api(prefix)
     assert before['trust_status'] == 'active' and before['connection_state'] == 'online'
@@ -883,7 +882,7 @@ def uninstall():
     endpoint_query = f"SELECT encode(endpoint_id,'hex')||'|'||state FROM node_endpoint_keys WHERE node_id='{node}' ORDER BY endpoint_id;"
     endpoint_trust = sql(endpoint_query)
     authorization_revision = trust.split('|')[1]
-    assert trust.startswith('active|') and endpoint_trust == os.environ['T07_ENDPOINT'] + '|active'
+    assert trust.startswith('active|') and endpoint_trust == os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID'] + '|active'
     assert run('dpkg-query', '-W', '-f=${Status}', 'ocservia-agent') == 'install ok installed'
     payload = run('dpkg-query', '-L', 'ocservia-agent').splitlines()
     paths = [path for path in payload if path.startswith(('/usr/libexec/ocservia/', '/usr/share/ocservia-agent/'))
@@ -892,7 +891,7 @@ def uninstall():
     paths += ['/usr/libexec/ocservia', '/usr/lib/systemd/system/ocservia-agent.service',
               '/usr/lib/systemd/system/ocservia-privd.service', '/usr/lib/systemd/system/ocservia-agent-retention.timer',
               '/usr/lib/systemd/system/ocservia-agent-retention.service', '/usr/lib/systemd/system/ocservia-upgrader@.service']
-    record('uninstall_before', node_id=node, endpoint_id=os.environ['T07_ENDPOINT'], identity=identity,
+    record('uninstall_before', node_id=node, endpoint_id=os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID'], identity=identity,
            owner=owner_before, trust=trust, endpoint_trust=endpoint_trust, ocserv=ocserv, native=native_before)
     # No purge, autoremove, revocation or preliminary systemctl stop.
     output = run('sudo', 'apt-get', 'remove', '-y', 'ocservia-agent')
@@ -933,7 +932,7 @@ def uninstall():
 
 def revocation():
     # Terminal stage: the node loses its Controller authority for good.
-    node = os.environ['T07_NODE']
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     prefix = 'nodes/' + node
     wait_for('online before revocation', lambda: api(prefix)['connection_state'] == 'online')
     before = owner()
@@ -941,13 +940,13 @@ def revocation():
     effects = node_side_effects()
     # Approved before revocation and never spent: the old authority under test.
     stale = approval('service.reload', 'node', node)
-    path, body = prefix + '/revocation', {'reason': 'T07 terminal node revocation'}
+    path, body = prefix + '/revocation', {'reason': 'Business test: terminal node revocation'}
     api(path, body, role='anonymous', status=401)
     api(path, body, headers={'Origin': 'https://attacker.invalid'}, status=403)
     api(path, body, status=400)
     api(path, body, headers={'X-Approval-ID': stale}, status=409)
     pending = api('approval-requests', {'action': 'node.revoke', 'resource_type': 'node', 'resource_id': node,
-                                        'reason': 'T07 unapproved revocation', 'ttl_seconds': 600}, status=201)
+                                        'reason': 'Business test: unapproved revocation', 'ttl_seconds': 600}, status=201)
     api(path, body, headers={'X-Approval-ID': pending['id']}, status=409)
     decision = approval('node.revoke', 'node', node)
     # The approver also holds node.revoke, yet cannot spend the requester's approval.
@@ -983,7 +982,7 @@ def revocation():
     record('node_revoked_trust_converged_and_disconnected', approval_id=decision,
            authorization_revision=int(revision), agent_session_ends=ended)
     key = secrets.token_hex(16)
-    denied = api(prefix + '/service:reload', {'reason': 'T07 old authority after revocation', 'ttl_seconds': 300},
+    denied = api(prefix + '/service:reload', {'reason': 'Business test: old authority after revocation', 'ttl_seconds': 300},
                  headers={'Idempotency-Key': key, 'If-Match': f'"revision-{api(prefix)["version"]}"',
                           'X-Approval-ID': stale}, status=404)
     assert denied['type'] == 'https://ocservia.dev/problems/not-found'
@@ -1011,10 +1010,10 @@ def verify_completed_operations(operations):
 
 
 def single_relay_argv():
-    observed = api('nodes/' + os.environ['T07_NODE'])
+    observed = api('nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])
     pid = run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip()
     agent_argv = run('sudo', 'cat', f'/proc/{int(pid)}/cmdline').rstrip('\0').split('\0')
-    transport_argv = run('docker', 'exec', os.environ['T07_TRANSPORT_CONTAINER'], 'sh', '-c',
+    transport_argv = run('docker', 'exec', os.environ['OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER'], 'sh', '-c',
                          'for exe in /proc/[0-9]*/exe; do '
                          'if [ "$(readlink "$exe")" = /usr/local/bin/ocservia-transportd ]; then '
                          'cat "${exe%/exe}/cmdline"; fi; done').rstrip('\0').split('\0')
@@ -1026,7 +1025,7 @@ def single_relay_argv():
 
 def single_relay_recovery(ping, native_session, operations):
     single_relay_argv()
-    node = os.environ['T07_NODE']
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     prefix = 'nodes/' + node
     live_session = native_session()
     ocserv_started = run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
@@ -1034,7 +1033,7 @@ def single_relay_recovery(ping, native_session, operations):
                           '/var/lib/ocservia-agent/identity/controller.endpoint')
     started_before = run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
     (EVIDENCE / 'identity-before-fault.json').write_text(json.dumps({
-        'agent_endpoint': os.environ['T07_ENDPOINT'], 'controller_endpoint': os.environ['OCSERV_CONTROLLER_ENDPOINT_ID'],
+        'agent_endpoint': os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID'], 'controller_endpoint': os.environ['OCSERV_CONTROLLER_ENDPOINT_ID'],
         'identity_file_digests': identity_before, 'agent_start_monotonic': started_before.strip(),
         'ocserv_start_monotonic': ocserv_started.strip(), 'native_session_id': live_session}))
     control = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'control-plane').strip()
@@ -1046,12 +1045,12 @@ def single_relay_recovery(ping, native_session, operations):
         record('controller_pause_preserves_live_vpn', native_session_id=live_session)
     finally:
         run('docker', 'unpause', control)
-    relay = os.environ['T07_RELAY_CONTAINER']
+    relay = os.environ['OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER']
     reload_approval = approval('service.reload', 'node', node)
 
     # The bootstrap SecurityAdmin can approve but cannot reload a service.
     # An approval ID must not grant the approver that missing RBAC permission.
-    denied = api(prefix + '/service:reload', {'reason': 'T07 isolated validation', 'ttl_seconds': 300},
+    denied = api(prefix + '/service:reload', {'reason': 'Business test: isolated validation', 'ttl_seconds': 300},
                  role='approver', headers={'Idempotency-Key': secrets.token_hex(16),
                                           'If-Match': f'"revision-{api(prefix)["version"]}"',
                                           'X-Approval-ID': reload_approval}, status=403)
@@ -1073,7 +1072,7 @@ def single_relay_recovery(ping, native_session, operations):
         # Retain the single-relay fixture's non-idempotent reload assertion;
         # never substitute an invisible duplicate enable or force Unknown green.
         key = secrets.token_hex(16)
-        body = {'reason': 'T07 isolated validation', 'ttl_seconds': 300}
+        body = {'reason': 'Business test: isolated validation', 'ttl_seconds': 300}
         for _ in range(3):
             revision = api(prefix)['version']
             headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{revision}"',
@@ -1148,7 +1147,7 @@ def issued_cookie(result):
 
 
 def cookie_client(cookie, log):
-    client = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 't07-client', 'openconnect', '--non-inter',
+    client = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'openconnect', '--non-inter',
                                '--protocol=anyconnect', '--cookie-on-stdin', '--cafile', str(WORK / 'ca.crt'),
                                '--script', str(WORK / 'vpn-script'), 'https://10.207.0.1:44443'],
                               stdin=subprocess.PIPE, stdout=log, stderr=log)
@@ -1159,7 +1158,7 @@ def cookie_client(cookie, log):
 
 def session_and_ban_controls(mutation, native_ids, attempt, password):
     """Controller session/IP-ban operations must leave real occtl effects."""
-    prefix = 'nodes/' + os.environ['T07_NODE']
+    prefix = 'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     client_ip = '10.207.0.2'
 
     def observed(native_id):
@@ -1173,7 +1172,7 @@ def session_and_ban_controls(mutation, native_ids, attempt, password):
         return operation
 
     def stop_clients():
-        subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect'],
+        subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'pkill', '-INT', '-x', 'openconnect'],
                        capture_output=True, check=False)
         wait_for('VPN clients stopped', lambda: not native_ids(), 30)
 
@@ -1196,7 +1195,7 @@ def session_and_ban_controls(mutation, native_ids, attempt, password):
                 # Control: a client that dies without logging off leaves its cookie
                 # valid, so a replay authenticates. (A server disconnect already
                 # invalidates cookies on 1.5.0 unless persistent-cookies is set.)
-                subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-KILL', '-x', 'openconnect'],
+                subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'pkill', '-KILL', '-x', 'openconnect'],
                                capture_output=True, check=False)
                 wait_for('killed cookie client session ends', lambda: first not in native_ids(), 60)
                 client = cookie_client(cookie, log)
@@ -1241,7 +1240,7 @@ def session_and_ban_controls(mutation, native_ids, attempt, password):
 
 
 def business():
-    node = os.environ['T07_NODE']
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     prefix = f'nodes/{node}'
     wait_for('online node', lambda: api(prefix).get('connection_state') == 'online')
     observed = api(prefix)
@@ -1267,7 +1266,7 @@ def business():
     def mutation(path, body, revision, method='POST', key=None, extra_headers=None):
         headers = {'Idempotency-Key': key or secrets.token_hex(16), 'If-Match': f'"revision-{revision}"'}
         headers.update(extra_headers or {})
-        operation = api(prefix + '/' + path, {**body, 'reason': 'T07 isolated validation'},
+        operation = api(prefix + '/' + path, {**body, 'reason': 'Business test: isolated validation'},
                         status=202, headers=headers, method=method)
         try:
             wait_for('operation ' + operation['id'], lambda: completed(operation))
@@ -1287,16 +1286,16 @@ def business():
         encrypted = subprocess.run(['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(WORK / 'user.pub.pem'),
                                     '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
                                    input=password.encode(), capture_output=True, check=True).stdout
-        return {'version': 1, 'purpose': 'user_password', 'key_id': 't07-user',
+        return {'version': 1, 'purpose': 'user_password', 'key_id': 'business-test-user-seal',
                 'ciphertext': base64.b64encode(encrypted).decode()}
 
     def user_revision():
         state = api(prefix + '/user-group-state')
-        return next(item['desired_version'] for item in state['items'] if item['kind'] == 'user' and item['name'] == 't07-vpn')
+        return next(item['desired_version'] for item in state['items'] if item['kind'] == 'user' and item['name'] == 'business-test-vpn-user')
 
     def attempt(password):
-        return subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'timeout', '20', 'openconnect',
-                               '--authenticate', '--non-inter', '--protocol=anyconnect', '--user=t07-vpn',
+        return subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'timeout', '20', 'openconnect',
+                               '--authenticate', '--non-inter', '--protocol=anyconnect', '--user=business-test-vpn-user',
                                '--passwd-on-stdin', '--cafile', str(WORK / 'ca.crt'), 'https://10.207.0.1:44443'],
                               input=(password + '\n').encode(), capture_output=True)
 
@@ -1311,22 +1310,22 @@ def business():
     password1, password2 = secrets.token_hex(24), secrets.token_hex(24)
     (WORK / 'private' / 'vpn-password-1').write_text(password1)
     (WORK / 'private' / 'vpn-password-2').write_text(password2)
-    operation, headers = mutation('users', {'name': 't07-vpn', 'sealed_password': sealed(password1)}, 0)
+    operation, headers = mutation('users', {'name': 'business-test-vpn-user', 'sealed_password': sealed(password1)}, 0)
     authenticate(password1, True)
-    api(prefix + '/users', {'name': 't07-vpn', 'password': password1, 'reason': 'T07 reject plaintext'},
+    api(prefix + '/users', {'name': 'business-test-vpn-user', 'password': password1, 'reason': 'Business test: reject plaintext'},
         headers={'Idempotency-Key': secrets.token_hex(16), 'If-Match': '"revision-0"'}, status=400)
     record('user_create_real_vpn_auth_and_plaintext_rejection', operation_id=operation['id'])
-    mutation('groups/t07-staff', {'members': ['t07-vpn']}, 0, method='PUT')
-    group = run('sudo', 'awk', '-F:', '$1 == "t07-vpn" {print $2}', '/etc/ocserv/ocpasswd').strip()
-    assert 't07-staff' in group.split(',')
+    mutation('groups/business-test-staff', {'members': ['business-test-vpn-user']}, 0, method='PUT')
+    group = run('sudo', 'awk', '-F:', '$1 == "business-test-vpn-user" {print $2}', '/etc/ocserv/ocpasswd').strip()
+    assert 'business-test-staff' in group.split(',')
     record('group_authoritative_state')
-    mutation('users/t07-vpn:rotate-password', {'sealed_password': sealed(password2)}, user_revision())
+    mutation('users/business-test-vpn-user:rotate-password', {'sealed_password': sealed(password2)}, user_revision())
     authenticate(password1, False)
     authenticate(password2, True)
     record('vpn_password_rotation')
-    mutation('users/t07-vpn:disable', {}, user_revision())
+    mutation('users/business-test-vpn-user:disable', {}, user_revision())
     authenticate(password2, False)
-    mutation('users/t07-vpn:enable', {}, user_revision())
+    mutation('users/business-test-vpn-user:enable', {}, user_revision())
     authenticate(password2, True)
     record('vpn_disable_restore')
     password_stat = run('sudo', 'stat', '-c', '%u:%g:%a:%h', '/etc/ocserv/ocpasswd').strip()
@@ -1340,30 +1339,31 @@ def business():
     record('audit_api_database_readback', event_ids=[item['id'] for item in audit])
     # The network namespace confines tunnel addresses/routes to the test client.
     client_log = (WORK / 'private' / 'openconnect.log').open('wb')
-    vpn = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 't07-client', 'openconnect', '--non-inter',
-                            '--protocol=anyconnect', '--user=t07-vpn', '--passwd-on-stdin',
+    vpn = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'openconnect', '--non-inter',
+                            '--protocol=anyconnect', '--user=business-test-vpn-user', '--passwd-on-stdin',
                             '--cafile', str(WORK / 'ca.crt'), '--script', str(WORK / 'vpn-script'),
                             'https://10.207.0.1:44443'], stdin=subprocess.PIPE, stdout=client_log, stderr=client_log)
     vpn.stdin.write((password2 + '\n').encode())
     vpn.stdin.close()
 
     def ping():
-        result = subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'ping', '-c', '2', '-W', '2', '10.208.0.1'],
+        result = subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'ping', '-c', '2', '-W', '2', '10.208.0.1'],
                                 capture_output=True)
         return result.returncode == 0 and vpn.poll() is None
 
     wait_for('real VPN ICMP', ping, 40)
     def native_ids():
         rows = json.loads(run('sudo', 'occtl', '--json', 'show', 'users'))
-        return [str(row['ID']) for row in rows if row['Username'] == 't07-vpn']
+        return [str(row['ID']) for row in rows if row['Username'] == 'business-test-vpn-user']
 
     def native_session():
         return native_ids()[0]
 
-    live_session = native_session()
-    ocserv_started = run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
+    # Confirm native readiness; recovery captures its own comparison baseline.
+    native_session()
+    run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
     session = wait_for('Controller session telemetry', lambda: api(prefix + '/sessions').get('items'))
-    assert any(row.get('username') == 't07-vpn' for row in session)
+    assert any(row.get('username') == 'business-test-vpn-user' for row in session)
     api(prefix + '/ip-bans')
     record('live_vpn_session_and_bans_read', session_count=len(session))
     try:
@@ -1373,7 +1373,7 @@ def business():
         verify_completed_operations(operations[controlled:])
     finally:
         # The controls already stop the client, so pkill may find nothing.
-        subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect'],
+        subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'pkill', '-INT', '-x', 'openconnect'],
                        capture_output=True, check=False)
         vpn.wait(timeout=15)
         client_log.close()
@@ -1382,9 +1382,9 @@ def business():
 def vpn_smoke(phase, relay_recovery=False):
     smoke = os.environ.get('BUSINESS_PROFILE', 'smoke') == 'smoke'
     password = (WORK / 'private' / ('smoke-vpn-password' if smoke else 'browser-vpn-password')).read_text().strip()
-    username = 't07-smoke' if smoke else 't07-browser'
+    username = 'business-test-smoke-user' if smoke else 'business-test-browser-user'
     with (WORK / 'private' / f'openconnect-{phase}.log').open('wb') as log:
-        vpn = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 't07-client', 'openconnect', '--non-inter',
+        vpn = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'openconnect', '--non-inter',
                                 '--protocol=anyconnect', '--user=' + username, '--passwd-on-stdin',
                                 '--cafile', str(WORK / 'ca.crt'), '--script', str(WORK / 'vpn-script'),
                                 'https://10.207.0.1:44443'], stdin=subprocess.PIPE, stdout=log, stderr=log)
@@ -1393,17 +1393,17 @@ def vpn_smoke(phase, relay_recovery=False):
             vpn.stdin.close()
 
             def connected():
-                result = subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'ping',
+                result = subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'ping',
                                          '-c', '2', '-W', '2', '10.208.0.1'], capture_output=True)
                 return vpn.poll() is None and result.returncode == 0
 
             wait_for('real VPN ICMP ' + phase, connected, 40)
-            assert api(f"nodes/{os.environ['T07_NODE']}")['config_revision'] == 1
+            assert api(f"nodes/{os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']}")['config_revision'] == 1
             record('real_vpn_' + phase)
             if relay_recovery:
                 smoke_relay_recovery(connected)
         finally:
-            subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect'],
+            subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'pkill', '-INT', '-x', 'openconnect'],
                            capture_output=True, check=False)
             vpn.wait(timeout=15)
 

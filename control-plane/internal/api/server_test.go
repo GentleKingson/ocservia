@@ -16,8 +16,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -104,7 +104,7 @@ func TestOperationBacklogErrorUsesServiceUnavailableProblem(t *testing.T) {
 	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/node/synthetic-commands", nil)
 	response := httptest.NewRecorder()
-	server.writeOperationError(response, request, operationstore.ErrBacklogExceeded)
+	server.writeOperationError(response, request, operations.ErrBacklogExceeded)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d", response.Code)
 	}
@@ -248,7 +248,7 @@ func TestDevAuthRejectsReboundHost(t *testing.T) {
 
 func TestCreateSimulationRejectsNullBody(t *testing.T) {
 	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters")
-	server.EnableLocalSlice(localslice.NewBackend(nil, nil))
+	server.EnableTransportEvents(transportevents.NewBackend(nil, nil))
 	for _, test := range []struct {
 		name, host, token string
 		want              int

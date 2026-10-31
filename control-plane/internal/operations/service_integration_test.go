@@ -90,11 +90,11 @@ func TestAuditFailureRejectsBusinessWriteIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer owner.Close()
-	if _, err := owner.Exec(ctx, `CREATE OR REPLACE FUNCTION i12_reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'injected audit failure'; END;$$; CREATE TRIGGER i12_reject_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION i12_reject_audit()`); err != nil {
+	if _, err := owner.Exec(ctx, `CREATE OR REPLACE FUNCTION test_operation_approval_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'injected audit failure'; END;$$; CREATE TRIGGER test_operation_approval_audit_failure BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION test_operation_approval_audit_failure()`); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_, _ = owner.Exec(context.Background(), `DROP TRIGGER IF EXISTS i12_reject_audit ON audit_events; DROP FUNCTION IF EXISTS i12_reject_audit()`)
+		_, _ = owner.Exec(context.Background(), `DROP TRIGGER IF EXISTS test_operation_approval_audit_failure ON audit_events; DROP FUNCTION IF EXISTS test_operation_approval_audit_failure()`)
 	}()
 	if _, _, err := service.Create(ctx, testRequest(nodeID, "audit-failure", SyntheticNoop, "")); err == nil {
 		t.Fatal("business write succeeded while audit failed")
@@ -765,7 +765,7 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 		t.Fatal(err)
 	}
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'I09 test',$2,now(),now())`, workspaceID, "i09-"+workspaceID.String()); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Operation test',$2,now(),now())`, workspaceID, "operation-"+workspaceID.String()); err != nil {
 		pool.Close()
 		t.Fatal(err)
 	}

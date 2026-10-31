@@ -38,9 +38,9 @@ fi
 [[ -z "$(docker volume ls -q --filter label=com.docker.compose.project=ocservia-production)" ]]
 umask 077
 mkdir -m 700 "${ARTIFACT_DIR}"
-export T07_WORK
-T07_WORK="$(mktemp -d "${HOME}/.t07-XXXXXX")"
-work="${T07_WORK}"
+export OCSERVIA_BUSINESS_TEST_WORK_DIR
+OCSERVIA_BUSINESS_TEST_WORK_DIR="$(mktemp -d "${HOME}/.ocservia-business-test-XXXXXX")"
+work="${OCSERVIA_BUSINESS_TEST_WORK_DIR}"
 stage=preflight
 started="$(date -u +%FT%TZ)"
 stage_started="$(date +%s)"
@@ -52,15 +52,15 @@ export DEPLOYMENT_CONFIG_DIR="${work}/bundle"
 SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)"
 export BUILDX_BUILDER="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
 registry="${BUILDX_BUILDER}-registry"
-export T07_RELAY_CONTAINER="${BUILDX_BUILDER}-relay"
+export OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER="${BUILDX_BUILDER}-relay"
 oidc_container="${BUILDX_BUILDER}-oidc"
-export T07_OIDC_CONTAINER="$oidc_container" T07_SIGNER_CONTAINER="${BUILDX_BUILDER}-signer"
+export OCSERVIA_BUSINESS_TEST_OIDC_CONTAINER="$oidc_container" OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER="${BUILDX_BUILDER}-signer"
 signer_pid=
 export OCSERV_SECRET_DIR="${work}/secrets" OCSERV_BACKUP_DIR="${work}/backup"
 export OCSERV_CONTROLLER_STATE_ROOT="${work}/state"
 export OCSERV_PUBLIC_HOST=localhost OCSERV_HTTPS_ADDRESS=127.0.0.1
 export OCSERV_CONTROLLER_PUBLIC_URL=https://localhost OCSERV_PUBLIC_ORIGIN=https://localhost
-export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_AUDIT_EVENT_KEY_ID=t07 OCSERV_BACKUP_INTERVAL_SECONDS=86400
+export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_AUDIT_EVENT_KEY_ID=business-test OCSERV_BACKUP_INTERVAL_SECONDS=86400
 export OCSERV_CERTIFICATE_SIGNER_URL=https://signer.unavailable.invalid
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   [[ "$EUID" == 0 ]]
@@ -116,8 +116,8 @@ cleanup() {
       docker logs "${oidc_container}"
       sudo journalctl --no-pager -o short-iso-precise -u ocservia-agent -u ocservia-privd -u ocserv
       if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-        docker logs "$T07_SIGNER_CONTAINER"
-        sudo journalctl --no-pager -o short-iso-precise -u ocservia-p2-crl
+        docker logs "$OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER"
+        sudo journalctl --no-pager -o short-iso-precise -u ocservia-business-test-crl
       fi
     } >>"${work}/private.log" 2>&1
   fi
@@ -161,13 +161,13 @@ cleanup() {
     sudo ip6tables -D OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
   fi
   if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-    sudo systemctl stop ocservia-p2-crl >/dev/null 2>&1
-    docker rm -f "$T07_SIGNER_CONTAINER" >/dev/null 2>&1
+    sudo systemctl stop ocservia-business-test-crl >/dev/null 2>&1
+    docker rm -f "$OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER" >/dev/null 2>&1
   fi
-  sudo ip netns pids t07-client 2>/dev/null | xargs -r sudo kill
-  sudo ip netns del t07-client >/dev/null 2>&1
+  sudo ip netns pids business-test-client 2>/dev/null | xargs -r sudo kill
+  sudo ip netns del business-test-client >/dev/null 2>&1
   compose down --volumes --remove-orphans >/dev/null 2>&1
-  docker rm -f "${registry}" "${T07_RELAY_CONTAINER}" "${oidc_container}" >/dev/null 2>&1
+  docker rm -f "${registry}" "${OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER}" "${oidc_container}" >/dev/null 2>&1
   if [[ -n "${signer_pid}" ]]; then kill "${signer_pid}" 2>/dev/null; wait "${signer_pid}" 2>/dev/null; fi
   docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1
   # Host installation is confined to this ephemeral GitHub runner, destroyed
@@ -201,7 +201,7 @@ for name in gateway control transport backup edge relay signer mysql_backup; do
   # Unrelated binfmt handlers could otherwise run a foreign image emulated.
   [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "ghcr.io/gentlekingson/ocservia/$name:$VERSION-linux-$CONTROLLER_ARCH")" == "linux/$CONTROLLER_ARCH" ]]
 done
-export T07_SIGNER_IMAGE="ghcr.io/gentlekingson/ocservia/signer:$VERSION-linux-$CONTROLLER_ARCH"
+export OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE="ghcr.io/gentlekingson/ocservia/signer:$VERSION-linux-$CONTROLLER_ARCH"
 docker tag "ghcr.io/gentlekingson/ocservia/relay:$VERSION-linux-$CONTROLLER_ARCH" "${BUILDX_BUILDER}-relay"
 docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay" --version >"${ARTIFACT_DIR}/relay-version.txt"
 record products_built
@@ -243,7 +243,7 @@ fi
 # Subsequent output can contain task-only secret data. Keep it private until
 # the exact-value redactor runs; the uploaded results never contain cookies.
 exec >"${work}/private.log" 2>&1
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=t07-ca \
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=business-test-ca \
   -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign \
   -keyout "${work}/private/ca.key" -out "${work}/ca.crt"
 chmod 444 "${work}/ca.crt"
@@ -315,8 +315,8 @@ for name in "${roles[@]}"; do
   args+=(--image "$name=$PUBLISHED_REFERENCE")
   export "OCSERV_${name^^}_IMAGE=$PUBLISHED_REFERENCE"
 done
-export T07_RELAY_IMAGE="${OCSERV_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}"
-export T07_SIGNER_IMAGE="${OCSERV_SIGNER_IMAGE:-$T07_SIGNER_IMAGE}"
+export OCSERVIA_BUSINESS_TEST_RELAY_IMAGE="${OCSERV_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}"
+export OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE="${OCSERV_SIGNER_IMAGE:-$OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE}"
 # Existing third-party runtime dependency versions.
 export OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE
 OCSERV_POSTGRES_IMAGE=docker.io/library/postgres@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
@@ -345,8 +345,8 @@ else
   "${ROOT}/deploy/production/controller.sh" install --release-file "$manifest"
 fi
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-  T07_SIGNER_CONTAINER="$(compose ps -q signer)"
-  T07_RELAY_CONTAINER="$(compose ps -q relay)"
+  OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER="$(compose ps -q signer)"
+  OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER="$(compose ps -q relay)"
 fi
 curl --fail --silent --show-error "$OCSERV_CONTROLLER_PUBLIC_URL/api/v1/version" | \
   jq -e --arg sha "${SOURCE_COMMIT}" --arg v "${VERSION}" '.commit == $sha and .version == $v' >/dev/null
@@ -355,20 +355,20 @@ if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   python3 "$ROOT/scripts/release-integrated-acceptance.py" entry
   record integrated_entry_and_internal_tls
 fi
-export T07_WORKSPACE=00000000-0000-7000-8000-000000000071
+export OCSERVIA_BUSINESS_TEST_WORKSPACE_ID=00000000-0000-7000-8000-000000000071
 compose exec -T postgres psql -XAt -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <<SQL
 INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES
- ('${T07_WORKSPACE}','T07','t07',now(),now()),
- ('00000000-0000-7000-8000-000000000072','Other','t07-other',now(),now());
+ ('${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}','Business Test','business-test',now(),now()),
+ ('00000000-0000-7000-8000-000000000072','Other','business-test-other',now(),now());
 SQL
 for role in requester approver; do
   openssl rand -hex 32 >"${work}/private/${role}-password"
   sudo install -o 65534 -g 65532 -m 400 "${work}/private/${role}-password" "${OCSERV_SECRET_DIR}/${role}-password"
 done
-compose run --rm --no-deps -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=t07-requester \
-  -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${T07_WORKSPACE}" \
+compose run --rm --no-deps -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=business-test-requester \
+  -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}" \
   -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/requester-password \
-  -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=t07-approver \
+  -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=business-test-approver \
   -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/secrets/approver-password \
   -v "${OCSERV_SECRET_DIR}/requester-password:/run/secrets/requester-password:ro" \
   -v "${OCSERV_SECRET_DIR}/approver-password:/run/secrets/approver-password:ro" \
@@ -431,14 +431,14 @@ sudo install -o root -g root -m 444 "${work}/ca.crt" /etc/ocservia-agent/relay-c
 export CONTROLLER_ENDPOINT_ID="${OCSERV_CONTROLLER_ENDPOINT_ID}" RELAY_URL_A="${OCSERV_RELAY_URL_A}" RELAY_URL_B=
 export RELAY_ACCESS_TOKEN_SOURCE="${OCSERV_SECRET_DIR}/relay-access-token"
 export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${work}/command.pub.pem"
-export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=production
+export USER_PASSWORD_SEAL_KEY_ID=business-test-user-seal P12_PASSWORD_SEAL_KEY_ID=business-test-p12-seal ENROLLMENT_ENVIRONMENT=production
 managed_options=(--version "v${VERSION}")
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then managed_options+=(--root-lifecycle); fi
 # The managed installer preflight reads the real native ocserv resources.
 # Prepare and start this task-owned VPN fixture before enrollment, then bind
 # its TLS material to the enrolled node through the existing ConfigPlan path.
-sudo install -m 600 "${work}/private/tls.key" /etc/ocserv/t07.key
-sudo install -m 644 "${OCSERV_SECRET_DIR}/tls.crt" /etc/ocserv/t07.crt
+sudo install -m 600 "${work}/private/tls.key" /etc/ocserv/business-test.key
+sudo install -m 644 "${OCSERV_SECRET_DIR}/tls.crt" /etc/ocserv/business-test.crt
 sudo install -m 600 /dev/null /etc/ocserv/ocpasswd
 sudo groupadd --system ocservia-vpn
 sudo useradd --system --no-create-home --gid ocservia-vpn --shell /usr/sbin/nologin ocservia-vpn
@@ -463,7 +463,7 @@ use-occtl = true
 EOF
 sudo install -m 600 "${work}/ocserv.conf" /etc/ocserv/ocserv.conf
 }
-write_node_config /etc/ocserv/t07.crt /etc/ocserv/t07.key
+write_node_config /etc/ocserv/business-test.crt /etc/ocserv/business-test.key
 sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
 sudo systemctl daemon-reload
 sudo systemctl restart ocserv
@@ -476,13 +476,13 @@ cp "${OCSERV_SECRET_DIR}/tls.crt" "${work}/relay/relay.crt"
 cp "${work}/private/tls.key" "${work}/relay/relay.key"
 cp "${work}/private/relay-access-token" "${work}/relay/relay-token"
 sudo chown -R 65532:65532 "${work}/relay"
-docker run -d --name "${T07_RELAY_CONTAINER}" --read-only --cap-drop ALL \
+docker run -d --name "${OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER}" --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true -p "${gateway}:3443:3443" \
   -e IROH_RELAY_ACCESS_TOKEN_FILE=/run/relay-secrets/relay-token \
   -e RUST_LOG=info,iroh_relay::server::clients=debug \
   -v "${work}/relay:/run/relay-secrets:ro" \
   -v "${ROOT}/deploy/test-fixtures/relay.toml:/etc/iroh-relay/relay.toml:ro" \
-  "${T07_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}" --config-path /etc/iroh-relay/relay.toml
+  "${OCSERVIA_BUSINESS_TEST_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}" --config-path /etc/iroh-relay/relay.toml
 fi
 if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
   # Standard path: an EndpointID-unbound bootstrap token from the protected
@@ -499,18 +499,18 @@ else
   grep -q ENROLLMENT_READY "${ARTIFACT_DIR}/managed-prepare.log"
 fi
 record signed_native_package_and_managed_prepare
-export T07_TRANSPORT_CONTAINER
-T07_TRANSPORT_CONTAINER="$(compose ps -q transportd)"
-[[ -n "${T07_TRANSPORT_CONTAINER}" ]]
+export OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER
+OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER="$(compose ps -q transportd)"
+[[ -n "${OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER}" ]]
 sudo openssl pkey -pubin -in "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem" -noout
 [[ "$(sudo stat -c '%u:%g:%a:%h' "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem")" == 0:65532:440:1 ]]
-docker inspect "${T07_TRANSPORT_CONTAINER}" | jq -e '.[0].Mounts | all(.[]; .Destination != "/run/secrets/controller_command_signing_key")' >/dev/null
-docker exec "${T07_TRANSPORT_CONTAINER}" test ! -e /run/secrets/controller_command_signing_key
+docker inspect "${OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER}" | jq -e '.[0].Mounts | all(.[]; .Destination != "/run/secrets/controller_command_signing_key")' >/dev/null
+docker exec "${OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER}" test ! -e /run/secrets/controller_command_signing_key
 printf 'SPKI public key, regular one-link root:65532 0440; no Controller signing-key mount\n' >"${ARTIFACT_DIR}/transport-key-boundary.txt"
 [[ "$(sudo stat -c '%u:%g:%a:%h' "${OCSERV_SECRET_DIR}/relay-ca.pem")" == 0:0:444:1 ]]
 [[ "$(sudo stat -c '%u:%g:%a:%h' /etc/ocservia-agent/relay-ca.pem)" == 0:0:444:1 ]]
 # Compose uses init:true, so PID 1 is Docker's init rather than transportd.
-docker exec "${T07_TRANSPORT_CONTAINER}" sh -c '
+docker exec "${OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER}" sh -c '
   found=false
   for executable in /proc/[0-9]*/exe; do
     if [ "$(readlink "$executable")" = /usr/local/bin/ocservia-transportd ]; then
@@ -523,10 +523,8 @@ docker exec "${T07_TRANSPORT_CONTAINER}" sh -c '
 grep -Fx /run/secrets/relay_ca "${ARTIFACT_DIR}/transport-argv.txt"
 printf 'Additional public Relay CA: one-link root:root 0444 on Controller and node; official transport launcher flag present\n' >"${ARTIFACT_DIR}/relay-ca-boundary.txt"
 sudo openssl pkey -in /etc/ocservia-agent/user-password-seal-private.pem -pubout >"${work}/user.pub.pem"
-export T07_ENDPOINT T07_USER_HASH T07_P12_HASH
-T07_ENDPOINT="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --controller "${CONTROLLER_ENDPOINT_ID}" --prepare-enrollment)"
-T07_USER_HASH="$(openssl pkey -pubin -in "${work}/user.pub.pem" -outform DER | sha256sum | cut -d' ' -f1)"
-T07_P12_HASH="$(sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-private.pem -pubout -outform DER | sha256sum | cut -d' ' -f1)"
+export OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID
+OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --controller "${CONTROLLER_ENDPOINT_ID}" --prepare-enrollment)"
 if [[ "${BUSINESS_PROFILE}" == extended ]]; then
   python3 "${ROOT}/scripts/release-business-api.py" token
   sudo install -o root -g ocserv-agent -m 640 "${work}/private/enrollment-token" /etc/ocservia-agent/enrollment-token
@@ -536,15 +534,16 @@ fi
 # checks the Controller's pending state before the authorized transition.
 grep -q '^ENROLLED_LOCAL$' "${ARTIFACT_DIR}/managed-enrollment.log"
 grep -q '^SERVICES: NOT_OBSERVED$' "${ARTIFACT_DIR}/managed-enrollment.log"
-export T07_NODE
-T07_NODE="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${ARTIFACT_DIR}/managed-enrollment.log")"
-[[ "${T07_NODE}" =~ ^[0-9a-f-]{36}$ ]]
-printf '%s\n' "${T07_NODE}" >"${work}/signer-node"
-printf '%s\n' "${T07_WORKSPACE}" >"${work}/signer-workspace"
-printf '%s\n' "${T07_ENDPOINT}" >"${work}/signer-endpoint"
+export OCSERVIA_BUSINESS_TEST_NODE_ID
+OCSERVIA_BUSINESS_TEST_NODE_ID="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${ARTIFACT_DIR}/managed-enrollment.log")"
+[[ "${OCSERVIA_BUSINESS_TEST_NODE_ID}" =~ ^[0-9a-f-]{36}$ ]]
+printf '%s\n' "${OCSERVIA_BUSINESS_TEST_NODE_ID}" >"${work}/signer-node"
+printf '%s\n' "${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}" >"${work}/signer-workspace"
+printf '%s\n' "${OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID}" >"${work}/signer-endpoint"
 sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-private.pem -pubout >"${work}/p12.pub.pem"
 sudo test ! -e /etc/ocservia-agent/enrollment-token
 cmp "${ROOT}/deploy/production/systemd/agent-relays.sh" /usr/libexec/ocservia/ocservia-agent-relays
+# Reject the forbidden legacy fixture override; it must never return.
 [[ ! -e /etc/systemd/system/ocservia-agent.service.d/99-t07-ca.conf ]]
 identity_digest() {
   sudo sha256sum /var/lib/ocservia-agent/identity/endpoint.key /var/lib/ocservia-agent/identity/controller.endpoint
@@ -555,7 +554,7 @@ if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
   # A pending rerun validates, never re-enrolls or regenerates identity.
   bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-pending-rerun.log"
   grep -Fxq ENROLLED_LOCAL "${ARTIFACT_DIR}/managed-pending-rerun.log"
-  grep -Fxq "NODE_ID: ${T07_NODE}" "${ARTIFACT_DIR}/managed-pending-rerun.log"
+  grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-pending-rerun.log"
   [[ "$(identity_digest)" == "${enrolled_identity}" ]]
   record bootstrap_token_enrollment_pending_and_rerun_identity
 fi
@@ -583,7 +582,7 @@ fi
 sudo systemctl enable --now ocservia-privd ocservia-agent
 bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"
 grep -q SERVICES_ACTIVE "${ARTIFACT_DIR}/managed-active.log"
-grep -Fxq "NODE_ID: ${T07_NODE}" "${ARTIFACT_DIR}/managed-active.log"
+grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-active.log"
 [[ "$(identity_digest)" == "${enrolled_identity}" ]]
 record native_node_services
 if [[ "${BUSINESS_PROFILE}" == extended ]]; then
@@ -595,11 +594,11 @@ next_stage browser
 npm --prefix "${ROOT}/web" ci --ignore-scripts
 (cd "${ROOT}/web" && npx playwright install --with-deps chromium)
 sudo apt-get install -y --no-install-recommends libnss3-tools
-sudo install -m 644 "${work}/ca.crt" /usr/local/share/ca-certificates/t07.crt
+sudo install -m 644 "${work}/ca.crt" /usr/local/share/ca-certificates/ocservia-business-test-ca.crt
 sudo update-ca-certificates
 mkdir -p "${HOME}/.pki/nssdb"
 if [[ ! -f "${HOME}/.pki/nssdb/cert9.db" ]]; then certutil -N --empty-password -d "sql:${HOME}/.pki/nssdb"; fi
-certutil -A -d "sql:${HOME}/.pki/nssdb" -n t07 -t C,, -i "${work}/ca.crt"
+certutil -A -d "sql:${HOME}/.pki/nssdb" -n ocservia-business-test-ca -t C,, -i "${work}/ca.crt"
 python3 "${ROOT}/scripts/release-business-api.py" browser_prepare
 NODE_EXTRA_CA_CERTS="${work}/ca.crt" node "${ROOT}/scripts/release-business-browser.mjs"
 python3 "${ROOT}/scripts/release-business-api.py" browser_verify
@@ -610,14 +609,14 @@ if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
   record approved_config_apply_and_vpn_user
 fi
 next_stage vpn_client_setup
-sudo ip netns add t07-client
-sudo ip link add t07-host type veth peer name t07-peer
-sudo ip link set t07-peer netns t07-client
-sudo ip addr add 10.207.0.1/30 dev t07-host
-sudo ip link set t07-host up
-sudo ip netns exec t07-client ip addr add 10.207.0.2/30 dev t07-peer
-sudo ip netns exec t07-client ip link set t07-peer up
-sudo ip netns exec t07-client ip link set lo up
+sudo ip netns add business-test-client
+sudo ip link add biztest-host type veth peer name biztest-peer
+sudo ip link set biztest-peer netns business-test-client
+sudo ip addr add 10.207.0.1/30 dev biztest-host
+sudo ip link set biztest-host up
+sudo ip netns exec business-test-client ip addr add 10.207.0.2/30 dev biztest-peer
+sudo ip netns exec business-test-client ip link set biztest-peer up
+sudo ip netns exec business-test-client ip link set lo up
 cat >"${work}/vpn-script" <<'EOF'
 #!/bin/sh
 set -eu

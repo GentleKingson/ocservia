@@ -15,6 +15,8 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+RELAY_VERSION = next(line.removeprefix('iroh=') for line in (ROOT / 'toolchains.lock').read_text().splitlines()
+                     if line.startswith('iroh='))
 CADDY = "caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e"
 PROBE = "node:24.18.1-bookworm@sha256:19cd848a0e073d34bd8cd5545a1b6b4d28489b3e3b607366621ced442bd5f6b4"
 
@@ -36,9 +38,9 @@ def main():
                         help="Explicitly bind TCP443/UDP7842 until this stop file exists (max 15 minutes)")
     args = parser.parse_args()
     args.artifacts.mkdir(parents=True, exist_ok=False)
-    work = Path(tempfile.mkdtemp(prefix="ocservia-p1-"))
+    work = Path(tempfile.mkdtemp(prefix="ocservia-integrated-test-"))
     os.chmod(work, 0o755)
-    project = "ocservia-p1-" + secrets.token_hex(4)
+    project = "ocservia-integrated-test-" + secrets.token_hex(4)
     gateway_image = project + "-gateway"
     command = ["docker", "compose", "-p", project, "-f", str(work / "compose.json")]
     result = {"scope": "isolated fixture, not external clients or real Agent",
@@ -61,11 +63,11 @@ def main():
         env = {key: value for key, value in os.environ.items() if not key.startswith('OCSERV_')}
         env.update({f"OCSERV_{role}_IMAGE": "fixture.invalid/image@sha256:" + "0" * 64
                     for role in ("EDGE", "RELAY", "GATEWAY", "CONTROL", "TRANSPORT", "BACKUP", "POSTGRES", "OTEL")})
-        env.update(OCSERV_PUBLIC_HOST="controller.p1.test", OCSERV_RELAY_PUBLIC_HOST="relay.p1.test",
+        env.update(OCSERV_PUBLIC_HOST="controller.integrated.test", OCSERV_RELAY_PUBLIC_HOST="relay.integrated.test",
                    OCSERV_SECRET_DIR=str(work), OCSERV_RELAY_SECRET_DIR=str(work),
                    OCSERV_AUDIT_EVENT_KEY_ID="fixture", OCSERV_CONTROLLER_ENDPOINT_ID="fixture",
-                   OCSERV_CERTIFICATE_SIGNER_URL="https://signer.p1.test/sign",
-                   OCSERV_RELAY_URL_A="https://relay.p1.test")
+                   OCSERV_CERTIFICATE_SIGNER_URL="https://signer.integrated.test/sign",
+                   OCSERV_RELAY_URL_A="https://relay.integrated.test")
         base = ["docker", "compose", "-f", str(ROOT / "deploy/production/compose.yaml")]
         raw = json.loads(run(*base, "-f", str(ROOT / "deploy/production/integrated/compose.yaml"),
                              "config", "--no-env-resolution", "--format", "json", env=env))
@@ -84,13 +86,13 @@ def main():
             f"FROM {CADDY}\nRUN setcap -r /usr/bin/caddy\nUSER 65532:65532\n"))
         for name in ("controller", "relay"):
             run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-                "-subj", f"/CN={name}.p1.test", "-addext", f"subjectAltName=DNS:{name}.p1.test",
+                "-subj", f"/CN={name}.integrated.test", "-addext", f"subjectAltName=DNS:{name}.integrated.test",
                 "-keyout", str(work / f"{name}.key"), "-out", str(work / f"{name}.crt"))
             os.chmod(work / f"{name}.key", 0o444)
         (work / "ca.crt").write_bytes((work / "controller.crt").read_bytes() + (work / "relay.crt").read_bytes())
         (work / "token").write_text(secrets.token_hex(32))
         os.chmod(work / "token", 0o444)
-        (work / "index.html").write_text("p1-static-fixture")
+        (work / "index.html").write_text("integrated-static-fixture")
         backend = '''from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import time
 class Handler(BaseHTTPRequestHandler):
@@ -112,14 +114,14 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
             service.pop("secrets", None)
             service["restart"] = "no"
         services["edge"].update(image=args.edge_image,
-            environment={"OCSERV_PUBLIC_HOST": "controller.p1.test", "OCSERV_RELAY_PUBLIC_HOST": "relay.p1.test"},
+            environment={"OCSERV_PUBLIC_HOST": "controller.integrated.test", "OCSERV_RELAY_PUBLIC_HOST": "relay.integrated.test"},
             ports=["127.0.0.1::8443"],
             networks={"frontend": {}, "edge-gateway": {"ipv4_address": "198.18.91.2"}, "edge-relay": {}})
         if args.serve_public_until:
             assert not args.serve_public_until.exists(), "stop file already exists"
             services["edge"]["ports"] = ["0.0.0.0:443:8443/tcp"]
         services["gateway"].update(image=gateway_image,
-            environment={"OCSERV_PUBLIC_HOST": "controller.p1.test", "OCSERV_EDGE_GATEWAY_IP": "198.18.91.2"},
+            environment={"OCSERV_PUBLIC_HOST": "controller.integrated.test", "OCSERV_EDGE_GATEWAY_IP": "198.18.91.2"},
             networks={"edge-gateway": {}, "application": {}},
             volumes=[f"{ROOT}/deploy/production/integrated/Caddyfile:/etc/caddy/Caddyfile:ro",
                      f"{ROOT}/deploy/production/integrated/site.caddy:/etc/caddy/site.caddy:ro",
@@ -149,7 +151,7 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
         no_sni_context = ssl.create_default_context(cafile=str(work / "ca.crt"))
         no_sni_context.check_hostname = False
 
-        def request(name="controller.p1.test", path="/api/ip", host=None, preamble=b"", stream=False):
+        def request(name="controller.integrated.test", path="/api/ip", host=None, preamble=b"", stream=False):
             with socket.create_connection(("127.0.0.1", port), timeout=8) as sock:
                 if preamble:
                     sock.sendall(preamble)
@@ -163,7 +165,7 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
                             return data
                     return data
 
-        def wait_ready(name="controller.p1.test", path="/api/ip"):
+        def wait_ready(name="controller.integrated.test", path="/api/ip"):
             deadline = time.monotonic() + 40
             last = None
             while time.monotonic() < deadline:
@@ -178,12 +180,12 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
             raise AssertionError(f"not ready: {name}: {last}")
 
         wait_ready()
-        wait_ready("relay.p1.test", "/healthz")
+        wait_ready("relay.integrated.test", "/healthz")
         if args.serve_public_until:
             # Only public trust material is exported. This is infrastructure,
             # not a PASS for the external/QUIC/Agent acceptance gates.
             (args.artifacts / "public.json").write_text(json.dumps({
-                "controller_host": "controller.p1.test", "relay_host": "relay.p1.test",
+                "controller_host": "controller.integrated.test", "relay_host": "relay.integrated.test",
                 "ca_pem": (work / "ca.crt").read_text(), "project": project,
             }, indent=2) + "\n")
             deadline = time.monotonic() + 900
@@ -193,16 +195,16 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
                 time.sleep(1)
             result["status"] = "SERVED"
             return
-        assert "iroh-relay 1.2.0" in compose("exec", "-T", "relay", "iroh-relay", "--version")
-        result["checks"].append("both TLS certificates; real iroh-relay 1.2.0 accepts stripped TLS")
-        assert b"421" in request(host="wrong.p1.test").split(b"\r\n", 1)[0]
-        assert b"421" in request(host="controller.p1.test:8443").split(b"\r\n", 1)[0]
-        assert b"200 OK" in request(host="controller.p1.test:443")
-        result["relay_wrong_host_status"] = request("relay.p1.test", "/healthz", "wrong.p1.test").split(b"\r\n", 1)[0].decode()
-        assert b"p1-static-fixture" in request(path="/")
+        assert f"iroh-relay {RELAY_VERSION}" in compose("exec", "-T", "relay", "iroh-relay", "--version")
+        result["checks"].append(f"both TLS certificates; real iroh-relay {RELAY_VERSION} accepts stripped TLS")
+        assert b"421" in request(host="wrong.integrated.test").split(b"\r\n", 1)[0]
+        assert b"421" in request(host="controller.integrated.test:8443").split(b"\r\n", 1)[0]
+        assert b"200 OK" in request(host="controller.integrated.test:443")
+        result["relay_wrong_host_status"] = request("relay.integrated.test", "/healthz", "wrong.integrated.test").split(b"\r\n", 1)[0].decode()
+        assert b"integrated-static-fixture" in request(path="/")
         assert b"alt-svc:" not in request(path="/").lower()
-        for name, preamble in (("unknown.p1.test", b""), (None, b""),
-                               ("controller.p1.test", b"PROXY TCP4 203.0.113.66 127.0.0.1 1234 443\r\n")):
+        for name, preamble in (("unknown.integrated.test", b""), (None, b""),
+                               ("controller.integrated.test", b"PROXY TCP4 203.0.113.66 127.0.0.1 1234 443\r\n")):
             try:
                 request(name=name, preamble=preamble)
             except OSError:
@@ -210,7 +212,7 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
             else:
                 raise AssertionError("invalid SNI/PROXY input accepted")
         with socket.create_connection(("127.0.0.1", port), timeout=8) as sock:
-            sock.sendall(b"GET / HTTP/1.1\r\nHost: controller.p1.test\r\n\r\n")
+            sock.sendall(b"GET / HTTP/1.1\r\nHost: controller.integrated.test\r\n\r\n")
             try:
                 assert sock.recv(1024) == b"", "plaintext request accepted"
             except ConnectionResetError:
@@ -218,8 +220,8 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
         # Two bridge sources test metadata propagation, not the two external-source gate.
         client_code = '''import socket, ssl, sys
 with socket.create_connection(('edge', 8443), timeout=5) as sock:
- with ssl.create_default_context(cafile='/ca.crt').wrap_socket(sock, server_hostname='controller.p1.test') as tls:
-  tls.sendall(b'GET /api/ip HTTP/1.1\\r\\nHost: controller.p1.test\\r\\nX-Ocservia-Client-IP: 203.0.113.66\\r\\nX-Forwarded-For: 203.0.113.66\\r\\nConnection: close\\r\\n\\r\\n')
+ with ssl.create_default_context(cafile='/ca.crt').wrap_socket(sock, server_hostname='controller.integrated.test') as tls:
+  tls.sendall(b'GET /api/ip HTTP/1.1\\r\\nHost: controller.integrated.test\\r\\nX-Ocservia-Client-IP: 203.0.113.66\\r\\nX-Forwarded-For: 203.0.113.66\\r\\nConnection: close\\r\\n\\r\\n')
   data = b''
   while part := tls.recv(65536): data += part
   assert sys.argv[1].encode() in data.split(b'\\r\\n\\r\\n', 1)[1], data
@@ -232,7 +234,7 @@ import socket, ssl, sys
 with socket.create_connection((sys.argv[1], 8443), timeout=5) as sock:
  sock.sendall(b'PROXY TCP4 203.0.113.66 127.0.0.1 1234 443\\r\\n')
  try:
-  with ssl.create_default_context(cafile='/ca.crt').wrap_socket(sock, server_hostname='controller.p1.test'):
+  with ssl.create_default_context(cafile='/ca.crt').wrap_socket(sock, server_hostname='controller.integrated.test'):
    raise AssertionError('Gateway trusted PROXY from a non-Edge source')
  except OSError: pass
 ''', address("gateway", "edge-gateway"))
@@ -253,14 +255,14 @@ with socket.create_connection((sys.argv[1], 8443), timeout=5) as sock:
                     "--ip", before, PROBE, "sleep", "120")
                 compose("up", "-d", name)
                 assert address(name, network) != before
-                wait_ready("relay.p1.test" if name == "relay" else "controller.p1.test",
+                wait_ready("relay.integrated.test" if name == "relay" else "controller.integrated.test",
                            "/healthz" if name == "relay" else "/api/ip")
             finally:
                 run("docker", "rm", "-f", holder, check=False)
         compose("restart", "edge")
         port = int(compose("port", "edge", "8443").strip().rsplit(":", 1)[1])
         wait_ready()
-        wait_ready("relay.p1.test", "/healthz")
+        wait_ready("relay.integrated.test", "/healthz")
         result["checks"].append("Gateway/Relay changed-IP recreation; Edge restart; new TLS connections recover")
         result["images"] = {name: json.loads(run("docker", "image", "inspect", image))[0]["Id"]
                             for name, image in (("edge", args.edge_image), ("relay", args.relay_image), ("caddy", gateway_image))}

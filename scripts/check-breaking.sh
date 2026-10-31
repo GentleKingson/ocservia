@@ -4,12 +4,27 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
 
-if git -C "${ROOT}" cat-file -e origin/main:proto/buf.yaml 2>/dev/null; then
-  (cd "${ROOT}" && buf breaking proto --against '.git#branch=origin/main,subdir=proto')
+if (($# > 1)); then
+  echo "usage: $0 [base-ref]" >&2
+  exit 2
+fi
+base_ref="${1:-origin/main}"
+if ! base_sha="$(git -C "${ROOT}" rev-parse --verify --end-of-options "${base_ref}^{commit}" 2>/dev/null)"; then
+  echo "contract comparison baseline is not a commit: ${base_ref}" >&2
+  exit 1
+fi
+if [[ "${base_sha}" == "$(git -C "${ROOT}" rev-parse HEAD)" ]]; then
+  echo "contract comparison baseline must differ from the candidate" >&2
+  exit 1
+fi
+temporary="$(mktemp -d)"
+trap 'rm -rf "${temporary}"' EXIT INT TERM
+if git -C "${ROOT}" cat-file -e "${base_sha}:proto/buf.yaml" 2>/dev/null; then
+  mkdir -p "${temporary}/baseline"
+  git -C "${ROOT}" archive "${base_sha}" proto | tar -x -C "${temporary}/baseline"
+  (cd "${ROOT}" && buf breaking proto --against "${temporary}/baseline/proto")
 else
-  echo "No contract exists on origin/main; validating FILE policy with a breaking fixture."
-  temporary="$(mktemp -d)"
-  trap 'rm -rf "${temporary}"' EXIT INT TERM
+  echo "No contract exists on ${base_ref}; validating FILE policy with a breaking fixture."
   cp -R "${ROOT}/proto" "${temporary}/against"
   cp -R "${ROOT}/proto" "${temporary}/candidate"
   sed -i.bak '/string version = 2;/d' \
@@ -21,10 +36,8 @@ else
   fi
 fi
 
-if git -C "${ROOT}" cat-file -e origin/main:openapi/openapi.yaml 2>/dev/null; then
-  temporary="$(mktemp -d)"
-  trap 'rm -rf "${temporary}"' EXIT INT TERM
-  git -C "${ROOT}" show origin/main:openapi/openapi.yaml >"${temporary}/main.yaml"
+if git -C "${ROOT}" cat-file -e "${base_sha}:openapi/openapi.yaml" 2>/dev/null; then
+  git -C "${ROOT}" show "${base_sha}:openapi/openapi.yaml" >"${temporary}/main.yaml"
   # Normalize only the deliberate fail-closed security migrations in the
   # comparison baseline so every unrelated OpenAPI break remains an error.
   (cd "${ROOT}/web" && node --input-type=module - \
@@ -231,9 +244,7 @@ EOF
   oasdiff breaking --fail-on ERR \
     "${temporary}/main.yaml" "${ROOT}/openapi/openapi.yaml"
 else
-  echo "No OpenAPI contract exists on origin/main; validating compatibility detection with a fixture."
-  temporary="$(mktemp -d)"
-  trap 'rm -rf "${temporary}"' EXIT INT TERM
+  echo "No OpenAPI contract exists on ${base_ref}; validating compatibility detection with a fixture."
   (cd "${ROOT}/web" && node --input-type=module - \
     "${ROOT}/openapi/openapi.yaml" "${temporary}/candidate.yaml" <<'EOF'
 import { readFileSync, writeFileSync } from "node:fs";

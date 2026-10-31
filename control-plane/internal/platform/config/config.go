@@ -340,7 +340,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	bootstrap := fs.Bool("bootstrap-local-admin", false, "create the initial Local administrator, then exit")
-	completeBootstrap := fs.Bool("complete-local-bootstrap", false, "complete an eligible pre-R4 Local initialization with an independent approver, then exit")
+	completeBootstrap := fs.Bool("complete-local-bootstrap", false, "add the missing independent approver to an eligible legacy Local initialization, then exit")
 	role := fs.String("role", string(cfg.Role), "process role: api, worker, scheduler, or all")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
 	provisionWorkspace := fs.Bool("provision-management-workspace", false, "create the administration workspace on a database without workspaces, then exit")

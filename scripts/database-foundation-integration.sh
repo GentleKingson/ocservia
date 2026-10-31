@@ -20,14 +20,14 @@ case "${ENGINE}" in
   mysql) IMAGE='mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d'; CLIENT=mysql ;;
   *) echo 'ENGINE must be mysql' >&2; exit 2 ;;
 esac
-NAME="ocservia-pr02-${ENGINE}-$$"
+NAME="ocservia-database-e2e-${ENGINE}-$$"
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
 require_test_commands go jq setsid python3 openssl
 if [[ "${scope}" == full ]]; then require_test_commands timeout; fi
 require_test_docker
 require_go_race
-TLS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-pr02-tls-XXXXXX")"
+TLS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-database-e2e-tls-XXXXXX")"
 TLS_DIR="${TLS_ROOT}/certs"
 if [[ "${scope}" == full || "${scope}" == regression ]]; then
   export DATABASE_CASE_RESULTS="${TLS_ROOT}/required-case-results.jsonl"
@@ -48,9 +48,9 @@ diagnostics() {
     'SELECT DIGEST,COUNT_STAR,SUM_TIMER_WAIT,SUM_LOCK_TIME FROM performance_schema.events_statements_summary_by_digest ORDER BY SUM_TIMER_WAIT DESC LIMIT 20' \
     "SELECT OBJECT_TYPE,OBJECT_SCHEMA,OBJECT_NAME,LOCK_TYPE,LOCK_STATUS FROM performance_schema.metadata_locks WHERE LOCK_STATUS='PENDING' LIMIT 20" \
     'SELECT EVENT_NAME,COUNT_STAR,SUM_TIMER_WAIT FROM performance_schema.file_summary_by_event_name ORDER BY SUM_TIMER_WAIT DESC LIMIT 20'; do
-    timeout 10s docker exec -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" \
+    timeout 10s docker exec -e MYSQL_PWD=database-e2e-isolated-test-root "${NAME}" "${CLIENT}" \
       --protocol=TCP -h127.0.0.1 -uroot -e "${query}" 2>&1 \
-      | sed -E '/password|IDENTIFIED|@tcp\(/Id; s/pr02-[a-z-]+/(redacted)/g' \
+      | sed -E '/password|IDENTIFIED|@tcp\(/Id; s/database-e2e-[a-z-]+/(redacted)/g' \
       | head -c 16384 || true
   done
 }
@@ -68,7 +68,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=ocservia-pr02-test' \
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=ocservia-database-e2e-test' \
   -addext 'subjectAltName=IP:127.0.0.1' -keyout "${TLS_DIR}/server-key.pem" \
   -out "${TLS_DIR}/server-cert.pem" >/dev/null 2>&1
 # The enclosing temporary directory is private on the host. The container's
@@ -80,26 +80,26 @@ chmod 644 "${TLS_DIR}"/*.pem
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
 docker run -d --name "${NAME}" -p "127.0.0.1:${PORT}:3306" \
   -v "${TLS_DIR}:/tls:ro" \
-  -e MYSQL_ROOT_PASSWORD=pr02-isolated-test-root -e MYSQL_DATABASE=ocservia \
+  -e MYSQL_ROOT_PASSWORD=database-e2e-isolated-test-root -e MYSQL_DATABASE=ocservia \
   "${IMAGE}" --log-bin-trust-function-creators=1 \
   --ssl-ca=/tls/server-cert.pem --ssl-cert=/tls/server-cert.pem --ssl-key=/tls/server-key.pem >/dev/null
 ready=false
 for ((i=0; i<90; i++)); do
   # The image initializes through a temporary socket-only server. Wait for
   # the final TCP listener, not that server which is about to shut down.
-  if docker exec -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null 2>&1; then ready=true; break; fi
+  if docker exec -e MYSQL_PWD=database-e2e-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null 2>&1; then ready=true; break; fi
   sleep 1
 done
 [[ "${ready}" == true ]] || { echo 'database did not become ready' >&2; exit 1; }
-docker exec -i -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot <<'SQL'
-CREATE USER 'ocservia_owner'@'%' IDENTIFIED BY 'pr02-owner-test-only';
-CREATE USER 'ocservia_app'@'%' IDENTIFIED BY 'pr02-runtime-test-only';
-CREATE USER 'ocservia_maintenance'@'%' IDENTIFIED BY 'pr02-maintenance-test-only';
+docker exec -i -e MYSQL_PWD=database-e2e-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot <<'SQL'
+CREATE USER 'ocservia_owner'@'%' IDENTIFIED BY 'database-e2e-owner-test-only';
+CREATE USER 'ocservia_app'@'%' IDENTIFIED BY 'database-e2e-runtime-test-only';
+CREATE USER 'ocservia_maintenance'@'%' IDENTIFIED BY 'database-e2e-maintenance-test-only';
 SQL
 PORT="$(docker port "${NAME}" 3306/tcp | sed 's/127.0.0.1://')"
-export PR02_ENGINE="${ENGINE}"
-export PR02_TLS_CA_FILE="${TLS_DIR}/server-cert.pem"
-export PR02_DSN="root:pr02-isolated-test-root@tcp(127.0.0.1:${PORT})/ocservia?tls=false"
+export OCSERVIA_DATABASE_TEST_ENGINE="${ENGINE}"
+export OCSERVIA_DATABASE_TEST_TLS_CA_FILE="${TLS_DIR}/server-cert.pem"
+export OCSERVIA_DATABASE_TEST_DSN="root:database-e2e-isolated-test-root@tcp(127.0.0.1:${PORT})/ocservia?tls=false"
 if [[ "${scope}" == smoke ]]; then
   cd "${ROOT}/control-plane"
   bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke

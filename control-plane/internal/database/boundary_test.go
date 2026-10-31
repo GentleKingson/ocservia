@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// PR-07 closes the temporary baseline: business code has no driver allowance.
+// Business code has no database-driver import allowance.
 func TestNoNewBusinessDriverLeaks(t *testing.T) {
 	root := "../../.."
 	counts := map[string]int{}

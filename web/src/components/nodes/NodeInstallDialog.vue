@@ -27,21 +27,22 @@ const config = ref<NodeInstallConfig>({
   name: "",
   environment: "production",
   release: "",
-  controller: "",
-  relay: "",
-  bootstrapFile: "/protected/node-bootstrap-token",
-  relayFile: "/protected/relay-access-token",
-  commandKeyFile: "/protected/controller-command-public.pem",
+  controllerEndpointId: "",
+  relayUrl: "",
+  bootstrapTokenFile: "/protected/node-bootstrap-token",
+  relayAccessTokenFile: "/protected/relay-access-token",
+  controllerCommandVerificationKeyFile:
+    "/protected/controller-command-public.pem",
 });
 const fields: (keyof NodeInstallConfig)[] = [
   "name",
   "environment",
   "release",
-  "controller",
-  "relay",
-  "bootstrapFile",
-  "relayFile",
-  "commandKeyFile",
+  "controllerEndpointId",
+  "relayUrl",
+  "bootstrapTokenFile",
+  "relayAccessTokenFile",
+  "controllerCommandVerificationKeyFile",
 ];
 const step = ref(1);
 const workspace = ref<Workspace>();

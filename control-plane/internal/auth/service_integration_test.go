@@ -120,7 +120,7 @@ func testOIDCAuthorizationCodePKCE(t *testing.T, suffix string) {
 	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES($1,$2,'operator-1','operator@example.test','Operator',now(),now())`, legacyID, strings.TrimSuffix(issuer, "/")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'R5',$2,now(),now())`, workspaceID, workspaceID.String()); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'OIDC profile test',$2,now(),now())`, workspaceID, workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,created_at) VALUES($1,$2,$3,'Viewer',now())`, bindingID, legacyID, workspaceID); err != nil {

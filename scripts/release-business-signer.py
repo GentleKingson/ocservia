@@ -50,7 +50,7 @@ class Signer(BaseHTTPRequestHandler):
                     return self.reply(400)
                 encrypted = openssl('pkeyutl', '-encrypt', '-pubin', '-inkey', str(work / 'p12.pub.pem'),
                                     '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256', data=body)
-                return self.reply(200, {'sealed': base64.b64encode(encrypted).decode(), 'key_id': 't07-p12',
+                return self.reply(200, {'sealed': base64.b64encode(encrypted).decode(), 'key_id': 'business-test-p12-seal',
                                         'version': 1, 'purpose': 'certificate_p12_password'})
             request = json.loads(body)
             if self.path == '/sign/public-key':
@@ -61,7 +61,7 @@ class Signer(BaseHTTPRequestHandler):
                 return self.reply(200, {
                     'workspace_id': (work / 'signer-workspace').read_text().strip(), 'node_id': node,
                     'endpoint_id': (work / 'signer-endpoint').read_text().strip(),
-                    'purpose': 'user_password', 'version': 1, 'key_id': 't07-user',
+                    'purpose': 'user_password', 'version': 1, 'key_id': 'business-test-user-seal',
                     'public_key_sha256': hashlib.sha256(public).hexdigest(),
                     'public_key_der': base64.b64encode(public).decode(),
                 })

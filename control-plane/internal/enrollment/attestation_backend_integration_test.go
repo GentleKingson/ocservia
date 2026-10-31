@@ -20,7 +20,7 @@ import (
 	"github.com/google/uuid"
 )
 
-var errAttestationRollback = errors.New("PR-05 injected registration rollback")
+var errAttestationRollback = errors.New("injected attestation registration rollback")
 
 type attestationRollbackBackend struct{ database.Backend }
 type attestationRollbackTx struct{ database.Tx }
@@ -49,7 +49,7 @@ func TestAttestationSafetyBackendIntegration(t *testing.T) {
 	identity, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	at, _ := value.FromTime(time.Now().UTC())
 	expires, _ := at.Add(time.Hour)
-	f.exec(t, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'pr05',$2,$3,$4)`, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,'pr05',?,?,?)`, identity, identity.String(), at, at)
+	f.exec(t, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'attestation-test',$2,$3,$4)`, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,'attestation-test',?,?,?)`, identity, identity.String(), at, at)
 	f.exec(t, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES(?,?,?,?)`, session, identity, expires, at)
 	service := privdattestation.NewBackend(f.b)
 	newNode := func() uuid.UUID {
@@ -73,7 +73,7 @@ func TestAttestationSafetyBackendIntegration(t *testing.T) {
 	}
 	credential := func(node uuid.UUID) privdattestation.Credential {
 		t.Helper()
-		c, err := service.CreateCredential(ctx, privdattestation.CredentialRequest{NodeID: node, IdentityID: identity, SessionID: session, TTL: 15 * time.Minute, RequestID: uuid.NewString(), Reason: "PR-05"})
+		c, err := service.CreateCredential(ctx, privdattestation.CredentialRequest{NodeID: node, IdentityID: identity, SessionID: session, TTL: 15 * time.Minute, RequestID: uuid.NewString(), Reason: "test attestation registration"})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -24,8 +24,9 @@ func (s *Service) BootstrapLocalAdmin(ctx context.Context, username, password st
 	return s.initializeLocal(ctx, username, password, workspaceID, approverUsername, approverPassword, false)
 }
 
-// CompleteLocalBootstrap only completes an eligible pre-R4 marker; it never
-// replaces a credential or grants a caller-selected role or workspace.
+// CompleteLocalBootstrap only completes an eligible legacy Local bootstrap
+// marker missing an independent approver. It never replaces a credential or
+// grants a caller-selected role or workspace.
 func (s *Service) CompleteLocalBootstrap(ctx context.Context, username, password string, workspaceID uuid.UUID, approverUsername, approverPassword string) (uuid.UUID, error) {
 	return s.initializeLocal(ctx, username, password, workspaceID, approverUsername, approverPassword, true)
 }

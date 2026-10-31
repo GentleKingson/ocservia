@@ -61,10 +61,10 @@ func TestLocalAccountBackoffIntegration(t *testing.T) {
 	ctx := context.Background()
 	for _, known := range []bool{true, false} {
 		t.Run(fmt.Sprintf("known=%t", known), func(t *testing.T) {
-			name := "r2-" + uuid.NewString()
+			name := "account-limit-" + uuid.NewString()
 			t.Cleanup(func() { localLimitExec(t, s, `DELETE FROM local_auth_attempts WHERE username=$1`, name) })
 			if known {
-				if _, err := s.CreateLocalCredential(ctx, name, "r2 account test password"); err != nil {
+				if _, err := s.CreateLocalCredential(ctx, name, "account-limit fixture password"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -84,7 +84,7 @@ func TestLocalAccountBackoffIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			for i := 0; i < 8; i++ {
-				if _, _, err := s.AuthenticateLocal(ctx, name, "r2 account test password"); !errors.Is(err, ErrUnauthenticated) {
+				if _, _, err := s.AuthenticateLocal(ctx, name, "account-limit fixture password"); !errors.Is(err, ErrUnauthenticated) {
 					t.Fatal(err)
 				}
 			}
@@ -134,7 +134,7 @@ func TestLocalAccountBackoffIntegration(t *testing.T) {
 			}
 			if known {
 				for i := 0; i < 3; i++ {
-					if _, _, err := s.AuthenticateLocal(ctx, name, "r2 account test password"); err != nil {
+					if _, _, err := s.AuthenticateLocal(ctx, name, "account-limit fixture password"); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -150,9 +150,9 @@ func TestLocalAccountBackoffIntegration(t *testing.T) {
 func TestLocalAccountConcurrentLeaseAndFencingIntegration(t *testing.T) {
 	s, other := localLimitService(t), localLimitService(t)
 	ctx := context.Background()
-	name := "r2-" + uuid.NewString()
+	name := "account-limit-" + uuid.NewString()
 	t.Cleanup(func() { localLimitExec(t, s, `DELETE FROM local_auth_attempts WHERE username=$1`, name) })
-	if _, err := s.CreateLocalCredential(ctx, name, "r2 concurrency test password"); err != nil {
+	if _, err := s.CreateLocalCredential(ctx, name, "account-limit concurrency password"); err != nil {
 		t.Fatal(err)
 	}
 	start := make(chan struct{})
@@ -252,10 +252,10 @@ func (c localCancelRead) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.T
 
 func TestLocalAccountCancellationAndErrorsIntegration(t *testing.T) {
 	s := localLimitService(t)
-	name := "r2-" + uuid.NewString()
+	name := "account-limit-" + uuid.NewString()
 	ctx := context.Background()
 	t.Cleanup(func() { localLimitExec(t, s, `DELETE FROM local_auth_attempts WHERE username=$1`, name) })
-	if _, err := s.CreateLocalCredential(ctx, name, "r2 cancellation test password"); err != nil {
+	if _, err := s.CreateLocalCredential(ctx, name, "account-limit cancellation password"); err != nil {
 		t.Fatal(err)
 	}
 	for _, after := range []bool{false, true} {
@@ -329,7 +329,7 @@ func TestLocalAccountCancellationAndErrorsIntegration(t *testing.T) {
 func TestLocalAccountCapacityAndCleanupIntegration(t *testing.T) {
 	s, other := localLimitService(t), localLimitService(t)
 	ctx := context.Background()
-	prefix := "r2-cap-" + uuid.NewString() + "-"
+	prefix := "account-limit-capacity-" + uuid.NewString() + "-"
 	t.Cleanup(func() { localLimitExec(t, s, `DELETE FROM local_auth_attempts WHERE username LIKE $1`, prefix+"%") })
 	// This test needs a disposable DB, as it deliberately fills the global
 	// bounded table. Other fixtures' live rows are retained, not evicted.
@@ -391,7 +391,7 @@ func TestLocalAccountDatabasePermissionsFailClosedIntegration(t *testing.T) {
 	if role == ownerRole {
 		t.Skip("requires a separate restricted runtime role")
 	}
-	name := "r2-db-" + uuid.NewString()
+	name := "account-limit-db-" + uuid.NewString()
 	t.Cleanup(func() { localLimitExec(t, s, `DELETE FROM local_auth_attempts WHERE username=$1`, name) })
 	for _, test := range []struct{ privilege, table string }{{"SELECT", "local_credentials"}, {"DELETE", "local_auth_attempts"}} {
 		t.Run(test.table, func(t *testing.T) {

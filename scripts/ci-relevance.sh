@@ -50,7 +50,7 @@ fail_closed() {
   local flag
   reason="$1"
   for flag in "${flags[@]}"; do printf -v "${flag}" true; done
-  tools_suite guards; tools_suite release; tools_suite cross-vm
+  tools_suite guards; tools_suite release; tools_suite cross-vm; tools_suite source-style; tools_suite contracts
   select_controller_images "${controller_images[@]}"
 }
 
@@ -61,7 +61,7 @@ classify_path() {
   case "${path}" in
     # Executable/configuration contracts must precede documentation suffixes.
     scripts/ci-tools-check.sh)
-      tools_suite guards; tools_suite release; tools_suite cross-vm ;;
+      tools_suite guards; tools_suite release; tools_suite cross-vm; tools_suite source-style; tools_suite contracts ;;
     scripts/build-relay.sh)
       run_rust=true; tools_suite release ;;
     scripts/buildx-cache.sh|scripts/test-buildx-cache-fallback.sh|.github/actions/build-cache-credentials/*)
@@ -71,6 +71,10 @@ classify_path() {
     deploy/test-fixtures/*|rust/test-runtime.Dockerfile)
       run_go=true; run_database=true; tools_suite release ;;
     proto/*|openapi/*|control-plane/gen/*) fail_closed shared_contract_changed ;;
+    scripts/generate.sh|scripts/generated-clean.sh|scripts/check-breaking.sh|scripts/test-generated-clean.sh)
+      tools_suite contracts ;;
+    scripts/lint.sh) tools_suite source-style; tools_suite contracts ;;
+    scripts/format.sh) run_go=true; run_rust=true; run_web=true; tools_suite contracts ;;
     web/*|scripts/web-check.sh) run_web=true ;;
     rust/agent-build.Dockerfile|rust/transportd.Dockerfile)
       tools_suite release ;;
@@ -98,7 +102,7 @@ classify_path() {
     deploy/bootstrap/*|deploy/managed-node/*|deploy/production/*|deploy/prepare-transport-runtime.sh)
       tools_suite release; run_installers=true ;;
     deploy/compose/*|deploy/database-e2e/*|scripts/*database*|scripts/*mysql*|scripts/*postgres*|\
-    scripts/i18-*-backup-restore-smoke.sh)
+    scripts/*-backup-restore-smoke.sh)
       run_go=true; run_database=true ;;
     # test-release-workflows.rb (release suite) reads the Release notes config.
     .github/release.yml) tools_suite release ;;
@@ -121,9 +125,24 @@ classify_path() {
       tools_suite guards ;;
     scripts/bootstrap.sh|scripts/env.sh|scripts/checksums.txt|toolchains.lock)
       fail_closed shared_toolchain_changed ;;
-    scripts/p1-*|scripts/test-p1-*|scripts/resilience-capacity-lib.sh|scripts/security-acceptance-*)
+    scripts/resilience-capacity.sh|scripts/test-resilience-capacity.sh|scripts/resilience-capacity-lib.sh|scripts/security-acceptance-*)
       tools_suite release ;;
     *) fail_closed "unknown_path:${path}" ;;
+  esac
+  # Style checks follow the maintained source set, including extensionless
+  # installer fixtures. Keep them independent of each script's behavior suite.
+  case "${path}" in
+    scripts/*.sh|scripts/*.py|deploy/*.sh|deploy/*.py|deploy/bootstrap/install-controller|deploy/bootstrap/install-node|deploy/database-e2e/systemctl)
+      tools_suite source-style ;;
+  esac
+  case "${path}" in
+    scripts/generate-controller-release-manifest.mjs|scripts/redact-release-upgrade-log.mjs|\
+    scripts/release-business-browser.mjs|scripts/release-upgrade-oidc-fixture.mjs|\
+    scripts/test-release-upgrade.mjs|.github/actions/build-cache-credentials/index.js)
+      run_web=true ;;
+  esac
+  case "${path}" in
+    web/src/api/generated/*|rust/crates/contracts/src/generated/*) tools_suite contracts ;;
   esac
   # Mirrors the COPY sources of the Dockerfiles built by build-release-controller.sh
   # (build context is the repository root) and the builder/cache machinery itself.
@@ -177,6 +196,7 @@ valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$1^{commit}" 2>/d
 
 if [[ "${event}" == workflow_dispatch ]]; then
   reason=workflow_dispatch_basic_checks
+  tools_suite source-style; tools_suite contracts
   for flag in run_docs run_go run_rust run_web run_web_browser run_database; do printf -v "${flag}" true; done
 elif [[ "${event}" != pull_request && "${event}" != push ]]; then
   fail_closed "unsupported_event:${event}"

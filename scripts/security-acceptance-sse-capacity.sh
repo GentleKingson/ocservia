@@ -15,7 +15,7 @@ for scale in 1 10 100; do
   scale_artifacts="${ARTIFACT_DIR}/sse-${scale}"
   scale_run_id="${RUN_ID}-sse-${scale}"
   mkdir -p "${scale_artifacts}"
-  P1_PROFILE=full \
+  OCSERVIA_RESILIENCE_PROFILE=full \
   AGENT_COUNT=24 \
   HEARTBEAT_COUNT=2 \
   HEARTBEAT_INTERVAL_MS=500 \
@@ -26,14 +26,14 @@ for scale in 1 10 100; do
   RUN_ID="${scale_run_id}" \
   COMPOSE_PROJECT="ocservia-${scale_run_id}" \
   ARTIFACT_DIR="${scale_artifacts}" \
-    "${ROOT}/scripts/p1-resilience-capacity.sh"
+    "${ROOT}/scripts/resilience-capacity.sh"
 
   grep -Fxq "sse_viewers=${scale}" "${scale_artifacts}/run-parameters.txt"
-  grep -Fq 'Last-Event-ID reconnect:' "${scale_artifacts}/p1-metrics.txt"
-  grep -Fxq 'sse released active: 0' "${scale_artifacts}/p1-metrics.txt"
-  grep -Fxq 'sse released watchers: 0' "${scale_artifacts}/p1-metrics.txt"
+  grep -Fq 'Last-Event-ID reconnect:' "${scale_artifacts}/resilience-metrics.txt"
+  grep -Fxq 'sse released active: 0' "${scale_artifacts}/resilience-metrics.txt"
+  grep -Fxq 'sse released watchers: 0' "${scale_artifacts}/resilience-metrics.txt"
   grep -Fxq 'test_exit=0 sampler_exit=0 trap_exit=0 cleanup_exit=0' \
-    "${scale_artifacts}/p1-exit-status.log"
+    "${scale_artifacts}/resilience-exit-status.log"
   jq -e --argjson scale "${scale}" '
     .max_sse_active_streams >= $scale and
     .max_sse_watchers == 1 and
@@ -41,14 +41,14 @@ for scale in 1 10 100; do
     .sampler_exit == 0 and
     .max_control_rss_kib > 0 and
     .max_control_fd > 0
-  ' "${scale_artifacts}/p1-summary.json" >/dev/null
-  summaries+=("${scale_artifacts}/p1-summary.json")
+  ' "${scale_artifacts}/resilience-summary.json" >/dev/null
+  summaries+=("${scale_artifacts}/resilience-summary.json")
 done
 
 jq -s '
   [.[0], .[1], .[2]] |
   {
-    F2: "PASS",
+    SSE_CAPACITY_ACCEPTANCE: "PASS",
     scales: [1, 10, 100],
     sustained_push: "PASS",
     reconnect: "PASS",
@@ -63,5 +63,5 @@ jq -s '
       max_db_total
     })
   }
-' "${summaries[@]}" >"${ARTIFACT_DIR}/f2-summary.json"
-echo "F2 SSE live capacity acceptance passed at 1, 10, and 100 connections"
+' "${summaries[@]}" >"${ARTIFACT_DIR}/sse-capacity-summary.json"
+echo "SSE_CAPACITY_ACCEPTANCE SSE live capacity acceptance passed at 1, 10, and 100 connections"

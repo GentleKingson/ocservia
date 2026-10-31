@@ -1,6 +1,6 @@
 import {
-  clearOIDCLoginAttempt,
-  hasOIDCLoginAttempt,
+  clearOidcLoginAttempt,
+  hasOidcLoginAttempt,
   safeLoginReturnPath,
 } from "./login";
 
@@ -32,7 +32,7 @@ export function redirectToLogin(): void {
       }
     }
     window.location.assign(
-      hasOIDCLoginAttempt() ? "/login?auth=failed" : "/login",
+      hasOidcLoginAttempt() ? "/login?auth=failed" : "/login",
     );
   }
 }
@@ -44,6 +44,6 @@ export function consumeLoginReturnPath(): string | undefined {
   } catch {
     // Nothing more can be cleared without storage.
   }
-  clearOIDCLoginAttempt();
+  clearOidcLoginAttempt();
   return safeLoginReturnPath(value);
 }

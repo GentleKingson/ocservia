@@ -33,6 +33,12 @@
 - 数据库结构以当前 SQL artifacts 和后端实现为准。新库初始化与已有库 forward-only 升级分开；保持 schema 来源与内容校验、迁移串行化、owner/runtime 权限分离和真实 receipts。移除软件版本准入不等于移除数据身份校验；不自动降级数据库、重置身份或改写执行历史。详见 [数据库契约](docs/reference/stable-contracts.md#database)。
 - Proto/OpenAPI 是协议字段来源，按 [契约与生成导航](docs/reference/stable-contracts.md#schema-sources-and-generation) 使用既有生成入口，不直接编辑生成物，不另建人工字段清单。命令签名和 semantic hash 遵守具体版本的 canonical 输入契约，不以 Protobuf 序列化字节替代。
 
+### 代码与命名规范
+
+- 名字表达真实领域职责、身份和单位，不使用阶段或任务号代替语义。Go 使用 ID/URL/HTTP；Rust 与自维护 TS/JS 分别遵循其生态的 Id/Url/Http 或 Id/Url/Api 拼写，生成代码、框架和外部契约沿用原名。领域词以[组件职责](docs/architecture.md#component-responsibilities)为准，区分 service/store、生产 transport events/开发 simulation、NodeID/EndpointID、operation/command、执行 receipt/浏览器 workflow reference，以及 UTC 输入文本/带时区时间。
+- 重命名前区分内部符号、仓内测试接口、公开自动化入口和持久化/协议字节。检查定义、调用链、env、JSON、SQL、模板、选择器、测试清单、CI 路由和文档，内部引用同批更新；公开兼容仅在入口单向适配，退出条件记入[验证与发布](docs/development/release-checks.md)。[稳定契约](docs/reference/stable-contracts.md)中的历史幂等键、journal、签名输入、SQL receipts、已执行迁移和分发字节不得为命名改写。
+- 复用既有格式、类型和静态检查入口。TS 的 unknown 解引用前须收窄；Rust lint 豁免保持最小作用域且有实际依据；Shell 保留 shebang 方言、引用、参数数组和受限 cleanup；Python 遵循 PEP 8；Ruby 保持赋值、逗号、Hash rocket 和 block 的常规间距。安全边界、事务、不同状态机和数据库方言不因表面相似而合并；新增工具须解决已确认且不重复的覆盖缺口。
+
 ## 4. 按任务读取
 
 仅按任务读取相关专题，不要求每次通读。新增行为先找已有职责所有者；重大边界变化按总览说明证据与取舍。
@@ -72,7 +78,7 @@
 | Go（`control-plane`、`signer`） | `scripts/go-check.sh standard`（与 Basic CI 相同，不含 race） |
 | Rust | `make rust-check` |
 | Web | `scripts/web-check.sh basic`（与 Basic CI 相同；`make web-check` 为 full，另跑浏览器认证套件） |
-| Proto/OpenAPI 契约 | 仅契约变更时：`make generate` 后审阅并提交生成差异；生成一致性由 `make generated-clean` 在已提交的干净工作树上重新生成并要求无差异来证明（`scripts/generated-clean.sh --skip-generate` 只比较工作树与 Git 索引，不能单独证明产物正确）；`make contracts-breaking` 对比 `origin/main` 检查破坏性变更 |
+| Proto/OpenAPI 契约 | 仅契约变更时：`make generate` 后审阅并提交生成差异；生成一致性由 `make generated-clean` 在已提交的干净工作树上重新生成并要求无差异来证明（`scripts/generated-clean.sh --skip-generate` 只比较工作树/索引与 HEAD，不能单独证明产物正确）；`make contracts-breaking` 默认对比 `origin/main`；CI 使用事件基准，手动工作流须提供不同于候选的 `contract_base_ref` |
 | 跨模块 | 确有需要时 `make verify`（本地宽基线，不启动数据库，不等于 Basic CI） |
 | 数据库、集成、跨 VM、发布 | 按 [验证指引](docs/development/release-checks.md#choose-a-broader-check-when-needed) 选专项入口；候选 SHA 的 Release Check 是必要发布门禁，发布前仍须按 [发布策略](docs/development/release-checks.md) 完成三 VM 证据与 SHA 核对、人工确认及其他前置条件 |
 

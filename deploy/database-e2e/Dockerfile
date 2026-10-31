@@ -1,7 +1,7 @@
 ARG WORKFLOW_TOOLS=workflow-tools
-FROM ocservia-pr02-agent:e2e AS agent
-FROM ocservia-pr02-transport:e2e AS transport
-FROM ocservia-pr02-relay:e2e AS relay
+FROM ocservia-database-e2e-agent:e2e AS agent
+FROM ocservia-database-e2e-transport:e2e AS transport
+FROM ocservia-database-e2e-relay:e2e AS relay
 FROM golang:1.26.10-trixie@sha256:7202554ed358a37f41c44e4910ae29bbc5ef0715f289ac637218adbb0ca132dd AS workflow-tools
 
 RUN apt-get update \

@@ -12,7 +12,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 )
 
 type createCertificateRequest struct {
@@ -226,11 +226,11 @@ func (s *Server) getCertificate(w http.ResponseWriter, r *http.Request) {
 
 func writeCertificateError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, certificates.ErrInvalid), errors.Is(err, operationstore.ErrInvalidRequest):
+	case errors.Is(err, certificates.ErrInvalid), errors.Is(err, operations.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/certificate-invalid", "Certificate request is invalid", "certificate subject, lifetime, or key parameters are invalid")
-	case errors.Is(err, operationstore.ErrIdempotencyConflict):
+	case errors.Is(err, operations.ErrIdempotencyConflict):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/idempotency-conflict", "Idempotency conflict", "the idempotency key was used for different certificate content")
-	case errors.Is(err, operationstore.ErrCapabilityMissing):
+	case errors.Is(err, operations.ErrCapabilityMissing):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/capability-unavailable", "Capability is unavailable", "the node cannot generate certificate keys")
 	case errors.Is(err, certificates.ErrNotReady):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/certificate-not-ready", "Certificate is not ready", "the CSR must be ready and the approval must match")

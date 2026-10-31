@@ -600,10 +600,10 @@ external database operator and require separate verification.
 Two smoke scripts exercise these mechanics in CI or disposable environments.
 Neither substitutes for testing an actual production archive.
 
-- `scripts/i18-backup-restore-smoke.sh` exercises bundled base backup and
+- `scripts/postgres-backup-restore-smoke.sh` exercises bundled base backup and
   restore by confirming that a marker row survives recovery, without checking
   schema receipts.
-- `scripts/i18-external-postgres-backup-restore-smoke.sh` covers the external
+- `scripts/external-postgres-backup-restore-smoke.sh` covers the external
   PostgreSQL contract. It runs a TLS server outside the Controller network,
   verifies routing and hostname rejection, applies migrations prior to backup,
   confirms that `pg_verifybackup` catches corruption, restores into an isolated

@@ -106,7 +106,7 @@ const {
   configCertificateSecretRefId,
   configPrivateKeySecretRefId,
   configReason,
-  configApplyApproval,
+  configApplyApprovalId,
   configApplyReason,
   openConfigPlan,
   submitConfigPlan,
@@ -126,7 +126,7 @@ const {
   certificateCommonName,
   certificateDnsNames,
   certificateReason,
-  certificateApproval,
+  certificateApprovalId,
   certificateError,
   certificateLoading,
   openCertificate,
@@ -723,7 +723,7 @@ function openPolicy(username: string): void {
         >
           <Input
             id="certificate-approval"
-            v-model="certificateApproval"
+            v-model="certificateApprovalId"
             :aria-describedby="describedBy"
             autocomplete="off"
             required
@@ -787,7 +787,7 @@ function openPolicy(username: string): void {
           :disabled="
             certificateLoading ||
             !actionAvailable('certificate.issue') ||
-            !certificateApproval.trim() ||
+            !certificateApprovalId.trim() ||
             !certificateReason.trim()
           "
           @click="submitCertificateIssue"
@@ -1200,7 +1200,7 @@ function openPolicy(username: string): void {
           >
             <Input
               id="config-apply-approval"
-              v-model="configApplyApproval"
+              v-model="configApplyApprovalId"
               :aria-describedby="describedBy"
               required
             />
@@ -1219,7 +1219,7 @@ function openPolicy(username: string): void {
               configLoading ||
               !canSubmitConfigPlan ||
               !actionAvailable('config.apply') ||
-              !configApplyApproval.trim() ||
+              !configApplyApprovalId.trim() ||
               !configApplyReason.trim()
             "
             @click="submitConfigApply"

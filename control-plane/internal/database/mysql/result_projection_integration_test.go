@@ -17,9 +17,9 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -44,7 +44,7 @@ func runResultProjectionWorkflows(t *testing.T, owner, backend *Backend, workspa
 	run(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,'result',?,?,?)`, UUIDBytes(actor), actor.String(), stamp, stamp)
 	run(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES(?,?,?,?)`, UUIDBytes(session), UUIDBytes(actor), expires, stamp)
 	digest, previous := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
-	service := localslice.NewBackend(backend, signer)
+	service := transportevents.NewBackend(backend, signer)
 	for _, kind := range []string{"certificate_csr", "certificate_p12", "certificate_revoke", "agent_upgrade", "config_success", "config_rollback", "config_critical"} {
 		t.Run(kind, func(t *testing.T) {
 			run := func(q string, args ...any) {
@@ -259,7 +259,7 @@ func runPrivilegedResultTrust(t *testing.T, owner, backend *Backend, workspace u
 	run(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at)VALUES(?,?,'active',?)`, UUIDBytes(node), endpoint[:], stamp)
 	run(`INSERT INTO privd_attestation_enrollment_credentials(id,node_id,secret_sha256,controller_nonce,credential_context_sha256,expires_at,consumed_at,created_by_identity_id,created_by_session_id,created_at)VALUES(?,?,?,?,?,?,?,?,?,?)`, UUIDBytes(credential), UUIDBytes(node), endpoint[:], endpoint[:], endpoint[:], expires, stamp, UUIDBytes(actor), UUIDBytes(session), stamp)
 	run(`INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,registration_credential_id)VALUES(?,?,'ed25519',?,'active',?,?,?,?)`, UUIDBytes(node), privdattestation.PublicKeyID(public), []byte(public), stamp, stamp, stamp, UUIDBytes(credential))
-	service := localslice.NewBackend(backend, signer)
+	service := transportevents.NewBackend(backend, signer)
 	// stage seeds a command whose delivery is already recorded (published outbox).
 	stage := func(state string, mode agentv1.CommandDeliveryMode) (operation, command, outbox uuid.UUID) {
 		t.Helper()

@@ -25,7 +25,7 @@ export function sameWorkspaceContext(
 
 // The remembered ID is only a preference among server-authorized Workspaces;
 // storage failures mean "no preference" and never block selection or events.
-function rememberedWorkspaceID(): string | null {
+function rememberedWorkspaceId(): string | null {
   try {
     return sessionStorage.getItem(workspaceKey);
   } catch {
@@ -59,7 +59,7 @@ export async function listAuthorizedWorkspaces(
     .listAuthorizedWorkspaces()
     .then((page) => {
       authorizedWorkspaces = page.items;
-      const remembered = rememberedWorkspaceID();
+      const remembered = rememberedWorkspaceId();
       setSelectedWorkspace(
         page.items.find((workspace) => workspace.id === remembered) ??
           page.items[0],
@@ -95,6 +95,6 @@ export async function selectWorkspace(workspaceId: string): Promise<Workspace> {
   return workspace;
 }
 
-export async function workspaceID(): Promise<string> {
+export async function getWorkspaceId(): Promise<string> {
   return (await getWorkspace()).id;
 }

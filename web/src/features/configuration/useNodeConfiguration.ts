@@ -14,8 +14,8 @@ import {
   beginNodeMutation,
   createNodeWorkflow,
   finishNodeMutation,
-  readNodeReceipt,
-  rememberNodeReceipt,
+  readNodeWorkflowReference,
+  rememberNodeWorkflowReference,
   waitForNodeMutation,
   waitForNodePoll,
   type NodeWorkflowContext,
@@ -80,7 +80,7 @@ export function useNodeConfiguration({
   const configCertificateSecretRefId = ref("");
   const configPrivateKeySecretRefId = ref("");
   const configReason = ref("");
-  const configApplyApproval = ref("");
+  const configApplyApprovalId = ref("");
   const configApplyReason = ref("");
   const configWorkflow = createNodeWorkflow(
     () => currentNode.value?.id,
@@ -127,7 +127,7 @@ export function useNodeConfiguration({
     configLoading.value = false;
     configError.value = "";
     configReason.value = "";
-    configApplyApproval.value = "";
+    configApplyApprovalId.value = "";
     configApplyReason.value = "";
     try {
       const pending = waitForNodeMutation(context, "config");
@@ -136,10 +136,10 @@ export function useNodeConfiguration({
         await pending;
         if (!configWorkflow.isCurrent(context)) return;
       }
-      const receipt = readNodeReceipt(context, "config");
-      if (!receipt.resourceId) return;
+      const reference = readNodeWorkflowReference(context, "config");
+      if (!reference.resourceId) return;
       configLoading.value = true;
-      const plan = await getConfigPlan(receipt.resourceId, context.signal);
+      const plan = await getConfigPlan(reference.resourceId, context.signal);
       if (!configWorkflow.isCurrent(context)) return;
       if (
         plan.nodeId !== context.nodeId ||
@@ -149,11 +149,14 @@ export function useNodeConfiguration({
       await pollConfigPlan(context, plan);
       if (
         !configWorkflow.isCurrent(context) ||
-        !receipt.operationId ||
-        receipt.operationId === plan.operationId
+        !reference.operationId ||
+        reference.operationId === plan.operationId
       )
         return;
-      const operation = await getOperation(receipt.operationId, context.signal);
+      const operation = await getOperation(
+        reference.operationId,
+        context.signal,
+      );
       if (
         configWorkflow.isCurrent(context) &&
         operation.nodeId === context.nodeId
@@ -251,7 +254,7 @@ export function useNodeConfiguration({
         ttlSeconds: 900,
         reason: configReason.value.trim(),
       });
-      rememberNodeReceipt(ticket, {
+      rememberNodeWorkflowReference(ticket, {
         resourceId: plan.id,
         operationId: plan.operationId,
       });
@@ -275,7 +278,7 @@ export function useNodeConfiguration({
       configLoading.value ||
       !canSubmitConfigPlan.value ||
       !plan ||
-      !configApplyApproval.value.trim() ||
+      !configApplyApprovalId.value.trim() ||
       !configApplyReason.value.trim()
     )
       return;
@@ -285,10 +288,10 @@ export function useNodeConfiguration({
     configError.value = "";
     try {
       const operation = await applyConfigPlan(plan.id, {
-        approvalId: configApplyApproval.value.trim(),
+        approvalId: configApplyApprovalId.value.trim(),
         reason: configApplyReason.value.trim(),
       });
-      rememberNodeReceipt(ticket, {
+      rememberNodeWorkflowReference(ticket, {
         resourceId: plan.id,
         operationId: operation.id,
       });
@@ -326,7 +329,7 @@ export function useNodeConfiguration({
     configCertificateSecretRefId,
     configPrivateKeySecretRefId,
     configReason,
-    configApplyApproval,
+    configApplyApprovalId,
     configApplyReason,
     openConfigPlan,
     submitConfigPlan,

@@ -22,7 +22,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/userstate/store"
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
@@ -33,14 +33,14 @@ import (
 func userStateBackend(t *testing.T) database.Backend {
 	t.Helper()
 	ctx := context.Background()
-	if dsn := os.Getenv("PR02_DSN"); dsn != "" {
-		options := mysql.Options{Engine: mysql.Engine(os.Getenv("PR02_ENGINE")), Environment: "test", DSN: dsn}
+	if dsn := os.Getenv("OCSERVIA_DATABASE_TEST_DSN"); dsn != "" {
+		options := mysql.Options{Engine: mysql.Engine(os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE")), Environment: "test", DSN: dsn}
 		admin, err := mysql.Open(ctx, options)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = admin.Close() })
-		name := "pr02_user_state_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		name := "dbtest_user_state_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 		if _, err := admin.Exec(ctx, "CREATE DATABASE `"+name+"`"); err != nil {
 			t.Fatal(err)
 		}
@@ -52,7 +52,7 @@ func userStateBackend(t *testing.T) database.Backend {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cfg.DBName, cfg.User, cfg.Passwd = name, "ocservia_owner", "pr02-owner-test-only"
+		cfg.DBName, cfg.User, cfg.Passwd = name, "ocservia_owner", "database-e2e-owner-test-only"
 		options.DSN = cfg.FormatDSN()
 		owner, err := mysql.Open(ctx, options)
 		if err != nil {
@@ -65,7 +65,7 @@ func userStateBackend(t *testing.T) database.Backend {
 		if err := owner.GrantTestPrivileges(ctx); err != nil {
 			t.Fatal(err)
 		}
-		cfg.User, cfg.Passwd = "ocservia_app", "pr02-runtime-test-only"
+		cfg.User, cfg.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
 		options.DSN = cfg.FormatDSN()
 		backend, err := mysql.Open(ctx, options)
 		if err != nil {
@@ -76,7 +76,7 @@ func userStateBackend(t *testing.T) database.Backend {
 	}
 	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("real PostgreSQL or PR02 backend required")
+		t.Skip("real PostgreSQL or configured database test backend required")
 	}
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -134,13 +134,13 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	signer := integrationCommandSigner()
 	s := NewWithSignerBackend(b, signer)
 	request := func(kind MutationKind, name string, version int64) MutationRequest {
-		r := MutationRequest{NodeID: node, Kind: kind, Name: name, ExpectedVersion: version, Members: []string{}, IdempotencyKey: uuid.NewString(), TTL: time.Hour, ActorID: "operator", Reason: "PR02 desired", RequestID: uuid.NewString(), Traceparent: testTraceparent}
+		r := MutationRequest{NodeID: node, Kind: kind, Name: name, ExpectedVersion: version, Members: []string{}, IdempotencyKey: uuid.NewString(), TTL: time.Hour, ActorID: "operator", Reason: "Database backend desired state", RequestID: uuid.NewString(), Traceparent: testTraceparent}
 		if kind == UserCreate || kind == UserPasswordRotate {
 			r.SealedPassword = &SealedSecret{Version: 1, Purpose: "user_password", KeyID: "key", Ciphertext: bytes.Repeat([]byte{1}, 32)}
 		}
 		return r
 	}
-	mutate := func(r MutationRequest) operationstore.Operation {
+	mutate := func(r MutationRequest) operations.Operation {
 		t.Helper()
 		op, replay, err := s.Mutate(ctx, r)
 		if err != nil || replay {
@@ -148,7 +148,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 		}
 		return op
 	}
-	assertEnvelope := func(op operationstore.Operation, expected, desired int64) {
+	assertEnvelope := func(op operations.Operation, expected, desired int64) {
 		t.Helper()
 		var encoded []byte
 		var stored int64

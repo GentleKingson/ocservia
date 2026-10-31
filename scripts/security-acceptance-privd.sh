@@ -5,16 +5,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
 suffix="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)"
-unit="ocservia-f3-${suffix}.service"
-config_dir="/etc/ocservia-f3-${suffix}"
-binary="/usr/local/libexec/ocservia-privd-f3-${suffix}"
-socket="/run/ocserv-platform/privd-f3-${suffix}.sock"
+unit="ocservia-privd-acceptance-${suffix}.service"
+config_dir="/etc/ocservia-privd-acceptance-${suffix}"
+binary="/usr/local/libexec/ocservia-privd-acceptance-${suffix}"
+socket="/run/ocserv-platform/privd-acceptance-${suffix}.sock"
 state_dir=/var/lib/ocservia-privd
-attestation_key="${state_dir}/attestation-f3-${suffix}.key"
+attestation_key="${state_dir}/attestation-privd-acceptance-${suffix}.key"
 upgrade_state_dir=/var/lib/ocservia-upgrade
 upgrade_state_dir_created=no
 node_id=019ff100-0000-7000-8000-000000000003
-work="${RUNNER_TEMP:-/tmp}/ocservia-f3-${suffix}"
+work="${RUNNER_TEMP:-/tmp}/ocservia-privd-acceptance-${suffix}"
 
 [[ -n "${suffix}" ]] || { echo "RUN_ID is unsafe" >&2; exit 2; }
 mkdir -p "${ARTIFACT_DIR}" "${work}"
@@ -96,10 +96,10 @@ start_privd() {
       --controller-command-key-file "${config_dir}/controller-command.pub.pem" \
       --attestation-key-file "${attestation_key}" \
       --user-password-seal-key-file "${config_dir}/user-seal.pem" \
-      --user-password-seal-key-id user-f3-v1 \
+      --user-password-seal-key-id user-privd-acceptance-v1 \
       --user-password-seal-public-key-sha256 "${user_hash}" \
       --p12-password-seal-key-file "${config_dir}/p12-seal.pem" \
-      --p12-password-seal-key-id p12-f3-v1 \
+      --p12-password-seal-key-id p12-privd-acceptance-v1 \
       --p12-password-seal-public-key-sha256 "${p12_hash}" >/dev/null
 }
 
@@ -171,12 +171,12 @@ if [[ "${upgrade_state_dir_created}" == yes ]]; then
   upgrade_state_dir_created=no
 fi
 RUN_ID="${RUN_ID}-package" ARTIFACT_DIR="${ARTIFACT_DIR}/package" \
-  "${ROOT}/scripts/i18-agent-package-smoke.sh"
+  "${ROOT}/scripts/agent-package-smoke.sh"
 
 sudo systemctl show "${unit}" -p ActiveState -p SubState -p MainPID \
   | tee "${ARTIFACT_DIR}/systemd-properties-after.txt" >/dev/null
 printf '%s\n' \
-  'F3=PASS' \
+  'PRIVD_ACCEPTANCE=PASS' \
   'privd_root_boundary=PASS' \
   'agent_key_access=DENIED' \
   'network_listener=ABSENT' \
@@ -184,5 +184,5 @@ printf '%s\n' \
   'attestation_key_restart_stability=PASS' \
   'unsafe_key_fail_closed=PASS' \
   'certificate_lifecycle=PASS' \
-  'package_upgrade_rollback=PASS' >"${ARTIFACT_DIR}/f3-summary.txt"
-echo "F3 systemd/root/privd/PKI acceptance passed"
+  'package_upgrade_rollback=PASS' >"${ARTIFACT_DIR}/privd-summary.txt"
+echo "PRIVD_ACCEPTANCE systemd/root/privd/PKI acceptance passed"

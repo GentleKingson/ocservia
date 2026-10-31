@@ -16,11 +16,11 @@ const config: NodeInstallConfig = {
   name: "edge-1",
   environment: "production",
   release: "v1.2.3",
-  controller: "a".repeat(64),
-  relay: "https://relay.example.com:443/",
-  bootstrapFile: "/protected/bootstrap",
-  relayFile: "/protected/relay",
-  commandKeyFile: "/protected/command.pem",
+  controllerEndpointId: "a".repeat(64),
+  relayUrl: "https://relay.example.com:443/",
+  bootstrapTokenFile: "/protected/bootstrap",
+  relayAccessTokenFile: "/protected/relay",
+  controllerCommandVerificationKeyFile: "/protected/command.pem",
 };
 
 describe("installer configuration", () => {
@@ -29,18 +29,18 @@ describe("installer configuration", () => {
     ["release", "latest"],
     ["release", "v1.2.3;id"],
     ["release", "v1.2.3-rc.01"],
-    ["controller", "A".repeat(64)],
-    ["controller", "a".repeat(63)],
-    ["relay", "http://relay.example.com"],
-    ["relay", "https://"],
-    ["relay", "https://user:pass@relay.example.com"],
-    ["relay", "https://relay.example.com?token=x"],
-    ["relay", "https://relay.example.com#fragment"],
-    ["relay", "https://relay.example.com\\path"],
-    ["relay", "https://relay.example.com:invalid"],
-    ["bootstrapFile", "relative/file"],
-    ["bootstrapFile", "/protected/../key"],
-    ["bootstrapFile", "/protected/$(id)"],
+    ["controllerEndpointId", "A".repeat(64)],
+    ["controllerEndpointId", "a".repeat(63)],
+    ["relayUrl", "http://relay.example.com"],
+    ["relayUrl", "https://"],
+    ["relayUrl", "https://user:pass@relay.example.com"],
+    ["relayUrl", "https://relay.example.com?token=x"],
+    ["relayUrl", "https://relay.example.com#fragment"],
+    ["relayUrl", "https://relay.example.com\\path"],
+    ["relayUrl", "https://relay.example.com:invalid"],
+    ["bootstrapTokenFile", "relative/file"],
+    ["bootstrapTokenFile", "/protected/../key"],
+    ["bootstrapTokenFile", "/protected/$(id)"],
     ["name", "node\nRELAY_URL_B=https://other"],
     ["environment", "prod\rtest"],
   ] as const)("rejects %s = %s", (field, value) => {
@@ -53,7 +53,10 @@ describe("installer configuration", () => {
     }
     expect(installEnv(config, `${workspace}\nEVIL=1`)).toBe("");
     expect(
-      validInstallConfig({ ...config, relayFile: config.bootstrapFile }),
+      validInstallConfig({
+        ...config,
+        relayAccessTokenFile: config.bootstrapTokenFile,
+      }),
     ).toBe(false);
   });
   it("pins stable and candidate commands without credential material", () => {
@@ -67,21 +70,23 @@ describe("installer configuration", () => {
     try {
       const input = {
         ...config,
-        bootstrapFile: join(directory, "bootstrap"),
-        relayFile: join(directory, "relay"),
-        commandKeyFile: join(directory, "public.pem"),
+        bootstrapTokenFile: join(directory, "bootstrap"),
+        relayAccessTokenFile: join(directory, "relay"),
+        controllerCommandVerificationKeyFile: join(directory, "public.pem"),
       };
-      writeFileSync(input.bootstrapFile, "synthetic-bootstrap", {
+      writeFileSync(input.bootstrapTokenFile, "synthetic-bootstrap", {
         mode: 0o600,
       });
-      writeFileSync(input.relayFile, "synthetic-relay", { mode: 0o600 });
+      writeFileSync(input.relayAccessTokenFile, "synthetic-relay", {
+        mode: 0o600,
+      });
       const privateKey = execFileSync("openssl", [
         "genpkey",
         "-algorithm",
         "ED25519",
       ]);
       writeFileSync(
-        input.commandKeyFile,
+        input.controllerCommandVerificationKeyFile,
         execFileSync("openssl", ["pkey", "-pubout"], { input: privateKey }),
         { mode: 0o600 },
       );
@@ -109,7 +114,7 @@ describe("installer configuration", () => {
         encoding: "utf8",
       });
       expect(output).toContain(
-        `${input.controller}\n${input.environment}\n${input.relay}\n${input.bootstrapFile}`,
+        `${input.controllerEndpointId}\n${input.environment}\n${input.relayUrl}\n${input.bootstrapTokenFile}`,
       );
     } finally {
       rmSync(directory, { recursive: true, force: true });

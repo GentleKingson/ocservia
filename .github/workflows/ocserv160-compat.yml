@@ -39,8 +39,8 @@ jobs:
           cargo test --locked --manifest-path rust/Cargo.toml -p ocservia-agent-protocol
           cargo test --locked --manifest-path rust/Cargo.toml -p ocservia-ocserv-adapter --lib --no-run --message-format=json >"$RUNNER_TEMP/adapter-build.jsonl"
           binary="$(jq -rs '[.[] | select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable] | unique | if length == 1 then .[0] else error("expected one native adapter test ELF") end' "$RUNNER_TEMP/adapter-build.jsonl")"
-          echo "I13_TEST_BINARY=$binary" >>"$GITHUB_ENV"
-      - name: Run native adapter regression and I13 on exactly 1.6.0
+          echo "NATIVE_OCSERV_TEST_BINARY=$binary" >>"$GITHUB_ENV"
+      - name: Run native adapter regression and native ocserv scenarios on exactly 1.6.0
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
@@ -51,7 +51,7 @@ jobs:
           [[ "$(docker image inspect --format '{{.Architecture}}' ocservia-compat160)" == "$EXPECTED_ARCH" ]]
           docker run --rm --network=none --cap-add=NET_ADMIN --device=/dev/net/tun \
             -v "$PWD:$PWD:ro" -v "$RUNNER_TEMP/ocserv160-evidence:/evidence" \
-            -e EXPECTED_ARCH -e OCSERVIA_I13_TEST_BINARY="$I13_TEST_BINARY" \
+            -e EXPECTED_ARCH -e OCSERVIA_NATIVE_OCSERV_TEST_BINARY="$NATIVE_OCSERV_TEST_BINARY" \
             ocservia-compat160 bash "$PWD/scripts/ocserv160-native-compat.sh" /evidence
       - name: Preserve native evidence
         if: always()

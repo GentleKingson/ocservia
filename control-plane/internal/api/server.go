@@ -22,14 +22,14 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
-	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 
@@ -53,10 +53,10 @@ type Server struct {
 	devAuth             bool
 	devAuthToken        string
 	browserOrigin       string
-	localSlice          *localslice.Service
-	localSliceMu        sync.RWMutex
+	transportEvents     *transportevents.Service
+	transportEventsMu   sync.RWMutex
 	localSimulator      bool
-	operations          *operationstore.Service
+	operations          *operations.Service
 	enrollment          *enrollment.Service
 	transport           *transportclient.Client
 	fences              ownersession.FencedExecutor
@@ -131,7 +131,7 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	}
 	// Normalize the known concrete service-to-interface boundaries. Do not turn
 	// arbitrary missing dependencies into replacements or successful no-ops.
-	if service, ok := modules.Nodes.(*telemetrystore.Service); ok && service == nil {
+	if service, ok := modules.Nodes.(*telemetry.Service); ok && service == nil {
 		modules.Nodes = nil
 	}
 	if service, ok := modules.ConfigPlans.(*configplan.Service); ok && service == nil {
@@ -165,7 +165,7 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	return s, nil
 }
 
-var _ nodehttp.Reader = (*telemetrystore.Service)(nil)
+var _ nodehttp.Reader = (*telemetry.Service)(nil)
 
 // NewBackend is a default-only compatibility constructor. Optional modules and
 // authentication are explicitly disabled, not waiting for later injection.
@@ -193,7 +193,7 @@ func (s *Server) EnableBrowserOrigin(origin string) {
 	s.browserOrigin = normalized
 }
 
-func (s *Server) EnableOperations(service *operationstore.Service) {
+func (s *Server) EnableOperations(service *operations.Service) {
 	s.operations = service
 }
 
@@ -251,17 +251,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (s *Server) EnableLocalSlice(service *localslice.Service) {
-	s.localSliceMu.Lock()
-	defer s.localSliceMu.Unlock()
-	s.localSlice = service
+func (s *Server) EnableTransportEvents(service *transportevents.Service) {
+	s.transportEventsMu.Lock()
+	defer s.transportEventsMu.Unlock()
+	s.transportEvents = service
 	s.localSimulator = true
 }
 
 func (s *Server) SetLocalSimulatorEnabled(enabled bool) { s.localSimulator = enabled }
 
-func (s *Server) localSliceService() *localslice.Service {
-	s.localSliceMu.RLock()
-	defer s.localSliceMu.RUnlock()
-	return s.localSlice
+func (s *Server) transportEventService() *transportevents.Service {
+	s.transportEventsMu.RLock()
+	defer s.transportEventsMu.RUnlock()
+	return s.transportEvents
 }

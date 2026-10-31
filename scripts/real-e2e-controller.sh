@@ -13,7 +13,7 @@ TLS_DIR="${WORK}/tls"
 OUTBOX="${WORK}/outbox"
 export REAL_E2E_RELAY_DIR="${WORK}/relay"
 WORKSPACE_ID="019d0000-0000-7000-8000-000000000001"
-export T07_WORK="${WORK}" T07_WORKSPACE="${WORKSPACE_ID}"
+export OCSERVIA_BUSINESS_TEST_WORK_DIR="${WORK}" OCSERVIA_BUSINESS_TEST_WORKSPACE_ID="${WORKSPACE_ID}"
 export OCSERV_CONTROLLER_PUBLIC_URL=https://localhost:8443
 
 case "${RUN_ID}${COMPOSE_PROJECT}" in
@@ -152,10 +152,10 @@ WEB
   compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     -c "INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES('${WORKSPACE_ID}','Cross-VM Real E2E','cross-vm-real-e2e',now(),now()),('00000000-0000-7000-8000-000000000072','Other','cross-vm-other',now(),now()) ON CONFLICT (id) DO NOTHING" >/dev/null
   compose run --rm --no-deps \
-    -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=t07-requester \
+    -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=business-test-requester \
     -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${WORKSPACE_ID}" \
     -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/real-e2e-business/requester-password \
-    -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=t07-approver \
+    -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=business-test-approver \
     -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/real-e2e-business/approver-password \
     control-plane --bootstrap-local-admin
   compose up --detach gateway

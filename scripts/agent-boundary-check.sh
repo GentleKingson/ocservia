@@ -44,7 +44,10 @@ grep -Fxq 'Type=exec' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
 grep -Fxq 'User=root' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
 grep -Fxq 'Group=root' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
 grep -Fxq 'ExecStart=/usr/libexec/ocservia/ocservia-upgrader --operation %i' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
-grep -Fxq 'ConditionPathExists=/var/lib/ocservia-upgrade/operations/%i/intent' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
+if grep -Eq '^[[:space:]]*ConditionPathExists[[:space:]]*=.*\/var\/lib\/ocservia-upgrade\/operations\/' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"; then
+  echo "the upgrade runner must validate intent in the active binding namespace, not require a legacy path" >&2
+  exit 1
+fi
 grep -Fxq 'ProtectSystem=strict' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
 grep -Fxq 'IPAddressDeny=any' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
 if grep -q '^\[Install\]' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"; then

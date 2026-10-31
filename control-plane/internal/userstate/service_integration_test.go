@@ -21,8 +21,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -102,8 +102,8 @@ func TestDesiredStateAtomicOfflineDriftVersionAndNodeScopeIntegration(t *testing
 	if _, err := pool.Exec(context.Background(), `UPDATE nodes SET status='active' WHERE id=$1`, nodeID); err != nil {
 		t.Fatal(err)
 	}
-	dispatches, err := operationstore.NewBackend(postgres.WrapPool(pool), 50, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
-	if err != nil || !slices.ContainsFunc(dispatches, func(dispatch operationstore.Dispatch) bool { return dispatch.NodeID == nodeID }) {
+	dispatches, err := operations.NewBackend(postgres.WrapPool(pool), 50, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
+	if err != nil || !slices.ContainsFunc(dispatches, func(dispatch operations.Dispatch) bool { return dispatch.NodeID == nodeID }) {
 		t.Fatalf("online reconciliation did not release pending command: dispatches=%+v err=%v", dispatches, err)
 	}
 	states, err = service.List(context.Background(), nodeID)
@@ -185,12 +185,12 @@ func TestFreshObservedGroupMembershipsBoundApplyCapacityIntegration(t *testing.T
 	if _, _, err := service.Mutate(context.Background(), request); !errors.Is(err, ErrCapacityExceeded) {
 		t.Fatalf("fresh observed membership capacity was not rejected: %v", err)
 	}
-	var desired, operations, commands int
-	if err := pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM desired_groups WHERE node_id=$1),(SELECT count(*) FROM operations WHERE node_id=$1),(SELECT count(*) FROM commands WHERE node_id=$1)`, nodeID).Scan(&desired, &operations, &commands); err != nil {
+	var desired, operationCount, commands int
+	if err := pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM desired_groups WHERE node_id=$1),(SELECT count(*) FROM operations WHERE node_id=$1),(SELECT count(*) FROM commands WHERE node_id=$1)`, nodeID).Scan(&desired, &operationCount, &commands); err != nil {
 		t.Fatal(err)
 	}
-	if desired != 0 || operations != 0 || commands != 0 {
-		t.Fatalf("capacity rejection persisted desired=%d operations=%d commands=%d", desired, operations, commands)
+	if desired != 0 || operationCount != 0 || commands != 0 {
+		t.Fatalf("capacity rejection persisted desired=%d operations=%d commands=%d", desired, operationCount, commands)
 	}
 }
 
@@ -210,12 +210,12 @@ func TestFreshObservedUsersBoundCreateCapacityIntegration(t *testing.T) {
 	if _, _, err := service.Mutate(context.Background(), request); !errors.Is(err, ErrCapacityExceeded) {
 		t.Fatalf("fresh observed user capacity was not rejected: %v", err)
 	}
-	var desired, operations, commands int
-	if err := pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM desired_users WHERE node_id=$1),(SELECT count(*) FROM operations WHERE node_id=$1),(SELECT count(*) FROM commands WHERE node_id=$1)`, nodeID).Scan(&desired, &operations, &commands); err != nil {
+	var desired, operationCount, commands int
+	if err := pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM desired_users WHERE node_id=$1),(SELECT count(*) FROM operations WHERE node_id=$1),(SELECT count(*) FROM commands WHERE node_id=$1)`, nodeID).Scan(&desired, &operationCount, &commands); err != nil {
 		t.Fatal(err)
 	}
-	if desired != 0 || operations != 0 || commands != 0 {
-		t.Fatalf("capacity rejection persisted desired=%d operations=%d commands=%d", desired, operations, commands)
+	if desired != 0 || operationCount != 0 || commands != 0 {
+		t.Fatalf("capacity rejection persisted desired=%d operations=%d commands=%d", desired, operationCount, commands)
 	}
 }
 
@@ -241,7 +241,7 @@ func TestUserMutationIntentAndTerminalAuditIdentityMatchIntegration(t *testing.T
 				if err != nil {
 					t.Fatal(err)
 				}
-				ingest := localslice.NewBackend(postgres.WrapPool(pool), integrationCommandSigner())
+				ingest := transportevents.NewBackend(postgres.WrapPool(pool), integrationCommandSigner())
 				if test.kind != UserCreate && test.kind != GroupApply {
 					enabled := test.kind != UserEnable
 					fingerprint := desiredFingerprint(UserCreate, test.name, nil)
@@ -399,7 +399,7 @@ func TestResourceMutationWaitsForPriorCrossKindRevisionIntegration(t *testing.T)
 }
 
 func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testing.T) {
-	markTerminal := func(t *testing.T, pool *pgxpool.Pool, operation operationstore.Operation, state string) {
+	markTerminal := func(t *testing.T, pool *pgxpool.Pool, operation operations.Operation, state string) {
 		t.Helper()
 		if operation.CommandID == nil {
 			t.Fatal("operation has no command")
@@ -415,7 +415,7 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 			t.Fatal(err)
 		}
 	}
-	assertEnvelope := func(t *testing.T, pool *pgxpool.Pool, operation operationstore.Operation, expected, desired uint64) {
+	assertEnvelope := func(t *testing.T, pool *pgxpool.Pool, operation operations.Operation, expected, desired uint64) {
 		t.Helper()
 		var encoded []byte
 		if err := pool.QueryRow(context.Background(), `SELECT envelope FROM commands WHERE id=$1`, uuid.MustParse(*operation.CommandID)).Scan(&encoded); err != nil {
@@ -575,7 +575,7 @@ func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
 	if err != nil || secondRotate.CommandID == nil {
 		t.Fatalf("replacement rotate=%+v err=%v", secondRotate, err)
 	}
-	assertCoalesced := func(first, second operationstore.Operation, payload func(*agentv1.CommandEnvelope) (uint64, uint64), expectedVersion, expectedRevision, desiredRevision int64) {
+	assertCoalesced := func(first, second operations.Operation, payload func(*agentv1.CommandEnvelope) (uint64, uint64), expectedVersion, expectedRevision, desiredRevision int64) {
 		t.Helper()
 		if first.CommandID == nil || second.CommandID == nil {
 			t.Fatal("coalesced operations must have command ids")
@@ -628,7 +628,7 @@ func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
 		t.Fatalf("coalesced group version/revision=%d/%d", groupVersion, groupRevision)
 	}
 
-	dispatcher := operationstore.NewBackend(postgres.WrapPool(pool), 50, nil)
+	dispatcher := operations.NewBackend(postgres.WrapPool(pool), 50, nil)
 	claimed := map[uuid.UUID]bool{}
 	for range 2 {
 		dispatches, err := dispatcher.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
@@ -651,7 +651,7 @@ func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
 }
 
 func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *testing.T) {
-	ingestResult := func(t *testing.T, pool *pgxpool.Pool, nodeID uuid.UUID, operation operationstore.Operation, state agentv1.CommandResultState, errorCode string) {
+	ingestResult := func(t *testing.T, pool *pgxpool.Pool, nodeID uuid.UUID, operation operations.Operation, state agentv1.CommandResultState, errorCode string) {
 		t.Helper()
 		commandID := uuid.MustParse(*operation.CommandID)
 		var encoded []byte
@@ -680,7 +680,7 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 			t.Fatal(err)
 		}
 		eventID := uuid.Must(uuid.NewV7())
-		if err := localslice.NewBackend(postgres.WrapPool(pool), integrationCommandSigner()).Ingest(context.Background(), &transportv1.TransportEvent{
+		if err := transportevents.NewBackend(postgres.WrapPool(pool), integrationCommandSigner()).Ingest(context.Background(), &transportv1.TransportEvent{
 			EventId: eventID[:], NodeId: nodeID[:], EndpointId: integrationEndpoint(nodeID), Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
 			OccurredAt: timestamppb.New(completed), Traceparent: testTraceparent, Payload: payload,
 		}); err != nil {
@@ -759,11 +759,11 @@ func TestGlobalCommandLimitAcrossProducersIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	users := NewWithSignerBackend(postgres.WrapPool(pool), integrationCommandSigner())
-	operations := operationstore.NewBackend(postgres.WrapPool(pool), 50, integrationCommandSigner())
+	operationService := operations.NewBackend(postgres.WrapPool(pool), 50, integrationCommandSigner())
 	if _, _, err := users.Mutate(context.Background(), mutation(nodeID, "limited-user", UserCreate, "limited", 0)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := operations.Create(context.Background(), operationstore.CreateRequest{NodeID: secondNodeID, IdempotencyKey: "limited-noop", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-limited-noop", Traceparent: testTraceparent}); err != nil {
+	if _, _, err := operationService.Create(context.Background(), operations.CreateRequest{NodeID: secondNodeID, IdempotencyKey: "limited-noop", ExpectedVersion: 1, Kind: operations.SyntheticNoop, TTL: time.Minute, RequestID: "request-limited-noop", Traceparent: testTraceparent}); err != nil {
 		t.Fatal(err)
 	}
 	baseline := activeCommands(t, pool)
@@ -771,7 +771,7 @@ func TestGlobalCommandLimitAcrossProducersIntegration(t *testing.T) {
 	results := make(chan int, 2)
 	go func() {
 		<-start
-		dispatches, err := operationstore.NewBackend(postgres.WrapPool(pool), baseline+1, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+		dispatches, err := operations.NewBackend(postgres.WrapPool(pool), baseline+1, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
 		if err != nil {
 			results <- -1
 			return
@@ -780,7 +780,7 @@ func TestGlobalCommandLimitAcrossProducersIntegration(t *testing.T) {
 	}()
 	go func() {
 		<-start
-		dispatches, err := operationstore.NewBackend(postgres.WrapPool(pool), baseline+1, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+		dispatches, err := operations.NewBackend(postgres.WrapPool(pool), baseline+1, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
 		if err != nil {
 			results <- -1
 			return
@@ -808,17 +808,17 @@ func TestOfflineQueueDoesNotConsumeGlobalDispatchCapacityIntegration(t *testing.
 	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'offline',1,now(),now())`, offlineNodeID, workspaceID, "offline-"+offlineNodeID.String()); err != nil {
 		t.Fatal(err)
 	}
-	operations := operationstore.NewBackend(postgres.WrapPool(pool), 50, integrationCommandSigner())
+	operationService := operations.NewBackend(postgres.WrapPool(pool), 50, integrationCommandSigner())
 	for _, item := range []struct {
 		node uuid.UUID
 		key  string
 	}{{offlineNodeID, "offline-backlog"}, {activeNodeID, "online-work"}} {
-		if _, _, err := operations.Create(context.Background(), operationstore.CreateRequest{NodeID: item.node, IdempotencyKey: item.key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + item.key, Traceparent: testTraceparent}); err != nil {
+		if _, _, err := operationService.Create(context.Background(), operations.CreateRequest{NodeID: item.node, IdempotencyKey: item.key, ExpectedVersion: 1, Kind: operations.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + item.key, Traceparent: testTraceparent}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	baseline := activeCommands(t, pool)
-	dispatches, err := operationstore.NewBackend(postgres.WrapPool(pool), baseline+1, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+	dispatches, err := operations.NewBackend(postgres.WrapPool(pool), baseline+1, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -837,10 +837,10 @@ func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id) active`).Scan(&baseline); err != nil {
 		t.Fatal(err)
 	}
-	service := operationstore.NewBackend(postgres.WrapPool(pool), baseline+1, integrationCommandSigner())
+	service := operations.NewBackend(postgres.WrapPool(pool), baseline+1, integrationCommandSigner())
 	for index, nodeID := range []uuid.UUID{firstNodeID, secondNodeID} {
 		key := fmt.Sprintf("lease-cap-%d", index)
-		if _, _, err := service.Create(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}); err != nil {
+		if _, _, err := service.Create(context.Background(), operations.CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operations.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -864,7 +864,7 @@ func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
 
 func TestUnknownReconciliationConsumesDispatchSlotIntegration(t *testing.T) {
 	_, pool, _, nodeID := integrationService(t, "active")
-	op, _, err := operationstore.NewBackend(postgres.WrapPool(pool), 1, integrationCommandSigner()).Create(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: "unknown-reconcile", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-unknown-reconcile", Traceparent: testTraceparent})
+	op, _, err := operations.NewBackend(postgres.WrapPool(pool), 1, integrationCommandSigner()).Create(context.Background(), operations.CreateRequest{NodeID: nodeID, IdempotencyKey: "unknown-reconcile", ExpectedVersion: 1, Kind: operations.SyntheticNoop, TTL: time.Minute, RequestID: "request-unknown-reconcile", Traceparent: testTraceparent})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -883,10 +883,10 @@ func TestUnknownReconciliationConsumesDispatchSlotIntegration(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id) active`).Scan(&baseline); err != nil {
 		t.Fatal(err)
 	}
-	if blocked, err := operationstore.NewBackend(postgres.WrapPool(pool), baseline, integrationCommandSigner()).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute); err != nil || len(blocked) != 0 {
+	if blocked, err := operations.NewBackend(postgres.WrapPool(pool), baseline, integrationCommandSigner()).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute); err != nil || len(blocked) != 0 {
 		t.Fatalf("unknown reconciliation bypassed a full budget=%+v err=%v", blocked, err)
 	}
-	service := operationstore.NewBackend(postgres.WrapPool(pool), baseline+1, integrationCommandSigner())
+	service := operations.NewBackend(postgres.WrapPool(pool), baseline+1, integrationCommandSigner())
 	dispatches, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
 	if err != nil || len(dispatches) != 1 || dispatches[0].OperationID != operationID {
 		t.Fatalf("unknown reconciliation claim=%+v err=%v", dispatches, err)
@@ -916,17 +916,17 @@ func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, otherNodeID, workspaceID, "fair-"+otherNodeID.String()); err != nil {
 		t.Fatal(err)
 	}
-	service := operationstore.NewBackend(postgres.WrapPool(pool), 50, integrationCommandSigner())
+	service := operations.NewBackend(postgres.WrapPool(pool), 50, integrationCommandSigner())
 	operationIDs := make([]uuid.UUID, 0, 21)
 	for index := range 20 {
 		key := fmt.Sprintf("busy-%02d", index)
-		operation, _, err := service.Create(context.Background(), operationstore.CreateRequest{NodeID: busyNodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent})
+		operation, _, err := service.Create(context.Background(), operations.CreateRequest{NodeID: busyNodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operations.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent})
 		if err != nil {
 			t.Fatal(err)
 		}
 		operationIDs = append(operationIDs, uuid.MustParse(operation.ID))
 	}
-	otherOperation, _, err := service.Create(context.Background(), operationstore.CreateRequest{NodeID: otherNodeID, IdempotencyKey: "other-node", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-other-node", Traceparent: testTraceparent})
+	otherOperation, _, err := service.Create(context.Background(), operations.CreateRequest{NodeID: otherNodeID, IdempotencyKey: "other-node", ExpectedVersion: 1, Kind: operations.SyntheticNoop, TTL: time.Minute, RequestID: "request-other-node", Traceparent: testTraceparent})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -957,10 +957,10 @@ func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
 func TestNodeBacklogBoundaryConcurrencyAndReplayIntegration(t *testing.T) {
 	_, pool, workspaceID, nodeID := integrationService(t, "active")
 	seedQueuedOperations(t, pool, workspaceID, []uuid.UUID{nodeID}, commandlimit.MaxNodeBacklog-1)
-	service := operationstore.NewBackend(postgres.WrapPool(pool), 50, integrationCommandSigner())
-	requests := []operationstore.CreateRequest{
-		{NodeID: nodeID, IdempotencyKey: "node-boundary-a", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-node-boundary-a", Traceparent: testTraceparent},
-		{NodeID: nodeID, IdempotencyKey: "node-boundary-b", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-node-boundary-b", Traceparent: testTraceparent},
+	service := operations.NewBackend(postgres.WrapPool(pool), 50, integrationCommandSigner())
+	requests := []operations.CreateRequest{
+		{NodeID: nodeID, IdempotencyKey: "node-boundary-a", ExpectedVersion: 1, Kind: operations.SyntheticNoop, TTL: time.Minute, RequestID: "request-node-boundary-a", Traceparent: testTraceparent},
+		{NodeID: nodeID, IdempotencyKey: "node-boundary-b", ExpectedVersion: 1, Kind: operations.SyntheticNoop, TTL: time.Minute, RequestID: "request-node-boundary-b", Traceparent: testTraceparent},
 	}
 	start := make(chan struct{})
 	type result struct {
@@ -969,7 +969,7 @@ func TestNodeBacklogBoundaryConcurrencyAndReplayIntegration(t *testing.T) {
 	}
 	results := make(chan result, 2)
 	for index, request := range requests {
-		go func(index int, request operationstore.CreateRequest) {
+		go func(index int, request operations.CreateRequest) {
 			<-start
 			_, _, err := service.Create(context.Background(), request)
 			results <- result{index: index, err: err}
@@ -981,7 +981,7 @@ func TestNodeBacklogBoundaryConcurrencyAndReplayIntegration(t *testing.T) {
 		result := <-results
 		if result.err == nil {
 			winner, successes = result.index, successes+1
-		} else if errors.Is(result.err, operationstore.ErrBacklogExceeded) {
+		} else if errors.Is(result.err, operations.ErrBacklogExceeded) {
 			rejected++
 		} else {
 			t.Fatalf("unexpected node backlog result: %v", result.err)
@@ -1006,15 +1006,15 @@ func TestWorkspaceBacklogBoundaryAcrossNodesIntegration(t *testing.T) {
 		nodeIDs = append(nodeIDs, nodeID)
 	}
 	seedQueuedOperations(t, pool, workspaceID, nodeIDs, commandlimit.MaxWorkspaceBacklog-1)
-	service := operationstore.NewBackend(postgres.WrapPool(pool), 50, integrationCommandSigner())
-	requests := []operationstore.CreateRequest{
-		{NodeID: nodeIDs[9], IdempotencyKey: "workspace-boundary-a", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-workspace-boundary-a", Traceparent: testTraceparent},
-		{NodeID: nodeIDs[10], IdempotencyKey: "workspace-boundary-b", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-workspace-boundary-b", Traceparent: testTraceparent},
+	service := operations.NewBackend(postgres.WrapPool(pool), 50, integrationCommandSigner())
+	requests := []operations.CreateRequest{
+		{NodeID: nodeIDs[9], IdempotencyKey: "workspace-boundary-a", ExpectedVersion: 1, Kind: operations.SyntheticNoop, TTL: time.Minute, RequestID: "request-workspace-boundary-a", Traceparent: testTraceparent},
+		{NodeID: nodeIDs[10], IdempotencyKey: "workspace-boundary-b", ExpectedVersion: 1, Kind: operations.SyntheticNoop, TTL: time.Minute, RequestID: "request-workspace-boundary-b", Traceparent: testTraceparent},
 	}
 	start := make(chan struct{})
 	results := make(chan error, 2)
 	for _, request := range requests {
-		go func(request operationstore.CreateRequest) {
+		go func(request operations.CreateRequest) {
 			<-start
 			_, _, err := service.Create(context.Background(), request)
 			results <- err
@@ -1026,7 +1026,7 @@ func TestWorkspaceBacklogBoundaryAcrossNodesIntegration(t *testing.T) {
 		err := <-results
 		if err == nil {
 			successes++
-		} else if errors.Is(err, operationstore.ErrBacklogExceeded) {
+		} else if errors.Is(err, operations.ErrBacklogExceeded) {
 			rejected++
 		} else {
 			t.Fatalf("unexpected workspace backlog result: %v", err)
@@ -1061,7 +1061,7 @@ func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, u
 		t.Fatal(err)
 	}
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	_, err = pool.Exec(context.Background(), `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'I13 test',$2,now(),now())`, workspaceID, "i13-"+workspaceID.String())
+	_, err = pool.Exec(context.Background(), `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'User state test',$2,now(),now())`, workspaceID, "user-state-"+workspaceID.String())
 	if err == nil {
 		_, err = pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,$4,1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String(), status)
 	}

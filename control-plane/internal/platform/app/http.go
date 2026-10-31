@@ -15,7 +15,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
@@ -23,20 +22,21 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 )
 
 // HTTP consumers reuse services already configured by runRoles. This input is
 // not retained by Server or passed to any handler.
 type httpServices struct {
-	modules        api.Modules
-	operations     *operations.Service
-	releaseCatalog *releasecatalog.Catalog
-	userState      *userstate.Service
-	enrollment     *enrollment.Service
-	transport      *transportclient.Client
-	fences         ownersession.FencedExecutor
-	localSlice     *localslice.Service
+	modules         api.Modules
+	operations      *operations.Service
+	releaseCatalog  *releasecatalog.Catalog
+	userState       *userstate.Service
+	enrollment      *enrollment.Service
+	transport       *transportclient.Client
+	fences          ownersession.FencedExecutor
+	transportEvents *transportevents.Service
 }
 
 func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger *slog.Logger, services httpServices) (*api.Server, error) {
@@ -74,7 +74,7 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 	server.EnablePrivdAttestation(privdattestation.NewBackend(backend))
 	server.EnableEnrollment(services.enrollment, services.transport)
 	server.EnableOwnerFencing(services.fences)
-	server.EnableLocalSlice(services.localSlice)
+	server.EnableTransportEvents(services.transportEvents)
 	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)
 
 	return server, nil

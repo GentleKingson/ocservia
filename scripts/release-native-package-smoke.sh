@@ -105,6 +105,7 @@ cleanup() {
   { sudo journalctl --no-pager -n 100 -u ocservia-agent-retention.service \
     -u ocservia-agent-retention.timer -u ocservia-agent.service -u ocservia-privd.service; } >"${ARTIFACT_DIR}/native-lifecycle-systemd.log" 2>&1 || true
   { sudo systemctl show ocservia-agent.service ocservia-privd.service \
+    ocservia-upgrader@00000000-0000-0000-0000-000000000000.service \
     ocservia-agent-retention.service ocservia-agent-retention.timer \
     -p Id -p ActiveState -p SubState -p Result -p StartLimitIntervalUSec -p StartLimitBurst; } \
     >"${ARTIFACT_DIR}/native-lifecycle-units.log" 2>&1 || true
@@ -266,6 +267,11 @@ assert_installed_state() {
     || { echo "${context}: privd unit missing" >&2; exit 1; }
   sudo test -f /usr/lib/systemd/system/ocservia-upgrader@.service \
     || { echo "${context}: upgrader unit missing" >&2; exit 1; }
+  sudo systemd-analyze verify /usr/lib/systemd/system/ocservia-upgrader@.service
+  [[ "$(sudo systemctl show ocservia-upgrader@00000000-0000-0000-0000-000000000000.service \
+    -p StartLimitIntervalUSec --value)" == "10min" ]]
+  [[ "$(sudo systemctl show ocservia-upgrader@00000000-0000-0000-0000-000000000000.service \
+    -p StartLimitBurst --value)" == "6" ]]
   sudo test -x /usr/libexec/ocservia/ocservia-agent-relays \
     || { echo "${context}: production Relay launcher missing" >&2; exit 1; }
   sudo test -f "/usr/share/ocservia-agent/ocservia-agent-${expected_version}-linux-${PACKAGE_ARCH}.tar.gz" \
@@ -731,6 +737,11 @@ container_assert_installed() {
     || { echo "${context}: privd unit missing" >&2; exit 1; }
   docker exec "${container}" test -f /usr/lib/systemd/system/ocservia-upgrader@.service \
     || { echo "${context}: upgrader unit missing" >&2; exit 1; }
+  docker exec "${container}" systemd-analyze verify /usr/lib/systemd/system/ocservia-upgrader@.service
+  [[ "$(docker exec "${container}" systemctl show ocservia-upgrader@00000000-0000-0000-0000-000000000000.service \
+    -p StartLimitIntervalUSec --value)" == "10min" ]]
+  [[ "$(docker exec "${container}" systemctl show ocservia-upgrader@00000000-0000-0000-0000-000000000000.service \
+    -p StartLimitBurst --value)" == "6" ]]
   docker exec "${container}" test -f \
     "/usr/share/ocservia-agent/ocservia-agent-${expected_version}-linux-${PACKAGE_ARCH}.tar.gz" \
     || { echo "${context}: embedded archive missing" >&2; exit 1; }

@@ -5821,7 +5821,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     async fn dedicated_relay_failure_accepts_an_immediate_survivor_connection() {
         const TEST_ALPN: &[u8] = b"ocservia/relay-failover-test/1";
-        const RELAY_TOKEN: &str = "i18-dedicated-relay-token";
+        const RELAY_TOKEN: &str = "dedicated-relay-test-token";
 
         async fn relay_auth_error(endpoint: &Endpoint) -> String {
             let mut statuses = endpoint.home_relay_status().stream();

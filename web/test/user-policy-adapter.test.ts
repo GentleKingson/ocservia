@@ -1,12 +1,46 @@
-import { describe, expect, it } from "vitest";
+import { ResponseError } from "@ocservia/api-client";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../src/api/users", () => ({
+  getUserPolicy: vi.fn(),
+  setUserPolicy: vi.fn(),
+}));
+
+import { getUserPolicy } from "../src/api/users";
 
 import {
   expiryInputType,
   formToRequest,
+  loadUserPolicy,
   policyToForm,
 } from "../src/adapters/user-policy";
 
 describe("upstream user policy adapter", () => {
+  it.each([
+    ["generated", new ResponseError(new Response(null, { status: 404 }))],
+    ["native", new Response(null, { status: 404 })],
+  ])("loads the default form for a %s 404", async (_kind, error) => {
+    vi.mocked(getUserPolicy).mockRejectedValueOnce(error);
+    await expect(loadUserPolicy("node", "alice")).resolves.toEqual(
+      policyToForm(),
+    );
+  });
+
+  it.each([
+    [
+      "generated non-404",
+      new ResponseError(new Response(null, { status: 403 })),
+    ],
+    ["native non-404", new Response(null, { status: 500 })],
+    ["null", null],
+    ["undefined", undefined],
+    ["network", new TypeError("network unavailable")],
+    ["abort", new DOMException("cancelled", "AbortError")],
+  ])("preserves the original %s rejection", async (_kind, error) => {
+    vi.mocked(getUserPolicy).mockRejectedValueOnce(error);
+    await expect(loadUserPolicy("node", "alice")).rejects.toBe(error);
+  });
+
   it("maps display units to integer bytes and UTC expiry", () => {
     const request = formToRequest(
       {
@@ -14,7 +48,7 @@ describe("upstream user policy adapter", () => {
         direction: "rxtx",
         quotaValue: 2.5,
         quotaUnit: "GiB",
-        expiresAtLocal: "2026-09-01T00:00",
+        expiresAtUtcInput: "2026-09-01T00:00",
         version: 3,
       },
       "ticket",
@@ -31,7 +65,7 @@ describe("upstream user policy adapter", () => {
         direction: "rx",
         quotaValue: 99,
         quotaUnit: "GiB",
-        expiresAtLocal: "",
+        expiresAtUtcInput: "",
         version: 0,
       },
       "ticket",
@@ -75,7 +109,7 @@ describe("upstream user policy adapter", () => {
       expired: false,
       convergence: "converged",
     });
-    expect(form.expiresAtLocal).toBe("2026-12-31T23:59");
+    expect(form.expiresAtUtcInput).toBe("2026-12-31T23:59");
   });
 
   it("never clears or truncates an expiry that the mutation API cannot accept", () => {
@@ -100,14 +134,14 @@ describe("upstream user policy adapter", () => {
         expired: false,
         convergence: "converged",
       });
-      expect(form.expiresAtLocal).toBe(expiry.replace(/Z$/, ""));
-      expect(expiryInputType(form.expiresAtLocal)).toBe("text");
+      expect(form.expiresAtUtcInput).toBe(expiry.replace(/Z$/, ""));
+      expect(expiryInputType(form.expiresAtUtcInput)).toBe("text");
       expect(() => formToRequest(form, "ticket")).toThrow("whole seconds");
-      form.expiresAtLocal = "2026-12-31T23:59:59";
+      form.expiresAtUtcInput = "2026-12-31T23:59:59";
       expect(formToRequest(form, "ticket").expiresAt?.toISOString()).toBe(
         "2026-12-31T23:59:59.000Z",
       );
-      form.expiresAtLocal = "";
+      form.expiresAtUtcInput = "";
       expect(formToRequest(form, "ticket").expiresAt).toBeUndefined();
     }
   });

@@ -10,16 +10,16 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 )
 
 type syntheticCommandRequest struct {
-	Kind             operationstore.Kind `json:"kind"`
-	Message          string              `json:"message,omitempty"`
-	ExpectedVersion  *int64              `json:"expected_version,omitempty"`
-	TTLSeconds       *int64              `json:"ttl_seconds,omitempty"`
-	SupersedePending bool                `json:"supersede_pending,omitempty"`
+	Kind             operations.Kind `json:"kind"`
+	Message          string          `json:"message,omitempty"`
+	ExpectedVersion  *int64          `json:"expected_version,omitempty"`
+	TTLSeconds       *int64          `json:"ttl_seconds,omitempty"`
+	SupersedePending bool            `json:"supersede_pending,omitempty"`
 }
 
 type controlledCommandRequest struct {
@@ -33,9 +33,9 @@ func (s *Server) sessionAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("session_action")
 	switch {
 	case strings.HasSuffix(action, ":disconnect"):
-		s.createControlledCommand(w, r, operationstore.SessionDisconnect, "session.disconnect", strings.TrimSuffix(action, ":disconnect"), "")
+		s.createControlledCommand(w, r, operations.SessionDisconnect, "session.disconnect", strings.TrimSuffix(action, ":disconnect"), "")
 	case strings.HasSuffix(action, ":terminate"):
-		s.createControlledCommand(w, r, operationstore.SessionTerminate, "session.terminate", strings.TrimSuffix(action, ":terminate"), "")
+		s.createControlledCommand(w, r, operations.SessionTerminate, "session.terminate", strings.TrimSuffix(action, ":terminate"), "")
 	default:
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 	}
@@ -47,11 +47,11 @@ func (s *Server) ipBanAction(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}
-	s.createControlledCommand(w, r, operationstore.IPBanRemove, "ip_ban.remove", "", strings.TrimSuffix(action, ":remove"))
+	s.createControlledCommand(w, r, operations.IPBanRemove, "ip_ban.remove", "", strings.TrimSuffix(action, ":remove"))
 }
 
 func (s *Server) reloadService(w http.ResponseWriter, r *http.Request) {
-	s.createControlledCommand(w, r, operationstore.ServiceReload, "service.reload", "", "")
+	s.createControlledCommand(w, r, operations.ServiceReload, "service.reload", "", "")
 }
 
 type agentUpgradeRequest struct {
@@ -107,20 +107,20 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 	target, err := s.operations.PrepareAgentUpgrade(r.Context(), workspace(r), nodeID, body.TargetVersion)
 	if err != nil {
 		switch {
-		case errors.Is(err, operationstore.ErrInvalidRequest):
+		case errors.Is(err, operations.ErrInvalidRequest):
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "target_version, approval_id, and reason are required and ttl_seconds must be between 60 and 3600")
-		case errors.Is(err, operationstore.ErrUpgradeArchitectureUnknown):
+		case errors.Is(err, operations.ErrUpgradeArchitectureUnknown):
 			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "the node has not reported its package architecture yet")
-		case errors.Is(err, operationstore.ErrUpgradeReleaseNotTrusted):
+		case errors.Is(err, operations.ErrUpgradeReleaseNotTrusted):
 			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "no trusted release exists for the requested version and architecture")
 		default:
 			writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested node does not exist")
 		}
 		return
 	}
-	operation, replayed, err := s.operations.Create(r.Context(), operationstore.CreateRequest{
+	operation, replayed, err := s.operations.Create(r.Context(), operations.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
-		Kind: operationstore.AgentUpgrade, TargetVersion: target.Version, PackageSHA256: target.PackageSHA256[:], Architecture: target.Architecture,
+		Kind: operations.AgentUpgrade, TargetVersion: target.Version, PackageSHA256: target.PackageSHA256[:], Architecture: target.Architecture,
 		ApprovalID: approval, Action: "agent.upgrade", Reason: reason,
 		TTL: time.Duration(ttl) * time.Second, RequestID: requestID(r), Traceparent: requestTraceparent(r),
 		ActorID: actorID(r), ActorIdentityID: principal(r).IdentityID, ActorSessionID: principal(r).SessionID,
@@ -137,7 +137,7 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, operation)
 }
 
-func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request, kind operationstore.Kind, action, sessionID, ip string) {
+func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request, kind operations.Kind, action, sessionID, ip string) {
 	if s.operations == nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
 		return
@@ -173,7 +173,7 @@ func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request,
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "reason is required and ttl_seconds must be between 1 and 300")
 		return
 	}
-	operation, replayed, err := s.operations.Create(r.Context(), operationstore.CreateRequest{
+	operation, replayed, err := s.operations.Create(r.Context(), operations.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
 		Kind: kind, SessionID: sessionID, BootID: body.BootID, IP: ip,
 		TTL: time.Duration(ttl) * time.Second, RequestID: requestID(r), Traceparent: requestTraceparent(r),
@@ -245,7 +245,7 @@ func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) 
 	}
 	requestID, _ := r.Context().Value(requestIDKey{}).(string)
 	actor := principal(r)
-	operation, replayed, err := s.operations.Create(r.Context(), operationstore.CreateRequest{
+	operation, replayed, err := s.operations.Create(r.Context(), operations.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
 		Kind: body.Kind, Message: body.Message, SupersedePending: body.SupersedePending,
 		TTL: time.Duration(ttl) * time.Second, RequestID: requestID, Traceparent: requestTraceparent(r),
@@ -294,7 +294,7 @@ func (s *Server) queueMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	// The unscoped development principal keeps controller-wide totals; every
 	// other principal only sees the workspace it was authorized for.
-	var metrics operationstore.QueueMetrics
+	var metrics operations.QueueMetrics
 	var err error
 	if principal(r).Issuer == "development" {
 		metrics, err = s.operations.Metrics(r.Context())
@@ -310,23 +310,23 @@ func (s *Server) queueMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeOperationError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, operationstore.ErrInvalidRequest):
+	case errors.Is(err, operations.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the operation request is invalid")
-	case errors.Is(err, operationstore.ErrIdempotencyConflict):
+	case errors.Is(err, operations.ErrIdempotencyConflict):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/idempotency-conflict", "Idempotency conflict", "the Idempotency-Key was already used with different input")
-	case errors.Is(err, operationstore.ErrStaleRevision):
+	case errors.Is(err, operations.ErrStaleRevision):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/stale-revision", "Resource revision is stale", "the node changed after this operation was prepared")
-	case errors.Is(err, operationstore.ErrCapabilityMissing):
+	case errors.Is(err, operations.ErrCapabilityMissing):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/capability-unavailable", "Capability is unavailable", "the node has not advertised and received approval for this operation")
-	case errors.Is(err, operationstore.ErrTargetNotObserved):
+	case errors.Is(err, operations.ErrTargetNotObserved):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/target-not-observed", "Target is not observed", "the typed target is not present in the node's current observed state")
-	case errors.Is(err, operationstore.ErrBacklogExceeded):
+	case errors.Is(err, operations.ErrBacklogExceeded):
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/command-backlog-exceeded", "Command backlog is full", "the node or workspace remote command backlog has reached its bound")
-	case errors.Is(err, operationstore.ErrUpgradeActive):
+	case errors.Is(err, operations.ErrUpgradeActive):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/upgrade-already-active", "Upgrade is already active", "another agent upgrade is already active for this node")
 	case errors.Is(err, approvals.ErrNotReady):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "a matching unexpired approval from a different principal is required")
-	case errors.Is(err, operationstore.ErrNodeUnavailable), errors.Is(err, database.ErrNotFound):
+	case errors.Is(err, operations.ErrNodeUnavailable), errors.Is(err, database.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested node or operation does not exist")
 	default:
 		s.logger.ErrorContext(r.Context(), "operation request failed", "error", err)

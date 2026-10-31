@@ -12,10 +12,10 @@ export const i18n = createI18n({
       loginPassword: "Password",
       loginSubmit: "Sign in",
       loginSubmitting: "Signing in...",
-      loginSSO: "Sign in with SSO",
+      loginSso: "Sign in with SSO",
       loginOr: "or",
       loginRedirecting: "Redirecting to SSO...",
-      loginSSOFailed: "SSO did not complete. Sign in with SSO to try again.",
+      loginSsoFailed: "SSO did not complete. Sign in with SSO to try again.",
       loginInvalid: "Invalid username or password",
       loginUnavailable: "Sign in is unavailable. Please try again later.",
       loginRateLimited: "Too many attempts. Please try again later.",
@@ -48,26 +48,27 @@ export const i18n = createI18n({
       installField_name: "Node name",
       installField_environment: "Enrollment environment",
       installField_release: "Install Release tag",
-      installField_controller: "Controller EndpointID",
-      installField_relay: "Dedicated Relay HTTPS URL",
-      installField_bootstrapFile: "Bootstrap token file path",
-      installField_relayFile: "Relay access token file path",
-      installField_commandKeyFile: "Controller command public key file path",
+      installField_controllerEndpointId: "Controller EndpointID",
+      installField_relayUrl: "Dedicated Relay HTTPS URL",
+      installField_bootstrapTokenFile: "Bootstrap token file path",
+      installField_relayAccessTokenFile: "Relay access token file path",
+      installField_controllerCommandVerificationKeyFile:
+        "Controller command public key file path",
       installHint_name:
         "Choose a name unique within this Workspace, including existing pending nodes. 1–128 letters, digits, dots, underscores or hyphens; start with a letter or digit. A duplicate can fail at enrollment even if token creation succeeds; changing install.env cannot change the token-bound name.",
       installHint_environment:
         "1–64 letters, digits, dots, underscores or hyphens; start with a letter or digit.",
       installHint_release:
         "Choose a published, matching Controller/Agent release: vX.Y.Z (or vX.Y.Z-rc.N). Never main or latest.",
-      installHint_controller:
+      installHint_controllerEndpointId:
         "64 lowercase hexadecimal characters. This is the Controller identity, not the Agent EndpointID.",
-      installHint_relay:
+      installHint_relayUrl:
         "One dedicated HTTPS Relay. No credentials, query, fragment, whitespace or shell expansion.",
-      installHint_bootstrapFile:
+      installHint_bootstrapTokenFile:
         "Absolute path on the Agent host to the short-lived token file.",
-      installHint_relayFile:
+      installHint_relayAccessTokenFile:
         "Absolute path on the Agent host to the Relay access token file.",
-      installHint_commandKeyFile:
+      installHint_controllerCommandVerificationKeyFile:
         "Absolute path to the trusted Ed25519 public key PEM, never the Controller private key.",
       installPaths:
         "Use three distinct absolute paths with letters, digits, dots, underscores or hyphens; each segment must start with a letter, digit, underscore or hyphen. Provision non-empty regular files, not symlinks, through a protected channel. Tokens must be owner-only (0600) and readable by the installer launcher.",

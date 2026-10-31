@@ -11,7 +11,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 )
@@ -53,7 +53,7 @@ func TestWorkerRoleAssembly(t *testing.T) {
 					cfg.ControllerEndpointID = strings.Repeat("ab", 32)
 				}
 				backend := stoppedBackend{}
-				service, fence, err := startWorker(life, cfg, BuildInfo{}, backend, signer, operationstore.NewBackend(backend, 50, signer), quietLogger())
+				service, fence, err := startWorker(life, cfg, BuildInfo{}, backend, signer, operations.NewBackend(backend, 50, signer), quietLogger())
 				if err != nil {
 					_ = life.close(err)
 					t.Fatal(err)
@@ -89,7 +89,7 @@ func TestWorkerPartialStartupClosesTrust(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	life := newLifecycle(ctx, time.Second, quietLogger())
-	cfg := config.Config{Role: config.RoleWorker, ControllerEndpointID: strings.Repeat("ab", 32), TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock"), TestResultCommitBarrier: "/missing/pr01-barrier"}
+	cfg := config.Config{Role: config.RoleWorker, ControllerEndpointID: strings.Repeat("ab", 32), TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock"), TestResultCommitBarrier: "/missing/result-commit-barrier"}
 	signer, err := commandauth.NewRandomSigner()
 	if err != nil {
 		t.Fatal(err)

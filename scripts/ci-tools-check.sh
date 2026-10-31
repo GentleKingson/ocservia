@@ -28,6 +28,23 @@ for suite in ${CI_SUITES}; do
       python3 scripts/test-real-e2e-business.py
       bash scripts/test-real-e2e-artifact.sh
       ;;
+    source-style)
+      bash scripts/lint.sh source-style
+      ;;
+    contracts)
+      : "${CONTRACT_BASE_REF:?contract_base_ref is required for contract checks}"
+      baseline="${CONTRACT_BASE_REF}"
+      if ! git rev-parse --verify --end-of-options "${baseline}^{commit}" >/dev/null 2>&1; then
+        git fetch --no-tags -- origin "${baseline}"
+        baseline="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+      fi
+      if [[ "${CONTRACT_EVENT:-}" == pull_request ]]; then
+        baseline="$(git merge-base "${baseline}" "${CONTRACT_HEAD_SHA:?PR head is required}")"
+      fi
+      bash scripts/lint.sh contracts
+      bash scripts/check-breaking.sh "${baseline}"
+      bash scripts/generated-clean.sh
+      ;;
     *) echo "unknown CI tool suite: ${suite}" >&2; exit 2 ;;
   esac
 done

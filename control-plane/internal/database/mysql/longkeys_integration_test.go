@@ -339,7 +339,7 @@ func TestRealLongKeyPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.DBName, c.User, c.Passwd = name, "ocservia_app", "pr02-runtime-test-only"
+	c.DBName, c.User, c.Passwd = name, "ocservia_app", "database-e2e-runtime-test-only"
 	o.DSN = c.FormatDSN()
 	runtime, err := Open(ctx, o)
 	if err != nil {

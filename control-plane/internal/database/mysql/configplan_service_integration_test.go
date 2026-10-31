@@ -16,9 +16,9 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -119,7 +119,7 @@ func runConfigPlanServiceChain(t *testing.T, owner, backend *Backend) {
 		t.Fatal(err)
 	}
 	event := id()
-	if err := localslice.NewBackend(backend, signer).Ingest(ctx, &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: resultBytes}); err != nil {
+	if err := transportevents.NewBackend(backend, signer).Ingest(ctx, &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: resultBytes}); err != nil {
 		t.Fatal("verified plan result", err)
 	}
 	if validated, err := service.Get(ctx, plan.ID); err != nil || validated.Validation != "valid" {
@@ -135,9 +135,9 @@ func runConfigPlanServiceChain(t *testing.T, owner, backend *Backend) {
 	}
 	applyRequest.ApprovalID = pending.ID
 	t.Run("apply-rollback", func(t *testing.T) {
-		exec(`ALTER TABLE audit_events ADD CONSTRAINT pr04_config_apply_audit CHECK(action <> 'config.apply')`)
+		exec(`ALTER TABLE audit_events ADD CONSTRAINT test_config_apply_audit_failure CHECK(action <> 'config.apply')`)
 		t.Cleanup(func() {
-			if _, err := owner.Exec(context.Background(), `ALTER TABLE audit_events DROP CONSTRAINT pr04_config_apply_audit`); err != nil {
+			if _, err := owner.Exec(context.Background(), `ALTER TABLE audit_events DROP CONSTRAINT test_config_apply_audit_failure`); err != nil {
 				t.Error(err)
 			}
 		})

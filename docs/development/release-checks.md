@@ -82,11 +82,11 @@ are in [Web validation](#web-validation).
 Use `make verify` when a change spans multiple modules and needs a full local
 baseline, not for small single-module edits. `make verify` (`scripts/verify.sh`)
 runs `scripts/lint.sh common` (ShellCheck, Buf, OpenAPI lint,
-`check-public-repository.sh`, `docs-check.sh`), the Buf breaking-change check,
+`check-public-repository.sh`, `docs-check.sh`; source style also includes Ruff), the Buf breaking-change check,
 `go-check.sh` in full mode, `rust-check.sh`, the transport and Agent boundary
 checks, `web-check.sh` in full mode, the policy and toolchain self-tests,
 `security-check.sh` (Gitleaks), `license-check.sh`, the generated-code checks,
-and the P1 harness bounds self-test. It does not start database containers or
+and the resilience harness bounds self-test. It does not start database containers or
 run `make integration`, `make e2e`, the CI router/selector/bootstrap self-tests,
 the installer or release self-tests, or manual acceptance harnesses.
 
@@ -105,7 +105,7 @@ Pick the entry point that matches the behavior under test:
   MySQL
   `DATABASE_TEST_SCOPE=full ENGINE=mysql bash scripts/database-foundation-integration.sh`.
 - Local Go and transport integration: `make integration` runs
-  `scripts/local-slice-integration.sh`, pairing the `control-plane` binary with
+  `scripts/development-simulation-integration.sh`, pairing the `control-plane` binary with
   a PostgreSQL container and the Rust `ocservia-transportd-stub` over local
   Unix sockets, without MySQL, real `transportd`, an Agent, a Relay, or a node.
 - Browser and runtime stack: `make e2e` runs `scripts/e2e.sh` (PostgreSQL,
@@ -136,17 +136,17 @@ installation or release readiness.
 
 ### Ocserv 1.6.0 compatibility
 
-The native I13 fixture also covers upstream ocserv `1.6.0`. Run it as root in a
+The native ocserv fixture also covers upstream ocserv `1.6.0`. Run it as root in a
 disposable Linux environment with TUN and `NET_ADMIN`, native `ocserv`, `occtl`,
 `ocpasswd`, OpenConnect, OpenSSL, `ssl-cert`, and the locked Rust toolchain:
 
 ```bash
-RUN_ID=I13-ocserv160 ARTIFACT_DIR="$PWD/.cache/i13-ocserv160" \
-  bash scripts/i13-native-ocserv-integration.sh
+RUN_ID=native-ocserv160 ARTIFACT_DIR="$PWD/.cache/native-ocserv160" \
+  bash scripts/native-ocserv-integration.sh
 ```
 
 For a container without Rust, build the adapter libtest ELF on the same
-architecture and set `OCSERVIA_I13_TEST_BINARY` to its absolute mounted path.
+architecture and set `OCSERVIA_NATIVE_OCSERV_TEST_BINARY` to its absolute mounted path.
 The script verifies that this binary contains the expected ignored test.
 
 On exactly `1.6.0`, the fixture also checks malformed per-user, per-group and
@@ -160,7 +160,7 @@ SIGHUP; this checks adapter rollback, not systemd integration.
 The opt-in `ocserv160` diagnostic builds the checksum-pinned upstream source
 (see [`scripts/build-ocserv160-compat.sh`](../../scripts/build-ocserv160-compat.sh)
 and [`deploy/test-fixtures/ocserv160.Dockerfile`](../../deploy/test-fixtures/ocserv160.Dockerfile))
-and runs the I13 fixture, the adapter regression suite, Agent protocol tests and
+and runs the native ocserv fixture, the adapter regression suite, Agent protocol tests and
 Controller ConfigPlan tests on native AMD64 and ARM64 runners in Debian 13
 containers ([`ocserv160-compat.yml`](../../.github/workflows/ocserv160-compat.yml)),
 checking host, image and ELF architectures. It does not use QEMU or change
@@ -184,7 +184,7 @@ The entry point is separate from release qualification: Release Check and the
 native package diagnostics still use the pinned 1.5.0 backport. Source binaries
 over a disposable distribution installation are not ocserv 1.6.0 package
 installation, upgrade or removal acceptance. User rotation, disable/enable,
-groups and session termination are covered by native I13, not by Controller
+groups and session termination are covered by native ocserv tests, not by Controller
 business acceptance for 1.6.0. Controller OIDC, the P12 lifecycle, Agent
 rollout, the full recovery matrix, AMD64 systemd business, IPv6, custom
 authentication, ocserv's OIDC browser flow and other platforms are outside this
@@ -260,8 +260,8 @@ Every database CI job fetches the v1.2.0 release history and runs
 `database-<engine>-snapshot.sh check` (in Full CI, MySQL runs it once, in the
 `services` shard). Full Basic CI also runs the physical PostgreSQL (external
 topology) and logical MySQL backup/restore smoke scripts
-(`i18-external-postgres-backup-restore-smoke.sh` and
-`i18-mysql-backup-restore-smoke.sh`), confirming that migration receipts survive
+(`external-postgres-backup-restore-smoke.sh` and
+`mysql-backup-restore-smoke.sh`), confirming that migration receipts survive
 backup, restore and repeated migration, and that restored PostgreSQL enforces
 runtime read access and owner-only DDL. Audit log authenticity, checkpointed-tail
 transitions and compaction remain required business checks.
@@ -396,7 +396,7 @@ test-only owner and runtime credentials; never pass production credentials or
 print DSNs to logs. If you invoke the `database-*` required-test groups
 directly, set both `OCSERV_TEST_DATABASE_URL` and
 `OCSERV_TEST_OWNER_DATABASE_URL`; the MySQL wrapper scripts populate their
-`PR02_*` variables. Only the required-case summaries count as acceptance evidence
+`OCSERVIA_DATABASE_TEST_*` variables. Only the required-case summaries count as acceptance evidence
 (synthetic selector JSON does not), and passing the PostgreSQL 18 and MySQL
 smoke suites does not certify the full database scope or release readiness.
 
@@ -510,7 +510,7 @@ The workflow file defines the matrices. The jobs and what they own:
 | Job | Responsibility |
 | --- | --- |
 | `docs` | `scripts/docs-check.sh` only |
-| `go` | `go-check.sh standard` for `control-plane` and `signer`, plus the selected CI guard and release self-test suites |
+| `go` | `go-check.sh standard` for `control-plane` and `signer`, plus the selected CI guard, release and cross-VM self-tests, source style and contract suites |
 | `rust` | `rust-check.sh` when routing selects Rust; Full also runs the focused vendored iroh patch tests against the lock in [`rust/vendor/iroh/OCSERVIA-PROVENANCE.md`](../../rust/vendor/iroh/OCSERVIA-PROVENANCE.md); installer and Relay-launcher self-tests when routing selects installers |
 | `web` | `web-check.sh basic`; no browser installation |
 | `web-browser` | Stubbed production-build browser regressions through `web/test/run-auth-browser.mjs`; Full also serves the build through the Standalone and Integrated gateways with CSP enforcement checks. A missing browser or non-declared skip fails the job |
@@ -561,7 +561,7 @@ source of the exact rule order. In outline:
 - Cross-VM files (`real-e2e.yml`, `deploy/real-e2e`, `scripts/real-e2e-*`,
   `scripts/test-real-e2e-*`) select the `cross-vm` suite: `make real-e2e-check`
   and the offline `test-real-e2e-*` contracts. The credentialed three-VM run is
-  never started, and the manual-acceptance harnesses (`scripts/p1-*`,
+  never started, and the manual-acceptance harnesses (`scripts/resilience-*`,
   `scripts/security-acceptance-*`) are checked but not run.
 - `ci.yml`, `security.yml`, `scripts/ci-*`, `test-ci-*`, the required-test
   selectors and the bootstrap tests select the CI guard suite
@@ -571,6 +571,23 @@ source of the exact rule order. In outline:
   `env.sh`, `checksums.txt`, `toolchains.lock` and any unknown path enable all
   Basic flags and every CI suite at Quick scope.
 
+The `source-style` suite checks tracked Shell sources using their shebangs
+(including extensionless launchers) and Python with the pinned Ruff
+`E4,E7,E9,F` rules. The Web job also checks the maintained root MJS files and
+build-cache Action with the same ESLint and Prettier configuration. The
+`contracts` suite runs Buf/Redocly lint, breaking checks and a clean regeneration
+in that order, when schemas, templates, generated outputs or generation tools
+change. These suites reuse the existing Go job; ordinary documentation does not
+install their toolchains.
+
+Contract comparison uses the PR merge-base or the push event before SHA. Manual
+Basic CI and Release Check require an explicit `contract_base_ref` naming an
+existing commit different from the candidate; Release Check forwards it to
+Full CI. A missing, unresolvable or self baseline fails. `generated-clean.sh`
+requires a clean committed candidate before regenerating and rejects changed or
+untracked outputs. `--skip-generate` only compares with HEAD (including staged
+changes); it does not prove reproducible generation.
+
 When a change touches several areas, the router takes the union of their flags.
 Pull requests diff `base...head`, push events diff `before..head`, and renames
 or deletions evaluate both old and new paths. If a diff is empty, invalid,
@@ -578,9 +595,9 @@ unresolvable, from an unsupported event, or contains an unrecognized path, the
 router fails closed by enabling every Basic flag and CI tool suite while keeping
 the Quick profile. Path routing never escalates Quick to Full.
 
-Manual dispatches bypass routing: docs, go, rust, web, web-browser and database
-jobs always run, while the CI-tool suites, installer self-tests and Controller
-cache refresh stay off. A manual Full run adds the PostgreSQL leg plus three
+Manual dispatches bypass path routing: docs, go, rust, web, web-browser and
+database jobs always run, along with source-style and contract checks in the
+existing Go job. Installer self-tests and Controller cache refresh stay off. A manual Full run adds the PostgreSQL leg plus three
 MySQL shards and `database-recovery-full`; a manual Quick run uses PostgreSQL and
 one MySQL smoke leg. Controller cache refresh runs only on pushes to main when
 routing sets `run_controller_cache`. It refreshes the union of the changed
@@ -659,7 +676,7 @@ native security acceptance and cross-VM enrollment also stay outside Basic CI,
 because they need dedicated resources, systemd/privd/PKI fixtures or separate
 VMs:
 
-- `make p1-smoke` and `make p1-full` invoke `scripts/p1-resilience-capacity.sh`
+- `make resilience-smoke` and `make resilience-full` invoke `scripts/resilience-capacity.sh`
   (see [Resilience and capacity](#resilience-and-capacity)).
 - `scripts/security-acceptance-transport.sh` checks Iroh connection budgets,
   trust updates, revocation, restart and identity churn.
@@ -667,9 +684,9 @@ VMs:
   stream cleanup and resource bounds at 1, 10 and 100 viewers.
 - `scripts/security-acceptance-privd.sh` checks the root boundary, systemd
   sandbox, attestation keys, certificate lifecycle and package upgrade/rollback.
-  The former `security-acceptance-f1.sh`, `-f2.sh` and `-f3.sh` commands remain
-  forwarding entrypoints, respectively; evidence filenames and F1/F2/F3 result
-  keys stay unchanged for existing consumers.
+  Results use `TRANSPORT_ACCEPTANCE`, `SSE_CAPACITY_ACCEPTANCE` and
+  `PRIVD_ACCEPTANCE`, with `transport-summary.txt`,
+  `sse-capacity-summary.json` and `privd-summary.txt` respectively.
 - `scripts/real-e2e-controller.sh`, `scripts/real-e2e-node.sh`,
   `scripts/real-e2e-artifact.sh` and `deploy/real-e2e` support manual
   two-machine enrollment and the hosted `real-e2e.yml` (see
@@ -685,7 +702,7 @@ scripts/bootstrap.sh go-test
 scripts/go-check.sh standard
 DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh
 DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh
-RUN_ID=local-mysql ARTIFACT_DIR="$PWD/.cache/recovery-mysql" ENGINE=mysql bash scripts/i18-mysql-backup-restore-smoke.sh
+RUN_ID=local-mysql ARTIFACT_DIR="$PWD/.cache/recovery-mysql" ENGINE=mysql bash scripts/mysql-backup-restore-smoke.sh
 ```
 
 With authorization to trigger remote workflows, run the candidate branch with
@@ -1321,7 +1338,7 @@ To validate the Compose configuration, export a unique `RUN_ID`, `ARTIFACT_DIR`
 and a private, owner-controlled `RUNNER_TEMP`, then run:
 
 ```sh
-bash scripts/i18-production-relays.sh --compose-only
+bash scripts/production-runtime-smoke.sh --compose-only
 bash scripts/test-database-deployment-config.sh
 bash scripts/test-production-auth-config.sh
 bash scripts/docs-check.sh
@@ -1330,7 +1347,7 @@ bash scripts/docs-check.sh
 The focused Compose mode checks the rendered Relay arguments and merged network
 boundaries without testing live reachability. The baseline Postgres and backup
 service definitions declare no `nofile` limits, so this mode does not satisfy the
-full I18 `nofile` assertion; the full and `--contract-only` I18 modes still
+full production-runtime `nofile` assertion; the full and `--contract-only` production-runtime modes still
 enforce it and must be run separately when needed.
 
 ### Network probe
@@ -1383,7 +1400,7 @@ as expected Unknown.
 
 ### Package lifecycle and cleanup
 
-For current DEB and RPM packages, run `i18-agent-package-smoke.sh` and
+For current DEB and RPM packages, run `agent-package-smoke.sh` and
 `release-native-package-smoke.sh` inside disposable systemd and packaging
 containers (see
 [Release candidates and package validation](#release-candidates-and-package-validation)).
@@ -1452,7 +1469,7 @@ execution or production RTO/RPO guarantees.
 
 ### Simulated load and capacity
 
-The simulated-Agent harness ([`scripts/p1-resilience-capacity.sh`](../../scripts/p1-resilience-capacity.sh))
+The simulated-Agent harness ([`scripts/resilience-capacity.sh`](../../scripts/resilience-capacity.sh))
 drives the read-only control path with up to 500 side-effect-free simulated
 Agents that send heartbeats (every 30 seconds by default), emit bounded
 telemetry and carry deterministic Direct and Relay path metadata. During the run
@@ -1468,19 +1485,30 @@ disconnects, file descriptors, goroutines, RSS and the completion of an
 unrelated probe.
 
 Both profiles are manual and outside Basic CI, with no Actions workflow. `make
-verify` runs only the bounds self-test (`scripts/test-p1-resilience-capacity.sh`).
+verify` runs only the bounds self-test (`scripts/test-resilience-capacity.sh`).
 Use a Linux host with Docker, Compose, `curl` and `jq`:
 
 ```bash
-make p1-smoke
-make p1-full
+make resilience-smoke
+make resilience-full
 ```
 
-The `p1-*` commands, `P1_PROFILE` variable and `p1-*` evidence filenames remain
-stable for existing automation; the profile names are `smoke` and `full`.
+The next release tag containing these names establishes the automation
+compatibility baseline. Earlier tags and their `p1-*`, F1/F2/F3 and Stage-0
+entrypoints are not compatibility targets; use the canonical entrypoints above.
+`OCSERVIA_RESILIENCE_PROFILE` selects `smoke` or `full`, and evidence filenames
+use the `resilience-` prefix. Historical artifacts and published document
+anchors retain their original bytes.
 
-`make p1-smoke` keeps all fault phases and resource assertions with a smaller
-workload; `make p1-full` uses the full defaults. The parameters and their capacity
+The same release changes the instrumentation scope `ocservia.localslice` to
+`ocservia.transportevents`, and span names `local_slice.event.ingest`,
+`local_slice.queue` and `local_slice.dispatch` to `transport.event.ingest`,
+`development.simulation.queue` and `development.simulation.dispatch`. Update
+collector filters, queries and alerts at deployment; spans are emitted once
+and historical traces are not rewritten.
+
+`make resilience-smoke` keeps all fault phases and resource assertions with a smaller
+workload; `make resilience-full` uses the full defaults. The parameters and their capacity
 upper bounds are defined in the script and the [`Makefile`](../../Makefile)
 targets. `REQUEST_CONCURRENCY` must be an integer in `1..32`, and any parameter
 outside the capacity envelope is rejected before the script touches Docker or creates
@@ -1522,7 +1550,7 @@ Run verification checks inside an authorized, isolated environment with all depe
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
 | ESLint configuration | `npm run lint`, `npx vitest run test/eslint-vue.test.ts` (Vue rules reach SFCs) and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |
 
-`scripts/web-check.sh basic` builds the generated OpenAPI client and runs formatting checks, ESLint, typecheck, Vitest unit tests, the production Vite build, and generated-auth verification. Running `scripts/web-check.sh full` adds the focused authentication browser runner (`test/run-auth-browser.mjs`), while the full Playwright E2E suite requires `npm run test:e2e` or `make e2e`. Neither this runner nor stubbed Playwright specs validate a live Controller, database recovery, or host installation. Specs that exercise the development simulator (`local-slice` and the first two `overview` tests) require a running backend stack; if the backend is not running, report those specs as not run. To run focused Playwright specs against an already-serving production bundle, export `PLAYWRIGHT_BASE_URL` beforehand.
+`scripts/web-check.sh basic` builds the generated OpenAPI client and runs formatting checks, ESLint, typecheck, Vitest unit tests, the production Vite build, and generated-auth verification. Running `scripts/web-check.sh full` adds the focused authentication browser runner (`test/run-auth-browser.mjs`), while the full Playwright E2E suite requires `npm run test:e2e` or `make e2e`. Neither this runner nor stubbed Playwright specs validate a live Controller, database recovery, or host installation. Specs that exercise the development simulator (`development-simulation` and the first two `overview` tests) require a running backend stack; if the backend is not running, report those specs as not run. To run focused Playwright specs against an already-serving production bundle, export `PLAYWRIGHT_BASE_URL` beforehand.
 
 Playwright projects are named after their browser target: `desktop` runs Chromium, `mobile` emulates an iPhone 13 viewport inside Chromium (and therefore does not provide Safari engine coverage), and `firefox` and `webkit` run the cross-engine subset covering login/Workspace selection, rollouts, node forms, password dialogs, shell/Overview layout, Nodes/detail, Operations, and approvals/audit. `npm run test:e2e` executes all four projects unless filtered with `--project`. `node test/run-auth-browser.mjs` accepts the same `--project` flags (for example `node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`) and exits with an error if a requested browser binary is missing; always report any project whose browser engine is not installed as not run.
 
@@ -1861,7 +1889,7 @@ Business, Basic CI, Release Check and release publication. They build the curren
 source's real Agent package and adapter test ELF on matching GitHub-hosted
 runners, verify the fixed
 [ocserv-backport 1.5.0-2 release](https://github.com/GentleKingson/ocserv-backport/releases/tag/1.5.0-2)
-metadata, `SHA256SUMS`, package digest and dpkg fields, then run the I13
+metadata, `SHA256SUMS`, package digest and dpkg fields, then run the native ocserv
 authentication, password rotation, disable/enable, group, occtl parsing,
 terminate, concurrency and file-permission fixture. Download, dependency or
 validation failures fail the job; no emulation or mock counts as native evidence.
@@ -1876,15 +1904,15 @@ Runner labels and the pinned Debian base image are defined in
 Only the isolated Debian container receives TUN and `NET_ADMIN`; it has no host
 network, Docker socket or systemd, and its Agent DEB dependencies, layout and
 verified payload executables are checked without systemd-dependent scriptlets.
-This proves PACKAGE and limited NATIVE_RUNTIME, and an executed I13 fixture also
+This proves PACKAGE and limited NATIVE_RUNTIME, and an executed native ocserv fixture also
 proves adapter NATIVE_OPERATIONS. It proves neither Debian systemd service
 lifecycle nor CONTROLLER_E2E, which need a separately authorized native VM and
-complete Business acceptance; Ubuntu I13 does not prove Controller E2E either.
+complete Business acceptance; Ubuntu native ocserv checks does not prove Controller E2E either.
 
 Evidence artifacts keep the run ID and attempt, source SHA, kernel and Docker
-architecture, package metadata and digests, runtime log, I13 summary and cleanup
+architecture, package metadata and digests, runtime log, native ocserv summary and cleanup
 result for seven days. The adapter libtest ELF may be passed through
-`OCSERVIA_I13_TEST_BINARY` so Debian needs no second Rust toolchain; the I13
+`OCSERVIA_NATIVE_OCSERV_TEST_BINARY` so Debian needs no second Rust toolchain; the native ocserv
 driver first checks that it contains exactly the requested ignored test, and the
 option is for matching native ELF binaries only. Platform diagnostics do not
 broaden the [support scope](../operations/production-deployment.md#support-scope)
@@ -1919,10 +1947,10 @@ verifies the archive checksum from `scripts/checksums.txt`, and builds against
 No upstream Relay changes are made.
 
 ```bash
-docker build -f deploy/production/edge.Dockerfile -t p1-edge .
-docker build -f deploy/production/relay.Dockerfile -t p1-relay .
+docker build -f deploy/production/edge.Dockerfile -t ocservia-integrated-test-edge .
+docker build -f deploy/production/relay.Dockerfile -t ocservia-integrated-test-relay .
 python3 scripts/test-integrated-network.py \
-  --edge-image p1-edge --relay-image p1-relay \
+  --edge-image ocservia-integrated-test-edge --relay-image ocservia-integrated-test-relay \
   --artifacts /absolute/new/evidence-directory
 ```
 

@@ -68,8 +68,8 @@ async function mount() {
   Object.assign(view.config, {
     name: "edge-1",
     release: "v1.2.3",
-    controller: "a".repeat(64),
-    relay: "https://relay.example.com",
+    controllerEndpointId: "a".repeat(64),
+    relayUrl: "https://relay.example.com",
   });
   view.prepare();
   return view;

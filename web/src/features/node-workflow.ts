@@ -49,41 +49,41 @@ export function waitForNodePoll(signal: AbortSignal): Promise<void> {
   return abortableDelay(500, signal, "Node workflow polling aborted");
 }
 
-interface Receipt {
+interface NodeWorkflowReference {
   resourceId?: string;
   operationId?: string;
 }
 
-function receiptKey(
+function workflowReferenceKey(
   context: NodeWorkflowContext,
   kind: "config" | "certificate",
 ): string {
   return `ocservia.node-workflow.${JSON.stringify([context.workspace.id, context.nodeId, kind])}`;
 }
 
-// Persistent receipts contain only identifiers. Reopening must read the server;
-// a receipt is not cached authorization, a Plan result or an artifact secret.
-export function readNodeReceipt(
+// Persistent references contain only identifiers. Reopening must read the server;
+// a reference is not cached authorization, a Plan result or an artifact secret.
+export function readNodeWorkflowReference(
   context: NodeWorkflowContext,
   kind: "config" | "certificate",
-): Receipt {
+): NodeWorkflowReference {
   try {
     const value: unknown = JSON.parse(
-      sessionStorage.getItem(receiptKey(context, kind)) ?? "{}",
+      sessionStorage.getItem(workflowReferenceKey(context, kind)) ?? "{}",
     );
-    const receipt: Receipt = {};
-    if (typeof value !== "object" || value === null) return receipt;
+    const reference: NodeWorkflowReference = {};
+    if (typeof value !== "object" || value === null) return reference;
     if ("resourceId" in value && typeof value.resourceId === "string")
-      receipt.resourceId = value.resourceId;
+      reference.resourceId = value.resourceId;
     if ("operationId" in value && typeof value.operationId === "string")
-      receipt.operationId = value.operationId;
-    return receipt;
+      reference.operationId = value.operationId;
+    return reference;
   } catch {
     return {};
   }
 }
 
-interface NodeMutation {
+interface NodeMutationTicket {
   key: string;
   settled: Promise<void>;
   resolve(): void;
@@ -91,13 +91,13 @@ interface NodeMutation {
 
 // Ownership outlives the dialog, but only until the request acknowledges or
 // fails. A reopened view waits for it instead of sending a new idempotency key.
-const pendingMutations = new Map<string, NodeMutation>();
+const pendingMutations = new Map<string, NodeMutationTicket>();
 
 export function beginNodeMutation(
   context: NodeWorkflowContext,
   kind: "config" | "certificate",
-): NodeMutation | undefined {
-  const key = receiptKey(context, kind);
+): NodeMutationTicket | undefined {
+  const key = workflowReferenceKey(context, kind);
   if (pendingMutations.has(key)) return undefined;
   let resolve!: () => void;
   const settled = new Promise<void>((done) => {
@@ -108,7 +108,7 @@ export function beginNodeMutation(
   return ticket;
 }
 
-export function finishNodeMutation(ticket: NodeMutation): void {
+export function finishNodeMutation(ticket: NodeMutationTicket): void {
   if (pendingMutations.get(ticket.key) !== ticket) return;
   pendingMutations.delete(ticket.key);
   ticket.resolve();
@@ -118,7 +118,7 @@ export function waitForNodeMutation(
   context: NodeWorkflowContext,
   kind: "config" | "certificate",
 ): Promise<void> | undefined {
-  const ticket = pendingMutations.get(receiptKey(context, kind));
+  const ticket = pendingMutations.get(workflowReferenceKey(context, kind));
   if (!ticket) return undefined;
   return new Promise((resolve, reject) => {
     function finish(): void {
@@ -135,13 +135,13 @@ export function waitForNodeMutation(
   });
 }
 
-export function rememberNodeReceipt(
-  ticket: NodeMutation,
-  receipt: Receipt,
+export function rememberNodeWorkflowReference(
+  ticket: NodeMutationTicket,
+  reference: NodeWorkflowReference,
 ): void {
   if (pendingMutations.get(ticket.key) !== ticket) return;
   try {
-    sessionStorage.setItem(ticket.key, JSON.stringify(receipt));
+    sessionStorage.setItem(ticket.key, JSON.stringify(reference));
   } catch {
     // Storage can be disabled; the accepted operation still exists server-side.
   } finally {

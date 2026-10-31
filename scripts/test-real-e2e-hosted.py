@@ -430,7 +430,8 @@ for role in ('relay', 'controller', 'node'):
     assert next(step for step in job['steps'] if step.get('name') == 'Logout local Tailnet identity')['if'] == 'always()'
 
 with tempfile.TemporaryDirectory(prefix='real-e2e-tailnet-test-') as directory:
-    import hashlib, json
+    import hashlib
+    import json
     temp = Path(directory)
     run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
         '-subj', '/CN=local-test-ca', '-keyout', str(temp/'ca.key'), '-out', str(temp/'ca.pem'))
@@ -549,4 +550,47 @@ esac
     run('bash',relay_host,'cleanup',env=env)
     assert events.read_text().splitlines()[-2:]==['start','remove']
     assert not ready_dir.parent.exists()
+# Exercise the native admission and cleanup guards without host changes. A bare
+# negated command bypasses Bash errexit, so each refusal must return explicitly.
+node_source = (ROOT / 'scripts/real-e2e-node.sh').read_text()
+admission_guard = '  if getent passwd' + node_source.split('  if getent passwd', 1)[1].split(
+    '\n  touch "${WORK}/native-owned"', 1)[0]
+admission_shell = '''set -euo pipefail
+getent() { [[ "$2" == "${PRESENT_ACCOUNT:-}" ]]; }
+dpkg-query() { [[ "$3" == "${PRESENT_PACKAGE:-}" ]] && printf 'install ok installed\\n'; }
+check_admission() {
+''' + admission_guard + '''
+}
+check_admission
+printf 'admitted\\n'
+'''
+for variable, value in (('', ''), ('PRESENT_ACCOUNT', 'ocserv-agent'), ('PRESENT_ACCOUNT', 'ocservia-vpn'),
+                        ('PRESENT_PACKAGE', 'ocservia-agent'), ('PRESENT_PACKAGE', 'ocserv')):
+    env = {**os.environ, 'PRESENT_ACCOUNT': '', 'PRESENT_PACKAGE': ''}
+    if variable:
+        env[variable] = value
+    result = subprocess.run(['bash', '-c', admission_shell], env=env, capture_output=True, text=True)
+    assert result.returncode == (1 if variable else 0), result.stderr
+    assert (result.stdout == 'admitted\n') == (not variable)
+
+cleanup_guard = '    if sudo ip netns list' + node_source.split('    if sudo ip netns list', 1)[1].split(
+    '\n  fi\n  rm -rf', 1)[0]
+cleanup_shell = '''set -euo pipefail
+sudo() { if [[ "${PRESENT_NAMESPACE:-}" == true ]]; then printf 'real-e2e-client (id: 1)\\n'; fi; }
+pgrep() { [[ "$2" == "${PRESENT_PROCESS:-}" ]]; }
+check_cleanup() {
+''' + cleanup_guard + '''
+}
+check_cleanup
+printf 'cleaned\\n'
+'''
+for variable, value in (('', ''), ('PRESENT_NAMESPACE', 'true'), ('PRESENT_PROCESS', 'ocservia-agent'),
+                        ('PRESENT_PROCESS', 'ocservia-privd'), ('PRESENT_PROCESS', 'ocserv')):
+    env = {**os.environ, 'PRESENT_NAMESPACE': '', 'PRESENT_PROCESS': ''}
+    if variable:
+        env[variable] = value
+    result = subprocess.run(['bash', '-c', cleanup_shell], env=env, capture_output=True, text=True)
+    assert result.returncode == (1 if variable else 0), result.stderr
+    assert (result.stdout == 'cleaned\n') == (not variable)
+
 print('three-VM OIDC, readiness, lifetime and cleanup negative contracts passed (no Tailnet credentials used)')

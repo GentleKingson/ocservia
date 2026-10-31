@@ -11,7 +11,7 @@ if [[ -n "${OCSERV_REBIND_E2E:-}" ]]; then
     echo 'Rebind E2E requires all role mode and revoked or unreachable disposition' >&2; exit 2;
   }
 fi
-NAME="pr07-controller-${ENGINE}-${ROLE_MODE}-$(date +%s)-$$"
+NAME="ocservia-database-controller-${ENGINE}-${ROLE_MODE}-$(date +%s)-$$"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${ROOT}/artifacts/${NAME}}"
 mkdir -p "${ARTIFACT_DIR}" "${ROOT}/.cache/go-build" "${ROOT}/.cache/go-mod"
 ARTIFACT_DIR="$(cd "${ARTIFACT_DIR}" && pwd)"
@@ -38,24 +38,24 @@ trap 'exit 143' TERM
 
 # Keep the production Rust feature partitions and frozen source inputs. The
 # final test image adds real Ocserv/OpenSSL, not a transport or Agent stub.
-WORKFLOW_IMAGE=ocservia-pr02-workflow:e2e
+WORKFLOW_IMAGE=ocservia-database-e2e-workflow:e2e
 if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
   : "${SINGLE_AGENT_ARCHIVE:?}" "${SINGLE_EXPECTED_AGENT_VERSION:?}"
   [[ "${RELEASE_WORKFLOW_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ && "${ENGINE}" == postgres ]]
   WORKFLOW_IMAGE="${RELEASE_WORKFLOW_IMAGE}"
 else
-docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target agent-runtime -t ocservia-pr02-agent:e2e "${ROOT}" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
-docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target transportd-runtime -t ocservia-pr02-transport:e2e "${ROOT}" >"${ARTIFACT_DIR}/transport-build.log" 2>&1
-docker build -f "${ROOT}/deploy/production/relay.Dockerfile" -t ocservia-pr02-relay:e2e "${ROOT}" >"${ARTIFACT_DIR}/relay-build.log" 2>&1
-docker build -f "${ROOT}/deploy/database-e2e/Dockerfile" -t ocservia-pr02-workflow:e2e "${ROOT}" >"${ARTIFACT_DIR}/workflow-build.log" 2>&1
-docker image inspect ocservia-pr02-agent:e2e ocservia-pr02-transport:e2e ocservia-pr02-relay:e2e ocservia-pr02-workflow:e2e --format '{{.Id}} {{json .RepoTags}}' >"${ARTIFACT_DIR}/images.txt"
+docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target agent-runtime -t ocservia-database-e2e-agent:e2e "${ROOT}" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
+docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target transportd-runtime -t ocservia-database-e2e-transport:e2e "${ROOT}" >"${ARTIFACT_DIR}/transport-build.log" 2>&1
+docker build -f "${ROOT}/deploy/production/relay.Dockerfile" -t ocservia-database-e2e-relay:e2e "${ROOT}" >"${ARTIFACT_DIR}/relay-build.log" 2>&1
+docker build -f "${ROOT}/deploy/database-e2e/Dockerfile" -t ocservia-database-e2e-workflow:e2e "${ROOT}" >"${ARTIFACT_DIR}/workflow-build.log" 2>&1
+docker image inspect ocservia-database-e2e-agent:e2e ocservia-database-e2e-transport:e2e ocservia-database-e2e-relay:e2e ocservia-database-e2e-workflow:e2e --format '{{.Id}} {{json .RepoTags}}' >"${ARTIFACT_DIR}/images.txt"
 fi
 docker image inspect "${WORKFLOW_IMAGE}" >"${ARTIFACT_DIR}/workflow-image.json"
 
 # Nothing is published on the host, and runtime processes cannot use public
 # discovery as an accidental substitute for the one dedicated TLS Relay.
 docker network create --internal "${NAME}" >/dev/null
-ENVIRONMENT=(-e "OCSERV_REBIND_E2E=${OCSERV_REBIND_E2E:-}" -e PR02_CONTROLLER_E2E=1 -e "PR07_CONTROLLER_ROLE_MODE=${ROLE_MODE}" -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
+ENVIRONMENT=(-e "OCSERV_REBIND_E2E=${OCSERV_REBIND_E2E:-}" -e OCSERVIA_DATABASE_TEST_CONTROLLER_E2E=1 -e "OCSERVIA_DATABASE_TEST_CONTROLLER_ROLE_MODE=${ROLE_MODE}" -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
 MOUNTS=()
 COMMAND=(go test -buildvcs=false -count=1 -race -timeout=15m -v ./internal/platform/app -run '^TestControllerTransportBackendE2E$')
 POSTGRES_IMAGE=postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
@@ -98,15 +98,15 @@ else
   IMAGE=mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d
   CLIENT=mysql
   docker run -d --name "${NAME}" --network "${NAME}" \
-    -e MYSQL_ROOT_PASSWORD=pr02-isolated-test-root -e MYSQL_DATABASE=ocservia \
+    -e MYSQL_ROOT_PASSWORD=database-e2e-isolated-test-root -e MYSQL_DATABASE=ocservia \
     "${IMAGE}" --log-bin-trust-function-creators=1 >/dev/null
   for _ in {1..90}; do
-    if docker exec -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null 2>&1; then break; fi
+    if docker exec -e MYSQL_PWD=database-e2e-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null 2>&1; then break; fi
     sleep 1
   done
-  docker exec -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null
-  docker exec -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -e "CREATE USER 'ocservia_owner'@'%' IDENTIFIED BY 'pr02-owner-test-only'; CREATE USER 'ocservia_app'@'%' IDENTIFIED BY 'pr02-runtime-test-only'; CREATE USER 'ocservia_maintenance'@'%' IDENTIFIED BY 'pr02-maintenance-test-only';"
-  ENVIRONMENT+=(-e "PR02_ENGINE=${ENGINE}" -e 'PR02_DSN=root:pr02-isolated-test-root@tcp(127.0.0.1:3306)/ocservia?tls=false')
+  docker exec -e MYSQL_PWD=database-e2e-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null
+  docker exec -e MYSQL_PWD=database-e2e-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -e "CREATE USER 'ocservia_owner'@'%' IDENTIFIED BY 'database-e2e-owner-test-only'; CREATE USER 'ocservia_app'@'%' IDENTIFIED BY 'database-e2e-runtime-test-only'; CREATE USER 'ocservia_maintenance'@'%' IDENTIFIED BY 'database-e2e-maintenance-test-only';"
+  ENVIRONMENT+=(-e "OCSERVIA_DATABASE_TEST_ENGINE=${ENGINE}" -e 'OCSERVIA_DATABASE_TEST_DSN=root:database-e2e-isolated-test-root@tcp(127.0.0.1:3306)/ocservia?tls=false')
 fi
 
 docker run --rm --name "${NAME}-workflow" --network "container:${NAME}" \

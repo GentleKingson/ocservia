@@ -34,12 +34,12 @@ func TestLocalAccountHTTPSharedLimitsIntegration(t *testing.T) {
 	defer otherPool.Close()
 	servers := []*Server{newAuthHTTPServer(t, pool, true, ""), newAuthHTTPServer(t, otherPool, true, "")}
 	logs := []*bytes.Buffer{captureAuthLogs(servers[0]), captureAuthLogs(servers[1])}
-	name := "r2-http-" + uuid.NewString()
+	name := "account-limit-http-" + uuid.NewString()
 	missing := "missing-" + name
 	defer func() {
 		_, _ = pool.Exec(ctx, `DELETE FROM local_auth_attempts WHERE username IN ($1,$2)`, name, missing)
 	}()
-	const password = "r2 http test password"
+	const password = "account-limit HTTP fixture password"
 	if _, err := servers[0].auth.CreateLocalCredential(ctx, name, password); err != nil {
 		t.Fatal(err)
 	}

@@ -28,7 +28,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
@@ -77,7 +77,7 @@ type RevokeSignerRequest struct {
 
 type Service struct {
 	backend     database.Backend
-	operations  *operationstore.Service
+	operations  *operations.Service
 	approvals   *approvals.Service
 	signer      Signer
 	sealer      SecretSealer
@@ -135,11 +135,11 @@ type P12Request struct {
 }
 
 type ArtifactGrant struct {
-	ArtifactID    uuid.UUID                `json:"artifact_id"`
-	Operation     operationstore.Operation `json:"operation"`
-	DownloadToken string                   `json:"download_token,omitempty"`
-	Password      string                   `json:"password,omitempty"`
-	ExpiresAt     value.Timestamp          `json:"expires_at"`
+	ArtifactID    uuid.UUID            `json:"artifact_id"`
+	Operation     operations.Operation `json:"operation"`
+	DownloadToken string               `json:"download_token,omitempty"`
+	Password      string               `json:"password,omitempty"`
+	ExpiresAt     value.Timestamp      `json:"expires_at"`
 }
 
 type ArtifactDownload struct {
@@ -153,8 +153,8 @@ type ArtifactDownload struct {
 
 // NewBackend uses common certificate transactions. CSR/P12/revocation also
 // require an operations service configured for the same backend.
-func NewBackend(backend database.Backend, operations *operationstore.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
-	return &Service{backend: backend, operations: operations, approvals: approvals.NewBackend(backend), signer: signer, sealer: sealer, artifacts: artifacts, grantSigner: grantSigner, now: func() time.Time { return time.Now().UTC() }}
+func NewBackend(backend database.Backend, operationService *operations.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
+	return &Service{backend: backend, operations: operationService, approvals: approvals.NewBackend(backend), signer: signer, sealer: sealer, artifacts: artifacts, grantSigner: grantSigner, now: func() time.Time { return time.Now().UTC() }}
 }
 
 // NewArtifactDownloads constructs downloads, durable consumption recovery and
@@ -193,9 +193,9 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificat
 	if err != nil {
 		return Certificate{}, false, err
 	}
-	op, replay, err := s.operations.Create(ctx, operationstore.CreateRequest{
+	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{
 		NodeID: request.NodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey,
-		Kind: operationstore.CertificateCSR, CertificateID: certificateID, CommonName: request.CommonName,
+		Kind: operations.CertificateCSR, CertificateID: certificateID, CommonName: request.CommonName,
 		DNSNames: request.DNSNames, KeyBits: request.KeyBits, ActorID: request.ActorID,
 		ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID,
 		Action: "certificate.issue", Reason: request.Reason, RequestID: request.RequestID,
@@ -439,44 +439,44 @@ func certificateIssueBinding(certificateID uuid.UUID, version int64, csrDER, rec
 	return digest[:]
 }
 
-func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operationstore.Operation, bool, error) {
+func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations.Operation, bool, error) {
 	if request.CertificateID == uuid.Nil || request.ApprovalID == uuid.Nil || request.CertificateVersion < 1 || request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil || request.ExpectedVersion < 1 || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || request.RequestID == "" {
-		return operationstore.Operation{}, false, ErrInvalid
+		return operations.Operation{}, false, ErrInvalid
 	}
 	if s.signer == nil {
-		return operationstore.Operation{}, false, ErrSignerUnavailable
+		return operations.Operation{}, false, ErrSignerUnavailable
 	}
 	certificate, err := s.Get(ctx, request.CertificateID)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	workspaceID, nodeID, serialNumber, state, certificateVersion := certificate.WorkspaceID, certificate.NodeID, certificate.SerialNumber, certificate.State, certificate.Version
 	existingRequest, err := s.operationExists(ctx, workspaceID, request.IdempotencyKey)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	if certificateVersion != request.CertificateVersion && !existingRequest {
-		return operationstore.Operation{}, false, ErrNotReady
+		return operations.Operation{}, false, ErrNotReady
 	}
 	requestHash, _, err := certificateActionBinding("certificate.revoke", request.CertificateID, nodeID, request.CertificateVersion, request.Reason, uuid.Nil, serialNumber, nil)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	if state == "revoked" {
 		exists, err := s.operationExists(ctx, workspaceID, request.IdempotencyKey)
 		if err != nil {
-			return operationstore.Operation{}, false, err
+			return operations.Operation{}, false, err
 		}
 		if !exists {
-			return operationstore.Operation{}, false, ErrNotReady
+			return operations.Operation{}, false, ErrNotReady
 		}
 	}
 	if state != "issued" && state != "expiring" && state != "expired" && state != "revoking" && state != "revocation_unknown" && state != "revoked" || serialNumber == "" {
-		return operationstore.Operation{}, false, ErrNotReady
+		return operations.Operation{}, false, ErrNotReady
 	}
-	op, replay, err := s.operations.Create(ctx, operationstore.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operationstore.CertificateRevoke, CertificateID: request.CertificateID, CertificateVersion: uint64(request.CertificateVersion), RevocationReason: request.Reason, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: requestHash, Action: "certificate.revoke", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute, HoldDispatch: true})
+	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operations.CertificateRevoke, CertificateID: request.CertificateID, CertificateVersion: uint64(request.CertificateVersion), RevocationReason: request.Reason, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: requestHash, Action: "certificate.revoke", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute, HoldDispatch: true})
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	if replay && op.State == "expired" {
 		return op, true, ErrNotReady
@@ -580,7 +580,7 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	existing, err := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey, intentHash[:])
 	if err == nil {
 		if !existing.SameIntent {
-			return ArtifactGrant{}, false, operationstore.ErrIdempotencyConflict
+			return ArtifactGrant{}, false, operations.ErrIdempotencyConflict
 		}
 		op, getErr := s.operations.Get(ctx, existing.OperationID)
 		if getErr != nil {
@@ -632,9 +632,9 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	if err != nil {
 		return ArtifactGrant{}, false, err
 	}
-	op, replay, err := s.operations.Create(ctx, operationstore.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operationstore.CertificateP12, CertificateID: request.CertificateID, CertificateVersion: uint64(certificateVersion), CertificateChain: chain, SealedPassword: sealed, ArtifactID: artifactID, ArtifactMetadata: &operationstore.ArtifactMetadata{TokenSHA256: tokenHash[:], RequestHash: intentHash[:], ExpiresAt: expiresAt}, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: approvalHash, Action: "certificate.private_key.export", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute})
+	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operations.CertificateP12, CertificateID: request.CertificateID, CertificateVersion: uint64(certificateVersion), CertificateChain: chain, SealedPassword: sealed, ArtifactID: artifactID, ArtifactMetadata: &operations.ArtifactMetadata{TokenSHA256: tokenHash[:], RequestHash: intentHash[:], ExpiresAt: expiresAt}, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: approvalHash, Action: "certificate.private_key.export", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute})
 	if err != nil {
-		if errors.Is(err, operationstore.ErrIdempotencyConflict) {
+		if errors.Is(err, operations.ErrIdempotencyConflict) {
 			found, lookupErr := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey, intentHash[:])
 			if lookupErr == nil && found.SameIntent {
 				existingOperation, getErr := s.operations.Get(ctx, found.OperationID)

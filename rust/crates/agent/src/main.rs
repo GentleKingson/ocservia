@@ -873,7 +873,6 @@ fn negotiate_session_mode_at(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn negotiate_session_mode_at_instant(
     response: &SessionHandshakeResponse,
     supported_capabilities: &[String],
@@ -985,7 +984,6 @@ fn negotiate_session_mode_at_instant(
 /// Verifies and durably records the owner term before a fenced session can
 /// become active. Every accepted handshake is a replacement connection, so
 /// its epoch must be strictly newer than the Agent's retained high-water mark.
-#[allow(clippy::too_many_arguments)]
 fn activate_session_connection_fence(
     session_mode: &AgentSessionMode,
     journal: &mut Journal,
@@ -4196,7 +4194,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn fenced_handshake_persists_new_epoch_before_activation_and_rejects_replay() {
         const NOW: i64 = 1_700_000_050;
         let signing = SigningKey::from_bytes(&[7; 32]);

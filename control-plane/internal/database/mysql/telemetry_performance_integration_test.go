@@ -21,12 +21,12 @@ import (
 // Explicit opt-in: latency assertions are unsuitable for ordinary shared CI.
 // Each invocation requires a disposable database and separate owner/runtime roles.
 func TestTelemetryLowDataPerformance(t *testing.T) {
-	if os.Getenv("PR07_PERFORMANCE") != "1" {
-		t.Skip("PR07_PERFORMANCE=1 and isolated database required")
+	if os.Getenv("OCSERVIA_DATABASE_TEST_TELEMETRY_PERFORMANCE") != "1" {
+		t.Skip("OCSERVIA_DATABASE_TEST_TELEMETRY_PERFORMANCE=1 and isolated database required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	pg := os.Getenv("PR02_DSN") == ""
+	pg := os.Getenv("OCSERVIA_DATABASE_TEST_DSN") == ""
 	var owner, runtime, monitor database.Backend
 	if pg {
 		for i, key := range []string{"OCSERV_TEST_OWNER_DATABASE_URL", "OCSERV_TEST_DATABASE_URL"} {
@@ -60,7 +60,7 @@ func TestTelemetryLowDataPerformance(t *testing.T) {
 			t.Fatal(err)
 		}
 		owner = b
-		options.DSN = strings.Replace(options.DSN, "ocservia_owner:pr02-owner-test-only@", "ocservia_app:pr02-runtime-test-only@", 1)
+		options.DSN = strings.Replace(options.DSN, "ocservia_owner:database-e2e-owner-test-only@", "ocservia_app:database-e2e-runtime-test-only@", 1)
 		r, err := Open(ctx, options)
 		if err != nil {
 			t.Fatal(err)

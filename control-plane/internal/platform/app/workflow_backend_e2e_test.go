@@ -40,7 +40,7 @@ import (
 // scripts/database-controller-e2e.sh on BuildServer. No application service,
 // transport, Agent, root receipt, or privileged command is replaced by a stub.
 func TestControllerTransportBackendE2E(t *testing.T) {
-	if os.Getenv("PR02_CONTROLLER_E2E") != "1" {
+	if os.Getenv("OCSERVIA_DATABASE_TEST_CONTROLLER_E2E") != "1" {
 		t.Skip("requires the isolated real-process database E2E container")
 	}
 	if os.Geteuid() != 0 {
@@ -121,7 +121,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		"OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true",
 	})
 	roles := []string{"all"}
-	switch os.Getenv("PR07_CONTROLLER_ROLE_MODE") {
+	switch os.Getenv("OCSERVIA_DATABASE_TEST_CONTROLLER_ROLE_MODE") {
 	case "", "all":
 	case "split":
 		roles = []string{"api", "worker", "scheduler"}
@@ -316,7 +316,7 @@ func newControllerE2E(t *testing.T) *controllerE2E {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 13*time.Minute)
 	t.Cleanup(cancel)
-	return newControllerE2EAt(t, ctx, "/run/pr02-e2e")
+	return newControllerE2EAt(t, ctx, "/run/ocservia-database-e2e")
 }
 
 func newControllerE2EAt(t *testing.T, ctx context.Context, root string) *controllerE2E {
@@ -777,7 +777,7 @@ func (f *controllerE2E) startOcserv() {
 	if err := os.WriteFile("/etc/ocserv/ocpasswd", nil, 0600); err != nil {
 		f.t.Fatal(err)
 	}
-	config := fmt.Sprintf("auth = \"plain[passwd=/etc/ocserv/ocpasswd]\"\ntcp-port = 44443\nudp-port = 0\nlisten-host = 127.0.0.1\nrun-as-user = nobody\nrun-as-group = ocservia-control\nsocket-file = /run/ocserv/ocserv.sock\nocctl-socket-file = /run/occtl.socket\npid-file = /run/ocserv.pid\nserver-cert = %s/relay.pem\nserver-key = %s/relay.key\nisolate-workers = false\nmax-clients = 4\nmax-same-clients = 2\nkeepalive = 30\ndpd = 30\nuse-occtl = true\ndevice = vpns-pr02\nipv4-network = 10.250.0.0\nipv4-netmask = 255.255.255.0\ndns = 192.0.2.53\n", f.root, f.root)
+	config := fmt.Sprintf("auth = \"plain[passwd=/etc/ocserv/ocpasswd]\"\ntcp-port = 44443\nudp-port = 0\nlisten-host = 127.0.0.1\nrun-as-user = nobody\nrun-as-group = ocservia-control\nsocket-file = /run/ocserv/ocserv.sock\nocctl-socket-file = /run/occtl.socket\npid-file = /run/ocserv.pid\nserver-cert = %s/relay.pem\nserver-key = %s/relay.key\nisolate-workers = false\nmax-clients = 4\nmax-same-clients = 2\nkeepalive = 30\ndpd = 30\nuse-occtl = true\ndevice = vpn-dbtest\nipv4-network = 10.250.0.0\nipv4-netmask = 255.255.255.0\ndns = 192.0.2.53\n", f.root, f.root)
 	if err := os.WriteFile("/etc/ocserv/ocserv.conf", []byte(config), 0600); err != nil {
 		f.t.Fatal(err)
 	}

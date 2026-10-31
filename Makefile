@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 
 .DEFAULT_GOAL := test
 
-.PHONY: bootstrap generate format lint test test-go test-rust test-web verify docs-check generated-clean generated-clean-test policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e p1-smoke p1-full real-e2e-check
+.PHONY: bootstrap generate format lint test test-go test-rust test-web verify docs-check generated-clean generated-clean-test policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e resilience-smoke resilience-full real-e2e-check
 
 bootstrap:
 	./scripts/bootstrap.sh all
@@ -35,16 +35,16 @@ database-integration:
 	./scripts/database-integration.sh
 
 integration:
-	./scripts/local-slice-integration.sh
+	./scripts/development-simulation-integration.sh
 
 e2e:
 	./scripts/e2e.sh
 
-p1-smoke:
-	P1_PROFILE=smoke AGENT_COUNT=24 HEARTBEAT_COUNT=2 HEARTBEAT_INTERVAL_MS=500 REQUEST_CONCURRENCY=8 QUEUE_CAPACITY=256 MINIMUM_RESOURCE_SAMPLES=8 ./scripts/p1-resilience-capacity.sh
+resilience-smoke:
+	OCSERVIA_RESILIENCE_PROFILE=smoke AGENT_COUNT=24 HEARTBEAT_COUNT=2 HEARTBEAT_INTERVAL_MS=500 REQUEST_CONCURRENCY=8 QUEUE_CAPACITY=256 MINIMUM_RESOURCE_SAMPLES=8 ./scripts/resilience-capacity.sh
 
-p1-full:
-	P1_PROFILE=full ./scripts/p1-resilience-capacity.sh
+resilience-full:
+	OCSERVIA_RESILIENCE_PROFILE=full ./scripts/resilience-capacity.sh
 
 real-e2e-check:
 	@for script in ./scripts/real-e2e-{controller,node,artifact,hosted,relay-host}.sh; do bash -n "$$script" || exit; done

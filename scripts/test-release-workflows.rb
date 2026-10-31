@@ -17,19 +17,19 @@ manual = load_workflow('release-upgrade')
 triggers = release.fetch(true)
 require_check(triggers.keys.sort == %w[push workflow_dispatch] && triggers.dig('push', 'tags') == ['v*.*.*'], 'Release triggers changed')
 require_check(triggers.dig('workflow_dispatch', 'inputs').keys == ['version'], 'dry-run must only select a test version')
-require_check(release['permissions'] == {'contents'=>'read'}, 'Release must default to read-only')
+require_check(release['permissions'] == { 'contents' => 'read' }, 'Release must default to read-only')
 publish = release.fetch('jobs').fetch('publish')
-require_check(publish['if'] == "github.event_name == 'push'" && publish['environment'] == {'name'=>'release-publishing', 'deployment'=>false}, 'publishing must require a tag push and the publishing environment without deployment records')
-require_check(publish['permissions'] == {'contents'=>'write','packages'=>'write','actions'=>'read'}, 'publishing permissions changed')
+require_check(publish['if'] == "github.event_name == 'push'" && publish['environment'] == { 'name' => 'release-publishing', 'deployment' => false }, 'publishing must require a tag push and the publishing environment without deployment records')
+require_check(publish['permissions'] == { 'contents' => 'write', 'packages' => 'write', 'actions' => 'read' }, 'publishing permissions changed')
 require_check(publish['needs'].sort == %w[assets build-amd64 build-arm64 prepare], 'publishing must wait for both native build/smoke legs and assets')
-require_check(publish['steps'].any? {|s| s.fetch('run','').match?(/gh release create[^\n]*--generate-notes/)}, 'Release must retain native generated notes')
-publish_body = publish['steps'].find {|step| step['name'] == 'Create new draft Release'}.fetch('run')
+require_check(publish['steps'].any? { |s| s.fetch('run', '').match?(/gh release create[^\n]*--generate-notes/) }, 'Release must retain native generated notes')
+publish_body = publish['steps'].find { |step| step['name'] == 'Create new draft Release' }.fetch('run')
 require_check(publish_body.include?('scripts/strip-release-owner-attribution.py') && publish_body.include?('gh release edit "v$VERSION" --notes-file "$notes_after"'), 'release notes owner cleanup missing')
 require_check(publish['steps'].first.fetch('uses', '').start_with?('actions/checkout@'), 'publication must check out the release notes filter')
-require_check(publish['steps'].first.dig('with','ref') == '${{ github.sha }}', 'publish checkout must use the immutable build SHA')
+require_check(publish['steps'].first.dig('with', 'ref') == '${{ github.sha }}', 'publish checkout must use the immutable build SHA')
 qualification = publish['steps'][1]
 require_check(qualification['name'] == 'Require successful Release Check for the tag commit' && !qualification.key?('if') && !qualification.key?('continue-on-error'), 'qualification must fail closed before publication steps')
-require_check(qualification['env'] == {'GH_TOKEN'=>'${{ github.token }}','GH_REPO'=>'${{ github.repository }}'}, 'qualification must query the current repository with its job token')
+require_check(qualification['env'] == { 'GH_TOKEN' => '${{ github.token }}', 'GH_REPO' => '${{ github.repository }}' }, 'qualification must query the current repository with its job token')
 Dir.mktmpdir('release-qualification-') do |dir|
   File.write("#{dir}/git", "#!/bin/sh\n[ \"$*\" = 'rev-parse HEAD' ] || exit 2\nprintf '%s\\n' \"$BUILD_SHA\"\n")
   File.write("#{dir}/gh", <<~'SH')
@@ -45,28 +45,45 @@ Dir.mktmpdir('release-qualification-') do |dir|
       *) exit 2 ;;
     esac
   SH
-  File.chmod(0755,"#{dir}/git","#{dir}/gh")
+  File.chmod(0755, "#{dir}/git", "#{dir}/gh")
   sha = 'a' * 40
-  run = {'run_number'=>10,'head_sha'=>sha,'head_branch'=>'main','event'=>'workflow_dispatch','status'=>'completed','conclusion'=>'success','html_url'=>'https://github.com/test/repo/actions/runs/10'}
-  env = {'PATH'=>"#{dir}:#{ENV.fetch('PATH')}",'BUILD_SHA'=>sha,'TAG_SHA'=>sha,'GITHUB_SHA'=>sha,'GITHUB_REF_NAME'=>'v1.2.3','GH_REPO'=>'test/repo','RUNS_FILE'=>"#{dir}/runs.json",'GITHUB_STEP_SUMMARY'=>"#{dir}/summary"}
-  execute = ->(pages, extra={}) {
+  run = {
+    'run_number' => 10,
+    'head_sha' => sha,
+    'head_branch' => 'main',
+    'event' => 'workflow_dispatch',
+    'status' => 'completed',
+    'conclusion' => 'success',
+    'html_url' => 'https://github.com/test/repo/actions/runs/10'
+  }
+  env = {
+    'PATH' => "#{dir}:#{ENV.fetch('PATH')}",
+    'BUILD_SHA' => sha,
+    'TAG_SHA' => sha,
+    'GITHUB_SHA' => sha,
+    'GITHUB_REF_NAME' => 'v1.2.3',
+    'GH_REPO' => 'test/repo',
+    'RUNS_FILE' => "#{dir}/runs.json",
+    'GITHUB_STEP_SUMMARY' => "#{dir}/summary"
+  }
+  execute = ->(pages, extra = {}) {
     File.write(env['RUNS_FILE'], pages.to_json)
     File.write(env['GITHUB_STEP_SUMMARY'], '')
-    Open3.capture3(env.merge(extra),'bash','-euo','pipefail','-c',qualification.fetch('run')).last.success?
+    Open3.capture3(env.merge(extra), 'bash', '-euo', 'pipefail', '-c', qualification.fetch('run')).last.success?
   }
-  pages = [{'workflow_runs'=>[run]}]
+  pages = [{ 'workflow_runs' => [run] }]
   require_check(execute.call(pages), 'same-SHA successful Release Check must allow publication')
   require_check(File.read(env['GITHUB_STEP_SUMMARY']).include?(sha) && File.read(env['GITHUB_STEP_SUMMARY']).include?(run['html_url']), 'qualification summary must preserve SHA and run URL')
-  require_check(!execute.call([{'workflow_runs'=>[]}]), 'missing Release Check accepted')
-  [{'head_sha'=>'b'*40},{'head_branch'=>'other'},{'event'=>'push'},{'status'=>'in_progress'},
-   *%w[failure cancelled skipped timed_out action_required neutral].map {|state| {'conclusion'=>state}}, {'conclusion'=>nil}].each do |changes|
-    require_check(!execute.call([{'workflow_runs'=>[run.merge(changes)]}]), "invalid Release Check accepted: #{changes}")
+  require_check(!execute.call([{ 'workflow_runs' => [] }]), 'missing Release Check accepted')
+  [{ 'head_sha' => 'b' * 40 }, { 'head_branch' => 'other' }, { 'event' => 'push' }, { 'status' => 'in_progress' },
+   *%w[failure cancelled skipped timed_out action_required neutral].map { |state| { 'conclusion' => state } }, { 'conclusion' => nil }].each do |changes|
+    require_check(!execute.call([{ 'workflow_runs' => [run.merge(changes)] }]), "invalid Release Check accepted: #{changes}")
   end
-  newer = run.merge('run_number'=>11,'conclusion'=>'failure')
-  require_check(!execute.call([{'workflow_runs'=>[run]},{'workflow_runs'=>[newer]}]), 'older PASS must not hide a newer failed run on another page')
-  require_check(execute.call([{'workflow_runs'=>[run.merge('conclusion'=>'failure')]},{'workflow_runs'=>[newer.merge('conclusion'=>'success')]}]), 'latest successful qualification must supersede an older failure')
-  [{'TAG_SHA'=>'b'*40},{'BUILD_SHA'=>'b'*40},{'TAG_API_FAIL'=>'true'},{'RUN_API_FAIL'=>'true'}].each do |changes|
-    require_check(!execute.call(pages,changes), "tag/build mismatch or API failure accepted: #{changes}")
+  newer = run.merge('run_number' => 11, 'conclusion' => 'failure')
+  require_check(!execute.call([{ 'workflow_runs' => [run] }, { 'workflow_runs' => [newer] }]), 'older PASS must not hide a newer failed run on another page')
+  require_check(execute.call([{ 'workflow_runs' => [run.merge('conclusion' => 'failure')] }, { 'workflow_runs' => [newer.merge('conclusion' => 'success')] }]), 'latest successful qualification must supersede an older failure')
+  [{ 'TAG_SHA' => 'b' * 40 }, { 'BUILD_SHA' => 'b' * 40 }, { 'TAG_API_FAIL' => 'true' }, { 'RUN_API_FAIL' => 'true' }].each do |changes|
+    require_check(!execute.call(pages, changes), "tag/build mismatch or API failure accepted: #{changes}")
   end
 end
 filter = File.expand_path('scripts/strip-release-owner-attribution.py')
@@ -78,110 +95,112 @@ second, _, status = Open3.capture3('python3', filter, stdin_data: first)
 require_check(status.success? && second == first, 'release note cleanup must be idempotent')
 
 changelog = YAML.safe_load(File.read('.github/release.yml')).fetch('changelog')
-require_check(changelog.dig('exclude','labels') == ['release/internal'], 'internal-only PRs must be excluded from release notes')
+require_check(changelog.dig('exclude', 'labels') == ['release/internal'], 'internal-only PRs must be excluded from release notes')
 categories = changelog.fetch('categories')
 expected_categories = {
-  'Breaking changes'=>'release/breaking',
-  'Security'=>'release/security',
-  'Controller'=>'area/controller',
-  'Agent'=>'area/agent',
-  'Relay & Transport'=>'area/relay',
-  'Database & Backup'=>'area/database',
-  'Authentication & Authorization'=>'area/auth',
-  'Web & API'=>'area/web',
-  'Deployment & Operations'=>'area/deployment',
-  'Dependencies'=>'area/dependencies',
-  'Other changes'=>'*'
+  'Breaking changes' => 'release/breaking',
+  'Security' => 'release/security',
+  'Controller' => 'area/controller',
+  'Agent' => 'area/agent',
+  'Relay & Transport' => 'area/relay',
+  'Database & Backup' => 'area/database',
+  'Authentication & Authorization' => 'area/auth',
+  'Web & API' => 'area/web',
+  'Deployment & Operations' => 'area/deployment',
+  'Dependencies' => 'area/dependencies',
+  'Other changes' => '*'
 }
-require_check(categories.map {|c| [c['title'], c['labels']]} == expected_categories.map {|title,label| [title,[label]]}, 'release-note categories, labels or catch-all order changed')
+require_check(categories.map { |c| [c['title'], c['labels']] } == expected_categories.map { |title, label| [title, [label]] }, 'release-note categories, labels or catch-all order changed')
 require_check(!File.read('.github/workflows/release.yml').include?('--clobber'), 'asset replacement must not be enabled')
 require_check(release.dig('concurrency', 'group') == 'release-${{ github.ref }}' && release.dig('concurrency', 'cancel-in-progress') == false, 'same-tag releases must serialize without cancelling publication')
-publication_steps = publish['steps'].map {|s| s.fetch('run', '')}
+publication_steps = publish['steps'].map { |s| s.fetch('run', '') }
 preflight_index = publication_steps.index('python3 scripts/publish-release.py preflight')
-draft_index = publish['steps'].index {|s| s['name'] == 'Create new draft Release'}
+draft_index = publish['steps'].index { |s| s['name'] == 'Create new draft Release' }
 finish_index = publication_steps.index('python3 scripts/publish-release.py finish')
 require_check(preflight_index && finish_index && preflight_index < draft_index && draft_index < finish_index, 'publication must preflight before draft and finish verification')
 [preflight_index, draft_index, finish_index].each do |i|
   require_check(!publish['steps'][i].key?('if') && !publish['steps'][i].key?('continue-on-error'), 'publication failures must propagate')
 end
-require_check(release.dig('jobs', 'assets', 'steps').any? {|s| s.fetch('run', '').include?('python3 scripts/publish-release.py check-assets')}, 'build-only must validate the complete asset inventory')
+require_check(release.dig('jobs', 'assets', 'steps').any? { |s| s.fetch('run', '').include?('python3 scripts/publish-release.py check-assets') }, 'build-only must validate the complete asset inventory')
 # A failed-job rerun retains successful upstream outputs, but increments
 # github.run_attempt. Consume the producer's immutable IDs, never new names.
-{'agent_packages'=>'build-agent-packages', 'controller_images'=>'build-controller-images'}.each do |kind,job|
-  require_check(products.dig(true,'workflow_call','outputs',"#{kind}_artifact_id",'value') == "${{ jobs.#{job}.outputs.artifact_id }}", "#{kind} must expose the producing job's artifact ID")
-  require_check(products.dig('jobs',job,'outputs','artifact_id') == '${{ steps.upload.outputs.artifact-id }}', "#{kind} ID must come from upload-artifact")
+{ 'agent_packages' => 'build-agent-packages', 'controller_images' => 'build-controller-images' }.each do |kind, job|
+  require_check(products.dig(true, 'workflow_call', 'outputs', "#{kind}_artifact_id", 'value') == "${{ jobs.#{job}.outputs.artifact_id }}", "#{kind} must expose the producing job's artifact ID")
+  require_check(products.dig('jobs', job, 'outputs', 'artifact_id') == '${{ steps.upload.outputs.artifact-id }}', "#{kind} ID must come from upload-artifact")
 end
-assets = release.dig('jobs','assets')
-require_check(assets.dig('outputs','artifact_id') == '${{ steps.upload.outputs.artifact-id }}' && assets['steps'].any? {|s| s['id'] == 'upload' && s.fetch('uses','').start_with?('actions/upload-artifact@')}, 'prepared assets must expose their upload ID')
-downloads = (assets['steps'] + publish['steps']).select {|s| s.fetch('uses','').start_with?('actions/download-artifact@')}
+assets = release.dig('jobs', 'assets')
+require_check(assets.dig('outputs', 'artifact_id') == '${{ steps.upload.outputs.artifact-id }}' && assets['steps'].any? { |s| s['id'] == 'upload' && s.fetch('uses', '').start_with?('actions/upload-artifact@') }, 'prepared assets must expose their upload ID')
+downloads = (assets['steps'] + publish['steps']).select { |s| s.fetch('uses', '').start_with?('actions/download-artifact@') }
 expected_ids = %w[agent_packages controller_images].map do |kind|
-  %w[amd64 arm64].map {|arch| "${{ needs.build-#{arch}.outputs.#{kind}_artifact_id || 'missing' }}"}.join(',')
+  %w[amd64 arm64].map { |arch| "${{ needs.build-#{arch}.outputs.#{kind}_artifact_id || 'missing' }}" }.join(',')
 end + ["${{ needs.assets.outputs.artifact_id || 'missing' }}"]
-require_check(downloads.map {|s| s.dig('with','artifact-ids')} == expected_ids, 'downloads must use exact upstream IDs and reject missing outputs')
-require_check(downloads.all? {|s| s.dig('with','merge-multiple') == true && !s['with'].key?('name') && !s['with'].key?('pattern')}, 'ID downloads must unpack directly without falling back to attempt names or broad patterns')
-require_check(release.fetch('jobs').values.none? {|j| ['./.github/workflows/ci.yml','./.github/workflows/security.yml','./.github/workflows/release-business-diagnostic.yml'].include?(j['uses'])}, 'formal Release must only build, image-scan, smoke and publish')
+require_check(downloads.map { |s| s.dig('with', 'artifact-ids') } == expected_ids, 'downloads must use exact upstream IDs and reject missing outputs')
+require_check(downloads.all? { |s| s.dig('with', 'merge-multiple') == true && !s['with'].key?('name') && !s['with'].key?('pattern') }, 'ID downloads must unpack directly without falling back to attempt names or broad patterns')
+require_check(release.fetch('jobs').values.none? { |j| ['./.github/workflows/ci.yml', './.github/workflows/security.yml', './.github/workflows/release-business-diagnostic.yml'].include?(j['uses']) }, 'formal Release must only build, image-scan, smoke and publish')
 %w[amd64 arm64].each do |arch|
   caller = release.fetch('jobs').fetch("build-#{arch}")
-  require_check(caller['uses'] == './.github/workflows/release-products.yml' && caller.dig('with','arch') == arch, "missing native #{arch} build")
+  require_check(caller['uses'] == './.github/workflows/release-products.yml' && caller.dig('with', 'arch') == arch, "missing native #{arch} build")
 end
 require_check(products.fetch('jobs').keys.sort == %w[build-agent-packages build-controller-images], 'products must build directly')
-products.fetch('jobs').each do |name,job|
+products.fetch('jobs').each do |name, job|
   require_check(!job.key?('if'), "#{name} must build on tags and dispatch")
   require_check(job.fetch('runs-on').include?('ubuntu-24.04-arm'), "#{name} missing native arm64")
-  require_check(job.fetch('steps').any? {|s| s.fetch('run','').include?(name == 'build-agent-packages' ? 'release-native-package-smoke.sh' : 'release-controller-image-smoke.sh')}, "#{name} missing real smoke")
+  require_check(job.fetch('steps').any? { |s| s.fetch('run', '').include?(name == 'build-agent-packages' ? 'release-native-package-smoke.sh' : 'release-controller-image-smoke.sh') }, "#{name} missing real smoke")
 end
 controller = products.fetch('jobs').fetch('build-controller-images')
 writer = load_workflow('ci').fetch('jobs').fetch('controller-cache')
-require_check(load_workflow('ci').dig('jobs','ci-relevance','outputs','controller_cache_images') == '${{ steps.relevance.outputs.controller_cache_images }}' &&
-              writer.dig('env','CONTROLLER_CACHE_IMAGES') == '${{ needs.ci-relevance.outputs.controller_cache_images }}', 'Controller image selection must flow from path routing to the cache builder')
+require_check(load_workflow('ci').dig('jobs', 'ci-relevance', 'outputs', 'controller_cache_images') == '${{ steps.relevance.outputs.controller_cache_images }}' &&
+              writer.dig('env', 'CONTROLLER_CACHE_IMAGES') == '${{ needs.ci-relevance.outputs.controller_cache_images }}', 'Controller image selection must flow from path routing to the cache builder')
 require_check(writer['needs'] == 'ci-relevance' && writer['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ci-relevance.outputs.run_controller_cache == 'true'", 'Controller cache writes must only run on trusted main pushes with Controller image inputs changed')
-require_check(writer.dig('strategy','matrix','arch') == %w[amd64 arm64] && writer['runs-on'].include?('ubuntu-24.04-arm'), 'main cache writer must cover both native architectures')
+require_check(writer.dig('strategy', 'matrix', 'arch') == %w[amd64 arm64] && writer['runs-on'].include?('ubuntu-24.04-arm'), 'main cache writer must cover both native architectures')
 require_check(!writer.key?('permissions') && !writer.key?('environment') && !writer.key?('continue-on-error'), 'cache writer must retain read-only authority and propagate export failures')
-require_check(writer.dig('concurrency','group') == 'controller-cache-${{ matrix.arch }}' && writer.dig('concurrency','cancel-in-progress') == false, 'cache writers must be serialized per architecture')
-require_check(writer['steps'].any? {|s| s['uses'] == './.github/actions/build-cache-credentials'} && writer['steps'].any? {|s| s['run'] == 'bash scripts/build-release-controller.sh --cache-only'}, 'writer must reuse the shared native builder and credential relay')
+require_check(writer.dig('concurrency', 'group') == 'controller-cache-${{ matrix.arch }}' && writer.dig('concurrency', 'cancel-in-progress') == false, 'cache writers must be serialized per architecture')
+require_check(writer['steps'].any? { |s| s['uses'] == './.github/actions/build-cache-credentials' } && writer['steps'].any? { |s| s['run'] == 'bash scripts/build-release-controller.sh --cache-only' }, 'writer must reuse the shared native builder and credential relay')
 require_check(File.read('scripts/release-business-probe.sh').include?('bash "${ROOT}/scripts/build-release-controller.sh" >'), 'Business must retain the shared default restore-only path')
-require_check(controller['steps'].any? {|s| s.fetch('run','').include?('bash scripts/build-release-controller.sh') && !s['run'].include?('--cache-only')}, 'Release must retain product build mode')
+require_check(controller['steps'].any? { |s| s.fetch('run', '').include?('bash scripts/build-release-controller.sh') && !s['run'].include?('--cache-only') }, 'Release must retain product build mode')
 steps = controller.fetch('steps')
 ordered = ['Build Controller images', 'Bootstrap pinned image-security tools', 'Scan exact Controller image archives', 'Smoke Controller images on the native runner', 'Upload Controller image archives']
-indices = ordered.map {|name| steps.index {|s| s['name'] == name}}
+indices = ordered.map { |name| steps.index { |s| s['name'] == name } }
 require_check(indices.none?(&:nil?) && indices == indices.sort, 'exact image scan must follow build and precede smoke/upload')
 require_check(!controller.key?('continue-on-error'), 'Controller scan failure must fail the product job')
 indices.each do |index|
   require_check(!steps[index].key?('if') && !steps[index].key?('continue-on-error'), 'build/scan/smoke/upload must use normal success-only failure propagation')
 end
 scan = steps[indices[2]]
-require_check(scan.dig('env','CONTROLLER_ARCH') == '${{ inputs.arch }}', 'scan must use the native product architecture')
+require_check(scan.dig('env', 'CONTROLLER_ARCH') == '${{ inputs.arch }}', 'scan must use the native product architecture')
 roles = %w[gateway control transport backup edge relay signer mysql_backup]
 require_check(scan.fetch('run').include?("for name in #{roles.join(' ')}; do") && scan['run'].include?('$RUNNER_TEMP/controller-images/$name-linux-$CONTROLLER_ARCH.tar'), 'scan must consume every exact release archive')
 require_check(scan['run'].include?('IMAGE_ARCHIVES_TSV="$scan_table" bash scripts/scan-release-images.sh'), 'existing scan failure semantics must remain mandatory')
 require_check(steps[indices[1]]['run'] == 'scripts/bootstrap.sh image-security', 'pinned scanner bootstrap missing')
-cache = steps.find {|s| s['name'] == 'Cache pinned image-security tools'}.fetch('with')
+cache = steps.find { |s| s['name'] == 'Cache pinned image-security tools' }.fetch('with')
 require_check(cache['path'].split == %w[.cache/downloads .tools], 'image-security cache must contain tools only, never vulnerability DB or results')
-%w[runner.os runner.arch toolchains.lock scripts/checksums.txt scripts/bootstrap.sh scripts/env.sh].each {|part| require_check(cache['key'].include?(part), "image-security cache identity missing #{part}")}
+%w[runner.os runner.arch toolchains.lock scripts/checksums.txt scripts/bootstrap.sh scripts/env.sh].each { |part| require_check(cache['key'].include?(part), "image-security cache identity missing #{part}") }
 require_check(!cache['key'].include?('github.sha'), 'stable tool cache must not depend on source SHA')
 probe = File.read('scripts/release-business-probe.sh')
 require_check(!probe.match?(/scan-release-images|image_security|bootstrap.sh.*image-security/), 'Business must not own the image-security gate')
-require_check(check.fetch(true).keys == ['workflow_dispatch'] && check['permissions'] == {'contents'=>'read'}, 'Release Check must be manual and read-only')
+require_check(check.fetch(true).keys == ['workflow_dispatch'] && check['permissions'] == { 'contents' => 'read' }, 'Release Check must be manual and read-only')
 jobs = check.fetch('jobs')
 require_check(jobs.fetch('main').fetch('steps').first.fetch('run') == 'test "$GITHUB_REF" = refs/heads/main', 'Release Check must use main')
-require_check(jobs.fetch('full-ci')['uses'] == './.github/workflows/ci.yml' && jobs.dig('full-ci','with','profile') == 'full', 'Full CI missing')
+require_check(jobs.fetch('full-ci')['uses'] == './.github/workflows/ci.yml' && jobs.dig('full-ci', 'with', 'profile') == 'full', 'Full CI missing')
+require_check(check.dig(true, 'workflow_dispatch', 'inputs', 'contract_base_ref', 'required') == true &&
+              jobs.dig('full-ci', 'with', 'contract_base_ref') == '${{ inputs.contract_base_ref }}', 'Release Check must pass its explicit contract comparison baseline to Full CI')
 require_check(jobs.fetch('security')['uses'] == './.github/workflows/security.yml', 'Security missing')
-require_check(jobs.fetch('business')['uses'] == './.github/workflows/release-business-diagnostic.yml' && jobs.dig('business','with') == {'arch'=>'${{ matrix.arch }}','version'=>'0.0.0','profile'=>'smoke','production_signer'=>true,'run-resilience'=>true}, 'Integrated Business Smoke and recovery must run')
+require_check(jobs.fetch('business')['uses'] == './.github/workflows/release-business-diagnostic.yml' && jobs.dig('business', 'with') == { 'arch' => '${{ matrix.arch }}', 'version' => '0.0.0', 'profile' => 'smoke', 'production_signer' => true, 'run-resilience' => true }, 'Integrated Business Smoke and recovery must run')
 quick = jobs.fetch('quick')
-require_check(quick['needs'] == 'main' && quick['steps'].any? {|s| s.fetch('run','').include?('bash scripts/release-quick-acceptance.sh')}, 'Quick Install acceptance must run')
-require_check(jobs.fetch('products')['uses'] == './.github/workflows/release-products.yml' && jobs.dig('products','with') == {'version'=>'0.0.0','arch'=>'${{ matrix.arch }}'}, 'Release Check must build, scan and smoke the release products')
+require_check(quick['needs'] == 'main' && quick['steps'].any? { |s| s.fetch('run', '').include?('bash scripts/release-quick-acceptance.sh') }, 'Quick Install acceptance must run')
+require_check(jobs.fetch('products')['uses'] == './.github/workflows/release-products.yml' && jobs.dig('products', 'with') == { 'version' => '0.0.0', 'arch' => '${{ matrix.arch }}' }, 'Release Check must build, scan and smoke the release products')
 # Both native legs run to completion; one failure must not cancel the other's evidence.
 %w[products business quick].each do |id|
-  require_check(jobs.dig(id,'strategy') == {'fail-fast'=>false,'matrix'=>{'arch'=>%w[amd64 arm64]}} && !jobs[id].key?('continue-on-error'), "#{id} must run on both native architectures")
+  require_check(jobs.dig(id, 'strategy') == { 'fail-fast' => false, 'matrix' => { 'arch' => %w[amd64 arm64] } } && !jobs[id].key?('continue-on-error'), "#{id} must run on both native architectures")
 end
-require_check(quick['runs-on'] == "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}" && quick['steps'].last.dig('env','CONTROLLER_ARCH') == '${{ matrix.arch }}' && quick['steps'].last['run'].include?('--preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,'), 'Quick Install must target its native runner')
+require_check(quick['runs-on'] == "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}" && quick['steps'].last.dig('env', 'CONTROLLER_ARCH') == '${{ matrix.arch }}' && quick['steps'].last['run'].include?('--preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,'), 'Quick Install must target its native runner')
 result = jobs.fetch('result')
 require_check(result['if'] == 'always()' && result['needs'].sort == %w[business full-ci main products quick security], 'Release Check result must handle every dependency')
 command = result.fetch('steps').first.fetch('run')
 Dir.mktmpdir('release-check-') do |dir|
-  results = result['needs'].to_h {|id| [id,{'result'=>'success'}]}
-  env = {'GITHUB_STEP_SUMMARY'=>"#{dir}/summary"}
-  execute = ->(data) { Open3.capture3(env.merge('RESULTS'=>data.to_json),'bash','-euo','pipefail','-c',command).last.success? }
+  results = result['needs'].to_h { |id| [id, { 'result' => 'success' }] }
+  env = { 'GITHUB_STEP_SUMMARY' => "#{dir}/summary" }
+  execute = ->(data) { Open3.capture3(env.merge('RESULTS' => data.to_json), 'bash', '-euo', 'pipefail', '-c', command).last.success? }
   require_check(execute.call(results), 'all PASS must pass Release Check')
   results.each_key do |id|
     %w[failure cancelled skipped missing].each do |state|
@@ -190,81 +209,81 @@ Dir.mktmpdir('release-check-') do |dir|
       require_check(!execute.call(failed), "Release Check accepted #{id}/#{state}")
     end
   end
-  extra = results.merge('unknown'=>{'result'=>'success'})
+  extra = results.merge('unknown' => { 'result' => 'success' })
   require_check(!execute.call(extra), 'Release Check accepted an unknown dependency')
-  prepare = release.dig('jobs','prepare','steps').first.fetch('run')
-  [['push','v1.2.3','',true],['workflow_dispatch','main','0.0.0',true],['push','main','1.2.3',false],['push','v1.2','',false],['workflow_dispatch','main','v1.2.3',false],['workflow_dispatch','main','1.2.3;false',false]].each do |event,tag,version,expected|
-    status = Open3.capture3({'EVENT'=>event,'TAG'=>tag,'TEST_VERSION'=>version,'GITHUB_OUTPUT'=>"#{dir}/outputs"},'bash','-euo','pipefail','-c',prepare).last.success?
+  prepare = release.dig('jobs', 'prepare', 'steps').first.fetch('run')
+  [['push', 'v1.2.3', '', true], ['workflow_dispatch', 'main', '0.0.0', true], ['push', 'main', '1.2.3', false], ['push', 'v1.2', '', false], ['workflow_dispatch', 'main', 'v1.2.3', false], ['workflow_dispatch', 'main', '1.2.3;false', false]].each do |event, tag, version, expected|
+    status = Open3.capture3({ 'EVENT' => event, 'TAG' => tag, 'TEST_VERSION' => version, 'GITHUB_OUTPUT' => "#{dir}/outputs" }, 'bash', '-euo', 'pipefail', '-c', prepare).last.success?
     require_check(status == expected, "version input validation failed for #{tag}/#{version}")
   end
   consumer = diagnostic.fetch('jobs').fetch('business')
-  summary = consumer['steps'].find {|s| s['name'] == 'Summarize business timings and sanitized failures'}
+  summary = consumer['steps'].find { |s| s['name'] == 'Summarize business timings and sanitized failures' }
   require_check(summary && summary['if'] == 'always()', 'business timings must remain visible on failure')
-  File.write("#{dir}/result.json", {'probe_status'=>'FAIL','last_stage'=>'single_instance_recovery','exit_code'=>1,'timings'=>[{'stage'=>'controller_image_build','seconds'=>42}],'private_detail'=>'omit-this-field'}.to_json)
-  File.write("#{dir}/api-checkpoints.jsonl", {'name'=>'real_vpn_relay_recovery','time'=>'2026-01-01T00:00:00Z','status'=>'PASS','private_detail'=>'omit-this-field'}.to_json + "\n")
+  File.write("#{dir}/result.json", { 'probe_status' => 'FAIL', 'last_stage' => 'single_instance_recovery', 'exit_code' => 1, 'timings' => [{ 'stage' => 'controller_image_build', 'seconds' => 42 }], 'private_detail' => 'omit-this-field' }.to_json)
+  File.write("#{dir}/api-checkpoints.jsonl", { 'name' => 'real_vpn_relay_recovery', 'time' => '2026-01-01T00:00:00Z', 'status' => 'PASS', 'private_detail' => 'omit-this-field' }.to_json + "\n")
   File.write("#{dir}/probe.log", "unrelated log line\nRuntimeError: timeout: owner lease invalidation\n")
-  output, _, status = Open3.capture3({'DIAGNOSTICS'=>dir},'bash','-euo','pipefail','-c',summary.fetch('run'))
+  output, _, status = Open3.capture3({ 'DIAGNOSTICS' => dir }, 'bash', '-euo', 'pipefail', '-c', summary.fetch('run'))
   require_check(status.success? && output.include?('controller_image_build') && output.include?('real_vpn_relay_recovery') && output.include?('RuntimeError: timeout'), 'safe diagnostic summary missing')
   require_check(!output.include?('omit-this-field') && !output.include?('unrelated log line'), 'summary must select safe fields instead of dumping logs')
-  require_check(diagnostic['permissions'] == {'contents'=>'read'} && !consumer.key?('environment'), 'Business must run without publishing authority')
-  require_check(diagnostic.dig(true,'workflow_call','inputs','arch') == {'type'=>'string','required'=>true} && !consumer.key?('strategy'), 'Business callers must choose one architecture per job')
-  require_check(consumer['runs-on'] == "${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}" && consumer.dig('env','CONTROLLER_ARCH') == '${{ inputs.arch }}', 'Business must run on the native runner of its architecture')
-  agent_cache = consumer['steps'].find {|s| s['id'] == 'agent-target-cache'}.fetch('with')
+  require_check(diagnostic['permissions'] == { 'contents' => 'read' } && !consumer.key?('environment'), 'Business must run without publishing authority')
+  require_check(diagnostic.dig(true, 'workflow_call', 'inputs', 'arch') == { 'type' => 'string', 'required' => true } && !consumer.key?('strategy'), 'Business callers must choose one architecture per job')
+  require_check(consumer['runs-on'] == "${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}" && consumer.dig('env', 'CONTROLLER_ARCH') == '${{ inputs.arch }}', 'Business must run on the native runner of its architecture')
+  agent_cache = consumer['steps'].find { |s| s['id'] == 'agent-target-cache' }.fetch('with')
   require_check(agent_cache['key'].start_with?('release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-') && agent_cache['restore-keys'].start_with?('release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-') &&
-                consumer['steps'].find {|s| s['id'] == 'agent-target'}['run'].include?('rust/target/agent-${{ inputs.arch }}-'), 'Agent build caches must be isolated per architecture')
-  require_check(consumer['steps'].find {|s| s['name'] == 'Preserve business timings and sanitized diagnostics'}.dig('with','name').include?('${{ inputs.arch }}'), 'Business evidence must be traceable per architecture')
-  gate = consumer['steps'].find {|s| s['name'] == 'Require completed business and actual recovery scenarios'}.fetch('run')
+                consumer['steps'].find { |s| s['id'] == 'agent-target' }['run'].include?('rust/target/agent-${{ inputs.arch }}-'), 'Agent build caches must be isolated per architecture')
+  require_check(consumer['steps'].find { |s| s['name'] == 'Preserve business timings and sanitized diagnostics' }.dig('with', 'name').include?('${{ inputs.arch }}'), 'Business evidence must be traceable per architecture')
+  gate = consumer['steps'].find { |s| s['name'] == 'Require completed business and actual recovery scenarios' }.fetch('run')
   require_check(!gate.match?(/arch|amd64|arm64/), 'both architectures must pass identical business checkpoints')
-  recovery = gate[/node --input-type=module <<'JS'\n(.*?)\nJS\n?/m,1]
+  recovery = gate[/node --input-type=module <<'JS'\n(.*?)\nJS\n?/m, 1]
   require_check(recovery, 'actual recovery result gate missing')
   names = %w[controller agent database relay]
-  sample = {'resilience_requested'=>true,'resilience_result'=>'PASS','resilience_scenarios'=>names.map {|n| {'name'=>"resilience_#{n}",'status'=>'PASS'}},'planned_topology'=>{'native_systemd_node'=>true}}
-  run_recovery = ->(data, flags={}) {
-    File.write("#{dir}/result.json",data.to_json)
-    Open3.capture3({'DIAGNOSTICS'=>dir,'BUSINESS_RUN_RESILIENCE'=>'true'}.merge(flags),'node','--input-type=module','-e',recovery).last.success?
+  sample = { 'resilience_requested' => true, 'resilience_result' => 'PASS', 'resilience_scenarios' => names.map { |n| { 'name' => "resilience_#{n}", 'status' => 'PASS' } }, 'planned_topology' => { 'native_systemd_node' => true } }
+  run_recovery = ->(data, flags = {}) {
+    File.write("#{dir}/result.json", data.to_json)
+    Open3.capture3({ 'DIAGNOSTICS' => dir, 'BUSINESS_RUN_RESILIENCE' => 'true' }.merge(flags), 'node', '--input-type=module', '-e', recovery).last.success?
   }
-  require_check(run_recovery.call(sample),'complete recoveries must pass')
+  require_check(run_recovery.call(sample), 'complete recoveries must pass')
   names.each do |name|
     failed = Marshal.load(Marshal.dump(sample))
-    failed['resilience_scenarios'].reject! {|r| r['name']=="resilience_#{name}"}
+    failed['resilience_scenarios'].reject! { |r| r['name'] == "resilience_#{name}" }
     require_check(!run_recovery.call(failed), "missing #{name} recovery accepted")
   end
-  %w[FAIL SKIPPED].each {|state| require_check(!run_recovery.call(sample.merge('resilience_result'=>state)), "#{state} recovery accepted")}
-  require_check(!run_recovery.call(sample.merge('planned_topology'=>{})), 'recovery without native node accepted')
-  require_check(run_recovery.call(sample.merge('resilience_requested'=>false,'resilience_result'=>'SKIPPED','resilience_scenarios'=>[]),{'BUSINESS_RUN_RESILIENCE'=>'false'}), 'unselected recovery must be skipped')
+  %w[FAIL SKIPPED].each { |state| require_check(!run_recovery.call(sample.merge('resilience_result' => state)), "#{state} recovery accepted") }
+  require_check(!run_recovery.call(sample.merge('planned_topology' => {})), 'recovery without native node accepted')
+  require_check(run_recovery.call(sample.merge('resilience_requested' => false, 'resilience_result' => 'SKIPPED', 'resilience_scenarios' => []), { 'BUSINESS_RUN_RESILIENCE' => 'false' }), 'unselected recovery must be skipped')
 end
-require_check(manual['permissions'] == {'contents'=>'read'} && manual.dig('jobs','business','uses') == './.github/workflows/release-business-diagnostic.yml', 'manual business diagnostics must use the same local checks')
-require_check(manual.dig(true,'workflow_dispatch','inputs','arch','options') == %w[amd64 arm64] && manual.dig('jobs','business','with','arch') == '${{ inputs.arch }}', 'manual business diagnostics must select a native architecture')
-require_check(manual.dig('jobs','business','if') == "inputs.purpose == 'smoke' || inputs.purpose == 'integration'", 'platform diagnostics must not run business acceptance')
+require_check(manual['permissions'] == { 'contents' => 'read' } && manual.dig('jobs', 'business', 'uses') == './.github/workflows/release-business-diagnostic.yml', 'manual business diagnostics must use the same local checks')
+require_check(manual.dig(true, 'workflow_dispatch', 'inputs', 'arch', 'options') == %w[amd64 arm64] && manual.dig('jobs', 'business', 'with', 'arch') == '${{ inputs.arch }}', 'manual business diagnostics must select a native architecture')
+require_check(manual.dig('jobs', 'business', 'if') == "inputs.purpose == 'smoke' || inputs.purpose == 'integration'", 'platform diagnostics must not run business acceptance')
 asset_smoke = manual.fetch('jobs').fetch('release-assets')
-require_check(manual.dig(true,'workflow_dispatch','inputs','purpose','options').include?('release-assets'), 'published asset diagnostic must be selectable')
+require_check(manual.dig(true, 'workflow_dispatch', 'inputs', 'purpose', 'options').include?('release-assets'), 'published asset diagnostic must be selectable')
 require_check(asset_smoke['if'] == "inputs.purpose == 'release-assets'" && asset_smoke['runs-on'].include?('ubuntu-24.04-arm'), 'asset smoke must be explicitly selected on a native runner')
 asset_steps = asset_smoke.fetch('steps')
-require_check(asset_steps.any? {|s| s['run'] == 'bash scripts/release-asset-smoke.sh "v$RELEASE_VERSION"' && s.dig('env','RELEASE_VERSION') == '${{ inputs.version }}'}, 'asset smoke must receive an explicit published version through env')
-require_check(asset_steps.any? {|s| s.fetch('uses','').start_with?('actions/upload-artifact@') && s['if'] == 'always()' && s.dig('with','if-no-files-found') == 'error'}, 'asset evidence must survive failures')
+require_check(asset_steps.any? { |s| s['run'] == 'bash scripts/release-asset-smoke.sh "v$RELEASE_VERSION"' && s.dig('env', 'RELEASE_VERSION') == '${{ inputs.version }}' }, 'asset smoke must receive an explicit published version through env')
+require_check(asset_steps.any? { |s| s.fetch('uses', '').start_with?('actions/upload-artifact@') && s['if'] == 'always()' && s.dig('with', 'if-no-files-found') == 'error' }, 'asset evidence must survive failures')
 require_check(!asset_smoke.key?('permissions') && !asset_smoke.key?('environment') && !asset_smoke.key?('continue-on-error'), 'asset smoke must retain read-only permissions and propagate failures')
-require_check(asset_steps.none? {|s| s.fetch('uses','').include?('download-artifact') || s.fetch('run','').match?(/build-release|gh release (create|upload)/)}, 'asset smoke must consume published bytes without rebuilding or publishing')
-require_check(manual.dig('jobs','native-platform','uses') == './.github/workflows/release-native-platform.yml' && manual.dig('jobs','native-platform','if') == "inputs.purpose == 'native-ubuntu-arm64' || inputs.purpose == 'native-debian13'", 'native diagnostics must be explicitly selected')
+require_check(asset_steps.none? { |s| s.fetch('uses', '').include?('download-artifact') || s.fetch('run', '').match?(/build-release|gh release (create|upload)/) }, 'asset smoke must consume published bytes without rebuilding or publishing')
+require_check(manual.dig('jobs', 'native-platform', 'uses') == './.github/workflows/release-native-platform.yml' && manual.dig('jobs', 'native-platform', 'if') == "inputs.purpose == 'native-ubuntu-arm64' || inputs.purpose == 'native-debian13'", 'native diagnostics must be explicitly selected')
 platform = load_workflow('release-native-platform')
-require_check(platform.fetch(true).keys == ['workflow_call'] && platform['permissions'] == {'contents'=>'read'}, 'platform diagnostics must be read-only and reusable only')
-require_check(platform.dig('jobs','native','timeout-minutes') == 60 && platform.dig('jobs','native','runs-on').include?('ubuntu-24.04-arm'), 'native diagnostics need bounded native runners')
+require_check(platform.fetch(true).keys == ['workflow_call'] && platform['permissions'] == { 'contents' => 'read' }, 'platform diagnostics must be read-only and reusable only')
+require_check(platform.dig('jobs', 'native', 'timeout-minutes') == 60 && platform.dig('jobs', 'native', 'runs-on').include?('ubuntu-24.04-arm'), 'native diagnostics need bounded native runners')
 puts 'Tag builds, dispatch write guard, Release Check failure propagation and actual recovery contracts passed'
 
-require_check(!manual.dig('jobs','business','with','profile').include?('production_signer'), 'Signer must not force integration')
+require_check(!manual.dig('jobs', 'business', 'with', 'profile').include?('production_signer'), 'Signer must not force integration')
 # Execute publication commands with recording doubles: no external writes.
 Dir.mktmpdir('release-rc-') do |dir|
-  prepare = release.dig('jobs','prepare','steps').first.fetch('run')
+  prepare = release.dig('jobs', 'prepare', 'steps').first.fetch('run')
   %w[1.2.3 1.2.3-rc.1 1.2.3-rc.10].each do |version|
-    [['push',"v#{version}",''],['workflow_dispatch','main',version]].each do |event,tag,input|
+    [['push', "v#{version}", ''], ['workflow_dispatch', 'main', version]].each do |event, tag, input|
       File.write("#{dir}/outputs", '')
-      _, error, status = Open3.capture3({'EVENT'=>event,'TAG'=>tag,'TEST_VERSION'=>input,'GITHUB_OUTPUT'=>"#{dir}/outputs"},'bash','-euo','pipefail','-c',prepare)
+      _, error, status = Open3.capture3({ 'EVENT' => event, 'TAG' => tag, 'TEST_VERSION' => input, 'GITHUB_OUTPUT' => "#{dir}/outputs" }, 'bash', '-euo', 'pipefail', '-c', prepare)
       require_check(status.success?, "valid RC input failed: #{error}")
       require_check(File.read("#{dir}/outputs").include?("is_prerelease=#{version.include?('-rc.') ? 'true' : 'false'}\n"), 'wrong prerelease output')
     end
   end
   %w[v1.2.3 v1.2.3-rc.1 1.2.3-rc 1.2.3-rc1 1.2.3-rc.0 1.2.3-rc.01 1.2.3-beta.1 1.2.3+build 1.2.3-rc.1+build].each do |version|
-    [['push',"v#{version}",''],['workflow_dispatch','main',version]].each do |event,tag,input|
-      status = Open3.capture3({'EVENT'=>event,'TAG'=>tag,'TEST_VERSION'=>input,'GITHUB_OUTPUT'=>"#{dir}/outputs"},'bash','-euo','pipefail','-c',prepare).last
+    [['push', "v#{version}", ''], ['workflow_dispatch', 'main', version]].each do |event, tag, input|
+      status = Open3.capture3({ 'EVENT' => event, 'TAG' => tag, 'TEST_VERSION' => input, 'GITHUB_OUTPUT' => "#{dir}/outputs" }, 'bash', '-euo', 'pipefail', '-c', prepare).last
       require_check(!status.success?, "invalid RC input accepted: #{version}")
     end
   end
@@ -286,29 +305,40 @@ Dir.mktmpdir('release-rc-') do |dir|
       *) exit 2 ;;
     esac
   SH
-  File.chmod(0755,"#{dir}/gh")
-  env={'PATH'=>"#{dir}:#{ENV.fetch('PATH')}",'GITHUB_OUTPUT'=>"#{dir}/outputs",'CALLS'=>"#{dir}/calls",'GH_REPO'=>'test/repo','GH_TOKEN'=>'test','GITHUB_ACTOR'=>'test','RUNNER_TEMP'=>dir,'GITHUB_SHA'=>'test-publish-sha','CREATE_ARGS'=>"#{dir}/create-args",'RELEASES_FILE'=>"#{dir}/releases.json"}
-  notes = publish['steps'].find {|s| s['id']=='notes'}.fetch('run')
-  publication = publish['steps'].find {|s| s['name']=='Create new draft Release'}.fetch('run')
-  [['1.2.3-rc.1','v1.1.0'],['1.2.3-rc.2','v1.2.3-rc.1'],['1.2.3-rc.10','v1.2.3-rc.9'],['1.2.3','v1.1.0'],['1.3.0-rc.1','v1.2.3'],['1.3.0','v1.2.3'],['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0-rc.4','v2.0.0-rc.3'],['2.0.0-rc.7','v2.0.0-rc.5'],['2.0.0','v1.1.0']].each do |version,base|
-    File.write("#{dir}/outputs",'')
-    File.write("#{dir}/calls",'')
-    File.write(env['RELEASES_FILE'], [[{'tag_name'=>'v2.0.0-rc.6','draft'=>true,'prerelease'=>true}],
-                                     [{'tag_name'=>base,'draft'=>false,'prerelease'=>true}]].to_json)
-    current=env.merge('VERSION'=>version,'IS_PRERELEASE'=>version.include?('-rc.') ? 'true' : 'false','STABLE_BASE'=>version.start_with?('1.3.0') ? 'v1.2.3' : 'v1.1.0')
-    _,err,status=Open3.capture3(current,'bash','-euo','pipefail','-c',notes)
+  File.chmod(0755, "#{dir}/gh")
+  env = {
+    'PATH' => "#{dir}:#{ENV.fetch('PATH')}",
+    'GITHUB_OUTPUT' => "#{dir}/outputs",
+    'CALLS' => "#{dir}/calls",
+    'GH_REPO' => 'test/repo',
+    'GH_TOKEN' => 'test',
+    'GITHUB_ACTOR' => 'test',
+    'RUNNER_TEMP' => dir,
+    'GITHUB_SHA' => 'test-publish-sha',
+    'CREATE_ARGS' => "#{dir}/create-args",
+    'RELEASES_FILE' => "#{dir}/releases.json"
+  }
+  notes = publish['steps'].find { |s| s['id'] == 'notes' }.fetch('run')
+  publication = publish['steps'].find { |s| s['name'] == 'Create new draft Release' }.fetch('run')
+  [['1.2.3-rc.1', 'v1.1.0'], ['1.2.3-rc.2', 'v1.2.3-rc.1'], ['1.2.3-rc.10', 'v1.2.3-rc.9'], ['1.2.3', 'v1.1.0'], ['1.3.0-rc.1', 'v1.2.3'], ['1.3.0', 'v1.2.3'], ['2.0.0-rc.2', 'v2.0.0-rc.1'], ['2.0.0-rc.3', 'v2.0.0-rc.2'], ['2.0.0-rc.4', 'v2.0.0-rc.3'], ['2.0.0-rc.7', 'v2.0.0-rc.5'], ['2.0.0', 'v1.1.0']].each do |version, base|
+    File.write("#{dir}/outputs", '')
+    File.write("#{dir}/calls", '')
+    File.write(env['RELEASES_FILE'], [[{ 'tag_name' => 'v2.0.0-rc.6', 'draft' => true, 'prerelease' => true }],
+                                     [{ 'tag_name' => base, 'draft' => false, 'prerelease' => true }]].to_json)
+    current = env.merge('VERSION' => version, 'IS_PRERELEASE' => version.include?('-rc.') ? 'true' : 'false', 'STABLE_BASE' => version.start_with?('1.3.0') ? 'v1.2.3' : 'v1.1.0')
+    _, err, status = Open3.capture3(current, 'bash', '-euo', 'pipefail', '-c', notes)
     require_check(status.success? && File.read("#{dir}/outputs").include?("base=#{base}\n"), "notes base failed #{version}: #{err}")
-    _,err,status=Open3.capture3(current.merge('NOTES_BASE'=>base),'bash','-euo','pipefail','-c',publication)
+    _, err, status = Open3.capture3(current.merge('NOTES_BASE' => base), 'bash', '-euo', 'pipefail', '-c', publication)
     require_check(status.success?, "publication failed: #{err}")
-    create=File.binread("#{dir}/create-args").split("\0")
-    require_check(create[create.index('--notes-start-tag')+1] == base && create.include?('--verify-tag') && create.include?('--generate-notes') && create.include?('--draft') && create[create.index('--target')+1] == 'test-publish-sha', 'publication lost native notes, explicit base or tag verification')
+    create = File.binread("#{dir}/create-args").split("\0")
+    require_check(create[create.index('--notes-start-tag') + 1] == base && create.include?('--verify-tag') && create.include?('--generate-notes') && create.include?('--draft') && create[create.index('--target') + 1] == 'test-publish-sha', 'publication lost native notes, explicit base or tag verification')
     require_check(!create.include?('--notes') && !File.read("#{dir}/calls").include?('/contents/'), 'publication must not add checked-in notes')
     require_check(create.include?('--prerelease') == version.include?('-rc.') && create.include?('--latest=false') == version.include?('-rc.'), 'wrong publication flags')
   end
-  [['1.3.0','v1.2.3'],['2.0.0-rc.2','v2.0.0-rc.1'],['2.0.0-rc.3','v2.0.0-rc.2'],['2.0.0-rc.4','v2.0.0-rc.3']].each do |version,base|
+  [['1.3.0', 'v1.2.3'], ['2.0.0-rc.2', 'v2.0.0-rc.1'], ['2.0.0-rc.3', 'v2.0.0-rc.2'], ['2.0.0-rc.4', 'v2.0.0-rc.3']].each do |version, base|
     [original, expected].each do |body|
       File.write("#{dir}/calls", '')
-      current = env.merge('VERSION'=>version, 'IS_PRERELEASE'=>version.include?('-rc.').to_s, 'NOTES_BASE'=>base, 'NOTES_BODY'=>body)
+      current = env.merge('VERSION' => version, 'IS_PRERELEASE' => version.include?('-rc.').to_s, 'NOTES_BASE' => base, 'NOTES_BODY' => body)
       _, err, status = Open3.capture3(current, 'bash', '-euo', 'pipefail', '-c', publication)
       require_check(status.success?, "notes cleanup publication failed: #{err}")
       calls = File.read("#{dir}/calls")
@@ -318,8 +348,8 @@ Dir.mktmpdir('release-rc-') do |dir|
     end
   end
   File.write(env['RELEASES_FILE'], [[]].to_json)
-  [['1.2.3-rc.2',{}],['1.2.3-rc.2',{'RELEASE_API_FAIL'=>'true'}],['1.2.3-rc.1',{'STABLE_BASE'=>''}]].each do |version,extra|
-    require_check(!Open3.capture3(env.merge('VERSION'=>version).merge(extra),'bash','-euo','pipefail','-c',notes).last.success?, 'missing comparison base accepted')
+  [['1.2.3-rc.2', {}], ['1.2.3-rc.2', { 'RELEASE_API_FAIL' => 'true' }], ['1.2.3-rc.1', { 'STABLE_BASE' => '' }]].each do |version, extra|
+    require_check(!Open3.capture3(env.merge('VERSION' => version).merge(extra), 'bash', '-euo', 'pipefail', '-c', notes).last.success?, 'missing comparison base accepted')
   end
 end
 

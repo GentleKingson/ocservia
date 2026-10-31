@@ -5,7 +5,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	transportstore "github.com/GentleKingson/ocservia/control-plane/internal/localslice/store"
+	transportstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 )
 

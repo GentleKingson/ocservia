@@ -17,10 +17,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
@@ -41,7 +41,7 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	if err != nil {
 		t.Fatal(err)
 	}
-	username, password := "s01-"+uuid.NewString(), "unique long HTTP assembly fixture password"
+	username, password := "http-assembly-"+uuid.NewString(), "unique long HTTP assembly fixture password"
 	identity, err := seedAuth.CreateLocalCredential(ctx, username, password)
 	if err != nil {
 		t.Fatal(err)
@@ -63,15 +63,15 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'S01',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'S01',?,?,?)`, workspace, workspace.String(), at, at)
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'S01','active',1,$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,'S01','active',1,?,?)`, node, workspace, at, at)
+	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP assembly fixture',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'HTTP assembly fixture',?,?,?)`, workspace, workspace.String(), at, at)
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'HTTP assembly fixture','active',1,$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,'HTTP assembly fixture','active',1,?,?)`, node, workspace, at, at)
 	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'PlatformAdmin','workspace',?)`, binding, identity, workspace, at)
 	signer := commandauth.NewSignerFromSeed([32]byte{1})
 	ops := operations.NewBackend(runtime.Store, 3, signer)
 	users := userstate.NewWithSignerBackend(runtime.Store, signer)
 	services := httpServices{
 		modules:    api.Modules{Nodes: telemetry.NewWithRecommendedAgentVersionBackend(runtime.Store, cfg.RecommendedAgentVersion), ConfigPlans: configplan.NewBackend(runtime.Store, ops), UserOperations: useroperations.NewWithConcurrencyBackend(runtime.Store, users, 3)},
-		operations: ops, userState: users, localSlice: localslice.NewBackend(runtime.Store, signer),
+		operations: ops, userState: users, transportEvents: transportevents.NewBackend(runtime.Store, signer),
 	}
 	life := newLifecycle(ctx, time.Second, quietLogger())
 	t.Cleanup(func() {
@@ -79,7 +79,7 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 			t.Error(err)
 		}
 	})
-	server, err := newHTTPServer(life, cfg, BuildInfo{Version: "s01"}, runtime.Store, nil, quietLogger(), services)
+	server, err := newHTTPServer(life, cfg, BuildInfo{Version: "test-http-assembly"}, runtime.Store, nil, quietLogger(), services)
 	if err != nil || life.http != server {
 		t.Fatal("production assembly ownership", err)
 	}

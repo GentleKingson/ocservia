@@ -15,7 +15,7 @@ cmp "$fixture/prepared/managed-node-bootstrap.sh" "$ROOT/deploy/managed-node/ins
 [[ -x "$fixture/prepared/controller-bootstrap.sh" && -x "$fixture/prepared/managed-node-bootstrap.sh" ]]
 
 fail() {
-  echo "stage-0 installer test: $1" >&2
+  echo "bootstrap installer test: $1" >&2
   exit 1
 }
 

@@ -1,6 +1,11 @@
 name: Release Check
 on:
   workflow_dispatch:
+    inputs:
+      contract_base_ref:
+        description: Prior commit or tag; must differ from this candidate
+        type: string
+        required: true
 permissions:
   contents: read
 concurrency:
@@ -16,6 +21,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       profile: full
+      contract_base_ref: ${{ inputs.contract_base_ref }}
   security:
     needs: main
     uses: ./.github/workflows/security.yml

@@ -11,15 +11,15 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-WORK = Path(os.environ['T07_WORK'])
+WORK = Path(os.environ['OCSERVIA_BUSINESS_TEST_WORK_DIR'])
 PRIVATE = WORK / 'private'
 STATE = WORK / 'production-signer'
 EVIDENCE = Path(os.environ['ARTIFACT_DIR'])
-CONTAINER = os.environ['T07_SIGNER_CONTAINER']
-IMAGE = os.environ['T07_SIGNER_IMAGE']
+CONTAINER = os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER']
+IMAGE = os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE']
 INTEGRATED = os.environ.get('OCSERV_DEPLOYMENT_MODE') == 'integrated'
 SIGNER_URL = 'https://signer:9443' if INTEGRATED else 'https://localhost:19444'
-NODE_CRL = Path('/etc/ocservia-p2-crl')
+NODE_CRL = Path('/etc/ocservia-business-test-crl')
 
 
 def run(*args, data=None):
@@ -82,14 +82,14 @@ def prepare():
         return  # The single production lifecycle owns the first init and serve.
     admin('init')
     run('docker', 'run', '-d', '--name', CONTAINER, '--read-only', '--cap-drop=ALL',
-        '--security-opt=no-new-privileges:true', '--network', 'container:' + os.environ['T07_OIDC_CONTAINER'],
+        '--security-opt=no-new-privileges:true', '--network', 'container:' + os.environ['OCSERVIA_BUSINESS_TEST_OIDC_CONTAINER'],
         '-v', f'{STATE}/secrets:/run/secrets:ro', '-v', f'{STATE}/data:/var/lib/ocservia-signer',
         IMAGE, 'serve', '--listen', ':19444')
     health()
 
 
 def import_binding():
-    node, endpoint = os.environ['T07_NODE'], os.environ['T07_ENDPOINT']
+    node, endpoint = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'], os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID']
     dsn = PRIVATE / 'export-dsn'
     run('sudo', 'install', '-o', '65534', '-g', '65532', '-m', '400', WORK / 'secrets/database-app-url', dsn)
     try:
@@ -97,14 +97,14 @@ def import_binding():
                        '--security-opt=no-new-privileges:true', '--network', 'ocservia-production_database',
                        '-v', f'{dsn}:/run/export-dsn:ro', '--entrypoint', '/usr/local/bin/ocserv-sealing-export',
                        os.environ['OCSERV_CONTROL_IMAGE'], '--database-url-file', '/run/export-dsn', '--bundled-postgres',
-                       '--workspace', os.environ['T07_WORKSPACE'], '--node', node, '--endpoint', endpoint,
+                       '--workspace', os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], '--node', node, '--endpoint', endpoint,
                        '--approval', (WORK / 'node-approval').read_text().strip())
     finally:
         run('sudo', 'rm', '--', dsn)
     public = run('sudo', 'python3', ROOT / 'scripts/export-node-sealing-keys.py', '--node', node,
                  '--endpoint', endpoint, '--user-key', '/etc/ocservia-agent/user-password-seal-private.pem',
-                 '--user-key-id', 't07-user', '--p12-key', '/etc/ocservia-agent/p12-password-seal-private.pem',
-                 '--p12-key-id', 't07-p12')
+                 '--user-key-id', 'business-test-user-seal', '--p12-key', '/etc/ocservia-agent/p12-password-seal-private.pem',
+                 '--p12-key-id', 'business-test-p12-seal')
     for name, data in [('approved.json', approved), ('public.json', public)]:
         source = WORK / name
         source.write_bytes(data)
@@ -112,7 +112,7 @@ def import_binding():
     run('docker', 'stop', CONTAINER)
     try:
         admin('import', '--approved', '/input/approved.json', '--public', '/input/public.json',
-              '--workspace', os.environ['T07_WORKSPACE'], '--node', node, '--endpoint', endpoint)
+              '--workspace', os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], '--node', node, '--endpoint', endpoint)
     finally:
         run('docker', 'start', CONTAINER)
     health()
@@ -167,7 +167,7 @@ def signer_request(path, payload, headers):
 def seal():
     result = signer_request('/sign/seal', sys.stdin.buffer.read(),
                             ['Content-Type: application/octet-stream',
-                             'X-Ocservia-Node-ID: ' + os.environ['T07_NODE'],
+                             'X-Ocservia-Node-ID: ' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'],
                              'X-Ocservia-Seal-Purpose: user_password'])
     print(json.dumps(dict(version=result['version'], purpose=result['purpose'],
                          key_id=result['key_id'], ciphertext=result['sealed'])))
@@ -198,8 +198,8 @@ def before():
     config = WORK / 'crl-ocserv.conf'
     config.write_text('auth = "certificate"\ncert-user-oid = 2.5.4.3\nlisten-host = 127.0.0.1\n'
                       'tcp-port = 44444\nudp-port = 0\nrun-as-user = ocservia-vpn\nrun-as-group = ocservia-vpn\n'
-                      'socket-file = /run/ocserv-p2-crl.socket\ndevice = p2crl\n'
-                      'occtl-socket-file = /run/occtl-p2-crl.socket\npid-file = /run/ocserv-p2-crl.pid\n'
+                      'socket-file = /run/ocserv-business-test-crl.socket\ndevice = business-crl\n'
+                      'occtl-socket-file = /run/occtl-business-test-crl.socket\npid-file = /run/ocserv-business-test-crl.pid\n'
                       'ipv4-network = 10.209.0.0/24\nmax-clients = 8\nmax-same-clients = 4\n'
                       f'server-cert = {NODE_CRL}/tls.crt\nserver-key = {NODE_CRL}/tls.key\n'
                       f'ca-cert = {NODE_CRL}/ca.pem\ncrl = {NODE_CRL}/crl.pem\n')
@@ -208,7 +208,7 @@ def before():
     # ocserv 1.5.0 resets occtl-socket-file to its built-in /var/run/occtl.socket
     # on SIGHUP and unlinks that path on exit; hide the primary socket from this
     # disposable instance so stopping it cannot remove the primary one.
-    run('sudo', 'systemd-run', '--unit=ocservia-p2-crl', '--property=Type=simple',
+    run('sudo', 'systemd-run', '--unit=ocservia-business-test-crl', '--property=Type=simple',
         '--property=InaccessiblePaths=-/run/occtl.socket',
         '/usr/sbin/ocserv', '-f', '-c', NODE_CRL / 'ocserv.conf')
     for _ in range(30):
@@ -233,7 +233,7 @@ def after():
                                '-untrusted', str(WORK / 'issuer.pem'), '-CRLfile', str(WORK / 'issuer.crl.pem'),
                                '-crl_check', str(WORK / 'revoked-leaf.pem')], capture_output=True)
     assert verified.returncode != 0 and b'certificate revoked' in verified.stderr
-    run('sudo', 'systemctl', 'kill', '--kill-whom=main', '--signal=HUP', 'ocservia-p2-crl')
+    run('sudo', 'systemctl', 'kill', '--kill-whom=main', '--signal=HUP', 'ocservia-business-test-crl')
     # SIGHUP reload is asynchronous; retry a bounded number of fresh logins.
     for _ in range(15):
         result = authenticate()
@@ -245,9 +245,9 @@ def after():
         raise RuntimeError('node still accepts revoked certificate or did not respond')
     control = authenticate(True)
     assert control.returncode == 0 and b'COOKIE=' in control.stdout, 'non-revoked control login failed'
-    journal = run('sudo', 'journalctl', '--no-pager', '-u', 'ocservia-p2-crl')
+    journal = run('sudo', 'journalctl', '--no-pager', '-u', 'ocservia-business-test-crl')
     assert b'revok' in journal.lower(), 'missing node revocation rejection evidence'
-    run('sudo', 'systemctl', 'stop', 'ocservia-p2-crl')
+    run('sudo', 'systemctl', 'stop', 'ocservia-business-test-crl')
     assert run('sudo', 'stat', '-c', '%d:%i', '/run/occtl.socket').decode().strip() == evidence['primary_occtl_identity']
     assert isinstance(json.loads(run('sudo', 'occtl', '--json', 'show', 'users')), list)
     evidence.update(after_crl_number=number, revoked_rejected=True, control_auth=True,

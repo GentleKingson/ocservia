@@ -19,9 +19,9 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -49,7 +49,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		defer ownerPool.Close()
 	}
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err = pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'I15 test',$2,now(),now())`, workspaceID, "i15-"+workspaceID.String()); err != nil {
+	if _, err = pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Configuration plan test',$2,now(),now())`, workspaceID, "config-plan-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
@@ -82,9 +82,9 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	request := CreateRequest{NodeID: nodeID, ExpectedRevision: 0, Template: Template{Name: "baseline", Directives: []Directive{
 		{Name: "auth", Value: "plain[passwd=/etc/ocserv/ocpasswd]"}, {Name: "max-clients", Value: "128"},
 		{Name: "socket-file", Value: "/run/ocserv.socket"}, {Name: "tcp-port", Value: "443"},
-	}}, TTL: 15 * time.Minute, IdempotencyKey: "i15-plan", ActorID: "developer", RequestID: "request-i15", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Reason: "integration plan"}
+	}}, TTL: 15 * time.Minute, IdempotencyKey: "config-plan-create", ActorID: "developer", RequestID: "config-plan-create-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Reason: "integration plan"}
 	failing := request
-	failing.IdempotencyKey = "i15-plan-atomic-failure"
+	failing.IdempotencyKey = "config-plan-atomic-failure"
 	failing.ActorIdentityID = uuid.Must(uuid.NewV7())
 	if _, _, err := service.Create(ctx, failing); err == nil {
 		t.Fatal("missing created_by identity did not fail plan persistence")
@@ -192,7 +192,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := localslice.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{
+	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
 		OccurredAt: timestamppb.New(completedPlan), Traceparent: request.Traceparent, Payload: encodedPlanResult,
 	}); err != nil {
@@ -203,7 +203,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatalf("validated plan=%+v err=%v", validated, err)
 	}
 	requesterID, approverID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1::uuid,'test','i16-'||$1::text,now(),now()),($2::uuid,'test','i16-'||$2::text,now(),now())`, requesterID, approverID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1::uuid,'test','config-apply-'||$1::text,now(),now()),($2::uuid,'test','config-apply-'||$2::text,now(),now())`, requesterID, approverID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary)
@@ -216,18 +216,18 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at)VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID); err != nil {
 		t.Fatal(err)
 	}
-	applyRequest := ApplyRequest{PlanID: plan.ID, ApprovalID: approvalID, IdempotencyKey: "i16-apply", ActorID: requesterID.String(), ActorIdentityID: requesterID, ActorSessionID: uuid.Must(uuid.NewV7()), RequestID: "request-i16", Traceparent: request.Traceparent, Reason: "apply approved plan"}
+	applyRequest := ApplyRequest{PlanID: plan.ID, ApprovalID: approvalID, IdempotencyKey: "config-plan-apply", ActorID: requesterID.String(), ActorIdentityID: requesterID, ActorSessionID: uuid.Must(uuid.NewV7()), RequestID: "config-plan-apply-request", Traceparent: request.Traceparent, Reason: "apply approved plan"}
 	creator.err = fmt.Errorf("creator: %w", operations.ErrStaleRevision)
 	if _, replay, err := service.Apply(ctx, applyRequest); err != creator.err || !errors.Is(err, ErrStaleRevision) || replay {
 		t.Fatal("Apply downstream error changed", replay, err)
 	}
 	creator.err = nil
 	t.Run("apply-rollback", func(t *testing.T) {
-		if _, err := ownerPool.Exec(ctx, `ALTER TABLE audit_events ADD CONSTRAINT pr04_config_apply_audit CHECK (workspace_id <> '`+workspaceID.String()+`' OR action <> 'config.apply') NOT VALID`); err != nil {
+		if _, err := ownerPool.Exec(ctx, `ALTER TABLE audit_events ADD CONSTRAINT test_config_apply_audit_failure CHECK (workspace_id <> '`+workspaceID.String()+`' OR action <> 'config.apply') NOT VALID`); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
-			if _, err := ownerPool.Exec(context.Background(), `ALTER TABLE audit_events DROP CONSTRAINT pr04_config_apply_audit`); err != nil {
+			if _, err := ownerPool.Exec(context.Background(), `ALTER TABLE audit_events DROP CONSTRAINT test_config_apply_audit_failure`); err != nil {
 				t.Error(err)
 			}
 		})
@@ -320,7 +320,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	invalidEventID := uuid.Must(uuid.NewV7())
-	if err := localslice.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: invalidEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: invalidResultBytes}); err != nil {
+	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: invalidEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: invalidResultBytes}); err != nil {
 		t.Fatalf("ingest invalid configuration evidence for reconciliation: %v", err)
 	}
 	var preEvidenceState string
@@ -355,7 +355,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	applyEventID := uuid.Must(uuid.NewV7())
-	if err := localslice.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: applyEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: commandResultBytes}); err != nil {
+	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: applyEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: commandResultBytes}); err != nil {
 		t.Fatal(err)
 	}
 	var applyState, lockReason string
@@ -377,7 +377,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	replayEventID := uuid.Must(uuid.NewV7())
-	if err := localslice.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: replayEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: replayedResultBytes}); err != nil {
+	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: replayEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: replayedResultBytes}); err != nil {
 		t.Fatalf("critical result replay failed: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_alerts WHERE workspace_id=$1 AND kind='config_apply.rollback_failed'`, workspaceID).Scan(&criticalAlerts); err != nil || criticalAlerts != 1 {
@@ -438,7 +438,7 @@ func cleanupConfigPlanIntegration(ctx context.Context, pool *pgxpool.Pool, works
 		`DELETE FROM node_endpoint_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
 		`DELETE FROM nodes WHERE workspace_id=$1`,
 		`DELETE FROM role_bindings WHERE workspace_id=$1`,
-		`DELETE FROM identities WHERE issuer='test' AND subject LIKE 'i16-%'`,
+		`DELETE FROM identities WHERE issuer='test' AND subject LIKE 'config-apply-%'`,
 		`DELETE FROM workspaces WHERE id=$1`,
 	}
 	for _, statement := range statements {

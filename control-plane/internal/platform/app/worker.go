@@ -8,15 +8,15 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/GentleKingson/ocservia/control-plane/internal/trustserver"
 )
 
-func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, commandSigner *commandauth.Signer, operationService *operationstore.Service, logger *slog.Logger) (*localslice.Service, ownersession.FencedExecutor, error) {
+func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, commandSigner *commandauth.Signer, operationService *operations.Service, logger *slog.Logger) (*transportevents.Service, ownersession.FencedExecutor, error) {
 	var err error
 	var workerTransport *transportclient.Client
 	var ownerSessions *ownersession.Manager
@@ -46,12 +46,12 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		life.trust = trust
 		life.start("serve trust UDS", func(context.Context) error { return trust.Serve() })
 	}
-	sliceService := localslice.NewBackend(backend, commandSigner)
+	eventService := transportevents.NewBackend(backend, commandSigner)
 	if ownerSessions != nil {
-		sliceService = localslice.NewBackendWithCommandRecovery(backend, commandSigner, operationService, ownerSessions)
+		eventService = transportevents.NewBackendWithCommandRecovery(backend, commandSigner, operationService, ownerSessions)
 	}
 	if cfg.TestResultCommitBarrier != "" {
-		if err := sliceService.EnableResultCommitBarrier(cfg.TestResultCommitBarrier); err != nil {
+		if err := eventService.EnableResultCommitBarrier(cfg.TestResultCommitBarrier); err != nil {
 			return nil, nil, fmt.Errorf("configure result commit barrier: %w", err)
 		}
 	}
@@ -61,10 +61,10 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 	}
 	if workerTransport != nil {
 		transport := workerTransport
-		worker := localslice.NewWorker(sliceService, transport, logger)
-		life.start("run local slice worker", worker.Run)
-		var operationWorker *operationstore.Worker
-		operationWorker, err = operationstore.NewFencedWorker(operationService, transport, fenceExecutor, logger)
+		worker := transportevents.NewWorker(eventService, transport, logger)
+		life.start("run transport event worker", worker.Run)
+		var operationWorker *operations.Worker
+		operationWorker, err = operations.NewFencedWorker(operationService, transport, fenceExecutor, logger)
 		if err != nil {
 			return nil, nil, fmt.Errorf("configure outbox worker: %w", err)
 		}
@@ -82,5 +82,5 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		life.start("run trust convergence worker", trustWorker.Run)
 	}
 
-	return sliceService, fenceExecutor, nil
+	return eventService, fenceExecutor, nil
 }

@@ -22,10 +22,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -211,7 +211,7 @@ func (f applyHTTPFixture) plan(validated bool) configplan.Plan {
 	}
 	event := uuid.Must(uuid.NewV7())
 	// Controlled signed result fixture, not evidence of a real Agent execution.
-	if err := localslice.NewBackend(f.b, f.signer).Ingest(f.t.Context(), &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: resultBytes}); err != nil {
+	if err := transportevents.NewBackend(f.b, f.signer).Ingest(f.t.Context(), &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: resultBytes}); err != nil {
 		f.t.Fatal(err)
 	}
 	w = f.call("GET", "/api/v1/config-plans/"+plan.ID.String(), "", "", f.requester.cookie, nil)
@@ -484,7 +484,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			}
 			event := uuid.Must(uuid.NewV7())
 			endpoint := sha256.Sum256(plan.NodeID[:])
-			if err := localslice.NewBackend(g.b, g.signer).Ingest(t.Context(), &transportv1.TransportEvent{
+			if err := transportevents.NewBackend(g.b, g.signer).Ingest(t.Context(), &transportv1.TransportEvent{
 				EventId: event[:], NodeId: plan.NodeID[:], EndpointId: endpoint[:],
 				Type:       transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED,
 				OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte("connection closed"),

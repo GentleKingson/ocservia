@@ -31,7 +31,8 @@ export OCSERV_GATEWAY_IMAGE="${image}" OCSERV_CONTROL_IMAGE="${image}"
 export OCSERV_TRANSPORT_IMAGE="${image}" OCSERV_BACKUP_IMAGE="${image}"
 export OCSERV_POSTGRES_IMAGE="${image}" OCSERV_OTEL_IMAGE="${image}"
 export OCSERV_PUBLIC_HOST=controller.example.com OCSERV_AUDIT_EVENT_KEY_ID=test-only
-export OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '%064d' 1)"
+OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '%064d' 1)"
+export OCSERV_CONTROLLER_ENDPOINT_ID
 export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test
 export OCSERV_RELAY_URL_A=https://relay-a.example.test OCSERV_RELAY_URL_B=
 unset OCSERV_OTEL_BACKEND_ENDPOINT
@@ -123,7 +124,7 @@ OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_PUBLIC_ORIGIN=https://custom.example.com \
     .OCSERV_OIDC_REDIRECT_URL == "https://custom.example.com/api/v1/auth/callback")' >/dev/null
 
 export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_PUBLIC_ORIGIN=https://controller.example.com
-export OCSERV_OIDC_ISSUER= OCSERV_OIDC_CLIENT_ID= OCSERV_OIDC_REDIRECT_URL=
+export OCSERV_OIDC_ISSUER='' OCSERV_OIDC_CLIENT_ID='' OCSERV_OIDC_REDIRECT_URL=''
 expect_failure() {
   if "$@" >"${work}/failure.log" 2>&1; then
     echo "unexpected success: $*" >&2

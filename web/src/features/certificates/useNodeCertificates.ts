@@ -19,8 +19,8 @@ import {
   beginNodeMutation,
   createNodeWorkflow,
   finishNodeMutation,
-  readNodeReceipt,
-  rememberNodeReceipt,
+  readNodeWorkflowReference,
+  rememberNodeWorkflowReference,
   waitForNodeMutation,
   waitForNodePoll,
   type NodeWorkflowContext,
@@ -52,7 +52,7 @@ export function useNodeCertificates({
   const certificateCommonName = ref("");
   const certificateDnsNames = ref("");
   const certificateReason = ref("");
-  const certificateApproval = ref("");
+  const certificateApprovalId = ref("");
   const certificateError = ref("");
   const certificateLoading = ref(false);
   const certificateWorkflow = createNodeWorkflow(
@@ -96,20 +96,20 @@ export function useNodeCertificates({
     certificateCommonName.value = commonName;
     certificateDnsNames.value = "";
     certificateReason.value = "";
-    certificateApproval.value = "";
+    certificateApprovalId.value = "";
     certificateError.value = "";
     certificateLoading.value = true;
     try {
       const pending = waitForNodeMutation(context, "certificate");
       if (pending) await pending;
       if (!certificateWorkflow.isCurrent(context)) return;
-      const receipt = readNodeReceipt(context, "certificate");
+      const reference = readNodeWorkflowReference(context, "certificate");
       const records = await listNodeCertificates(node.id, context.signal);
       if (!certificateWorkflow.isCurrent(context)) return;
       const record =
         records.find(
           (record) =>
-            record.id === receipt.resourceId && record.state !== "revoked",
+            record.id === reference.resourceId && record.state !== "revoked",
         ) ?? records.find((record) => record.state !== "revoked");
       if (record) {
         if (
@@ -124,11 +124,14 @@ export function useNodeCertificates({
       if (
         !certificateWorkflow.isCurrent(context) ||
         !record ||
-        receipt.resourceId !== record.id ||
-        !receipt.operationId
+        reference.resourceId !== record.id ||
+        !reference.operationId
       )
         return;
-      const operation = await getOperation(receipt.operationId, context.signal);
+      const operation = await getOperation(
+        reference.operationId,
+        context.signal,
+      );
       if (
         certificateWorkflow.isCurrent(context) &&
         operation.nodeId === context.nodeId
@@ -192,7 +195,7 @@ export function useNodeCertificates({
         keyBits: 3072,
         reason: certificateReason.value.trim(),
       });
-      rememberNodeReceipt(ticket, {
+      rememberNodeWorkflowReference(ticket, {
         resourceId: value.id,
         operationId: value.operationId,
       });
@@ -216,7 +219,7 @@ export function useNodeCertificates({
       !certificateWorkflow.isCurrent(context) ||
       certificateLoading.value ||
       !current ||
-      !certificateApproval.value.trim() ||
+      !certificateApprovalId.value.trim() ||
       !certificateReason.value.trim()
     )
       return;
@@ -226,10 +229,10 @@ export function useNodeCertificates({
     certificateError.value = "";
     try {
       const issued = await issueCertificate(current.id, {
-        approvalId: certificateApproval.value.trim(),
+        approvalId: certificateApprovalId.value.trim(),
         reason: certificateReason.value.trim(),
       });
-      rememberNodeReceipt(ticket, {
+      rememberNodeWorkflowReference(ticket, {
         resourceId: issued.id,
         operationId: issued.operationId,
       });
@@ -256,7 +259,7 @@ export function useNodeCertificates({
       !current ||
       !node ||
       !certificateReason.value.trim() ||
-      !certificateApproval.value.trim()
+      !certificateApprovalId.value.trim()
     )
       return;
     if (readCertificateGrant(context, current.id)?.downloadToken) return;
@@ -268,11 +271,11 @@ export function useNodeCertificates({
       const grant = await createCertificateP12(current.id, {
         expectedVersion: node.version,
         certificateVersion: current.version,
-        approvalId: certificateApproval.value.trim(),
+        approvalId: certificateApprovalId.value.trim(),
         reason: certificateReason.value.trim(),
       });
       rememberCertificateGrant(context, current.id, grant);
-      rememberNodeReceipt(ticket, {
+      rememberNodeWorkflowReference(ticket, {
         resourceId: current.id,
         operationId: grant.operation.id,
       });
@@ -345,7 +348,7 @@ export function useNodeCertificates({
       !current ||
       !node ||
       !certificateReason.value.trim() ||
-      !certificateApproval.value.trim()
+      !certificateApprovalId.value.trim()
     )
       return;
     const ticket = beginNodeMutation(context, "certificate");
@@ -356,10 +359,10 @@ export function useNodeCertificates({
       const operation = await revokeCertificate(current.id, {
         expectedVersion: node.version,
         certificateVersion: current.version,
-        approvalId: certificateApproval.value.trim(),
+        approvalId: certificateApprovalId.value.trim(),
         reason: certificateReason.value.trim(),
       });
-      rememberNodeReceipt(ticket, {
+      rememberNodeWorkflowReference(ticket, {
         resourceId: current.id,
         operationId: operation.id,
       });
@@ -387,7 +390,7 @@ export function useNodeCertificates({
     certificateCommonName,
     certificateDnsNames,
     certificateReason,
-    certificateApproval,
+    certificateApprovalId,
     certificateError,
     certificateLoading,
     openCertificate,

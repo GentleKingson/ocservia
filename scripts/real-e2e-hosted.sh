@@ -235,7 +235,7 @@ PATHINFO
   recovery-node-baseline|recovery-node-queued|recovery-node-result)
     phase="${1#recovery-node-}"
     input="$phase"
-    [[ "$phase" != result ]] || input=done
+    [[ "$phase" != result ]] || input='done'
     private_run "$1" bash "$ROOT/scripts/real-e2e-node.sh" "recovery-$phase" "$PRIVATE/recovery-controller-$input"
     cp "$WORK/outbox/recovery-node-$phase/result.json" "$EVIDENCE/recovery-$phase.json"
     ;;

@@ -557,7 +557,7 @@ describe("production overview isolation", () => {
       resolve(import.meta.dirname, "../src/views/OverviewView.vue"),
       "utf8",
     );
-    expect(source).not.toContain("useLocalSliceStore");
+    expect(source).not.toContain("useDevelopmentSimulationStore");
     expect(source).not.toContain("SimulationScenario");
     expect(source).not.toContain("createLocalSimulation");
     expect(source).not.toContain("run-probe");

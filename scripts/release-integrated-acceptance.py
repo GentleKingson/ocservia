@@ -17,7 +17,7 @@ import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-WORK = Path(os.environ['T07_WORK'])
+WORK = Path(os.environ['OCSERVIA_BUSINESS_TEST_WORK_DIR'])
 EVIDENCE = Path(os.environ['ARTIFACT_DIR'])
 CONTEXT = ssl.create_default_context(cafile=str(WORK / 'ca.crt'))
 COMPOSE = str(ROOT / 'deploy/production/compose.sh')
@@ -229,7 +229,7 @@ def public_relay():
 
 
 def revocation_check():
-    os.environ['T07_SIGNER_CONTAINER'] = container('signer')
+    os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER'] = container('signer')
     signer = module('release-production-signer')
     number = signer.export_crl()
     verify = run('openssl', 'verify', '-CAfile', WORK / 'signer-root.pem', '-untrusted', WORK / 'issuer.pem',
@@ -249,12 +249,12 @@ def rollback_and_upgrade(api, identities, identity_files):
     assert status == 200 and json.loads(body)['commit'] == os.environ['SOURCE_COMMIT']
     state = Path(os.environ['OCSERV_CONTROLLER_STATE_ROOT']) / 'current-release.json'
     baseline = json.loads(state.read_text())
-    os.environ['T07_SIGNER_IMAGE'] = baseline['images']['signer']
+    os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE'] = baseline['images']['signer']
     reverted = revocation_check()
     assert reverted > before and run('sha256sum', *identity_files).stdout == identities
     run(ROOT / 'deploy/production/controller.sh', 'upgrade', '--release-file',
         Path(os.environ['DEPLOYMENT_CONFIG_DIR']) / f"controller-release-{os.environ['CONTROLLER_ARCH']}.json")
-    os.environ['T07_SIGNER_IMAGE'] = os.environ['OCSERV_SIGNER_IMAGE']
+    os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE'] = os.environ['OCSERV_SIGNER_IMAGE']
     assert revocation_check() > reverted
     api.transport_ready()
     api.trust_controller()
@@ -282,10 +282,10 @@ def recovery():
     assert all(container(name) != value for name, value in old.items())
     api.transport_ready()
     api.trust_controller()
-    os.environ['T07_SIGNER_CONTAINER'] = container('signer')
+    os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER'] = container('signer')
     entry()
     rollback_and_upgrade(api, identities, identity_files)
-    node = os.environ['T07_NODE']
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     api.wait_for('established Agent reconnect after recreation',
                  lambda: api.api('nodes/' + node)['connection_state'] == 'online')
     approval = api.approval('service.reload', 'node', node)

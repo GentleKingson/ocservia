@@ -18,9 +18,9 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -235,7 +235,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		endpoint := sha256.Sum256(d.NodeID[:])
 		event := &transportv1.TransportEvent{EventId: id[:], NodeId: d.NodeID[:], EndpointId: endpoint[:],
 			Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: at, Traceparent: d.Traceparent, Payload: payload}
-		ingress := localslice.NewBackend(f.backend, f.signer)
+		ingress := transportevents.NewBackend(f.backend, f.signer)
 		for range 2 {
 			if err := ingress.Ingest(ctx, event); err != nil {
 				t.Fatal(err)
@@ -292,8 +292,8 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'PR04 other',$2,$3,$4)`,
-				`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'PR04 other',?,?,?)`, otherWorkspace, otherWorkspace.String(), at, at)
+			f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox other workspace',$2,$3,$4)`,
+				`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Outbox other workspace',?,?,?)`, otherWorkspace, otherWorkspace.String(), at, at)
 			node := uuid.Must(uuid.NewV7())
 			f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',$4,$5)`,
 				`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, node, otherWorkspace, node.String(), at, at)

@@ -25,7 +25,7 @@ func TestTwoPersonApprovalAndSingleConsumptionIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 	workspaceID, nodeID, requesterID, approverID, lateApproverID, requesterSession, approverSession, lateApproverSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'I12 approvals',$2,now(),now())`, workspaceID, "i12-"+workspaceID.String()); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Approval test',$2,now(),now())`, workspaceID, "approval-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'node','active',now(),now())`, nodeID, workspaceID); err != nil {

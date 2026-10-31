@@ -21,8 +21,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
-	localstore "github.com/GentleKingson/ocservia/control-plane/internal/localslice/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
+	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -37,7 +37,7 @@ func newLifecycleFixture(t *testing.T) lifecycleFixture {
 	t.Helper()
 	f := lifecycleFixture{enrollmentBackend(t), uuid.Must(uuid.NewV7())}
 	f.within(t, func(tx database.Tx) error {
-		s, err := localstore.Local(tx)
+		s, err := eventstore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -92,7 +92,7 @@ func (f lifecycleFixture) trust(t *testing.T, fn func(enrollmentstore.TrustStore
 func (f lifecycleFixture) job(t *testing.T) enrollmentstore.TrustJob {
 	t.Helper()
 	id := uuid.Must(uuid.NewV7())
-	v := enrollmentstore.TrustJob{NodeID: id, EndpointID: append(bytes.Clone(id[:]), id[:]...), DesiredState: "revoked", Revision: 2, Reason: "PR-05"}
+	v := enrollmentstore.TrustJob{NodeID: id, EndpointID: append(bytes.Clone(id[:]), id[:]...), DesiredState: "revoked", Revision: 2, Reason: "test trust revocation"}
 	f.within(t, func(tx database.Tx) error {
 		s, err := enrollmentstore.Enrollment(tx)
 		if err != nil {
@@ -759,7 +759,7 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 		other := uuid.Must(uuid.NewV7())
 		// Use the same database, creating another workspace through its store.
 		f.within(t, func(tx database.Tx) error {
-			store, err := localstore.Local(tx)
+			store, err := eventstore.FromTransaction(tx)
 			if err != nil {
 				return err
 			}

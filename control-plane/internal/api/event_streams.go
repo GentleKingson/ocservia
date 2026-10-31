@@ -13,7 +13,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 )
 
@@ -90,11 +90,11 @@ func (s *Server) fetchPlatformEvents(ctx context.Context, scope string, after uu
 	if err != nil || workspaceID.Version() != 7 {
 		return nil, errors.New("event watcher workspace is invalid")
 	}
-	service := s.localSliceService()
+	service := s.transportEventService()
 	if service == nil {
 		return nil, errors.New("platform event source is unavailable")
 	}
-	events, _, err := service.ListEventsInWorkspace(ctx, workspaceID, after, limit, localslice.ListEventsAscending)
+	events, _, err := service.ListEventsInWorkspace(ctx, workspaceID, after, limit, transportevents.ListEventsAscending)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func (s *Server) resolvePlatformEventCursor(ctx context.Context, scope string, c
 	if err != nil || workspaceID.Version() != 7 {
 		return 0, eventstream.ErrInvalidCursor
 	}
-	service := s.localSliceService()
+	service := s.transportEventService()
 	if service == nil {
 		return 0, errors.New("platform event source is unavailable")
 	}

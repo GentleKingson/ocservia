@@ -6,18 +6,24 @@
 // are never logged or exported as step outputs. Cache persistence is
 // optional, so a missing runtime token marks the cache unavailable and lets
 // the caller continue with a cold build.
-'use strict';
+"use strict";
 
-const fs = require('fs');
+const fs = require("fs");
 
-const relayed = ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_CACHE_URL', 'ACTIONS_RESULTS_URL'];
+const relayed = [
+  "ACTIONS_RUNTIME_TOKEN",
+  "ACTIONS_CACHE_URL",
+  "ACTIONS_RESULTS_URL",
+];
 const envFile = process.env.GITHUB_ENV;
 if (!envFile) {
-  console.warn('GITHUB_ENV is not available; continuing without BuildKit cache credentials');
+  console.warn(
+    "GITHUB_ENV is not available; continuing without BuildKit cache credentials",
+  );
   process.exit(0);
 }
 
-let payload = '';
+let payload = "";
 const values = new Map();
 for (const name of relayed) {
   const value = process.env[name];
@@ -29,18 +35,22 @@ for (const name of relayed) {
   console.log(`relayed ${name} to the job environment`);
 }
 const cacheAvailable =
-  values.has('ACTIONS_RUNTIME_TOKEN') &&
-  (values.has('ACTIONS_CACHE_URL') || values.has('ACTIONS_RESULTS_URL'));
+  values.has("ACTIONS_RUNTIME_TOKEN") &&
+  (values.has("ACTIONS_CACHE_URL") || values.has("ACTIONS_RESULTS_URL"));
 payload += `BUILD_CACHE_AVAILABLE<<BUILD_CACHE_CREDENTIALS_EOF\n${cacheAvailable}\nBUILD_CACHE_CREDENTIALS_EOF\n`;
 
 try {
   fs.appendFileSync(envFile, payload);
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  console.warn(`could not relay BuildKit cache credentials; continuing without cache: ${message}`);
+  console.warn(
+    `could not relay BuildKit cache credentials; continuing without cache: ${message}`,
+  );
   process.exit(0);
 }
 
 if (!cacheAvailable) {
-  console.warn('BuildKit cache credentials are unavailable; continuing with a cold build');
+  console.warn(
+    "BuildKit cache credentials are unavailable; continuing with a cold build",
+  );
 }

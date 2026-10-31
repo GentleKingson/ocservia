@@ -12,7 +12,7 @@
     "format": "prettier --write \"{src,test,e2e}/**/*.{ts,mjs,vue,css,json}\" \"*.{ts,json,html}\"",
     "format:check": "prettier --check \"{src,test,e2e}/**/*.{ts,mjs,vue,css,json}\" \"*.{ts,json,html}\"",
     "prelint": "npm --prefix src/api/generated run build",
-    "lint": "eslint src test e2e playwright.config.ts",
+    "lint": "eslint src test e2e \"*.config.ts\"",
     "test": "vitest run test",
     "test:e2e": "playwright test",
     "test:generated-auth": "node test/generated-client-auth.mjs",

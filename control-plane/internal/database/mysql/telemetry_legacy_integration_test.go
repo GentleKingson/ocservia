@@ -110,7 +110,7 @@ func TestRealTelemetryAutomaticLegacyMigration(t *testing.T) {
 	if err = b.GrantTestPrivileges(ctx); err != nil {
 		t.Fatal(err)
 	}
-	options.DSN = strings.Replace(options.DSN, "ocservia_owner:pr02-owner-test-only@", "ocservia_app:pr02-runtime-test-only@", 1)
+	options.DSN = strings.Replace(options.DSN, "ocservia_owner:database-e2e-owner-test-only@", "ocservia_app:database-e2e-runtime-test-only@", 1)
 	runtime, err := Open(ctx, options)
 	if err != nil {
 		t.Fatal(err)

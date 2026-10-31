@@ -37,7 +37,7 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	}
 	defer ownerPool.Close()
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'I14 test',$2,now(),now())`, workspaceID, "i14-"+workspaceID.String()); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'User operation test',$2,now(),now())`, workspaceID, "user-operation-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {

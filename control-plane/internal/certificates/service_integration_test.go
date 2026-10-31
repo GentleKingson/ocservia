@@ -24,8 +24,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -47,7 +47,7 @@ func newFixturePKI(t *testing.T) *fixturePKI {
 	if err != nil {
 		t.Fatal(err)
 	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "I17 Fixture CA"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Certificate Test CA"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
 		t.Fatal(err)
@@ -166,9 +166,9 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		query string
 		args  []any
 	}{
-		{`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'I17 test',$2,now(),now())`, []any{workspaceID, "i17-" + workspaceID.String()}},
+		{`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Certificate lifecycle test',$2,now(),now())`, []any{workspaceID, "certificate-" + workspaceID.String()}},
 		{`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'offline',1,now(),now())`, []any{nodeID, workspaceID, "node-" + nodeID.String()}},
-		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, []any{requesterID, "i17-requester-" + requesterID.String(), approverID, "i17-approver-" + approverID.String()}},
+		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, []any{requesterID, "certificate-requester-" + requesterID.String(), approverID, "certificate-approver-" + approverID.String()}},
 		{`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.certificate.issue',true),($1,'ocserv.certificate.revoke',true)`, []any{nodeID}},
 		{`INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at)VALUES($1,1,1,'fixture-user-key',decode(repeat('11',32),'hex'),now()),($1,2,1,'fixture-p12-key',decode(repeat('22',32),'hex'),now())`, []any{nodeID}},
 		{`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($1,$2,$3,'SecurityAdmin','node',$4,now()-interval '1 minute'),($5,$6,$3,'SecurityAdmin','node',$4,now()-interval '1 minute')`, []any{uuid.Must(uuid.NewV7()), approverID, workspaceID, nodeID, uuid.Must(uuid.NewV7()), requesterID}},
@@ -197,11 +197,11 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	commandSigner := commandauth.NewSignerFromSeed(commandSeed)
 	artifactTransport := &fixtureArtifacts{data: artifactBytes}
 	service := NewBackend(postgres.WrapPool(pool), operations.NewBackend(postgres.WrapPool(pool), 50, commandSigner), pki, pki, artifactTransport, commandSigner)
-	certificate, replayed, err := service.Create(ctx, CreateRequest{NodeID: nodeID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-csr", CommonName: "node.example.test", DNSNames: []string{"node.example.test"}, KeyBits: 2048, ActorID: requesterID.String(), Reason: "issue node certificate", RequestID: "i17-csr-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	certificate, replayed, err := service.Create(ctx, CreateRequest{NodeID: nodeID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "certificate-csr", CommonName: "node.example.test", DNSNames: []string{"node.example.test"}, KeyBits: 2048, ActorID: requesterID.String(), Reason: "issue node certificate", RequestID: "certificate-csr-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed {
 		t.Fatalf("create certificate replay=%v err=%v", replayed, err)
 	}
-	replayedCertificate, replayed, err := service.Create(ctx, CreateRequest{NodeID: nodeID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-csr", CommonName: "node.example.test", DNSNames: []string{"node.example.test"}, KeyBits: 2048, ActorID: requesterID.String(), Reason: "issue node certificate", RequestID: "i17-csr-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	replayedCertificate, replayed, err := service.Create(ctx, CreateRequest{NodeID: nodeID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "certificate-csr", CommonName: "node.example.test", DNSNames: []string{"node.example.test"}, KeyBits: 2048, ActorID: requesterID.String(), Reason: "issue node certificate", RequestID: "certificate-csr-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || !replayed || replayedCertificate.ID != certificate.ID {
 		t.Fatalf("replay certificate=%s want=%s replay=%v err=%v", replayedCertificate.ID, certificate.ID, replayed, err)
 	}
@@ -248,7 +248,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventID := uuid.Must(uuid.NewV7())
-	if err := localslice.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{
+	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
 		OccurredAt: timestamppb.New(completed), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: encodedCSRResult,
 	}); err != nil {
@@ -289,11 +289,11 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	p12ArtifactID := uuid.Must(uuid.NewV7())
 	p12ApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", p12ArtifactID)
-	grant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: p12ApprovalID, ArtifactRequestID: p12ArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-p12", Reason: "export certificate", RequestID: "p12-request", Traceparent: "00-1123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	grant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: p12ApprovalID, ArtifactRequestID: p12ArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12", Reason: "export certificate", RequestID: "p12-request", Traceparent: "00-1123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed || grant.Password == "" || grant.DownloadToken == "" {
 		t.Fatalf("grant=%+v replay=%v err=%v", grant, replayed, err)
 	}
-	replayedGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: p12ApprovalID, ArtifactRequestID: p12ArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-p12", Reason: "export certificate", RequestID: "p12-request", Traceparent: "00-1123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	replayedGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: p12ApprovalID, ArtifactRequestID: p12ArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12", Reason: "export certificate", RequestID: "p12-request", Traceparent: "00-1123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || !replayed || replayedGrant.ArtifactID != grant.ArtifactID || replayedGrant.Password != "" || replayedGrant.DownloadToken != "" {
 		t.Fatalf("replayed grant=%+v replay=%v err=%v", replayedGrant, replayed, err)
 	}
@@ -449,7 +449,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	staleArtifactID := uuid.Must(uuid.NewV7())
 	staleApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", staleArtifactID)
-	staleGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: staleApprovalID, ArtifactRequestID: staleArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-p12-stale", Reason: "test revision fence", RequestID: "p12-stale", Traceparent: "00-5123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	staleGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: staleApprovalID, ArtifactRequestID: staleArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "p12-stale", Reason: "test revision fence", RequestID: "p12-stale", Traceparent: "00-5123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +471,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	consumeFailureArtifactID := uuid.Must(uuid.NewV7())
 	consumeFailureApproval := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", consumeFailureArtifactID)
-	consumeFailureGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: consumeFailureApproval, ArtifactRequestID: consumeFailureArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-p12-consume-recovery", Reason: "test finalize recovery", RequestID: "p12-consume-recovery", Traceparent: "00-2123456789abcdef0123456789abcdef-1123456789abcdef-01"})
+	consumeFailureGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: consumeFailureApproval, ArtifactRequestID: consumeFailureArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12-consume-recovery", Reason: "test finalize recovery", RequestID: "p12-consume-recovery", Traceparent: "00-2123456789abcdef0123456789abcdef-1123456789abcdef-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +517,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	releasedArtifactID := uuid.Must(uuid.NewV7())
 	releasedApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", certificateAfterMaintenance.Version, "certificate_p12", releasedArtifactID)
-	releasedGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: releasedApprovalID, ArtifactRequestID: releasedArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-p12-released-lease", Reason: "test released lease recovery", RequestID: "p12-released-lease", Traceparent: "00-2923456789abcdef0123456789abcdef-1123456789abcdef-01"})
+	releasedGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: releasedApprovalID, ArtifactRequestID: releasedArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12-released-lease", Reason: "test released lease recovery", RequestID: "p12-released-lease", Traceparent: "00-2923456789abcdef0123456789abcdef-1123456789abcdef-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,7 +606,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	crashArtifactID := uuid.Must(uuid.NewV7())
 	crashApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", certificateAfterMaintenance.Version, "certificate_p12", crashArtifactID)
-	crashGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: crashApprovalID, ArtifactRequestID: crashArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-p12-crash-recovery", Reason: "test crash recovery", RequestID: "p12-crash-recovery", Traceparent: "00-3123456789abcdef0123456789abcdef-1123456789abcdef-01"})
+	crashGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: crashApprovalID, ArtifactRequestID: crashArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12-crash-recovery", Reason: "test crash recovery", RequestID: "p12-crash-recovery", Traceparent: "00-3123456789abcdef0123456789abcdef-1123456789abcdef-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,7 +648,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	expiredArtifactID := uuid.Must(uuid.NewV7())
 	expiredApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", expiredArtifactID)
-	expiredGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: expiredApprovalID, ArtifactRequestID: expiredArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-p12-expired", Reason: "expired export", RequestID: "p12-expired-request", Traceparent: "00-3123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	expiredGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: expiredApprovalID, ArtifactRequestID: expiredArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12-expired", Reason: "expired export", RequestID: "p12-expired-request", Traceparent: "00-3123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed {
 		t.Fatalf("expired fixture grant=%+v replay=%v err=%v", expiredGrant, replayed, err)
 	}
@@ -667,7 +667,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	hashArtifactID := uuid.Must(uuid.NewV7())
 	hashApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", hashArtifactID)
-	hashGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: hashApprovalID, ArtifactRequestID: hashArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-p12-hash", Reason: "integrity export", RequestID: "p12-hash-request", Traceparent: "00-4123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	hashGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: hashApprovalID, ArtifactRequestID: hashArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12-hash", Reason: "integrity export", RequestID: "p12-hash-request", Traceparent: "00-4123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed {
 		t.Fatalf("hash fixture grant=%+v replay=%v err=%v", hashGrant, replayed, err)
 	}
@@ -714,7 +714,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	afterExpiryArtifact := uuid.Must(uuid.NewV7())
 	afterExpiryApproval := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", expired.Version, "certificate_p12", afterExpiryArtifact)
-	afterExpiryDedupe := "i17-p12-after-expiry"
+	afterExpiryDedupe := "certificate-p12-after-expiry"
 	if _, _, err := service.CreateP12(ctx, P12Request{
 		CertificateID: certificate.ID, ApprovalID: afterExpiryApproval, ArtifactRequestID: afterExpiryArtifact,
 		CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession,
@@ -725,13 +725,13 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	pki.revokeUnavailable = true
 	revokeApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.revoke", expired.Version, "retire certificate", uuid.Nil)
-	op, replayed, err := service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ApprovalID: revokeApprovalID, CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	op, replayed, err := service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ApprovalID: revokeApprovalID, CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if !errors.Is(err, ErrSignerUnavailable) || replayed || op.ID == "" {
 		t.Fatalf("durable revoke=%+v replay=%v err=%v", op, replayed, err)
 	}
 	var revokeState string
 	var held bool
-	if err := pool.QueryRow(ctx, `SELECT c.state,o.available_at>now() FROM certificates c JOIN operations p ON p.workspace_id=c.workspace_id AND p.idempotency_key='i17-revoke' JOIN outbox_events o ON o.command_id=p.command_id WHERE c.id=$1`, certificate.ID).Scan(&revokeState, &held); err != nil || revokeState != "revocation_unknown" || !held {
+	if err := pool.QueryRow(ctx, `SELECT c.state,o.available_at>now() FROM certificates c JOIN operations p ON p.workspace_id=c.workspace_id AND p.idempotency_key='certificate-revoke' JOIN outbox_events o ON o.command_id=p.command_id WHERE c.id=$1`, certificate.ID).Scan(&revokeState, &held); err != nil || revokeState != "revocation_unknown" || !held {
 		t.Fatalf("durable revoke intent state=%q held=%v err=%v", revokeState, held, err)
 	}
 	pki.revokeUnavailable = false
@@ -741,7 +741,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err := operations.NewBackend(postgres.WrapPool(pool), 50, nil).Expire(ctx); err != nil {
 		t.Fatal(err)
 	}
-	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ApprovalID: revokeApprovalID, CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ApprovalID: revokeApprovalID, CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if !errors.Is(err, ErrNotReady) || !replayed || pki.revoked {
 		t.Fatalf("expired revoke retry=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)
 	}
@@ -750,7 +750,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(fetchErr)
 	}
 	recoveredApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.revoke", revocationUnknown.Version, "retire certificate", uuid.Nil)
-	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ApprovalID: recoveredApprovalID, CertificateVersion: revocationUnknown.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-revoke-recovered", Reason: "retire certificate", RequestID: "revoke-recovered", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ApprovalID: recoveredApprovalID, CertificateVersion: revocationUnknown.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-revoke-recovered", Reason: "retire certificate", RequestID: "revoke-recovered", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed || op.ID == "" || !pki.revoked {
 		t.Fatalf("recovered revoke=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)
 	}
@@ -783,7 +783,7 @@ func cleanupCertificateIntegration(ctx context.Context, pool *pgxpool.Pool, work
 	defer func() {
 		_, _ = pool.Exec(context.Background(), `ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only`)
 	}()
-	statements := []string{`DELETE FROM artifact_operations WHERE workspace_id=$1`, `DELETE FROM certificates WHERE workspace_id=$1`, `DELETE FROM secret_provider_refs WHERE workspace_id=$1`, `DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM transport_events WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM security_alerts WHERE workspace_id=$1`, `DELETE FROM approval_requests WHERE workspace_id=$1`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM role_bindings WHERE workspace_id=$1`, `DELETE FROM node_endpoint_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_sealing_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM identities WHERE issuer='test' AND subject LIKE 'i17-%'`, `DELETE FROM workspaces WHERE id=$1`}
+	statements := []string{`DELETE FROM artifact_operations WHERE workspace_id=$1`, `DELETE FROM certificates WHERE workspace_id=$1`, `DELETE FROM secret_provider_refs WHERE workspace_id=$1`, `DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM transport_events WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM security_alerts WHERE workspace_id=$1`, `DELETE FROM approval_requests WHERE workspace_id=$1`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM role_bindings WHERE workspace_id=$1`, `DELETE FROM node_endpoint_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_sealing_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM identities WHERE issuer='test' AND subject LIKE 'certificate-%'`, `DELETE FROM workspaces WHERE id=$1`}
 	for _, statement := range statements {
 		args := []any(nil)
 		if strings.Contains(statement, "$1") {

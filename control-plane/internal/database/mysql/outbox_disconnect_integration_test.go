@@ -27,17 +27,17 @@ func TestRealOutboxCommitDisconnect(t *testing.T) {
 				}
 				workspace, node := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 				at := fixtureTimestamp(t, time.Now().UTC())
-				if _, err := owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'PR04',?,?,?)`, UUIDBytes(workspace), workspace.String(), at, at); err != nil {
+				if _, err := owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Outbox transaction test',?,?,?)`, UUIDBytes(workspace), workspace.String(), at, at); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := owner.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'PR04','active',?,?)`, UUIDBytes(node), UUIDBytes(workspace), at, at); err != nil {
+				if _, err := owner.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'Outbox transaction test','active',?,?)`, UUIDBytes(node), UUIDBytes(workspace), at, at); err != nil {
 					t.Fatal(err)
 				}
 				cfg, err := driver.ParseDSN(options.DSN)
 				if err != nil {
 					t.Fatal(err)
 				}
-				cfg.User, cfg.Passwd = "ocservia_app", "pr02-runtime-test-only"
+				cfg.User, cfg.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
 				options.DSN = cfg.FormatDSN()
 				runtime, err := Open(ctx, options)
 				if err != nil {
@@ -49,7 +49,7 @@ func TestRealOutboxCommitDisconnect(t *testing.T) {
 					t.Fatal(err)
 				}
 				service := operations.NewBackend(runtime, 1, signer)
-				if _, _, err := service.Create(ctx, operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1, Kind: operations.SyntheticEcho, Message: "PR04", TTL: time.Minute, RequestID: uuid.NewString(), Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"}); err != nil {
+				if _, _, err := service.Create(ctx, operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1, Kind: operations.SyntheticEcho, Message: "Outbox transaction test", TTL: time.Minute, RequestID: uuid.NewString(), Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"}); err != nil {
 					t.Fatal(err)
 				}
 				var dispatch operations.Dispatch

@@ -28,14 +28,14 @@ import (
 func telemetryBackend(t *testing.T) database.Backend {
 	t.Helper()
 	ctx := context.Background()
-	if dsn := os.Getenv("PR02_DSN"); dsn != "" {
-		options := mysql.Options{Engine: mysql.Engine(os.Getenv("PR02_ENGINE")), Environment: "test", DSN: dsn}
+	if dsn := os.Getenv("OCSERVIA_DATABASE_TEST_DSN"); dsn != "" {
+		options := mysql.Options{Engine: mysql.Engine(os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE")), Environment: "test", DSN: dsn}
 		admin, err := mysql.Open(ctx, options)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { admin.Close() })
-		name := "pr02_ingest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		name := "dbtest_ingest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 		if _, err = admin.Exec(ctx, "CREATE DATABASE `"+name+"`"); err != nil {
 			t.Fatal(err)
 		}
@@ -51,7 +51,7 @@ func telemetryBackend(t *testing.T) database.Backend {
 		if err != nil {
 			t.Fatal("invalid test DSN")
 		}
-		config.DBName, config.User, config.Passwd = name, "ocservia_owner", "pr02-owner-test-only"
+		config.DBName, config.User, config.Passwd = name, "ocservia_owner", "database-e2e-owner-test-only"
 		options.DSN = config.FormatDSN()
 		owner, err := mysql.Open(ctx, options)
 		if err != nil {
@@ -74,7 +74,7 @@ func telemetryBackend(t *testing.T) database.Backend {
 		if err = owner.GrantTestPrivileges(ctx); err != nil {
 			t.Fatal(err)
 		}
-		config.User, config.Passwd = "ocservia_app", "pr02-runtime-test-only"
+		config.User, config.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
 		options.DSN = config.FormatDSN()
 		runtime, err := mysql.Open(ctx, options)
 		if err != nil {
@@ -85,7 +85,7 @@ func telemetryBackend(t *testing.T) database.Backend {
 	}
 	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("real PostgreSQL or PR02 database required")
+		t.Skip("real PostgreSQL or configured database test backend required")
 	}
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {

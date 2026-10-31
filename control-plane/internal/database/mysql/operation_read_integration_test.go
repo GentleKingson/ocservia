@@ -13,9 +13,9 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -51,7 +51,7 @@ func TestRealOperationReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.User, cfg.Passwd = "ocservia_app", "pr02-runtime-test-only"
+	cfg.User, cfg.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
 	options.DSN = cfg.FormatDSN()
 	backend, err := Open(ctx, options)
 	if err != nil {
@@ -116,7 +116,7 @@ func TestRealOperationReads(t *testing.T) {
 	if _, err := service.Get(ctx, uuid.Must(uuid.NewV7())); !errors.Is(err, database.ErrNotFound) {
 		t.Fatal("missing operation", err)
 	}
-	reader := localslice.NewBackend(backend, nil)
+	reader := transportevents.NewBackend(backend, nil)
 	local, err := reader.GetOperation(ctx, id)
 	if err != nil || local.CreatedAt != negative || local.UpdatedAt != positive || local.NodeID != nil || local.CommandID != nil {
 		t.Fatal("local logical detail", local, err)
@@ -164,7 +164,7 @@ func TestRealOperationIntentTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.User, cfg.Passwd = "ocservia_app", "pr02-runtime-test-only"
+	cfg.User, cfg.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
 	options.DSN = cfg.FormatDSN()
 	backend, err := Open(ctx, options)
 	if err != nil {

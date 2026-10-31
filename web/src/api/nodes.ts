@@ -7,7 +7,7 @@ import {
   type UserGroupStatePage,
 } from "@ocservia/api-client";
 import { configuration, requestInit } from "./transport";
-import { workspaceID } from "./workspace";
+import { getWorkspaceId } from "./workspace";
 
 const nodes = new NodesApi(configuration);
 
@@ -15,7 +15,7 @@ export async function listNodes(
   cursor?: string,
   signal?: AbortSignal,
 ): Promise<NodePage> {
-  const xWorkspaceID = await workspaceID();
+  const xWorkspaceID = await getWorkspaceId();
   return nodes.listNodes(
     cursor
       ? { xWorkspaceID, cursor, pageSize: 200 }

@@ -53,7 +53,7 @@ func TestLifecycleCleanup(t *testing.T) {
 }
 
 func TestLifecycleFailureDuringCancellation(t *testing.T) {
-	for _, name := range []string{"serve HTTP", "run local slice worker", "serve trust UDS", "run telemetry maintenance"} {
+	for _, name := range []string{"serve HTTP", "run transport event worker", "serve trust UDS", "run telemetry maintenance"} {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

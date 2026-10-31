@@ -255,7 +255,7 @@ func TestMySQLCutoverCrashRecovery(t *testing.T) {
 			proxy.occurrence.Store(test.occurrence)
 			cfg.Addr = proxy.listener.Addr().String()
 			child := exec.Command(os.Args[0], "-test.run=^TestCrashChild$", "-test.timeout=90s")
-			child.Env = append(os.Environ(), "PR02_CRASH_CHILD=yes", "PR02_DSN="+cfg.FormatDSN())
+			child.Env = append(os.Environ(), "OCSERVIA_DATABASE_TEST_MIGRATION_CRASH_CHILD=yes", "OCSERVIA_DATABASE_TEST_DSN="+cfg.FormatDSN())
 			if err = child.Start(); err != nil {
 				t.Fatal(err)
 			}

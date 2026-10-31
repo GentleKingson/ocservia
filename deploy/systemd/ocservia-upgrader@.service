@@ -5,6 +5,8 @@ Description=Ocservia durable standalone upgrade runner (%i)
 # never waits for - and never lives inside - the upgrade it authorized.
 # The runner validates the committed intent in the active binding namespace.
 # A fixed legacy path condition would suppress all upgrades after rebind.
+StartLimitIntervalSec=10min
+StartLimitBurst=6
 
 [Service]
 Type=exec
@@ -15,8 +17,6 @@ ExecStart=/usr/libexec/ocservia/ocservia-upgrader --operation %i
 # binaries skip the destructive lifecycle instead of repeating it.
 Restart=on-failure
 RestartSec=10s
-StartLimitIntervalSec=10min
-StartLimitBurst=6
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
