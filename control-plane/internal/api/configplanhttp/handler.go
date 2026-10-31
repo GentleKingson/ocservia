@@ -9,7 +9,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 )
 
@@ -150,17 +150,17 @@ func (h *Handler) applyConfigPlan(w http.ResponseWriter, r *http.Request) {
 
 func writeConfigPlanError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, configplan.ErrInvalid), errors.Is(err, operationstore.ErrInvalidRequest):
+	case errors.Is(err, configplan.ErrInvalid), errors.Is(err, operations.ErrInvalidRequest):
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/config-plan-invalid", "Configuration plan is invalid", "the template, variables, revision, or lifetime is invalid")
-	case errors.Is(err, configplan.ErrStaleRevision), errors.Is(err, operationstore.ErrStaleRevision):
+	case errors.Is(err, configplan.ErrStaleRevision), errors.Is(err, operations.ErrStaleRevision):
 		httpx.WriteProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/stale-revision", "Configuration revision is stale", "refresh configuration state and plan again")
 	case errors.Is(err, approvals.ErrNotReady):
 		httpx.WriteProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-not-ready", "Approval is not ready", "an unexpired independent approval for this exact plan is required")
-	case errors.Is(err, configplan.ErrCapability), errors.Is(err, operationstore.ErrCapabilityMissing):
+	case errors.Is(err, configplan.ErrCapability), errors.Is(err, operations.ErrCapabilityMissing):
 		httpx.WriteProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/capability-unavailable", "Capability is unavailable", "the node cannot validate this configuration")
-	case errors.Is(err, operationstore.ErrIdempotencyConflict):
+	case errors.Is(err, operations.ErrIdempotencyConflict):
 		httpx.WriteProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/idempotency-conflict", "Idempotency conflict", "the idempotency key was used for different configuration content")
-	case errors.Is(err, operationstore.ErrConfigApplyActive):
+	case errors.Is(err, operations.ErrConfigApplyActive):
 		httpx.WriteProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/config-apply-active", "Configuration apply already active", "wait for the active apply or its reconciliation to reach a terminal state")
 	case errors.Is(err, database.ErrNotFound):
 		httpx.WriteProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the configuration plan or node does not exist")

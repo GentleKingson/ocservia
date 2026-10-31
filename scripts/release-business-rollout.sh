@@ -4,11 +4,11 @@
 # patch version. It replaces the installed Agent, so nothing may follow it.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-: "${ARTIFACT_DIR:?}" "${VERSION:?}" "${T07_WORK:?}" "${T07_NODE:?}" "${PACKAGE_ARCH:?}"
+: "${ARTIFACT_DIR:?}" "${VERSION:?}" "${OCSERVIA_BUSINESS_TEST_WORK_DIR:?}" "${OCSERVIA_BUSINESS_TEST_NODE_ID:?}" "${PACKAGE_ARCH:?}"
 # shellcheck source=scripts/env.sh
 # shellcheck disable=SC1091
 source "$ROOT/scripts/env.sh"
-work="${T07_WORK}"
+work="${OCSERVIA_BUSINESS_TEST_WORK_DIR}"
 compose() { "${ROOT}/deploy/production/compose.sh" "$@"; }
 IFS=. read -r major minor patch <<<"$VERSION"
 export ROLLOUT_VERSION="${major}.${minor}.$((patch + 1))"

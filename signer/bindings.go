@@ -38,18 +38,18 @@ func validUUID(s string) bool {
 	id, err := uuid.Parse(s)
 	return err == nil && id != uuid.Nil && id.String() == s
 }
-func validDigest(s string) bool {
+func validLowerHex32Bytes(s string) bool {
 	b, e := hex.DecodeString(s)
 	return e == nil && len(b) == 32 && hex.EncodeToString(b) == s
 }
-func purpose(s string) bool { return s == "user_password" || s == "certificate_p12_password" }
+func validSealPurpose(s string) bool { return s == "user_password" || s == "certificate_p12_password" }
 
 func validateBinding(b binding) error {
-	if !validUUID(b.WorkspaceID) || !validUUID(b.NodeID) || !validUUID(b.ApprovalID) || !validDigest(b.ApprovalHash) || !validDigest(b.EndpointID) || b.ExportedAt.IsZero() || len(b.Keys) != 2 {
+	if !validUUID(b.WorkspaceID) || !validUUID(b.NodeID) || !validUUID(b.ApprovalID) || !validLowerHex32Bytes(b.ApprovalHash) || !validLowerHex32Bytes(b.EndpointID) || b.ExportedAt.IsZero() || len(b.Keys) != 2 {
 		return errors.New("invalid approved binding")
 	}
 	for _, k := range b.Keys {
-		if !purpose(k.Purpose) || k.Version != 1 || !validName(k.KeyID, 128) || !validDigest(k.Digest) || digest(k.DER) != k.Digest {
+		if !validSealPurpose(k.Purpose) || k.Version != 1 || !validName(k.KeyID, 128) || !validLowerHex32Bytes(k.Digest) || digest(k.DER) != k.Digest {
 			return errors.New("key descriptor mismatch")
 		}
 		pub, err := x509.ParsePKIXPublicKey(k.DER)

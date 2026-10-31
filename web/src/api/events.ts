@@ -4,7 +4,7 @@ import {
   type PlatformEventPage,
 } from "@ocservia/api-client";
 import { configuration, devAuthToken, requestInit } from "./transport";
-import { getWorkspace, workspaceID } from "./workspace";
+import { getWorkspace, getWorkspaceId } from "./workspace";
 
 const events = new EventsApi(configuration);
 export const platformEventsEvent = "ocservia:platform-events";
@@ -27,7 +27,7 @@ export async function listEvents(
   signal?: AbortSignal,
   order?: "asc" | "desc",
 ): Promise<PlatformEventPage> {
-  const xWorkspaceID = await workspaceID();
+  const xWorkspaceID = await getWorkspaceId();
   return events.listEvents(
     {
       xWorkspaceID,
@@ -42,7 +42,7 @@ export async function listEvents(
 export async function listAuditEvents(
   signal?: AbortSignal,
 ): Promise<AuditEventPage> {
-  const xWorkspaceID = await workspaceID();
+  const xWorkspaceID = await getWorkspaceId();
   return events.listAuditEvents(
     { xWorkspaceID, pageSize: 50 },
     requestInit(signal),

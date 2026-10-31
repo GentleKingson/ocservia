@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Probe one authorized public P1 fixture using its exact test CA and SNI."""
+"""Probe one authorized public integrated network fixture using its exact test CA and SNI."""
 import argparse
 import http.client
 import ipaddress
@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--candidate-sha", default='')
     args = parser.parse_args()
     assert ipaddress.ip_address(args.address).is_global, "a public IP is required"
-    context = ssl.create_default_context(cadata=os.environ["P1_PUBLIC_CA_PEM"])
+    context = ssl.create_default_context(cadata=os.environ["OCSERVIA_INTEGRATED_TEST_CA_PEM"])
 
     def request(name, path, extra="", method="GET", body=""):
         with socket.create_connection((args.address, 443), timeout=10) as sock:
@@ -58,14 +58,14 @@ def main():
         print(args.output.read_text())
         return
 
-    status, observed = request("controller.p1.test", "/api/ip")
+    status, observed = request("controller.integrated.test", "/api/ip")
     assert status == 200, status
     client_ip = ipaddress.ip_address(observed.strip())
     assert client_ip.is_global, f"not a public client source: {client_ip}"
-    status, spoofed = request("controller.p1.test", "/api/ip",
+    status, spoofed = request("controller.integrated.test", "/api/ip",
                               "X-Ocservia-Client-IP: 203.0.113.66\r\nX-Forwarded-For: 203.0.113.66\r\n")
     assert status == 200 and spoofed.strip() == str(client_ip), "forwarded source changed"
-    status, _ = request("relay.p1.test", "/healthz")
+    status, _ = request("relay.integrated.test", "/healthz")
     assert status == 200, status
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({

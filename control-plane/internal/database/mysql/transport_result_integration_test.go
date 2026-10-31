@@ -12,8 +12,8 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -39,7 +39,7 @@ func TestRealTransportResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.User, cfg.Passwd = "ocservia_app", "pr02-runtime-test-only"
+	cfg.User, cfg.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
 	options.DSN = cfg.FormatDSN()
 	backend, err := Open(ctx, options)
 	if err != nil {
@@ -51,7 +51,7 @@ func TestRealTransportResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	operations := operations.NewBackend(backend, 50, signer)
-	ingress := localslice.NewBackend(backend, signer)
+	ingress := transportevents.NewBackend(backend, signer)
 	worker := uuid.Must(uuid.NewV7())
 	trace := "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"
 	create := func() (uuid.UUID, uuid.UUID, *agentv1.CommandEnvelope) {

@@ -37,6 +37,10 @@ worker_flags = {
 reject("Basic CI triggers drifted") unless workflow.fetch(true).keys.sort == %w[pull_request push workflow_call workflow_dispatch]
 reject("reusable Basic CI must require an explicit profile") unless
   workflow.fetch(true).dig("workflow_call", "inputs", "profile") == {"type" => "string", "required" => true}
+%w[workflow_call workflow_dispatch].each do |trigger|
+  input = workflow.fetch(true).dig(trigger, "inputs", "contract_base_ref")
+  reject("manual/reusable contracts need one explicit baseline") unless input && input["type"] == "string" && input["required"] == true
+end
 reject("Basic CI permissions must be read-only") unless workflow.fetch("permissions") == {"contents" => "read"}
 worker_flags.each do |id, flag|
   condition = "needs.ci-relevance.outputs.#{flag} == 'true'"
@@ -86,10 +90,11 @@ require "json"
 require "open3"
 summary = result.fetch("steps").first.fetch("run")
 %w[quick full].each do |profile|
-  selections = profile == "full" ? [worker_flags.keys] : [%w[docs], %w[web], %w[rust], %w[go database-smoke], %w[ci_tools], %w[installers], %w[ci_tools installers], worker_flags.keys]
+  selections = profile == "full" ? [worker_flags.keys + ["ci_tools"]] : [%w[docs], %w[web], %w[rust], %w[go database-smoke], %w[ci_tools], %w[installers], %w[ci_tools installers], worker_flags.keys]
   selections.each do |selected|
     flags = worker_flags.to_h { |id, flag| [flag, selected.include?(id).to_s] }
     flags["run_ci_tools"] = selected.include?("ci_tools").to_s
+    flags["ci_suites"] = profile == "full" ? "source-style contracts" : (selected.include?("ci_tools") ? "guards" : "")
     flags["run_installers"] = selected.include?("installers").to_s
     flags["run_controller_cache"] = (selected.include?("web") || selected.include?("installers")).to_s
     selected = selected.dup
@@ -109,6 +114,13 @@ summary = result.fetch("steps").first.fetch("run")
         reject("summary accepted #{id}/#{state}") if check.call(broken)
       end
     end
+    if profile == "full"
+      %w[source-style contracts].each do |suite|
+        broken = Marshal.load(Marshal.dump(needs))
+        broken["ci-relevance"]["outputs"]["ci_suites"] = suite
+        reject("Full summary accepted an omitted style/contract suite") if check.call(broken)
+      end
+    end
     needs["ci-relevance"]["outputs"].delete("run_database")
     reject("summary accepted missing routing") if check.call(needs)
     needs["ci-relevance"]["outputs"]["run_database"] = flags["run_database"]
@@ -124,7 +136,17 @@ require "fileutils"
 standard = jobs.fetch("go").fetch("steps").find { |step| step["run"] == "scripts/go-check.sh standard" }
 reject("standard Go checks must follow run_go") unless standard && standard["if"] == "needs.ci-relevance.outputs.run_go == 'true'"
 reject("tool checks must receive the same Go selection") unless
-  guard.fetch("env") == {"CI_SUITES" => "${{ needs.ci-relevance.outputs.ci_suites }}", "CI_RUN_GO" => "${{ needs.ci-relevance.outputs.run_go }}"}
+  guard.fetch("env").slice("CI_SUITES", "CI_RUN_GO") == {"CI_SUITES" => "${{ needs.ci-relevance.outputs.ci_suites }}", "CI_RUN_GO" => "${{ needs.ci-relevance.outputs.run_go }}"}
+reject("contract baseline must use event history or the manual input") unless
+  guard.fetch("env").fetch("CONTRACT_BASE_REF") == "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || inputs.contract_base_ref }}"
+reject("contract PR comparison must receive the actual head") unless
+  guard.fetch("env").fetch("CONTRACT_HEAD_SHA") == "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" &&
+  guard.fetch("env").fetch("CONTRACT_EVENT") == "${{ github.event_name }}"
+%w[source-style contracts].each do |suite|
+  step = jobs.fetch("go").fetch("steps").find { |item| item["run"] == "scripts/bootstrap.sh #{suite}" }
+  reject("#{suite} dependencies must follow their exact suite") unless step &&
+    step["if"] == "contains(needs.ci-relevance.outputs.ci_suites, '#{suite}')"
+end
 Dir.mktmpdir("ci-entrypoints-") do |tmp|
   work = File.join(tmp, "work")
   files = Dir.glob(File.join(root, "scripts", "*")).select { |path| File.file?(path) }
@@ -149,6 +171,19 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
     end
     File.write(path, stub)
   end
+  # These fixture dispatches prove selection and order; each actual tool is
+  # checked by its owning suite, not downloaded into this offline fixture.
+  %w[lint.sh check-breaking.sh generated-clean.sh].each do |name|
+    File.write(File.join(work, "scripts", name), "#!/usr/bin/env bash\nprintf '%s|%s\\n' \"${0##*/}\" \"$*\" >> \"${CI_TRACE}\"\n")
+  end
+  %w[init config].each do |operation|
+    args = operation == "init" ? ["init", "-q"] : ["config", "user.name", "fixture"]
+    raise "fixture Git failed" unless system("git", "-C", work, *args)
+  end
+  raise "fixture identity failed" unless system("git", "-C", work, "config", "user.email", "fixture@invalid")
+  raise "fixture baseline failed" unless system("git", "-C", work, "commit", "--allow-empty", "-qm", "base")
+  work_base = Open3.capture2("git", "-C", work, "rev-parse", "HEAD").first.strip
+  raise "fixture candidate failed" unless system("git", "-C", work, "commit", "--allow-empty", "-qm", "candidate")
   %w[bin control-plane signer].each { |path| FileUtils.mkdir_p(File.join(work, path)) }
   %w[go gofmt].each do |name|
     path = File.join(work, "bin", name)
@@ -191,9 +226,10 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
       routing.fetch("run_go") == (!["Release-only", "shared tooling"].include?(name)).to_s
     trace = File.join(tmp, "trace")
     File.write(trace, "")
-    env = guard.fetch("env").transform_values do |value|
+    env = guard.fetch("env").slice("CI_SUITES", "CI_RUN_GO").transform_values do |value|
       routing.fetch(value.delete_prefix("${{ needs.ci-relevance.outputs.").delete_suffix(" }}"))
-    end.merge("CI_TRACE" => trace, "PATH" => File.join(work, "bin") + ":" + ENV.fetch("PATH"))
+    end.merge("CI_TRACE" => trace, "PATH" => File.join(work, "bin") + ":" + ENV.fetch("PATH"),
+              "CONTRACT_BASE_REF" => work_base, "CONTRACT_EVENT" => "workflow_dispatch")
     reject("#{name} omitted tool contracts") unless routing.fetch("run_ci_tools") == "true"
     run.call(env, "bash", "-eo", "pipefail", "-c", guard.fetch("run"), chdir: work)
     reject("#{name} tool suite duplicated standard Go checks") if
@@ -207,6 +243,24 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
       %w[test-build-cache-credentials.sh test-buildx-cache-fallback.sh test-secret-scan-config.sh].all? { |test| calls.count(test) == 1 }
     reject("#{name} skipped offline Cross-VM contracts") if name == "shared bootstrap" &&
       !%w[test-real-e2e-hosted.py test-real-e2e-business.py test-real-e2e-artifact.sh].all? { |test| calls.count(test) == 1 }
+    if name == "shared bootstrap"
+      expected = ["lint.sh|source-style", "lint.sh|contracts", "check-breaking.sh|#{work_base}", "generated-clean.sh|"]
+      reject("contract suite order or single execution drifted") unless calls.grep(/^(lint|check-breaking|generated-clean)\.sh\|/) == expected
+      # A diverged PR base must compare from the common ancestor, not the
+      # base branch tip or the synthetic candidate checkout.
+      head = run.call({}, "git", "-C", work, "rev-parse", "HEAD").strip
+      tree = run.call({}, "git", "-C", work, "rev-parse", "#{work_base}^{tree}").strip
+      diverged = run.call({}, "git", "-C", work, "commit-tree", tree, "-p", work_base, "-m", "base-branch-only").strip
+      File.write(trace, "")
+      pr_env = env.merge("CI_SUITES" => "contracts", "CONTRACT_EVENT" => "pull_request",
+                         "CONTRACT_BASE_REF" => diverged, "CONTRACT_HEAD_SHA" => head)
+      run.call(pr_env, "bash", "-eo", "pipefail", "-c", guard.fetch("run"), chdir: work)
+      reject("PR contract comparison did not use its merge base") unless
+        File.readlines(trace, chomp: true) == expected.drop(1)
+      _, missing_status = Open3.capture2e(env.merge("CI_SUITES" => "contracts", "CONTRACT_BASE_REF" => ""),
+                                         "bash", "-eo", "pipefail", "-c", guard.fetch("run"), chdir: work)
+      reject("manual contracts accepted an omitted baseline") if missing_status.success?
+    end
     if name == "Release-only"
 
       reject("Release-only must not run unrelated guards") if calls.include?("test-bootstrap-profiles.sh")
@@ -239,6 +293,8 @@ stubs = bootstrap.scan(/^(install_\w+|verify_\w+)\(\)/).flatten.map do |name|
   "#{name}() { echo #{name}; }"
 end.join("\n")
 {
+  "source-style" => %w[verify_host_command verify_host_command install_ruff],
+  "contracts" => %w[install_node install_npm install_contract_tools verify_java install_web_dependencies],
   "go-security" => %w[install_go install_govulncheck],
   "rust-security" => %w[install_rust install_cargo_audit install_cargo_deny],
   "npm-security" => %w[install_node install_npm],
@@ -283,12 +339,12 @@ reject("release publishing must retain contents write as a job-local permission"
 RUBY
 
 for script in \
-  i14-quota-expiry-backport.sh \
-  i15-config-plan.sh \
-  i16-config-apply.sh \
-  i17-certificate-secret.sh \
-  i18-production-relays.sh \
-  i19-five-minute-offline-recovery.sh; do
+  quota-expiry-check.sh \
+  config-plan-check.sh \
+  config-apply-check.sh \
+  certificate-secret-check.sh \
+  production-runtime-smoke.sh \
+  five-minute-offline-recovery.sh; do
   if "${ROOT}/scripts/${script}" --unsupported >/dev/null 2>&1; then
     echo "${script} accepted an unsupported execution mode" >&2
     exit 1

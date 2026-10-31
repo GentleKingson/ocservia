@@ -7,11 +7,11 @@ import PageHeader from "../components/common/PageHeader.vue";
 import SectionCard from "../components/common/SectionCard.vue";
 import StatusBadge from "../components/common/StatusBadge.vue";
 import { Button } from "../components/ui/button";
-import { useLocalSliceStore } from "../shared/localSlice";
+import { useDevelopmentSimulationStore } from "../shared/development-simulation";
 import { useReadinessStore } from "../shared/readiness";
 
 const readiness = useReadinessStore();
-const slice = useLocalSliceStore();
+const simulation = useDevelopmentSimulationStore();
 const mode = ref<"normal" | "duplicate" | "error" | "disconnect">("normal");
 
 const scenarios: Record<typeof mode.value, SimulationScenario> = {
@@ -26,8 +26,8 @@ const scenarios: Record<typeof mode.value, SimulationScenario> = {
 };
 
 onMounted(async () => {
-  await slice.rebuild();
-  void slice.connect();
+  await simulation.rebuild();
+  void simulation.connect();
 });
 
 function eventLabel(type: string): string {
@@ -72,13 +72,13 @@ function timeLabel(value: string): string {
           },
           {
             label: 'activeNodes',
-            value: slice.activeNodes,
+            value: simulation.activeNodes,
             icon: Workflow,
             testid: 'active-nodes',
           },
           {
             label: 'pendingOperations',
-            value: slice.pendingOperations,
+            value: simulation.pendingOperations,
             icon: Clock3,
             testid: 'pending-operations',
           },
@@ -131,17 +131,17 @@ function timeLabel(value: string): string {
         <Button
           type="button"
           size="icon-sm"
-          :disabled="slice.running"
+          :disabled="simulation.running"
           :title="$t('runProbe')"
           :aria-label="$t('runProbe')"
           data-testid="run-probe"
-          @click="slice.run(scenarios[mode])"
+          @click="simulation.run(scenarios[mode])"
         >
           <Play fill="currentColor" aria-hidden="true" />
         </Button>
       </template>
       <div
-        v-if="slice.events.length === 0"
+        v-if="simulation.events.length === 0"
         class="text-muted-foreground grid min-h-40 place-content-center justify-items-center gap-2.5 text-sm"
       >
         <Clock3 class="size-6" aria-hidden="true" /><span>{{
@@ -154,7 +154,7 @@ function timeLabel(value: string): string {
         data-testid="event-list"
       >
         <li
-          v-for="event in [...slice.events].reverse()"
+          v-for="event in [...simulation.events].reverse()"
           :key="event.id"
           class="border-border text-muted-foreground grid min-h-12 grid-cols-[minmax(92px,1fr)_auto] items-center gap-4 border-b text-xs last:border-b-0 md:grid-cols-[minmax(110px,1fr)_minmax(80px,1fr)_auto]"
         >

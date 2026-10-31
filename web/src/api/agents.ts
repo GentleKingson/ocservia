@@ -6,7 +6,7 @@ import {
   type AgentRolloutPage,
 } from "@ocservia/api-client";
 import { configuration, newIdempotencyKey, requestInit } from "./transport";
-import { workspaceID } from "./workspace";
+import { getWorkspaceId } from "./workspace";
 
 const operations = new OperationsApi(configuration);
 
@@ -46,7 +46,7 @@ export async function createAgentRollout(
   return operations.createAgentRollout(
     {
       idempotencyKey: newIdempotencyKey(),
-      xWorkspaceID: await workspaceID(),
+      xWorkspaceID: await getWorkspaceId(),
       agentRolloutCreateRequest: {
         targetVersion,
         nodeIds,
@@ -63,7 +63,7 @@ export async function listAgentRollouts(
   limit?: number,
   signal?: AbortSignal,
 ): Promise<AgentRolloutPage> {
-  const xWorkspaceID = await workspaceID();
+  const xWorkspaceID = await getWorkspaceId();
   return operations.listAgentRollouts(
     limit === undefined ? { xWorkspaceID } : { xWorkspaceID, limit },
     requestInit(signal),
@@ -76,7 +76,7 @@ export async function getAgentRollout(
 ): Promise<AgentRollout> {
   return operations.getAgentRollout(
     {
-      xWorkspaceID: await workspaceID(),
+      xWorkspaceID: await getWorkspaceId(),
       rolloutId,
     },
     requestInit(signal),
@@ -90,7 +90,7 @@ export async function resumeAgentRollout(
   return operations.resumeAgentRollout(
     {
       idempotencyKey: newIdempotencyKey(),
-      xWorkspaceID: await workspaceID(),
+      xWorkspaceID: await getWorkspaceId(),
       rolloutId,
     },
     requestInit(signal),

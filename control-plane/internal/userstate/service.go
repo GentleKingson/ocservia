@@ -20,7 +20,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationdata "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
@@ -119,92 +119,92 @@ func commitFenced(ctx context.Context, tx database.Tx) error {
 	return tx.Commit(ctx)
 }
 
-func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operationstore.Operation, bool, error) {
+func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operations.Operation, bool, error) {
 	if err := validateMutation(request); err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	request.Members = normalizeMembers(request.Members)
 	hash := requestHash(request)
 	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
-		return operationstore.Operation{}, false, fmt.Errorf("begin desired state transaction: %w", err)
+		return operations.Operation{}, false, fmt.Errorf("begin desired state transaction: %w", err)
 	}
 	defer rollback(tx)
 	users, err := userstore.From(tx)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
-	operations, err := operationdata.FromTransaction(tx)
+	operationStore, err := operationdata.FromTransaction(tx)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
-	node, err := operations.LockNode(ctx, request.NodeID)
+	node, err := operationStore.LockNode(ctx, request.NodeID)
 	if errors.Is(err, database.ErrNotFound) {
-		return operationstore.Operation{}, false, ErrNodeUnavailable
+		return operations.Operation{}, false, ErrNodeUnavailable
 	}
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	if node.Status != "active" && node.Status != "offline" {
-		return operationstore.Operation{}, false, ErrNodeUnavailable
+		return operations.Operation{}, false, ErrNodeUnavailable
 	}
 	workspaceID := node.WorkspaceID
 	if request.SealedPassword != nil {
 		registered, err := users.HasSealingKey(ctx, request.NodeID, request.SealedPassword.Version, request.SealedPassword.KeyID)
 		if err != nil {
-			return operationstore.Operation{}, false, err
+			return operations.Operation{}, false, err
 		}
 		if !registered {
-			return operationstore.Operation{}, false, ErrInvalidRequest
+			return operations.Operation{}, false, ErrInvalidRequest
 		}
 	}
 	if existing, same, err := findIdempotent(ctx, tx, workspaceID, request.IdempotencyKey, hash[:]); err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	} else if existing.ID != "" {
 		if !same {
-			return operationstore.Operation{}, false, ErrIdempotencyConflict
+			return operations.Operation{}, false, ErrIdempotencyConflict
 		}
 		if err := commitFenced(ctx, tx); err != nil {
-			return operationstore.Operation{}, false, err
+			return operations.Operation{}, false, err
 		}
 		return existing, true, nil
 	}
-	approved, err := operations.HasCapability(ctx, request.NodeID, capabilityFor(request.Kind))
+	approved, err := operationStore.HasCapability(ctx, request.NodeID, capabilityFor(request.Kind))
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	if !approved {
-		return operationstore.Operation{}, false, ErrCapabilityMissing
+		return operations.Operation{}, false, ErrCapabilityMissing
 	}
 	currentVersion, currentRevision, err := lockDesired(ctx, users, request)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	if currentVersion != request.ExpectedVersion {
-		return operationstore.Operation{}, false, ErrVersionConflict
+		return operations.Operation{}, false, ErrVersionConflict
 	}
 	resourceType := resourceTypeFor(request.Kind)
 	replaceRevision, err := revisionReplacement(ctx, users, request.NodeID, resourceType, request.Name, request.Kind, currentRevision)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	if request.Kind == UserCreate && currentVersion > 0 && !replaceRevision {
-		return operationstore.Operation{}, false, ErrVersionConflict
+		return operations.Operation{}, false, ErrVersionConflict
 	}
 	now := s.now()
 	created, err := value.FromTime(now)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	if err := ensureMutationCapacity(ctx, users, request, currentVersion == 0, now); err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	coalesced, err := supersedePending(ctx, users, request.NodeID, resourceType, request.Name, request.Kind, currentRevision, created)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	if err := commandlimit.ReserveBacklog(ctx, tx, workspaceID, request.NodeID); err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	nextVersion, nextRevision := currentVersion+1, currentRevision+1
 	commandExpectedRevision := currentRevision
@@ -218,35 +218,35 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 		if errors.Is(err, database.ErrNotFound) {
 			err = ErrNotFound
 		}
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	operationID, commandID, outboxID, auditID, eventID, err := newIDs()
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	expiresAt := now.Add(request.TTL)
 	expiry, err := value.FromTime(expiresAt)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	envelope, err := marshalEnvelope(request, operationID, commandID, node.AuthorizationRevision, uint64(nextRevision), now, expiresAt, s.signer)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
-	if err := operations.InsertIntent(ctx, operationdata.QueuedIntent{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, CommandID: commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey, RequestHash: hash[:], ExpiresAt: expiry, CreatedAt: created}); err != nil {
-		return operationstore.Operation{}, false, fmt.Errorf("insert user operation: %w", err)
+	if err := operationStore.InsertIntent(ctx, operationdata.QueuedIntent{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, CommandID: commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey, RequestHash: hash[:], ExpiresAt: expiry, CreatedAt: created}); err != nil {
+		return operations.Operation{}, false, fmt.Errorf("insert user operation: %w", err)
 	}
-	if err := operations.EnqueueCommand(ctx, operationdata.QueuedCommand{ID: commandID, OperationID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, OutboxID: outboxID, EventID: eventID, PayloadType: string(request.Kind), IdempotencyKey: request.IdempotencyKey, Traceparent: request.Traceparent, Envelope: envelope, ExpectedVersion: commandExpectedRevision, ExpiresAt: expiry, CreatedAt: created, AvailableAt: created, ResourceType: &resourceType, ResourceKey: &request.Name}); err != nil {
-		return operationstore.Operation{}, false, fmt.Errorf("insert user command: %w", err)
+	if err := operationStore.EnqueueCommand(ctx, operationdata.QueuedCommand{ID: commandID, OperationID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, OutboxID: outboxID, EventID: eventID, PayloadType: string(request.Kind), IdempotencyKey: request.IdempotencyKey, Traceparent: request.Traceparent, Envelope: envelope, ExpectedVersion: commandExpectedRevision, ExpiresAt: expiry, CreatedAt: created, AvailableAt: created, ResourceType: &resourceType, ResourceKey: &request.Name}); err != nil {
+		return operations.Operation{}, false, fmt.Errorf("insert user command: %w", err)
 	}
 	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: actionFor(request.Kind), ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), Reason: request.Reason, At: now}); err != nil {
-		return operationstore.Operation{}, false, fmt.Errorf("append desired state audit intent: %w", err)
+		return operations.Operation{}, false, fmt.Errorf("append desired state audit intent: %w", err)
 	}
 	if err := commitFenced(ctx, tx); err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	nodeText, commandText := request.NodeID.String(), commandID.String()
-	return operationstore.Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: created, UpdatedAt: created, ExpiresAt: &expiry}, false, nil
+	return operations.Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: created, UpdatedAt: created, ExpiresAt: &expiry}, false, nil
 }
 
 func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, error) {
@@ -543,10 +543,10 @@ func convergence(item ResourceState, nodeStatus string) string {
 	return "drifted"
 }
 
-func findIdempotent(ctx context.Context, tx database.Tx, workspaceID uuid.UUID, key string, hash []byte) (operationstore.Operation, bool, error) {
+func findIdempotent(ctx context.Context, tx database.Tx, workspaceID uuid.UUID, key string, hash []byte) (operations.Operation, bool, error) {
 	store, err := operationdata.FromTransaction(tx)
 	if err != nil {
-		return operationstore.Operation{}, false, err
+		return operations.Operation{}, false, err
 	}
 	return store.FindIdempotent(ctx, workspaceID, key, hash)
 }

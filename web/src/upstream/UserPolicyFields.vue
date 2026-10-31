@@ -93,11 +93,11 @@ function update<K extends keyof UserPolicyForm>(
     >
       <Input
         id="expires-at"
-        :type="expiryInputType(modelValue.expiresAtLocal)"
+        :type="expiryInputType(modelValue.expiresAtUtcInput)"
         step="1"
         :aria-describedby="describedBy"
-        :model-value="modelValue.expiresAtLocal"
-        @update:model-value="update('expiresAtLocal', String($event))"
+        :model-value="modelValue.expiresAtUtcInput"
+        @update:model-value="update('expiresAtUtcInput', String($event))"
       />
     </FormField>
   </fieldset>

@@ -47,7 +47,7 @@ port="$(docker port "${name}" 5432/tcp | sed 's/127.0.0.1://')"
 export OCSERV_TEST_OWNER_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
 export OCSERV_TEST_DATABASE_URL="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
 export OCSERV_TEST_SNAPSHOT_DATABASE_URL="${OCSERV_TEST_OWNER_DATABASE_URL}"
-unset PR02_DSN PR02_ENGINE
+unset OCSERVIA_DATABASE_TEST_DSN OCSERVIA_DATABASE_TEST_ENGINE
 cd "${ROOT}/control-plane"
 bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke
 docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'CREATE DATABASE initialization_smoke' >/dev/null

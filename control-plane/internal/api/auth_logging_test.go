@@ -76,12 +76,12 @@ func TestAuthLogKindsAndBoundedFields(t *testing.T) {
 	b := captureAuthLogs(s)
 	id := uuid.New()
 	r := httptest.NewRequest("POST", "/api/v1/auth/login", nil)
-	r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, "request-r6"))
+	r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, "auth-log-request"))
 	for kind := authLogKind(0); kind < authLogKinds; kind++ {
 		s.logAuth(r, kind, id, "")
 		d := authLogDefinitions[kind]
 		record := assertAuthLog(t, b, d.method, d.outcome, d.reason)
-		if record["request_id"] != "request-r6" {
+		if record["request_id"] != "auth-log-request" {
 			t.Fatal("request correlation missing")
 		}
 		if d.outcome == "succeeded" && record["identity_id"] != id.String() {
@@ -93,12 +93,12 @@ func TestAuthLogKindsAndBoundedFields(t *testing.T) {
 	}
 	for _, username := range []string{"bad\r\nforged-event", strings.Repeat("x", 8000)} {
 		b.Reset()
-		body, _ := json.Marshal(map[string]string{"username": username, "password": "password-bait-r6"})
+		body, _ := json.Marshal(map[string]string{"username": username, "password": "password-log-bait"})
 		r := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(body))
 		r.Header.Set("Origin", authTestOrigin)
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("X-Request-ID", "injected\r\n"+strings.Repeat("z", 500))
-		r.Header.Set("Cookie", "session-bait-r6")
+		r.Header.Set("Cookie", "session-log-bait")
 		w := httptest.NewRecorder()
 		s.http.Handler.ServeHTTP(w, r)
 		if w.Code != 401 {
@@ -108,7 +108,7 @@ func TestAuthLogKindsAndBoundedFields(t *testing.T) {
 		if record["account_ref"] != "invalid" || record["request_id"] != w.Header().Get("X-Request-ID") || b.Len() > 700 || bytes.Count(b.Bytes(), []byte("\n")) != 1 {
 			t.Fatal("unbounded or injected log")
 		}
-		assertNoAuthSecrets(t, b, username, "password-bait-r6", "session-bait-r6", "injected")
+		assertNoAuthSecrets(t, b, username, "password-log-bait", "session-log-bait", "injected")
 	}
 }
 
@@ -222,12 +222,12 @@ func TestAuthLogFailureAndInfrastructure(t *testing.T) {
 	pool.Close()
 	s := newAuthHTTPServer(t, pool, true, "")
 	b := captureAuthLogs(s)
-	w := authHTTPRequest(s, "POST", "login", `{"username":"valid-name","password":"password-bait-r6"}`, authTestOrigin)
+	w := authHTTPRequest(s, "POST", "login", `{"username":"valid-name","password":"password-log-bait"}`, authTestOrigin)
 	if w.Code != 503 || len(w.Result().Cookies()) != 0 {
 		t.Fatal("infrastructure failure authorized")
 	}
 	assertAuthLog(t, b, "local", "unavailable", "infrastructure_failure")
-	assertNoAuthSecrets(t, b, "db-connection-bait", "password-bait-r6", "valid-name")
+	assertNoAuthSecrets(t, b, "db-connection-bait", "password-log-bait", "valid-name")
 	for _, panics := range []bool{false, true} {
 		s := newAuthHTTPServer(t, nil, true, "https://idp.example.test")
 		s.logger = slog.New(brokenAuthHandler{panic: panics})
@@ -241,7 +241,7 @@ func TestAuthLogFailureAndInfrastructure(t *testing.T) {
 				t.Fatal("logger failure changed rejection")
 			}
 		}
-		if w := authHTTPRequest(s, "GET", "callback?code=code-bait-r6", "", ""); w.Code != http.StatusUnauthorized {
+		if w := authHTTPRequest(s, "GET", "callback?code=authorization-code-log-bait", "", ""); w.Code != http.StatusUnauthorized {
 			t.Fatal("logger failure changed callback")
 		}
 	}
@@ -249,7 +249,7 @@ func TestAuthLogFailureAndInfrastructure(t *testing.T) {
 
 func TestAuthLogOIDCStartFailureRedacted(t *testing.T) {
 	idp := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "client-secret-bait-r6 id-token-bait-r6", 503)
+		http.Error(w, "client-secret-log-bait id-token-log-bait", 503)
 	}))
 	defer idp.Close()
 	s := newAuthHTTPServer(t, nil, false, idp.URL)
@@ -262,7 +262,7 @@ func TestAuthLogOIDCStartFailureRedacted(t *testing.T) {
 		t.Fatal("failed discovery issued login")
 	}
 	assertAuthLog(t, b, "oidc", "unavailable", "start_failed")
-	assertNoAuthSecrets(t, b, "client-secret-bait-r6", "id-token-bait-r6", idp.URL)
+	assertNoAuthSecrets(t, b, "client-secret-log-bait", "id-token-log-bait", idp.URL)
 }
 
 func TestAuthLogSessionFailureIntegration(t *testing.T) {
@@ -283,12 +283,12 @@ func TestAuthLogSessionFailureIntegration(t *testing.T) {
 	defer owner.Close()
 	s := newAuthHTTPServer(t, pool, true, "")
 	b := captureAuthLogs(s)
-	name, password := "r6-"+uuid.NewString(), "r6-session-password-bait"
+	name, password := "auth-log-"+uuid.NewString(), "session-password-log-bait"
 	id, err := s.auth.CreateLocalCredential(ctx, name, password)
 	if err != nil {
 		t.Fatal(err)
 	}
-	constraint := "r6_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	constraint := "auth_log_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	if _, err := owner.Exec(ctx, `ALTER TABLE auth_sessions ADD CONSTRAINT `+constraint+` CHECK (identity_id <> '`+id.String()+`'::uuid) NOT VALID`); err != nil {
 		t.Fatal(err)
 	}

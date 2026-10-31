@@ -194,14 +194,14 @@ test("switching workspace clears fleet state and reconnects its stream", async (
         return {
           count: sources.length,
           firstClosed: sources[0]?.closed,
-          latestURL: sources.at(-1)?.url,
+          latestUrl: sources.at(-1)?.url,
         };
       }),
     )
     .toMatchObject({
       count: 2,
       firstClosed: true,
-      latestURL: expect.stringContaining(`workspace_id=${betaId}`),
+      latestUrl: expect.stringContaining(`workspace_id=${betaId}`),
     });
 });
 

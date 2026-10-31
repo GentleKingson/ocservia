@@ -110,7 +110,7 @@ func run() error {
 		if json.Unmarshal(b, &p) != nil {
 			return errors.New("invalid public export")
 		}
-		if !validUUID(*workspace) || !validUUID(*node) || !validDigest(*endpoint) || a.WorkspaceID != *workspace || a.NodeID != *node || a.EndpointID != *endpoint {
+		if !validUUID(*workspace) || !validUUID(*node) || !validLowerHex32Bytes(*endpoint) || a.WorkspaceID != *workspace || a.NodeID != *node || a.EndpointID != *endpoint {
 			return errors.New("expected identity mismatch")
 		}
 		return s.importBinding(a, p)

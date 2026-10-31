@@ -1,6 +1,6 @@
 # Manual regression/deep acceptance only. Basic CI uses explicit --smoke entrypoints.
 backend-mysql-current internal/database/mysql TestDatabaseInitializationSmoke
-# group package (relative to control-plane) exact test/subtest name [PR02_ENGINE]
+# group package (relative to control-plane) exact test/subtest name [OCSERVIA_DATABASE_TEST_ENGINE]
 # PR-06 policy, configuration, certificate and upgrade acceptance.
 backend-policy-userstate internal/userstate TestUserStateBackendIntegration
 backend-policy-useroperations internal/useroperations TestUserOperationsBackendIntegration
@@ -164,7 +164,7 @@ backend-mysql-current internal/database/mysql TestRealExistingLongTextBounds
 backend-mysql-current internal/database/mysql TestRealFiniteTimestampBackfill
 backend-mysql-current internal/database/mysql TestRealIdentityProfiles
 backend-mysql-current internal/database/mysql TestRealIndependentTransactionCleanup
-backend-mysql-current internal/database/mysql TestRealLocalSliceLifecycle
+backend-mysql-current internal/database/mysql TestRealSimulationLifecycle
 backend-mysql-current internal/database/mysql TestRealLogicalValueValidators
 backend-mysql-current internal/database/mysql TestRealLogicalValues
 backend-mysql-current internal/database/mysql TestRealLongIdentityUpsert
@@ -225,7 +225,7 @@ database-auth internal/auth TestLocalAccountCapacityAndCleanupIntegration
 database-auth internal/auth TestLocalAccountDatabasePermissionsFailClosedIntegration
 database-auth internal/auth TestLocalAccountDatabasePermissionsFailClosedIntegration/local_credentials
 database-auth internal/auth TestLocalAccountDatabasePermissionsFailClosedIntegration/local_auth_attempts
-database-auth internal/auth TestLocalR4ConcurrencyIntegration
+database-auth internal/auth TestLocalLifecycleConcurrencyIntegration
 database-auth internal/auth TestOIDCDisableCommitOrdersIntegration
 database-auth internal/auth TestOIDCDisableCommitOrdersIntegration/disable-first
 database-auth internal/auth TestOIDCDisableCommitOrdersIntegration/login-first

@@ -189,8 +189,8 @@ assert_auth_fixture_cleanup() {
   local container=$1 database=$2
   test "$(docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${database}" -Atc "
     SELECT (SELECT count(*) FROM local_auth_bootstrap)
-      + (SELECT count(*) FROM pg_constraint WHERE conname IN ('r4_fail_approver','r4_fail_password','p4_reject_bootstrap','p4_reject_create','p4_reject_reset','pr03_audit_failure') OR conname LIKE 'r6_%')
-      + (SELECT count(*) FROM role_bindings b JOIN workspaces w ON w.id=b.workspace_id WHERE w.slug LIKE 'r4-%' OR w.slug LIKE 'bootstrap-%' OR w.slug LIKE 'pr03-%')
+      + (SELECT count(*) FROM pg_constraint WHERE conname IN ('test_bootstrap_approver_audit_failure','test_password_change_audit_failure','p4_reject_bootstrap','p4_reject_create','p4_reject_reset','test_auth_audit_failure') OR conname LIKE 'auth_log_%' OR conname LIKE 'auth_oidc_log_%')
+      + (SELECT count(*) FROM role_bindings b JOIN workspaces w ON w.id=b.workspace_id WHERE w.slug LIKE 'local-lifecycle-%' OR w.slug LIKE 'bootstrap-%' OR w.slug LIKE 'auth-safety-%')
   ")" = 0
 }
 
@@ -347,7 +347,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_class WHERE relname = 'telemetry_samples_' || to_char(date_trunc('month', now()) - interval '2 months', 'YYYYMM')")" = "0"
   stop_process "${pid}"
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment -p 1 ./internal/operations ./internal/enrollment ./internal/localslice -run Integration)
+    bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment -p 1 ./internal/operations ./internal/enrollment ./internal/transportevents -run Integration)
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     go test -p 1 ./internal/telemetry -run Integration -count=1)
   OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \

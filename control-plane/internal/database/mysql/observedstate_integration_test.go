@@ -25,7 +25,7 @@ func TestRealObservedStateTransactions(t *testing.T) {
 	if err = owner.QueryRow(ctx, `SELECT DATABASE()`).Scan(&config.DBName); err != nil {
 		t.Fatal(err)
 	}
-	config.User, config.Passwd = "ocservia_app", "pr02-runtime-test-only"
+	config.User, config.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
 	options.DSN = config.FormatDSN()
 	b, err := Open(ctx, options)
 	if err != nil {

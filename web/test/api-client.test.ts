@@ -21,7 +21,7 @@ let browser: EventTarget & {
 };
 
 // Exercise each public owner directly; production has no aggregate API barrel.
-async function loadAPI() {
+async function loadApi() {
   return {
     ...(await import("../src/shared/session")),
     ...(await import("../src/api/workspace")),
@@ -108,7 +108,7 @@ afterEach(() => {
 
 describe("API transport and session contracts", () => {
   it("keeps one 401 redirect and return path across generated and artifact requests", async () => {
-    const api = await loadAPI();
+    const api = await loadApi();
     fetchMock.mockImplementation(() => Promise.resolve(json({}, 401)));
     await expect(api.getNode("node-a")).rejects.toMatchObject({
       response: { status: 401 },
@@ -131,7 +131,7 @@ describe("API transport and session contracts", () => {
     storage.set("ocservia.login.return-to", "/operations?state=failed");
     storage.set("ocservia.login.oidc-attempt", "started");
     fetchMock.mockResolvedValue(json({}, 401));
-    const api = await loadAPI();
+    const api = await loadApi();
     await expect(api.getVersion()).rejects.toMatchObject({
       response: { status: 401 },
     });
@@ -140,7 +140,7 @@ describe("API transport and session contracts", () => {
   });
 
   it("does not redirect from login or on non-401 errors, and never retries", async () => {
-    const api = await loadAPI();
+    const api = await loadApi();
     fetchMock.mockResolvedValueOnce(json({}, 403));
     await expect(api.getNode("node-a")).rejects.toMatchObject({
       response: { status: 403 },
@@ -157,7 +157,7 @@ describe("API transport and session contracts", () => {
 
   it("keeps artifact grant authorization separate from Workspace headers", async () => {
     vi.stubEnv("VITE_DEV_AUTH_TOKEN", "fictional-dev-token");
-    const api = await loadAPI();
+    const api = await loadApi();
     fetchMock.mockResolvedValue(new Response("certificate-bytes"));
     expect(
       await (
@@ -176,7 +176,7 @@ describe("API transport and session contracts", () => {
   it("does not include development credentials in production", async () => {
     vi.stubEnv("DEV", false);
     vi.stubEnv("VITE_DEV_AUTH_TOKEN", "fictional-dev-token");
-    const api = await loadAPI();
+    const api = await loadApi();
     await api.getNode("node-a");
     expect(request().headers.has("Authorization")).toBe(false);
     expect(request().credentials).toBe("same-origin");
@@ -187,7 +187,7 @@ describe("API transport and session contracts", () => {
 
 describe("Workspace authority and events", () => {
   it("rejects an empty authorized Workspace list", async () => {
-    const api = await loadAPI();
+    const api = await loadApi();
     fetchMock.mockResolvedValueOnce(json({ items: [] }));
     await expect(api.getWorkspace()).rejects.toThrow(
       "No authorized workspace is available",
@@ -206,7 +206,7 @@ describe("Workspace authority and events", () => {
   ] as const)(
     "compares Workspace contexts (%s/%s, %s/%s)",
     async (aId, aGeneration, bId, bGeneration, matches) => {
-      const api = await loadAPI();
+      const api = await loadApi();
       const a = { id: aId, generation: aGeneration };
       const b = { id: bId, generation: bGeneration };
       expect(api.sameWorkspaceContext(a, b)).toBe(matches);
@@ -217,7 +217,7 @@ describe("Workspace authority and events", () => {
   );
 
   it("rejects an earlier context after selecting A → B → A", async () => {
-    const api = await loadAPI();
+    const api = await loadApi();
     await api.selectWorkspace(alpha.id);
     const firstA = api.workspaceContext();
     await api.selectWorkspace(beta.id);
@@ -236,7 +236,7 @@ describe("Workspace authority and events", () => {
 
   it("coalesces discovery, remembers selection and advances generation only on changes", async () => {
     storage.set("ocservia.workspace-id", beta.id);
-    const api = await loadAPI();
+    const api = await loadApi();
     expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
     const changed = vi.fn<(event: Event) => void>();
     browser.addEventListener(api.workspaceChangedEvent, changed);
@@ -260,7 +260,7 @@ describe("Workspace authority and events", () => {
   });
 
   it("keeps session probes independent of cached Workspace authority and coalesces only in flight", async () => {
-    const api = await loadAPI();
+    const api = await loadApi();
     await api.selectWorkspace(beta.id);
     await Promise.all([api.probeAuthentication(), api.probeAuthentication()]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -278,7 +278,7 @@ describe("Workspace authority and events", () => {
 
   it("scopes list requests and stream URLs without placing credentials in the URL", async () => {
     vi.stubEnv("VITE_DEV_AUTH_TOKEN", "fictional-dev-token");
-    const api = await loadAPI();
+    const api = await loadApi();
     const signal = new AbortController().signal;
     await api.selectWorkspace(beta.id);
     await api.listNodes("cursor/a", signal);
@@ -296,8 +296,8 @@ describe("Workspace authority and events", () => {
     await api.listEvents("event/a", signal, "desc");
     expect(request().headers.get("X-Workspace-ID")).toBe(beta.id);
     expect(request().signal).toBe(signal);
-    const eventURL = new URL(request().path, "https://console.invalid");
-    expect(Object.fromEntries(eventURL.searchParams)).toEqual({
+    const eventUrl = new URL(request().path, "https://console.invalid");
+    expect(Object.fromEntries(eventUrl.searchParams)).toEqual({
       page_size: "200",
       after: "event/a",
       order: "desc",
@@ -317,7 +317,7 @@ describe("Workspace authority and events", () => {
       if (developmentToken)
         vi.stubEnv("VITE_DEV_AUTH_TOKEN", "fictional-dev-token");
       fetchMock.mockResolvedValue(json({}, 503));
-      const api = await loadAPI();
+      const api = await loadApi();
       if (developmentToken)
         expect(await api.eventStreamPath("cursor")).toBe(
           "/api/v1/events/stream?after=cursor",
@@ -361,7 +361,7 @@ describe.each(["getter", "getItem", "setItem", "removeItem"] as const)(
     });
 
     it("still redirects once and returns the original 401", async () => {
-      const api = await loadAPI();
+      const api = await loadApi();
       fetchMock.mockImplementation(() => Promise.resolve(json({}, 401)));
       await expect(api.getNode("node-a")).rejects.toMatchObject({
         response: { status: 401 },
@@ -375,7 +375,7 @@ describe.each(["getter", "getItem", "setItem", "removeItem"] as const)(
     });
 
     it("selects only authorized Workspaces and keeps events in step", async () => {
-      const api = await loadAPI();
+      const api = await loadApi();
       const changed = vi.fn<(event: Event) => void>();
       browser.addEventListener(api.workspaceChangedEvent, changed);
       expect((await api.getWorkspace()).id).toBe(alpha.id);
@@ -392,7 +392,7 @@ describe.each(["getter", "getItem", "setItem", "removeItem"] as const)(
     });
 
     it("keeps discovery failures and empty lists as failures", async () => {
-      const api = await loadAPI();
+      const api = await loadApi();
       fetchMock.mockResolvedValueOnce(json({}, 403));
       await expect(api.getWorkspace()).rejects.toMatchObject({
         response: { status: 403 },
@@ -409,7 +409,7 @@ describe.each(["getter", "getItem", "setItem", "removeItem"] as const)(
 
 describe("domain request contracts", () => {
   it("preserves desired mutation fences, unique idempotency keys, body and AbortSignal", async () => {
-    const api = await loadAPI();
+    const api = await loadApi();
     const signal = new AbortController().signal;
     await api.createUser(
       node.id,
@@ -457,7 +457,7 @@ describe("domain request contracts", () => {
   });
 
   it("preserves controlled operation boot binding, TTL and approval headers", async () => {
-    const api = await loadAPI();
+    const api = await loadApi();
     const signal = new AbortController().signal;
     const withoutBoot = { ...node };
     delete withoutBoot.bootId;
@@ -484,7 +484,7 @@ describe("domain request contracts", () => {
   });
 
   it("preserves configuration and certificate mutation policies without automatic retries", async () => {
-    const api = await loadAPI();
+    const api = await loadApi();
     const signal = new AbortController().signal;
     await api.createConfigPlan(
       node.id,
@@ -529,7 +529,7 @@ describe("domain request contracts", () => {
   });
 
   it("keeps rollout scope and trusted upgrade selection in their existing requests", async () => {
-    const api = await loadAPI();
+    const api = await loadApi();
     const signal = new AbortController().signal;
     await api.upgradeNodeAgent(
       node,

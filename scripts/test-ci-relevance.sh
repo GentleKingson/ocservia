@@ -84,19 +84,32 @@ while read -r path selected; do
     expect "${out}" profile quick
     expect "${out}" database_scope smoke
     if [[ " ${selected} " == *' run_ci_tools '* ]]; then
-      grep -Eq '^ci_suites=(guards|release|cross-vm)( (guards|release|cross-vm))*$' "${out}"
+      grep -Eq '^ci_suites=(guards|release|cross-vm|source-style|contracts)( (guards|release|cross-vm|source-style|contracts))*$' "${out}"
       case "${path}" in
-        scripts/ci-tools-check.sh) expect "${out}" ci_suites 'guards release cross-vm' ;;
-        .github/workflows/real-e2e.yml|deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*)
+        scripts/ci-tools-check.sh) expect "${out}" ci_suites 'guards release cross-vm source-style contracts' ;;
+        .github/workflows/real-e2e.yml|deploy/real-e2e/*)
           expect "${out}" ci_suites cross-vm ;;
-        scripts/release-business-api.py) expect "${out}" ci_suites 'release cross-vm' ;;
-        scripts/buildx-cache.sh|.github/actions/build-cache-credentials/index.js|\
-        scripts/test-bootstrap-installers.sh|scripts/resilience-capacity-lib.sh)
-          expect "${out}" ci_suites 'release' ;;
-        .github/workflows/ci.yml|.github/workflows/security.yml|scripts/ci-relevance.sh)
-          expect "${out}" ci_suites guards ;;
-        .github/workflows/release*.yml|.github/release.yml|.github/release-notes/*.md|scripts/release-quick-acceptance.sh)
+        scripts/real-e2e-*|scripts/test-real-e2e-*)
+          expect "${out}" ci_suites 'cross-vm source-style' ;;
+        scripts/release-business-api.py) expect "${out}" ci_suites 'release cross-vm source-style' ;;
+        .github/actions/build-cache-credentials/index.js)
           expect "${out}" ci_suites release ;;
+        scripts/buildx-cache.sh|scripts/test-bootstrap-installers.sh|scripts/resilience-capacity-lib.sh)
+          expect "${out}" ci_suites 'release source-style' ;;
+        .github/workflows/ci.yml|.github/workflows/security.yml)
+          expect "${out}" ci_suites guards ;;
+        scripts/ci-relevance.sh) expect "${out}" ci_suites 'guards source-style' ;;
+        scripts/lint.sh) expect "${out}" ci_suites 'source-style contracts' ;;
+        scripts/check-breaking.sh|scripts/generate.sh|scripts/generated-clean.sh)
+          expect "${out}" ci_suites 'contracts source-style' ;;
+        web/src/api/generated/*|rust/crates/contracts/src/generated/*)
+          expect "${out}" ci_suites contracts ;;
+        deploy/bootstrap/install-controller|deploy/bootstrap/install-node)
+          expect "${out}" ci_suites 'release source-style' ;;
+        deploy/database-e2e/systemctl) expect "${out}" ci_suites source-style ;;
+        .github/workflows/release*.yml|.github/release.yml|.github/release-notes/*.md)
+          expect "${out}" ci_suites release ;;
+        scripts/release-quick-acceptance.sh) expect "${out}" ci_suites 'release source-style' ;;
       esac
     else
       expect "${out}" ci_suites ''
@@ -116,7 +129,7 @@ CLAUDE.md run_docs
 .github/release-notes/v9.9.9.md run_docs run_ci_tools
 .github/release-notes/v9.9.9.json run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 web/src/App.vue run_web run_web_browser run_controller_cache
-web/src/api/generated/index.ts run_web run_web_browser run_controller_cache
+web/src/api/generated/index.ts run_web run_web_browser run_controller_cache run_ci_tools
 web/src/views/NodesView.vue run_web run_web_browser run_controller_cache
 web/src/views/OverviewView.vue run_web run_web_browser run_controller_cache
 web/src/components/overview/MetricCard.vue run_web run_web_browser run_controller_cache
@@ -143,31 +156,31 @@ control-plane/migrations/cutover_test.go run_go run_database
 control-plane/Dockerfile run_go run_controller_cache
 control-plane/internal/auth/password_blocklist/common-passwords.txt run_go run_database run_controller_cache
 control-plane/migrations/000036.up.sql run_go run_database run_controller_cache
-scripts/database-foundation-integration.sh run_go run_database
-scripts/go-check.sh run_go
+scripts/database-foundation-integration.sh run_go run_database run_ci_tools
+scripts/go-check.sh run_go run_ci_tools
 signer/http.go run_go run_controller_cache
 signer/store_test.go run_go
 signer/go.sum run_go run_controller_cache
 signer/notes.txt run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
-scripts/web-check.sh run_web
+scripts/web-check.sh run_web run_ci_tools
 scripts/test-bootstrap-installers.sh run_ci_tools
 scripts/resilience-capacity-lib.sh run_ci_tools
-deploy/managed-node/install.sh run_installers
-deploy/production/install.sh run_installers
-deploy/production/controller-bootstrap.sh run_installers
-deploy/lib/install-env.sh run_installers
-deploy/production/transportd-relays.sh run_installers run_controller_cache
-deploy/production/systemd/agent-relays.sh run_installers
+deploy/managed-node/install.sh run_installers run_ci_tools
+deploy/production/install.sh run_installers run_ci_tools
+deploy/production/controller-bootstrap.sh run_installers run_ci_tools
+deploy/lib/install-env.sh run_installers run_ci_tools
+deploy/production/transportd-relays.sh run_installers run_controller_cache run_ci_tools
+deploy/production/systemd/agent-relays.sh run_installers run_ci_tools
 deploy/production/systemd/ocservia-agent-relays.conf run_installers
-scripts/prepare-bootstrap-release-assets.sh run_installers
-scripts/release-agent-state-check.sh run_installers
-scripts/package-agent.sh run_installers
-scripts/verify-agent-package.sh run_installers
-scripts/test-managed-node-install.sh run_installers
-scripts/test-controller-install.sh run_installers
-scripts/test-controller-bootstrap.sh run_installers
-scripts/test-relay-launchers.py run_installers
-scripts/test-release-agent-state-check.sh run_installers
+scripts/prepare-bootstrap-release-assets.sh run_installers run_ci_tools
+scripts/release-agent-state-check.sh run_installers run_ci_tools
+scripts/package-agent.sh run_installers run_ci_tools
+scripts/verify-agent-package.sh run_installers run_ci_tools
+scripts/test-managed-node-install.sh run_installers run_ci_tools
+scripts/test-controller-install.sh run_installers run_ci_tools
+scripts/test-controller-bootstrap.sh run_installers run_ci_tools
+scripts/test-relay-launchers.py run_installers run_ci_tools
+scripts/test-release-agent-state-check.sh run_installers run_ci_tools
 .gitignore run_installers
 deploy/managed-node/install.env.example run_ci_tools run_installers
 deploy/production/Caddyfile run_ci_tools run_installers run_controller_cache
@@ -197,7 +210,7 @@ scripts/ci-relevance.sh run_ci_tools
 scripts/ci-tools-check.sh run_ci_tools
 scripts/bootstrap.sh run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 scripts/buildx-cache.sh run_ci_tools run_controller_cache
-.github/actions/build-cache-credentials/index.js run_ci_tools run_controller_cache
+.github/actions/build-cache-credentials/index.js run_ci_tools run_controller_cache run_web
 deploy/test-fixtures/relay.toml run_go run_database run_ci_tools
 deploy/test-fixtures/scheduler-maintenance.sql run_go run_database run_ci_tools
 rust/test-runtime.Dockerfile run_go run_database run_ci_tools
@@ -208,8 +221,8 @@ THIRD_PARTY_NOTICES.md run_docs run_controller_cache
 deploy/production/relay.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/integrated/nginx.conf.template run_ci_tools run_installers run_controller_cache
 deploy/production/relay.Cargo.lock run_ci_tools run_installers run_controller_cache
-scripts/mysql-backup.sh run_go run_database run_controller_cache
-scripts/postgres-backup.sh run_go run_database run_controller_cache
+scripts/mysql-backup.sh run_go run_database run_controller_cache run_ci_tools
+scripts/postgres-backup.sh run_go run_database run_controller_cache run_ci_tools
 deploy/prepare-transport-runtime.sh run_ci_tools run_installers run_controller_cache
 scripts/build-relay.sh run_rust run_ci_tools run_controller_cache
 scripts/build-release-controller.sh run_ci_tools run_installers run_controller_cache
@@ -219,12 +232,23 @@ signer/Dockerfile run_docs run_go run_rust run_web run_web_browser run_database 
 scripts/release-quick-acceptance.sh run_ci_tools
 deploy/production/quick-install.sh run_ci_tools run_installers
 rust/agent-build.Dockerfile run_ci_tools
+scripts/lint.sh run_ci_tools
+scripts/check-breaking.sh run_ci_tools
+scripts/generate.sh run_ci_tools
+scripts/generated-clean.sh run_ci_tools
+scripts/generate-controller-release-manifest.mjs run_ci_tools run_installers run_web
+deploy/bootstrap/install-controller run_ci_tools run_installers
+deploy/bootstrap/install-node run_ci_tools run_installers
+deploy/database-e2e/systemctl run_go run_database run_ci_tools
+web/eslint.config.ts run_web run_controller_cache
+rust/crates/contracts/src/generated/mod.rs run_rust run_controller_cache run_ci_tools
 CASES
 for profile in quick full; do
   out="${fixture}/dispatch-${profile}.output"
   (cd "${fixture}" && bash "${SCRIPT}" workflow_dispatch invalid invalid "${out}" "${profile}")
   for flag in run_docs run_go run_rust run_web run_web_browser run_database; do expect "${out}" "${flag}" true; done
-  expect "${out}" run_ci_tools false
+  expect "${out}" run_ci_tools true
+  expect "${out}" ci_suites 'source-style contracts'
   expect "${out}" run_installers false
   expect "${out}" run_controller_cache false
   expect_images "${out}" ''
@@ -238,7 +262,7 @@ expect "${out}" profile quick
 check_matrix "${out}" quick
 for flag in "${flags[@]}"; do expect "${out}" "${flag}" true; done
 expect_images "${out}" "${all_images}"
-expect "${out}" ci_suites 'guards release cross-vm'
+expect "${out}" ci_suites 'guards release cross-vm source-style contracts'
 # A PR uses the merge base, whereas a push includes both endpoints. Renames
 # are deliberately expanded into deletion + addition, including old domains.
 git -C "${fixture}" checkout -q --detach "${base}"

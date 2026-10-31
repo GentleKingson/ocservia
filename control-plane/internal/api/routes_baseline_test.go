@@ -25,12 +25,12 @@ import (
 const baselineID = "019fc0a4-6d92-765c-a8a1-4af556614cc3"
 
 // Behavior frozen at de26ea4: pattern | handler/wrapper | method rule | permission.
-// PR-03 changes only the five nodehttp handler/wrapper expressions.
-// F-1 restores the registered ConfigPlan Apply route's POST method rule.
-// R2-01 changes eight business wrappers to fixed, explicit actions.
-// R2-02 moves only the three ConfigPlan handler/wrapper expressions.
-// Repair PR-11 adds GET on the existing approval collection path.
-// Repair PR-12 adds an authorized node public sealing key read.
+// Node handler extraction changes only the five nodehttp handler/wrapper expressions.
+// Method compatibility restores the registered ConfigPlan Apply route's POST method rule.
+// Explicit authorization changes eight business wrappers to fixed, explicit actions.
+// ConfigPlan handler extraction moves only the three ConfigPlan handler/wrapper expressions.
+// Approval collection support adds GET on the existing approval collection path.
+// Node sealing key support adds an authorized node public sealing key read.
 // "self" identifies endpoint validation, not requireOperationAuth. This is a
 // test inventory, never an input to production routing or authorization.
 const routeBaseline = `GET /livez|s.live|GET|public

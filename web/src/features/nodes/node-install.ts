@@ -2,11 +2,11 @@ export interface NodeInstallConfig {
   name: string;
   environment: string;
   release: string;
-  controller: string;
-  relay: string;
-  bootstrapFile: string;
-  relayFile: string;
-  commandKeyFile: string;
+  controllerEndpointId: string;
+  relayUrl: string;
+  bootstrapTokenFile: string;
+  relayAccessTokenFile: string;
+  controllerCommandVerificationKeyFile: string;
 }
 
 export function validInstallField(
@@ -21,9 +21,9 @@ export function validInstallField(
       return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value);
     case "release":
       return /^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$/.test(value);
-    case "controller":
+    case "controllerEndpointId":
       return /^[0-9a-f]{64}$/.test(value);
-    case "relay": {
+    case "relayUrl": {
       if (!value.startsWith("https://") || /[\s"'`$\\?#@]/u.test(value))
         return false;
       try {
@@ -50,8 +50,11 @@ export function validInstallConfig(config: NodeInstallConfig): boolean {
     (Object.keys(config) as (keyof NodeInstallConfig)[]).every((key) =>
       validInstallField(key, config[key]),
     ) &&
-    new Set([config.bootstrapFile, config.relayFile, config.commandKeyFile])
-      .size === 3
+    new Set([
+      config.bootstrapTokenFile,
+      config.relayAccessTokenFile,
+      config.controllerCommandVerificationKeyFile,
+    ]).size === 3
   );
 }
 
@@ -67,7 +70,7 @@ export function installEnv(
   )
     return "";
   // Name/workspace bind the server-issued token; these are not installer keys.
-  return `# Node: ${config.name}\n# Workspace: ${workspaceId}\n# Release: ${config.release}\nCONTROLLER_ENDPOINT_ID=${config.controller}\nENROLLMENT_ENVIRONMENT=${config.environment}\nRELAY_URL_A=${config.relay}\nRELAY_URL_B=\nBOOTSTRAP_TOKEN_SOURCE=${config.bootstrapFile}\nRELAY_ACCESS_TOKEN_SOURCE=${config.relayFile}\nCONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${config.commandKeyFile}\n`;
+  return `# Node: ${config.name}\n# Workspace: ${workspaceId}\n# Release: ${config.release}\nCONTROLLER_ENDPOINT_ID=${config.controllerEndpointId}\nENROLLMENT_ENVIRONMENT=${config.environment}\nRELAY_URL_A=${config.relayUrl}\nRELAY_URL_B=\nBOOTSTRAP_TOKEN_SOURCE=${config.bootstrapTokenFile}\nRELAY_ACCESS_TOKEN_SOURCE=${config.relayAccessTokenFile}\nCONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${config.controllerCommandVerificationKeyFile}\n`;
 }
 
 export function installCommand(release: string): string {

@@ -1,26 +1,22 @@
 import eslint from "@eslint/js";
+import { defineConfig } from "eslint/config";
 import pluginVue from "eslint-plugin-vue";
 import tseslint from "typescript-eslint";
 
 // Match relative imports at any depth and the `@/` source alias.
 const pageOwnedImports = {
   regex:
-    "(^|/)(views(/|$)|shared/(router|fleet|localSlice)(\\.[^/]+)?$)|^vue-router(/|$)",
+    "(^|/)(views(/|$)|shared/(router|fleet|development-simulation)(\\.[^/]+)?$)|^vue-router(/|$)",
   message:
-    "Keep routing and Fleet/local-slice state in page composition; use API modules and injected context/tracking callbacks.",
+    "Keep routing and Fleet/development-simulation state in page composition; use API modules and injected context/tracking callbacks.",
 };
 
-export default tseslint.config(
+export default defineConfig(
   eslint.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   ...pluginVue.configs["flat/essential"],
   {
-    files: [
-      "src/**/*.ts",
-      "test/**/*.ts",
-      "e2e/**/*.ts",
-      "playwright.config.ts",
-    ],
+    files: ["src/**/*.ts", "test/**/*.ts", "e2e/**/*.ts", "*.config.ts"],
     languageOptions: {
       parserOptions: {
         projectService: true,
@@ -54,6 +50,54 @@ export default tseslint.config(
   {
     files: ["test/**/*.mjs"],
     ...tseslint.configs.disableTypeChecked,
+  },
+  {
+    // The root script invocation uses --config web/eslint.config.ts from the
+    // repository root, so these patterns are relative to that working directory.
+    files: [
+      "scripts/generate-controller-release-manifest.mjs",
+      "scripts/redact-release-upgrade-log.mjs",
+      "scripts/release-business-browser.mjs",
+      "scripts/release-upgrade-oidc-fixture.mjs",
+      "scripts/test-release-upgrade.mjs",
+    ],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      sourceType: "module",
+      globals: {
+        process: "readonly",
+        console: "readonly",
+        Buffer: "readonly",
+        URL: "readonly",
+        URLSearchParams: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+      },
+    },
+  },
+  {
+    // Playwright evaluate callbacks in this harness run in the browser.
+    files: ["scripts/release-business-browser.mjs"],
+    languageOptions: {
+      globals: {
+        document: "readonly",
+        window: "readonly",
+        sessionStorage: "readonly",
+        Image: "readonly",
+      },
+    },
+  },
+  {
+    files: [".github/actions/build-cache-credentials/index.js"],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      sourceType: "commonjs",
+      globals: { process: "readonly", console: "readonly" },
+    },
+    rules: {
+      ...tseslint.configs.disableTypeChecked.rules,
+      "@typescript-eslint/no-require-imports": "off",
+    },
   },
   {
     files: ["src/api/**/*.ts"],

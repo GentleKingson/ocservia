@@ -308,6 +308,8 @@ download_release_bundle() {
   if [[ -L "${STATE_ROOT}/release-bundles" || -L "${BUNDLE_DIR}" ]]; then
     fail "release bundle directory ${BUNDLE_DIR} must not be a symlink"
   fi
+  # Only the version directory is private; its parent holds public release bundles.
+  # shellcheck disable=SC2174
   mkdir -p -m 0700 -- "${BUNDLE_DIR}"
   for name in "${names[@]}"; do
     echo "downloading ${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"

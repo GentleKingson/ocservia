@@ -18,17 +18,17 @@ func TestModuleMethodRegistration(t *testing.T) {
 		mux := http.NewServeMux()
 		registrar := &methodRegistrar{mux: mux}
 		calls := 0
-		registrar.HandleFunc("POST /s03/ordinary", func(w http.ResponseWriter, r *http.Request) {
+		registrar.HandleFunc("POST /test/ordinary", func(w http.ResponseWriter, r *http.Request) {
 			calls++
 			w.WriteHeader(202)
 		})
 		s := &Server{registeredMethods: registrar.rules}
-		if _, ok := s02BaselineRouteMethod("/s03/ordinary"); ok {
+		if _, ok := legacyRouteMethod("/test/ordinary"); ok {
 			t.Fatal("test route exists in the old method table")
 		}
 		for _, method := range []string{"POST", "GET", "HEAD", "OPTIONS", "BREW"} {
 			w := httptest.NewRecorder()
-			s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest(method, "/s03/ordinary", nil))
+			s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest(method, "/test/ordinary", nil))
 			if method == "POST" {
 				if w.Code != 202 || calls != 1 {
 					t.Fatal("ordinary handler not dispatched exactly once")
@@ -44,31 +44,31 @@ func TestModuleMethodRegistration(t *testing.T) {
 	calls := 0
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if r.PathValue("item") != "a%2Fb" || r.Method != "GET" || r.URL.Path != "/s02/a%2Fb" || r.URL.RawPath != "" {
+		if r.PathValue("item") != "a%2Fb" || r.Method != "GET" || r.URL.Path != "/test/items/a%2Fb" || r.URL.RawPath != "" {
 			t.Errorf("request or parameter changed: %s %v %q", r.Method, r.URL, r.PathValue("item"))
 		}
 		w.WriteHeader(204)
 	}
-	registrar.HandleFunc("GET /s02/{item}", handler)
+	registrar.HandleFunc("GET /test/items/{item}", handler)
 	s.registeredMethods = registrar.rules
-	if _, ok := compatibilityRouteMethod("/s02/a"); ok {
+	if _, ok := compatibilityRouteMethod("/test/items/a"); ok {
 		t.Fatal("test route must not be known to the legacy table")
 	}
-	if methods, ok := s.routeMethods("/s02/a"); !ok || methods.allow() != "GET" {
+	if methods, ok := s.routeMethods("/test/items/a"); !ok || methods.allow() != "GET" {
 		t.Fatalf("single registration did not derive methods: %v %v", methods, ok)
 	}
 	w := httptest.NewRecorder()
-	s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest("GET", "/s02/a%252Fb", nil))
+	s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest("GET", "/test/items/a%252Fb", nil))
 	if w.Code != 204 || calls != 1 {
 		t.Fatalf("root mux dispatch: %d calls=%d", w.Code, calls)
 	}
 	w = httptest.NewRecorder()
-	s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest("PUT", "/s02/a", nil))
+	s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest("PUT", "/test/items/a", nil))
 	if w.Code != 405 || w.Header().Get("Allow") != "GET" || calls != 1 {
 		t.Fatalf("wrong method reached handler: %d %v calls=%d", w.Code, w.Header(), calls)
 	}
 	puts := 0
-	registrar.HandleFunc("PUT /s02/{item}", func(w http.ResponseWriter, r *http.Request) {
+	registrar.HandleFunc("PUT /test/items/{item}", func(w http.ResponseWriter, r *http.Request) {
 		puts++
 		if r.PathValue("item") != "a" {
 			t.Error("root mux did not bind parameter")
@@ -76,17 +76,17 @@ func TestModuleMethodRegistration(t *testing.T) {
 		w.WriteHeader(202)
 	})
 	s.registeredMethods = registrar.rules
-	if methods, ok := s.routeMethods("/s02/a"); !ok || methods.allow() != "GET, PUT" {
+	if methods, ok := s.routeMethods("/test/items/a"); !ok || methods.allow() != "GET, PUT" {
 		t.Fatalf("second registration did not merge methods: %v %v", methods, ok)
 	}
 	w = httptest.NewRecorder()
-	s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest("PUT", "/s02/a", nil))
+	s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest("PUT", "/test/items/a", nil))
 	if w.Code != 202 || puts != 1 || calls != 1 {
 		t.Fatalf("second handler dispatch: %d GET=%d PUT=%d", w.Code, calls, puts)
 	}
 	for _, method := range []string{"POST", "HEAD", "OPTIONS", "BREW"} {
 		w := httptest.NewRecorder()
-		s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest(method, "/s02/a", nil))
+		s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest(method, "/test/items/a", nil))
 		if w.Code != 405 || w.Header().Get("Allow") != "GET, PUT" || puts != 1 || calls != 1 {
 			t.Fatalf("method %s: %d %v calls=%d/%d", method, w.Code, w.Header(), calls, puts)
 		}
@@ -111,18 +111,18 @@ func TestModuleMethodRegistrationFailure(t *testing.T) {
 			}
 		})
 	}
-	for _, pattern := range []string{"GET /s02/{id}", "POST /s02/fixed", "POST /s02/{other}"} {
+	for _, pattern := range []string{"GET /test/items/{id}", "POST /test/items/fixed", "POST /test/items/{other}"} {
 		t.Run("conflict-"+pattern, func(t *testing.T) {
 			mux := http.NewServeMux()
 			registrar := &methodRegistrar{mux: mux}
-			registrar.HandleFunc("GET /s02/{id}", handler)
+			registrar.HandleFunc("GET /test/items/{id}", handler)
 			before := slices.Clone(registrar.rules)
 			mustRegistrationPanic(t, func() { registrar.HandleFunc(pattern, handler) })
 			if !reflect.DeepEqual(before, registrar.rules) {
 				t.Fatal("failed registration changed existing rules")
 			}
 			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, httptest.NewRequest("POST", "/s02/fixed", nil))
+			mux.ServeHTTP(w, httptest.NewRequest("POST", "/test/items/fixed", nil))
 			if w.Code != 405 {
 				t.Fatal("rejected overlapping handler was installed", w.Code)
 			}
@@ -130,9 +130,9 @@ func TestModuleMethodRegistrationFailure(t *testing.T) {
 	}
 	t.Run("root-mux-conflict", func(t *testing.T) {
 		mux := http.NewServeMux()
-		mux.HandleFunc("GET /s02/{id}", handler)
+		mux.HandleFunc("GET /test/items/{id}", handler)
 		registrar := &methodRegistrar{mux: mux}
-		mustRegistrationPanic(t, func() { registrar.HandleFunc("GET /s02/{id}", handler) })
+		mustRegistrationPanic(t, func() { registrar.HandleFunc("GET /test/items/{id}", handler) })
 		if len(registrar.rules) != 0 {
 			t.Fatal("root mux failure published metadata")
 		}
@@ -140,11 +140,11 @@ func TestModuleMethodRegistrationFailure(t *testing.T) {
 	t.Run("nil-handler", func(t *testing.T) {
 		mux := http.NewServeMux()
 		registrar := &methodRegistrar{mux: mux}
-		mustRegistrationPanic(t, func() { registrar.HandleFunc("GET /s02", nil) })
+		mustRegistrationPanic(t, func() { registrar.HandleFunc("GET /test/items", nil) })
 		if len(registrar.rules) != 0 {
 			t.Fatal("nil handler published metadata")
 		}
-		registrar.HandleFunc("GET /s02", handler)
+		registrar.HandleFunc("GET /test/items", handler)
 	})
 }
 
@@ -187,7 +187,7 @@ func TestModuleMethodPrecedence(t *testing.T) {
 		if line == "POST /api/v1/approval-requests/{approval_id}" {
 			path += ":approve"
 		}
-		want, wantOK := s02BaselineRouteMethod(path)
+		want, wantOK := legacyRouteMethod(path)
 		if methods, ok := production.routeMethods(path); !ok || !wantOK || methods.allow() != want {
 			t.Fatalf("compatibility route changed: %s %v/%v", path, methods, ok)
 		}
@@ -229,9 +229,9 @@ func TestModuleMethodIsolationAndOrder(t *testing.T) {
 	for _, order := range [][]string{{"GET", "PUT", "POST"}, {"PUT", "POST", "GET"}} {
 		registrar := &methodRegistrar{mux: http.NewServeMux()}
 		for _, method := range order {
-			registrar.HandleFunc(method+" /s02/{id}", func(http.ResponseWriter, *http.Request) {})
+			registrar.HandleFunc(method+" /test/items/{id}", func(http.ResponseWriter, *http.Request) {})
 		}
-		if methods, _ := registeredRouteMethods(registrar.rules, "/s02/a"); methods.allow() != "GET, POST, PUT" {
+		if methods, _ := registeredRouteMethods(registrar.rules, "/test/items/a"); methods.allow() != "GET, POST, PUT" {
 			t.Fatal("method ordering depends on registration order", methods)
 		}
 	}
@@ -241,7 +241,7 @@ func TestModuleMethodIsolationAndOrder(t *testing.T) {
 			for _, path := range ordinaryPathCorpus() {
 				path = httptest.NewRequest("GET", path, nil).URL.Path
 				methods, ok := s.routeMethods(path)
-				want, wantOK := s02BaselineRouteMethod(path)
+				want, wantOK := legacyRouteMethod(path)
 				if methods.allow() != strings.ReplaceAll(want, "_OR_", ", ") || ok != wantOK {
 					t.Errorf("concurrent query changed rules for %s", path)
 				}
@@ -251,13 +251,13 @@ func TestModuleMethodIsolationAndOrder(t *testing.T) {
 	wg.Wait()
 }
 
-type s02UnreachablePlans struct{ ConfigPlans }
-type s02UnreachableOperations struct{ useroperationshttp.Operations }
+type unreachableConfigPlans struct{ ConfigPlans }
+type unreachableUserOperations struct{ useroperationshttp.Operations }
 
 func TestModuleMethodRejectedWrites(t *testing.T) {
 	reader := &constructionReader{}
 	// Embedded capabilities panic if unexpectedly called, including writes.
-	s := newTestServer(t, testHTTPConfig(true), nil, Modules{Nodes: reader, ConfigPlans: &s02UnreachablePlans{}, UserOperations: &s02UnreachableOperations{}}, Authorization{})
+	s := newTestServer(t, testHTTPConfig(true), nil, Modules{Nodes: reader, ConfigPlans: &unreachableConfigPlans{}, UserOperations: &unreachableUserOperations{}}, Authorization{})
 	for _, tc := range []struct{ method, path, allow string }{
 		{"PUT", "/api/v1/nodes", "GET"},
 		{"PUT", "/api/v1/nodes/" + baselineID, "GET"},

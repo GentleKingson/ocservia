@@ -1026,6 +1026,8 @@ echo "malformed install.env lines fail closed"
 # 10e. nothing in install.env is ever executed: command substitution,
 # backticks, and source lines are rejected, never evaluated.
 scenario
+# Literal shell syntax tests rejection; it must not expand here.
+# shellcheck disable=SC2016
 printf 'RELAY_URL_A=$(touch %s)\n' "${fixture}/pwned-marker" >"${repo}/install.env"
 capture_from "${repo}"
 assert_status 1 "command substitution syntax must fail closed"
@@ -1033,6 +1035,8 @@ assert_output "must be a literal value"
 [[ ! -e "${fixture}/pwned-marker" ]] ||
   die "command substitution in install.env must never execute"
 scenario
+# Literal shell syntax tests rejection; it must not expand here.
+# shellcheck disable=SC2016
 printf 'RELAY_URL_A=`touch %s`\n' "${fixture}/pwned-marker" >"${repo}/install.env"
 capture_from "${repo}"
 assert_status 1 "backtick syntax must fail closed"
@@ -1742,6 +1746,8 @@ if ((EUID != 0)) && can_root; then
 EOF
   chmod 0755 -- "${root_lifecycle_bin}/sudo"
   RUN_STATUS=0
+  # Each fixture intentionally isolates its PATH and exported settings.
+  # shellcheck disable=SC2030,SC2031
   RUN_OUTPUT="$(
     export PATH="${root_lifecycle_bin}"
     export UNRELATED_ENV=must-not-cross-sudo
@@ -1779,6 +1785,8 @@ EOF
   printf 'CONTROLLER_ENDPOINT_ID=%s\nRELAY_URL_A=https://relay-poisoned-a.example.test\nRELAY_URL_B=https://relay-poisoned-b.example.test\n' \
     "${controller_id}" >"${fixture}/poison-install-env"
   RUN_STATUS=0
+  # Each fixture intentionally isolates its PATH and exported settings.
+  # shellcheck disable=SC2030,SC2031
   RUN_OUTPUT="$(
     export PATH="${root_lifecycle_bin}"
     TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env
@@ -1825,6 +1833,8 @@ RELAY_URL_B=
 EOF
   ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B)
   RUN_STATUS=0
+  # Each fixture intentionally isolates its PATH and exported settings.
+  # shellcheck disable=SC2030,SC2031
   RUN_OUTPUT="$(
     export PATH="${root_lifecycle_bin}"
     TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env
@@ -1846,6 +1856,8 @@ EOF
     if [[ "${single_b}" == empty ]]; then printf 'RELAY_URL_B=\n' >>"${repo}/install.env"; fi
     if [[ "${single_b}" == override ]]; then printf 'RELAY_URL_B=\n' >>"${repo}/install.env"; fi
     RUN_STATUS=0
+    # Each fixture intentionally isolates its PATH and exported settings.
+    # shellcheck disable=SC2030,SC2031
     RUN_OUTPUT="$(
       export PATH="${root_lifecycle_bin}"
       TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env

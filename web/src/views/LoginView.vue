@@ -9,8 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 import {
-  hasOIDCLoginAttempt,
-  startOIDCLoginAttempt,
+  hasOidcLoginAttempt,
+  startOidcLoginAttempt,
   retryAfterSeconds,
 } from "../shared/login";
 
@@ -22,13 +22,13 @@ const pending = ref(false);
 const loading = ref(true);
 const error = ref("");
 const ssoStopped = ref(
-  hasOIDCLoginAttempt() ||
+  hasOidcLoginAttempt() ||
     new URLSearchParams(window.location.search).get("auth") === "failed",
 );
 
-function signInSSO(): void {
+function signInSso(): void {
   password.value = "";
-  startOIDCLoginAttempt();
+  startOidcLoginAttempt();
   ssoStopped.value = false;
   window.location.assign("/api/v1/auth/login");
 }
@@ -50,8 +50,8 @@ async function loadMethods(): Promise<void> {
     )
       throw new Error("Authentication unavailable");
     methods.value = data;
-    if (data.oidc && ssoStopped.value) error.value = t("loginSSOFailed");
-    if (!data.local && data.oidc && !ssoStopped.value) signInSSO();
+    if (data.oidc && ssoStopped.value) error.value = t("loginSsoFailed");
+    if (!data.local && data.oidc && !ssoStopped.value) signInSso();
   } catch {
     error.value = t("loginUnavailable");
   } finally {
@@ -173,9 +173,9 @@ onMounted(loadMethods);
         variant="outline"
         type="button"
         :disabled="pending"
-        @click="signInSSO"
+        @click="signInSso"
       >
-        <LogIn aria-hidden="true" />{{ t("loginSSO") }}
+        <LogIn aria-hidden="true" />{{ t("loginSso") }}
       </Button>
       <p
         v-if="methods?.oidc && !methods.local && !ssoStopped"

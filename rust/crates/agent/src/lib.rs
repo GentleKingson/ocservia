@@ -610,7 +610,6 @@ impl CommandExecutor {
     /// # Errors
     ///
     /// Rejects invalid or mismatched commands and propagates journal failures.
-    #[allow(clippy::too_many_lines)]
     pub fn reconcile_external(
         &mut self,
         envelope: &CommandEnvelope,
@@ -1015,16 +1014,15 @@ struct ValidatedCommand {
     external: bool,
 }
 
-/// Computes the cross-language semantic payload identity for a supported command.
-///
-/// Delivery metadata is intentionally excluded because reconciliation intent does not change the
-/// side effect. The capability, node, revision, and canonical typed payload are all bound.
+/// Reproduces the historical UNSPECIFIED payload hash used by synthetic Noop/Echo
+/// compatibility vectors. This test helper also retains the historical typed-payload
+/// cases; its Protobuf encoding is not the current canonical V1/V2 identity.
 ///
 /// # Errors
 ///
 /// Rejects unsupported payload types.
 #[cfg(test)]
-fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
+fn legacy_synthetic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
     let (capability, payload_bytes) = match envelope.payload.as_ref() {
         Some(command_envelope::Payload::SyntheticNoop(payload)) => {
             ("synthetic.noop", payload.encode_to_vec())
@@ -1093,7 +1091,6 @@ fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], Command
 /// # Errors
 ///
 /// Rejects unsupported payload types.
-#[allow(clippy::too_many_lines)]
 pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
     ocservia_command_authorization::semantic_payload_hash_v1(envelope)
         .map_err(|error| CommandError::Rejected(error.code()))
@@ -1901,7 +1898,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_payload_hash_matches_cross_language_golden_vectors() {
+    fn legacy_synthetic_payload_hash_matches_cross_language_golden_vectors() {
         let node = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         let key = *Uuid::now_v7().as_bytes();
         let mut envelope = command(node, key, "", 100);
@@ -1924,7 +1921,7 @@ mod tests {
                 message: message.to_owned(),
             }));
             assert_eq!(
-                hex::encode(semantic_payload_hash(&envelope).unwrap()),
+                hex::encode(legacy_synthetic_payload_hash(&envelope).unwrap()),
                 expected
             );
         }
@@ -1932,14 +1929,14 @@ mod tests {
             message: "x".repeat(4096),
         }));
         assert_eq!(
-            hex::encode(semantic_payload_hash(&envelope).unwrap()),
+            hex::encode(legacy_synthetic_payload_hash(&envelope).unwrap()),
             "d6f3a8f8d0fc7ccbbfe6fec9f93bcad544d98fec0f3501aeef8be2a5d2b78daa"
         );
         envelope.payload = Some(command_envelope::Payload::SyntheticNoop(
             SyntheticNoop::default(),
         ));
         assert_eq!(
-            hex::encode(semantic_payload_hash(&envelope).unwrap()),
+            hex::encode(legacy_synthetic_payload_hash(&envelope).unwrap()),
             "2e5b198f3c3a2718113a4dbf2a552c730ddede13567ee448c6118459ccfa0d98"
         );
         envelope.payload = Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
@@ -1947,13 +1944,13 @@ mod tests {
         }));
         envelope.expected_revision = 2;
         assert_eq!(
-            hex::encode(semantic_payload_hash(&envelope).unwrap()),
+            hex::encode(legacy_synthetic_payload_hash(&envelope).unwrap()),
             "79659b4e1819080191867174096d8aa5d01a43cb634cab9c51b113391643c343"
         );
         envelope.expected_revision = 1;
         envelope.node_id = (1_u8..=16).collect();
         assert_eq!(
-            hex::encode(semantic_payload_hash(&envelope).unwrap()),
+            hex::encode(legacy_synthetic_payload_hash(&envelope).unwrap()),
             "a45222e4babe147a02b9274937f09c337ac56764a56c61a9ebfd901d4fec7afe"
         );
     }

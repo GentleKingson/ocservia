@@ -19,8 +19,8 @@ def main():
         (work / 'evidence').mkdir()
         (work / 'config-reference.json').write_text(json.dumps({'id': 'tls-ref'}))
         (work / 'private/smoke-vpn-password').write_text('test-password')
-        env = {'T07_WORK': str(work), 'ARTIFACT_DIR': str(work / 'evidence'),
-               'T07_WORKSPACE': 'workspace', 'T07_NODE': 'node', 'BUSINESS_PROFILE': 'smoke'}
+        env = {'OCSERVIA_BUSINESS_TEST_WORK_DIR': str(work), 'ARTIFACT_DIR': str(work / 'evidence'),
+               'OCSERVIA_BUSINESS_TEST_WORKSPACE_ID': 'workspace', 'OCSERVIA_BUSINESS_TEST_NODE_ID': 'node', 'BUSINESS_PROFILE': 'smoke'}
         spec = importlib.util.spec_from_file_location('release_business_api', root / 'scripts/release-business-api.py')
         with patch.dict(os.environ, env), patch('ssl.create_default_context'):
             business = importlib.util.module_from_spec(spec)
@@ -199,7 +199,7 @@ certutil() { :; }
                 if not result:
                     raise RuntimeError(description)
                 return result
-            with patch.dict(os.environ, {**env, 'T07_RELAY_CONTAINER': 'relay'}), \
+            with patch.dict(os.environ, {**env, 'OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER': 'relay'}), \
                     patch.object(business, 'single_relay_argv'), patch.object(business, 'owner', return_value='old'), \
                     patch.object(business, 'run', side_effect=recovery_command), \
                     patch.object(business, 'api', side_effect=AssertionError('must not poll stale telemetry')), \
@@ -357,7 +357,9 @@ certutil() { :; }
                              'nodes': [{'node_id': 'node', 'batch': 0, 'state': 'succeeded', 'operation_id': 'upgrade'}]},
                          'approval-requests/approval': {'status': 'consumed'},
                          'nodes/node': {'connection_state': 'online', 'agent_version': '0.0.1'}}
-        binaries = lambda path, _flag: f'{path.rsplit("/", 1)[1]} 0.0.1\n'
+        def binaries(path, _flag):
+            return f'{path.rsplit("/", 1)[1]} 0.0.1\n'
+
         rollout_file.write_text(json.dumps(rollout_entries))
         with patch.dict(os.environ, rollout_env), patch.object(business, 'api', side_effect=rollout_state.__getitem__), \
                 patch.object(business, 'run', side_effect=binaries), patch.object(business, 'record') as record:
@@ -411,7 +413,7 @@ certutil() { :; }
             business.vpn_smoke('after_config_apply')
             business.vpn_smoke('after_rollback')
             assert popen.call_count == 2
-            assert all('--user=t07-smoke' in call.args[0] for call in popen.call_args_list)
+            assert all('--user=business-test-smoke-user' in call.args[0] for call in popen.call_args_list)
             assert [call.args[0] for call in record.call_args_list] == [
                 'real_vpn_after_config_apply', 'real_vpn_after_rollback']
 
@@ -429,7 +431,7 @@ certutil() { :; }
             record.assert_called_once_with('bootstrap_token_created_unbound', token_id='token-id')
         binding = {'token_hash': hashlib.sha256(token.encode()).hexdigest(), 'bound_endpoint': 'e' * 64,
                    'unbound_at_creation': True, 'consumed_node_id': 'node', 'consumed': True}
-        verify_env = {**env, 'T07_ENDPOINT': 'e' * 64}
+        verify_env = {**env, 'OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID': 'e' * 64}
         for label, row, status in [('accepted', binding, 'pending'),
                                    ('other endpoint', {**binding, 'bound_endpoint': 'f' * 64}, 'pending'),
                                    ('unconsumed', {**binding, 'consumed': False}, 'pending'),
@@ -599,7 +601,7 @@ python3() { echo "api:$2"; return "$API_EXIT"; }
                 if not value:
                     raise RuntimeError('timeout: ' + description)
                 return value
-            with patch.dict(os.environ, {**env, 'T07_ENDPOINT': 'endpoint'}), \
+            with patch.dict(os.environ, {**env, 'OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID': 'endpoint'}), \
                     patch.object(business, 'api', side_effect=terminal_api), \
                     patch.object(business, 'sql', side_effect=terminal_sql), \
                     patch.object(business, 'run', side_effect=terminal_run), \

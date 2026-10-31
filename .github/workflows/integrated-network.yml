@@ -12,7 +12,7 @@ on:
         type: string
         default: ''
       probe_mode:
-        description: Existing P1 fixture or real Integrated Controller
+        description: Existing integrated network fixture or real Integrated Controller
         type: choice
         options: [fixture, controller]
         default: fixture
@@ -51,12 +51,12 @@ jobs:
           persist-credentials: false
       - name: Probe shared public fixture
         env:
-          P1_PUBLIC_ADDRESS: ${{ inputs.public_address }}
-          P1_PUBLIC_CA_PEM: ${{ inputs.public_ca_pem }}
+          OCSERVIA_INTEGRATED_TEST_PUBLIC_ADDRESS: ${{ inputs.public_address }}
+          OCSERVIA_INTEGRATED_TEST_CA_PEM: ${{ inputs.public_ca_pem }}
           PROBE_MODE: ${{ inputs.probe_mode }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
-          python3 scripts/probe-integrated-public.py --address "${P1_PUBLIC_ADDRESS}" \
+          python3 scripts/probe-integrated-public.py --address "${OCSERVIA_INTEGRATED_TEST_PUBLIC_ADDRESS}" \
             --mode "${PROBE_MODE}" --candidate-sha "${CANDIDATE_SHA}" \
             --output "${RUNNER_TEMP}/public-client/result.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -85,12 +85,12 @@ jobs:
           persist-credentials: false
       - name: Build development images (no Registry write)
         run: |
-          docker build -f deploy/production/edge.Dockerfile -t ocservia-p1-edge .
-          docker build -f deploy/production/relay.Dockerfile -t ocservia-p1-relay .
+          docker build -f deploy/production/edge.Dockerfile -t ocservia-integrated-test-edge .
+          docker build -f deploy/production/relay.Dockerfile -t ocservia-integrated-test-relay .
       - name: Test isolated network
         run: |
           python3 scripts/test-integrated-network.py \
-            --edge-image ocservia-p1-edge --relay-image ocservia-p1-relay \
+            --edge-image ocservia-integrated-test-edge --relay-image ocservia-integrated-test-relay \
             --artifacts "${RUNNER_TEMP}/integrated-network"
       - name: Upload scoped evidence
         if: always()

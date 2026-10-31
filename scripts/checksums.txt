@@ -35,3 +35,5 @@ c46d5e4c28e12aa4c5becfaa343ef1c7f89045b6b895f2c21d471c62db09c706  syft_1.52.0_li
 3fa2dc4b924621ab65404cf08d0b8438d896d80ab949c9d5a4ca283c36004c9b  grype_0.119.0_linux_amd64.tar.gz
 29f0ec7c549ddb0e2b6a0ca714851f7399438afc399b80c12808e065edc9a8f8  grype_0.119.0_linux_arm64.tar.gz
 9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792  rustup-init-aarch64-unknown-linux-gnu
+cb8a88912aa91a1864ad662c24df4514699ddfcbc52e684218aaf5ac57d7de0d  ruff-0.14.3-x86_64-unknown-linux-gnu.tar.gz
+fc4c2c153656bc4082fb6c928fbd6867d5eb932240b663b329365f3f1821fc82  ruff-0.14.3-aarch64-apple-darwin.tar.gz

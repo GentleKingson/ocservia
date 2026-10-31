@@ -1,5 +1,5 @@
 // Package semanticpayload computes the versioned canonical semantic hash for
-// command envelopes, shared by the localslice and operations packages.
+// command envelopes, shared by the transportevents and operations packages.
 package semanticpayload
 
 import (

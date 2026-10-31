@@ -15,11 +15,11 @@ import (
 
 func testOptions(t *testing.T) Options {
 	t.Helper()
-	dsn := os.Getenv("PR02_DSN")
+	dsn := os.Getenv("OCSERVIA_DATABASE_TEST_DSN")
 	if dsn == "" {
-		t.Skip("real database test: PR02_DSN required")
+		t.Skip("real database test: OCSERVIA_DATABASE_TEST_DSN required")
 	}
-	return Options{Engine: Engine(os.Getenv("PR02_ENGINE")), Environment: "test", DSN: dsn}
+	return Options{Engine: Engine(os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE")), Environment: "test", DSN: dsn}
 }
 func fixture(t *testing.T) (*Backend, *Backend, Options) {
 	t.Helper()
@@ -30,7 +30,7 @@ func fixture(t *testing.T) (*Backend, *Backend, Options) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { admin.Close() })
-	name := "pr02_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	name := "dbtest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	if _, err = admin.Exec(ctx, "CREATE DATABASE `"+name+"`"); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func fixture(t *testing.T) (*Backend, *Backend, Options) {
 	}
 	c.DBName = name
 	c.User = "ocservia_owner"
-	c.Passwd = "pr02-owner-test-only"
+	c.Passwd = "database-e2e-owner-test-only"
 	o.DSN = c.FormatDSN()
 	b, err := Open(ctx, o)
 	if err != nil {
@@ -68,9 +68,9 @@ func migrateFixture(t *testing.T) (*Backend, *Backend, Options) {
 
 func TestRealTLS(t *testing.T) {
 	o := testOptions(t)
-	ca := os.Getenv("PR02_TLS_CA_FILE")
+	ca := os.Getenv("OCSERVIA_DATABASE_TEST_TLS_CA_FILE")
 	if ca == "" {
-		t.Fatal("real TLS test requires PR02_TLS_CA_FILE")
+		t.Fatal("real TLS test requires OCSERVIA_DATABASE_TEST_TLS_CA_FILE")
 	}
 	o.DSN = strings.Replace(o.DSN, "tls=false", "tls=true", 1)
 	o.CAFile = ca
@@ -102,7 +102,7 @@ func TestRealConcurrentMigration(t *testing.T) {
 	}
 }
 func TestCrashChild(t *testing.T) {
-	if os.Getenv("PR02_CRASH_CHILD") != "yes" {
+	if os.Getenv("OCSERVIA_DATABASE_TEST_MIGRATION_CRASH_CHILD") != "yes" {
 		t.Skip("subprocess only")
 	}
 	b, err := Open(context.Background(), testOptions(t))
@@ -217,7 +217,7 @@ func TestRealPrivileges(t *testing.T) {
 	}
 	c, _ := driver.ParseDSN(o.DSN)
 	c.User = "ocservia_app"
-	c.Passwd = "pr02-runtime-test-only"
+	c.Passwd = "database-e2e-runtime-test-only"
 	o.DSN = c.FormatDSN()
 	runtime, err := Open(ctx, o)
 	if err != nil {
@@ -286,7 +286,7 @@ func TestRealPrivileges(t *testing.T) {
 		}
 	}
 	c.User = "ocservia_maintenance"
-	c.Passwd = "pr02-maintenance-test-only"
+	c.Passwd = "database-e2e-maintenance-test-only"
 	o.DSN = c.FormatDSN()
 	maintenance, err := Open(ctx, o)
 	if err != nil {

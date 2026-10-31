@@ -83,8 +83,8 @@ under the production workspace lock, without opening network connections.
 
 The status/path/queue changes also apply when persistence is disabled, including
 single-Relay configurations. None is removed on the assumption that production
-supports only one Relay. The seven existing focused regression names remain
-stable; no new product support or discovery service is enabled.
+supports only one Relay. The ten focused regressions cover status, queue, retry and receive-mapping
+boundaries; no new product support or discovery service is enabled.
 
 Relay receive mappings are capped at 65,536 entries before unauthenticated
 sender metadata reaches QUIC. On pressure, mappings without a remote actor are
@@ -130,9 +130,13 @@ The focused names are `concurrent_relay_status_transitions_preserve_every_actor`
 `relay_paths_offered_only_for_connected_relays`,
 `home_relay_failover_only_picks_connected_configured_standbys`,
 `persistent_relay_retry_sleep_stays_inside_recovery_budget`,
-`test_prio_inbox_answered_during_backoff`, and
-`close_all_active_relays_survives_a_cancelled_task`. These tests are not
+`test_prio_inbox_answered_during_backoff`,
+`close_all_active_relays_survives_a_cancelled_task`,
+`endpoint_mappings_are_reclaimed_and_bounded`,
+`relay_sender_hints_are_bounded_and_relearned`, and
+`both_relay_receive_loops_use_the_shared_handler`. The last is a source-structure
+assertion; the two preceding mapping tests exercise runtime behavior. These tests are not
 invoked by `scripts/rust-check.sh` or Quick CI; the Full profile of
-`.github/workflows/ci.yml` (also run by Release Check) runs all seven by exact
-name and fails unless all seven ran. Do not infer their execution from a green
+`.github/workflows/ci.yml` (also run by Release Check) runs all ten by exact
+name and fails unless all ten ran. Do not infer their execution from a green
 Quick Rust job.

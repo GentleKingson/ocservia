@@ -24,7 +24,7 @@ import (
 	configplanstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -498,10 +498,10 @@ func TestApprovalDetailRequiresEveryAuthorityScopeIntegration(t *testing.T) {
 	}
 }
 
-func apiOperationService(pool *pgxpool.Pool) *operationstore.Service {
+func apiOperationService(pool *pgxpool.Pool) *operations.Service {
 	var seed [32]byte
 	seed[0] = 7
-	return operationstore.NewBackend(postgres.WrapPool(pool), 50, commandauth.NewSignerFromSeed(seed))
+	return operations.NewBackend(postgres.WrapPool(pool), 50, commandauth.NewSignerFromSeed(seed))
 }
 
 // TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations drives the full

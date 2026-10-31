@@ -2131,7 +2131,6 @@ mod tests {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn signed_command(
         key: &SigningKey,
         node_id: [u8; 16],

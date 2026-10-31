@@ -1,7 +1,7 @@
 const oidcAttemptKey = "ocservia.login.oidc-attempt";
 
 // UX state only. Authorization always comes from the server.
-export function hasOIDCLoginAttempt(): boolean {
+export function hasOidcLoginAttempt(): boolean {
   try {
     return sessionStorage.getItem(oidcAttemptKey) !== null;
   } catch {
@@ -9,7 +9,7 @@ export function hasOIDCLoginAttempt(): boolean {
   }
 }
 
-export function startOIDCLoginAttempt(): void {
+export function startOidcLoginAttempt(): void {
   try {
     sessionStorage.setItem(oidcAttemptKey, "started");
   } catch {
@@ -17,7 +17,7 @@ export function startOIDCLoginAttempt(): void {
   }
 }
 
-export function clearOIDCLoginAttempt(): void {
+export function clearOidcLoginAttempt(): void {
   try {
     sessionStorage.removeItem(oidcAttemptKey);
   } catch {

@@ -6,6 +6,10 @@ on:
       profile:
         type: string
         required: true
+      contract_base_ref:
+        description: Prior commit or tag for manual contract comparison
+        type: string
+        required: true
   pull_request:
   push:
     branches: [main]
@@ -16,6 +20,10 @@ on:
         type: choice
         options: [quick, full]
         default: full
+        required: true
+      contract_base_ref:
+        description: Prior commit or tag; must differ from this candidate
+        type: string
         required: true
 
 permissions:
@@ -78,6 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Cache pinned go-test tools
         if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'guards')
@@ -89,6 +98,12 @@ jobs:
           key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'control-plane/go.sum', 'signer/go.sum') }}
       - if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'guards')
         run: scripts/bootstrap.sh go-test
+      - name: Install source style tools
+        if: contains(needs.ci-relevance.outputs.ci_suites, 'source-style')
+        run: scripts/bootstrap.sh source-style
+      - name: Install contract tools
+        if: contains(needs.ci-relevance.outputs.ci_suites, 'contracts')
+        run: scripts/bootstrap.sh contracts
       - id: cache-key
         if: needs.ci-relevance.outputs.run_go == 'true'
         run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
@@ -110,6 +125,9 @@ jobs:
         env:
           CI_SUITES: ${{ needs.ci-relevance.outputs.ci_suites }}
           CI_RUN_GO: ${{ needs.ci-relevance.outputs.run_go }}
+          CONTRACT_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || inputs.contract_base_ref }}
+          CONTRACT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          CONTRACT_EVENT: ${{ github.event_name }}
         run: bash scripts/ci-tools-check.sh
       - if: needs.ci-relevance.outputs.run_go == 'true'
         run: scripts/go-check.sh standard
@@ -170,9 +188,12 @@ jobs:
             socket::transports::relay::actor::tests::persistent_relay_retry_sleep_stays_inside_recovery_budget \
             socket::transports::relay::actor::tests::test_prio_inbox_answered_during_backoff \
             socket::transports::relay::actor::tests::close_all_active_relays_survives_a_cancelled_task \
+            socket::remote_map::tests::endpoint_mappings_are_reclaimed_and_bounded \
+            socket::transports::relay::actor::tests::relay_sender_hints_are_bounded_and_relearned \
+            socket::transports::relay::actor::tests::both_relay_receive_loops_use_the_shared_handler \
             | tee "${RUNNER_TEMP}/iroh-vendor-tests.log"
           # A renamed test would otherwise match nothing and still pass.
-          grep -q '^test result: ok. 7 passed;' "${RUNNER_TEMP}/iroh-vendor-tests.log"
+          grep -q '^test result: ok. 10 passed;' "${RUNNER_TEMP}/iroh-vendor-tests.log"
       - name: Relay launcher and installer contracts
         if: needs.ci-relevance.outputs.run_installers == 'true'
         run: |
@@ -353,8 +374,8 @@ jobs:
           persist-credentials: false
       - run: scripts/bootstrap.sh go-test
       - run: |
-          script=scripts/i18-mysql-backup-restore-smoke.sh
-          if [[ "$ENGINE" == postgres ]]; then script=scripts/i18-external-postgres-backup-restore-smoke.sh; fi
+          script=scripts/mysql-backup-restore-smoke.sh
+          if [[ "$ENGINE" == postgres ]]; then script=scripts/external-postgres-backup-restore-smoke.sh; fi
           RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ENGINE}" \
             ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-${ENGINE}" \
             bash "$script"
@@ -416,7 +437,8 @@ jobs:
             all(["run_docs", "run_go", "run_rust", "run_web", "run_web_browser", "run_database", "run_ci_tools", "run_installers", "run_controller_cache"][];
               $routing[.] == "true" or $routing[.] == "false") and
             (if $routing.profile == "full" then
-              all(["run_docs", "run_go", "run_rust", "run_web", "run_web_browser", "run_database"][]; $routing[.] == "true")
+              all(["run_docs", "run_go", "run_rust", "run_web", "run_web_browser", "run_database", "run_ci_tools"][]; $routing[.] == "true") and
+              ($routing.ci_suites | split(" ") | index("source-style") != null and index("contracts") != null)
             else true end) and
             all(["docs", "go", "rust", "web", "web-browser", "database-smoke"][];
               . as $job | (if $job == "go" then ($routing.run_go == "true" or $routing.run_ci_tools == "true")

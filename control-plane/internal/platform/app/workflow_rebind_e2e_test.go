@@ -30,7 +30,7 @@ import (
 
 // A second real Controller, with its own database, signing key and transport identity.
 func startRebindTarget(t *testing.T, source *controllerE2E) (*controllerE2E, string) {
-	f := newControllerE2EAt(t, source.ctx, "/run/pr02-rebind-target")
+	f := newControllerE2EAt(t, source.ctx, "/run/ocservia-database-rebind-target")
 	f.artifacts = filepath.Join(source.artifacts, "target")
 	if err := os.MkdirAll(f.artifacts, 0700); err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func startRebindTarget(t *testing.T, source *controllerE2E) (*controllerE2E, str
 		"OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true",
 	})
 	roles := []string{"all"}
-	switch os.Getenv("PR07_CONTROLLER_ROLE_MODE") {
+	switch os.Getenv("OCSERVIA_DATABASE_TEST_CONTROLLER_ROLE_MODE") {
 	case "", "all":
 	case "split":
 		roles = []string{"api", "worker", "scheduler"}

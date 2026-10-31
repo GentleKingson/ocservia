@@ -143,9 +143,11 @@ for name in ['schema.raw','seeds.raw','scheduler.sql']:
   raise SystemExit('released checkpoint upgrade and fresh schema differ: '+name)
 
 PY_COMPARE
-for file in schema.sql; do
- if [[ "$mode" == generate ]]; then cp "$tmp/$file" "$ROOT/control-plane/migrations/$file"; else diff -u "$ROOT/control-plane/migrations/$file" "$tmp/$file"; fi
-done
+if [[ "$mode" == generate ]]; then
+ cp "$tmp/schema.sql" "$ROOT/control-plane/migrations/schema.sql"
+else
+ diff -u "$ROOT/control-plane/migrations/schema.sql" "$tmp/schema.sql"
+fi
 if [[ "$mode" == generate ]]; then
  python3 - "$ROOT/control-plane/migrations" <<'PY_BASELINE'
 import hashlib,pathlib,re,sys

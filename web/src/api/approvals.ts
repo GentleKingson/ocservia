@@ -6,7 +6,7 @@ import {
 } from "@ocservia/api-client";
 import { configuration, requestInit } from "./transport";
 
-import { workspaceID } from "./workspace";
+import { getWorkspaceId } from "./workspace";
 
 const operations = new OperationsApi(configuration);
 
@@ -28,7 +28,7 @@ export async function listPendingApprovals(
   cursor?: string,
   signal?: AbortSignal,
 ): Promise<ApprovalPage> {
-  const xWorkspaceID = await workspaceID();
+  const xWorkspaceID = await getWorkspaceId();
   return operations.listPendingApprovals(
     { xWorkspaceID, pageSize: 50, ...(cursor ? { cursor } : {}) },
     requestInit(signal),

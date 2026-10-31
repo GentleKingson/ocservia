@@ -40,7 +40,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("authenticated_tcp=PASS");
     let rejected = tokio::time::timeout(
         Duration::from_secs(20),
-        builder.auth_token("p1-deliberately-wrong-token").connect(),
+        builder
+            .auth_token("deliberately-wrong-relay-token")
+            .connect(),
     )
     .await?;
     let error = rejected.expect_err("wrong token unexpectedly accepted");

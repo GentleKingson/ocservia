@@ -10,9 +10,13 @@ if [[ "${1:-}" != "--skip-generate" ]]; then
     echo "usage: $0 [--skip-generate]" >&2
     exit 2
   }
+  if [[ -n "$(git -C "${ROOT}" status --porcelain --untracked-files=normal)" ]]; then
+    echo "generated-clean requires a clean candidate checkout before regeneration; use --skip-generate for a read-only preflight" >&2
+    exit 1
+  fi
   "${ROOT}/scripts/generate.sh"
 fi
-git -C "${ROOT}" diff --exit-code -- \
+git -C "${ROOT}" diff HEAD --exit-code -- \
   control-plane/gen/proto \
   rust/crates/contracts/src/generated \
   web/src/api/generated

@@ -16,8 +16,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -54,7 +54,7 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 			t.Error(err)
 		}
 	}()
-	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, requester, "i16-"+requester.String(), approver, "i16-"+approver.String())
+	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, requester, "config-apply-"+requester.String(), approver, "config-apply-"+approver.String())
 	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at) VALUES($1,now(),'complete',$2,'0.7.0','1.2.4','test','{}','{}','{}',now())`, node, uuid.Must(uuid.NewV7()))
 	for _, capability := range []string{configprofile.PlanCapability, configprofile.ApplyCapability} {
 		exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,$2,true)`, node, capability)
@@ -113,7 +113,7 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 			t.Fatal(err)
 		}
 		event := uuid.Must(uuid.NewV7())
-		if err := localslice.NewBackend(postgres.WrapPool(pool), signer).Ingest(ctx, &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: trace, Payload: encoded}); err != nil {
+		if err := transportevents.NewBackend(postgres.WrapPool(pool), signer).Ingest(ctx, &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: trace, Payload: encoded}); err != nil {
 			t.Fatal(err)
 		}
 	}

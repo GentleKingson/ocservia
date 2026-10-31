@@ -4,9 +4,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
+# Profile fixtures intentionally keep their environment inside this subshell.
+# shellcheck disable=SC2030
 (
+  # Read by the sourced managed_options initialization below.
+  # shellcheck disable=SC2034
   VERSION=1.0.2
   for PRODUCTION_SIGNER_ACCEPTANCE in false true; do
+    managed_options=()
     # shellcheck disable=SC1090
     source <(sed -n '/^managed_options=/,+1p' scripts/release-business-probe.sh)
     [[ "${managed_options[0]} ${managed_options[1]}" == '--version v1.0.2' ]]
@@ -45,6 +50,8 @@ set -e
 # Exercise the actual profile routing without installing anything on this host.
 for BUSINESS_PROFILE in smoke extended; do
   (
+    # This separate fixture deliberately sets its own signer mode.
+    # shellcheck disable=SC2031
     export PRODUCTION_SIGNER_ACCEPTANCE=true BUSINESS_RUN_RESILIENCE=true BUSINESS_TERMINAL=revocation
     # shellcheck disable=SC2317
     next_stage() { :; }

@@ -36,7 +36,7 @@ func TestRealOperationReaping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.User, cfg.Passwd = "ocservia_app", "pr02-runtime-test-only"
+	cfg.User, cfg.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
 	options.DSN = cfg.FormatDSN()
 	backend, err := Open(ctx, options)
 	if err != nil {

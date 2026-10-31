@@ -1,4 +1,8 @@
-import type { UserPolicy, UserPolicyRequest } from "@ocservia/api-client";
+import {
+  ResponseError,
+  type UserPolicy,
+  type UserPolicyRequest,
+} from "@ocservia/api-client";
 
 import { getUserPolicy, setUserPolicy } from "../api/users";
 
@@ -9,7 +13,8 @@ export interface UserPolicyForm {
   direction: "rx" | "tx" | "rxtx";
   quotaValue: number;
   quotaUnit: QuotaUnit;
-  expiresAtLocal: string;
+  // UTC wall-clock text for the input; the control itself carries no timezone.
+  expiresAtUtcInput: string;
   version: number;
 }
 
@@ -26,7 +31,7 @@ export function policyToForm(policy?: UserPolicy): UserPolicyForm {
     direction: policy?.quotaDirection ?? "rxtx",
     quotaValue: policy ? policy.quotaBytes / unitBytes[unit] : 0,
     quotaUnit: unit,
-    expiresAtLocal:
+    expiresAtUtcInput:
       policy?.expiresAt?.replace(/:00Z$/, "").replace(/Z$/, "") ?? "",
     version: policy?.version ?? 0,
   };
@@ -49,12 +54,12 @@ export function formToRequest(
       : Math.round(form.quotaValue * unitBytes[form.quotaUnit]);
   if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 0)
     throw new Error("Quota is outside the supported byte range");
-  if (expiryInputType(form.expiresAtLocal) === "text")
+  if (expiryInputType(form.expiresAtUtcInput) === "text")
     throw new Error("Expiry must be a finite UTC date with whole seconds");
   const expiry =
-    form.expiresAtLocal.length === 16
-      ? `${form.expiresAtLocal}:00`
-      : form.expiresAtLocal;
+    form.expiresAtUtcInput.length === 16
+      ? `${form.expiresAtUtcInput}:00`
+      : form.expiresAtUtcInput;
   const expiresAt = expiry ? new Date(`${expiry}Z`) : undefined;
   if (
     expiresAt &&
@@ -80,10 +85,9 @@ export async function loadUserPolicy(
   try {
     return policyToForm(await getUserPolicy(nodeId, username, signal));
   } catch (error) {
-    const response = (error as { response?: Response }).response;
     if (
       (error instanceof Response && error.status === 404) ||
-      response?.status === 404
+      (error instanceof ResponseError && error.response.status === 404)
     )
       return policyToForm();
     throw error;

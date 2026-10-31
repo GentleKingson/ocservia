@@ -89,7 +89,7 @@ func (s *service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	code := 200
 	if r.URL.Path == "/sign/seal" {
 		node, use := r.Header.Get("X-Ocservia-Node-ID"), r.Header.Get("X-Ocservia-Seal-Purpose")
-		if !validUUID(node) || !purpose(use) {
+		if !validUUID(node) || !validSealPurpose(use) {
 			err = statusError(400)
 		} else {
 			response, err = s.seal(node, use, body)

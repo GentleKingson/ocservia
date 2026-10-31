@@ -12,7 +12,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-WORK = Path(os.environ['T07_WORK'])
+WORK = Path(os.environ['OCSERVIA_BUSINESS_TEST_WORK_DIR'])
 OUTBOX = WORK / 'outbox'
 STATE = WORK / 'state'
 PRIVATE = WORK / 'private'
@@ -57,7 +57,7 @@ def plan_result(plan_id):
 def issue_token(endpoint):
     assert endpoint == hex64(STATE / 'agent-endpoint-id')
     response = business.api('enrollment-tokens', {
-        'workspace_id': os.environ['T07_WORKSPACE'], 'environment': 'development',
+        'workspace_id': os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], 'environment': 'development',
         'expected_node_name': 'github-hosted-node', 'expected_endpoint_id': endpoint,
         'ttl_seconds': 600, 'reason': 'cross-VM native business enrollment'}, status=201)
     assert re.fullmatch(r'[A-Za-z0-9_-]{43}', response['token'])
@@ -121,7 +121,7 @@ def run_business(ready_dir, peer_dir):
     ready = json.loads((ready_dir / 'ready.json').read_text())
     assert ready['node_id'] == node
     assert ready['agent_endpoint_id'] == hex64(STATE / 'agent-endpoint-id')
-    os.environ['T07_NODE'] = node
+    os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'] = node
     def online():
         item = business.api('nodes/' + node)
         checks = {'active': item['trust_status'] == 'active',
@@ -221,7 +221,7 @@ def verify_result(result_dir):
 
 def recovery(phase, peer_dir):
     node = node_id()
-    os.environ['T07_NODE'] = node
+    os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'] = node
     prefix = 'nodes/' + node
     baseline_path = OUTBOX / 'recovery-controller-baseline/result.json'
     queued_path = OUTBOX / 'recovery-controller-queued/result.json'

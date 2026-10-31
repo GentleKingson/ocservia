@@ -8,7 +8,7 @@ import (
 
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 )
@@ -63,7 +63,7 @@ func (s *Server) createAgentRollout(w http.ResponseWriter, r *http.Request) {
 		batchSize = *body.BatchSize
 	}
 	actor := principal(r)
-	rollout, replayed, err := s.operations.CreateAgentRollout(r.Context(), operationstore.CreateAgentRolloutRequest{
+	rollout, replayed, err := s.operations.CreateAgentRollout(r.Context(), operations.CreateAgentRolloutRequest{
 		WorkspaceID:     workspace(r),
 		TargetVersion:   strings.TrimSpace(body.TargetVersion),
 		NodeIDs:         nodeIDs,
@@ -193,15 +193,15 @@ func (s *Server) resumeAgentRollout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeRolloutError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, operationstore.ErrRolloutInvalid):
+	case errors.Is(err, operations.ErrRolloutInvalid):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the agent rollout request is invalid")
-	case errors.Is(err, operationstore.ErrIdempotencyConflict):
+	case errors.Is(err, operations.ErrIdempotencyConflict):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/idempotency-conflict", "Idempotency conflict", "the Idempotency-Key was already used with different input")
-	case errors.Is(err, operationstore.ErrNoEligibleNodes):
+	case errors.Is(err, operations.ErrNoEligibleNodes):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/no-eligible-nodes", "No eligible nodes", "none of the requested nodes is currently eligible for the target version")
-	case errors.Is(err, operationstore.ErrRolloutState):
+	case errors.Is(err, operations.ErrRolloutState):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/rollout-state", "Rollout state is invalid", "only a paused rollout can be resumed")
-	case errors.Is(err, operationstore.ErrRolloutUnavailable):
+	case errors.Is(err, operations.ErrRolloutUnavailable):
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "rollout orchestration is unavailable")
 	case errors.Is(err, approvalstore.ErrNotReady):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "the approval is expired, consumed, or does not match the rollout request")

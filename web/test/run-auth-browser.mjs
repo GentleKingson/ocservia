@@ -114,7 +114,7 @@ async function startGateway() {
   );
   await chmod(directory, 0o755);
   await chmod(join(directory, "tls.key"), 0o444);
-  const edgeIP = "198.18.95.2";
+  const edgeIp = "198.18.95.2";
   docker(
     "network",
     "create",
@@ -148,7 +148,7 @@ async function startGateway() {
         "-e",
         `OCSERV_PUBLIC_HOST=${host}`,
         "-e",
-        `OCSERV_EDGE_GATEWAY_IP=${edgeIP}`,
+        `OCSERV_EDGE_GATEWAY_IP=${edgeIp}`,
         "-v",
         `${join(root, "deploy/production/integrated/Caddyfile")}:/etc/caddy/Caddyfile:ro`,
         "-v",
@@ -186,7 +186,7 @@ async function startGateway() {
       "--network",
       gatewayName,
       "--ip",
-      edgeIP,
+      edgeIp,
       "--user",
       "65532:65532",
       "--read-only",

@@ -77,7 +77,7 @@ func createScheduledUpgrade(t *testing.T, service *Service, pool *pgxpool.Pool, 
 	return operationUUID
 }
 
-// acknowledgeUpgradeScheduling simulates the localslice normalization of the
+// acknowledgeUpgradeScheduling simulates the transportevents normalization of the
 // agent's scheduling acknowledgement: non-terminal accepted with a timestamp.
 func acknowledgeUpgradeScheduling(t *testing.T, pool *pgxpool.Pool, operationID uuid.UUID) {
 	t.Helper()

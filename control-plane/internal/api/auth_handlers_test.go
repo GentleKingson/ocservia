@@ -51,7 +51,7 @@ func authHTTPRequest(s *Server, method, path, body, origin string) *httptest.Res
 	r := httptest.NewRequest(method, "/api/v1/auth/"+path, strings.NewReader(body))
 	r.Header.Set("Origin", origin)
 	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("X-Request-ID", "r6-http-request")
+	r.Header.Set("X-Request-ID", "auth-http-request")
 	w := httptest.NewRecorder()
 	s.http.Handler.ServeHTTP(w, r)
 	return w
@@ -206,8 +206,8 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, Algorithm: "RS256", Use: "sig"}}})
 		case "/token":
 			_ = r.ParseForm()
-			if r.Form.Get("code") == "code-bait-r6-rejected" {
-				http.Error(w, `{"error":"invalid_grant","error_description":"upstream-secret-bait-r6"}`, 400)
+			if r.Form.Get("code") == "rejected-authorization-code-log-bait" {
+				http.Error(w, `{"error":"invalid_grant","error_description":"upstream-secret-log-bait"}`, 400)
 				return
 			}
 			digest := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
@@ -228,7 +228,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 				return
 			}
 			secrets = append(secrets, token)
-			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "access-token-bait-r6", "refresh_token": "refresh-token-bait-r6", "token_type": "Bearer", "id_token": token})
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "access-token-log-bait", "refresh_token": "refresh-token-log-bait", "token_type": "Bearer", "id_token": token})
 		default:
 			http.NotFound(w, r)
 		}
@@ -245,7 +245,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 			logs := captureAuthLogs(s)
 			defer func() {
 				assertNoAuthSecrets(t, logs, secrets...)
-				assertNoAuthSecrets(t, logs, "http-test-password", "access-token-bait-r6", "refresh-token-bait-r6", "code-bait-r6-rejected", "upstream-secret-bait-r6")
+				assertNoAuthSecrets(t, logs, "http-test-password", "access-token-log-bait", "refresh-token-log-bait", "rejected-authorization-code-log-bait", "upstream-secret-log-bait")
 			}()
 			logout := func(cookie *http.Cookie) {
 				t.Helper()
@@ -302,7 +302,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 			if mode != "local" {
 				do := func(path string, cookie *http.Cookie) *httptest.ResponseRecorder {
 					r := httptest.NewRequest("GET", "/api/v1/auth/"+path, nil)
-					r.Header.Set("X-Request-ID", "r6-oidc-request")
+					r.Header.Set("X-Request-ID", "oidc-log-request")
 					r = r.WithContext(context.WithValue(r.Context(), oauth2.HTTPClient, idp.Client()))
 					if cookie != nil {
 						r.AddCookie(cookie)
@@ -331,7 +331,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 					t.Fatal("invalid state accepted")
 				}
 				assertAuthLog(t, logs, "oidc", "rejected", "state_rejected")
-				if rejected := do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=code-bait-r6-rejected", cookie); rejected.Code != 401 {
+				if rejected := do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=rejected-authorization-code-log-bait", cookie); rejected.Code != 401 {
 					t.Fatal("upstream failure accepted")
 				}
 				assertAuthLog(t, logs, "oidc", "rejected", "callback_rejected")
@@ -346,7 +346,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 						t.Fatal(err)
 					}
 					defer owner.Close()
-					constraint := "r6_oidc_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+					constraint := "auth_oidc_log_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 					if _, err := owner.Exec(ctx, `ALTER TABLE auth_sessions ADD CONSTRAINT `+constraint+` CHECK (false) NOT VALID`); err != nil {
 						t.Fatal(err)
 					}
@@ -376,7 +376,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 					if err := pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions`).Scan(&after); err != nil || after != before {
 						t.Fatal("failed session write did not roll back")
 					}
-					assertNoAuthSecrets(t, logs, constraint, cookie.Value, query.Get("state"), "access-token-bait-r6", "refresh-token-bait-r6", "upstream-secret-bait-r6")
+					assertNoAuthSecrets(t, logs, constraint, cookie.Value, query.Get("state"), "access-token-log-bait", "refresh-token-log-bait", "upstream-secret-log-bait")
 				})
 				w = do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=test", cookie)
 				if w.Code != 302 {
@@ -396,7 +396,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 					t.Fatal(err)
 				}
 				record := assertAuthLog(t, logs, "oidc", "succeeded", "session_created")
-				if record["identity_id"] != actor.IdentityID.String() || record["request_id"] != "r6-oidc-request" {
+				if record["identity_id"] != actor.IdentityID.String() || record["request_id"] != "oidc-log-request" {
 					t.Fatal("OIDC success correlation differs")
 				}
 				logout(session)

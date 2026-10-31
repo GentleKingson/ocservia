@@ -8,8 +8,8 @@ import process from "node:process";
 import console from "node:console";
 import { URL } from "node:url";
 
-const work = process.env.T07_WORK;
-const workspace = process.env.T07_WORKSPACE;
+const work = process.env.OCSERVIA_BUSINESS_TEST_WORK_DIR;
+const workspace = process.env.OCSERVIA_BUSINESS_TEST_WORKSPACE_ID;
 const phase = process.argv[2];
 const read = async (file) => (await readFile(file, "utf8")).trim();
 function check(condition) {
@@ -39,11 +39,16 @@ async function main() {
     name: "github-hosted-node",
     environment: "development",
     release: "v0.0.0",
-    controller: await read(path.join(state, "controller-endpoint-id")),
-    relay: await read(path.join(work, "relay/url")),
-    bootstrapFile: path.join(agent, "secrets/bootstrap-token"),
-    relayFile: path.join(agent, "relay/token"),
-    commandKeyFile: path.join(agent, "controller-ready/command.pub.pem"),
+    controllerEndpointId: await read(
+      path.join(state, "controller-endpoint-id"),
+    ),
+    relayUrl: await read(path.join(work, "relay/url")),
+    bootstrapTokenFile: path.join(agent, "secrets/bootstrap-token"),
+    relayAccessTokenFile: path.join(agent, "relay/token"),
+    controllerCommandVerificationKeyFile: path.join(
+      agent,
+      "controller-ready/command.pub.pem",
+    ),
   };
   process.env.TMPDIR = path.join(work, "private/browser");
   await mkdir(process.env.TMPDIR, { recursive: true, mode: 0o700 });
@@ -71,7 +76,9 @@ async function main() {
       }
     });
     await page.goto("/nodes");
-    await page.getByLabel("Username", { exact: true }).fill("t07-requester");
+    await page
+      .getByLabel("Username", { exact: true })
+      .fill("business-test-requester");
     await page
       .getByLabel("Password", { exact: true })
       .fill(await read(path.join(work, "private/requester-password")));
@@ -97,7 +104,7 @@ async function main() {
       .getByLabel("install.env (no secrets)", { exact: true })
       .inputValue();
     // An exact literal allowlist also excludes injected keys, expansions and secrets.
-    const expected = `# Node: ${fields.name}\n# Workspace: ${workspace}\n# Release: ${fields.release}\nCONTROLLER_ENDPOINT_ID=${fields.controller}\nENROLLMENT_ENVIRONMENT=development\nRELAY_URL_A=${fields.relay}\nRELAY_URL_B=\nBOOTSTRAP_TOKEN_SOURCE=${fields.bootstrapFile}\nRELAY_ACCESS_TOKEN_SOURCE=${fields.relayFile}\nCONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fields.commandKeyFile}\n`;
+    const expected = `# Node: ${fields.name}\n# Workspace: ${workspace}\n# Release: ${fields.release}\nCONTROLLER_ENDPOINT_ID=${fields.controllerEndpointId}\nENROLLMENT_ENVIRONMENT=development\nRELAY_URL_A=${fields.relayUrl}\nRELAY_URL_B=\nBOOTSTRAP_TOKEN_SOURCE=${fields.bootstrapTokenFile}\nRELAY_ACCESS_TOKEN_SOURCE=${fields.relayAccessTokenFile}\nCONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fields.controllerCommandVerificationKeyFile}\n`;
     check(config === expected && posts.length === 0);
     const configPath = path.join(work, "outbox/controller-ready/install.env");
     if (phase === "prepare") {

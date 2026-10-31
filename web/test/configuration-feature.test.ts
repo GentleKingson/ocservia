@@ -101,7 +101,7 @@ describe("configuration feature without a page or store", () => {
         ttlSeconds: 900,
       }),
     );
-    feature.configApplyApproval.value = " approval ";
+    feature.configApplyApprovalId.value = " approval ";
     feature.configApplyReason.value = " apply ";
     trackOperation.mockImplementation(() => {
       expect(feature.configDialog.value).toBe(false);
@@ -130,7 +130,7 @@ describe("configuration feature without a page or store", () => {
     },
   );
 
-  it("disposes its polling scope without losing the accepted receipt", async () => {
+  it("disposes its polling scope without losing the accepted reference", async () => {
     const { feature, scope } = setup();
     await feature.openConfigPlan();
     api.createConfigPlan.mockResolvedValueOnce({ ...plan, state: "queued" });

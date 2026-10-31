@@ -75,9 +75,9 @@ if [[ "$mode" == runtime ]]; then
   printf 'PACKAGE_AGENT_PAYLOAD=PASS\nNATIVE_RUNTIME=PASS\n' >>"$work/checkpoints.txt"
   # This fixture only listens on loopback in the disposable host/container.
   test -c /dev/net/tun
-  RUN_ID="I13-p3-${arch}" ARTIFACT_DIR="$work/i13" OCSERVIA_I13_TEST_BINARY="$test_binary" \
-    bash "$ROOT/scripts/i13-native-ocserv-integration.sh"
-  grep -Fx 'session_terminate=PASS' "$work/i13/lifecycle-summary.txt"
+  RUN_ID="native-ocserv-platform-${arch}" ARTIFACT_DIR="$work/native-ocserv" OCSERVIA_NATIVE_OCSERV_TEST_BINARY="$test_binary" \
+    bash "$ROOT/scripts/native-ocserv-integration.sh"
+  grep -Fx 'session_terminate=PASS' "$work/native-ocserv/lifecycle-summary.txt"
   printf 'NATIVE_OPERATIONS=PASS\n' >>"$work/checkpoints.txt"
   exit
 fi
@@ -85,7 +85,7 @@ fi
 [[ "$mode" == host && "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]]
 [[ ! -e "$work" ]]
 mkdir -m 700 "$work"
-container="ocservia-p3-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}-${arch}"
+container="ocservia-native-platform-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}-${arch}"
 cleanup() {
   local status=$?
   trap - EXIT

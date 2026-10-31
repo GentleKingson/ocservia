@@ -415,14 +415,12 @@ fi
 bundle_dir="${state_root}/release-bundles/v0.1.2"
 [[ "$(stat -c '%a' "${bundle_dir}")" == 700 ]] ||
   die "bundle directory mode is wrong: $(stat -c '%a' "${bundle_dir}")"
-[[ "$(ls -A -- "${bundle_dir}" | sort | tr '\n' ' ')" == \
-  "controller-release-${native_arch}.json " ]] ||
-  die "unexpected bundle contents: $(ls -A -- "${bundle_dir}")"
-for bundle_file in \
-  "controller-release-${native_arch}.json"; do
-  [[ "$(stat -c '%a' "${bundle_dir}/${bundle_file}")" == 600 ]] ||
-    die "bundle file ${bundle_file} mode is wrong"
-done
+mapfile -d '' -t bundle_files < <(find "${bundle_dir}" -mindepth 1 -maxdepth 1 -printf '%f\0')
+bundle_file="controller-release-${native_arch}.json"
+[[ "${#bundle_files[@]}" == 1 && "${bundle_files[0]}" == "${bundle_file}" ]] ||
+  die "unexpected bundle contents: $(printf '%q ' "${bundle_files[@]}")"
+[[ "$(stat -c '%a' "${bundle_dir}/${bundle_file}")" == 600 ]] ||
+  die "bundle file ${bundle_file} mode is wrong"
 assert_log_contains "${controller_log}" "install --release-file ${bundle_dir}/controller-release-${native_arch}.json"
 echo "the launcher install flow bootstraps, downloads, and activates"
 
@@ -547,6 +545,8 @@ if can_root; then
     reset_logs
     reset_checkout
     RUN_STATUS=0
+    # Each fixture intentionally isolates its PATH and exported settings.
+    # shellcheck disable=SC2030,SC2031
     RUN_OUTPUT="$(
       export INSTALL_TEST_CURL_LOG="${curl_log}"
       export INSTALL_TEST_BOOTSTRAP_LOG="${bootstrap_log}"
@@ -599,6 +599,8 @@ if can_root; then
       if [[ "${single_b}" == empty ]]; then printf 'OCSERV_RELAY_URL_B=\n' >>"${repo}/install.env"; fi
       if [[ "${single_b}" == override ]]; then printf 'OCSERV_RELAY_URL_B=https://relay-b.example.test\n' >>"${repo}/install.env"; fi
       RUN_STATUS=0
+      # Each fixture intentionally isolates its PATH and exported settings.
+      # shellcheck disable=SC2030,SC2031
       RUN_OUTPUT="$(
         export PATH="${root_lifecycle_bin}"
         export OCSERV_CONTROLLER_STATE_ROOT="${state_root}"
@@ -636,6 +638,8 @@ EOF
     printf 'OCSERV_PUBLIC_HOST=controller-poisoned.example.test\nOCSERV_SECRET_DIR=%s\nOCSERV_BACKUP_DIR=%s\n' \
       "${fixture}/poisoned-secrets" "${fixture}/poisoned-backup" >"${fixture}/poison-install-env"
     RUN_STATUS=0
+    # Each fixture intentionally isolates its PATH and exported settings.
+    # shellcheck disable=SC2030,SC2031
     RUN_OUTPUT="$(
       export INSTALL_TEST_CURL_LOG="${root_curl_log}"
       export INSTALL_TEST_BOOTSTRAP_LOG="${root_bootstrap_log}"
@@ -798,6 +802,8 @@ echo "malformed install.env lines fail closed"
 # backticks, and source lines are rejected, never evaluated.
 reset_logs
 reset_checkout
+# Literal shell syntax tests rejection; it must not expand here.
+# shellcheck disable=SC2016
 printf 'OCSERV_PUBLIC_HOST=$(touch %s)\n' "${fixture}/pwned-marker" >"${repo}/install.env"
 capture_from "${repo}"
 assert_status 1 "command substitution syntax must fail closed"
@@ -806,6 +812,8 @@ assert_output "must be a literal value"
   die "command substitution in install.env must never execute"
 reset_logs
 reset_checkout
+# Literal shell syntax tests rejection; it must not expand here.
+# shellcheck disable=SC2016
 printf 'OCSERV_PUBLIC_HOST=`touch %s`\n' "${fixture}/pwned-marker" >"${repo}/install.env"
 capture_from "${repo}"
 assert_status 1 "backtick syntax must fail closed"

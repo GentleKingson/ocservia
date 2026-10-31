@@ -10,7 +10,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 echo 'Required-test guard self-test: synthetic events below are NOT database acceptance'
 check() {
-  PR02_ENGINE="${3:-mysql}" jq -se --arg group "${2:-database-api}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
+  OCSERVIA_DATABASE_TEST_ENGINE="${3:-mysql}" jq -se --arg group "${2:-database-api}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
     -f "${ROOT}/scripts/check-required-go-tests.jq" "$1"
 }
 jq -n --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
@@ -34,26 +34,25 @@ for mutation in \
     exit 1
   fi
 done
-for scope in full; do
-  group="backend-mysql-${scope}"
-  jq -n --arg scope "${scope}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
-    [$manifest | split("\n")[] | split(" ")
-     | select(.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql" or .[0] == "mysql-snapshot")
-     | {Package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), Test: .[2]}
-     | . + {Action: "run"}, . + {Action: "pass"}][]
-  ' >"${tmp}/mysql.json"
-  check "${tmp}/mysql.json" "${group}"
-  for name in TestRealTLS TestRealPrivileges TestDatabaseInitializationSmoke TestRealUsageTransactions TestRealOutboxCommitDisconnect/claim-request-lost; do
-    jq -c --arg name "${name}" 'select(.Test != $name)' "${tmp}/mysql.json" >"${tmp}/bad.json"
-    if check "${tmp}/bad.json" "${group}" >/dev/null 2>&1; then
-      echo "${group} accepted missing ${name}" >&2; exit 1
-    fi
-  done
-  jq -c 'if .Test == "TestRealUsageTransactions" and .Action == "pass" then .Action = "skip" else . end' "${tmp}/mysql.json" >"${tmp}/bad.json"
+scope=full
+group="backend-mysql-${scope}"
+jq -n --arg scope "${scope}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
+  [$manifest | split("\n")[] | split(" ")
+   | select(.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql" or .[0] == "mysql-snapshot")
+   | {Package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), Test: .[2]}
+   | . + {Action: "run"}, . + {Action: "pass"}][]
+' >"${tmp}/mysql.json"
+check "${tmp}/mysql.json" "${group}"
+for name in TestRealTLS TestRealPrivileges TestDatabaseInitializationSmoke TestRealUsageTransactions TestRealOutboxCommitDisconnect/claim-request-lost; do
+  jq -c --arg name "${name}" 'select(.Test != $name)' "${tmp}/mysql.json" >"${tmp}/bad.json"
   if check "${tmp}/bad.json" "${group}" >/dev/null 2>&1; then
-    echo "${group} accepted skipped regression" >&2; exit 1
+    echo "${group} accepted missing ${name}" >&2; exit 1
   fi
 done
+jq -c 'if .Test == "TestRealUsageTransactions" and .Action == "pass" then .Action = "skip" else . end' "${tmp}/mysql.json" >"${tmp}/bad.json"
+if check "${tmp}/bad.json" "${group}" >/dev/null 2>&1; then
+  echo "${group} accepted skipped regression" >&2; exit 1
+fi
 # Full acceptance must require actual checkpoint cutover crash recovery.
 jq -c 'select(.Test != "TestMySQLCutoverCrashRecovery")' "${tmp}/mysql.json" >"${tmp}/bad.json"
 if check "${tmp}/bad.json" backend-mysql-full >/dev/null 2>&1; then
@@ -61,7 +60,7 @@ if check "${tmp}/bad.json" backend-mysql-full >/dev/null 2>&1; then
 fi
 # CI shards: one pattern partitions the full guard; each half still fails closed.
 shard_check() {
-  PR02_ENGINE=mysql jq -se --arg group backend-mysql-full --arg shard_mode "$2" --arg shard_pattern '^Test(MySQLCutover|MySQLArtifact|SnapshotDumpTableRoundtrip)' \
+  OCSERVIA_DATABASE_TEST_ENGINE=mysql jq -se --arg group backend-mysql-full --arg shard_mode "$2" --arg shard_pattern '^Test(MySQLCutover|MySQLArtifact|SnapshotDumpTableRoundtrip)' \
     --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" -f "${ROOT}/scripts/check-required-go-tests.jq" "$1"
 }
 full_required="$(check "${tmp}/mysql.json" backend-mysql-full | jq .required)"
@@ -76,35 +75,34 @@ jq -c 'select(.Test != "TestRealTLS")' "${tmp}/core.json" >"${tmp}/bad.json"
 if shard_check "${tmp}/bad.json" skip >/dev/null 2>&1; then echo 'core shard accepted missing TestRealTLS' >&2; exit 1; fi
 echo 'MySQL current correctness and recovery guards passed'
 # Exercise every explicit critical inventory, not just a successful go exit.
-for engine in mysql; do
-  while read -r group; do
-    PR02_ENGINE="${engine}" jq -n --arg group "${group}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
-      $manifest | split("\n")[] | split(" ")
-      | select(.[0] == $group and (length < 4 or .[3] == env.PR02_ENGINE))
-      | {Package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), Test: .[2]}
-      | . + {Action: "run"}, . + {Action: "pass"}
-    ' >"${tmp}/critical.json"
-    check "${tmp}/critical.json" "${group}" "${engine}"
-    PR02_ENGINE="${engine}" jq -ner --arg group "${group}" --arg mode select \
-      --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
-      -f "${ROOT}/scripts/check-required-go-tests.jq" >/dev/null
-    for mutation in 'select(.Action != "run")' 'select(.Action != "pass")' \
-      'if .Action == "pass" then .Action = "skip" else . end' \
-      'if .Action == "pass" then .Action = "fail" else . end' '.Test += "Renamed"' 'empty'; do
-      jq -c "${mutation}" "${tmp}/critical.json" >"${tmp}/bad.json"
-      if check "${tmp}/bad.json" "${group}" "${engine}" >/dev/null 2>&1; then
-        echo "${group} accepted ${mutation}" >&2; exit 1
-      fi
-    done
-    # Removing any single required child must fail even with its parent pass.
-    while read -r name; do
-      jq -c --arg name "${name}" 'select(.Test != $name)' "${tmp}/critical.json" >"${tmp}/bad.json"
-      if check "${tmp}/bad.json" "${group}" "${engine}" >/dev/null 2>&1; then
-        echo "${group} accepted missing ${name}" >&2; exit 1
-      fi
-    done < <(jq -r '.Test' "${tmp}/critical.json" | sort -u)
-  done < <(awk '$1 ~ /^regression-/ {print $1}' "${ROOT}/scripts/required-go-tests.txt" | sort -u)
-done
+engine=mysql
+while read -r group; do
+  OCSERVIA_DATABASE_TEST_ENGINE="${engine}" jq -n --arg group "${group}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
+    $manifest | split("\n")[] | split(" ")
+    | select(.[0] == $group and (length < 4 or .[3] == env.OCSERVIA_DATABASE_TEST_ENGINE))
+    | {Package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), Test: .[2]}
+    | . + {Action: "run"}, . + {Action: "pass"}
+  ' >"${tmp}/critical.json"
+  check "${tmp}/critical.json" "${group}" "${engine}"
+  OCSERVIA_DATABASE_TEST_ENGINE="${engine}" jq -ner --arg group "${group}" --arg mode select \
+    --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
+    -f "${ROOT}/scripts/check-required-go-tests.jq" >/dev/null
+  for mutation in 'select(.Action != "run")' 'select(.Action != "pass")' \
+    'if .Action == "pass" then .Action = "skip" else . end' \
+    'if .Action == "pass" then .Action = "fail" else . end' '.Test += "Renamed"' 'empty'; do
+    jq -c "${mutation}" "${tmp}/critical.json" >"${tmp}/bad.json"
+    if check "${tmp}/bad.json" "${group}" "${engine}" >/dev/null 2>&1; then
+      echo "${group} accepted ${mutation}" >&2; exit 1
+    fi
+  done
+  # Removing any single required child must fail even with its parent pass.
+  while read -r name; do
+    jq -c --arg name "${name}" 'select(.Test != $name)' "${tmp}/critical.json" >"${tmp}/bad.json"
+    if check "${tmp}/bad.json" "${group}" "${engine}" >/dev/null 2>&1; then
+      echo "${group} accepted missing ${name}" >&2; exit 1
+    fi
+  done < <(jq -r '.Test' "${tmp}/critical.json" | sort -u)
+done < <(awk '$1 ~ /^regression-/ {print $1}' "${ROOT}/scripts/required-go-tests.txt" | sort -u)
 for mode in check select; do
   if jq -ne --arg group nonexistent --arg mode "${mode}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
     -f "${ROOT}/scripts/check-required-go-tests.jq" >/dev/null 2>&1; then
@@ -121,16 +119,24 @@ for script in database-integration.sh database-foundation-integration.sh; do
 done
 # PostgreSQL full acceptance keeps each package's complete Integration suite;
 # the manifest is an additional guard, not the test selector.
+# Match literal shell source, without expanding its variables.
+# shellcheck disable=SC2016
 grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" "${group}" -p 1 "./internal/${package}" -run Integration)' \
   "${ROOT}/scripts/database-integration.sh"
+# Match literal shell source, without expanding its variables.
+# shellcheck disable=SC2016
 grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-config -p 1 ./internal/configplan -run Integration)' \
   "${ROOT}/scripts/database-integration.sh"
+# Match literal shell source, without expanding its variables.
+# shellcheck disable=SC2016
 grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates -p 1 ./internal/certificates -run Integration)' \
   "${ROOT}/scripts/database-integration.sh"
 grep -Fq 'go test -p 1 ./internal/telemetry -run Integration -count=1)' \
   "${ROOT}/scripts/database-integration.sh"
 grep -Fq 'checked_go_tests backend-policy-api --select -race -p 1 -parallel 1' \
   "${ROOT}/scripts/database-integration.sh"
+# Match literal shell source, without expanding its variables.
+# shellcheck disable=SC2016
 grep -Fq 'clone_database "${container}" ocservia_latest ocservia_policy_api' \
   "${ROOT}/scripts/database-integration.sh"
 grep -Fq 'dropdb -U ocservia_owner ocservia_policy_api' \
@@ -266,7 +272,7 @@ printf '%s%s\n' "${REQUIRED_SHARD_RUN:+run=${REQUIRED_SHARD_RUN} }${REQUIRED_SHA
 SH
 cat >"${tmp}/wrapper/scripts/test-enrollment-restart.sh" <<'SH'
 #!/usr/bin/env bash
-[[ "$1" == ocservia-pr02-mysql-* || "$1" == ocservia-pg-smoke-* ]] || exit 1
+[[ "$1" == ocservia-database-e2e-mysql-* || "$1" == ocservia-pg-smoke-* ]] || exit 1
 printf 'backend-enrollment-restart\n' >>"${ROUTE_LOG}"
 SH
 cat >"${tmp}/wrapper/bin/docker" <<'SH'
@@ -369,7 +375,7 @@ func TestPass(t *testing.T) {
 func TestSkipped(t *testing.T) { t.Skip("missing database fixture") }
 func TestFailure(t *testing.T) { t.Fatal("injected core failure") }
 GO
-for attempt in 1 2; do
+for _attempt in 1 2; do
   (cd "${tmp}/smoke" && GOWORK=off SMOKE_COUNT="${tmp}/count" \
     bash "${ROOT}/scripts/required-go-tests.sh" --smoke . TestPass) >"${tmp}/smoke.log" 2>&1
 done

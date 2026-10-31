@@ -59,7 +59,7 @@ def native_snapshot(work, expected):
         identity[name] = digest
     run('sudo', 'ip', 'netns', 'exec', 'real-e2e-client', 'ping', '-c', '3', '-W', '2', '10.208.0.1')
     users = json.loads(run('sudo', 'occtl', '--json', 'show', 'users'))
-    sessions = [str(user['ID']) for user in users if user['Username'] == 't07-smoke']
+    sessions = [str(user['ID']) for user in users if user['Username'] == 'business-test-smoke-user']
     assert sessions == [expected['vpn']['native_session']]
     return {'identity':identity, 'services':services, 'vpn_session':sessions[0], 'icmp':True,
             'reloads':run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service'),
@@ -143,7 +143,7 @@ def business(done_path, password_path, result_path, work_path):
     script.chmod(0o700)
     log = (work_path / 'vpn-client.log').open('wb')
     vpn = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 'real-e2e-client', 'openconnect',
-                            '--non-inter', '--protocol=anyconnect', '--user=t07-smoke',
+                            '--non-inter', '--protocol=anyconnect', '--user=business-test-smoke-user',
                             '--passwd-on-stdin', '--cafile', str(work_path / 'vpn-ca.crt'),
                             '--script', str(script), 'https://10.207.0.1:44443'],
                            stdin=subprocess.PIPE, stdout=log, stderr=log, start_new_session=True)
@@ -161,7 +161,7 @@ def business(done_path, password_path, result_path, work_path):
                                    '-c', '2', '-W', '2', '10.208.0.1'], capture_output=True)
             icmp = ping.returncode == 0
             users = json.loads(run('sudo', 'occtl', '--json', 'show', 'users'))
-            matching = [str(user['ID']) for user in users if user['Username'] == 't07-smoke']
+            matching = [str(user['ID']) for user in users if user['Username'] == 'business-test-smoke-user']
             if icmp and len(matching) == 1:
                 session = matching[0]
                 break

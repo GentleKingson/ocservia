@@ -18,9 +18,7 @@
     "src/**/*.vue",
     "test/**/*.ts",
     "e2e/**/*.ts",
-    "eslint.config.ts",
-    "playwright.config.ts",
-    "vite.config.ts"
+    "*.config.ts"
   ],
   "exclude": ["src/api/generated"]
 }

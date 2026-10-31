@@ -1,6 +1,6 @@
 # Exact names prevent a removed/renamed subtest from silently weakening the gate.
 ($manifest | split("\n") | map(select(length > 0 and (startswith("#") | not)) | split(" "))
- | map(select(length < 4 or .[3] == env.PR02_ENGINE)
+ | map(select(length < 4 or .[3] == env.OCSERVIA_DATABASE_TEST_ENGINE)
    | select(.[0] == $group or
      ($group == "backend-mysql-full" and
        (.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql" or .[0] == "mysql-snapshot")))

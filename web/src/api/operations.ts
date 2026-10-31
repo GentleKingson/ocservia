@@ -8,7 +8,7 @@ import {
   type SimulationScenario,
 } from "@ocservia/api-client";
 import { configuration, newIdempotencyKey, requestInit } from "./transport";
-import { workspaceID } from "./workspace";
+import { getWorkspaceId } from "./workspace";
 
 const operations = new OperationsApi(configuration);
 const development = new DevelopmentApi(configuration);
@@ -29,7 +29,7 @@ export async function listOperations(
   cursor?: string,
   signal?: AbortSignal,
 ): Promise<OperationPage> {
-  const xWorkspaceID = await workspaceID();
+  const xWorkspaceID = await getWorkspaceId();
   return operations.listOperations(
     cursor
       ? { xWorkspaceID, cursor, pageSize: 200 }
@@ -41,7 +41,7 @@ export async function listOperations(
 export async function operationSummary(
   signal?: AbortSignal,
 ): Promise<OperationSummary> {
-  const xWorkspaceID = await workspaceID();
+  const xWorkspaceID = await getWorkspaceId();
   return operations.getOperationSummary({ xWorkspaceID }, requestInit(signal));
 }
 

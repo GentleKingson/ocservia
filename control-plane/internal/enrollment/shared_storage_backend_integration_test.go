@@ -9,7 +9,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
-	localstore "github.com/GentleKingson/ocservia/control-plane/internal/localslice/store"
+	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 )
 
@@ -25,7 +25,7 @@ func TestEnrollmentSharedStorageBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-			local, err := localstore.Local(tx)
+			local, err := eventstore.FromTransaction(tx)
 			if err != nil {
 				return err
 			}
@@ -56,7 +56,7 @@ func TestEnrollmentSharedStorageBackendIntegration(t *testing.T) {
 			if _, err := enroll.Activate(ctx, node, labels, "fixture", at); err != nil {
 				return err
 			}
-			if err := local.DisconnectNode(ctx, localstore.GapNode{ID: node, Traceparent: "00-11111111111111111111111111111111-2222222222222222-01"}, uuid.Must(uuid.NewV7()), at); err != nil {
+			if err := local.DisconnectNode(ctx, eventstore.GapNode{ID: node, Traceparent: "00-11111111111111111111111111111111-2222222222222222-01"}, uuid.Must(uuid.NewV7()), at); err != nil {
 				return err
 			}
 			_, err = enroll.Revoke(ctx, node, at)

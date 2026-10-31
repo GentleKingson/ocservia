@@ -97,6 +97,8 @@ fingerprint_a="b0156efe8c67273d773be595fa34546d0"
 fingerprint_b="86950961d8fa33b5f7bfe6297e80369"
 prose_a="validity"
 column_a="partial"
+# Keep the historical literal: its exact exemption still protects full-history scans.
+# The renamed database fixture does not trigger the default detector.
 database_a="pr02-isolated"
 relay_half="0123456789abcdef"
 literal_prefixes=('key_der_sha256": "' 'credential, ' 'idempotency_key, `' 'MYSQL_ROOT_PASSWORD=' 'std::fs::write(&token, "')

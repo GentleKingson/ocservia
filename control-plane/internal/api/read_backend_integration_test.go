@@ -14,10 +14,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 )
 
@@ -56,7 +56,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	bindingID := uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'PlatformAdmin','workspace',?)`, bindingID, identity, workspace, at)
 	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(backend)})
-	server.EnableLocalSlice(localslice.NewBackend(backend, nil))
+	server.EnableTransportEvents(transportevents.NewBackend(backend, nil))
 	server.devAuthToken = "read-backend-development-token-32-characters"
 	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
 	login := authHTTPRequest(server, "POST", "login", `{"username":"`+username+`","password":"`+password+`"}`, authTestOrigin)
@@ -157,7 +157,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	}
 	w = get("/api/v1/events", workspace, cookie, http.StatusOK)
 	var events struct {
-		Items []localslice.Event `json:"items"`
+		Items []transportevents.Event `json:"items"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &events); err != nil || len(events.Items) != 1 || events.Items[0].NodeID != node.String() || events.Items[0].Type != "disconnected" {
 		t.Fatalf("offline event API: %s %v", w.Body, err)

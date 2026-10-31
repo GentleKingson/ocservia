@@ -53,8 +53,8 @@ func authSafetyWorkspace(t *testing.T, owner database.Backend) uuid.UUID {
 		t.Fatal(err)
 	}
 	authSafetyExec(t, owner,
-		`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'PR03',$2,$3,$4)`,
-		`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'PR03',?,?,?)`, id, "pr03-"+id.String(), now, now)
+		`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Authentication safety test',$2,$3,$4)`,
+		`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Authentication safety test',?,?,?)`, id, "auth-safety-"+id.String(), now, now)
 	t.Cleanup(func() {
 		authSafetyExec(t, owner, `DELETE FROM local_auth_bootstrap WHERE workspace_id=$1`, `DELETE FROM local_auth_bootstrap WHERE workspace_id=?`, id)
 		authSafetyExec(t, owner, `DELETE FROM role_bindings WHERE workspace_id=$1`, `DELETE FROM role_bindings WHERE workspace_id=?`, id)
@@ -64,19 +64,19 @@ func authSafetyWorkspace(t *testing.T, owner database.Backend) uuid.UUID {
 
 func authSafetyAuditFailure(t *testing.T, owner database.Backend, workspace uuid.UUID, action string) func() {
 	t.Helper()
-	pg := `ALTER TABLE audit_events ADD CONSTRAINT pr03_audit_failure CHECK(workspace_id <> '` + workspace.String() + `' OR action <> '` + action + `')`
-	my := `ALTER TABLE audit_events ADD CONSTRAINT pr03_audit_failure CHECK(workspace_id <> X'` + strings.ReplaceAll(workspace.String(), "-", "") + `' OR action <> '` + action + `')`
+	pg := `ALTER TABLE audit_events ADD CONSTRAINT test_auth_audit_failure CHECK(workspace_id <> '` + workspace.String() + `' OR action <> '` + action + `')`
+	my := `ALTER TABLE audit_events ADD CONSTRAINT test_auth_audit_failure CHECK(workspace_id <> X'` + strings.ReplaceAll(workspace.String(), "-", "") + `' OR action <> '` + action + `')`
 	authSafetyExec(t, owner, pg, my)
 	removed := false
 	drop := func() {
 		if removed {
 			return
 		}
-		my := `ALTER TABLE audit_events DROP CONSTRAINT pr03_audit_failure`
-		if os.Getenv("PR02_ENGINE") == "mysql" {
-			my = `ALTER TABLE audit_events DROP CHECK pr03_audit_failure`
+		my := `ALTER TABLE audit_events DROP CONSTRAINT test_auth_audit_failure`
+		if os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE") == "mysql" {
+			my = `ALTER TABLE audit_events DROP CHECK test_auth_audit_failure`
 		}
-		authSafetyExec(t, owner, `ALTER TABLE audit_events DROP CONSTRAINT pr03_audit_failure`, my)
+		authSafetyExec(t, owner, `ALTER TABLE audit_events DROP CONSTRAINT test_auth_audit_failure`, my)
 		removed = true
 	}
 	t.Cleanup(drop)
@@ -108,7 +108,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
-			authSafetyExec(t, b, `DELETE FROM local_auth_attempts WHERE username LIKE 'pr03-capacity-%'`, `DELETE FROM local_auth_attempts WHERE username LIKE 'pr03-capacity-%'`)
+			authSafetyExec(t, b, `DELETE FROM local_auth_attempts WHERE username LIKE 'auth-capacity-%'`, `DELETE FROM local_auth_attempts WHERE username LIKE 'auth-capacity-%'`)
 		})
 		results := make(chan error, 16)
 		for i := range cap(results) {
@@ -118,7 +118,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					admitted, err := store.ReserveAttempt(ctx, fmt.Sprintf("pr03-capacity-%d", i), uuid.New(), baseline+8, 15*time.Minute, 30*time.Second)
+					admitted, err := store.ReserveAttempt(ctx, fmt.Sprintf("auth-capacity-%d", i), uuid.New(), baseline+8, 15*time.Minute, 30*time.Second)
 					if err == nil && !admitted {
 						return errors.New("distinct account unexpectedly refused")
 					}
@@ -145,9 +145,9 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	}
 	wid := authSafetyWorkspace(t, owner)
 	other := authSafetyWorkspace(t, owner)
-	name := "pr03-" + uuid.NewString()
-	const password = "pr03 administrator authentication secret"
-	const approverPassword = "pr03 independent approver authentication secret"
+	name := "auth-safety-" + uuid.NewString()
+	const password = "auth-safety administrator credential"
+	const approverPassword = "auth-safety independent approver credential"
 	bootstrap := func() error {
 		_, err := s.BootstrapLocalAdmin(ctx, name, password, wid, name+"-approver", approverPassword)
 		return err
@@ -224,7 +224,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 		t.Fatalf("completed bootstrap reopened: %v", err)
 	}
 	mutate := func(actor auth.Principal, action string, id, workspace, approval uuid.UUID) error {
-		_, err := s.MutateLocalUser(ctx, auth.LocalUserMutation{Action: action, IdentityID: id, ActorID: actor.IdentityID, SessionID: actor.SessionID, WorkspaceID: workspace, ApprovalID: approval, Password: "pr03 replacement credential secret", RequestID: uuid.NewString()})
+		_, err := s.MutateLocalUser(ctx, auth.LocalUserMutation{Action: action, IdentityID: id, ActorID: actor.IdentityID, SessionID: actor.SessionID, WorkspaceID: workspace, ApprovalID: approval, Password: "auth-safety replacement credential", RequestID: uuid.NewString()})
 		return err
 	}
 	for _, id := range []uuid.UUID{admin.IdentityID, approver.IdentityID} {
@@ -251,7 +251,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	approvalService := approvals.NewBackend(b)
 	approve := func(action, kind string, id uuid.UUID, hash []byte, summary []byte) uuid.UUID {
 		t.Helper()
-		request, err := approvalService.Create(ctx, approvals.Request{WorkspaceID: wid, RequesterID: admin.IdentityID, SessionID: admin.SessionID, ResourceID: id, Action: action, ResourceType: kind, Reason: "PR03 review", TTL: time.Hour, RequestID: uuid.NewString(), RequestHash: hash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: wid, Type: "workspace"}}})
+		request, err := approvalService.Create(ctx, approvals.Request{WorkspaceID: wid, RequesterID: admin.IdentityID, SessionID: admin.SessionID, ResourceID: id, Action: action, ResourceType: kind, Reason: "Authentication safety test review", TTL: time.Hour, RequestID: uuid.NewString(), RequestHash: hash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: wid, Type: "workspace"}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +305,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	if _, err := roles.CreateBinding(ctx, rbac.BindingRequest{IdentityID: memberID, WorkspaceID: wid, Role: "PlatformAdmin", ResourceType: "workspace", ActorID: admin.IdentityID, SessionID: admin.SessionID, ApprovalID: approvalID, RequestID: uuid.NewString(), Reason: "second independent administrator"}); err != nil {
 		t.Fatal(err)
 	}
-	_, second, err := s.AuthenticateLocal(ctx, name+"-member", "pr03 replacement credential secret")
+	_, second, err := s.AuthenticateLocal(ctx, name+"-member", "auth-safety replacement credential")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,8 +369,8 @@ func TestAuthenticationBackendLegacyIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	name := "legacy-" + uuid.NewString()
-	const password = "pr03 existing legacy administrator password"
-	const approverPassword = "pr03 independent legacy completion password"
+	const password = "legacy-auth administrator password"
+	const approverPassword = "legacy-auth independent approver password"
 	id, err := s.CreateLocalCredential(ctx, name, password)
 	if err != nil {
 		t.Fatal(err)

@@ -26,7 +26,7 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 	if err := owner.GrantTestPrivileges(ctx); err != nil {
 		t.Fatal(err)
 	}
-	options.DSN = strings.Replace(options.DSN, "ocservia_owner:pr02-owner-test-only@", "ocservia_app:pr02-runtime-test-only@", 1)
+	options.DSN = strings.Replace(options.DSN, "ocservia_owner:database-e2e-owner-test-only@", "ocservia_app:database-e2e-runtime-test-only@", 1)
 	config, err := configuration(options)
 	if err != nil {
 		t.Fatal(err)

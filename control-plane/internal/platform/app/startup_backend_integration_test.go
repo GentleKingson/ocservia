@@ -32,15 +32,15 @@ import (
 func controllerProcessDatabase(t *testing.T) (owner, runtime connection.Options, account string) {
 	t.Helper()
 	ctx := context.Background()
-	if dsn := os.Getenv("PR02_DSN"); dsn != "" {
-		options := mysql.Options{Engine: mysql.Engine(os.Getenv("PR02_ENGINE")), Environment: "test", DSN: dsn}
+	if dsn := os.Getenv("OCSERVIA_DATABASE_TEST_DSN"); dsn != "" {
+		options := mysql.Options{Engine: mysql.Engine(os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE")), Environment: "test", DSN: dsn}
 		admin, err := mysql.Open(ctx, options)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = admin.Close() })
 		suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
-		name, user := "pr02_startup_"+suffix, "startup_"+suffix[:20]
+		name, user := "dbtest_startup_"+suffix, "startup_"+suffix[:20]
 		if _, err := admin.Exec(ctx, "CREATE DATABASE `"+name+"`"); err != nil {
 			t.Fatal(err)
 		}
@@ -56,11 +56,11 @@ func controllerProcessDatabase(t *testing.T) (owner, runtime connection.Options,
 		if err != nil {
 			t.Fatal("invalid fixture DSN")
 		}
-		caFile := os.Getenv("PR02_TLS_CA_FILE")
+		caFile := os.Getenv("OCSERVIA_DATABASE_TEST_TLS_CA_FILE")
 		if caFile != "" {
 			cfg.TLSConfig = "true"
 		}
-		cfg.DBName, cfg.User, cfg.Passwd = name, "ocservia_owner", "pr02-owner-test-only"
+		cfg.DBName, cfg.User, cfg.Passwd = name, "ocservia_owner", "database-e2e-owner-test-only"
 		owner = connection.Options{Backend: string(options.Engine), Environment: "production", URL: cfg.FormatDSN(), CAFile: caFile}
 		cfg.User, cfg.Passwd = user, "startup-runtime-test-only"
 		runtime = owner
@@ -128,7 +128,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	environment := func(options connection.Options, extra map[string]string) []string {
 		var env []string
 		for _, item := range os.Environ() {
-			if !strings.HasPrefix(item, "OCSERV_") && !strings.HasPrefix(item, "OTEL_") && !strings.HasPrefix(item, "PR02_") {
+			if !strings.HasPrefix(item, "OCSERV_") && !strings.HasPrefix(item, "OTEL_") && !strings.HasPrefix(item, "OCSERVIA_DATABASE_TEST_") {
 				env = append(env, item)
 			}
 		}

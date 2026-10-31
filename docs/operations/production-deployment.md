@@ -1087,8 +1087,8 @@ receipts to force startup.
 
 The reference Controller bounds shared SSE fan-out with the admission limits in
 [Event streams](../reference/stable-contracts.md#event-streams), reserving
-PostgreSQL and HTTP capacity for non-streaming API work in the P1 single-VM
-profile; raising any of these limits requires rerunning `make p1-full`. Do not
+PostgreSQL and HTTP capacity for non-streaming API work in the resilience single-VM
+profile; raising any of these limits requires rerunning `make resilience-full`. Do not
 remove application admission checks, session revalidation, bounded queues, or
 watcher backoff, because the gateway serves only as defense in depth. Alert on
 `sse_unhealthy_watchers` and verify cursor catch-up instead of repeatedly
@@ -1679,9 +1679,6 @@ scripts/verify-bootstrap-endpoint.sh \
   https://get.ocservia.example/install.env.example \
   install.env.example
 ```
-
-`scripts/check-release-stage0.sh` remains a compatibility entrypoint for
-`scripts/check-release-bootstrap.sh`.
 
 Each `verify-bootstrap-endpoint.sh` invocation downloads the URL read-only over
 HTTPS, enforces exact byte equality against the local file, and prints the

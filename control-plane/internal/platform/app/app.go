@@ -17,12 +17,12 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
-	"github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
+	platformtelemetry "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
-	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
@@ -34,7 +34,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	if err := validateBootstrapPasswords(cfg); err != nil {
 		return err
 	}
-	shutdownTelemetry, err := telemetry.Configure(ctx, cfg.OTLPEndpoint, build.Version, cfg.Environment)
+	shutdownTelemetry, err := platformtelemetry.Configure(ctx, cfg.OTLPEndpoint, build.Version, cfg.Environment)
 	if err != nil {
 		return err
 	}
@@ -84,7 +84,7 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 		}
 		logger.Warn("using an ephemeral Controller command signing key", "environment", cfg.Environment)
 	}
-	operationService := operationstore.NewBackend(backend, cfg.UserOperationConcurrency, commandSigner)
+	operationService := operations.NewBackend(backend, cfg.UserOperationConcurrency, commandSigner)
 	if err := operationService.SetAgentUpgradeReconcileTimeout(cfg.AgentUpgradeReconcile); err != nil {
 		return fmt.Errorf("configure agent upgrade reconciliation window: %w", err)
 	}
@@ -96,11 +96,11 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 		}
 	}
 	operationService.EnableReleaseCatalog(releaseCatalog)
-	sliceService, fenceExecutor, err := startWorker(life, cfg, build, backend, commandSigner, operationService, logger)
+	eventService, fenceExecutor, err := startWorker(life, cfg, build, backend, commandSigner, operationService, logger)
 	if err != nil {
 		return err
 	}
-	telemetryService := telemetrystore.NewWithRecommendedAgentVersionBackend(backend, cfg.RecommendedAgentVersion)
+	telemetryService := telemetry.NewWithRecommendedAgentVersionBackend(backend, cfg.RecommendedAgentVersion)
 	telemetryService.EnableAgentUpgradeEligibility(releaseCatalog)
 	userStateService := userstate.NewWithSignerBackend(backend, commandSigner)
 	userOperationsService := useroperations.NewWithConcurrencyBackend(backend, userStateService, cfg.UserOperationConcurrency)
@@ -179,7 +179,7 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 
 	services := httpServices{
 		modules:    api.Modules{Nodes: telemetryService, ConfigPlans: configplan.NewBackend(backend, operationService), UserOperations: userOperationsService, Certificates: certificateService},
-		operations: operationService, releaseCatalog: releaseCatalog, userState: userStateService, localSlice: sliceService,
+		operations: operationService, releaseCatalog: releaseCatalog, userState: userStateService, transportEvents: eventService,
 	}
 	if cfg.ControllerEndpointID != "" {
 		services.enrollment = enrollment.NewBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner)

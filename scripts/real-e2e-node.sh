@@ -46,10 +46,15 @@ prepare_endpoint() {
   [[ -s "${PACKAGE_DIR}/ocservia-agent_${VERSION}-1_amd64.deb" ]]
   [[ ! -e /etc/ocservia-agent && ! -e /usr/libexec/ocservia && ! -e /etc/ocservia \
     && ! -e /var/lib/ocservia-agent && ! -e /var/lib/ocservia-privd ]]
-  ! getent passwd ocserv-agent >/dev/null
-  ! getent passwd ocservia-vpn >/dev/null
-  ! dpkg-query -W -f='${Status}' ocservia-agent 2>/dev/null | grep -Fxq 'install ok installed'
-  ! dpkg-query -W -f='${Status}' ocserv 2>/dev/null | grep -Fxq 'install ok installed'
+  if getent passwd ocserv-agent >/dev/null || getent passwd ocservia-vpn >/dev/null; then
+    echo 'refusing a host with existing Agent or VPN accounts' >&2
+    return 1
+  fi
+  if dpkg-query -W -f='${Status}' ocservia-agent 2>/dev/null | grep -Fxq 'install ok installed' ||
+    dpkg-query -W -f='${Status}' ocserv 2>/dev/null | grep -Fxq 'install ok installed'; then
+    echo 'refusing a host with an existing Agent or ocserv installation' >&2
+    return 1
+  fi
   touch "${WORK}/native-owned"
   sudo apt-get update -qq
   sudo apt-get install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping
@@ -71,8 +76,8 @@ prepare_endpoint() {
   openssl x509 -req -days 1 -in "${SECRETS}/vpn.csr" -CA "${WORK}/vpn-ca.crt" \
     -CAkey "${SECRETS}/vpn-ca.key" -CAcreateserial -extfile "${SECRETS}/vpn.ext" \
     -out "${WORK}/vpn.crt" >/dev/null 2>&1
-  sudo install -m 0600 "${SECRETS}/vpn.key" /etc/ocserv/t07.key
-  sudo install -m 0644 "${WORK}/vpn.crt" /etc/ocserv/t07.crt
+  sudo install -m 0600 "${SECRETS}/vpn.key" /etc/ocserv/business-test.key
+  sudo install -m 0644 "${WORK}/vpn.crt" /etc/ocserv/business-test.crt
   cat >"${WORK}/ocserv.conf" <<'EOF'
 auth = "plain[passwd=/etc/ocserv/ocpasswd]"
 tcp-port = 44443
@@ -80,8 +85,8 @@ udp-port = 0
 run-as-user = ocservia-vpn
 run-as-group = ocservia-vpn
 socket-file = /run/ocserv.socket
-server-cert = /etc/ocserv/t07.crt
-server-key = /etc/ocserv/t07.key
+server-cert = /etc/ocserv/business-test.crt
+server-key = /etc/ocserv/business-test.key
 max-clients = 4
 max-same-clients = 2
 cookie-timeout = 300
@@ -94,10 +99,11 @@ EOF
   sudo install -m 0600 "${WORK}/ocserv.conf" /etc/ocserv/ocserv.conf
   sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
   sudo systemctl restart ocserv
-  export CONTROLLER_ENDPOINT_ID="${controller}" RELAY_URL_A="$(<"${WORK}/relay/url")" RELAY_URL_B=
+  RELAY_URL_A="$(<"${WORK}/relay/url")"
+  export CONTROLLER_ENDPOINT_ID="${controller}" RELAY_URL_A RELAY_URL_B=''
   export RELAY_ACCESS_TOKEN_SOURCE="${WORK}/relay/token"
   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${WORK}/controller-ready/command.pub.pem"
-  export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=development
+  export USER_PASSWORD_SEAL_KEY_ID=business-test-user-seal P12_PASSWORD_SEAL_KEY_ID=business-test-p12-seal ENROLLMENT_ENVIRONMENT=development
   if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
     install -m 0600 "${ready_dir}/install.env" "${WORK}/install.env"
     # Validate literals before the native loader reads them; never source the file.
@@ -116,9 +122,11 @@ CONFIG
     (unset CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B RELAY_ACCESS_TOKEN_SOURCE \
       CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE ENROLLMENT_ENVIRONMENT
      cd "${WORK}"
-     BOOTSTRAP_TOKEN_SOURCE= bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}") \
+     BOOTSTRAP_TOKEN_SOURCE='' bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}") \
       >"${SECRETS}/managed-prepare.log"
     assert_not_started
+    # The runner owns this private evidence file; sudo only reads the root identity.
+    # shellcheck disable=SC2024
     sudo sha256sum /var/lib/ocservia-agent/identity/endpoint.key \
       /var/lib/ocservia-agent/identity/controller.endpoint >"${SECRETS}/identity.sha256"
   else
@@ -131,6 +139,8 @@ CONFIG
   printf '%s\n' "${endpoint}" >"${OUTBOX}/agent-endpoint/agent-endpoint-id"
   runner_instance_id >"${OUTBOX}/agent-endpoint/runner-instance"
   printf '%s\n' "${controller}" >"${WORK}/controller-endpoint-id"
+  # Export public material into the runner-owned outbox, not a root-owned file.
+  # shellcheck disable=SC2024
   sudo openssl pkey -in /etc/ocservia-agent/user-password-seal-private.pem -pubout >"${OUTBOX}/agent-endpoint/user.pub.pem"
   openssl x509 -in "${WORK}/vpn.crt" -outform DER | sha256sum | cut -d' ' -f1 >"${OUTBOX}/agent-endpoint/vpn-cert-sha256"
   openssl x509 -in "${WORK}/vpn.crt" -pubkey -noout | openssl pkey -pubin -outform DER \
@@ -169,10 +179,11 @@ enroll() {
   else
     sudo install -o root -g ocserv-agent -m 0640 "${token_dir}/enrollment-token" /etc/ocservia-agent/enrollment-token
   fi
-  export CONTROLLER_ENDPOINT_ID="${controller}" RELAY_URL_A="$(<"${WORK}/relay/url")" RELAY_URL_B=
+  RELAY_URL_A="$(<"${WORK}/relay/url")"
+  export CONTROLLER_ENDPOINT_ID="${controller}" RELAY_URL_A RELAY_URL_B=''
   export RELAY_ACCESS_TOKEN_SOURCE="${WORK}/relay/token"
   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${WORK}/controller-ready/command.pub.pem"
-  export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=development
+  export USER_PASSWORD_SEAL_KEY_ID=business-test-user-seal P12_PASSWORD_SEAL_KEY_ID=business-test-p12-seal ENROLLMENT_ENVIRONMENT=development
   if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
     (unset CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B RELAY_ACCESS_TOKEN_SOURCE \
       CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE ENROLLMENT_ENVIRONMENT BOOTSTRAP_TOKEN_SOURCE
@@ -214,6 +225,8 @@ activate_native() {
   openssl pkeyutl -decrypt -inkey "${WORK}/exchange.key" \
     -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 \
     -in "${authority_dir}/credential.oaep" -out "${SECRETS}/privd-credential"
+  # The proof is public evidence written to the runner-owned exchange directory.
+  # shellcheck disable=SC2024
   sudo /usr/libexec/ocservia/ocservia-privd attestation-registration \
     /var/lib/ocservia-privd/attestation.key "${node}" \
     "$(jq -r .controller_nonce_hex "${authority_dir}/authority.json")" \
@@ -223,11 +236,11 @@ activate_native() {
   ref="$(jq -r .secret_ref_id "${authority_dir}/authority.json")"
   expected_key="$(jq -r .secret_ref_key "${authority_dir}/authority.json")"
   observed_key="$(sudo bash "${ROOT}/deploy/managed-node/provision-config-tls.sh" \
-    "${node}" "${ref}" v1 /etc/ocserv/t07.crt /etc/ocserv/t07.key | jq -r .key)"
+    "${node}" "${ref}" v1 /etc/ocserv/business-test.crt /etc/ocserv/business-test.key | jq -r .key)"
   [[ "${observed_key}" == "${expected_key}" ]]
   # ConfigPlan cannot change TLS startup paths through a reload.
-  sed -e "s|^server-cert = /etc/ocserv/t07.crt$|server-cert = /etc/ocservia-agent/config-tls/${ref}/v1/server-cert.pem|" \
-    -e "s|^server-key = /etc/ocserv/t07.key$|server-key = /etc/ocservia-agent/config-tls/${ref}/v1/server-key.pem|" \
+  sed -e "s|^server-cert = /etc/ocserv/business-test.crt$|server-cert = /etc/ocservia-agent/config-tls/${ref}/v1/server-cert.pem|" \
+    -e "s|^server-key = /etc/ocserv/business-test.key$|server-key = /etc/ocservia-agent/config-tls/${ref}/v1/server-key.pem|" \
     "${WORK}/ocserv.conf" >"${WORK}/bound-ocserv.conf"
   sudo install -m 0600 "${WORK}/bound-ocserv.conf" /etc/ocserv/ocserv.conf
   sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
@@ -313,14 +326,15 @@ cleanup_node() {
       sudo apt-get purge -y ocserv
     fi
     sudo rm -rf -- /etc/ocservia-agent /var/lib/ocservia-agent /var/lib/ocservia-privd /etc/ocservia
-    sudo rm -f -- /etc/ocserv/t07.crt /etc/ocserv/t07.key /etc/ocserv/ocpasswd
+    sudo rm -f -- /etc/ocserv/business-test.crt /etc/ocserv/business-test.key /etc/ocserv/ocpasswd
     sudo userdel ocservia-vpn 2>/dev/null || true
     sudo groupdel ocservia-vpn 2>/dev/null || true
     [[ ! -e /etc/ocservia-agent && ! -e /var/lib/ocservia-agent && ! -e /var/lib/ocservia-privd ]]
-    ! sudo ip netns list | grep -q '^real-e2e-client '
-    ! pgrep -x ocservia-agent >/dev/null
-    ! pgrep -x ocservia-privd >/dev/null
-    ! pgrep -x ocserv >/dev/null
+    if sudo ip netns list | grep -q '^real-e2e-client ' ||
+      pgrep -x ocservia-agent >/dev/null || pgrep -x ocservia-privd >/dev/null || pgrep -x ocserv >/dev/null; then
+      echo 'native cleanup left a client namespace or service process running' >&2
+      return 1
+    fi
   fi
   rm -rf -- "${WORK}" "${TARGET}" \
     "${RUNNER_TEMP:-/tmp}/real-e2e-controller-ready" \

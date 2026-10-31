@@ -41,10 +41,10 @@ func newOutboxFixture(t *testing.T) *outboxFixture {
 	t.Helper()
 	ctx := context.Background()
 	f := &outboxFixture{workspace: uuid.Must(uuid.NewV7())}
-	name := "pr04_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if dsn := os.Getenv("PR02_DSN"); dsn != "" {
+	name := "dbtest_outbox_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if dsn := os.Getenv("OCSERVIA_DATABASE_TEST_DSN"); dsn != "" {
 		f.mysql = true
-		opts := mysql.Options{Engine: mysql.Engine(os.Getenv("PR02_ENGINE")), Environment: "test", DSN: dsn}
+		opts := mysql.Options{Engine: mysql.Engine(os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE")), Environment: "test", DSN: dsn}
 		admin, err := mysql.Open(ctx, opts)
 		if err != nil {
 			t.Fatal(err)
@@ -65,7 +65,7 @@ func newOutboxFixture(t *testing.T) *outboxFixture {
 		if err != nil {
 			t.Fatal("invalid fixture DSN")
 		}
-		cfg.DBName, cfg.User, cfg.Passwd = name, "ocservia_owner", "pr02-owner-test-only"
+		cfg.DBName, cfg.User, cfg.Passwd = name, "ocservia_owner", "database-e2e-owner-test-only"
 		opts.DSN = cfg.FormatDSN()
 		owner, err := mysql.Open(ctx, opts)
 		if err != nil {
@@ -78,7 +78,7 @@ func newOutboxFixture(t *testing.T) *outboxFixture {
 		if err := owner.GrantTestPrivileges(ctx); err != nil {
 			t.Fatal(err)
 		}
-		cfg.User, cfg.Passwd = "ocservia_app", "pr02-runtime-test-only"
+		cfg.User, cfg.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
 		opts.DSN = cfg.FormatDSN()
 		runtime, err := mysql.Open(ctx, opts)
 		if err != nil {
@@ -89,10 +89,10 @@ func newOutboxFixture(t *testing.T) *outboxFixture {
 	} else {
 		ownerURL, runtimeURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"), os.Getenv("OCSERV_TEST_DATABASE_URL")
 		if runtimeURL == "" {
-			t.Skip("real PostgreSQL or PR02 database required")
+			t.Skip("real PostgreSQL or configured database test backend required")
 		}
 		if ownerURL == "" {
-			t.Fatal("OCSERV_TEST_OWNER_DATABASE_URL required for disposable PR04 database")
+			t.Fatal("OCSERV_TEST_OWNER_DATABASE_URL required for disposable Outbox transaction test database")
 		}
 		admin, err := pgxpool.New(ctx, ownerURL)
 		if err != nil {
@@ -139,8 +139,8 @@ func newOutboxFixture(t *testing.T) *outboxFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'PR04',$2,$3,$4)`,
-		`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'PR04',?,?,?)`, f.workspace, f.workspace.String(), at, at)
+	f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox transaction test',$2,$3,$4)`,
+		`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Outbox transaction test',?,?,?)`, f.workspace, f.workspace.String(), at, at)
 	return f
 }
 
@@ -192,7 +192,7 @@ func (f *outboxFixture) node(t *testing.T) uuid.UUID {
 
 func outboxRequest(node uuid.UUID) operations.CreateRequest {
 	return operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1,
-		Kind: operations.SyntheticEcho, Message: "PR04", TTL: time.Hour, RequestID: uuid.NewString(),
+		Kind: operations.SyntheticEcho, Message: "Outbox transaction test", TTL: time.Hour, RequestID: uuid.NewString(),
 		Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"}
 }
 

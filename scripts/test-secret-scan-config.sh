@@ -72,6 +72,8 @@ grep -qF 'test-secret-scan-config-runtime.sh' "${SECURITY_CHECK}" || {
   echo "the repository security scan must run the historical scan-config runtime proof" >&2
   exit 1
 }
+# Match the literal source argument rather than this test's ROOT.
+# shellcheck disable=SC2016
 grep -qF -- '--config "${ROOT}/scripts/secret-scan.toml"' "${SECURITY_CHECK}" || {
   echo "the repository security scan must load the pinned gitleaks configuration" >&2
   exit 1

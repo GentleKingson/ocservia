@@ -3,10 +3,18 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const imageNames = ["gateway", "control", "transport", "backup", "postgres", "otel"];
+const imageNames = [
+  "gateway",
+  "control",
+  "transport",
+  "backup",
+  "postgres",
+  "otel",
+];
 const integratedImageNames = ["edge", "relay", "signer", "mysql_backup"];
 const supportedPlatforms = ["linux/amd64", "linux/arm64"];
-const imageReferencePattern = /^[^\s@]+(?:@sha256:[0-9a-f]{64}|:v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?)$/;
+const imageReferencePattern =
+  /^[^\s@]+(?:@sha256:[0-9a-f]{64}|:v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?)$/;
 const semverPattern = /^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$/;
 const commitPattern = /^[0-9a-f]{40}$/;
 
@@ -26,7 +34,10 @@ function usage() {
 }
 
 function parseArguments(argv) {
-  const values = { images: new Map(), migrationDir: "control-plane/migrations" };
+  const values = {
+    images: new Map(),
+    migrationDir: "control-plane/migrations",
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--image") {
@@ -35,13 +46,28 @@ function parseArguments(argv) {
       const separator = value.indexOf("=");
       const name = value.slice(0, separator);
       const ref = value.slice(separator + 1);
-      if (![...imageNames, ...integratedImageNames].includes(name) || values.images.has(name)) {
-        fail(`image must be one unique production name (${imageNames.join(", ")})`);
+      if (
+        ![...imageNames, ...integratedImageNames].includes(name) ||
+        values.images.has(name)
+      ) {
+        fail(
+          `image must be one unique production name (${imageNames.join(", ")})`,
+        );
       }
       values.images.set(name, ref);
       continue;
     }
-    if (["--output", "--release-version", "--release-tag", "--source-commit", "--platform", "--migration-dir", "--manifest-version"].includes(argument)) {
+    if (
+      [
+        "--output",
+        "--release-version",
+        "--release-tag",
+        "--source-commit",
+        "--platform",
+        "--migration-dir",
+        "--manifest-version",
+      ].includes(argument)
+    ) {
       const value = argv[++index];
       if (!value) usage();
       const key = {
@@ -53,7 +79,8 @@ function parseArguments(argv) {
         "--migration-dir": "migrationDir",
         "--manifest-version": "manifestVersion",
       }[argument];
-      if (values[key] !== undefined && key !== "migrationDir") fail(`${argument} was provided more than once`);
+      if (values[key] !== undefined && key !== "migrationDir")
+        fail(`${argument} was provided more than once`);
       values[key] = value;
       continue;
     }
@@ -73,16 +100,25 @@ function deriveMigrationHead(directory) {
   const headers = {};
   for (const line of schema.split("\n")) {
     if (line.startsWith("-- ocservia:step=")) break;
-    const match = /^-- ocservia:(artifact|format|engine|epoch|revision)=(.+)$/.exec(line);
+    const match =
+      /^-- ocservia:(artifact|format|engine|epoch|revision)=(.+)$/.exec(line);
     if (!match) continue;
-    if (headers[match[1]] !== undefined) fail(`duplicate schema header ${match[1]}`);
+    if (headers[match[1]] !== undefined)
+      fail(`duplicate schema header ${match[1]}`);
     headers[match[1]] = match[2];
   }
-  if (headers.artifact !== "schema" || headers.format !== "1" || headers.engine !== "postgresql") {
+  if (
+    headers.artifact !== "schema" ||
+    headers.format !== "1" ||
+    headers.engine !== "postgresql"
+  ) {
     fail("unsupported PostgreSQL schema artifact");
   }
   for (const key of ["epoch", "revision"]) {
-    if (!/^(0|[1-9][0-9]*)$/.test(headers[key] ?? "") || !Number.isSafeInteger(Number(headers[key]))) {
+    if (
+      !/^(0|[1-9][0-9]*)$/.test(headers[key] ?? "") ||
+      !Number.isSafeInteger(Number(headers[key]))
+    ) {
       fail(`invalid schema ${key}`);
     }
   }
@@ -92,24 +128,40 @@ function deriveMigrationHead(directory) {
 
 const values = parseArguments(process.argv.slice(2));
 const manifestVersion = values.manifestVersion ?? "1";
-if (!["1", "2"].includes(manifestVersion)) fail("manifest version must be 1 or 2");
-const requiredImages = manifestVersion === "2" ? [...imageNames, ...integratedImageNames] : imageNames;
+if (!["1", "2"].includes(manifestVersion))
+  fail("manifest version must be 1 or 2");
+const requiredImages =
+  manifestVersion === "2"
+    ? [...imageNames, ...integratedImageNames]
+    : imageNames;
 if ([...values.images.keys()].some((name) => !requiredImages.includes(name))) {
   fail("image is not supported by this manifest version");
 }
-if (!values.output || !values.releaseVersion || !values.releaseTag || !values.sourceCommit || !values.platform) usage();
-if (!semverPattern.test(values.releaseVersion)) fail(`release version is not plain SemVer: ${values.releaseVersion}`);
+if (
+  !values.output ||
+  !values.releaseVersion ||
+  !values.releaseTag ||
+  !values.sourceCommit ||
+  !values.platform
+)
+  usage();
+if (!semverPattern.test(values.releaseVersion))
+  fail(`release version is not plain SemVer: ${values.releaseVersion}`);
 if (values.releaseTag !== `v${values.releaseVersion}`) {
   fail(`release tag must be v${values.releaseVersion}`);
 }
-if (!commitPattern.test(values.sourceCommit)) fail("source commit must be a lowercase 40-character Git SHA");
+if (!commitPattern.test(values.sourceCommit))
+  fail("source commit must be a lowercase 40-character Git SHA");
 if (!supportedPlatforms.includes(values.platform)) {
-  fail(`platform must be one of the supported release platforms (${supportedPlatforms.join(", ")}): ${values.platform}`);
+  fail(
+    `platform must be one of the supported release platforms (${supportedPlatforms.join(", ")}): ${values.platform}`,
+  );
 }
 for (const name of requiredImages) {
   if (!values.images.has(name)) fail(`missing production image: ${name}`);
   const ref = values.images.get(name);
-  if (!imageReferencePattern.test(ref)) fail(`${name} must be a version-tagged or sha256 image reference`);
+  if (!imageReferencePattern.test(ref))
+    fail(`${name} must be a version-tagged or sha256 image reference`);
 }
 
 const manifest = {
@@ -120,12 +172,17 @@ const manifest = {
   platform: values.platform,
   database_migration: deriveMigrationHead(path.resolve(values.migrationDir)),
   ...(manifestVersion === "2" ? { signer_state_version: 1 } : {}),
-  images: Object.fromEntries(requiredImages.map((name) => [name, values.images.get(name)])),
+  images: Object.fromEntries(
+    requiredImages.map((name) => [name, values.images.get(name)]),
+  ),
 };
 const serialized = `${JSON.stringify(manifest, null, 2)}\n`;
 
 if (values.output === "-") {
   process.stdout.write(serialized);
 } else {
-  fs.writeFileSync(values.output, serialized, { encoding: "utf8", mode: 0o644 });
+  fs.writeFileSync(values.output, serialized, {
+    encoding: "utf8",
+    mode: 0o644,
+  });
 }

@@ -99,7 +99,7 @@ describe("certificate feature without a page or store", () => {
       keyBits: 3072,
       reason: "certificate",
     });
-    feature.certificateApproval.value = " approval ";
+    feature.certificateApprovalId.value = " approval ";
     await feature.submitCertificateIssue();
     expect(api.issueCertificate).toHaveBeenCalledExactlyOnceWith(
       "certificate-a",
@@ -142,19 +142,19 @@ describe("certificate feature without a page or store", () => {
 
   it.each([
     {
-      scenario: "the receipt certificate is still active",
+      scenario: "the reference certificate is still active",
       records: [otherCertificate, certificate],
       selectedId: certificate.id,
       restoresOperation: true,
     },
     {
-      scenario: "the receipt certificate is revoked",
+      scenario: "the reference certificate is revoked",
       records: [{ ...certificate, state: "revoked" }, otherCertificate],
       selectedId: "certificate-b",
       restoresOperation: false,
     },
     {
-      scenario: "the receipt certificate is missing",
+      scenario: "the reference certificate is missing",
       records: [otherCertificate],
       selectedId: "certificate-b",
       restoresOperation: false,

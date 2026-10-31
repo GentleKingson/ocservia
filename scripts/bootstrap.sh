@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|ci-quality|contracts|secret-scan|go-test|go-quality|go-security|go-rust-integration|native|native-packages|package-tools|image-security|rust-basic|rust-validation|rust-security|web|npm-security|security]" >&2
+  echo "usage: $0 [all|ci-quality|source-style|contracts|secret-scan|go-test|go-quality|go-security|go-rust-integration|native|native-packages|package-tools|image-security|rust-basic|rust-validation|rust-security|web|npm-security|security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | ci-quality | contracts | secret-scan | go-test | go-quality | go-security | go-rust-integration | native | native-packages | package-tools | image-security | rust-basic | rust-validation | rust-security | web | npm-security | security) ;;
+  all | ci-quality | source-style | contracts | secret-scan | go-test | go-quality | go-security | go-rust-integration | native | native-packages | package-tools | image-security | rust-basic | rust-validation | rust-security | web | npm-security | security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -98,6 +98,7 @@ case "${platform}" in
     go_platform="darwin-arm64"
     node_platform="darwin-arm64"
     rust_platform="aarch64-apple-darwin"
+    ruff_platform="aarch64-apple-darwin"
     buf_platform="Darwin-arm64"
     protoc_platform="osx-aarch_64"
     gitleaks_platform="darwin_arm64"
@@ -114,6 +115,7 @@ case "${platform}" in
     go_platform="linux-amd64"
     node_platform="linux-x64"
     rust_platform="x86_64-unknown-linux-gnu"
+    ruff_platform="x86_64-unknown-linux-gnu"
     buf_platform="Linux-x86_64"
     protoc_platform="linux-x86_64"
     gitleaks_platform="linux_x64"
@@ -233,6 +235,18 @@ install_buf() {
     install -m 0755 "${binary}" "${TOOLS}/bin/buf"
   fi
   [[ "$(buf --version)" == "$(version buf)" ]]
+}
+
+install_ruff() {
+  local artifact archive
+  artifact="ruff-$(version ruff)-${ruff_platform}.tar.gz"
+  if ! version_output_equals "ruff $(version ruff)" "${TOOLS}/bin/ruff" \
+    "${TOOLS}/bin/ruff" --version; then
+    archive="$(download "https://github.com/astral-sh/ruff/releases/download/$(version ruff)/ruff-${ruff_platform}.tar.gz" "${artifact}")"
+    tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/bin" "ruff-${ruff_platform}/ruff"
+    chmod 0755 "${TOOLS}/bin/ruff"
+  fi
+  [[ "$(ruff --version)" == "ruff $(version ruff)" ]]
 }
 
 install_protoc() {
@@ -435,6 +449,7 @@ case "${PROFILE}" in
     verify_java
     verify_host_command jq
     verify_host_command shellcheck
+    install_ruff
     install_web_dependencies
     ;;
   ci-quality)
@@ -449,7 +464,13 @@ case "${PROFILE}" in
     verify_java
     verify_host_command jq
     verify_host_command shellcheck
+    install_ruff
     install_web_dependencies
+    ;;
+  source-style)
+    verify_host_command shellcheck
+    verify_host_command python3
+    install_ruff
     ;;
   contracts)
     install_node
