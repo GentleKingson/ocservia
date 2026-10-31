@@ -58,12 +58,10 @@ digest="${checksum%% *}"
 [[ "$(sha256sum "${work}/${archive}" | awk '{print $1}')" == "${digest}" ]]
 printf 'published_archive_checksum=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
 
-# The Nodes wizard fetches this fixed-tag source, while the bootstrap launcher fetches the
-# Release copy. Both entrypoints must execute the same single-file installer.
-download "https://raw.githubusercontent.com/GentleKingson/ocservia/${release_tag}/deploy/managed-node/install.sh" wizard-install.sh
-cmp "${work}/wizard-install.sh" "${work}/managed-node-bootstrap.sh"
+# The Nodes wizard and Stage-0 now use the same fixed Release asset.
+grep -qxF "readonly DEFAULT_VERSION=\"${release_tag}\"" "${work}/managed-node-bootstrap.sh"
 chmod 0700 "${work}/managed-node-bootstrap.sh"
-printf 'wizard_release_installer_match=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
+printf 'installer_embedded_version=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
 
 # The fixture suite also manages the ocserv-agent account. Guard before it,
 # not just later inside the native smoke's own pristine-host check.

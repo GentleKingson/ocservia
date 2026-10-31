@@ -14,12 +14,28 @@ require_asset() {
     exit 1
   }
 }
-for asset in install-controller controller-bootstrap.sh managed-node-bootstrap.sh controller-release-amd64.json controller-release-arm64.json controller-release.json; do
+for asset in install-controller install-node install.env.example controller-bootstrap.sh managed-node-bootstrap.sh \
+  "controller-runtime-v$VERSION.tar.gz" "controller-runtime-v$VERSION.tar.gz.sha256" \
+  controller-release-amd64.json controller-release-arm64.json controller-release.json; do
   require_asset "$asset"
 done
-cmp "$ASSET_DIR/controller-bootstrap.sh" "$ROOT/deploy/production/controller-bootstrap.sh"
-cmp "$ASSET_DIR/managed-node-bootstrap.sh" "$ROOT/deploy/managed-node/install.sh"
+# Stage-1 now embeds shared helpers and all four scripts carry the exact tag.
+# Compare against a fresh preparation from this build's source, preserving the
+# old source/asset equality gate without treating the stamped bytes as source.
+mkdir "$work/expected"
+"$ROOT/scripts/prepare-bootstrap-release-assets.sh" "$work/expected" "v$VERSION"
+for asset in install-controller install-node controller-bootstrap.sh managed-node-bootstrap.sh install.env.example; do
+  cmp "$ASSET_DIR/$asset" "$work/expected/$asset"
+done
 "$ROOT/scripts/check-release-bootstrap.sh" "$ASSET_DIR/install-controller" "v$VERSION"
+# Reuse the installer's archive checks, reading local build assets here.
+# shellcheck source=deploy/lib/controller-runtime.sh
+source "$ROOT/deploy/lib/controller-runtime.sh"
+fail() { echo "release runtime: $*" >&2; exit 1; }
+runtime_download() { cp -- "$ASSET_DIR/${1##*/}" "$2"; }
+runtime_fetch "$work/runtime" "v$VERSION" "$(git -C "$ROOT" rev-parse HEAD)"
+tar -xOf "$work/expected/controller-runtime-v$VERSION.tar.gz" SHA256SUMS >"$work/expected-runtime-checksums"
+cmp "$work/runtime/SHA256SUMS" "$work/expected-runtime-checksums"
 for arch in amd64 arm64; do
   case "$arch" in amd64) rpm_arch=x86_64; elf_word=x86-64 ;; arm64) rpm_arch=aarch64; elf_word=aarch64 ;; esac
   archive="ocservia-agent-$VERSION-linux-$arch.tar.gz"

@@ -33,8 +33,17 @@ note() { echo "quick install: $*"; }
 
 controller_domain="" relay_domain="" acme_email="" release_file=""
 materials_args=()
+non_interactive=false
+sudo_args=()
 original_args=("$@")
 while (($#)); do
+  if [[ "$1" == --non-interactive ]]; then
+    non_interactive=true
+    sudo_args=(-n)
+    materials_args+=(--non-interactive)
+    shift
+    continue
+  fi
   (($# >= 2)) || fail "missing value for $1"
   case "$1" in
     --controller-domain) controller_domain="$2" ;;
@@ -52,9 +61,12 @@ done
 [[ -z "${release_file}" || ("${release_file}" == /* && -f "${release_file}") ]] ||
   fail "--release-file must be an absolute path to a release manifest"
 
+if [[ "${non_interactive}" == true && " ${materials_args[*]} " != *" --root-ca-passphrase-file "* ]]; then
+  fail "--non-interactive requires --root-ca-passphrase-file"
+fi
 if ((EUID != 0)); then
   command -v sudo >/dev/null 2>&1 || fail "run as root or install sudo"
-  exec sudo env ${OCSERV_ACME_DIRECTORY_URL:+"OCSERV_ACME_DIRECTORY_URL=${OCSERV_ACME_DIRECTORY_URL}"} \
+  exec sudo "${sudo_args[@]}" env ${OCSERV_ACME_DIRECTORY_URL:+"OCSERV_ACME_DIRECTORY_URL=${OCSERV_ACME_DIRECTORY_URL}"} \
     ${OCSERV_ACME_CA_FILE:+"OCSERV_ACME_CA_FILE=${OCSERV_ACME_CA_FILE}"} "$0" "${original_args[@]}"
 fi
 

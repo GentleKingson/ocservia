@@ -10,7 +10,7 @@ if ! command -v flock >/dev/null 2>&1; then
   exit 0
 fi
 
-fixture="$(mktemp -d "${HOME}/.ocservia-controller-test.XXXXXX")"
+fixture="$(mktemp -d "${TMPDIR:-${HOME}}/.ocservia-controller-test.XXXXXX")"
 trap 'rm -rf -- "${fixture}"' EXIT
 bin="${fixture}/bin"
 mkdir -m 700 -- "${bin}" "${fixture}/release"
@@ -1244,4 +1244,63 @@ if run_controller "${init_failure}" "${integrated_release}" env OCSERV_SIGNER_ST
   echo "uncertain Signer init was repeated" >&2; exit 1
 fi
 test "$(grep -Fc 'run --rm --no-deps signer init' "${init_failure}/compose.log")" = 1
-echo "Controller lifecycle tests passed"
+# Runtime lifecycle uses only fixed Release assets; retain both versions for
+# offline recovery. An executable Git sentinel fails if any dependency remains.
+runtime_root="${fixture}/runtime"
+runtime_assets="${fixture}/runtime-assets"
+mkdir -m 700 "${runtime_root}" "${runtime_assets}"
+for tag in v0.2.0 v0.3.0; do
+  payload="${runtime_root}/${tag}"
+  mkdir -p "${payload}/deploy/production" "${payload}/deploy/lib"
+  cp "${ROOT}/deploy/production/controller.sh" "${payload}/deploy/production/"
+  cp "${ROOT}/deploy/lib/controller-runtime.sh" "${payload}/deploy/lib/"
+  cp "${bin}/compose.sh" "${bin}/controller-release-smoke.sh" "${payload}/deploy/production/"
+  printf '%s %s\n' "${tag}" "${commit}" >"${payload}/RELEASE"
+  (cd "${payload}" && find deploy RELEASE -type f | sort | xargs sha256sum >SHA256SUMS)
+  (cd "${payload}" && find deploy RELEASE SHA256SUMS -type f | sort | tar -czf "${runtime_assets}/controller-runtime-${tag}.tar.gz" -T -)
+  (cd "${runtime_assets}" && sha256sum "controller-runtime-${tag}.tar.gz" >"controller-runtime-${tag}.tar.gz.sha256")
+done
+cat >"${bin}/git" <<'EOF_GIT'
+#!/usr/bin/env bash
+echo 'Git must not run in runtime lifecycle' >&2
+exit 97
+EOF_GIT
+cat >"${bin}/curl" <<'EOF_CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+output="" url=""
+while (($#)); do
+  case "$1" in --output) output="$2"; shift ;; https://*) url="$1" ;; esac
+  shift
+done
+[[ "${url}" == https://github.com/GentleKingson/ocservia/releases/download/v0.3.0/* ]] || exit 22
+cp "${RUNTIME_TEST_ASSETS}/${url##*/}" "${output}"
+EOF_CURL
+chmod 755 "${bin}/git" "${bin}/curl"
+export RUNTIME_TEST_ASSETS="${runtime_assets}"
+CONTROLLER="${runtime_root}/v0.2.0/deploy/production/controller.sh"
+runtime_state="${fixture}/runtime-state"
+mkdir -m 700 "${runtime_state}"
+# Empty overrides ensure lifecycle chooses the runtime's own executable files.
+run_controller "${runtime_state}" "${release_file}" env OCSERV_CONTROLLER_COMPOSE_SH= OCSERV_CONTROLLER_SMOKE_SH=
+if run_controller_upgrade "${runtime_state}" "${next_release_file}" env \
+  OCSERV_CONTROLLER_COMPOSE_SH= OCSERV_CONTROLLER_SMOKE_SH= MOCK_SMOKE_EXIT=1 >"${runtime_state}/failure.log" 2>&1; then
+  echo 'runtime smoke failure accepted' >&2; exit 1
+fi
+cmp "${release_file}" "${runtime_state}/current-release.json"
+test -f "${runtime_state}/pending-release.json"
+run_controller_upgrade "${runtime_state}" "${next_release_file}" env OCSERV_CONTROLLER_COMPOSE_SH= OCSERV_CONTROLLER_SMOKE_SH=
+cmp "${next_release_file}" "${runtime_state}/current-release.json"
+# Disable network fetches after both runtimes have been retained.
+printf '#!/usr/bin/env bash\nexit 97\n' >"${bin}/curl"
+run_controller_rollback "${runtime_state}" env OCSERV_CONTROLLER_COMPOSE_SH= OCSERV_CONTROLLER_SMOKE_SH=
+cmp "${release_file}" "${runtime_state}/current-release.json"
+run_controller_uninstall "${runtime_state}"
+test -f "${runtime_state}/current-release.json"
+run_controller_start "${runtime_state}"
+printf '\n# local drift\n' >>"${runtime_state}/runtime-v0.2.0/deploy/production/compose.sh"
+if run_controller_start "${runtime_state}" >"${runtime_state}/drift.log" 2>&1; then
+  echo 'runtime drift accepted' >&2; exit 1
+fi
+grep -Fq 'runtime content changed' "${runtime_state}/drift.log"
+echo "Controller lifecycle tests passed (including Git-free runtime upgrade, rollback and recovery)"

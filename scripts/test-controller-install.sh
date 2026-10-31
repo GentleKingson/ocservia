@@ -27,7 +27,7 @@ umask 022
 
 # Keep the fixture under HOME: /tmp is world-writable (mode 1777), which the
 # lifecycle state root ancestry contract must reject.
-fixture="$(mktemp -d "${HOME}/.ocservia-install-test.XXXXXX")"
+fixture="$(mktemp -d "${TMPDIR:-${HOME}}/.ocservia-install-test.XXXXXX")"
 
 can_root() {
   (( EUID == 0 )) || sudo -n true >/dev/null 2>&1
@@ -149,6 +149,7 @@ EOF
 cat >"${bin}/sudo" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${INSTALL_TEST_SUDO_LOG}"
+[[ "${1:-}" != -n ]] || shift
 exec "$@"
 EOF
 
@@ -893,4 +894,27 @@ reset_logs
 capture
 assert_status 1 "RC and final at the same HEAD must fail closed"
 assert_log_empty "${curl_log}"
-echo "Controller install tests passed"
+# The backend orchestrator also consumes runtime metadata without any Git.
+reset_logs
+reset_checkout
+install_docker_client_stub
+runtime_commit="$(git -C "${repo}" rev-parse HEAD)"
+mv "${repo}/.git" "${fixture}/legacy-git"
+mv "${repo}/.gitignore" "${fixture}/legacy-ignore"
+cp "${ROOT}/deploy/lib/controller-runtime.sh" "${repo}/deploy/lib/"
+printf 'v0.1.2 %s\n' "${runtime_commit}" >"${repo}/RELEASE"
+(cd "${repo}" && find deploy RELEASE -type f | sort | xargs sha256sum >SHA256SUMS)
+printf '#!/usr/bin/env bash\nexit 97\n' >"${bin}/git"
+chmod 755 "${bin}/git"
+capture --non-interactive
+assert_status 0 "the runtime installer must not need Git"
+assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v0.1.2/controller-release-${native_arch}.json"
+assert_log_contains "${controller_log}" 'install --release-file'
+reset_logs
+printf '\n# local drift\n' >>"${repo}/deploy/production/controller.sh"
+capture --non-interactive
+assert_status 1 "runtime drift must fail before host bootstrap"
+assert_output 'runtime content changed'
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+echo "Controller install tests passed (including runtime identity without Git)"

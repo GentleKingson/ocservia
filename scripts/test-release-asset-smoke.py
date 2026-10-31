@@ -31,8 +31,7 @@ assert "--fail" in args and "--location" in args
 assert args[args.index("--proto") + 1] == "=https"
 assert args[args.index("--proto-redir") + 1] == "=https"
 url = args[-1]
-assert url.startswith(("https://github.com/GentleKingson/ocservia/releases/download/v",
-                       "https://raw.githubusercontent.com/GentleKingson/ocservia/v"))
+assert url.startswith("https://github.com/GentleKingson/ocservia/releases/download/v")
 assert "/latest/" not in url
 mode = os.environ.get("FAIL_MODE", "")
 if mode in ("404", "tls"):
@@ -44,9 +43,8 @@ if name.endswith(".sha256"):
     filename = "../other" if mode == "checksum-path" else name[:-7]
     payload = f"{digest}  {filename}\n".encode()
 elif name.endswith(".sh"):
-    payload = b"#!/bin/bash\n# same pinned installer\n"
-    if mode == "source-mismatch" and name == "install.sh":
-        payload += b"# unexpected difference\n"
+    tag = "v9.9.9" if mode == "version-mismatch" else url.split("/")[-2]
+    payload = f'#!/bin/bash\nreadonly DEFAULT_VERSION="{tag}"\n'.encode()
 if mode == "empty":
     payload = b""
 pathlib.Path(args[args.index("--output") + 1]).write_bytes(payload)
@@ -92,7 +90,7 @@ echo native >>"$CALLS"
                 self.assertEqual((self.root / "calls").read_text().splitlines()[-2:],
                                  ["contracts", "native"])
                 urls = (self.root / "evidence/release-assets-downloads.txt").read_text().splitlines()
-                self.assertEqual(len(urls), 6)
+                self.assertEqual(len(urls), 5)
                 self.assertTrue(all(f"/{tag}/" in url for url in urls))
 
     def test_reject_unpinned_or_synthetic_versions(self):
@@ -104,7 +102,7 @@ echo native >>"$CALLS"
                 self.assertFalse((self.root / "calls").exists())
 
     def test_failures_never_report_pass(self):
-        for mode in ("404", "tls", "empty", "checksum", "checksum-path", "source-mismatch", "contracts", "skipped", "native"):
+        for mode in ("404", "tls", "empty", "checksum", "checksum-path", "version-mismatch", "contracts", "skipped", "native"):
             with self.subTest(mode=mode):
                 (self.root / "calls").unlink(missing_ok=True)
                 result, summary = self.run_smoke(mode=mode)

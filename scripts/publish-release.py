@@ -44,7 +44,8 @@ def api(path, *args):
 
 
 def asset_files(version, directory):
-    names = {'install-controller', 'controller-bootstrap.sh', 'managed-node-bootstrap.sh',
+    names = {'install-controller', 'install-node', 'install.env.example',
+             f'controller-runtime-v{version}.tar.gz', f'controller-runtime-v{version}.tar.gz.sha256', 'controller-bootstrap.sh', 'managed-node-bootstrap.sh',
              'controller-release.json', 'controller-release-amd64.json', 'controller-release-arm64.json'}
     for arch, rpm_arch in (('amd64', 'x86_64'), ('arm64', 'aarch64')):
         archive = f'ocservia-agent-{version}-linux-{arch}.tar.gz'

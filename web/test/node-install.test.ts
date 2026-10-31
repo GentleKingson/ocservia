@@ -107,7 +107,7 @@ describe("installer configuration", () => {
         installer.indexOf("validate_operator_inputs() {"),
         installer.indexOf("create_launcher_staging() {"),
       );
-      const script = `set -euo pipefail\nfail() { exit 1; }\n${loader}\n${validation}\nvalidate_operator_inputs\nvalidate_bootstrap_token_source\nprintf '%s\\n' "$CONTROLLER_ENDPOINT_ID" "$ENROLLMENT_ENVIRONMENT" "$RELAY_URL_A" "$BOOTSTRAP_TOKEN_SOURCE"`;
+      const script = `set -euo pipefail\nfail() { exit 1; }\nCONFIG_FILE="$PWD/install.env"\n${loader}\n${validation}\nvalidate_operator_inputs\nvalidate_bootstrap_token_source\nprintf '%s\\n' "$CONTROLLER_ENDPOINT_ID" "$ENROLLMENT_ENVIRONMENT" "$RELAY_URL_A" "$BOOTSTRAP_TOKEN_SOURCE"`;
       const output = execFileSync("bash", ["-c", script], {
         cwd: directory,
         env: { PATH: process.env.PATH },

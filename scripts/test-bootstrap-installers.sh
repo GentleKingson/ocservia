@@ -10,8 +10,8 @@ trap 'rm -rf -- "${fixture}"' EXIT
 # Published versioned installer copies must be the actual executable sources.
 mkdir "$fixture/prepared"
 "$ROOT/scripts/prepare-bootstrap-release-assets.sh" "$fixture/prepared"
-cmp "$fixture/prepared/controller-bootstrap.sh" "$ROOT/deploy/production/controller-bootstrap.sh"
-cmp "$fixture/prepared/managed-node-bootstrap.sh" "$ROOT/deploy/managed-node/install.sh"
+bash -n "$fixture/prepared/controller-bootstrap.sh"
+bash -n "$fixture/prepared/managed-node-bootstrap.sh"
 [[ -x "$fixture/prepared/controller-bootstrap.sh" && -x "$fixture/prepared/managed-node-bootstrap.sh" ]]
 
 fail() {
@@ -304,9 +304,10 @@ grep -qx 'https://github.com/GentleKingson/ocservia/releases/download/v4.5.6/con
   fail "stamped quick mode did not use its default release"
 run_installer "${fixture}/stamped/install-controller" "${quick[@]}" --version v4.5.7 >"${fixture}/output" 2>&1
 grep -q '/download/v4.5.7/' "${fixture}/downloads.log" || fail "explicit --version did not override the default release"
-if run_installer "${fixture}/stamped/install-controller" --root-lifecycle >"${fixture}/output" 2>&1; then
-  fail "stamped bootstrap launcher used its default release outside quick mode"
-fi
+run_installer "${fixture}/stamped/install-controller" --non-interactive --root-lifecycle >"${fixture}/output" 2>&1
+grep -q '/download/v4.5.6/' "${fixture}/downloads.log" || fail "manual mode did not use embedded version"
+run_installer "${fixture}/stamped/install-node" --non-interactive >"${fixture}/output" 2>&1
+grep -q '/download/v4.5.6/' "${fixture}/downloads.log" || fail "Agent did not use embedded version"
 
 for installer in "${CONTROLLER}" "${NODE}"; do
   [[ "$(tail -n 1 "${installer}")" == 'main "$@"' ]] || fail "main invocation is not the final line"

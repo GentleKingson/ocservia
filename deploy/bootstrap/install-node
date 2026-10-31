@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Bootstrap launcher: download one versioned installer asset over HTTPS.
 set -euo pipefail
+readonly DEFAULT_VERSION=""
 
 fail() {
   echo "install-node: $1" >&2
@@ -8,6 +9,8 @@ fail() {
 }
 
 usage() {
+  echo "No arguments: interactive wizard (TTY required). --non-interactive: unattended, no prompts." >&2
+  echo "Options: --config PATH (default ./install.env), --version vX.Y.Z (Release default embedded)." >&2
   echo "usage: install-node --version vX.Y.Z [--root-lifecycle]" >&2
   exit 2
 }
@@ -30,9 +33,19 @@ main() {
   local -a installer_args=()
 
   umask 077
+  if (($# == 0)); then
+    [[ -t 0 && -t 1 ]] || fail "interactive installation requires a TTY; use --non-interactive"
+    stage1_args+=(--interactive)
+  fi
 
   while (($# > 0)); do
     case "$1" in
+      --non-interactive)
+        stage1_args+=(--non-interactive); shift ;;
+      --config)
+        [[ $# -ge 2 && -f "$2" ]] || fail "--config requires an existing file"
+        stage1_args+=(--config "$2"); shift 2 ;;
+      --help|-h) usage ;;
       --version)
         [[ "${version_seen}" == false && $# -ge 2 ]] || usage
         version="$2"
@@ -48,7 +61,10 @@ main() {
       *) usage ;;
     esac
   done
-  [[ "${version_seen}" == true ]] || usage
+  if [[ "${version_seen}" == false ]]; then
+    version="${DEFAULT_VERSION}"
+  fi
+  [[ -n "${version}" ]] || fail "this source copy has no default release; pass --version vX.Y.Z"
   [[ "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
     fail "an exact vX.Y.Z or vX.Y.Z-rc.N release is required"
   for command_name in mktemp chmod rm sleep; do

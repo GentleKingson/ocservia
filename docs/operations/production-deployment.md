@@ -316,7 +316,7 @@ private keys, certificates, relay tokens, or signing keys. Only
 A manual installation needs:
 
 - A supported `amd64` or `arm64` Linux host (see [Supported platforms](#supported-platforms)).
-- Git, `curl`, and Docker Engine with the Compose v2 plugin. The installer can
+- `wget` or `curl`, GNU `tar`, `gzip`, `sha256sum`, and Docker Engine with the Compose v2 plugin. The installer can
   install Docker on most supported distributions, but on Ubuntu 20.04 you must
   install a compatible Docker yourself before you run the script.
 - A DNS name and HTTPS certificate for the Controller. Integrated mode needs a
@@ -357,14 +357,12 @@ operator-provisioned.
 
 ### The install.env file
 
-Check out the pinned release tag and create a configuration directory outside
-the repository tree:
+Download the configuration template from the selected immutable Release into a private working directory:
 
 ```bash
-git clone --branch vX.Y.Z --single-branch --depth 1 \
-  https://github.com/GentleKingson/ocservia.git ocservia-vX.Y.Z
 mkdir ocservia-install && cd ocservia-install
-cp ../ocservia-vX.Y.Z/install.env.example install.env
+wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/install.env.example -O install.env
+chmod 0600 install.env
 editor install.env
 ```
 
@@ -411,7 +409,7 @@ print it into logs.
 ### Production secrets
 
 All prebuilt `OCSERV_*_IMAGE` settings must use explicit `vX.Y.Z` /
-`vX.Y.Z-rc.N` tags or SHA-256 references. Store secrets outside the checkout in
+`vX.Y.Z-rc.N` tags or SHA-256 references. Store secrets outside the runtime in
 a canonical absolute `OCSERV_SECRET_DIR` whose ancestor directories are owned by
 root or the launcher user without group or world write permission. The launcher
 rejects missing files, symlinks, and ownership or mode mismatches. Credentials
@@ -469,7 +467,7 @@ descriptors. Rotating or removing `relay-ca.pem` is an explicit operator trust
 change that install and upgrade runs never perform automatically.
 
 Manual installations must also generate the command signing key pair outside
-the checkout before installing or upgrading to this descriptor (Quick mode
+the runtime before installing or upgrading to this descriptor (Quick mode
 generates it automatically). Place the private key in `OCSERV_SECRET_DIR` and
 write its Ed25519 SPKI public key to `controller-command-verification-key.pem`
 in the same directory as a one-link regular file owned by `0:65532` with mode
@@ -496,7 +494,7 @@ sudo install -d -o 999 -g 999 -m 0700 "$OCSERV_BACKUP_DIR"
 
 During first-time setup of bundled PostgreSQL, role initialization scripts read
 passwords from standard input. Those scripts come from the selected release
-checkout's `postgres-init` directory and run inside the official PostgreSQL
+runtime's `postgres-init` directory and run inside the official PostgreSQL
 container only when the data directory is empty; replacing a Controller image
 or Agent package does not re-run them. Never delete a database volume or
 rebuild a database just to rerun initialization. Evaluate any historical
@@ -756,7 +754,7 @@ match Controller's `certificate-signer-token`; no private issuer key is mounted
 into Controller. See [Signer and certificate materials](#signer-and-certificate-materials)
 for chain, token, approved key-transfer and recovery requirements.
 
-Installation validates the deployment configuration and its source checkout,
+Installation validates the deployment configuration and its runtime bundle,
 checks the final Compose model and pulls all selected images before stopping
 anything. Only first installation attempts `signer init`; its durable intent
 is recorded before execution. Retry, start, upgrade and rollback inspect an
@@ -818,11 +816,16 @@ profile instead of starting without certificates.
 
 ## Install the Controller
 
-First installation runs the versioned `controller-bootstrap.sh` from a clean,
-exact-release checkout (manual path) or with `--quick` on a new host. Both hand
-off to `controller.sh`, which validates the deployment configuration and
-protected local state before activating any services. An operator-hosted
-[bootstrap launcher](#bootstrap-launcher-hosting) is optional.
+Download the installer from an exact Release (replace `vX.Y.Z`):
+
+```bash
+wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/controller-bootstrap.sh -O install.sh
+bash install.sh
+```
+
+No arguments opens a TTY-only wizard for Quick or Manual installation. It detects the platform, collects deployment, database, Relay and authentication settings, validates inputs and asks for confirmation. Manual mode saves public configuration and protected file paths in mode-0600 `install.env`; Quick delegates material generation to the existing Quick workflow. No TTY is an error, never an implicit installation.
+
+The script embeds its fixed Release version and downloads a checksum-verified minimal runtime bundle. Production installation and lifecycle commands require no Git checkout. Explicit legacy arguments remain CLI calls; `--non-interactive` ensures no prompts, including sudo password prompts. Arrange the required root or scoped passwordless sudo access beforehand.
 
 ### Lifecycle commands
 
@@ -830,7 +833,7 @@ Use `controller.sh` (implemented in
 [controller.sh](../../deploy/production/controller.sh) and
 [compose.sh](../../deploy/production/compose.sh)) for install, upgrade,
 rollback, start, and uninstall, keeping the configured database backend,
-authentication environment, secrets, and clean release source available on the
+authentication environment, secrets, and verified release runtime available on the
 host. Replacing images or invoking Docker Compose directly bypasses its checks.
 The versioned bootstrap script is only a first-install entrypoint. Never rerun
 an unpinned or `latest` installer or bootstrap launcher script as an implicit upgrade
@@ -838,40 +841,19 @@ path. Run subsequent upgrades, rollbacks, and uninstalls through the Controller
 lifecycle scripts as described in
 [Upgrade, rollback and uninstall](#upgrade-rollback-and-uninstall).
 
-Lifecycle commands never create or rotate secrets, certificates, or identity
-keys. Run every lifecycle command with the validated target configuration and
-ensure its `source_commit` is available locally (fetching the exact commit from
-the trusted repository if the checkout is shallow). The lifecycle either reuses
-the caller's matching clean checkout or retains a separate clean Git checkout
-under the protected state root, never modifying an existing checkout to force a
-match. Compose definitions and smoke checks run from that target source,
-including during later `start` and `uninstall` operations. Source checkouts
-retained under the state root are not database backups and are not removed by
-runtime uninstall.
+Lifecycle commands never create or rotate secrets, certificates, or identity keys. Run commands from the retained runtime's `deploy/production/controller.sh` with the validated configuration. The lifecycle verifies the runtime's `RELEASE` version/source commit against the manifest and its full `SHA256SUMS` inventory, retaining each selected bundle under the protected state root as `runtime-<tag>`. Upgrade downloads the exact target bundle if absent; rollback, start and uninstall reuse retained bundles. Existing invalid or modified bundles fail closed. Keep these files for recovery; they are not database backups and uninstall does not remove them. Legacy clean Git checkouts remain supported for existing explicit source-based calls and are not migrated automatically.
 
 ### Manual installation
 
-From the directory containing `./install.env`, run the versioned bootstrap
-script out of the release checkout:
+After preparing `install.env` and the protected files, run the downloaded installer:
 
 ```bash
-../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh \
-  --version vX.Y.Z
+bash install.sh --non-interactive --config ./install.env
+# Integrated deployments require the root lifecycle:
+bash install.sh --non-interactive --config ./install.env --root-lifecycle
 ```
 
-To run the full installation lifecycle as `root`, append `--root-lifecycle`:
-
-```bash
-../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh \
-  --version vX.Y.Z \
-  --root-lifecycle
-```
-
-The bootstrap script validates `./install.env` and prepares a verified release
-checkout under the Controller source root. It then runs the production
-installer, which validates the configuration, starts the containers, and
-confirms that the services are ready. The `--version` value must be an existing
-stable or RC release tag.
+Exported variables override file values. `--config` defaults to `./install.env`; an explicit `--version vX.Y.Z` overrides the embedded version. No `latest` or branch lookup occurs. The verified runtime is retained under `${OCSERV_CONTROLLER_SOURCE_ROOT:-$HOME/.local/share/ocservia/controller/releases}/vX.Y.Z`. `--check` validates inputs, platform and the downloaded runtime without installing host software; it does not establish live service readiness.
 
 Do not replace this workflow with a direct `docker compose up -d`. That skips
 release digest verification and the lifecycle checks. To validate the rendered
@@ -882,8 +864,7 @@ support. `install` runs these steps in order:
 
 1. Acquires an exclusive local lock in `/var/lib/ocservia-controller`.
 2. Rejects any existing `current-release.json`.
-3. Verifies that the checkout HEAD and clean working tree match the manifest's
-   `source_commit`.
+3. Verifies the runtime version, file inventory and manifest `source_commit`.
 4. Runs the guarded Compose preflight.
 5. Atomically records the target and lifecycle phase in `pending-release.json`
    before activation.
@@ -937,7 +918,7 @@ The launcher prints the resolved release tag before downloading the versioned in
 explicit `--version` flag always overrides the stamped default.
 
 When the versioned installer (`controller-bootstrap.sh --quick`) starts, it ignores any local
-`./install.env` and runs a read-only host preflight before cloning (including
+`./install.env` and runs a read-only host preflight before downloading the runtime (including
 when invoked with `--check`):
 
 - `getent`, `ip`, and `ss` must exist.
@@ -1003,6 +984,8 @@ Formal GitHub Releases publish:
   and `controller-release-arm64.json`, alongside the Agent assets.
 - A byte-identical `controller-release.json` alias of the amd64 manifest for
   existing operators.
+- The minimal `controller-runtime-vX.Y.Z.tar.gz` and its published `.sha256`,
+  the stamped `install-controller` and `install-node` wrappers, and `install.env.example`.
 - The versioned installer entrypoints `controller-bootstrap.sh` and
   `managed-node-bootstrap.sh` for HTTPS download.
 
@@ -1021,7 +1004,7 @@ ordinary deployment configuration: download it over HTTPS and keep it in a
 protected directory as a regular root- or launcher-owned file without symlink
 ancestry or group and world write permission. Before running Compose config,
 pull, or activation, the lifecycle validates the manifest's JSON structure,
-architecture, source checkout, and image mapping, without requiring a release
+architecture, runtime bundle, and image mapping, without requiring a release
 public key, signature, signed checksum manifest, or provenance evidence. Later
 `rollback` and `start` runs use the copies saved in protected local lifecycle
 state and do not need the original download.
@@ -1117,7 +1100,7 @@ has no admission gates for source-version windows, version ordering, or
 descriptor equality, so running it across incompatible versions can fail or
 damage state, and the tooling does not convert historical deployments (see
 [Version policy](#version-policy)). In an Integrated deployment, run the
-commands as root from a clean checkout at the configuration's `source_commit`,
+commands as root from the retained verified runtime,
 with the same configuration used for installation.
 
 ### Upgrade
@@ -1130,11 +1113,7 @@ review the target release's persistent-state requirements and the
 lifecycle script checks only that the database backup service (along with
 PostgreSQL in bundled deployments) is running and healthy, so you must verify
 on your own that a recent backup file exists and is restorable. Run the upgrade
-from a clean Git clone with no staged, unstaged, or untracked changes, using a
-protected release bundle that matches the Docker daemon architecture. When the
-working tree is not already checked out at the target `source_commit`, that
-commit must exist in the local repository so the lifecycle can maintain a
-separate clean clone under the protected state root.
+from the retained runtime, using a protected release manifest that matches the Docker daemon architecture. The lifecycle downloads the exact target runtime when it is not already cached; versions without a runtime asset require the legacy checkout workflow and are not converted automatically.
 
 ```bash
 deploy/production/controller.sh upgrade \
@@ -1142,7 +1121,7 @@ deploy/production/controller.sh upgrade \
 ```
 
 An `upgrade` run first validates the confirmed current state and target
-manifest, checks the target `source_commit` against a clean checkout before any
+manifest, checks the target `source_commit` against the verified runtime before any
 Compose operation, and verifies the current deployment's dependency and backup
 health. While the current release stays online, `upgrade` records the pending
 state, renders the target Compose configuration and pulls the target images,
@@ -1252,11 +1231,7 @@ disk and never takes an operator-supplied manifest. It enforces no version
 ordering, equal migration counts, or descriptor equality checks, and runs no
 historical database compatibility preflight, so rollback does not guarantee that
 an arbitrary previous release can operate against the existing database state.
-It uses that target release's exact source commit for Docker Compose and smoke
-checks, maintaining a separate clean checkout under the protected state root
-whenever needed so bind-mounted files remain available. Missing source commits,
-dirty checkouts, invalid platforms, and configuration or runtime failures remain
-hard errors.
+It uses the retained target runtime matching the manifest's exact source commit for Docker Compose and smoke checks. Missing or modified runtime files, invalid platforms, and configuration or runtime failures remain hard errors.
 
 Provided the exact target source and images remain available and satisfy the
 deployment's requirements, `rollback` renders and pulls the previous image
@@ -1327,7 +1302,7 @@ deploy/production/controller.sh uninstall
 
 Running `uninstall` acquires the lifecycle lock and executes protected Compose
 `down`, retaining named database, transport, and trust volumes, external
-databases, confirmed manifests, source checkouts, backups, and secrets so that
+databases, confirmed manifests, runtime bundles, backups, and secrets so that
 repeating a completed uninstall is safe. The Controller remains offline and
 managed nodes lose their Controller connection until you run `start`. In an
 Integrated deployment, the non-purging uninstall is a full maintenance stop of
@@ -1347,8 +1322,7 @@ In Standalone mode, `--purge-data` removes the production project volumes
 an off-host backup) and the lifecycle state files (`current-release.json`,
 `previous-release.json`, `pending-release.json`, and the deployment profile)
 after a clean shutdown. It keeps the lock, secrets, backup directory, external
-databases, off-host backups, source checkouts (including retained source clones
-under the state root), container images, and unrelated Docker volumes intact.
+databases, off-host backups, runtime bundles (and any legacy runtime bundles), container images, and unrelated Docker volumes intact.
 Volume purge is neither a secure erase nor a database recovery mechanism.
 Integrated mode refuses the operation because disposing of Signer and identity
 material requires separate reconciliation.
@@ -1577,7 +1551,7 @@ verifies both static and 502 responses across both configurations.
 If CSP enforcement breaks a page, roll back at the release level instead of
 editing an installed copy, since the Standalone Caddyfile is built into the
 gateway image and Integrated mode mounts its gateway files from a release
-checkout that the lifecycle requires to stay clean. Either run
+runtime that the lifecycle requires to remain unchanged. Either run
 [Controller rollback](#rollback) to return to a previous Report-Only release, or
 upgrade to a release built from a commit that renames only this header to
 `Content-Security-Policy-Report-Only` across all four blocks while keeping the
@@ -1618,49 +1592,19 @@ services to force a new layout to fit.
 
 ## Bootstrap launcher hosting
 
-In a manual installation, the bootstrap launcher is an optional convenience wrapper over the
-same lifecycle boundaries as the manual path:
-
-```text
-bootstrap launcher -> exact vX.Y.Z versioned installer -> install.env -> durable clean checkout
-        -> production/install.sh -> deployment configuration -> controller.sh
-        -> smoke/readiness
-```
-
-The bootstrap launcher's initial bytes come from the static HTTPS endpoint, and it fetches the
-versioned installer script over HTTPS. The versioned installer prepares a durable release checkout
-and leaves `install.env` in the operator's configuration directory outside that
-checkout. It then hands off to controller.sh, which validates the deployment
-configuration and protected local state before activating any services. Until
-the static bootstrap host has operational ownership and byte-verification
-evidence, obtain the versioned installer directly from a clean, exact-release checkout as
-described in [Manual installation](#manual-installation).
-
 The repository maintains two bootstrap launchers:
 
 - `deploy/bootstrap/install-controller`
 - `deploy/bootstrap/install-node`
 
-When an operator hosts the public bootstrap endpoints, `install-node` is served
-byte-for-byte from Git at `https://get.ocservia.example/install-node`.
-`install-controller` is served byte-for-byte from the `install-controller`
-asset of the latest stable Release at
-`https://get.ocservia.example/install-controller`. That Release asset matches
-the Git source except for its stamped default version; see
-[Quick mode](#quick-mode). The non-executable configuration template
-`install.env.example` is served byte-for-byte at
-`https://get.ocservia.example/install.env.example`. External static-hosting
-infrastructure lives outside this repository, so those example endpoints are
-active only when deployed by an operator.
+The standard installation uses fixed GitHub Release assets directly. Operators may additionally host exact copies of the version-stamped `install-controller`, `install-node` and `install.env.example` assets from a deliberately selected stable Release. Example `get.ocservia.example` endpoints below are placeholders, active only when deployed by an operator. Do not resolve a Release dynamically from `latest` or a branch.
 
 ### Hosting requirements
 
 Serve the endpoints from static HTTPS hosting with HSTS enabled and
 `Content-Type: text/plain`. Responses must be static for all callers, without
 per-user templating, query-parameter tokens, embedded secrets, or server-side
-session state. Publish only from the Git source file (or, for
-`install-controller`, the latest stable Release asset built from it), and never
-host an RC asset.
+session state. Publish the selected stable Release assets unchanged.
 
 After deploying the files, verify that the served bytes match the expected
 source artifacts. `check-release-bootstrap.sh` first checks that the downloaded
@@ -1674,7 +1618,7 @@ scripts/verify-bootstrap-endpoint.sh \
   "$RELEASE_ASSETS/install-controller"
 scripts/verify-bootstrap-endpoint.sh \
   https://get.ocservia.example/install-node \
-  deploy/bootstrap/install-node
+  "$RELEASE_ASSETS/install-node"
 scripts/verify-bootstrap-endpoint.sh \
   https://get.ocservia.example/install.env.example \
   install.env.example
@@ -1684,79 +1628,41 @@ Each `verify-bootstrap-endpoint.sh` invocation downloads the URL read-only over
 HTTPS, enforces exact byte equality against the local file, and prints the
 deployed SHA-256 digest for the deployment record.
 
-<a id="stage-0-trust-model"></a>
-
 ### Bootstrap launcher trust model
 
-Outside [Quick mode](#quick-mode), the launcher requires an explicit stable
-`--version vX.Y.Z`, builds the corresponding GitHub Release URL for that tag,
-and hands off execution to the matching `controller-bootstrap.sh` or
-`managed-node-bootstrap.sh` versioned installer asset. The launcher itself never reads
+The bootstrap launcher uses its embedded exact Release tag or an explicit `--version vX.Y.Z`, builds the corresponding GitHub Release URL, and hands off to `controller-bootstrap.sh` or `managed-node-bootstrap.sh`. The bootstrap launcher itself never reads
 `install.env`, installs packages, runs the Controller lifecycle, enrolls or
 approves a node, starts services, or crosses a privilege boundary; the versioned installer owns
 all configuration, installation, enrollment, activation, and package or
 lifecycle validation.
 
-During the handoff, the launcher fetches the versioned installer script over HTTPS with TLS
+During the handoff, the bootstrap launcher fetches the versioned installer script over HTTPS with TLS
 verification enabled, rejects download errors or empty responses, and runs the
 downloaded file from a private temporary directory. Download authenticity in
 this phase relies on the HTTPS endpoint and its PKI without separate release
-keys, fingerprints, signed checksum manifests, or detached signatures. The launcher
-imposes no additional OpenSSL version requirement.
+keys, fingerprints, signed checksum manifests, or detached signatures, and
+the bootstrap launcher imposes no additional OpenSSL version requirement.
 
-Operators should download the launcher locally, inspect its contents, and invoke it
+Operators should download the bootstrap launcher locally, inspect its contents, and invoke it
 with an explicit version tag. Never resolve the version dynamically from
-`latest`, a branch name, or a commit hash, and never pipe an unverified script
-into a shell; the only permitted default version is the exact release tag
-stamped into a Release's own `install-controller` asset for
-[Quick mode](#quick-mode).
+`latest`, a branch name, or a commit hash; the only permitted default version
+is the exact release tag stamped into that Release’s own scripts.
 
 ### Intended entrypoints
 
-Once the static endpoints are deployed and verified, the one-line convenience
-wrappers below download the launcher to a temporary file, check for its trailing
-`main "$@"` completeness marker, and only then execute it. Wrapping the steps
-in a subshell surfaces any transport, empty-body, or truncated-download failure
-to calling automation:
+Production installation uses fixed GitHub Release assets directly; no static host or source checkout is required:
 
 ```bash
-(
-  set -eu
-  bootstrap_file="$(mktemp)" || exit 1
-  trap 'rm -f -- "$bootstrap_file"' EXIT
-  trap 'exit 1' HUP INT TERM
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$bootstrap_file" \
-    https://get.ocservia.example/install-controller || exit 1
-  test "$(tail -n 1 "$bootstrap_file")" = 'main "$@"' || exit 1
-  bash "$bootstrap_file" --version vX.Y.Z
-)
-
-(
-  set -eu
-  bootstrap_file="$(mktemp)" || exit 1
-  trap 'rm -f -- "$bootstrap_file"' EXIT
-  trap 'exit 1' HUP INT TERM
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$bootstrap_file" \
-    https://get.ocservia.example/install-node || exit 1
-  test "$(tail -n 1 "$bootstrap_file")" = 'main "$@"' || exit 1
-  bash "$bootstrap_file" --version vX.Y.Z
-)
+wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/controller-bootstrap.sh -O install.sh
+bash install.sh
+# On a managed node, download managed-node-bootstrap.sh instead.
 ```
 
-Beyond `--version`, the launcher accepts only `--root-lifecycle` and, on the
-Controller entrypoint, `--check` and the [Quick mode](#quick-mode) flags. Pass
-all configuration and secrets through the environment or protected host paths
-consumed by the installer. The launcher neither parses nor prints secret material. On a
-managed node, automated bootstrap stops at `ENROLLED_LOCAL` with the node
-pending approval on the Controller, leaving approval and service activation as
-explicit post-enrollment steps.
+`install-controller` and `install-node` remain optional thin bootstrap launcher wrappers, also published with an embedded fixed version. No arguments requests the versioned installer wizard; explicit legacy arguments retain CLI behavior. `--non-interactive` and `--config PATH` pass through to the versioned installer. Neither stage selects `latest` or `main`.
 
-The bootstrap launcher is only for first installation. Subsequent Controller upgrades
-and rollbacks run through `controller.sh` and its protected lifecycle state.
-Managed-node upgrades and removals run through the authorized upgrader or
-native package manager. Persist long-lived settings in `install.env` or the
-installed service configuration so they do not depend on re-running the
-bootstrap wrapper with CLI flags.
+The interaction follows the explicit unattended switches and confirmation model of [Rustup](https://rust-lang.github.io/rustup/installation/index.html) and [Homebrew](https://docs.brew.sh/Installation#unattended-installation). This installer requires a TTY for its default wizard and refuses to install when one is absent. Configuration collection is the only distinction between the wizard and CLI; both delegate to the same lifecycle authorities.
+
+Release preparation stamps both wrappers and both standalone versioned installer scripts. The Controller installer downloads `controller-runtime-vX.Y.Z.tar.gz` and its published `.sha256`, verifies archive paths/types, version and checksums, and retains the bundle under the existing `OCSERV_CONTROLLER_SOURCE_ROOT` path. The bundle holds only production Compose, lifecycle scripts and public bind-mount configuration. Its `RELEASE` records the release tag and source commit; `SHA256SUMS` detects local drift. These hashes detect corruption and do not add a separate signing authority beyond HTTPS and immutable Release publication. The Agent installer continues to download the platform-native package and freeze it in protected staging.
 
 ## Troubleshooting
 
@@ -1820,7 +1726,7 @@ Collector logs and check backend mTLS connectivity.
 ### Deployment configuration is rejected
 
 Use the JSON release configuration that matches the Docker daemon architecture
-along with a clean Git checkout of its `source_commit`. Verify the release
+along with a verified runtime matching its `source_commit`. Verify the release
 version, topology, image references, and root-controlled file ancestry, then
 fix the reported prerequisite without bypassing lifecycle validation or
 overwriting confirmed or pending state files.

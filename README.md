@@ -97,20 +97,15 @@ deploy/compose/compose.sh down --volumes
 
 ### 1. Deploy the Controller
 
-Keep production configuration files in a working directory outside the repository checkout. In the commands below, replace `vX.Y.Z` with an official release tag:
+Download the installer from an exact GitHub Release (replace `vX.Y.Z`):
 
 ```bash
-# Clone the pinned release
-git clone --branch vX.Y.Z --single-branch --depth 1 \
-  https://github.com/GentleKingson/ocservia.git ocservia-vX.Y.Z
-
 mkdir ocservia-install && cd ocservia-install
-cp ../ocservia-vX.Y.Z/install.env.example install.env
-$EDITOR install.env
-
-# Run the verified bootstrap
-../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh --version vX.Y.Z
+wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/controller-bootstrap.sh -O install.sh
+bash install.sh
 ```
+
+The wizard detects the platform, collects Quick or Manual settings, checks prerequisites and asks for confirmation. It requires a TTY. For automation, use `bash install.sh --non-interactive --config ./install.env`; missing required configuration fails without prompting. Release scripts embed their version, so production installation needs neither Git nor a source checkout.
 
 Operators sign in with local credentials, OpenID Connect (OIDC), or both. A fresh installation has no default administrator account. If you enable local login in a manual setup, create the first administrator with the separate one-shot bootstrap command described in [Production authentication](docs/operations/authentication.md#bootstrap-the-first-local-admin).
 
@@ -123,14 +118,9 @@ For a new Integrated host, the Quick preset can generate the configuration, cryp
 On each ocserv host you want to manage, run the node installer from the same release:
 
 ```bash
-git clone --branch vX.Y.Z --single-branch --depth 1 \
-  https://github.com/GentleKingson/ocservia.git ocservia-vX.Y.Z
-
 mkdir ocservia-node-install && cd ocservia-node-install
-cp ../ocservia-vX.Y.Z/install.env.example install.env
-$EDITOR install.env
-
-../ocservia-vX.Y.Z/deploy/managed-node/install.sh
+wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/managed-node-bootstrap.sh -O install.sh
+bash install.sh
 ```
 
 Without an enrollment token, the installer leaves the host in `ENROLLMENT_READY`. With a token, it completes enrollment and reports `ENROLLED_LOCAL`: the Controller now holds a pending record for the node, but the node has no control-plane access until it is approved.

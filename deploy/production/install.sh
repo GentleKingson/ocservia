@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Thin production orchestrator for a one-command Controller install.
 #
-# Scope: from a clean version-tag checkout, prepare the host, download the
+# Scope: from a verified Release runtime bundle, prepare the host, download the
 # architecture-specific Controller deployment configuration over HTTPS into
 # protected lifecycle state, and delegate activation to controller.sh.
 # Host preparation and Controller lifecycle remain their existing authorities.
 # Production secrets and runtime command/PKI trust material are operator supplied.
 #
 # Usage model:
-#   git clone --branch vX.Y.Z --depth 1 <ocservia repository>
-#   cd ocservia
+#   cd <configuration directory>
 #   export OCSERV_BACKUP_DIR=... OCSERV_SECRET_DIR=...
 #   # export the remaining production Controller configuration...
 #   # (or keep the allowlisted configuration in ./install.env, parsed by the
@@ -101,18 +100,18 @@ fail() {
   exit 1
 }
 
-if (($# > 1)); then
-  echo "usage: deploy/production/install.sh [--root-lifecycle] (the production environment comes from the operator session or ./install.env)" >&2
-  exit 2
-fi
-case "${1:-}" in
-  "") ;;
-  --root-lifecycle) ROOT_LIFECYCLE=true ;;
-  *)
-    echo "usage: deploy/production/install.sh [--root-lifecycle] (the production environment comes from the operator session or ./install.env)" >&2
-    exit 2
-    ;;
-esac
+CONFIG_FILE="${PWD}/install.env"
+NON_INTERACTIVE=false
+while (($#)); do
+  case "$1" in
+    --root-lifecycle) ROOT_LIFECYCLE=true; shift ;;
+    --non-interactive) NON_INTERACTIVE=true; shift ;;
+    --config) (($# >= 2)) || fail "--config requires a path"; CONFIG_FILE="$2"; shift 2 ;;
+    *) echo "usage: install.sh [--root-lifecycle] [--non-interactive] [--config PATH]" >&2; exit 2 ;;
+  esac
+done
+sudo_args=()
+[[ "${NON_INTERACTIVE}" == false ]] || sudo_args+=(-n)
 
 # Operator configuration comes from the invoking shell environment and, for
 # allowlisted variables not exported there, from $PWD/install.env. The
@@ -127,7 +126,7 @@ esac
 if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
   # shellcheck source=../lib/install-env.sh disable=SC1091
   source "${ROOT}/deploy/lib/install-env.sh"
-  install_env_load "${PWD}/install.env" \
+  install_env_load "${CONFIG_FILE}" \
     OCSERV_AUDIT_EVENT_KEY_ID \
     OCSERV_BACKUP_DIR \
     OCSERV_BACKUP_INTERVAL_SECONDS \
@@ -184,6 +183,8 @@ fi
 
 forward_root_lifecycle() {
   local variable allowed
+  local -a reexec_args=()
+  [[ "${NON_INTERACTIVE}" == false ]] || reexec_args+=(--non-interactive)
   local -a forwarded_environment=()
   while IFS= read -r variable; do
     for allowed in "${ROOT_LIFECYCLE_ENV_NAMES[@]}"; do
@@ -197,9 +198,9 @@ forward_root_lifecycle() {
   # OCSERV_INSTALL_ENV_RESOLVED tells the root re-exec that install.env was
   # already resolved by the launcher user: root must not re-read a file that
   # may have been replaced across the privilege transition.
-  exec sudo env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
+  exec sudo "${sudo_args[@]}" env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
     OCSERV_INSTALL_ENV_RESOLVED=1 \
-    "${ROOT}/deploy/production/install.sh" --root-lifecycle
+    "${ROOT}/deploy/production/install.sh" --root-lifecycle "${reexec_args[@]}"
 }
 
 if [[ "${ROOT_LIFECYCLE}" == true ]]; then
@@ -227,6 +228,15 @@ fi
 
 resolve_release_identity() {
   local tag matching=()
+  if [[ -e "${ROOT}/RELEASE" ]]; then
+    # shellcheck source=deploy/lib/controller-runtime.sh
+    source "${ROOT}/deploy/lib/controller-runtime.sh"
+    read -r RELEASE_TAG RELEASE_COMMIT <"${ROOT}/RELEASE"
+    runtime_validate "${ROOT}" "${RELEASE_TAG}" "${RELEASE_COMMIT}"
+    echo "release identity: ${RELEASE_TAG} (${RELEASE_COMMIT})"
+    return
+  fi
+  # Compatibility for deliberate invocation from an old tagged checkout.
   command -v git >/dev/null 2>&1 ||
     fail "git is required to identify the release checkout"
   RELEASE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)" ||
@@ -283,7 +293,7 @@ run_host_bootstrap() {
     # provisioned for the same root user that activates the Controller.
     env "${sudo_env[@]+"${sudo_env[@]}"}" "${BOOTSTRAP}" "${args[@]}"
   else
-    sudo env "${sudo_env[@]+"${sudo_env[@]}"}" "${BOOTSTRAP}" "${args[@]}"
+    sudo "${sudo_args[@]}" env "${sudo_env[@]+"${sudo_env[@]}"}" "${BOOTSTRAP}" "${args[@]}"
   fi
 }
 
