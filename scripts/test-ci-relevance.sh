@@ -90,7 +90,8 @@ while read -r path selected; do
         .github/workflows/real-e2e.yml|deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*)
           expect "${out}" ci_suites cross-vm ;;
         scripts/release-business-api.py) expect "${out}" ci_suites 'release cross-vm' ;;
-        scripts/buildx-cache.sh|.github/actions/build-cache-credentials/index.js)
+        scripts/buildx-cache.sh|.github/actions/build-cache-credentials/index.js|\
+        scripts/test-bootstrap-installers.sh|scripts/resilience-capacity-lib.sh)
           expect "${out}" ci_suites 'release' ;;
         .github/workflows/ci.yml|.github/workflows/security.yml|scripts/ci-relevance.sh)
           expect "${out}" ci_suites guards ;;
@@ -149,6 +150,8 @@ signer/store_test.go run_go
 signer/go.sum run_go run_controller_cache
 signer/notes.txt run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 scripts/web-check.sh run_web
+scripts/test-bootstrap-installers.sh run_ci_tools
+scripts/resilience-capacity-lib.sh run_ci_tools
 deploy/managed-node/install.sh run_installers
 deploy/production/install.sh run_installers
 deploy/production/controller-bootstrap.sh run_installers

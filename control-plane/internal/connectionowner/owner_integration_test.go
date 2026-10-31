@@ -76,7 +76,7 @@ func assertExactLeaseDeadline(t *testing.T, pool *pgxpool.Pool, node [16]byte, d
 	}
 }
 
-// TestConnectionOwnerExactLeaseDeadlineHandoffIntegration locks the Stage 4
+// TestConnectionOwnerExactLeaseDeadlineHandoffIntegration locks the ownership-fence
 // precondition that Acquire and Renew hand back the exact PostgreSQL deadline
 // with microsecond fidelity: any drift would let an owner sign a fence whose
 // lease outlives the authority's.

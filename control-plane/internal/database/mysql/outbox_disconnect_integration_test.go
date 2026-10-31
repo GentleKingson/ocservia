@@ -49,7 +49,7 @@ func TestRealOutboxCommitDisconnect(t *testing.T) {
 					t.Fatal(err)
 				}
 				service := operations.NewBackend(runtime, 1, signer)
-				if _, _, err := service.CreateSynthetic(ctx, operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1, Kind: operations.SyntheticEcho, Message: "PR04", TTL: time.Minute, RequestID: uuid.NewString(), Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"}); err != nil {
+				if _, _, err := service.Create(ctx, operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1, Kind: operations.SyntheticEcho, Message: "PR04", TTL: time.Minute, RequestID: uuid.NewString(), Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"}); err != nil {
 					t.Fatal(err)
 				}
 				var dispatch operations.Dispatch

@@ -60,7 +60,7 @@ func TestRealTransportResults(t *testing.T) {
 		endpoint := sha256.Sum256(node[:])
 		run(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES(?,?,?,'active',?,?)`, UUIDBytes(node), UUIDBytes(workspace), node.String(), fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 		run(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at)VALUES(?,?,'active',?)`, UUIDBytes(node), endpoint[:], fixtureTimestamp(t, now))
-		v, _, err := operations.CreateSynthetic(ctx, operationRequest(node, trace))
+		v, _, err := operations.Create(ctx, operationRequest(node, trace))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -265,7 +265,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, candidate, at) }); err != nil {
 		t.Fatal(err)
 	}
-	key := stableKey("policy", node.String(), "alice", "1", "quota", monthStart(now).Format(time.RFC3339))
+	key := operationIdempotencyKey("policy", node.String(), "alice", "1", "quota", monthStart(now).Format(time.RFC3339))
 	mutation := userstate.MutationRequest{NodeID: node, Kind: userstate.UserDisable, Name: "alice", ExpectedVersion: 1, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: key, Traceparent: stableTraceparent(key)}
 	t.Run("quota-revoked-node", func(t *testing.T) { checkRevokedCandidates(t, s.enforcePolicies) })
 	t.Run("quota-port-errors", func(t *testing.T) { checkPolicyErrors(t, policyErrors.enforcePolicies, mutation, "quota") })
@@ -288,7 +288,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	exec(`INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at)VALUES($1,'alice',false,2,$2,$3)`, `INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at)VALUES(?,'alice',false,2,?,?)`, node, make([]byte, 32), at)
 	exec(`UPDATE commands SET state='succeeded' WHERE node_id=$1 AND resource_key='alice'`, `UPDATE commands SET state='succeeded' WHERE node_id=? AND resource_key='alice'`, node)
 	now = monthStart(now).AddDate(0, 1, 0).Add(time.Second)
-	resetKey := stableKey("policy-reset", node.String(), "alice", "1", monthStart(now).Format(time.RFC3339))
+	resetKey := operationIdempotencyKey("policy-reset", node.String(), "alice", "1", monthStart(now).Format(time.RFC3339))
 	resetRequest := userstate.MutationRequest{NodeID: node, Kind: userstate.UserEnable, Name: "alice", ExpectedVersion: 2, IdempotencyKey: resetKey, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: resetKey, Traceparent: stableTraceparent(resetKey)}
 	t.Run("reset-revoked-node", func(t *testing.T) { checkRevokedCandidates(t, s.resetMonthlyPolicies) })
 	t.Run("reset-port-errors", func(t *testing.T) {
@@ -341,7 +341,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	if n, err := s.enforcePolicies(ctx, 10); err != nil || n != 1 {
 		t.Fatal("expiry enforcement", n, err)
 	}
-	expiryKey := stableKey("policy", node.String(), "expired", "1", "expiry", "1970-01-01T00:00:00Z")
+	expiryKey := operationIdempotencyKey("policy", node.String(), "expired", "1", "expiry", "1970-01-01T00:00:00Z")
 	mutator.assertLast(t, ctx, 1, userstate.MutationRequest{NodeID: node, Kind: userstate.UserDisable, Name: "expired", ExpectedVersion: 1, IdempotencyKey: expiryKey, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: expiryKey, Traceparent: stableTraceparent(expiryKey)})
 	exec(`UPDATE nodes SET status='offline' WHERE id=$1`, `UPDATE nodes SET status='offline' WHERE id=?`, node)
 	items := []BatchItemRequest{{NodeID: node, Username: "bob", Action: "disable", ExpectedVersion: 1, Authorized: true}, {NodeID: node, Username: "charlie", Action: "disable", ExpectedVersion: 1, Authorized: false}}
@@ -370,7 +370,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	if _, replay, err := s.CreateBatch(ctx, batchRequest); err != nil || !replay {
 		t.Fatal("batch replay", replay, err)
 	}
-	key = stableKey("batch", batchID.String(), "0")
+	key = operationIdempotencyKey("batch", batchID.String(), "0")
 	batchMutation := userstate.MutationRequest{NodeID: node, Kind: userstate.UserDisable, Name: "bob", ExpectedVersion: 1, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "operator", ActorIdentityID: requester, ActorSessionID: session, Reason: "ticket", RequestID: batchRequest.RequestID + ":0", Traceparent: testTraceparent}
 	if _, _, err := users.Mutate(ctx, batchMutation); err != nil {
 		t.Fatal("batch crash window", err)
@@ -439,7 +439,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 					t.Fatalf("Mutate calls=%d, want %d", len(mutator.requests), wantCalls)
 				}
 				for index, got := range mutator.requests {
-					key := stableKey("batch", batch.ID.String(), fmt.Sprint(index))
+					key := operationIdempotencyKey("batch", batch.ID.String(), fmt.Sprint(index))
 					want := userstate.MutationRequest{NodeID: node, Kind: userstate.UserEnable, Name: request.Items[index].Username, ExpectedVersion: 1, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: request.ActorID, ActorIdentityID: requester, ActorSessionID: session, Reason: request.Reason, RequestID: request.RequestID + ":" + fmt.Sprint(index), Traceparent: request.Traceparent}
 					if !reflect.DeepEqual(got, want) || mutator.contexts[index] != ctx {
 						t.Fatalf("batch item %d request=%+v, want %+v", index, got, want)

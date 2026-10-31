@@ -35,15 +35,15 @@ copy_asset() {
 copy_asset "${ROOT}/deploy/production/controller-bootstrap.sh" "controller-bootstrap.sh"
 copy_asset "${ROOT}/deploy/managed-node/install.sh" "managed-node-bootstrap.sh"
 
-# The released Controller Stage-0 differs from its Git source only in the
+# The released Controller bootstrap launcher differs from its Git source only in the
 # stamped default version used by --quick.
 if [[ -n "${release_tag}" ]]; then
   copy_asset "${ROOT}/deploy/bootstrap/install-controller" "install-controller"
   default_line='readonly DEFAULT_VERSION=""'
   [[ "$(grep -cxF "${default_line}" "${asset_dir}/install-controller")" == 1 ]] || {
-    echo "Controller Stage-0 must contain exactly one empty default version line" >&2
+    echo "Controller bootstrap launcher must contain exactly one empty default version line" >&2
     exit 1
   }
   sed -i "s|^${default_line}\$|readonly DEFAULT_VERSION=\"${release_tag}\"|" "${asset_dir}/install-controller"
-  "${ROOT}/scripts/check-release-stage0.sh" "${asset_dir}/install-controller" "${release_tag}"
+  "${ROOT}/scripts/check-release-bootstrap.sh" "${asset_dir}/install-controller" "${release_tag}"
 fi

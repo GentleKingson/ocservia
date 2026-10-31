@@ -15,11 +15,11 @@ import (
 )
 
 type syntheticCommandRequest struct {
-	Kind             operationstore.SyntheticKind `json:"kind"`
-	Message          string                       `json:"message,omitempty"`
-	ExpectedVersion  *int64                       `json:"expected_version,omitempty"`
-	TTLSeconds       *int64                       `json:"ttl_seconds,omitempty"`
-	SupersedePending bool                         `json:"supersede_pending,omitempty"`
+	Kind             operationstore.Kind `json:"kind"`
+	Message          string              `json:"message,omitempty"`
+	ExpectedVersion  *int64              `json:"expected_version,omitempty"`
+	TTLSeconds       *int64              `json:"ttl_seconds,omitempty"`
+	SupersedePending bool                `json:"supersede_pending,omitempty"`
 }
 
 type controlledCommandRequest struct {
@@ -118,7 +118,7 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	operation, replayed, err := s.operations.CreateSynthetic(r.Context(), operationstore.CreateRequest{
+	operation, replayed, err := s.operations.Create(r.Context(), operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
 		Kind: operationstore.AgentUpgrade, TargetVersion: target.Version, PackageSHA256: target.PackageSHA256[:], Architecture: target.Architecture,
 		ApprovalID: approval, Action: "agent.upgrade", Reason: reason,
@@ -137,7 +137,7 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, operation)
 }
 
-func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request, kind operationstore.SyntheticKind, action, sessionID, ip string) {
+func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request, kind operationstore.Kind, action, sessionID, ip string) {
 	if s.operations == nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
 		return
@@ -173,7 +173,7 @@ func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request,
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "reason is required and ttl_seconds must be between 1 and 300")
 		return
 	}
-	operation, replayed, err := s.operations.CreateSynthetic(r.Context(), operationstore.CreateRequest{
+	operation, replayed, err := s.operations.Create(r.Context(), operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
 		Kind: kind, SessionID: sessionID, BootID: body.BootID, IP: ip,
 		TTL: time.Duration(ttl) * time.Second, RequestID: requestID(r), Traceparent: requestTraceparent(r),
@@ -245,7 +245,7 @@ func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) 
 	}
 	requestID, _ := r.Context().Value(requestIDKey{}).(string)
 	actor := principal(r)
-	operation, replayed, err := s.operations.CreateSynthetic(r.Context(), operationstore.CreateRequest{
+	operation, replayed, err := s.operations.Create(r.Context(), operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
 		Kind: body.Kind, Message: body.Message, SupersedePending: body.SupersedePending,
 		TTL: time.Duration(ttl) * time.Second, RequestID: requestID, Traceparent: requestTraceparent(r),

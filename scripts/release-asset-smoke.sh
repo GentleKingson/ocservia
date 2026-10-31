@@ -58,7 +58,7 @@ digest="${checksum%% *}"
 [[ "$(sha256sum "${work}/${archive}" | awk '{print $1}')" == "${digest}" ]]
 printf 'published_archive_checksum=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
 
-# The Nodes wizard fetches this fixed-tag source, while Stage-0 fetches the
+# The Nodes wizard fetches this fixed-tag source, while the bootstrap launcher fetches the
 # Release copy. Both entrypoints must execute the same single-file installer.
 download "https://raw.githubusercontent.com/GentleKingson/ocservia/${release_tag}/deploy/managed-node/install.sh" wizard-install.sh
 cmp "${work}/wizard-install.sh" "${work}/managed-node-bootstrap.sh"

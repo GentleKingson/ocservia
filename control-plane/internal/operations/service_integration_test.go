@@ -24,11 +24,11 @@ const testTraceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01
 func TestTransactionalCreateIdempotencyAndTypedPayloadIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := integrationService(t)
 	request := testRequest(nodeID, "same-key", SyntheticEcho, "hello")
-	first, replayed, err := service.CreateSynthetic(context.Background(), request)
+	first, replayed, err := service.Create(context.Background(), request)
 	if err != nil || replayed {
 		t.Fatalf("first create = %+v, %v, %v", first, replayed, err)
 	}
-	second, replayed, err := service.CreateSynthetic(context.Background(), request)
+	second, replayed, err := service.Create(context.Background(), request)
 	if err != nil || !replayed || second.ID != first.ID {
 		t.Fatalf("replay = %+v, %v, %v", second, replayed, err)
 	}
@@ -49,12 +49,12 @@ func TestTransactionalCreateIdempotencyAndTypedPayloadIntegration(t *testing.T) 
 
 	conflict := request
 	conflict.Message = "different"
-	if _, _, err := service.CreateSynthetic(context.Background(), conflict); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, _, err := service.Create(context.Background(), conflict); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("conflicting replay error = %v", err)
 	}
 	stale := testRequest(nodeID, "stale", SyntheticNoop, "")
 	stale.ExpectedVersion = 2
-	if _, _, err := service.CreateSynthetic(context.Background(), stale); !errors.Is(err, ErrStaleRevision) {
+	if _, _, err := service.Create(context.Background(), stale); !errors.Is(err, ErrStaleRevision) {
 		t.Fatalf("stale revision error = %v", err)
 	}
 	ctx := context.Background()
@@ -68,7 +68,7 @@ func TestTransactionalCreateIdempotencyAndTypedPayloadIntegration(t *testing.T) 
 	if err != nil || read.CreatedAt.Micros != value.NegativeInfinity || read.UpdatedAt.Micros != value.PositiveInfinity || read.ExpiresAt == nil || read.ExpiresAt.Micros != value.PositiveInfinity {
 		t.Fatal("extended operation read", read, err)
 	}
-	read, replayed, err = service.CreateSynthetic(ctx, request)
+	read, replayed, err = service.Create(ctx, request)
 	if err != nil || !replayed || read.CreatedAt.Micros != value.NegativeInfinity {
 		t.Fatal("extended idempotent read", read, replayed, err)
 	}
@@ -96,7 +96,7 @@ func TestAuditFailureRejectsBusinessWriteIntegration(t *testing.T) {
 	defer func() {
 		_, _ = owner.Exec(context.Background(), `DROP TRIGGER IF EXISTS i12_reject_audit ON audit_events; DROP FUNCTION IF EXISTS i12_reject_audit()`)
 	}()
-	if _, _, err := service.CreateSynthetic(ctx, testRequest(nodeID, "audit-failure", SyntheticNoop, "")); err == nil {
+	if _, _, err := service.Create(ctx, testRequest(nodeID, "audit-failure", SyntheticNoop, "")); err == nil {
 		t.Fatal("business write succeeded while audit failed")
 	}
 	var count int
@@ -120,12 +120,12 @@ func TestIdempotencyKeyCannotReplayAcrossNodesIntegration(t *testing.T) {
 	}
 	request := controlledTestRequest(nodeID, "cross-node-key", ServiceReload, "service.reload", "", "", "")
 	approveOperation(t, pool, workspaceID, &request)
-	first, replayed, err := service.CreateSynthetic(ctx, request)
+	first, replayed, err := service.Create(ctx, request)
 	if err != nil || replayed || first.NodeID == nil || *first.NodeID != nodeID.String() {
 		t.Fatalf("first node operation = %+v, %v, %v", first, replayed, err)
 	}
 	request.NodeID = otherNodeID
-	if _, _, err := service.CreateSynthetic(ctx, request); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, _, err := service.Create(ctx, request); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("cross-node replay error = %v", err)
 	}
 }
@@ -168,11 +168,11 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 	requests["reload"] = reload
 	for name, request := range requests {
 		t.Run(name, func(t *testing.T) {
-			operation, replayed, err := service.CreateSynthetic(ctx, request)
+			operation, replayed, err := service.Create(ctx, request)
 			if err != nil || replayed || operation.State != "queued" {
 				t.Fatalf("create controlled operation = %+v, %v, %v", operation, replayed, err)
 			}
-			replayedOperation, replayed, err := service.CreateSynthetic(ctx, request)
+			replayedOperation, replayed, err := service.Create(ctx, request)
 			if err != nil || !replayed || replayedOperation.ID != operation.ID {
 				t.Fatalf("replay controlled operation = %+v, %v, %v", replayedOperation, replayed, err)
 			}
@@ -180,7 +180,7 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 	}
 
 	missing := controlledTestRequest(nodeID, "missing", SessionDisconnect, "session.disconnect", bootID, "43", "")
-	if _, _, err := service.CreateSynthetic(ctx, missing); !errors.Is(err, ErrTargetNotObserved) {
+	if _, _, err := service.Create(ctx, missing); !errors.Is(err, ErrTargetNotObserved) {
 		t.Fatalf("missing observed target error = %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE node_capabilities SET approved=false WHERE node_id=$1 AND capability='ocserv.service.reload'`, nodeID); err != nil {
@@ -188,7 +188,7 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 	}
 	denied := controlledTestRequest(nodeID, "denied", ServiceReload, "service.reload", "", "", "")
 	denied.ActorIdentityID, denied.ActorSessionID, denied.ApprovalID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, _, err := service.CreateSynthetic(ctx, denied); !errors.Is(err, ErrCapabilityMissing) {
+	if _, _, err := service.Create(ctx, denied); !errors.Is(err, ErrCapabilityMissing) {
 		t.Fatalf("missing capability error = %v", err)
 	}
 }
@@ -204,11 +204,11 @@ func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) 
 	}
 	base := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-exact", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "1.2.3", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-upgrade", Traceparent: testTraceparent}
 	approveOperation(t, pool, workspaceID, &base)
-	operation, replayed, err := service.CreateSynthetic(ctx, base)
+	operation, replayed, err := service.Create(ctx, base)
 	if err != nil || replayed || operation.State != "queued" {
 		t.Fatalf("create approved upgrade = %+v, %v, %v", operation, replayed, err)
 	}
-	if _, replayed, err := service.CreateSynthetic(ctx, base); err != nil || !replayed {
+	if _, replayed, err := service.Create(ctx, base); err != nil || !replayed {
 		t.Fatalf("replay approved upgrade = %v, %v", replayed, err)
 	}
 
@@ -238,7 +238,7 @@ func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) 
 			request := base
 			request.PackageSHA256 = append([]byte(nil), base.PackageSHA256...)
 			tc.mutate(&request)
-			if _, _, err := service.CreateSynthetic(ctx, request); !errors.Is(err, approvals.ErrNotReady) {
+			if _, _, err := service.Create(ctx, request); !errors.Is(err, approvals.ErrNotReady) {
 				t.Fatalf("drifted %s error = %v", tc.name, err)
 			}
 		})
@@ -265,7 +265,7 @@ func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) 
 	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := service.CreateSynthetic(ctx, generic); !errors.Is(err, approvals.ErrNotReady) {
+	if _, _, err := service.Create(ctx, generic); !errors.Is(err, approvals.ErrNotReady) {
 		t.Fatalf("action-level approval error = %v", err)
 	}
 }
@@ -283,7 +283,7 @@ func TestAgentUpgradeWithoutVersionOrderIntegration(t *testing.T) {
 			}
 			request := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-explicit-target", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-explicit-target", Traceparent: testTraceparent}
 			approveOperation(t, pool, workspaceID, &request)
-			operation, replayed, err := service.CreateSynthetic(ctx, request)
+			operation, replayed, err := service.Create(ctx, request)
 			if err != nil || replayed || operation.AgentUpgradeState != "queued" {
 				t.Fatalf("explicit target: operation=%+v replayed=%v err=%v", operation, replayed, err)
 			}
@@ -294,7 +294,7 @@ func TestAgentUpgradeWithoutVersionOrderIntegration(t *testing.T) {
 func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := integrationService(t)
 	for _, key := range []string{"one", "two"} {
-		if _, _, err := service.CreateSynthetic(context.Background(), testRequest(nodeID, key, SyntheticNoop, "")); err != nil {
+		if _, _, err := service.Create(context.Background(), testRequest(nodeID, key, SyntheticNoop, "")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -380,7 +380,7 @@ func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 func TestClaimedCommandExpiryDoesNotLeakNodeLeaseIntegration(t *testing.T) {
 	service, pool, _, nodeID := integrationService(t)
 	ctx := context.Background()
-	operation, replayed, err := service.CreateSynthetic(ctx, testRequest(nodeID, "crash-window-expiry", SyntheticNoop, ""))
+	operation, replayed, err := service.Create(ctx, testRequest(nodeID, "crash-window-expiry", SyntheticNoop, ""))
 	if err != nil || replayed || operation.CommandID == nil {
 		t.Fatalf("create crash-window command = %+v, replayed=%v, err=%v", operation, replayed, err)
 	}
@@ -440,7 +440,7 @@ func TestClaimedCommandExpiryDoesNotLeakNodeLeaseIntegration(t *testing.T) {
 	if err := service.MarkSent(ctx, recovery[0]); err != nil {
 		t.Fatalf("mark recovery sent: %v", err)
 	}
-	later, replayed, err := service.CreateSynthetic(ctx, testRequest(nodeID, "post-crash-window", SyntheticNoop, ""))
+	later, replayed, err := service.Create(ctx, testRequest(nodeID, "post-crash-window", SyntheticNoop, ""))
 	if err != nil || replayed || later.CommandID == nil {
 		t.Fatalf("create later command = %+v, replayed=%v, err=%v", later, replayed, err)
 	}
@@ -457,7 +457,7 @@ func TestClaimedCommandExpiryDoesNotLeakNodeLeaseIntegration(t *testing.T) {
 func TestSentCommandWithoutResultEntersAndContinuesReconciliationIntegration(t *testing.T) {
 	service, pool, _, nodeID := integrationService(t)
 	ctx := context.Background()
-	operation, replayed, err := service.CreateSynthetic(ctx, testRequest(nodeID, "sent-result-missing", SyntheticNoop, ""))
+	operation, replayed, err := service.Create(ctx, testRequest(nodeID, "sent-result-missing", SyntheticNoop, ""))
 	if err != nil || replayed || operation.CommandID == nil {
 		t.Fatalf("create missing-result command = %+v, replayed=%v, err=%v", operation, replayed, err)
 	}
@@ -590,7 +590,7 @@ func TestSentCommandWithoutResultEntersAndContinuesReconciliationIntegration(t *
 func TestMissingResultReapSkipsOutboxLockedByTerminalResultIntegration(t *testing.T) {
 	service, pool, _, nodeID := integrationService(t)
 	ctx := context.Background()
-	operation, replayed, err := service.CreateSynthetic(ctx, testRequest(nodeID, "sent-result-race", SyntheticNoop, ""))
+	operation, replayed, err := service.Create(ctx, testRequest(nodeID, "sent-result-race", SyntheticNoop, ""))
 	if err != nil || replayed || operation.CommandID == nil {
 		t.Fatalf("create result-race command = %+v, replayed=%v, err=%v", operation, replayed, err)
 	}
@@ -697,13 +697,13 @@ func assertReconciliationEnvelope(t *testing.T, original, reconciled *agentv1.Co
 
 func TestBacklogRecoverySupersededExpiryAndUnknownIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := integrationService(t)
-	old, _, err := service.CreateSynthetic(context.Background(), testRequest(nodeID, "old", SyntheticEcho, "old"))
+	old, _, err := service.Create(context.Background(), testRequest(nodeID, "old", SyntheticEcho, "old"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	replacement := testRequest(nodeID, "replacement", SyntheticEcho, "new")
 	replacement.SupersedePending = true
-	if _, _, err := service.CreateSynthetic(context.Background(), replacement); err != nil {
+	if _, _, err := service.Create(context.Background(), replacement); err != nil {
 		t.Fatal(err)
 	}
 	var oldState string
@@ -737,7 +737,7 @@ func TestBacklogRecoverySupersededExpiryAndUnknownIntegration(t *testing.T) {
 
 	expiring := testRequest(nodeID, "expires", SyntheticNoop, "")
 	expiring.TTL = time.Second
-	if _, _, err := service.CreateSynthetic(context.Background(), expiring); err != nil {
+	if _, _, err := service.Create(context.Background(), expiring); err != nil {
 		t.Fatal(err)
 	}
 	_, err = pool.Exec(context.Background(), `UPDATE commands SET created_at=now()-interval '2 seconds',expires_at=now()-interval '1 second' WHERE workspace_id=$1 AND idempotency_key='expires'`, workspaceID)
@@ -799,7 +799,7 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 	return NewBackend(postgres.WrapPool(pool), 50, testCommandSigner(t)), pool, workspaceID, nodeID
 }
 
-func controlledTestRequest(nodeID uuid.UUID, key string, kind SyntheticKind, action, bootID, sessionID, ip string) CreateRequest {
+func controlledTestRequest(nodeID uuid.UUID, key string, kind Kind, action, bootID, sessionID, ip string) CreateRequest {
 	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: kind, BootID: bootID, SessionID: sessionID, IP: ip, ActorID: "operator", Action: action, Reason: "integration test", TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
 }
 
@@ -831,6 +831,6 @@ func approveOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, r
 	}
 }
 
-func testRequest(nodeID uuid.UUID, key string, kind SyntheticKind, message string) CreateRequest {
+func testRequest(nodeID uuid.UUID, key string, kind Kind, message string) CreateRequest {
 	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: kind, Message: message, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
 }

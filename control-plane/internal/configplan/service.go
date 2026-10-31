@@ -77,7 +77,7 @@ type ApplyRequest struct {
 }
 
 type operationCreator interface {
-	CreateSynthetic(context.Context, operations.CreateRequest) (operations.Operation, bool, error)
+	Create(context.Context, operations.CreateRequest) (operations.Operation, bool, error)
 }
 
 var _ operationCreator = (*operations.Service)(nil)
@@ -159,7 +159,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 	if err != nil {
 		return Plan{}, false, err
 	}
-	op, replayed, err := s.operations.CreateSynthetic(ctx, operations.CreateRequest{
+	op, replayed, err := s.operations.Create(ctx, operations.CreateRequest{
 		NodeID: request.NodeID, IdempotencyKey: request.IdempotencyKey, ExpectedVersion: node.Version,
 		Kind: operations.ConfigPlan, Candidate: rendered.Candidate, CandidateHash: rendered.Hash[:], PlanRevision: uint64(request.ExpectedRevision),
 		CompleteCandidate: rendered.CompleteCandidate,
@@ -301,7 +301,7 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 		operationRequest.MaterializedHash = materialized
 		operationRequest.PlanExpiresAt = timestamppb.New(expires)
 	}
-	return s.operations.CreateSynthetic(ctx, operationRequest)
+	return s.operations.Create(ctx, operationRequest)
 }
 
 func (s *Service) Resource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {

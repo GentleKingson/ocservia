@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage-1 versioned Controller bootstrap: prepare a durable, clean checkout
+# Versioned Controller installer: prepare a durable, clean checkout
 # of an exact vX.Y.Z release tag and hand off to the existing production
 # installer.
 #
@@ -116,7 +116,7 @@ INSTALL_ENV_NAMES=(
   OCSERV_SECRET_DIR
 )
 
-# Embedded install.env loader: the Stage-1 contract copy of
+# Embedded install.env loader: the versioned installer contract copy of
 # deploy/lib/install-env.sh, kept functionally identical to it. This bootstrap
 # is a single self-contained Release asset, so it cannot source repository
 # siblings before it clones the requested release; any loader contract change

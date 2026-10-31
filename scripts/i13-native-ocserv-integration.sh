@@ -17,9 +17,9 @@ PORT="${OCSERVIA_I13_OCSERV_PORT:-44443}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 RUN_AS_USER="${SUDO_USER:-nobody}"
 RUN_AS_GROUP="$(id -gn "${RUN_AS_USER}")"
-P1=""
-P2=""
-P3=""
+INITIAL_PASSWORD=""
+ROTATED_PASSWORD=""
+DISABLED_ROTATION_PASSWORD=""
 client_pid=""
 
 server_ready() {
@@ -41,7 +41,7 @@ persist_artifacts() {
 scan_artifacts() {
   [[ -n "${ARTIFACT_DIR}" && -d "${ARTIFACT_DIR}" ]] || return 0
   local secret
-  for secret in "${P1}" "${P2}" "${P3}"; do
+  for secret in "${INITIAL_PASSWORD}" "${ROTATED_PASSWORD}" "${DISABLED_ROTATION_PASSWORD}"; do
     if [[ -n "${secret}" ]] && grep -rIFq -- "${secret}" "${ARTIFACT_DIR}"; then
       echo "native artifact contains a plaintext canary" >&2
       rm -rf "${ARTIFACT_DIR}"
@@ -85,7 +85,7 @@ cleanup() {
     cleanup_status=1
   fi
   rm -rf "${NATIVE_ROOT}"
-  unset P1 P2 P3
+  unset INITIAL_PASSWORD ROTATED_PASSWORD DISABLED_ROTATION_PASSWORD
   if ((status != 0)); then
     exit "${status}"
   fi
@@ -120,15 +120,15 @@ fi
 umask 077
 mkdir -p "${NATIVE_ROOT}/groups"
 chmod 755 "${NATIVE_ROOT}" "${NATIVE_ROOT}/groups"
-P1="$(openssl rand -base64 36 | tr -d '\n')"
-P2="$(openssl rand -base64 36 | tr -d '\n')"
-P3="$(openssl rand -base64 36 | tr -d '\n')"
-test -n "${P1}"
-test -n "${P2}"
-test -n "${P3}"
-test "${P1}" != "${P2}"
-test "${P1}" != "${P3}"
-test "${P2}" != "${P3}"
+INITIAL_PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"
+ROTATED_PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"
+DISABLED_ROTATION_PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"
+test -n "${INITIAL_PASSWORD}"
+test -n "${ROTATED_PASSWORD}"
+test -n "${DISABLED_ROTATION_PASSWORD}"
+test "${INITIAL_PASSWORD}" != "${ROTATED_PASSWORD}"
+test "${INITIAL_PASSWORD}" != "${DISABLED_ROTATION_PASSWORD}"
+test "${ROTATED_PASSWORD}" != "${DISABLED_ROTATION_PASSWORD}"
 
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
   -out "${NATIVE_ROOT}/private.pem" >/dev/null 2>&1
@@ -137,9 +137,9 @@ openssl pkey -in "${NATIVE_ROOT}/private.pem" -pubout \
   -out "${NATIVE_ROOT}/public.pem" >/dev/null 2>&1
 for index in 1 2 3; do
   case "${index}" in
-    1) password=${P1} ;;
-    2) password=${P2} ;;
-    3) password=${P3} ;;
+    1) password=${INITIAL_PASSWORD} ;;
+    2) password=${ROTATED_PASSWORD} ;;
+    3) password=${DISABLED_ROTATION_PASSWORD} ;;
   esac
   printf '%s' "${password}" | openssl pkeyutl -encrypt \
     -pubin -inkey "${NATIVE_ROOT}/public.pem" \
@@ -291,18 +291,18 @@ authenticate() {
   rm -f "${output}"
 }
 
-authenticate create-p1 "${P1}" success
+authenticate create-p1 "${INITIAL_PASSWORD}" success
 run_native_phase rotate-p2
-authenticate old-p1 "${P1}" failure
-authenticate current-p2 "${P2}" success
+authenticate old-p1 "${INITIAL_PASSWORD}" failure
+authenticate current-p2 "${ROTATED_PASSWORD}" success
 run_native_phase disable
-authenticate disabled-p2 "${P2}" failure
+authenticate disabled-p2 "${ROTATED_PASSWORD}" failure
 run_native_phase rotate-disabled-p3
-authenticate disabled-old-p2 "${P2}" failure
-authenticate disabled-current-p3 "${P3}" failure
+authenticate disabled-old-p2 "${ROTATED_PASSWORD}" failure
+authenticate disabled-current-p3 "${DISABLED_ROTATION_PASSWORD}" failure
 run_native_phase enable
-authenticate enabled-old-p2 "${P2}" failure
-authenticate enabled-current-p3 "${P3}" success
+authenticate enabled-old-p2 "${ROTATED_PASSWORD}" failure
+authenticate enabled-current-p3 "${DISABLED_ROTATION_PASSWORD}" success
 run_native_phase group-apply
 run_native_phase config-rollback
 
@@ -311,7 +311,7 @@ reject_supplemental_config() {
   before=$(wc -l <"${NATIVE_ROOT}/server.log")
   rm -f "${NATIVE_ROOT}/client.env"
   set +e
-  printf '%s\n' "${P3}" | timeout 10 openconnect --no-proxy --non-inter \
+  printf '%s\n' "${DISABLED_ROTATION_PASSWORD}" | timeout 10 openconnect --no-proxy --non-inter \
     --protocol=anyconnect --user=alice --passwd-on-stdin \
     --servercert "pin-sha256:${PIN}" --script-tun --script "${NATIVE_ROOT}/capture.sh" \
     "https://127.0.0.1:${PORT}" >"${NATIVE_ROOT}/auth-${label}.log" 2>&1
@@ -341,7 +341,7 @@ if ${OCSERV_160}; then
 fi
 
 rm -f "${NATIVE_ROOT}/client.env"
-printf '%s\n' "${P3}" | timeout "${CLIENT_TIMEOUT}" openconnect --no-proxy \
+printf '%s\n' "${DISABLED_ROTATION_PASSWORD}" | timeout "${CLIENT_TIMEOUT}" openconnect --no-proxy \
   --protocol=anyconnect --user=alice --passwd-on-stdin \
   --servercert "pin-sha256:${PIN}" --script-tun \
   --script "${NATIVE_ROOT}/capture.sh" \
@@ -405,4 +405,4 @@ if ${OCSERV_160}; then
 fi
 persist_artifacts
 scan_artifacts
-echo "native Ocserv P1/P2/P3 authentication lifecycle passed"
+echo "native Ocserv password rotation and disable/enable lifecycle passed"

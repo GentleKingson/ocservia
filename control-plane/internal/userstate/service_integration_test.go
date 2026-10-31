@@ -219,7 +219,7 @@ func TestFreshObservedUsersBoundCreateCapacityIntegration(t *testing.T) {
 	}
 }
 
-func TestI13IntentAndTerminalAuditIdentityMatchIntegration(t *testing.T) {
+func TestUserMutationIntentAndTerminalAuditIdentityMatchIntegration(t *testing.T) {
 	tests := []struct {
 		kind    MutationKind
 		name    string
@@ -763,7 +763,7 @@ func TestGlobalCommandLimitAcrossProducersIntegration(t *testing.T) {
 	if _, _, err := users.Mutate(context.Background(), mutation(nodeID, "limited-user", UserCreate, "limited", 0)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := operations.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: secondNodeID, IdempotencyKey: "limited-noop", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-limited-noop", Traceparent: testTraceparent}); err != nil {
+	if _, _, err := operations.Create(context.Background(), operationstore.CreateRequest{NodeID: secondNodeID, IdempotencyKey: "limited-noop", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-limited-noop", Traceparent: testTraceparent}); err != nil {
 		t.Fatal(err)
 	}
 	baseline := activeCommands(t, pool)
@@ -813,7 +813,7 @@ func TestOfflineQueueDoesNotConsumeGlobalDispatchCapacityIntegration(t *testing.
 		node uuid.UUID
 		key  string
 	}{{offlineNodeID, "offline-backlog"}, {activeNodeID, "online-work"}} {
-		if _, _, err := operations.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: item.node, IdempotencyKey: item.key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + item.key, Traceparent: testTraceparent}); err != nil {
+		if _, _, err := operations.Create(context.Background(), operationstore.CreateRequest{NodeID: item.node, IdempotencyKey: item.key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + item.key, Traceparent: testTraceparent}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -840,7 +840,7 @@ func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
 	service := operationstore.NewBackend(postgres.WrapPool(pool), baseline+1, integrationCommandSigner())
 	for index, nodeID := range []uuid.UUID{firstNodeID, secondNodeID} {
 		key := fmt.Sprintf("lease-cap-%d", index)
-		if _, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}); err != nil {
+		if _, _, err := service.Create(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -864,7 +864,7 @@ func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
 
 func TestUnknownReconciliationConsumesDispatchSlotIntegration(t *testing.T) {
 	_, pool, _, nodeID := integrationService(t, "active")
-	op, _, err := operationstore.NewBackend(postgres.WrapPool(pool), 1, integrationCommandSigner()).CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: "unknown-reconcile", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-unknown-reconcile", Traceparent: testTraceparent})
+	op, _, err := operationstore.NewBackend(postgres.WrapPool(pool), 1, integrationCommandSigner()).Create(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: "unknown-reconcile", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-unknown-reconcile", Traceparent: testTraceparent})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -920,13 +920,13 @@ func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
 	operationIDs := make([]uuid.UUID, 0, 21)
 	for index := range 20 {
 		key := fmt.Sprintf("busy-%02d", index)
-		operation, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: busyNodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent})
+		operation, _, err := service.Create(context.Background(), operationstore.CreateRequest{NodeID: busyNodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent})
 		if err != nil {
 			t.Fatal(err)
 		}
 		operationIDs = append(operationIDs, uuid.MustParse(operation.ID))
 	}
-	otherOperation, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: otherNodeID, IdempotencyKey: "other-node", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-other-node", Traceparent: testTraceparent})
+	otherOperation, _, err := service.Create(context.Background(), operationstore.CreateRequest{NodeID: otherNodeID, IdempotencyKey: "other-node", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-other-node", Traceparent: testTraceparent})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -971,7 +971,7 @@ func TestNodeBacklogBoundaryConcurrencyAndReplayIntegration(t *testing.T) {
 	for index, request := range requests {
 		go func(index int, request operationstore.CreateRequest) {
 			<-start
-			_, _, err := service.CreateSynthetic(context.Background(), request)
+			_, _, err := service.Create(context.Background(), request)
 			results <- result{index: index, err: err}
 		}(index, request)
 	}
@@ -990,7 +990,7 @@ func TestNodeBacklogBoundaryConcurrencyAndReplayIntegration(t *testing.T) {
 	if successes != 1 || rejected != 1 {
 		t.Fatalf("node backlog boundary successes=%d rejected=%d", successes, rejected)
 	}
-	if _, replayed, err := service.CreateSynthetic(context.Background(), requests[winner]); err != nil || !replayed {
+	if _, replayed, err := service.Create(context.Background(), requests[winner]); err != nil || !replayed {
 		t.Fatalf("idempotent replay at backlog capacity replayed=%v err=%v", replayed, err)
 	}
 }
@@ -1016,7 +1016,7 @@ func TestWorkspaceBacklogBoundaryAcrossNodesIntegration(t *testing.T) {
 	for _, request := range requests {
 		go func(request operationstore.CreateRequest) {
 			<-start
-			_, _, err := service.CreateSynthetic(context.Background(), request)
+			_, _, err := service.Create(context.Background(), request)
 			results <- err
 		}(request)
 	}

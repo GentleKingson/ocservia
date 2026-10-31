@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/p1-resilience-capacity-lib.sh
-source "${ROOT}/scripts/p1-resilience-capacity-lib.sh"
+# shellcheck source=scripts/resilience-capacity-lib.sh
+source "${ROOT}/scripts/resilience-capacity-lib.sh"
 temporary="$(mktemp -d)"
 trap 'rm -rf "${temporary}"' EXIT INT TERM
 
@@ -20,17 +20,17 @@ rejects 1 33 1 1 1
 rejects 1 1 30001 1 1
 rejects 1 1 1 1 4097
 
-invalid_run_id="I08-invalid-concurrency-$$"
+invalid_run_id="capacity-invalid-concurrency-$$"
 invalid_prefix="$(printf '%s' "${invalid_run_id}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
 if RUN_ID="${invalid_run_id}" RUNNER_TEMP="${temporary}" REQUEST_CONCURRENCY=33 \
   "${ROOT}/scripts/p1-resilience-capacity.sh" >"${temporary}/invalid.out" 2>"${temporary}/invalid.err"; then
   echo "capacity harness accepted excessive request concurrency" >&2
   exit 1
 fi
-grep -Fq 'REQUEST_CONCURRENCY exceeds the I08 envelope maximum 32' "${temporary}/invalid.err"
+grep -Fq 'REQUEST_CONCURRENCY exceeds the capacity envelope maximum 32' "${temporary}/invalid.err"
 test ! -e "${temporary}/ocservia-${invalid_prefix}"
 
-invalid_profile_id="I08-invalid-profile-$$"
+invalid_profile_id="capacity-invalid-profile-$$"
 if RUN_ID="${invalid_profile_id}" RUNNER_TEMP="${temporary}" P1_PROFILE=custom \
   "${ROOT}/scripts/p1-resilience-capacity.sh" >"${temporary}/profile.out" 2>"${temporary}/profile.err"; then
   echo "capacity harness accepted an unknown profile" >&2
@@ -87,7 +87,7 @@ make_sample() {
 }
 samples="${temporary}/samples.jsonl"
 epoch=0
-IFS=',' read -r -a phases <<<"${I08_REQUIRED_SAMPLE_PHASES}"
+IFS=',' read -r -a phases <<<"${REQUIRED_RESOURCE_SAMPLE_PHASES}"
 for phase in "${phases[@]}" capacity-load capacity-load capacity-load; do
   make_sample "${phase}" "${epoch}" >>"${samples}"
   epoch=$((epoch + 1))

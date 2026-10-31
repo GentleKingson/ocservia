@@ -221,8 +221,8 @@ const (
 )
 
 // Rollout and node states mirror the agent_rollouts CHECK constraints. The
-// failed/cancelled rollout states exist in the schema; P0 only ever writes
-// paused (awaiting an explicit operator decision) or the two terminal states.
+// failed/cancelled rollout states exist in the schema; the rollout coordinator
+// only writes paused (awaiting an operator decision) or the two terminal states.
 const (
 	RolloutStateQueued    = "queued"
 	RolloutStateRunning   = "running"
@@ -872,8 +872,8 @@ func (s *Service) evaluateRolloutBatch(ctx context.Context, q operationstore.Sto
 		}
 	}
 	if blocked != nil && rollout.StopOnFailure {
-		// P0 fixes the stop-on-failure policy to true; the stored policy is
-		// part of the approved rollout request hash.
+		// Rollout admission fixes stop-on-failure to true; the stored policy
+		// is part of the approved rollout request hash.
 		pauseCode := "node_" + blocked.State
 		if err := q.SetRolloutState(ctx, rollout.ID, "paused", pauseCode, at); err != nil {
 			return nil, false, fmt.Errorf("pause rollout: %w", err)
@@ -1063,7 +1063,7 @@ func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, 
 	if rollout.State != RolloutStateRunning {
 		return true, nil
 	}
-	operation, _, err := s.CreateSynthetic(ctx, CreateRequest{
+	operation, _, err := s.Create(ctx, CreateRequest{
 		NodeID:              node.NodeID,
 		IdempotencyKey:      "agent-rollout:" + rolloutID.String() + ":" + node.NodeID.String() + ":" + strconv.Itoa(node.DispatchAttempt),
 		ExpectedVersion:     node.DispatchVersion,

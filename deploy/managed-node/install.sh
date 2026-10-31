@@ -3,7 +3,7 @@
 #
 # Scope: install an exact vX.Y.Z release package-first. With --version the
 # release is pinned on the command line and this script is a self-contained
-# Stage-1: one file, no Git checkout, and no repository sibling files.
+# Versioned installer: one file, no Git checkout, and no repository sibling files.
 # Without --version it must run from a clean checkout of the exact release
 # tag and derives the release identity from the Git tag (the compatibility
 # path). Either way the script runs the platform preflight, downloads the
@@ -230,11 +230,11 @@ fi
 # $PWD/install.env as new authoritative input. The fixture seams above stay
 # deliberately outside this allowlist: they are test seams, not operator
 # configuration, and must not gain an install.env entry.
-# Embedded install.env loader: the Stage-1 contract copy of
+# Embedded install.env loader: the versioned installer contract copy of
 # deploy/lib/install-env.sh, kept functionally identical to it. This script
 # must stay a single self-contained file (it runs without a repository
 # checkout), so it cannot source the shared loader; any contract change is
-# made in the shared loader and both Stage-1 copies. Contract:
+# made in the shared loader and both versioned installer copies. Contract:
 # - The caller names its own allowlist; any other key in the file fails
 #   closed, so a typo cannot silently drop a setting and internal test seams
 #   never gain a production configuration entry.

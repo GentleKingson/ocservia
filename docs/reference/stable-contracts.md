@@ -35,8 +35,8 @@ An `Unknown` command is never guessed and never resent for execution. It is reco
 ### Controller delivery
 
 All Controller-issued commands follow the same delivery pipeline. Either
-Operations `CreateSynthetic` (which, despite the name, also serves the
-configuration, certificate, and Agent-upgrade services) or the user and group
+`operations.Service.Create` (used by configuration, certificate and Agent
+upgrade services) or the user and group
 service signs and queues a typed command. The outbox worker dispatches it
 through `transportd`, and the Agent journal and privd record the resulting
 effect. The side-effect-free synthetic command endpoint exercises this full

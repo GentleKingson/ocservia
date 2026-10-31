@@ -83,7 +83,7 @@ func TestCommandResultBeforeMarkSentIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = term.ReleaseBackend(context.Background(), postgres.WrapPool(pool)) })
 	authority := &recoveryTestAuthority{nodeID: nodeID, connectionID: term.ConnectionID(), epoch: term.Epoch()}
 	service := NewBackendWithCommandRecovery(postgres.WrapPool(pool), signer, operations, authority)
-	held, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
+	held, replayed, err := operations.Create(ctx, operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: "unclaimed-result", ExpectedVersion: 1,
 		Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
 		RequestID: "unclaimed-result", Traceparent: reconnectRecoveryTraceparent,
@@ -117,7 +117,7 @@ func TestCommandResultBeforeMarkSentIntegration(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
 			t.Fatal(err)
 		}
-		operation, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
+		operation, replayed, err := operations.Create(ctx, operationstore.CreateRequest{
 			NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: nodeVersion,
 			Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
 			RequestID: key, Traceparent: reconnectRecoveryTraceparent,
@@ -292,7 +292,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 
 	signer := integrationCommandSigner()
 	operations := operationstore.NewBackend(postgres.WrapPool(pool), 200, signer)
-	operation, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
+	operation, replayed, err := operations.Create(ctx, operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: "lost-result", ExpectedVersion: 1,
 		Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
 		RequestID: "lost-result", Traceparent: reconnectRecoveryTraceparent,
@@ -492,7 +492,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
 		t.Fatal(err)
 	}
-	lateOperation, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
+	lateOperation, replayed, err := operations.Create(ctx, operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: "late-old-owner-send", ExpectedVersion: nodeVersion,
 		Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
 		RequestID: "late-old-owner-send", Traceparent: reconnectRecoveryTraceparent,
@@ -588,7 +588,7 @@ func TestCrashedClaimExpiryKeepsLaterCommandDispatchableIntegration(t *testing.T
 	authority := &recoveryTestAuthority{nodeID: nodeID, connectionID: crashTerm.ConnectionID(), epoch: crashTerm.Epoch()}
 	service := NewBackendWithCommandRecovery(postgres.WrapPool(pool), signer, operations, authority)
 
-	crashOperation, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
+	crashOperation, replayed, err := operations.Create(ctx, operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: "crash-window-pre-send", ExpectedVersion: 1,
 		Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
 		RequestID: "crash-window-pre-send", Traceparent: reconnectRecoveryTraceparent,
@@ -674,7 +674,7 @@ func TestCrashedClaimExpiryKeepsLaterCommandDispatchableIntegration(t *testing.T
 	if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
 		t.Fatal(err)
 	}
-	later, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
+	later, replayed, err := operations.Create(ctx, operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: "post-crash-real-command", ExpectedVersion: nodeVersion,
 		Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
 		RequestID: "post-crash-real-command", Traceparent: reconnectRecoveryTraceparent,

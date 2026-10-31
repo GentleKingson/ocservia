@@ -661,8 +661,15 @@ VMs:
 
 - `make p1-smoke` and `make p1-full` invoke `scripts/p1-resilience-capacity.sh`
   (see [Resilience and capacity](#resilience-and-capacity)).
-- `scripts/security-acceptance-f1.sh`, `scripts/security-acceptance-f2.sh` and
-  `scripts/security-acceptance-f3.sh` run the live security acceptance phases.
+- `scripts/security-acceptance-transport.sh` checks Iroh connection budgets,
+  trust updates, revocation, restart and identity churn.
+- `scripts/security-acceptance-sse-capacity.sh` checks SSE delivery, reconnect,
+  stream cleanup and resource bounds at 1, 10 and 100 viewers.
+- `scripts/security-acceptance-privd.sh` checks the root boundary, systemd
+  sandbox, attestation keys, certificate lifecycle and package upgrade/rollback.
+  The former `security-acceptance-f1.sh`, `-f2.sh` and `-f3.sh` commands remain
+  forwarding entrypoints, respectively; evidence filenames and F1/F2/F3 result
+  keys stay unchanged for existing consumers.
 - `scripts/real-e2e-controller.sh`, `scripts/real-e2e-node.sh`,
   `scripts/real-e2e-artifact.sh` and `deploy/real-e2e` support manual
   two-machine enrollment and the hosted `real-e2e.yml` (see
@@ -766,7 +773,7 @@ attempt numbers, and the exact candidate SHA. The harness records these limits
 and never scores them as PASS:
 
 - Local artifacts leave the public GitHub Release download endpoint untested;
-  Stage-0 download/failure fixtures and Release build-only smoke cover it.
+  Bootstrap launcher download/failure fixtures and Release build-only smoke cover it.
 - The private Relay CA is provisioned through the documented protected public CA
   files, and the shipped Compose overlay and native launcher enable the existing
   strict-TLS flag unpatched. The managed-node installer drives enrollment, with
@@ -1445,7 +1452,7 @@ execution or production RTO/RPO guarantees.
 
 ### Simulated load and capacity
 
-The P1 harness ([`scripts/p1-resilience-capacity.sh`](../../scripts/p1-resilience-capacity.sh))
+The simulated-Agent harness ([`scripts/p1-resilience-capacity.sh`](../../scripts/p1-resilience-capacity.sh))
 drives the read-only control path with up to 500 side-effect-free simulated
 Agents that send heartbeats (every 30 seconds by default), emit bounded
 telemetry and carry deterministic Direct and Relay path metadata. During the run
@@ -1469,11 +1476,14 @@ make p1-smoke
 make p1-full
 ```
 
+The `p1-*` commands, `P1_PROFILE` variable and `p1-*` evidence filenames remain
+stable for existing automation; the profile names are `smoke` and `full`.
+
 `make p1-smoke` keeps all fault phases and resource assertions with a smaller
-workload; `make p1-full` uses the full defaults. The parameters and their I08
+workload; `make p1-full` uses the full defaults. The parameters and their capacity
 upper bounds are defined in the script and the [`Makefile`](../../Makefile)
 targets. `REQUEST_CONCURRENCY` must be an integer in `1..32`, and any parameter
-outside the I08 envelope is rejected before the script touches Docker or creates
+outside the capacity envelope is rejected before the script touches Docker or creates
 temporary directories; environment overrides may adjust values within the
 envelope but not exceed it.
 
@@ -1605,7 +1615,7 @@ reconciliation, semantic payload hashes, command/fence/receipt signatures and
 durable immutable operation intent. The operator-provisioned release catalog
 supplies the authorized upgrade package digests. When changing upgrade or
 bootstrap paths, test authorized AgentUpgrade digest acceptance and rejection and
-Stage-0 download and checksum failures.
+Bootstrap launcher download and checksum failures.
 
 ### Release candidates and package validation
 

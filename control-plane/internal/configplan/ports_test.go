@@ -17,22 +17,22 @@ type recordingOperationCreator struct {
 	err      error
 }
 
-func (r *recordingOperationCreator) CreateSynthetic(ctx context.Context, request operations.CreateRequest) (operations.Operation, bool, error) {
+func (r *recordingOperationCreator) Create(ctx context.Context, request operations.CreateRequest) (operations.Operation, bool, error) {
 	r.contexts = append(r.contexts, ctx)
 	r.requests = append(r.requests, request)
 	if r.err != nil {
 		return operations.Operation{}, false, r.err
 	}
-	return r.delegate.CreateSynthetic(ctx, request)
+	return r.delegate.Create(ctx, request)
 }
 
 func (r *recordingOperationCreator) assertLast(t *testing.T, ctx context.Context, count int, want operations.CreateRequest) {
 	t.Helper()
 	if len(r.requests) != count {
-		t.Fatalf("CreateSynthetic calls = %d, want %d", len(r.requests), count)
+		t.Fatalf("Create calls = %d, want %d", len(r.requests), count)
 	}
 	if r.contexts[count-1] != ctx || !reflect.DeepEqual(r.requests[count-1], want) {
-		t.Fatalf("CreateSynthetic context preserved = %v, request = %+v, want %+v", r.contexts[count-1] == ctx, r.requests[count-1], want)
+		t.Fatalf("Create context preserved = %v, request = %+v, want %+v", r.contexts[count-1] == ctx, r.requests[count-1], want)
 	}
 }
 

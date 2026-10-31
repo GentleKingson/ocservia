@@ -32,7 +32,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Exercise the exact flat Release asset with no repository siblings. This is
-# the real Stage-1 entry shape, not the source path inside this checkout.
+# the real versioned installer entry shape, not the source path inside this checkout.
 release_assets="${fixture}/release-assets"
 mkdir -m 700 -- "${release_assets}"
 "${PREPARE_BOOTSTRAPS}" "${release_assets}"

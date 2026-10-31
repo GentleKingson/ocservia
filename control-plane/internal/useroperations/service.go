@@ -481,7 +481,7 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 	}
 	processed := 0
 	for _, item := range candidates {
-		key := stableKey("policy-reset", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), monthTime.Format(time.RFC3339))
+		key := operationIdempotencyKey("policy-reset", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), monthTime.Format(time.RFC3339))
 		if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, item, now) }); err != nil {
 			return 0, err
 		}
@@ -596,7 +596,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		key := stableKey("policy", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), item.Cause, period.Format(time.RFC3339))
+		key := operationIdempotencyKey("policy", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), item.Cause, period.Format(time.RFC3339))
 		trace := stableTraceparent(key)
 		if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, item, now) }); err != nil {
 			return 0, err
@@ -681,7 +681,7 @@ func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit i
 		if item.Action == "enable" {
 			kind = userstate.UserEnable
 		}
-		key := stableKey("batch", item.BatchID.String(), fmt.Sprint(item.Index))
+		key := operationIdempotencyKey("batch", item.BatchID.String(), fmt.Sprint(item.Index))
 		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: kind, Name: item.Username, ExpectedVersion: item.ExpectedVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: batch.ActorID, ActorIdentityID: derefUUID(batch.ActorIdentityID), ActorSessionID: derefUUID(batch.ActorSessionID), Reason: batch.Reason, RequestID: batch.RequestID + ":" + fmt.Sprint(item.Index), Traceparent: batch.Traceparent})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
@@ -800,8 +800,9 @@ func monthStart(value time.Time) time.Time {
 	return time.Date(value.Year(), value.Month(), 1, 0, 0, 0, 0, time.UTC)
 }
 
-func stableKey(parts ...string) string {
+func operationIdempotencyKey(parts ...string) string {
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	// Keep the persisted prefix so scheduler retries replay existing operations.
 	return "i14-" + hex.EncodeToString(digest[:])
 }
 

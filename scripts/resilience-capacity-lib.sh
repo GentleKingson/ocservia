@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
-I08_MAX_AGENTS=500
-I08_MAX_HEARTBEATS=32
-I08_MAX_HEARTBEAT_INTERVAL_MS=30000
-I08_MAX_REQUEST_CONCURRENCY=32
-I08_MAX_QUEUE_CAPACITY=4096
-I08_REQUIRED_SAMPLE_PHASES="capacity-load,slow-sse,controller-restart,transport-interrupt,transport-recovery,postgres-paused,postgres-recovered"
+CAPACITY_MAX_AGENTS=500
+CAPACITY_MAX_HEARTBEATS=32
+CAPACITY_MAX_HEARTBEAT_INTERVAL_MS=30000
+CAPACITY_MAX_REQUEST_CONCURRENCY=32
+CAPACITY_MAX_QUEUE_CAPACITY=4096
+REQUIRED_RESOURCE_SAMPLE_PHASES="capacity-load,slow-sse,controller-restart,transport-interrupt,transport-recovery,postgres-paused,postgres-recovered"
 
 validate_capacity_settings() {
   local agent_count=$1 heartbeat_count=$2 heartbeat_interval_ms=$3 request_concurrency=$4 queue_capacity=$5
@@ -23,24 +23,24 @@ validate_capacity_settings() {
       return 2
     fi
   done
-  if ((agent_count > I08_MAX_AGENTS)); then
-    echo "AGENT_COUNT exceeds the I08 envelope maximum ${I08_MAX_AGENTS}" >&2
+  if ((agent_count > CAPACITY_MAX_AGENTS)); then
+    echo "AGENT_COUNT exceeds the capacity envelope maximum ${CAPACITY_MAX_AGENTS}" >&2
     return 2
   fi
-  if ((heartbeat_count > I08_MAX_HEARTBEATS)); then
-    echo "HEARTBEAT_COUNT exceeds the I08 envelope maximum ${I08_MAX_HEARTBEATS}" >&2
+  if ((heartbeat_count > CAPACITY_MAX_HEARTBEATS)); then
+    echo "HEARTBEAT_COUNT exceeds the capacity envelope maximum ${CAPACITY_MAX_HEARTBEATS}" >&2
     return 2
   fi
-  if ((heartbeat_interval_ms > I08_MAX_HEARTBEAT_INTERVAL_MS)); then
-    echo "HEARTBEAT_INTERVAL_MS exceeds the I08 envelope maximum ${I08_MAX_HEARTBEAT_INTERVAL_MS}" >&2
+  if ((heartbeat_interval_ms > CAPACITY_MAX_HEARTBEAT_INTERVAL_MS)); then
+    echo "HEARTBEAT_INTERVAL_MS exceeds the capacity envelope maximum ${CAPACITY_MAX_HEARTBEAT_INTERVAL_MS}" >&2
     return 2
   fi
-  if ((request_concurrency > I08_MAX_REQUEST_CONCURRENCY)); then
-    echo "REQUEST_CONCURRENCY exceeds the I08 envelope maximum ${I08_MAX_REQUEST_CONCURRENCY}" >&2
+  if ((request_concurrency > CAPACITY_MAX_REQUEST_CONCURRENCY)); then
+    echo "REQUEST_CONCURRENCY exceeds the capacity envelope maximum ${CAPACITY_MAX_REQUEST_CONCURRENCY}" >&2
     return 2
   fi
-  if ((queue_capacity > I08_MAX_QUEUE_CAPACITY)); then
-    echo "QUEUE_CAPACITY exceeds the I08 envelope maximum ${I08_MAX_QUEUE_CAPACITY}" >&2
+  if ((queue_capacity > CAPACITY_MAX_QUEUE_CAPACITY)); then
+    echo "QUEUE_CAPACITY exceeds the capacity envelope maximum ${CAPACITY_MAX_QUEUE_CAPACITY}" >&2
     return 2
   fi
 }
@@ -139,7 +139,7 @@ stop_sampler() {
 
 validate_resource_samples() {
   local samples=$1 summary=$2 minimum_samples=$3 minimum_span=$4 sampler_exit=$5
-  local required_phases=${6:-${I08_REQUIRED_SAMPLE_PHASES}}
+  local required_phases=${6:-${REQUIRED_RESOURCE_SAMPLE_PHASES}}
   local total_run_seconds=${7:-0}
   jq -se --arg phases "${required_phases}" --argjson minimum_samples "${minimum_samples}" \
     --argjson minimum_span "${minimum_span}" --argjson sampler_exit "${sampler_exit}" \

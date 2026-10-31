@@ -16,7 +16,7 @@ func TestConsumerServiceBoundaries(t *testing.T) {
 		pkg, field, port, method, provider string
 		constructors                       map[string]int
 	}{
-		{"configplan", "operations", "operationCreator", "CreateSynthetic", "operations", map[string]int{"NewBackend": 1}},
+		{"configplan", "operations", "operationCreator", "Create", "operations", map[string]int{"NewBackend": 1}},
 		{"useroperations", "users", "userMutator", "Mutate", "userstate", map[string]int{"NewBackend": 1, "NewWithConcurrencyBackend": 1}},
 	} {
 		t.Run(boundary.pkg, func(t *testing.T) {

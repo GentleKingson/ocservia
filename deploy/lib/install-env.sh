@@ -2,7 +2,7 @@
 # Strict, non-executing install.env loader sourced by the production
 # Controller installer (deploy/production/install.sh). The managed-node
 # versioned Controller and managed-node bootstraps embed functionally identical
-# copies because they must stay single self-contained Stage-1 files; any
+# copies because they must stay single self-contained versioned installer files; any
 # contract change is made in all three places.
 # Sourced, never executed directly.
 #

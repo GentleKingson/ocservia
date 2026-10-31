@@ -16,7 +16,7 @@ for suite in ${CI_SUITES}; do
       bash scripts/test-controller-release-manifest.sh
       bash scripts/test-controller-release-smoke.sh
       bash scripts/test-release-image-security.sh
-      bash scripts/test-stage0-installers.sh
+      bash scripts/test-bootstrap-installers.sh
       bash scripts/test-controller-quick-materials.sh
       bash scripts/test-build-cache-credentials.sh
       bash scripts/test-buildx-cache-fallback.sh

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage-0 downloads one versioned Stage-1 asset over HTTPS.
+# Bootstrap launcher: download one versioned installer asset over HTTPS.
 set -euo pipefail
 
 fail() {
@@ -27,7 +27,7 @@ download() {
 main() {
   local version="" version_seen=false root_lifecycle=false
   local base asset url temporary cleanup_parent cleanup_directory command_name
-  local -a stage1_args=()
+  local -a installer_args=()
 
   umask 077
 
@@ -42,7 +42,7 @@ main() {
       --root-lifecycle)
         [[ "${root_lifecycle}" == false ]] || usage
         root_lifecycle=true
-        stage1_args+=(--root-lifecycle)
+        installer_args+=(--root-lifecycle)
         shift
         ;;
       *) usage ;;
@@ -62,21 +62,21 @@ main() {
   trap 'rm -rf -- "${temporary}"' EXIT
   trap 'exit 1' HUP INT TERM
 
-  download "${url}/${asset}" "${temporary}/${asset}" || fail "Stage-1 download failed"
-  [[ -s "${temporary}/${asset}" ]] || fail "Stage-1 download is empty"
+  download "${url}/${asset}" "${temporary}/${asset}" || fail "versioned installer download failed"
+  [[ -s "${temporary}/${asset}" ]] || fail "versioned installer download is empty"
 
   chmod 0700 -- "${temporary}/${asset}"
-  stage1_args=(--version "${version}" "${stage1_args[@]}")
+  installer_args=(--version "${version}" "${installer_args[@]}")
   cleanup_parent="${BASHPID}"
   cleanup_directory="${temporary}"
-  # exec replaces Stage-0, so a minimal watcher owns post-Stage-1 cleanup.
+  # exec replaces the launcher; a watcher cleans up after the installer exits.
   (
     trap - EXIT
     trap '' HUP INT TERM
     while kill -0 "${cleanup_parent}" 2>/dev/null; do sleep 1; done
     rm -rf -- "${cleanup_directory}"
   ) >/dev/null 2>&1 &
-  exec "${temporary}/${asset}" "${stage1_args[@]}"
+  exec "${temporary}/${asset}" "${installer_args[@]}"
 }
 
 main "$@"

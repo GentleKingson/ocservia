@@ -7,7 +7,7 @@ NODE="${ROOT}/deploy/bootstrap/install-node"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
 
-# Published Stage-1 copies must be the actual executable sources.
+# Published versioned installer copies must be the actual executable sources.
 mkdir "$fixture/prepared"
 "$ROOT/scripts/prepare-bootstrap-release-assets.sh" "$fixture/prepared"
 cmp "$fixture/prepared/controller-bootstrap.sh" "$ROOT/deploy/production/controller-bootstrap.sh"
@@ -35,13 +35,13 @@ done
 printf '%s\n' "${url}" >>"${TEST_DOWNLOAD_LOG}"
 case "${TEST_DOWNLOAD_MODE:-success}" in
   tls) exit 35 ;;
-  404-stage0)
+  404-bootstrap)
     case "${url}" in */install-controller|*/install-node) exit 22 ;; esac
     ;;
-  empty-stage0)
+  empty-bootstrap)
     case "${url}" in */install-controller|*/install-node) : >"${output}"; exit 0 ;; esac
     ;;
-  truncated-stage0)
+  truncated-bootstrap)
     case "${url}" in
       */install-controller|*/install-node)
         head -n -1 "${TEST_RELEASE_DIR}/${url##*/}" >"${output}"
@@ -49,7 +49,7 @@ case "${TEST_DOWNLOAD_MODE:-success}" in
         ;;
     esac
     ;;
-  404-stage1)
+  404-installer)
     case "${url}" in */controller-bootstrap.sh|*/managed-node-bootstrap.sh) exit 22 ;; esac
     ;;
 esac
@@ -95,18 +95,18 @@ run_installer() {
 
 run_documented_fetch() (
   set -eu
-  local endpoint="$1" mode="${2:-success}" stage0
+  local endpoint="$1" mode="${2:-success}" bootstrap
   cd "${fixture}"
-  stage0="$(TMPDIR="${fixture}/tmp" mktemp)" || exit 1
-  trap 'rm -f -- "$stage0"' EXIT
+  bootstrap="$(TMPDIR="${fixture}/tmp" mktemp)" || exit 1
+  trap 'rm -f -- "$bootstrap"' EXIT
   trap 'exit 1' HUP INT TERM
   PATH="${fixture}/bin:${PATH}" \
     TEST_RELEASE_DIR="${fixture}/release" \
     TEST_DOWNLOAD_LOG="${fixture}/downloads.log" \
     TEST_DOWNLOAD_MODE="${mode}" \
-    curl -fsSL --proto '=https' --tlsv1.2 -o "${stage0}" \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "${bootstrap}" \
       "https://get.ocservia.example/${endpoint}" || exit 1
-  test "$(tail -n 1 "${stage0}")" = 'main "$@"' || exit 1
+  test "$(tail -n 1 "${bootstrap}")" = 'main "$@"' || exit 1
   PATH="${fixture}/bin:${PATH}" \
     TMPDIR="${fixture}/tmp" \
     TEST_RELEASE_DIR="${fixture}/release" \
@@ -115,7 +115,7 @@ run_documented_fetch() (
     TEST_ARGS_LOG="${fixture}/args.log" \
     TEST_TEMP_LOG="${fixture}/temp.log" \
     TEST_DOWNLOAD_MODE="${mode}" \
-    bash "${stage0}" --version v1.2.3
+    bash "${bootstrap}" --version v1.2.3
 )
 
 for installer in "${CONTROLLER}" "${NODE}"; do
@@ -124,37 +124,37 @@ for installer in "${CONTROLLER}" "${NODE}"; do
     if run_installer "${installer}" ${args} >"${fixture}/output" 2>&1; then
       fail "$(basename "${installer}") accepted a missing or non-release version: ${args:-<missing>}"
     fi
-    [[ ! -s "${fixture}/exec.log" ]] || fail "invalid input reached Stage-1"
+    [[ ! -s "${fixture}/exec.log" ]] || fail "invalid input reached versioned installer"
   done
 done
 
 for installer in "${CONTROLLER}" "${NODE}"; do
   run_installer "${installer}" --version v1.2.3-rc.1 >"${fixture}/output" 2>&1
-  grep -qx 'v1.2.3-rc.1' "${fixture}/args.log" || fail "RC identity was not passed to Stage-1"
+  grep -qx 'v1.2.3-rc.1' "${fixture}/args.log" || fail "RC identity was not passed to versioned installer"
   grep -q '/download/v1.2.3-rc.1/' "${fixture}/downloads.log" || fail "RC download URL missing"
 done
 
 if run_installer "${NODE}" --version v1.2.3 --token token-must-not-leak >"${fixture}/output" 2>&1; then
-  fail "Node Stage-0 accepted a non-allowlisted argument"
+  fail "Node bootstrap launcher accepted a non-allowlisted argument"
 fi
-[[ ! -s "${fixture}/exec.log" ]] || fail "a non-allowlisted argument reached Stage-1"
+[[ ! -s "${fixture}/exec.log" ]] || fail "a non-allowlisted argument reached versioned installer"
 
 run_installer "${CONTROLLER}" --version v1.2.3 --root-lifecycle --check >"${fixture}/output" 2>&1
-[[ "$(cat "${fixture}/exec.log")" == controller ]] || fail "Controller Stage-0 executed the wrong Stage-1"
+[[ "$(cat "${fixture}/exec.log")" == controller ]] || fail "Controller bootstrap launcher executed the wrong versioned installer"
 [[ "$(<"${fixture}/args.log")" == $'--version\nv1.2.3\n--root-lifecycle\n--check' ]] ||
-  fail "Controller Stage-0 did not pass the allowlisted arguments exactly"
+  fail "Controller bootstrap launcher did not pass the allowlisted arguments exactly"
 grep -qx 'https://github.com/GentleKingson/ocservia/releases/download/v1.2.3/controller-bootstrap.sh' "${fixture}/downloads.log" ||
-  fail "Controller Stage-0 did not construct the versioned release URL"
+  fail "Controller bootstrap launcher did not construct the versioned release URL"
 
 run_installer "${NODE}" --root-lifecycle --version v9.8.7 >"${fixture}/output" 2>&1
-[[ "$(cat "${fixture}/exec.log")" == node ]] || fail "Node Stage-0 executed the wrong Stage-1"
+[[ "$(cat "${fixture}/exec.log")" == node ]] || fail "Node bootstrap launcher executed the wrong versioned installer"
 [[ "$(<"${fixture}/args.log")" == $'--version\nv9.8.7\n--root-lifecycle' ]] ||
-  fail "Node Stage-0 did not pass the allowlisted arguments exactly"
+  fail "Node bootstrap launcher did not pass the allowlisted arguments exactly"
 grep -qx 'https://github.com/GentleKingson/ocservia/releases/download/v9.8.7/managed-node-bootstrap.sh' "${fixture}/downloads.log" ||
-  fail "Node Stage-0 did not construct the versioned release URL"
+  fail "Node bootstrap launcher did not construct the versioned release URL"
 
 if grep -Eq 'token-must-not-leak|config-must-not-leak|install-env-secret-must-not-leak' "${fixture}/output"; then
-  fail "Stage-0 leaked token or configuration content"
+  fail "bootstrap launcher leaked token or configuration content"
 fi
 
 for ((attempt = 0; attempt < 30; attempt++)); do
@@ -165,23 +165,23 @@ done
 [[ -n "${temporary}" && ! -e "${temporary}" ]] || fail "successful handoff did not clean its temporary directory"
 
 for asset in controller-bootstrap.sh managed-node-bootstrap.sh; do
-  cp -- "${fixture}/release/${asset}" "${fixture}/stage1.good"
+  cp -- "${fixture}/release/${asset}" "${fixture}/installer.good"
   : >"${fixture}/release/${asset}"
   installer="${CONTROLLER}"
   [[ "${asset}" != managed-node-bootstrap.sh ]] || installer="${NODE}"
   if run_installer "${installer}" --version v1.2.3 >"${fixture}/output" 2>&1; then
-    fail "empty Stage-1 download unexpectedly succeeded"
+    fail "empty versioned installer download unexpectedly succeeded"
   fi
-  [[ ! -s "${fixture}/exec.log" ]] || fail "empty Stage-1 reached execution"
-  mv -- "${fixture}/stage1.good" "${fixture}/release/${asset}"
+  [[ ! -s "${fixture}/exec.log" ]] || fail "empty versioned installer reached execution"
+  mv -- "${fixture}/installer.good" "${fixture}/release/${asset}"
 done
 
-for mode in 404-stage1 tls; do
+for mode in 404-installer tls; do
   rm -rf -- "${fixture}/tmp"/*
   if TEST_DOWNLOAD_MODE="${mode}" run_installer "${CONTROLLER}" --version v1.2.3 >"${fixture}/output" 2>&1; then
     fail "${mode} download failure unexpectedly succeeded"
   fi
-  [[ ! -s "${fixture}/exec.log" ]] || fail "${mode} download failure reached Stage-1"
+  [[ ! -s "${fixture}/exec.log" ]] || fail "${mode} download failure reached versioned installer"
   [[ -z "$(find "${fixture}/tmp" -mindepth 1 -print -quit)" ]] || fail "${mode} download failure leaked temporary files"
 done
 
@@ -211,19 +211,19 @@ fi
 
 : >"${fixture}/exec.log"
 for endpoint in install-controller install-node; do
-  expected_stage1="${endpoint#install-}"
+  expected_installer="${endpoint#install-}"
   run_documented_fetch "${endpoint}" success >"${fixture}/output" 2>&1 ||
     fail "the documented complete ${endpoint} fetch failed"
-  [[ "$(tail -n 1 "${fixture}/exec.log")" == "${expected_stage1}" ]] ||
-    fail "the documented complete ${endpoint} fetch did not reach its Stage-1"
+  [[ "$(tail -n 1 "${fixture}/exec.log")" == "${expected_installer}" ]] ||
+    fail "the documented complete ${endpoint} fetch did not reach its versioned installer"
 done
-for mode in tls 404-stage0 empty-stage0 truncated-stage0; do
+for mode in tls 404-bootstrap empty-bootstrap truncated-bootstrap; do
   for endpoint in install-controller install-node; do
     : >"${fixture}/exec.log"
     if run_documented_fetch "${endpoint}" "${mode}" >"${fixture}/output" 2>&1; then
       fail "the documented ${endpoint} fetch accepted ${mode}"
     fi
-    [[ ! -s "${fixture}/exec.log" ]] || fail "the documented ${mode} fetch reached Stage-1"
+    [[ ! -s "${fixture}/exec.log" ]] || fail "the documented ${mode} fetch reached versioned installer"
   done
 done
 
@@ -233,15 +233,15 @@ chmod 0700 "${fixture}/truncated"
 set +e
 PATH="${fixture}/bin:${PATH}" TEST_EXEC_LOG="${fixture}/exec.log" "${fixture}/truncated" --version v1.2.3
 set -e
-[[ ! -s "${fixture}/exec.log" ]] || fail "a truncated Stage-0 script executed main"
+[[ ! -s "${fixture}/exec.log" ]] || fail "a truncated bootstrap launcher script executed main"
 
 # Quick mode: the Git source has no default release, so --version is required.
 quick=(--quick --controller-domain vpn.example.com --relay-domain relay.example.com --acme-email ops@example.com)
 if run_installer "${CONTROLLER}" "${quick[@]}" >"${fixture}/output" 2>&1; then
-  fail "the unstamped Controller Stage-0 accepted --quick without --version"
+  fail "the unstamped Controller bootstrap launcher accepted --quick without --version"
 fi
 grep -q 'no default release' "${fixture}/output" || fail "missing default release diagnostic"
-[[ ! -s "${fixture}/exec.log" ]] || fail "unstamped quick mode reached Stage-1"
+[[ ! -s "${fixture}/exec.log" ]] || fail "unstamped quick mode reached versioned installer"
 
 run_installer "${CONTROLLER}" "${quick[@]}" --version v1.2.3 --check >"${fixture}/output" 2>&1
 [[ "$(<"${fixture}/args.log")" == $'--version\nv1.2.3\n--quick\n--controller-domain\nvpn.example.com\n--relay-domain\nrelay.example.com\n--acme-email\nops@example.com\n--check\n--root-lifecycle' ]] ||
@@ -275,26 +275,26 @@ invalid_quick=(
 for args in "${invalid_quick[@]}"; do
   # shellcheck disable=SC2086 # each fixture intentionally supplies several words
   if run_installer "${CONTROLLER}" ${args} >"${fixture}/output" 2>&1; then
-    fail "Controller Stage-0 accepted invalid quick input: ${args}"
+    fail "Controller bootstrap launcher accepted invalid quick input: ${args}"
   fi
-  [[ ! -s "${fixture}/exec.log" ]] || fail "invalid quick input reached Stage-1: ${args}"
+  [[ ! -s "${fixture}/exec.log" ]] || fail "invalid quick input reached versioned installer: ${args}"
 done
 if run_installer "${NODE}" --version v1.2.3 --quick >"${fixture}/output" 2>&1; then
-  fail "Node Stage-0 accepted --quick"
+  fail "Node bootstrap launcher accepted --quick"
 fi
 
-# A released Stage-0 defaults to its own tag and otherwise equals the source.
+# A released bootstrap launcher defaults to its own tag and otherwise equals the source.
 mkdir "${fixture}/stamped"
 "${ROOT}/scripts/prepare-bootstrap-release-assets.sh" "${fixture}/stamped" v4.5.6
-[[ -x "${fixture}/stamped/install-controller" ]] || fail "stamped Stage-0 is not executable"
-"${ROOT}/scripts/check-release-stage0.sh" "${fixture}/stamped/install-controller" v4.5.6
-if "${ROOT}/scripts/check-release-stage0.sh" "${fixture}/stamped/install-controller" v4.5.7 >/dev/null 2>&1; then
-  fail "stamped Stage-0 check accepted a different tag"
+[[ -x "${fixture}/stamped/install-controller" ]] || fail "stamped bootstrap launcher is not executable"
+"${ROOT}/scripts/check-release-bootstrap.sh" "${fixture}/stamped/install-controller" v4.5.6
+if "${ROOT}/scripts/check-release-bootstrap.sh" "${fixture}/stamped/install-controller" v4.5.7 >/dev/null 2>&1; then
+  fail "stamped bootstrap launcher check accepted a different tag"
 fi
 cp -- "${fixture}/stamped/install-controller" "${fixture}/tampered"
 printf '# extra\n' >>"${fixture}/tampered"
-if "${ROOT}/scripts/check-release-stage0.sh" "${fixture}/tampered" v4.5.6 >/dev/null 2>&1; then
-  fail "stamped Stage-0 check accepted bytes beyond the default version"
+if "${ROOT}/scripts/check-release-bootstrap.sh" "${fixture}/tampered" v4.5.6 >/dev/null 2>&1; then
+  fail "stamped bootstrap launcher check accepted bytes beyond the default version"
 fi
 if "${ROOT}/scripts/prepare-bootstrap-release-assets.sh" "${fixture}/stamped" latest >/dev/null 2>&1; then
   fail "release asset preparation accepted a non-release tag"
@@ -305,7 +305,7 @@ grep -qx 'https://github.com/GentleKingson/ocservia/releases/download/v4.5.6/con
 run_installer "${fixture}/stamped/install-controller" "${quick[@]}" --version v4.5.7 >"${fixture}/output" 2>&1
 grep -q '/download/v4.5.7/' "${fixture}/downloads.log" || fail "explicit --version did not override the default release"
 if run_installer "${fixture}/stamped/install-controller" --root-lifecycle >"${fixture}/output" 2>&1; then
-  fail "stamped Stage-0 used its default release outside quick mode"
+  fail "stamped bootstrap launcher used its default release outside quick mode"
 fi
 
 for installer in "${CONTROLLER}" "${NODE}"; do
@@ -315,4 +315,4 @@ for installer in "${CONTROLLER}" "${NODE}"; do
   fi
 done
 
-echo "Stage-0 installer tests passed"
+echo "bootstrap launcher installer tests passed"

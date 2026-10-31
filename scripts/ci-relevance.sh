@@ -116,11 +116,12 @@ classify_path() {
     .github/workflows/ci.yml)
       tools_suite guards ;;
     .github/workflows/security.yml) tools_suite guards ;;
+    scripts/test-bootstrap-installers.sh) tools_suite release ;;
     scripts/ci-*|scripts/test-ci-*|scripts/*required-go-tests*|scripts/test-bootstrap-*|scripts/go-test-environment.sh)
       tools_suite guards ;;
     scripts/bootstrap.sh|scripts/env.sh|scripts/checksums.txt|toolchains.lock)
       fail_closed shared_toolchain_changed ;;
-    scripts/p1-*|scripts/test-p1-*|scripts/security-acceptance-*)
+    scripts/p1-*|scripts/test-p1-*|scripts/resilience-capacity-lib.sh|scripts/security-acceptance-*)
       tools_suite release ;;
     *) fail_closed "unknown_path:${path}" ;;
   esac
