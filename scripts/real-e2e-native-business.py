@@ -30,7 +30,7 @@ def operation_result(operation):
                 'SELECT count(*),state,length(response)>0 '
                 f"FROM authorized_effects WHERE hex(command_id)=upper('{command}');")
     assert journal == '1|succeeded||1' and privd == '1|applied|1'
-    return {'id':operation_id, 'command_id':operation['command_id'], 'journal':journal, 'privd':privd}
+    return {'id': operation_id, 'command_id': operation['command_id'], 'journal': journal, 'privd': privd}
 
 
 def native_snapshot(work, expected):
@@ -44,10 +44,10 @@ def native_snapshot(work, expected):
         pid = int(run('systemctl', 'show', name, '-p', 'MainPID', '--value'))
         started = int(run('systemctl', 'show', name, '-p', 'ExecMainStartTimestampMonotonic', '--value'))
         assert pid > 0 and started > 0
-        services[name] = {'pid':pid, 'started':started}
+        services[name] = {'pid': pid, 'started': started}
     argv = run('sudo', 'cat', f'/proc/{services["ocservia-agent"]["pid"]}/cmdline').rstrip('\0').split('\0')
-    assert [argv[i+1] for i, arg in enumerate(argv) if arg == '--relay-url'] == [(work / 'relay/url').read_text().strip()]
-    assert argv[argv.index('--relay-mode')+1] == 'custom'
+    assert [argv[i + 1] for i, arg in enumerate(argv) if arg == '--relay-url'] == [(work / 'relay/url').read_text().strip()]
+    assert argv[argv.index('--relay-mode') + 1] == 'custom'
     uid = run('id', '-u', 'ocserv-agent')
     for tool in ('iptables', 'ip6tables') if Path('/proc/net/if_inet6').read_text().strip() else ('iptables',):
         run('sudo', tool, '-C', 'OUTPUT', '-m', 'owner', '--uid-owner', uid,
@@ -61,9 +61,9 @@ def native_snapshot(work, expected):
     users = json.loads(run('sudo', 'occtl', '--json', 'show', 'users'))
     sessions = [str(user['ID']) for user in users if user['Username'] == 'business-test-smoke-user']
     assert sessions == [expected['vpn']['native_session']]
-    return {'identity':identity, 'services':services, 'vpn_session':sessions[0], 'icmp':True,
-            'reloads':run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service'),
-            'single_agent_relay':True, 'udp_isolated':True}
+    return {'identity': identity, 'services': services, 'vpn_session': sessions[0], 'icmp': True,
+            'reloads': run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service'),
+            'single_agent_relay': True, 'udp_isolated': True}
 
 
 def recovery(phase, source, result_path, work):
@@ -75,7 +75,7 @@ def recovery(phase, source, result_path, work):
         assert value['agent_endpoint_id'] == expected['agent_endpoint_id'] and value['path_mode'] == 'relay'
         snapshot = native_snapshot(work, expected)
         baseline_path.write_text(json.dumps(snapshot))
-        result = {'node_id':expected['node_id'], 'agent_endpoint_id':expected['agent_endpoint_id'], 'before':snapshot}
+        result = {'node_id': expected['node_id'], 'agent_endpoint_id': expected['agent_endpoint_id'], 'before': snapshot}
     elif phase == 'queued':
         before = json.loads(baseline_path.read_text())
         assert native_snapshot(work, expected) == before
@@ -89,8 +89,8 @@ def recovery(phase, source, result_path, work):
                                 '--max-time', '5', '--cacert', str(work / 'relay/ca.pem'),
                                 (work / 'relay/url').read_text().strip()], capture_output=True)
         assert probe.returncode in (7, 28), 'stopped Relay remained reachable or failed for another reason'
-        result = {'queued':value, 'queued_native':{'journal':0, 'privd':0, 'reload_delta':0,
-                                                  'vpn_unchanged':True, 'relay_unreachable':True}}
+        result = {'queued': value, 'queued_native': {'journal': 0, 'privd': 0, 'reload_delta': 0,
+                                                  'vpn_unchanged': True, 'relay_unreachable': True}}
         (work / 'recovery-queued.json').write_text(json.dumps(result))
     elif phase == 'result':
         before = json.loads(baseline_path.read_text())
@@ -100,8 +100,8 @@ def recovery(phase, source, result_path, work):
         after = native_snapshot(work, expected)
         assert before['identity'] == after['identity'] and before['services'] == after['services']
         assert before['vpn_session'] == after['vpn_session'] and after['reloads'] == before['reloads'] + 1
-        result = {**queued, 'node_id':expected['node_id'], 'agent_endpoint_id':expected['agent_endpoint_id'],
-                  'before':before, 'after':after, 'operations':[operation_result(value['operation'])]}
+        result = {**queued, 'node_id': expected['node_id'], 'agent_endpoint_id': expected['agent_endpoint_id'],
+                  'before': before, 'after': after, 'operations': [operation_result(value['operation'])]}
     else:
         raise ValueError('unknown native recovery phase')
     result_path.parent.mkdir(parents=True, exist_ok=True)

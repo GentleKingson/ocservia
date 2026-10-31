@@ -1,4 +1,4 @@
-# Offline Local password blocklist (R1, version 1)
+# Offline Local password blocklist (version 1)
 
 `common-passwords.txt` is the unmodified decompressed list from Django 5.2.6,
 commit `75c4403f07b8ad25893f7832dbe8fc6814b53b2d`:

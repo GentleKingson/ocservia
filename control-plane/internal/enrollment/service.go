@@ -17,7 +17,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
-	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -598,7 +598,7 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 		if bindingErr != nil {
 			return NodeTrust{}, bindingErr
 		}
-		if err := approvalstore.ValidateConsumedBoundTx(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
+		if err := approvals.ValidateConsumedBoundTx(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
 			return NodeTrust{}, err
 		}
 		return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID, Revision: revision}, nil
@@ -607,7 +607,7 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	if err != nil {
 		return NodeTrust{}, err
 	}
-	if err := approvalstore.ConsumeBoundTx(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
+	if err := approvals.ConsumeBoundTx(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
 		return NodeTrust{}, err
 	}
 	labels := mapToJSON(approval.Labels)
@@ -723,14 +723,14 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 		return NodeTrust{}, fmt.Errorf("lock node for revocation: %w", err)
 	}
 	workspaceID, endpointID, currentStatus, revision := node.WorkspaceID, node.Endpoint, node.Status, node.AuthorizationRevision
-	revokeHash, _ := approvalstore.GenericBinding("node.revoke", "node", revocation.NodeID)
+	revokeHash, _ := approvals.GenericBinding("node.revoke", "node", revocation.NodeID)
 	if currentStatus == "revoked" {
-		if err := approvalstore.ValidateConsumedBoundTx(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
+		if err := approvals.ValidateConsumedBoundTx(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
 			return NodeTrust{}, err
 		}
 		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
-	if err := approvalstore.ConsumeBoundTx(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
+	if err := approvals.ConsumeBoundTx(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
 		return NodeTrust{}, err
 	}
 	now := s.now().UTC()

@@ -193,13 +193,13 @@ node_version="$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -At
 synthetic="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" \
   -H 'Content-Type: application/json' -H 'Idempotency-Key: synthetic-echo-1' \
   -H "If-Match: \"revision-${node_version}\"" \
-  -d '{"kind":"echo","message":"i09"}' \
+  -d '{"kind":"echo","message":"development-simulation-echo"}' \
   "http://127.0.0.1:${API_PORT}/api/v1/nodes/${normal_node}/synthetic-commands")"
 synthetic_id="$(jq -r .id <<<"${synthetic}")"
 wait_state "${synthetic_id}" dispatched >/dev/null
 replayed="$(curl --fail --silent -D "${TMP_ROOT}/replay.headers" -H "Authorization: Bearer ${AUTH_TOKEN}" \
   -H 'Content-Type: application/json' -H 'Idempotency-Key: synthetic-echo-1' \
-  -d "{\"kind\":\"echo\",\"message\":\"i09\",\"expected_version\":${node_version}}" \
+  -d "{\"kind\":\"echo\",\"message\":\"development-simulation-echo\",\"expected_version\":${node_version}}" \
   "http://127.0.0.1:${API_PORT}/api/v1/nodes/${normal_node}/synthetic-commands")"
 test "$(jq -r .id <<<"${replayed}")" = "${synthetic_id}"
 grep -qi '^Idempotency-Replayed: true' "${TMP_ROOT}/replay.headers"

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
@@ -203,7 +203,7 @@ func (s *Server) writeRolloutError(w http.ResponseWriter, r *http.Request, err e
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/rollout-state", "Rollout state is invalid", "only a paused rollout can be resumed")
 	case errors.Is(err, operations.ErrRolloutUnavailable):
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "rollout orchestration is unavailable")
-	case errors.Is(err, approvalstore.ErrNotReady):
+	case errors.Is(err, approvals.ErrNotReady):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "the approval is expired, consumed, or does not match the rollout request")
 	case errors.Is(err, database.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested rollout does not exist")

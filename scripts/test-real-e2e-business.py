@@ -73,13 +73,13 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
     (work / 'state/agent-endpoint-id').write_text('a' * 64 + '\n')
     (work / 'private').mkdir()
     (work / 'private/privd-credential').write_text('private-test-credential')
-    (result_dir / 'ready.json').write_text(json.dumps({'node_id':node, 'agent_endpoint_id':'a'*64}))
-    (result_dir / 'proof.json').write_text(json.dumps({'signature':'public-test-proof'}))
+    (result_dir / 'ready.json').write_text(json.dumps({'node_id': node, 'agent_endpoint_id': 'a' * 64}))
+    (result_dir / 'proof.json').write_text(json.dumps({'signature': 'public-test-proof'}))
     confirmation = work / 'outbox/business-authority-registered/ready.json'
     def register_api(path, proof, **kwargs):
         assert path == f'nodes/{node}/privd-attestation-keys:register'
-        assert proof == {'signature':'public-test-proof', 'credential':'private-test-credential'}
-        assert kwargs == {'role':'anonymous', 'status':201}
+        assert proof == {'signature': 'public-test-proof', 'credential': 'private-test-credential'}
+        assert kwargs == {'role': 'anonymous', 'status': 201}
         raise RuntimeError('registration rejected')
     harness.business.api = register_api
     try:
@@ -91,7 +91,7 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
     assert not confirmation.exists()
     harness.business.api = lambda *args, **kwargs: None
     harness.register_authority(result_dir)
-    assert json.loads(confirmation.read_text()) == {'node_id':node, 'agent_endpoint_id':'a'*64}
+    assert json.loads(confirmation.read_text()) == {'node_id': node, 'agent_endpoint_id': 'a' * 64}
     assert 'private-test-credential' not in confirmation.read_text()
     for state in ('queued', 'unknown', 'succeeded', 'failed'):
         plan = {'operation_id': operation, 'state': state, 'validation': 'pending',
@@ -105,14 +105,14 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
         except RuntimeError:
             assert state == 'failed'
         status = json.loads((work / 'config-plan-status.json').read_text())
-        assert status == {'state':state, 'operation_state':state, 'validation':'pending',
-                          'current_unchanged':False, 'staging_cleaned':True}
+        assert status == {'state': state, 'operation_state': state, 'validation': 'pending',
+                          'current_unchanged': False, 'staging_cleaned': True}
     harness.business.api = api
-    baseline = {'node_id':node, 'agent_endpoint_id':'a'*64, 'path_mode':'relay',
-                'single_controller_relay':True, 'owner':{'connection_id':'1'*32, 'owner_epoch':1}}
-    queued = {'node_id':node, 'operation':expected['operations'][0], 'owner_lease_invalid':True,
-              'offline':True, 'state':'queued', 'unpublished_outbox':1, 'sent_attempts':0}
-    done = {**queued, 'owner':{'connection_id':'2'*32, 'owner_epoch':2}, 'idempotent_replay':True}
+    baseline = {'node_id': node, 'agent_endpoint_id': 'a' * 64, 'path_mode': 'relay',
+                'single_controller_relay': True, 'owner': {'connection_id': '1' * 32, 'owner_epoch': 1}}
+    queued = {'node_id': node, 'operation': expected['operations'][0], 'owner_lease_invalid': True,
+              'offline': True, 'state': 'queued', 'unpublished_outbox': 1, 'sent_attempts': 0}
+    done = {**queued, 'owner': {'connection_id': '2' * 32, 'owner_epoch': 2}, 'idempotent_replay': True}
     for phase, value in (('baseline', baseline), ('queued', queued), ('done', done)):
         target = work / ('outbox/recovery-controller-' + phase)
         target.mkdir(parents=True)

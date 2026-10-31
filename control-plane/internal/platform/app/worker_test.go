@@ -59,7 +59,7 @@ func TestWorkerRoleAssembly(t *testing.T) {
 					t.Fatal(err)
 				}
 				if service == nil {
-					t.Fatal("shared local slice service missing")
+					t.Fatal("shared transport event service missing")
 				}
 				want := 0
 				workerRole := role == config.RoleWorker || role == config.RoleAll

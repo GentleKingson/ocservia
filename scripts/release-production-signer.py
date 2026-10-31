@@ -51,10 +51,10 @@ def prepare():
     for folder in ('secrets', 'input', 'data'):
         run('sudo', 'install', '-d', '-o', '65532', '-g', '65532', '-m', '700', STATE / folder)
     run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '7',
-        '-subj', '/CN=P2-offline-root', '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:1',
+        '-subj', '/CN=signer-offline-root', '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:1',
         '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
         '-keyout', PRIVATE / 'signer-root.key', '-out', WORK / 'signer-root.pem')
-    run('openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=P2-online-issuer',
+    run('openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=signer-online-issuer',
         '-keyout', PRIVATE / 'issuer-key.pem', '-out', WORK / 'issuer.csr')
     (WORK / 'issuer.ext').write_text('basicConstraints=critical,CA:TRUE,pathlen:0\n'
                                    'keyUsage=critical,keyCertSign,cRLSign\n'
@@ -182,7 +182,7 @@ def before():
     run('openssl', 'pkcs12', '-in', PRIVATE / 'download.p12', '-passin', 'file:' + str(PRIVATE / 'p12-password'),
         '-clcerts', '-nokeys', '-out', WORK / 'revoked-leaf.pem')
     # A second valid identity distinguishes revocation enforcement from outages.
-    run('openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=p2-control',
+    run('openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=crl-control-client',
         '-keyout', PRIVATE / 'control.key', '-outform', 'DER', '-out', WORK / 'control.csr')
     cert_id = str(uuid.uuid4())
     payload = json.dumps({'certificate_id': cert_id,

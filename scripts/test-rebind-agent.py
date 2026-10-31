@@ -125,6 +125,7 @@ class RebindTests(unittest.TestCase):
         operations = set(rebind.STATE.iterdir())
         env = {key: 'fixture' for key in ['USER_PASSWORD_SEAL_KEY_ID', 'USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256',
                                          'P12_PASSWORD_SEAL_KEY_ID', 'P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256']}
+
         def send(args, *rest):
             return self.state['node'] if '--enrollment-token-file' in args else self.source['endpoint']
         with patch.object(rebind.sys, 'argv', ['rebind'] + arguments), \
@@ -240,20 +241,26 @@ class RebindTests(unittest.TestCase):
         sentinel.chmod(0o600)
         content = sentinel.read_bytes()
         moved = self.root / 'moved-agent'
+
         def symlink():
             journal.unlink()
             journal.symlink_to(sentinel)
+
         def hardlink():
             os.link(journal, rebind.AGENT_STATE / 'alias.db')
+
         def fifo():
             journal.unlink()
             os.mkfifo(journal)
             os.chown(journal, 1000, 1000)
+
         def parent():
             rebind.AGENT_STATE.rename(moved)
             rebind.AGENT_STATE.symlink_to(moved, target_is_directory=True)
+
         def corrupt():
             journal.write_bytes(b'not a database' * 100)
+
         def root_owned():
             os.chown(journal, 0, 0)
         for substitute in (symlink, hardlink, fifo, parent, corrupt, root_owned):
@@ -281,8 +288,10 @@ class RebindTests(unittest.TestCase):
         sentinel.chmod(0o600)
         journal = rebind.AGENT_STATE / 'bindings' / self.state['node'] / 'agent.db'
         legitimate = self.target_journal
+
         def substitute(path):
             path.symlink_to(sentinel)
+
         def oversized(path):
             self.agent_database(path, 'CREATE TABLE agent_metadata(key TEXT, value BLOB);'
                                       "INSERT INTO agent_metadata VALUES('verified_session_grant', randomblob("
@@ -311,6 +320,7 @@ class RebindTests(unittest.TestCase):
 
     def test_publication_failure_preserves_source_and_can_resume(self):
         original = rebind.atomic_write
+
         def fail(path, *args, **kwargs):
             if path == rebind.ACTIVE:
                 raise OSError('injected publication failure')
@@ -358,6 +368,7 @@ class RebindTests(unittest.TestCase):
         env = {key: 'fixture' for key in ['USER_PASSWORD_SEAL_KEY_ID', 'USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256',
                                          'P12_PASSWORD_SEAL_KEY_ID', 'P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256']}
         calls = []
+
         def send(args, *rest):
             if '--enrollment-token-file' in args:
                 self.assertEqual(args.count('--relay-url'), 1)
@@ -404,6 +415,7 @@ class RebindTests(unittest.TestCase):
         protected.mkdir(mode=0o700)
         retained = self.root / 'retained'
         original = os.rename
+
         def substitute(source, destination, **kwargs):
             original(target, retained)
             target.symlink_to(protected, target_is_directory=True)

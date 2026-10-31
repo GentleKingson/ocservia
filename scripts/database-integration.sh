@@ -189,7 +189,7 @@ assert_auth_fixture_cleanup() {
   local container=$1 database=$2
   test "$(docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${database}" -Atc "
     SELECT (SELECT count(*) FROM local_auth_bootstrap)
-      + (SELECT count(*) FROM pg_constraint WHERE conname IN ('test_bootstrap_approver_audit_failure','test_password_change_audit_failure','p4_reject_bootstrap','p4_reject_create','p4_reject_reset','test_auth_audit_failure') OR conname LIKE 'auth_log_%' OR conname LIKE 'auth_oidc_log_%')
+      + (SELECT count(*) FROM pg_constraint WHERE conname IN ('test_bootstrap_approver_audit_failure','test_password_change_audit_failure','test_local_user_bootstrap_audit_failure','test_local_user_create_audit_failure','test_local_user_reset_audit_failure','test_auth_audit_failure') OR conname LIKE 'auth_log_%' OR conname LIKE 'auth_oidc_log_%')
       + (SELECT count(*) FROM role_bindings b JOIN workspaces w ON w.id=b.workspace_id WHERE w.slug LIKE 'local-lifecycle-%' OR w.slug LIKE 'bootstrap-%' OR w.slug LIKE 'auth-safety-%')
   ")" = 0
 }
