@@ -39,7 +39,7 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 		if i > 0 {
 			next.IdempotencyKey = uuid.NewString()
 		}
-		op, _, err := service.CreateSynthetic(ctx, next)
+		op, _, err := service.Create(ctx, next)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -119,7 +119,7 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 	if count() != 33 {
 		t.Fatal("compaction not idempotent")
 	}
-	again, replay, err := service.CreateSynthetic(ctx, request)
+	again, replay, err := service.Create(ctx, request)
 	if err != nil || !replay || again.ID != firstID {
 		t.Fatal("idempotency identity lost", again, replay, err)
 	}

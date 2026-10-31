@@ -509,7 +509,7 @@ git -C "${repo}" add -A
 git -C "${repo}" commit -qm base
 git -C "${repo}" tag "v${VERSION}"
 
-# The Stage-1 self-containment fixture: the installer alone in a plain
+# The versioned installer self-containment fixture: the installer alone in a plain
 # directory, with no repository siblings and no .git anywhere it could
 # consult. The package-first --version mode must run from exactly this.
 standalone="${fixture}/standalone"
@@ -1308,7 +1308,7 @@ as_root test -e "${sysroot}/etc/ocservia-agent/enrollment-token" ||
 echo "an invalid enrollment token leaves the node state intact"
 
 # 15a. a protected bootstrap token source completes identity preparation and
-# enrollment in one Stage-1 run. The plaintext never appears in output or
+# enrollment in one versioned installer run. The plaintext never appears in output or
 # process arguments, both local copies are removed only after success, and no
 # service is enabled or started.
 scenario

@@ -60,21 +60,21 @@ const (
 	reconciliationCandidateScanLimit = 500
 )
 
-type SyntheticKind string
+type Kind string
 
 const (
-	SyntheticNoop     SyntheticKind = "noop"
-	SyntheticEcho     SyntheticKind = "echo"
-	SessionDisconnect SyntheticKind = "session_disconnect"
-	SessionTerminate  SyntheticKind = "session_terminate"
-	IPBanRemove       SyntheticKind = "ip_ban_remove"
-	ServiceReload     SyntheticKind = "service_reload"
-	ConfigPlan        SyntheticKind = "config_plan"
-	ConfigApply       SyntheticKind = "config_apply"
-	CertificateCSR    SyntheticKind = "certificate_csr"
-	CertificateP12    SyntheticKind = "certificate_p12"
-	CertificateRevoke SyntheticKind = "certificate_revoke"
-	AgentUpgrade      SyntheticKind = "agent_upgrade"
+	SyntheticNoop     Kind = "noop"
+	SyntheticEcho     Kind = "echo"
+	SessionDisconnect Kind = "session_disconnect"
+	SessionTerminate  Kind = "session_terminate"
+	IPBanRemove       Kind = "ip_ban_remove"
+	ServiceReload     Kind = "service_reload"
+	ConfigPlan        Kind = "config_plan"
+	ConfigApply       Kind = "config_apply"
+	CertificateCSR    Kind = "certificate_csr"
+	CertificateP12    Kind = "certificate_p12"
+	CertificateRevoke Kind = "certificate_revoke"
+	AgentUpgrade      Kind = "agent_upgrade"
 )
 
 type CreateRequest struct {
@@ -84,7 +84,7 @@ type CreateRequest struct {
 	NodeID              uuid.UUID
 	IdempotencyKey      string
 	ExpectedVersion     int64
-	Kind                SyntheticKind
+	Kind                Kind
 	Message             string
 	Candidate           []byte
 	CandidateHash       []byte
@@ -195,7 +195,7 @@ func (s *Service) EnableReleaseCatalog(catalog *releasecatalog.Catalog) {
 	s.releaseCatalog = catalog
 }
 
-func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (Operation, bool, error) {
+func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation, bool, error) {
 	if err := validateCreate(request); err != nil {
 		return Operation{}, false, err
 	}
@@ -819,7 +819,7 @@ func requestHash(r CreateRequest) [32]byte {
 		MaterializedHash     string                 `json:"materialized_hash,omitempty"`
 		PlanExpiresAt        *timestamppb.Timestamp `json:"plan_expires_at,omitempty"`
 		NodeID               uuid.UUID              `json:"node_id"`
-		Kind                 SyntheticKind          `json:"kind"`
+		Kind                 Kind                   `json:"kind"`
 		Message              string                 `json:"message"`
 		SessionID            string                 `json:"session_id"`
 		BootID               string                 `json:"boot_id"`
@@ -1063,7 +1063,7 @@ func requestCapability(request CreateRequest) string {
 	return capabilityFor(request.Kind)
 }
 
-func capabilityFor(kind SyntheticKind) string {
+func capabilityFor(kind Kind) string {
 	switch kind {
 	case SessionDisconnect:
 		return "ocserv.session.disconnect"

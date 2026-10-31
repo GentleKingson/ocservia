@@ -137,7 +137,7 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 		t.Fatalf("usage did not saturate rx=%d tx=%d", saturatedRX, saturatedTX)
 	}
 
-	policyKey := stableKey("policy", nodeID.String(), "alice", "1", "quota", monthStart(now).Format(time.RFC3339))
+	policyKey := operationIdempotencyKey("policy", nodeID.String(), "alice", "1", "quota", monthStart(now).Format(time.RFC3339))
 	if _, err := pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,'alice',1,'quota',$2,1,now())`, nodeID, monthStart(now)); err != nil {
 		t.Fatalf("inject enforcement intent: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	if _, replayed, err := service.CreateBatch(ctx, batchRequest); err != nil || !replayed {
 		t.Fatalf("batch replay=%v err=%v", replayed, err)
 	}
-	batchKey := stableKey("batch", batchID.String(), "0")
+	batchKey := operationIdempotencyKey("batch", batchID.String(), "0")
 	if _, _, err := service.users.Mutate(ctx, userstate.MutationRequest{NodeID: nodeID, Kind: userstate.UserDisable, Name: "bob", ExpectedVersion: 1, IdempotencyKey: batchKey, TTL: 24 * time.Hour, ActorID: "operator", ActorIdentityID: requesterID, Reason: "ticket", RequestID: "request-batch:0", Traceparent: testTraceparent}); err != nil {
 		t.Fatalf("inject batch post-mutation crash window: %v", err)
 	}

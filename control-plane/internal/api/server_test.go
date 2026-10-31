@@ -424,7 +424,7 @@ func TestControlledOperationRoutesRequireAuthentication(t *testing.T) {
 	}
 }
 
-func TestI14RoutesRequireAuthentication(t *testing.T) {
+func TestUserPolicyAndBatchRoutesRequireAuthentication(t *testing.T) {
 	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
 	tests := []struct {
 		method string

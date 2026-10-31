@@ -318,17 +318,17 @@ func TestRealOperationIntentTransaction(t *testing.T) {
 	}
 	service := operations.NewBackend(backend, 50, signer)
 	request := operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1, Kind: operations.SyntheticEcho, Message: "portable", TTL: time.Minute, RequestID: uuid.NewString(), Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"}
-	created, replayed, err := service.CreateSynthetic(ctx, request)
+	created, replayed, err := service.Create(ctx, request)
 	if err != nil || replayed || created.State != "queued" || created.CommandID == nil {
 		t.Fatal("common operation creation", created, replayed, err)
 	}
-	replay, replayed, err := service.CreateSynthetic(ctx, request)
+	replay, replayed, err := service.Create(ctx, request)
 	if err != nil || !replayed || replay.ID != created.ID {
 		t.Fatal("common operation replay", replay, replayed, err)
 	}
 	conflict := request
 	conflict.Message = "different"
-	if _, _, err := service.CreateSynthetic(ctx, conflict); !errors.Is(err, operations.ErrIdempotencyConflict) {
+	if _, _, err := service.Create(ctx, conflict); !errors.Is(err, operations.ErrIdempotencyConflict) {
 		t.Fatal("common operation conflict", err)
 	}
 	operationID := uuid.MustParse(created.ID)
@@ -346,7 +346,7 @@ func TestRealOperationIntentTransaction(t *testing.T) {
 	}
 	request.IdempotencyKey = uuid.NewString()
 	request.SupersedePending = true
-	if _, _, err := service.CreateSynthetic(ctx, request); err != nil {
+	if _, _, err := service.Create(ctx, request); err != nil {
 		t.Fatal("common superseding creation", err)
 	}
 	superseded, err := service.Get(ctx, operationID)

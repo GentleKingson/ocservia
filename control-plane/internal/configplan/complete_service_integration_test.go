@@ -75,7 +75,7 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 	trace := "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
-	planOperation, _, err := ops.CreateSynthetic(ctx, operations.CreateRequest{NodeID: node, IdempotencyKey: "complete-plan", ExpectedVersion: 1, Kind: operations.ConfigPlan, Candidate: rendered.Candidate, CompleteCandidate: rendered.CompleteCandidate, CandidateHash: rendered.Hash[:], PlanCapabilities: rendered.RequiredCapabilities, OcservVersion: "1.2.4", TTL: 15 * time.Minute, ActorID: requester.String(), ActorIdentityID: requester, Action: "config.plan", Reason: "complete plan", RequestID: "complete-plan", Traceparent: trace, PlanMetadata: &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}}})
+	planOperation, _, err := ops.Create(ctx, operations.CreateRequest{NodeID: node, IdempotencyKey: "complete-plan", ExpectedVersion: 1, Kind: operations.ConfigPlan, Candidate: rendered.Candidate, CompleteCandidate: rendered.CompleteCandidate, CandidateHash: rendered.Hash[:], PlanCapabilities: rendered.RequiredCapabilities, OcservVersion: "1.2.4", TTL: 15 * time.Minute, ActorID: requester.String(), ActorIdentityID: requester, Action: "config.plan", Reason: "complete plan", RequestID: "complete-plan", Traceparent: trace, PlanMetadata: &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}}})
 	if err != nil {
 		t.Fatal(err)
 	}

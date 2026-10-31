@@ -30,10 +30,10 @@ type configPlanCreator struct {
 	requests []operations.CreateRequest
 }
 
-func (r *configPlanCreator) CreateSynthetic(ctx context.Context, request operations.CreateRequest) (operations.Operation, bool, error) {
+func (r *configPlanCreator) Create(ctx context.Context, request operations.CreateRequest) (operations.Operation, bool, error) {
 	r.contexts = append(r.contexts, ctx)
 	r.requests = append(r.requests, request)
-	return r.service.CreateSynthetic(ctx, request)
+	return r.service.Create(ctx, request)
 }
 
 // Keep the existing MySQL restricted-runtime fixture, but exercise the

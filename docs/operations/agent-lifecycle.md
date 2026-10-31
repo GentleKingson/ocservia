@@ -106,15 +106,15 @@ The installer enables and starts the history-retention timer (`ocservia-agent-re
 
 ### Package verification and staging
 
-Once its external endpoint is deployed and verified, the operator-hosted thin first-install chain separates each stage (see [Stage-0 bootstrap hosting](production-deployment.md#stage-0-bootstrap-hosting)):
+Once its external endpoint is deployed and verified, the operator-hosted thin first-install chain separates each stage (see [Bootstrap launcher hosting](production-deployment.md#bootstrap-launcher-hosting)):
 
 ```text
-Stage-0 -> exact vX.Y.Z Stage-1 -> HTTPS native package
+bootstrap launcher -> exact vX.Y.Z versioned installer -> HTTPS native package
         -> identity/sealing -> Bootstrap Enrollment -> ENROLLED_LOCAL
         -> independent approval -> service activation
 ```
 
-Stage-0 and the initial Stage-1 and native package downloads rely on HTTPS. Before invoking the package manager, the installer copies the downloaded native package into root-owned staging and verifies that its bytes remain unchanged. That transport check applies only to initial installation; an AgentUpgrade instead verifies against the SHA256 carried in the already-authorized Controller command. Likewise, a Bootstrap Token can create or recover only the same pending node and cannot approve it, keeping package installation, enrollment, approval, and service activation across separate authority boundaries. Until external hosting has operational ownership and byte-verification evidence, the first-install procedure above obtains the installer from a clean exact-release checkout. Once installed, the native package has no runtime dependency on Git. Stage-0 plays no role in ongoing lifecycle operations.
+The bootstrap launcher and the initial versioned installer and native package downloads rely on HTTPS. Before invoking the package manager, the installer copies the downloaded native package into root-owned staging and verifies that its bytes remain unchanged. That transport check applies only to initial installation; an AgentUpgrade instead verifies against the SHA256 carried in the already-authorized Controller command. Likewise, a Bootstrap Token can create or recover only the same pending node and cannot approve it, keeping package installation, enrollment, approval, and service activation across separate authority boundaries. Until external hosting has operational ownership and byte-verification evidence, the first-install procedure above obtains the installer from a clean exact-release checkout. Once installed, the native package has no runtime dependency on Git. The bootstrap launcher plays no role in ongoing lifecycle operations.
 
 The verifier copies only the archive into a unique `root:root` mode `0700` directory below `/var/lib/ocservia-upgrade/package-staging`, compares the copied archive SHA256 with the caller-supplied expected digest, rejects unsafe archive paths and member types, and extracts that root-owned copy. Install and upgrade scripts accept only the verified directory printed by the verifier; never extract or run installers from a download directory, and remove the verified staging directory after the lifecycle operation succeeds. `PACKAGE_ARCH` pins the package architecture (`amd64` or `arm64`), which the MANIFEST records as `arch=`. On a real host install (no `DESTDIR`), the verifier also checks host architecture equivalence (`x86_64` for `amd64`, `aarch64` for `arm64`) and rejects a foreign-architecture package before anything is staged.
 
@@ -226,7 +226,7 @@ A `403` means the caller lacks authorization; `400` means the request was reject
 
    Specify a `workspace_id` that the caller is authorized to access; the `X-Workspace-ID` header may be omitted only when the caller belongs to exactly one workspace. The API returns the plaintext `obt1_` token once, and it expires within 15 minutes (`ttl_seconds` may only shorten that window). Including an optional `expected_endpoint_id` pre-binds the token so the Controller rejects any other presenting endpoint before consuming it. Write the token to a protected file, and never expose it in a URL, command-line argument, log, or shared shell history.
 
-2. Point `BOOTSTRAP_TOKEN_SOURCE` at the protected token file and run the version-pinned Stage-1 installer. The installer prepares the local identity, enrolls immediately with the Controller, deletes the plaintext token source after enrollment succeeds, writes `agent.env` atomically, and stops at `ENROLLED_LOCAL` without enabling or starting any service.
+2. Point `BOOTSTRAP_TOKEN_SOURCE` at the protected token file and run the version-pinned installer. The installer prepares the local identity, enrolls immediately with the Controller, deletes the plaintext token source after enrollment succeeds, writes `agent.env` atomically, and stops at `ENROLLED_LOCAL` without enabling or starting any service.
 
    ```bash
    export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token

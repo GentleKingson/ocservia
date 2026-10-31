@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/p1-resilience-capacity-lib.sh
-source "${ROOT}/scripts/p1-resilience-capacity-lib.sh"
+# shellcheck source=scripts/resilience-capacity-lib.sh
+source "${ROOT}/scripts/resilience-capacity-lib.sh"
 RUN_ID="${RUN_ID:-p1-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 P1_PROFILE="${P1_PROFILE:-full}"
 AGENT_COUNT="${AGENT_COUNT:-500}"
@@ -502,7 +502,7 @@ printf 'sse released active: %s\nsse released watchers: %s\n' \
 stop_sampler
 TOTAL_RUN_SECONDS=$(($(date -u +%s) - RUN_STARTED_EPOCH))
 validate_resource_samples "${RESOURCE_SAMPLES}" "${TMP_ROOT}/summary.json" "${MINIMUM_RESOURCE_SAMPLES}" \
-  "${MINIMUM_SAMPLE_SPAN_SECONDS}" "${SAMPLER_EXIT}" "${I08_REQUIRED_SAMPLE_PHASES}" "${TOTAL_RUN_SECONDS}"
+  "${MINIMUM_SAMPLE_SPAN_SECONDS}" "${SAMPLER_EXIT}" "${REQUIRED_RESOURCE_SAMPLE_PHASES}" "${TOTAL_RUN_SECONDS}"
 jq --arg profile "${P1_PROFILE}" '. + {profile:$profile}' "${TMP_ROOT}/summary.json" \
   >"${TMP_ROOT}/summary.json.next"
 mv "${TMP_ROOT}/summary.json.next" "${TMP_ROOT}/summary.json"

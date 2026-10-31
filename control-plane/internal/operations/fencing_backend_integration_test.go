@@ -263,7 +263,7 @@ func TestFencingBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		service := operations.NewBackend(f.backend, 1, f.signer)
-		if _, _, err := service.CreateSynthetic(ctx, outboxRequest(node)); err != nil {
+		if _, _, err := service.Create(ctx, outboxRequest(node)); err != nil {
 			t.Fatal(err)
 		}
 		d := claimOutbox(t, service)

@@ -27,7 +27,7 @@ type AgentUpgradeTarget struct {
 }
 
 // PrepareAgentUpgrade preserves single-node admission, not rollout eligibility.
-// CreateSynthetic still owns the locked revision/capability/approval checks and
+// Create still owns the locked revision/capability/approval checks and
 // idempotent intent transaction. In particular, do not replace ExpectedVersion
 // with a newly read node version here: that would change replay identity.
 func (s *Service) PrepareAgentUpgrade(ctx context.Context, workspaceID, nodeID uuid.UUID, version string) (AgentUpgradeTarget, error) {

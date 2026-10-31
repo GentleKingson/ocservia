@@ -34,7 +34,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		service := operations.NewBackend(fault, 1, f.signer)
 		request := outboxRequest(f.node(t))
 		fault.armed.Store(true)
-		if _, _, err := service.CreateSynthetic(ctx, request); !errors.Is(err, lostCommit) {
+		if _, _, err := service.Create(ctx, request); !errors.Is(err, lostCommit) {
 			t.Fatal(err)
 		}
 		for _, table := range []string{"operations", "commands", "outbox_events", "audit_events", "operation_events"} {
@@ -44,11 +44,11 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		}
 		fault.commit = true
 		fault.armed.Store(true)
-		created, replay, err := service.CreateSynthetic(ctx, request)
+		created, replay, err := service.Create(ctx, request)
 		if err != nil || replay {
 			t.Fatal(created, replay, err)
 		}
-		again, replay, err := service.CreateSynthetic(ctx, request)
+		again, replay, err := service.Create(ctx, request)
 		if err != nil || !replay || again.ID != created.ID {
 			t.Fatal("idempotent readback", again, replay, err)
 		}
@@ -58,7 +58,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			}
 		}
 		request.Message = "different effect"
-		if _, _, err := service.CreateSynthetic(ctx, request); !errors.Is(err, operations.ErrIdempotencyConflict) {
+		if _, _, err := service.Create(ctx, request); !errors.Is(err, operations.ErrIdempotencyConflict) {
 			t.Fatal(err)
 		}
 		// A claim whose commit did not happen cannot escape to transport.
@@ -91,7 +91,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		fault := &commitFaultBackend{Backend: f.backend, commit: true}
 		service := operations.NewBackend(fault, 1, f.signer)
 		for range 2 {
-			if _, _, err := service.CreateSynthetic(ctx, outboxRequest(f.node(t))); err != nil {
+			if _, _, err := service.Create(ctx, outboxRequest(f.node(t))); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -158,7 +158,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			f := newOutboxFixture(t)
 			ctx := context.Background()
 			service := operations.NewBackend(f.backend, 1, f.signer)
-			created, _, err := service.CreateSynthetic(ctx, outboxRequest(f.node(t)))
+			created, _, err := service.Create(ctx, outboxRequest(f.node(t)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,7 +214,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		f := newOutboxFixture(t)
 		ctx := context.Background()
 		service := operations.NewBackend(f.backend, 1, f.signer)
-		created, _, err := service.CreateSynthetic(ctx, outboxRequest(f.node(t)))
+		created, _, err := service.Create(ctx, outboxRequest(f.node(t)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -267,7 +267,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			// seed creates one operation and moves it to a durable state, either
 			// quiescent (outbox published) or with its recovery outbox pending.
 			seed := func(node uuid.UUID, state string, published bool) uuid.UUID {
-				created, _, err := service.CreateSynthetic(context.Background(), outboxRequest(node))
+				created, _, err := service.Create(context.Background(), outboxRequest(node))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -389,7 +389,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 			ctx := t.Context()
 			service := operations.NewBackend(f.backend, 1, f.signer)
 			node := f.node(t)
-			created, _, err := service.CreateSynthetic(ctx, outboxRequest(node))
+			created, _, err := service.Create(ctx, outboxRequest(node))
 			if err != nil {
 				t.Fatal(err)
 			}

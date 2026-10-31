@@ -3,7 +3,7 @@
 This manual covers a production Controller and its dedicated Relay. It follows
 the order of a deployment: support scope, the choice between Quick and manual
 installation, configuration and materials, installation, verification, upgrade,
-rollback and uninstall, the Relay and its networking, optional Stage-0
+rollback and uninstall, the Relay and its networking, optional bootstrap launcher
 bootstrap hosting, and troubleshooting. Standalone and Integrated deployments
 share the same steps. Where they differ, a conditional paragraph or the
 [comparison table](#deployment-combinations) says so.
@@ -822,7 +822,7 @@ First installation runs the versioned `controller-bootstrap.sh` from a clean,
 exact-release checkout (manual path) or with `--quick` on a new host. Both hand
 off to `controller.sh`, which validates the deployment configuration and
 protected local state before activating any services. An operator-hosted
-[Stage-0 wrapper](#stage-0-bootstrap-hosting) is optional.
+[bootstrap launcher](#bootstrap-launcher-hosting) is optional.
 
 ### Lifecycle commands
 
@@ -833,7 +833,7 @@ rollback, start, and uninstall, keeping the configured database backend,
 authentication environment, secrets, and clean release source available on the
 host. Replacing images or invoking Docker Compose directly bypasses its checks.
 The versioned bootstrap script is only a first-install entrypoint. Never rerun
-an unpinned or `latest` installer or Stage-0 script as an implicit upgrade
+an unpinned or `latest` installer or bootstrap launcher script as an implicit upgrade
 path. Run subsequent upgrades, rollbacks, and uninstalls through the Controller
 lifecycle scripts as described in
 [Upgrade, rollback and uninstall](#upgrade-rollback-and-uninstall).
@@ -906,10 +906,10 @@ evidence and permits only a retry against the identical target (see
 Quick mode sets up a brand-new host with a fixed single-host preset on top of
 the standard production installer: Integrated mode, bundled PostgreSQL, ACME
 TLS, Local authentication, and the root lifecycle. To use it, pass `--quick` to
-`controller-bootstrap.sh`, or to the Controller Stage-0 script, which accepts:
+`controller-bootstrap.sh`, or to the Controller bootstrap launcher script, which accepts:
 
 ```bash
-bash "$stage0" --quick \
+bash "$bootstrap_file" --quick \
   --controller-domain vpn.example.com \
   --relay-domain relay.example.com \
   --acme-email ops@example.com \
@@ -922,21 +922,21 @@ that is, a stable or RC release after v1.2.0. Releases up to v1.2.0 reject
 external or MySQL database, OIDC authentication, or manual TLS certificates,
 use the manual workflow above.
 
-At the Stage-0 layer, the script validates only argument syntax: two distinct
+At the bootstrap launcher layer, the script validates only argument syntax: two distinct
 lowercase DNS names, a well-formed email address, and absolute paths for the
 optional Root CA arguments (without reading the passphrase file or export
 directory). Passing `--quick` implies `--root-lifecycle`. Quick-specific flags
-are rejected unless `--quick` is set, and the node Stage-0 script rejects all
+are rejected unless `--quick` is set, and the node bootstrap launcher script rejects all
 of them.
 
-When `--version` is omitted under `--quick`, Stage-0 falls back to the
+When `--version` is omitted under `--quick`, the launcher falls back to the
 `DEFAULT_VERSION` value stamped into the Release asset by
 `scripts/prepare-bootstrap-release-assets.sh` (an unstamped copy from Git
 leaves `DEFAULT_VERSION` empty and therefore still requires `--version`).
-Stage-0 prints the resolved release tag before downloading Stage-1, and an
+The launcher prints the resolved release tag before downloading the versioned installer, and an
 explicit `--version` flag always overrides the stamped default.
 
-When Stage-1 (`controller-bootstrap.sh --quick`) starts, it ignores any local
+When the versioned installer (`controller-bootstrap.sh --quick`) starts, it ignores any local
 `./install.env` and runs a read-only host preflight before cloning (including
 when invoked with `--check`):
 
@@ -951,7 +951,7 @@ when invoked with `--check`):
   Quick run, and upstream cloud firewalls must allow inbound traffic on both
   ports.
 
-After the preflight succeeds, Stage-1 invokes the release's
+After the preflight succeeds, the versioned installer invokes the release's
 `deploy/production/quick-install.sh`, which:
 
 1. Prepares the host.
@@ -1003,7 +1003,7 @@ Formal GitHub Releases publish:
   and `controller-release-arm64.json`, alongside the Agent assets.
 - A byte-identical `controller-release.json` alias of the amd64 manifest for
   existing operators.
-- The versioned Stage-1 entrypoints `controller-bootstrap.sh` and
+- The versioned installer entrypoints `controller-bootstrap.sh` and
   `managed-node-bootstrap.sh` for HTTPS download.
 
 Native builds and assembled version images cover `linux/amd64` and
@@ -1359,7 +1359,7 @@ Both uninstall modes:
 - Leave confirmed state and data untouched if shutdown fails.
 - Retain lifecycle state if volume purge fails.
 - Report residual paths if state cleanup fails.
-- Never re-enter Stage-0.
+- Never re-enter the bootstrap launcher.
 
 If Docker fails to remove a volume, the purge remains partial and the lifecycle
 state files are kept. If volume removal succeeds and only state-file cleanup
@@ -1614,27 +1614,29 @@ removed. Changing an existing network layout requires an explicit operator
 redeployment, as the lifecycle never removes existing networks or attached
 services to force a new layout to fit.
 
-## Stage-0 bootstrap hosting
+<a id="stage-0-bootstrap-hosting"></a>
 
-In a manual installation, Stage-0 is an optional convenience wrapper over the
+## Bootstrap launcher hosting
+
+In a manual installation, the bootstrap launcher is an optional convenience wrapper over the
 same lifecycle boundaries as the manual path:
 
 ```text
-Stage-0 -> exact vX.Y.Z Stage-1 -> install.env -> durable clean checkout
+bootstrap launcher -> exact vX.Y.Z versioned installer -> install.env -> durable clean checkout
         -> production/install.sh -> deployment configuration -> controller.sh
         -> smoke/readiness
 ```
 
-Stage-0's initial bytes come from the static HTTPS endpoint, and it fetches the
-versioned Stage-1 script over HTTPS. Stage-1 prepares a durable release checkout
+The bootstrap launcher's initial bytes come from the static HTTPS endpoint, and it fetches the
+versioned installer script over HTTPS. The versioned installer prepares a durable release checkout
 and leaves `install.env` in the operator's configuration directory outside that
 checkout. It then hands off to controller.sh, which validates the deployment
 configuration and protected local state before activating any services. Until
 the static bootstrap host has operational ownership and byte-verification
-evidence, obtain Stage-1 directly from a clean, exact-release checkout as
+evidence, obtain the versioned installer directly from a clean, exact-release checkout as
 described in [Manual installation](#manual-installation).
 
-The repository maintains two Stage-0 bootstrap scripts:
+The repository maintains two bootstrap launchers:
 
 - `deploy/bootstrap/install-controller`
 - `deploy/bootstrap/install-node`
@@ -1661,12 +1663,12 @@ session state. Publish only from the Git source file (or, for
 host an RC asset.
 
 After deploying the files, verify that the served bytes match the expected
-source artifacts. `check-release-stage0.sh` first checks that the downloaded
+source artifacts. `check-release-bootstrap.sh` first checks that the downloaded
 Release asset differs from the Git source at that tag only in its stamped
 default version:
 
 ```bash
-scripts/check-release-stage0.sh "$RELEASE_ASSETS/install-controller" vX.Y.Z
+scripts/check-release-bootstrap.sh "$RELEASE_ASSETS/install-controller" vX.Y.Z
 scripts/verify-bootstrap-endpoint.sh \
   https://get.ocservia.example/install-controller \
   "$RELEASE_ASSETS/install-controller"
@@ -1678,29 +1680,34 @@ scripts/verify-bootstrap-endpoint.sh \
   install.env.example
 ```
 
+`scripts/check-release-stage0.sh` remains a compatibility entrypoint for
+`scripts/check-release-bootstrap.sh`.
+
 Each `verify-bootstrap-endpoint.sh` invocation downloads the URL read-only over
 HTTPS, enforces exact byte equality against the local file, and prints the
 deployed SHA-256 digest for the deployment record.
 
-### Stage-0 trust model
+<a id="stage-0-trust-model"></a>
 
-Outside [Quick mode](#quick-mode), Stage-0 requires an explicit stable
+### Bootstrap launcher trust model
+
+Outside [Quick mode](#quick-mode), the launcher requires an explicit stable
 `--version vX.Y.Z`, builds the corresponding GitHub Release URL for that tag,
 and hands off execution to the matching `controller-bootstrap.sh` or
-`managed-node-bootstrap.sh` Stage-1 asset. Stage-0 itself never reads
+`managed-node-bootstrap.sh` versioned installer asset. The launcher itself never reads
 `install.env`, installs packages, runs the Controller lifecycle, enrolls or
-approves a node, starts services, or crosses a privilege boundary; Stage-1 owns
+approves a node, starts services, or crosses a privilege boundary; the versioned installer owns
 all configuration, installation, enrollment, activation, and package or
 lifecycle validation.
 
-During the handoff, Stage-0 fetches the Stage-1 script over HTTPS with TLS
+During the handoff, the launcher fetches the versioned installer script over HTTPS with TLS
 verification enabled, rejects download errors or empty responses, and runs the
 downloaded file from a private temporary directory. Download authenticity in
 this phase relies on the HTTPS endpoint and its PKI without separate release
-keys, fingerprints, signed checksum manifests, or detached signatures. Stage-0
+keys, fingerprints, signed checksum manifests, or detached signatures. The launcher
 imposes no additional OpenSSL version requirement.
 
-Operators should download Stage-0 locally, inspect its contents, and invoke it
+Operators should download the launcher locally, inspect its contents, and invoke it
 with an explicit version tag. Never resolve the version dynamically from
 `latest`, a branch name, or a commit hash, and never pipe an unverified script
 into a shell; the only permitted default version is the exact release tag
@@ -1710,7 +1717,7 @@ stamped into a Release's own `install-controller` asset for
 ### Intended entrypoints
 
 Once the static endpoints are deployed and verified, the one-line convenience
-wrappers below download Stage-0 to a temporary file, check for its trailing
+wrappers below download the launcher to a temporary file, check for its trailing
 `main "$@"` completeness marker, and only then execute it. Wrapping the steps
 in a subshell surfaces any transport, empty-body, or truncated-download failure
 to calling automation:
@@ -1718,36 +1725,36 @@ to calling automation:
 ```bash
 (
   set -eu
-  stage0="$(mktemp)" || exit 1
-  trap 'rm -f -- "$stage0"' EXIT
+  bootstrap_file="$(mktemp)" || exit 1
+  trap 'rm -f -- "$bootstrap_file"' EXIT
   trap 'exit 1' HUP INT TERM
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$stage0" \
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$bootstrap_file" \
     https://get.ocservia.example/install-controller || exit 1
-  test "$(tail -n 1 "$stage0")" = 'main "$@"' || exit 1
-  bash "$stage0" --version vX.Y.Z
+  test "$(tail -n 1 "$bootstrap_file")" = 'main "$@"' || exit 1
+  bash "$bootstrap_file" --version vX.Y.Z
 )
 
 (
   set -eu
-  stage0="$(mktemp)" || exit 1
-  trap 'rm -f -- "$stage0"' EXIT
+  bootstrap_file="$(mktemp)" || exit 1
+  trap 'rm -f -- "$bootstrap_file"' EXIT
   trap 'exit 1' HUP INT TERM
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$stage0" \
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$bootstrap_file" \
     https://get.ocservia.example/install-node || exit 1
-  test "$(tail -n 1 "$stage0")" = 'main "$@"' || exit 1
-  bash "$stage0" --version vX.Y.Z
+  test "$(tail -n 1 "$bootstrap_file")" = 'main "$@"' || exit 1
+  bash "$bootstrap_file" --version vX.Y.Z
 )
 ```
 
-Beyond `--version`, Stage-0 accepts only `--root-lifecycle` and, on the
+Beyond `--version`, the launcher accepts only `--root-lifecycle` and, on the
 Controller entrypoint, `--check` and the [Quick mode](#quick-mode) flags. Pass
 all configuration and secrets through the environment or protected host paths
-consumed by Stage-1. Stage-0 neither parses nor prints secret material. On a
+consumed by the installer. The launcher neither parses nor prints secret material. On a
 managed node, automated bootstrap stops at `ENROLLED_LOCAL` with the node
 pending approval on the Controller, leaving approval and service activation as
 explicit post-enrollment steps.
 
-Stage-0 is only a first-install bootstrapper. Subsequent Controller upgrades
+The bootstrap launcher is only for first installation. Subsequent Controller upgrades
 and rollbacks run through `controller.sh` and its protected lifecycle state.
 Managed-node upgrades and removals run through the authorized upgrader or
 native package manager. Persist long-lived settings in `install.env` or the

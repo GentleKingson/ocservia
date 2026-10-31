@@ -53,7 +53,7 @@ func TestRealOperationReaping(t *testing.T) {
 		for range count {
 			node := uuid.Must(uuid.NewV7())
 			run(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES(?,?,?,'active',?,?)`, UUIDBytes(node), UUIDBytes(workspace), node.String(), fixtureTimestamp(t, now), fixtureTimestamp(t, now))
-			_, _, err := service.CreateSynthetic(ctx, operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1, Kind: operations.SyntheticEcho, Message: "recovery", TTL: time.Hour, RequestID: uuid.NewString(), Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"})
+			_, _, err := service.Create(ctx, operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1, Kind: operations.SyntheticEcho, Message: "recovery", TTL: time.Hour, RequestID: uuid.NewString(), Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"})
 			if err != nil {
 				t.Fatal(err)
 			}

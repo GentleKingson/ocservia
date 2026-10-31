@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage-0 downloads one versioned Stage-1 asset over HTTPS.
+# Bootstrap launcher: download one versioned installer asset over HTTPS.
 set -euo pipefail
 
 # Empty in the Git source. Release asset preparation stamps the release tag
@@ -45,7 +45,7 @@ main() {
   local quick=false controller_domain="" relay_domain="" acme_email=""
   local passphrase_file="" export_dir="" option
   local base asset url temporary cleanup_parent cleanup_directory command_name
-  local -a stage1_args=()
+  local -a installer_args=()
 
   umask 077
 
@@ -60,19 +60,19 @@ main() {
       --root-lifecycle)
         [[ "${root_lifecycle}" == false ]] || usage
         root_lifecycle=true
-        stage1_args+=(--root-lifecycle)
+        installer_args+=(--root-lifecycle)
         shift
         ;;
       --check)
         [[ "${check_only}" == false ]] || usage
         check_only=true
-        stage1_args+=(--check)
+        installer_args+=(--check)
         shift
         ;;
       --quick)
         [[ "${quick}" == false ]] || usage
         quick=true
-        stage1_args+=(--quick)
+        installer_args+=(--quick)
         shift
         ;;
       --controller-domain|--relay-domain|--acme-email|--root-ca-passphrase-file|--root-ca-export-dir)
@@ -85,7 +85,7 @@ main() {
           --root-ca-passphrase-file) [[ -z "${passphrase_file}" ]] || usage; passphrase_file="$2" ;;
           --root-ca-export-dir) [[ -z "${export_dir}" ]] || usage; export_dir="$2" ;;
         esac
-        stage1_args+=("${option}" "$2")
+        installer_args+=("${option}" "$2")
         shift 2
         ;;
       *) usage ;;
@@ -103,9 +103,9 @@ main() {
         fail "root CA paths must be absolute and contain only letters, digits, '.', '_', '-' and '/'"
     done
     # Integrated deployment requires the explicit root lifecycle.
-    [[ "${root_lifecycle}" == true ]] || stage1_args+=(--root-lifecycle)
+    [[ "${root_lifecycle}" == true ]] || installer_args+=(--root-lifecycle)
     if [[ "${version_seen}" == false ]]; then
-      [[ -n "${DEFAULT_VERSION}" ]] || fail "this Stage-0 copy has no default release; pass --version vX.Y.Z"
+      [[ -n "${DEFAULT_VERSION}" ]] || fail "this bootstrap launcher copy has no default release; pass --version vX.Y.Z"
       version="${DEFAULT_VERSION}"
       version_seen=true
     fi
@@ -127,21 +127,21 @@ main() {
   trap 'exit 1' HUP INT TERM
 
   echo "install-controller: using release ${version}" >&2
-  download "${url}/${asset}" "${temporary}/${asset}" || fail "Stage-1 download failed"
-  [[ -s "${temporary}/${asset}" ]] || fail "Stage-1 download is empty"
+  download "${url}/${asset}" "${temporary}/${asset}" || fail "versioned installer download failed"
+  [[ -s "${temporary}/${asset}" ]] || fail "versioned installer download is empty"
 
   chmod 0700 -- "${temporary}/${asset}"
-  stage1_args=(--version "${version}" "${stage1_args[@]}")
+  installer_args=(--version "${version}" "${installer_args[@]}")
   cleanup_parent="${BASHPID}"
   cleanup_directory="${temporary}"
-  # exec replaces Stage-0, so a minimal watcher owns post-Stage-1 cleanup.
+  # exec replaces the launcher; a watcher cleans up after the installer exits.
   (
     trap - EXIT
     trap '' HUP INT TERM
     while kill -0 "${cleanup_parent}" 2>/dev/null; do sleep 1; done
     rm -rf -- "${cleanup_directory}"
   ) >/dev/null 2>&1 &
-  exec "${temporary}/${asset}" "${stage1_args[@]}"
+  exec "${temporary}/${asset}" "${installer_args[@]}"
 }
 
 main "$@"
