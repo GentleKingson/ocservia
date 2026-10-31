@@ -675,16 +675,14 @@ try {
         operation: grant.operation,
       });
       const revokeReason = "Business test: browser revoke";
-      await page
-        .getByLabel("Approval ID")
-        .fill(
-          await approval("certificate.revoke", issued, {
-            certificate: {
-              expected_version: issued.version,
-              reason: revokeReason,
-            },
-          }),
-        );
+      await page.getByLabel("Approval ID").fill(
+        await approval("certificate.revoke", issued, {
+          certificate: {
+            expected_version: issued.version,
+            reason: revokeReason,
+          },
+        }),
+      );
       await page.getByLabel("Reason", { exact: true }).fill(revokeReason);
       const revoking = page.waitForResponse((response) =>
         response.url().endsWith(`/certificates/${certificate.id}:revoke`),
