@@ -309,6 +309,39 @@ grep -q '/download/v4.5.6/' "${fixture}/downloads.log" || fail "manual mode did 
 run_installer "${fixture}/stamped/install-node" --non-interactive >"${fixture}/output" 2>&1
 grep -q '/download/v4.5.6/' "${fixture}/downloads.log" || fail "Agent did not use embedded version"
 
+# Check the arguments received by the downloaded installer, not just its URL.
+touch "${fixture}/custom config.env"
+for installer in install-controller install-node; do
+  run_installer "${fixture}/stamped/${installer}" --non-interactive --config "./custom config.env" >"${fixture}/output" 2>&1
+  [[ "$(<"${fixture}/args.log")" == $'--version\nv4.5.6\n--non-interactive\n--config\n./custom config.env' ]] ||
+    fail "${installer} did not forward unattended mode and the exact configuration path"
+  if run_installer "${fixture}/stamped/${installer}" </dev/null >"${fixture}/output" 2>&1; then
+    fail "${installer} accepted a no-argument invocation without a TTY"
+  fi
+  grep -q 'requires a TTY' "${fixture}/output" || fail "missing TTY diagnostic"
+  [[ ! -s "${fixture}/downloads.log" ]] || fail "non-TTY invocation downloaded an installer"
+done
+
+# A real TTY must select the wizard across the executable handoff.
+python3 - "${fixture}" <<'PTY'
+import os, pty, subprocess, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+env = dict(os.environ, PATH=str(root/'bin')+os.pathsep+os.environ['PATH'],
+           TMPDIR=str(root/'tmp'), TEST_RELEASE_DIR=str(root/'release'),
+           TEST_DOWNLOAD_LOG=str(root/'downloads.log'), TEST_EXEC_LOG=str(root/'exec.log'),
+           TEST_ARGS_LOG=str(root/'args.log'), TEST_TEMP_LOG=str(root/'temp.log'))
+for name in ('install-controller', 'install-node'):
+    master, slave = pty.openpty()
+    try:
+        subprocess.run(['bash', str(root/'stamped'/name)], cwd=root, env=env,
+                       stdin=slave, stdout=slave, stderr=slave, check=True, timeout=10)
+        assert (root/'args.log').read_text().splitlines() == ['--version', 'v4.5.6', '--interactive'], name
+    finally:
+        os.close(slave)
+        os.close(master)
+PTY
+
 for installer in "${CONTROLLER}" "${NODE}"; do
   [[ "$(tail -n 1 "${installer}")" == 'main "$@"' ]] || fail "main invocation is not the final line"
   if grep -Eq '(^|[^[:alnum:]_])(sudo|apt|apt-get|dnf|yum|rpm|dpkg|docker|systemctl|psql)([^[:alnum:]_]|$)' "${installer}"; then

@@ -52,16 +52,16 @@ main() {
   umask 077
   if (($# == 0)); then
     [[ -t 0 && -t 1 ]] || fail "interactive installation requires a TTY; use --non-interactive"
-    stage1_args+=(--interactive)
+    installer_args+=(--interactive)
   fi
 
   while (($# > 0)); do
     case "$1" in
       --non-interactive)
-        stage1_args+=(--non-interactive); shift ;;
+        installer_args+=(--non-interactive); shift ;;
       --config)
         [[ $# -ge 2 && -f "$2" ]] || fail "--config requires an existing file"
-        stage1_args+=(--config "$2"); shift 2 ;;
+        installer_args+=(--config "$2"); shift 2 ;;
       --help|-h) usage ;;
       --version)
         [[ "${version_seen}" == false && $# -ge 2 ]] || usage

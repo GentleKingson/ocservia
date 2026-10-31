@@ -791,6 +791,34 @@ else
 fi
 echo "install.env works in the single-file --version mode"
 
+# Exercise the downloaded, non-executable file through the real re-exec path.
+# This probe does not elevate: append --help at the sudo boundary so the second
+# invocation exits before installation instead of recursively requesting sudo.
+if ((EUID != 0)); then
+  scenario
+  mkdir -m 700 "${fixture}/reexec-bin"
+  cat >"${fixture}/reexec-bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$(dirname "${OCSERV_MANAGED_NODE_SYSROOT}")/logs/root-sudo.log"
+[[ "$1" == -n ]]
+shift
+exec "$@" --help
+EOF
+  chmod 0755 "${fixture}/reexec-bin/sudo"
+  chmod 0644 "${standalone}/install.sh"
+  TEST_PATH_PREFIX="${fixture}/reexec-bin:${bin}:${PATH}" build_env
+  RUN_STATUS=0
+  RUN_OUTPUT="$(env "${ROOT_ENV[@]}" bash "${standalone}/install.sh" \
+    --non-interactive --version "v${VERSION}" --root-lifecycle 2>&1)" || RUN_STATUS=$?
+  assert_status 2
+  assert_output "usage: deploy/managed-node/install.sh"
+  assert_log_contains "${root_sudo_log}" "bash ${standalone}/install.sh --root-lifecycle --non-interactive --version v${VERSION}"
+  assert_log_empty "${curl_log}"
+  chmod 0755 "${standalone}/install.sh"
+  echo "a mode-0644 downloaded installer re-executes via Bash without sudo prompts"
+fi
+
 # A released single file uses its embedded default, while source-only copies
 # require an explicit tag or the deliberate legacy checkout CLI path.
 scenario
@@ -1892,6 +1920,7 @@ RELAY_URL_A=https://relay-root-file-a.example.test
 RELAY_URL_B=
 EOF
   ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B)
+  chmod 0644 "${standalone}/install.sh"
   RUN_STATUS=0
   # Each fixture intentionally isolates its PATH and exported settings.
   # shellcheck disable=SC2030,SC2031
@@ -1899,16 +1928,17 @@ EOF
     export PATH="${root_lifecycle_bin}"
     TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env
     cd -- "${standalone}"
-    env "${ROOT_ENV[@]}" "${standalone}/install.sh" --version "v${VERSION}" --root-lifecycle 2>&1
+    env "${ROOT_ENV[@]}" bash "${standalone}/install.sh" --version "v${VERSION}" --root-lifecycle 2>&1
   )" || RUN_STATUS=$?
   assert_status 0 "the single-file root-lifecycle command must succeed"
   assert_output "ENROLLMENT_READY"
   assert_output "rerun this installer with the same --version v${VERSION} argument"
-  assert_log_contains "${root_sudo_log}" "${standalone}/install.sh --root-lifecycle --version v${VERSION}"
+  assert_log_contains "${root_sudo_log}" "bash ${standalone}/install.sh --root-lifecycle --version v${VERSION}"
   as_root grep -qx "RELAY_URL_A=https://relay-root-file-a.example.test" \
     "${sysroot}/etc/ocservia-agent/relays.env" ||
     die "relays.env must carry the launcher-resolved relay URL A"
-  echo "the root lifecycle re-execs the single file with the pinned version"
+  chmod 0755 "${standalone}/install.sh"
+  echo "the root lifecycle re-execs the mode-0644 single file with the pinned version"
   for single_b in unset empty override; do
     scenario
     ROOT_ENV_OMIT=(RELAY_URL_A RELAY_URL_B)

@@ -461,12 +461,13 @@ forward_root_lifecycle() {
   # OCSERV_INSTALL_ENV_RESOLVED tells the root re-exec that install.env was
   # already resolved by the launcher user: root must not re-read a file that
   # may have been replaced across the privilege transition. The re-exec
-  # targets this script's own path, never a repository sibling.
+  # targets this script's own path via Bash, so a downloaded mode-0644 file
+  # works just like the documented 'bash install.sh' invocation.
   local -a sudo_args=()
   [[ "${NON_INTERACTIVE}" == false ]] || sudo_args+=(-n)
   exec sudo "${sudo_args[@]}" env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
     OCSERV_INSTALL_ENV_RESOLVED=1 \
-    "${INSTALLER_PATH}" "${reexec_arguments[@]}"
+    bash "${INSTALLER_PATH}" "${reexec_arguments[@]}"
 }
 
 resolve_release_identity() {
