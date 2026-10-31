@@ -457,7 +457,7 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 		t.Fatalf("ordinary principal: %+v %v", actor, err)
 	}
 	workspaceID, targetID, approverID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'P6 parity',$2,now(),now())`, workspaceID, "parity-"+workspaceID.String()); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Authentication authorization parity',$2,now(),now())`, workspaceID, "parity-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = pool.Exec(ctx, `DELETE FROM role_bindings WHERE workspace_id=$1`, workspaceID) }()
@@ -480,7 +480,7 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 		}
 		return w
 	}
-	binding := fmt.Sprintf(`{"identity_id":%q,"workspace_id":%q,"role":"SecurityAdmin","resource_type":"workspace","reason":"P6 parity"}`, targetID, workspaceID)
+	binding := fmt.Sprintf(`{"identity_id":%q,"workspace_id":%q,"role":"SecurityAdmin","resource_type":"workspace","reason":"Authentication authorization parity"}`, targetID, workspaceID)
 	call("GET", "nodes", "", 403)
 	call("POST", "role-bindings", binding, 403)
 	for id, role := range map[uuid.UUID]string{actor.IdentityID: "PlatformAdmin", approverID: "SecurityAdmin"} {
@@ -500,7 +500,7 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 	if w := call("POST", "role-bindings", viewer, 409); !strings.Contains(w.Body.String(), "role-binding-exists") {
 		t.Fatalf("duplicate binding problem: %s", w.Body)
 	}
-	w := call("POST", "approval-requests", fmt.Sprintf(`{"action":"role_binding.elevate","resource_type":"role_binding","resource_id":%q,"reason":"P6 parity","ttl_seconds":600,"role_binding":{"identity_id":%q,"role":"SecurityAdmin","resource_type":"workspace"}}`, targetID, targetID), 201)
+	w := call("POST", "approval-requests", fmt.Sprintf(`{"action":"role_binding.elevate","resource_type":"role_binding","resource_id":%q,"reason":"Authentication authorization parity","ttl_seconds":600,"role_binding":{"identity_id":%q,"role":"SecurityAdmin","resource_type":"workspace"}}`, targetID, targetID), 201)
 	var approval approvals.Approval
 	if err := json.Unmarshal(w.Body.Bytes(), &approval); err != nil {
 		t.Fatal(err)

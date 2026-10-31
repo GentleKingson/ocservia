@@ -26,6 +26,8 @@ if [[ "${scope}" != contracts ]]; then
   done < <(git ls-files -z -- scripts deploy)
   shellcheck -x "${shell_sources[@]}"
   ruff check --select E4,E7,E9,F -- "${python_sources[@]}"
+  # These spacing rules require preview mode in the pinned Ruff release.
+  ruff check --preview --select E225,E226,E231,E302,E303,E305,E306 -- "${python_sources[@]}"
 fi
 if [[ "${scope}" != source-style ]]; then
   (cd "${ROOT}/proto" && buf format --diff --exit-code && buf lint)

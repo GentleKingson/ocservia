@@ -166,9 +166,11 @@ certutil() { :; }
             verify.assert_not_called()
 
         events = []
+
         def recovery_command(*args):
             events.append(args)
             return ''
+
         def recovery_api(path, **kwargs):
             if path == 'readyz':
                 assert kwargs['status'] == 503
@@ -193,6 +195,7 @@ certutil() { :; }
 
         for expired in (True, False):
             events.clear()
+
             def relay_wait(description, fn, seconds=120):
                 events.append(('wait', description))
                 result = fn()
@@ -357,6 +360,7 @@ certutil() { :; }
                              'nodes': [{'node_id': 'node', 'batch': 0, 'state': 'succeeded', 'operation_id': 'upgrade'}]},
                          'approval-requests/approval': {'status': 'consumed'},
                          'nodes/node': {'connection_state': 'online', 'agent_version': '0.0.1'}}
+
         def binaries(path, _flag):
             return f'{path.rsplit("/", 1)[1]} 0.0.1\n'
 
@@ -454,6 +458,7 @@ certutil() { :; }
         # timeout never stands in for that evidence.
         def revocation_case(synced=True, queued=True, readmitted='0', effects_change=False):
             state = {'revoked': False, 'effects': 0}
+
             def fake_api(path, body=None, *, role='requester', status=200, headers=None, **_kwargs):
                 headers = headers or {}
                 if path == 'nodes/node':
@@ -476,6 +481,7 @@ certutil() { :; }
                     assert status == 404 and state['revoked']
                     return {'type': 'https://ocservia.dev/problems/not-found'}
                 raise AssertionError(path)
+
             def fake_sql(query):
                 if 'FROM node_trust_convergence' in query:
                     return 't' if queued else 'f'
@@ -492,6 +498,7 @@ certutil() { :; }
                 if 'FROM operations' in query:
                     return '0'
                 raise AssertionError(query)
+
             def fake_run(*args):
                 if args[:2] == ('systemctl', 'show'):
                     return '42' if 'MainPID' in args else 'active'
@@ -524,7 +531,6 @@ certutil() { :; }
             names, passed = revocation_case(**case)
             assert not passed, 'revocation accepted: ' + label
             assert 'revoked_node_old_authority_without_privd_effect' not in names, label
-
 
         with patch.object(business, 'run', side_effect=[
                 'ocservia-agent.service loaded active running Ocservia Agent\n'
@@ -563,11 +569,13 @@ python3() { echo "api:$2"; return "$API_EXIT"; }
         for fault in (None, 'remove', 'package installed', 'process', 'timer', 'payload', 'identity', 'endpoint changed', 'online',
                       'api timeout', 'revoked', 'trust revision', 'owner', 'readmitted', 'effect', 'ocserv'):
             state = {'removed': False}
+
             def native():
                 active = not state['removed']
                 return {'processes': ['42'] if active or fault == 'process' else [],
                         'units': [{'unit': unit, 'active': 'active' if active or fault == 'timer' else 'inactive'}
                                   for unit in ('ocservia-agent.service', 'ocservia-privd.service', 'ocservia-agent-retention.timer')]}
+
             def terminal_run(*args):
                 if args[:3] == ('sudo', 'apt-get', 'remove'):
                     if fault == 'remove':
@@ -583,11 +591,13 @@ python3() { echo "api:$2"; return "$API_EXIT"; }
                 if args[:2] == ('systemctl', 'show'):
                     return 'ActiveState=active\nMainPID=' + ('99' if state['removed'] and fault == 'ocserv' else '42') + '\n'
                 return ''
+
             def terminal_api(*_args, **_kwargs):
                 if state['removed'] and fault == 'api timeout':
                     raise TimeoutError('API timed out')
                 return {'trust_status': 'revoked' if state['removed'] and fault == 'revoked' else ('offline' if state['removed'] else 'active'),
                         'connection_state': 'offline' if state['removed'] and fault != 'online' else 'online'}
+
             def terminal_sql(query):
                 if 'owner_epoch>' in query:
                     return '1' if fault == 'readmitted' else '0'
@@ -596,6 +606,7 @@ python3() { echo "api:$2"; return "$API_EXIT"; }
                 if 'authorization_revision' in query:
                     return ('offline|4' if fault == 'trust revision' else 'offline|3') if state['removed'] else 'active|3'
                 return ('changed|active' if state['removed'] and fault == 'endpoint changed' else 'endpoint|active')
+
             def once(description, fn, seconds=120):
                 value = fn()
                 if not value:
@@ -725,6 +736,7 @@ python3() { echo "api:$2"; return "$API_EXIT"; }
                 assert ('session_disconnect_native_effect' in names) == (fault != 'disconnect ignored'), fault
                 assert ('session_terminate_native_effect' in names) == (fault is None and version >= (1, 4, 2)), fault
                 assert ('session_cookie_replay_control' in names) == (version >= (1, 4, 2) and fault in (None, 'terminate ignored', 'cookie kept')), fault
+
 
 if __name__ == '__main__':
     main()

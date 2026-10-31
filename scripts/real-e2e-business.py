@@ -122,6 +122,7 @@ def run_business(ready_dir, peer_dir):
     assert ready['node_id'] == node
     assert ready['agent_endpoint_id'] == hex64(STATE / 'agent-endpoint-id')
     os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'] = node
+
     def online():
         item = business.api('nodes/' + node)
         checks = {'active': item['trust_status'] == 'active',
@@ -237,35 +238,35 @@ def recovery(phase, peer_dir):
                             'for exe in /proc/[0-9]*/exe; do '
                             'if [ "$(readlink "$exe")" = /usr/local/bin/ocservia-transportd ]; then '
                             'cat "${exe%/exe}/cmdline"; fi; done').rstrip('\0').split('\0')
-        assert [argv[i+1] for i, arg in enumerate(argv) if arg == '--relay-url'] == [(WORK / 'relay/url').read_text().strip()]
-        assert argv[argv.index('--relay-mode')+1] == 'custom'
-        value = {'node_id':node, 'agent_endpoint_id':hex64(STATE / 'agent-endpoint-id'),
-                 'owner':business.owner(), 'path_mode':'relay', 'single_controller_relay':True}
+        assert [argv[i + 1] for i, arg in enumerate(argv) if arg == '--relay-url'] == [(WORK / 'relay/url').read_text().strip()]
+        assert argv[argv.index('--relay-mode') + 1] == 'custom'
+        value = {'node_id': node, 'agent_endpoint_id': hex64(STATE / 'agent-endpoint-id'),
+                 'owner': business.owner(), 'path_mode': 'relay', 'single_controller_relay': True}
         assert value['owner'] and value['owner']['connection_id']
     elif phase == 'queued':
         business.wait_for_relay_outage(node)
         business.wait_for('node offline during Relay outage',
                           lambda: business.api(prefix)['connection_state'] == 'offline')
         approval_id = business.approval('service.reload', 'node', node)
-        body = {'reason':'cross-VM Relay recovery', 'ttl_seconds':300}
+        body = {'reason': 'cross-VM Relay recovery', 'ttl_seconds': 300}
         key = secrets.token_hex(16)
         for _ in range(3):
-            headers = {'Idempotency-Key':key, 'X-Approval-ID':approval_id,
-                       'If-Match':f'"revision-{business.api(prefix)["version"]}"'}
+            headers = {'Idempotency-Key': key, 'X-Approval-ID': approval_id,
+                       'If-Match': f'"revision-{business.api(prefix)["version"]}"'}
             operation = business.api(prefix + '/service:reload', body, headers=headers, status=(202, 409))
             if 'id' in operation:
                 break
             assert operation['type'] == 'https://ocservia.dev/problems/stale-revision'
         assert 'id' in operation
-        (STATE / 'recovery-request.json').write_text(json.dumps({'body':body, 'headers':headers}))
+        (STATE / 'recovery-request.json').write_text(json.dumps({'body': body, 'headers': headers}))
         time.sleep(10)
         assert business.api('operations/' + operation['id'])['state'] == 'queued'
         command = operation['command_id']
         assert business.sql(f"SELECT count(*) FROM outbox_events WHERE command_id='{command}' AND published_at IS NULL;") == '1'
         assert business.sql(f"SELECT count(*) FROM command_attempts WHERE command_id='{command}' AND state='sent';") == '0'
-        value = {'node_id':node, 'operation':{'id':operation['id'], 'command_id':command},
-                 'owner_lease_invalid':True, 'offline':True, 'state':'queued',
-                 'unpublished_outbox':1, 'sent_attempts':0}
+        value = {'node_id': node, 'operation': {'id': operation['id'], 'command_id': command},
+                 'owner_lease_invalid': True, 'offline': True, 'state': 'queued',
+                 'unpublished_outbox': 1, 'sent_attempts': 0}
     elif phase == 'done':
         before = json.loads(baseline_path.read_text())
         queued = json.loads(queued_path.read_text())
@@ -277,7 +278,7 @@ def recovery(phase, peer_dir):
         replay = business.api(prefix + '/service:reload', request['body'], headers=request['headers'], status=202)
         assert replay['id'] == operation['id'] and replay['command_id'] == operation['command_id']
         assert business.api('approval-requests/' + request['headers']['X-Approval-ID'])['status'] == 'consumed'
-        value = {**queued, 'owner':after, 'idempotent_replay':True}
+        value = {**queued, 'owner': after, 'idempotent_replay': True}
     elif phase == 'verify':
         result = json.loads((peer_dir / 'result.json').read_text())
         before = json.loads(baseline_path.read_text())
@@ -299,10 +300,10 @@ def recovery(phase, peer_dir):
         assert old['vpn_session'] == json.loads((Path(os.environ['ARTIFACT_DIR']) / 'business.json').read_text())['vpn_native_session']
         assert old['icmp'] and new['icmp'] and old['udp_isolated'] and new['udp_isolated']
         assert old['single_agent_relay'] and new['single_agent_relay']
-        assert result['queued_native'] == {'journal':0, 'privd':0, 'reload_delta':0, 'vpn_unchanged':True, 'relay_unreachable':True}
+        assert result['queued_native'] == {'journal': 0, 'privd': 0, 'reload_delta': 0, 'vpn_unchanged': True, 'relay_unreachable': True}
         assert new['reloads'] == old['reloads'] + 1
         checked = verify_operations(result['operations'], [queued['operation']])
-        value = {**result, 'before_owner':before['owner'], 'after_owner':done['owner'], 'operations':checked}
+        value = {**result, 'before_owner': before['owner'], 'after_owner': done['owner'], 'operations': checked}
         evidence = Path(os.environ['ARTIFACT_DIR'])
         (evidence / 'recovery.json').write_text(json.dumps(value, sort_keys=True) + '\n')
         (evidence / 'recovery.txt').write_text(

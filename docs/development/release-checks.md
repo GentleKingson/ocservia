@@ -573,7 +573,9 @@ source of the exact rule order. In outline:
 
 The `source-style` suite checks tracked Shell sources using their shebangs
 (including extensionless launchers) and Python with the pinned Ruff
-`E4,E7,E9,F` rules. The Web job also checks the maintained root MJS files and
+`E4,E7,E9,F` rules, plus the explicit spacing and blank-line rules
+`E225,E226,E231,E302,E303,E305,E306` (which require preview mode in the pinned
+version). The Web job also checks the maintained root MJS files and
 build-cache Action with the same ESLint and Prettier configuration. The
 `contracts` suite runs Buf/Redocly lint, breaking checks and a clean regeneration
 in that order, when schemas, templates, generated outputs or generation tools

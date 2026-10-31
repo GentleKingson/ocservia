@@ -10,7 +10,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
-	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
@@ -219,7 +219,7 @@ func (s *Server) adminExecuteFenced(ctx context.Context, nodeID uuid.UUID, kind 
 
 func (s *Server) writeEnrollmentError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, approvalstore.ErrNotReady):
+	case errors.Is(err, approvals.ErrNotReady):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "a matching unexpired approval from a different principal is required")
 	case errors.Is(err, enrollment.ErrInvalidTransition):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/invalid-node-state", "Invalid node state", "the requested node transition is not allowed")

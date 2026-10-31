@@ -222,6 +222,7 @@ def oidc():
     api('nodes', role='oidc', headers={'X-Workspace-ID': '00000000-0000-7000-8000-000000000072'}, status=403)
     run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'control-plane')
     trust_controller()
+
     def ready():
         try:
             return api('readyz', role='anonymous').get('status') == 'ok'
@@ -335,6 +336,7 @@ def certificate():
         before = owner()
         run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
         # A cached online flag can still describe the process we just stopped.
+
         def fresh_session():
             current = owner()
             return current if (current and current['owner_epoch'] > before['owner_epoch'] and
@@ -389,6 +391,7 @@ def certificate():
     record('certificate_p12_ready', certificate_id=cert['id'], operation_id=operation_ids[-1])
     restart_node()
     download_headers = {'X-Artifact-Token': grant['download_token']}
+
     def artifact_state():
         return json.loads(sql("SELECT row_to_json(s) FROM (SELECT a.id,a.state,a.certificate_version,a.content_size,"
                               "a.expires_at,a.consumed_at,c.state certificate_state,c.version current_certificate_version "
@@ -474,6 +477,7 @@ def smoke_user():
     operation = api(f'nodes/{node}/users', {'name': 'business-test-smoke-user', 'sealed_password': sealed,
                                            'reason': 'Business test: Release Business Smoke'},
                     headers={'Idempotency-Key': secrets.token_hex(16), 'If-Match': '"revision-0"'}, status=202)
+
     def user_ready():
         state = api('operations/' + operation['id'])['state']
         if state in ('failed', 'expired', 'cancelled'):
@@ -999,6 +1003,7 @@ def completed(operation):
         raise RuntimeError(f"operation {operation['id']} reached {result['state']}")
     return result if result['state'] == 'succeeded' else None
 
+
 def verify_completed_operations(operations):
     for operation in operations:
         snapshot = cross_check(operation)
@@ -1006,7 +1011,6 @@ def verify_completed_operations(operations):
         assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
         assert snapshot['root_count_state_response'] == '1|applied|1'
     record('api_database_agent_journal_root_receipt', operation_ids=[op['id'] for op in operations])
-
 
 
 def single_relay_argv():
@@ -1352,6 +1356,7 @@ def business():
         return result.returncode == 0 and vpn.poll() is None
 
     wait_for('real VPN ICMP', ping, 40)
+
     def native_ids():
         rows = json.loads(run('sudo', 'occtl', '--json', 'show', 'users'))
         return [str(row['ID']) for row in rows if row['Username'] == 'business-test-vpn-user']

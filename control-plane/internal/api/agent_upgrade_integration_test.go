@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
@@ -161,7 +161,7 @@ func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
 	// The approval is created through the approval surface bound to exactly
 	// the server-resolved release identity.
 	approvalID := uuid.Must(uuid.NewV7())
-	approvalHash, approvalSummary := approvalstore.AgentUpgradeBinding(nodeID, "2.0.0", trustedDigest, "amd64")
+	approvalHash, approvalSummary := approvals.AgentUpgradeBinding(nodeID, "2.0.0", trustedDigest, "amd64")
 	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.upgrade','node',$4,'api integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)`, approvalID, workspaceID, operatorID, nodeID, approverID, approvalHash, approvalSummary); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 
 	// The approval is bound to the canonical sorted request: target version,
 	// sorted node set, batch size two, stop-on-failure.
-	requestHash, requestSummary := approvalstore.AgentRolloutBinding("2.0.0", requested, 2, true)
+	requestHash, requestSummary := approvals.AgentRolloutBinding("2.0.0", requested, 2, true)
 	approvalID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, "INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.rollout','batch_operation',$4,'fleet rollout integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)", approvalID, workspaceID, operatorID, rolloutID, approverID, requestHash, requestSummary); err != nil {
 		t.Fatal(err)
@@ -675,7 +675,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 
 	createApprovedRollout := func(id uuid.UUID, key string, batchSize int) uuid.UUID {
 		t.Helper()
-		hash, summary := approvalstore.AgentRolloutBinding("2.0.0", nodeIDs, batchSize, true)
+		hash, summary := approvals.AgentRolloutBinding("2.0.0", nodeIDs, batchSize, true)
 		approvalID := uuid.Must(uuid.NewV7())
 		if _, err := pool.Exec(ctx, "INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.rollout','batch_operation',$4,'fleet rollout integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)", approvalID, workspaceID, operatorID, id, approverID, hash, summary); err != nil {
 			t.Fatal(err)

@@ -43,7 +43,7 @@ jobs:
       - name: Build current-source native Agent package and adapter tests
         env:
           PACKAGE_ARCH: ${{ matrix.arch }}
-          OUTPUT_DIR: ${{ runner.temp }}/p3-products
+          OUTPUT_DIR: ${{ runner.temp }}/native-platform-products
           VERSION: 0.0.0
         run: |
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
@@ -66,18 +66,18 @@ jobs:
             *) exit 2 ;;
           esac
           bash scripts/release-native-platform-smoke.sh host "$distro" "$PLATFORM_ARCH" \
-            "$RUNNER_TEMP/p3-evidence" "$NATIVE_OCSERV_TEST_BINARY" "$RUNNER_TEMP/p3-products"
+            "$RUNNER_TEMP/native-platform-evidence" "$NATIVE_OCSERV_TEST_BINARY" "$RUNNER_TEMP/native-platform-products"
       - name: Preserve bounded platform evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: native-platform-${{ inputs.purpose }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/p3-evidence/*.json
-            ${{ runner.temp }}/p3-evidence/*.txt
-            ${{ runner.temp }}/p3-evidence/SHA256SUMS
-            ${{ runner.temp }}/p3-evidence/runtime.log
-            ${{ runner.temp }}/p3-evidence/native-ocserv/
+            ${{ runner.temp }}/native-platform-evidence/*.json
+            ${{ runner.temp }}/native-platform-evidence/*.txt
+            ${{ runner.temp }}/native-platform-evidence/SHA256SUMS
+            ${{ runner.temp }}/native-platform-evidence/runtime.log
+            ${{ runner.temp }}/native-platform-evidence/native-ocserv/
           if-no-files-found: error
           retention-days: 7
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6

@@ -293,6 +293,7 @@ def recovery():
                         headers={'Idempotency-Key': secrets.token_hex(16),
                                  'If-Match': f'"revision-{api.api("nodes/" + node)["version"]}"',
                                  'X-Approval-ID': approval}, status=202)
+
     def completed():
         result = api.api('operations/' + operation['id'])
         assert result['state'] not in ('failed', 'expired', 'cancelled', 'unknown'), result['state']

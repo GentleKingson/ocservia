@@ -37,17 +37,17 @@ class RetentionTests(unittest.TestCase):
             self.patches.append(p)
         os.chown(r.AGENT_STATE, 1000, 1000)
         self.account = types.SimpleNamespace(pw_uid=1000, pw_gid=1000)
-        self.source = dict(node='018f0c2e-7b1a-7c3d-8e9f-0123456789ab', controller='11'*32,
-                           endpoint='22'*32, key='33'*32, blocked=False,
+        self.source = dict(node='018f0c2e-7b1a-7c3d-8e9f-0123456789ab', controller='11' * 32,
+                           endpoint='22' * 32, key='33' * 32, blocked=False,
                            identity=str(r.AGENT_STATE / 'identity'), journal=str(r.AGENT_STATE / 'agent.db'),
                            effects=str(r.PRIVD_STATE / 'desired-effects.sqlite3'))
         self.operation = r.STATE / str(uuid.uuid4())
         self.operation.mkdir(mode=0o700)
         self.now = int(time.time())
         self.state = dict(id=self.operation.name, phase='verified', source=self.source,
-                          node='018f0c2e-7b1a-7c3d-8e9f-0123456789ac', controller='44'*32, key='55'*32,
+                          node='018f0c2e-7b1a-7c3d-8e9f-0123456789ac', controller='44' * 32, key='55' * 32,
                           record_hex='aa', source_disposition='unreachable', mutations_blocked=False,
-                          verified_at=self.now-400*86400, reason='old detail', token_hash='token hash')
+                          verified_at=self.now - 400 * 86400, reason='old detail', token_hash='token hash')
         self.active = dict(node=self.state['node'], endpoint=self.source['endpoint'])
         r.atomic_write(self.operation / 'token', b'old-token')
         with closing(sqlite3.connect(self.source['effects'])) as db, db:
@@ -65,9 +65,9 @@ INSERT INTO agent_metadata VALUES('owner_fence_floor',x'00000009');
 ''')
             for i in range(35):
                 key = i.to_bytes(16, 'big')
-                db.execute('INSERT INTO command_journal VALUES(?,?,?,?,?,?,?,?)', (key,key,b'h'*32,'succeeded',b'verbose',None,None,1))
-                db.execute('INSERT INTO synthetic_effects VALUES(?,?,?)', (key,b'h'*32,b'verbose'))
-            db.execute('INSERT INTO command_journal VALUES(?,?,?,?,?,?,?,?)', (b'p'*16,b'p'*16,b'h'*32,'succeeded',b'privileged-result',None,b'proof',1))
+                db.execute('INSERT INTO command_journal VALUES(?,?,?,?,?,?,?,?)', (key, key, b'h' * 32, 'succeeded', b'verbose', None, None, 1))
+                db.execute('INSERT INTO synthetic_effects VALUES(?,?,?)', (key, b'h' * 32, b'verbose'))
+            db.execute('INSERT INTO command_journal VALUES(?,?,?,?,?,?,?,?)', (b'p' * 16, b'p' * 16, b'h' * 32, 'succeeded', b'privileged-result', None, b'proof', 1))
         os.chown(self.database, 1000, 1000)
         os.chmod(self.database, 0o600)
 
@@ -110,9 +110,9 @@ INSERT INTO agent_metadata VALUES('owner_fence_floor',x'00000009');
         self.assertTrue((self.operation / 'token').exists())
 
     def test_unresolved_journal_and_foreign_authority_are_not_compacted(self):
-        for state, error in [('accepted', None), ('running', None), ('unknown', None), ('failed','manual_reconciliation_required')]:
+        for state, error in [('accepted', None), ('running', None), ('unknown', None), ('failed', 'manual_reconciliation_required')]:
             with closing(sqlite3.connect(self.database)) as db, db:
-                db.execute('UPDATE command_journal SET state=?,error_code=? WHERE idempotency_key=?', (state,error,bytes(16)))
+                db.execute('UPDATE command_journal SET state=?,error_code=? WHERE idempotency_key=?', (state, error, bytes(16)))
             with self.assertRaises(subprocess.CalledProcessError):
                 self.retain()
         with closing(sqlite3.connect(self.database)) as db, db:
@@ -138,13 +138,13 @@ INSERT INTO agent_metadata VALUES('owner_fence_floor',x'00000009');
             self.retain()
 
     def test_defaults_ranges_and_invalid_configuration(self):
-        self.assertEqual(m.policy(), (30,365))
+        self.assertEqual(m.policy(), (30, 365))
         for content in (b'OCSERV_AGENT_RETIRED_BINDING_RETENTION_DAYS=0', b'OCSERV_REBIND_HISTORY_RETENTION_DAYS=89', b'UNKNOWN=30'):
             r.atomic_write(r.CONF / 'retention.env', content)
             with self.assertRaises(RuntimeError):
                 m.policy()
         r.atomic_write(r.CONF / 'retention.env', b'OCSERV_AGENT_RETIRED_BINDING_RETENTION_DAYS=7\nOCSERV_REBIND_HISTORY_RETENTION_DAYS=2555\n')
-        self.assertEqual(m.policy(), (7,2555))
+        self.assertEqual(m.policy(), (7, 2555))
 
 
 if __name__ == '__main__':

@@ -217,7 +217,6 @@ async fn handle_client(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 async fn dispatch_attested(
     request: &PrivdRequest,
     node_id: &[u8; 16],
