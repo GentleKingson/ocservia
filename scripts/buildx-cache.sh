@@ -4,8 +4,8 @@
 # BUILD_CACHE_STRICT_EXPORT=true switches to the provisioner semantics: the
 # solve's only purpose is to write the external cache, so it requires
 # available cache credentials, drops the tolerant exporter, and never falls
-# back to a cache-less retry — a build failure or an unfinished export fails
-# the solve, so green means the cache export completed. BUILD_CACHE_TIMEOUT
+# back to a cache-less retry. It retries a failed solve once with the same
+# arguments; green still means the cache export completed. BUILD_CACHE_TIMEOUT
 # overrides the bounded per-command cache timeout (default 60s).
 set -euo pipefail
 
@@ -66,22 +66,33 @@ mkdir -p "${log_dir}"
 log_file="${log_dir}/${log_name}.log"
 failure_marker="${log_dir}/cache-disabled"
 
-# The provisioner path: one strict attempt, no tolerant exporter, no
-# cache-less fallback. Exiting with the solve status is the point — a
-# non-zero status means the cache was not provisioned.
+# The provisioner retries the same strict solve once, keeping the builder's
+# local layers and requiring a completed export. Docker's exit code does not
+# distinguish transient export errors from build errors, so either can retry.
 if [[ "${strict_export}" == true ]]; then
   if [[ -e "${failure_marker}" ]]; then
     echo "::error::strict cache export refused: an earlier solve in this job disabled the external cache" >&2
     exit 1
   fi
-  set +e
-  docker buildx build "${cache_args[@]}" "$@" 2>&1 | tee "${log_file}"
-  strict_status="${PIPESTATUS[0]}"
-  set -e
-  if [[ "${strict_status}" -ne 0 ]]; then
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  : >"${log_file}"
+  for attempt in 1 2; do
+    printf 'strict cache export attempt %s/2\n' "${attempt}" | tee -a "${log_file}"
+    set +e
+    docker buildx build "${cache_args[@]}" "$@" 2>&1 | tee -a "${log_file}"
+    strict_status="${PIPESTATUS[0]}"
+    set -e
+    if [[ "${strict_status}" -eq 0 ]]; then exit 0; fi
     printf 'strict cache export solve failed with status %s; a completed cache export is required\n' \
       "${strict_status}" >>"${log_file}"
-  fi
+    # Do not retry interrupted/killed solves, including cancellation by CI.
+    case "${strict_status}" in 130|137|143) exit "${strict_status}" ;; esac
+    if [[ "${attempt}" == 1 ]]; then
+      echo "::warning::Strict cache solve failed for ${log_name}; retrying once with the same cache settings in 10s" | tee -a "${log_file}"
+      sleep 10
+    fi
+  done
   exit "${strict_status}"
 fi
 
