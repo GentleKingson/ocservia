@@ -18,6 +18,14 @@ log_file="${BUILD_FAKE_DOCKER_LOG:?BUILD_FAKE_DOCKER_LOG is required}"
 printf '%s\n' "$*" >>"${log_file}"
 if [[ "${1:-} ${2:-}" == 'buildx create' ]]; then exit 0; fi
 [[ "${1:-}" == buildx && "${2:-}" == build ]] || exit 64
+if [[ -n "${BUILD_FAKE_STATUSES:-}" ]]; then
+  read -r -a statuses <<<"${BUILD_FAKE_STATUSES}"
+  attempt="$(wc -l <"${log_file}")"
+  status="${statuses[attempt-1]:-99}"
+  echo "simulated solve attempt ${attempt}: status ${status}"
+  if [[ -n "${BUILD_FAKE_SOLVE_SIGNAL:-}" ]]; then kill -s "${BUILD_FAKE_SOLVE_SIGNAL}" "${PPID}"; fi
+  exit "${status}"
+fi
 if [[ "${BUILD_FAKE_IMPORT_OK:-false}" != true ]] && [[ " $* " == *" --cache-from "* ]]; then
   echo "simulated cache importer failure" >&2
   exit 23
@@ -39,6 +47,16 @@ for arg in "$@"; do
 done
 DOCKER
 chmod 0755 "${fake_bin}/docker"
+
+# Keep backoff deterministic and fast, while asserting the production delay.
+cat >"${fake_bin}/sleep" <<'SLEEP'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == 10 ]] || exit 64
+printf '%s\n' "$*" >>"${BUILD_FAKE_DOCKER_LOG}.sleep"
+if [[ -n "${BUILD_FAKE_SLEEP_SIGNAL:-}" ]]; then kill -s "${BUILD_FAKE_SLEEP_SIGNAL}" "${PPID}"; fi
+SLEEP
+chmod 0755 "${fake_bin}/sleep"
 
 docker_log="${test_dir}/docker.log"
 PATH="${fake_bin}:${PATH}" \
@@ -175,8 +193,8 @@ if PATH="${fake_bin}:${PATH}" \
   echo "a failed strict cache export must fail the solve" >&2
   exit 1
 fi
-[[ "$(wc -l <"${strict_export_log}" | tr -d '[:space:]')" == 1 ]] || {
-  echo "the strict exporter must not fall back to a cache-less retry" >&2
+[[ "$(wc -l <"${strict_export_log}" | tr -d '[:space:]')" == 2 ]] || {
+  echo "the strict exporter must retry once with external cache still enabled" >&2
   exit 1
 }
 strict_export_invocation="$(sed -n '1p' "${strict_export_log}")"
@@ -184,6 +202,45 @@ strict_export_invocation="$(sed -n '1p' "${strict_export_log}")"
   echo "the strict exporter must carry the configured timeout without ignore-error" >&2
   exit 1
 }
+[[ "$(sed -n '2p' "${strict_export_log}")" == "${strict_export_invocation}" ]]
+[[ "$(cat "${strict_export_log}.sleep")" == 10 ]]
+
+# The last Docker status is authoritative; signals stop both the solve and backoff.
+for scenario in transient persistent interrupted killed terminated solve-int solve-term backoff-int backoff-term; do
+  statuses='31 0'; expected_status=0; calls=2; waits=1
+  solve_signal=''; sleep_signal=''
+  case "${scenario}" in
+    persistent) statuses='31 29'; expected_status=29 ;;
+    interrupted) statuses=130; expected_status=130; calls=1; waits=0 ;;
+    killed) statuses=137; expected_status=137; calls=1; waits=0 ;;
+    terminated) statuses=143; expected_status=143; calls=1; waits=0 ;;
+    solve-int) statuses=0; solve_signal=INT; expected_status=130; calls=1; waits=0 ;;
+    solve-term) statuses=0; solve_signal=TERM; expected_status=143; calls=1; waits=0 ;;
+    backoff-int) sleep_signal=INT; expected_status=130; calls=1 ;;
+    backoff-term) sleep_signal=TERM; expected_status=143; calls=1 ;;
+  esac
+  log="${test_dir}/strict-${scenario}.log"
+  evidence="${test_dir}/strict-${scenario}"
+  status=0
+  PATH="${fake_bin}:${PATH}" BUILD_CACHE_AVAILABLE=true BUILD_CACHE_STRICT_EXPORT=true \
+    BUILD_CACHE_FAILURE_DIR="${evidence}" BUILD_FAKE_DOCKER_LOG="${log}" \
+    BUILD_FAKE_STATUSES="${statuses}" BUILD_FAKE_SOLVE_SIGNAL="${solve_signal}" \
+    BUILD_FAKE_SLEEP_SIGNAL="${sleep_signal}" \
+    bash "${ROOT}/scripts/buildx-cache.sh" test-control true "${scenario}" \
+      --builder same-builder --output type=cacheonly --file 'path with spaces/Dockerfile' . \
+      >"${test_dir}/${scenario}.out" 2>&1 || status=$?
+  [[ "${status}" == "${expected_status}" && "$(wc -l <"${log}")" -eq "${calls}" ]] || {
+    cat "${test_dir}/${scenario}.out" >&2
+    echo "wrong strict retry outcome for ${scenario}: status=${status}" >&2; exit 1
+  }
+  if ((waits)); then [[ "$(cat "${log}.sleep")" == 10 ]]; else test ! -e "${log}.sleep"; fi
+  test ! -e "${evidence}/cache-disabled"
+  if ((calls == 2)); then
+    [[ "$(sed -n '1p' "${log}")" == "$(sed -n '2p' "${log}")" ]]
+    grep -Fq 'simulated solve attempt 1: status 31' "${evidence}/${scenario}.log"
+    grep -Fq "simulated solve attempt 2: status ${expected_status}" "${evidence}/${scenario}.log"
+  fi
+done
 
 strict_ok_log="${test_dir}/strict-ok.log"
 mkdir -p "${test_dir}/cache-failures-strict-ok"
@@ -201,6 +258,7 @@ PATH="${fake_bin}:${PATH}" \
   echo "a successful strict export must be a single solve" >&2
   exit 1
 }
+test ! -e "${strict_ok_log}.sleep"
 strict_ok_invocation="$(sed -n '1p' "${strict_ok_log}")"
 [[ "${strict_ok_invocation}" == *"--cache-to type=gha,scope=test-rust-runtime,mode=max,timeout=60s,version=2"* ]] || {
   echo "the strict exporter must default to the 60s cache timeout" >&2
