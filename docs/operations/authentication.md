@@ -313,8 +313,8 @@ a Quick host, because Quick reruns accept an already-initialized database.
    receipts or the fixed `v1.2.0` checkpoint at epoch 1 / revision 0; older
    databases must upgrade to `v1.2.0` first). Confirm that the migration
    process logged `database migrations complete` and exited cleanly, and that
-   the Controller is ready. Run the remaining commands from the installed
-   release checkout with the same effective exported production settings and
+   the Controller is ready. Run the remaining commands from the retained
+   release runtime with the same effective exported production settings and
    verified image digests; in Integrated mode, run `compose.sh` as root with
    the Integrated environment exported.
 2. Obtain the UUIDv7 of the management workspace. `--bootstrap-local-admin`
@@ -782,7 +782,6 @@ rules follow the
 The identity model, session revocation and Local user lifecycle rules are in
 [Local authentication core](../reference/stable-contracts.md#local-authentication-core)
 and [Local initialization and lifecycle](../reference/stable-contracts.md#local-initialization-and-lifecycle).
-The endpoints are listed below.
 
 ### Local user lifecycle endpoints
 

@@ -195,7 +195,7 @@ nor world-writable. Point the Controller at its private key via
 `--controller-command-key-file` flags to both the Agent and privd. In
 production, startup aborts if either verifier is missing a configured key or if
 the key file's type, ownership, permissions, hardlink count, symlink status, or
-parent directory ancestry is unsafe. Privd additionally checks its locally
+parent directory ancestry is unsafe. Privd also checks its locally
 configured node UUID and rejects valid proofs addressed to any other node.
 
 To rotate the signing key, distribute the new public key to every Agent and

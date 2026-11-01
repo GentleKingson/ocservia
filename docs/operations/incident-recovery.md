@@ -449,7 +449,6 @@ only from files and are never accepted on the command line or printed to logs.
 The rules for `Unknown` operations are in the
 [Matched-release recovery boundary](../reference/stable-contracts.md#matched-release-recovery-boundary)
 and [Controlled session and service operations](../reference/stable-contracts.md#controlled-session-and-service-operations).
-Use them with the steps below.
 
 1. Stop affected writers and command dispatch, and pause conflicting writes to
    the affected node or resource while an operation is `Unknown`. Stop new
@@ -848,7 +847,6 @@ The steps for moving a node to another Controller are in
 and the retention settings are in
 [Independent local retention](agent-lifecycle.md#independent-local-retention).
 The invariants are in [Controller rebind](../reference/stable-contracts.md#controller-rebind).
-This section lists what rebind does not recover.
 
 Rebinding is not a database recovery path: restore a lost Controller database
 with the [database procedure](#database-recovery). Recovery never resets node

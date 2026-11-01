@@ -28,6 +28,9 @@ compatibility-policy reset in v1.1.0 described below.
   ACME TLS, generated protected material and separate initial Local admin
   and approver accounts. Manual installation remains available.
 - Add Integrated ACME for distinct Controller and Relay DNS names.
+- Install the Controller and managed nodes from version-stamped GitHub Release
+  assets without Git or a source checkout, with an interactive TTY wizard by
+  default and `--non-interactive --config` for automation.
 
 ### Breaking changes and upgrade notes
 
@@ -41,6 +44,11 @@ compatibility-policy reset in v1.1.0 described below.
   [database migration contract](docs/reference/stable-contracts.md#database).
 - Require `OCSERV_CONTROLLER_ENDPOINT_ID` for normal production Controller
   startup; database-only one-shot commands remain exempt.
+- Rename the OpenTelemetry instrumentation scope `ocservia.localslice` to
+  `ocservia.transportevents` and its `local_slice.*` spans to
+  `transport.event.ingest`, `development.simulation.queue` and
+  `development.simulation.dispatch`. Update collector filters, queries and
+  alerts when deploying.
 
 ### Security
 
@@ -51,9 +59,11 @@ compatibility-policy reset in v1.1.0 described below.
   RUSTSEC-2026-0349.
 - Enforce Content Security Policy in Standalone and Integrated gateways,
   including gateway error responses.
-- Update Go to 1.26.9, Controller `x/net` to v0.60.0 and affected Vue,
+- Update Go to 1.26.10, Controller `x/net` to v0.60.0 and affected Vue,
   source-map and Vite dependencies for published advisories. Go vulnerability
   scanning now covers both Controller and Signer modules.
+- Update the PostgreSQL backup image's libsasl2 packages and pin the Web
+  build's `minimatch` to 11.0.3 for published advisories.
 
 ### Fixed
 

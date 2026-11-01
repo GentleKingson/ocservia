@@ -240,7 +240,7 @@ A `403` means the caller lacks authorization; `400` means the request was reject
 
    ```bash
    export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
-   ./install.sh --version vX.Y.Z
+   bash install.sh --non-interactive --version vX.Y.Z
    ```
 
    The token source must be a non-empty regular file (never a symlink) with no group or world permissions, and you must also supply the Controller, Relay, and command-key inputs listed under [Prepare the node configuration](#prepare-the-node-configuration).
@@ -465,7 +465,7 @@ Node revocation follows the same independent two-principal approval pattern as a
 
 ## Configuration and TLS operations
 
-The rules for plans, hashes, revisions and node TLS are in [Configuration and node TLS](../reference/stable-contracts.md#configuration-and-node-tls). This section covers the operator steps.
+The rules for plans, hashes, revisions and node TLS are in [Configuration and node TLS](../reference/stable-contracts.md#configuration-and-node-tls).
 
 ### Plan and apply a configuration
 
