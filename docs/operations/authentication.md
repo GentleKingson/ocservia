@@ -782,7 +782,6 @@ rules follow the
 The identity model, session revocation and Local user lifecycle rules are in
 [Local authentication core](../reference/stable-contracts.md#local-authentication-core)
 and [Local initialization and lifecycle](../reference/stable-contracts.md#local-initialization-and-lifecycle).
-The endpoints are listed below.
 
 ### Local user lifecycle endpoints
 

@@ -702,15 +702,14 @@ node. If the Controller returns `Revocation committed` with HTTP 503, follow
 
 ### Integrated configuration
 
-Use the existing bootstrap, `install.sh`, `controller.sh` and `compose.sh`,
-not a second installer. Standalone remains the default. Integrated requires a
+Integrated mode uses the same bootstrap, `install.sh`, `controller.sh` and
+`compose.sh` as Standalone, which remains the default. Integrated requires a
 v2 platform manifest, Compose >= 2.24.4, and these additional `install.env`
 settings alongside the normal database, authentication and Controller Secrets.
-This section is the manual path: you write `install.env` and prepare every
-file below. Quick mode generates this configuration and the protected
+In a manual installation you write `install.env` and prepare every file below
+yourself. Quick mode generates this configuration and the protected
 Controller and Signer material for a new host (see [Quick mode](#quick-mode)
-and [Quick install materials](#quick-install-materials)), so only the manual
-path needs the file preparation described here. Manual installs may use any
+and [Quick install materials](#quick-install-materials)). Manual installs may use any
 supported database and login mode, and either TLS mode.
 
 ```dotenv
@@ -731,8 +730,8 @@ rejected before host bootstrap; standalone launcher behavior is unchanged.
 Set `OCSERV_PUBLIC_HOST` to a distinct lowercase Controller DNS name. Omit
 `OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` and `OCSERV_CERTIFICATE_SIGNER_URL`:
 the launcher derives one Relay URL and `https://signer:9443/sign`. Conflicting
-values are rejected, and `OCSERV_RELAY_URL_B` must be empty: exactly one Relay is
-supported, not a redundant pair. Controller's trusted proxy must remain the
+values are rejected, and `OCSERV_RELAY_URL_B` must be empty because only one
+Relay is supported. Controller's trusted proxy must remain the
 Gateway's application `/32`, not Edge or an entire subnet.
 
 By default (`OCSERV_TLS_MODE=manual`) certificates are provisioned externally;
@@ -1599,7 +1598,7 @@ The repository maintains two bootstrap launchers:
 - `deploy/bootstrap/install-controller`
 - `deploy/bootstrap/install-node`
 
-The standard installation uses fixed GitHub Release assets directly. Operators may additionally host exact copies of the version-stamped `install-controller`, `install-node` and `install.env.example` assets from a deliberately selected stable Release. Example `get.ocservia.example` endpoints below are placeholders, active only when deployed by an operator. Do not resolve a Release dynamically from `latest` or a branch.
+The standard installation uses fixed GitHub Release assets directly. Operators may also host exact copies of the version-stamped `install-controller`, `install-node` and `install.env.example` assets from a deliberately selected stable Release. Example `get.ocservia.example` endpoints below are placeholders, active only when deployed by an operator. Do not resolve a Release dynamically from `latest` or a branch.
 
 ### Hosting requirements
 
@@ -1648,7 +1647,7 @@ the bootstrap launcher imposes no additional OpenSSL version requirement.
 Operators should download the bootstrap launcher locally, inspect its contents, and invoke it
 with its stamped release or an explicit exact version tag. Never resolve the version dynamically from
 `latest`, a branch name, or a commit hash; the only permitted default version
-is the exact release tag stamped into that Release’s own scripts.
+is the exact release tag stamped into that Release's own scripts.
 
 ### Intended entrypoints
 

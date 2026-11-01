@@ -169,7 +169,7 @@ hash because it governs recovery flow and leaves the command's target side
 effect unchanged.
 
 Desired user, group, and configuration mutations enforce independent durable
-resource-revision fences, and `ConfigApply` additionally checks privd's
+resource-revision fences, and `ConfigApply` also checks privd's
 root-owned prepared, applied, or absent effect record. Reconciliation can
 reconstruct a lost Agent journal entry only from an exact durable effect
 identity in privd; a matching current configuration file hash by itself never
@@ -1357,8 +1357,6 @@ Each database engine maintains two active SQL files: `schema.sql` and `upgrade.s
 
 Migration admission, meaning the full SQL checksum and receipt verification, runs only in the owner `--migrate-only` entry point (or the test and development-only `ocserv-db-foundation` tool). Normal Controller startup without `--migrate-only` verifies audit authenticity and checks required telemetry objects and runtime privileges. It does not check receipts, checksums, or schema drift. The `/readyz` endpoint executes a zero-row read against core tables (workspaces, nodes, operations) and checks event-stream health, without reading `schema_revisions`. A passing `/readyz` response therefore indicates runtime connectivity and is not evidence of schema identity.
 
-The format of these files is specified in the next section.
-
 ### SQL artifact format 1
 
 The parser recognizes whole-line `-- ocservia:` markers at column zero. Files
@@ -1429,7 +1427,7 @@ declared checkpoint and end with `-- ocservia:end-transition`. The reference
 must be fixed by the release process; parsing it does not establish trust in
 that release or a database.
 
-Executors additionally require `previous-checkpoint-receipt` to pin the exact
+Executors also require `previous-checkpoint-receipt` to pin the exact
 journal checksum, step count, and necessary backend schema verification metadata
 at that checkpoint. A syntactically valid release reference is insufficient.
 
