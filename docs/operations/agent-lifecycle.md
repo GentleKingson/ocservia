@@ -240,7 +240,7 @@ A `403` means the caller lacks authorization; `400` means the request was reject
 
    ```bash
    export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
-   ./install.sh --version vX.Y.Z
+   bash install.sh --non-interactive --version vX.Y.Z
    ```
 
    The token source must be a non-empty regular file (never a symlink) with no group or world permissions, and you must also supply the Controller, Relay, and command-key inputs listed under [Prepare the node configuration](#prepare-the-node-configuration).

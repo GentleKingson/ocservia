@@ -396,7 +396,8 @@ login modes. Quick mode configures Local only.
 Keep `install.env` restricted to the operator account and out of version
 control. The installer parses it as a strict key-value allowlist. It is data,
 not a shell script, so do not `source` it. During a manual installation, the
-installer loads `./install.env` from its working directory, and explicit
+installer loads `./install.env` from its working directory (or the file named by
+`--config`), and explicit
 exported settings (including empty values) override that file. Quick mode
 ignores `./install.env` and writes its own `/etc/ocservia/install.env`.
 Subsequent lifecycle and Compose commands do not reload either file. They
@@ -666,7 +667,8 @@ mutations before modifying sealing-key mappings. The rules this transfer
 enforces are in
 [Trusted public-key transfer](../reference/stable-contracts.md#trusted-public-key-transfer).
 
-1. On the managed node, run `scripts/export-node-sealing-keys.py` as root with
+1. On the managed node, run `scripts/export-node-sealing-keys.py` from the same
+   release tag (the node package does not ship it) as root with
    `--node`, `--endpoint`, `--user-key`, `--user-key-id`, `--p12-key`, and
    `--p12-key-id`. The script derives the exact OpenSSL RSA public SPKI DER
    checked by privd at startup without exporting private keys. Set `umask 077`
@@ -910,7 +912,7 @@ directory). Passing `--quick` implies `--root-lifecycle`. Quick-specific flags
 are rejected unless `--quick` is set, and the node bootstrap launcher script rejects all
 of them.
 
-When `--version` is omitted under `--quick`, the launcher falls back to the
+When `--version` is omitted (with or without `--quick`), the launcher falls back to the
 `DEFAULT_VERSION` value stamped into the Release asset by
 `scripts/prepare-bootstrap-release-assets.sh` (an unstamped copy from Git
 leaves `DEFAULT_VERSION` empty and therefore still requires `--version`).
@@ -1644,7 +1646,7 @@ keys, fingerprints, signed checksum manifests, or detached signatures, and
 the bootstrap launcher imposes no additional OpenSSL version requirement.
 
 Operators should download the bootstrap launcher locally, inspect its contents, and invoke it
-with an explicit version tag. Never resolve the version dynamically from
+with its stamped release or an explicit exact version tag. Never resolve the version dynamically from
 `latest`, a branch name, or a commit hash; the only permitted default version
 is the exact release tag stamped into that Release’s own scripts.
 

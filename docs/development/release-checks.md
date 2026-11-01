@@ -81,8 +81,8 @@ are in [Web validation](#web-validation).
 
 Use `make verify` when a change spans multiple modules and needs a full local
 baseline, not for small single-module edits. `make verify` (`scripts/verify.sh`)
-runs `scripts/lint.sh common` (ShellCheck, Buf, OpenAPI lint,
-`check-public-repository.sh`, `docs-check.sh`; source style also includes Ruff), the Buf breaking-change check,
+runs `scripts/lint.sh common` (ShellCheck, Ruff, Buf, OpenAPI lint,
+`check-public-repository.sh`, `docs-check.sh`), the Buf breaking-change check,
 `go-check.sh` in full mode, `rust-check.sh`, the transport and Agent boundary
 checks, `web-check.sh` in full mode, the policy and toolchain self-tests,
 `security-check.sh` (Gitleaks), `license-check.sh`, the generated-code checks,
@@ -708,8 +708,10 @@ RUN_ID=local-mysql ARTIFACT_DIR="$PWD/.cache/recovery-mysql" ENGINE=mysql bash s
 ```
 
 With authorization to trigger remote workflows, run the candidate branch with
-`gh workflow run ci.yml --ref <candidate-branch> -f profile=full` (or
-`profile=quick`) and record the candidate SHA, cache state and per-job timings.
+`gh workflow run ci.yml --ref <candidate-branch> -f profile=full -f contract_base_ref=<base-commit>`
+(or `profile=quick`; the baseline must differ from the candidate, see
+[Path routing](#path-routing)) and record the candidate SHA, cache state and
+per-job timings.
 
 ## Business validation
 
@@ -1588,7 +1590,7 @@ PR -> Basic CI -> merge main
 
 On pull requests, `Basic CI Result` remains the required check. Once changes
 merge to `main`, an operator triggers Release Check manually via
-`workflow_dispatch`. Every required job must pass; a failure, cancellation or
+`workflow_dispatch` with the required `contract_base_ref`. Every required job must pass; a failure, cancellation or
 unexpected skip blocks qualification. Each run executes from scratch, without
 inheriting earlier results or nominating a persistent candidate. Full CI inside
 Release Check is the Basic CI Full profile (see [Basic CI](#basic-ci)), not
