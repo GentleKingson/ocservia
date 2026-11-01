@@ -19,7 +19,7 @@ defineProps<{
     :aria-label="title"
     class="bg-card border-border text-card-foreground hover:border-primary/50 focus-visible:ring-ring flex min-w-0 flex-col gap-3 rounded-xl border p-5 no-underline shadow-xs motion-safe:transition-[border-color,box-shadow] hover:shadow-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
   >
-    <div class="flex items-start justify-between gap-3">
+    <div class="flex flex-wrap items-start justify-between gap-3">
       <h2 class="text-muted-foreground m-0 text-sm font-medium">
         {{ title }}
       </h2>
