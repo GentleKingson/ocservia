@@ -86,7 +86,7 @@ function focusMainContent(): void {
   <div
     v-if="reloadableNavigation"
     role="alert"
-    class="bg-background fixed inset-x-4 bottom-4 z-50 flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm shadow-md md:left-auto md:max-w-md"
+    class="glass border-border fixed inset-x-4 bottom-4 z-50 flex flex-wrap items-center gap-2 rounded-xl border p-3 text-sm shadow-lg md:left-auto md:max-w-md"
     data-testid="navigation-reload"
   >
     <p class="m-0 min-w-0 flex-1">{{ $t("pageLoadFailed") }}</p>
@@ -112,11 +112,13 @@ function focusMainContent(): void {
       @click.prevent="focusMainContent"
       >{{ $t("skipToContent") }}</a
     >
-    <aside class="sticky top-0 hidden h-screen md:block">
-      <AppSidebar />
+    <aside class="sticky top-0 hidden h-screen p-2 md:block">
+      <div class="glass border-border h-full rounded-xl border shadow-xs">
+        <AppSidebar />
+      </div>
     </aside>
     <div
-      class="bg-card min-h-screen min-w-0 md:m-2 md:ml-0 md:min-h-[calc(100vh-1rem)] md:rounded-xl md:shadow-xs"
+      class="bg-card min-h-screen min-w-0 md:m-2 md:ml-0 md:min-h-[calc(100vh-1rem)] md:rounded-xl md:border md:border-border md:shadow-xs"
     >
       <AppHeader
         :workspace-id="selectedWorkspaceId"

@@ -20,7 +20,7 @@ const footerLinks = computed(() =>
   <div class="text-sidebar-foreground flex h-full flex-col gap-3 p-3">
     <div class="flex h-12 items-center gap-2.5 px-2 text-sm font-semibold">
       <span
-        class="bg-primary text-primary-foreground flex size-8 items-center justify-center rounded-lg"
+        class="from-primary/80 to-primary text-primary-foreground flex size-8 items-center justify-center rounded-[9px] bg-linear-to-b shadow-xs"
       >
         <Activity class="size-4" stroke-width="2.4" aria-hidden="true" />
       </span>
@@ -45,13 +45,17 @@ const footerLinks = computed(() =>
               :aria-current="
                 isCurrentSection(link.to, route.path) ? 'page' : undefined
               "
-              class="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-ring aria-[current=page]:bg-sidebar-accent aria-[current=page]:text-sidebar-accent-foreground flex h-9 items-center gap-3 rounded-lg px-3 text-sm focus-visible:outline-2 focus-visible:outline-offset-1 aria-[current=page]:font-semibold"
+              class="hover:bg-foreground/5 focus-visible:outline-ring aria-[current=page]:bg-sidebar-accent aria-[current=page]:text-sidebar-accent-foreground flex h-9 items-center gap-3 rounded-lg px-3 text-sm focus-visible:outline-2 focus-visible:outline-offset-1 aria-[current=page]:font-semibold motion-safe:transition-colors"
               @click="
                 navigate($event);
                 emit('navigate');
               "
             >
-              <component :is="link.icon" class="size-4" aria-hidden="true" />
+              <component
+                :is="link.icon"
+                class="text-primary size-4"
+                aria-hidden="true"
+              />
               <span>{{ $t(link.label) }}</span>
             </a>
           </RouterLink>

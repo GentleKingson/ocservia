@@ -403,7 +403,7 @@ function openPolicy(username: string): void {
     <NodeDetailSkeleton v-if="detailLoading" />
     <div
       v-else-if="detailState === 'not-found'"
-      class="bg-card border-border text-muted-foreground grid min-h-56 place-content-center justify-items-center gap-2.5 rounded-lg border p-7 text-center text-sm"
+      class="bg-card border-border text-muted-foreground grid min-h-56 place-content-center justify-items-center gap-2.5 rounded-xl border p-7 text-center text-sm shadow-xs"
     >
       <Server class="size-6" aria-hidden="true" /><span>{{
         $t("nodeNotFound")

@@ -141,7 +141,7 @@ function restoreFocus(event: Event): void {
     ></span>
     <div
       data-testid="readiness"
-      class="inline-flex shrink-0 items-center gap-2 max-sm:ml-auto"
+      class="bg-muted text-foreground inline-flex h-7 shrink-0 items-center gap-2 rounded-full px-2.5 text-xs font-medium max-sm:ml-auto"
     >
       <span
         class="size-2 rounded-full"
