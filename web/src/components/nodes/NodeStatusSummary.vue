@@ -14,7 +14,7 @@ const relative = (value: string) =>
   relativeTimestamp(value, now.value.getTime(), locale.value);
 
 const tile =
-  "bg-card border-border grid min-w-0 grid-cols-1 content-start gap-1 rounded-xl border px-4 py-3";
+  "bg-card border-border grid min-w-0 grid-cols-1 content-start gap-1 rounded-xl border px-4 py-3 shadow-xs";
 const label = "text-muted-foreground text-xs";
 const value = "text-sm font-semibold wrap-anywhere";
 </script>

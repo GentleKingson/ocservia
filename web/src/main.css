@@ -75,6 +75,25 @@
 }
 
 /*
+ * Translucent material for the navigation layer and floating surfaces only;
+ * Apple's HIG keeps glass out of the content layer, so cards and tables stay
+ * solid. Opaque unless the browser can blur (Lightning CSS adds the Safari
+ * prefix for the 16.4 floor), and opaque again when the user asks for less
+ * transparency or more contrast.
+ */
+@utility glass {
+  background-color: var(--card);
+  @supports (backdrop-filter: blur(1px)) {
+    background-color: color-mix(in srgb, var(--card) 72%, transparent);
+    backdrop-filter: blur(20px) saturate(180%);
+  }
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    background-color: var(--card);
+    backdrop-filter: none;
+  }
+}
+
+/*
  * The subset of Preflight that components/ui relies on, scoped by the
  * `data-slot` marker every primitive renders. It also applies to content a
  * primitive teleports to <body>. Zero specificity keeps utilities in charge.

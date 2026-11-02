@@ -125,7 +125,7 @@ onBeforeUnmount(() => {
         </h2>
         <p
           v-if="fleet.snapshotAt"
-          class="text-muted-foreground m-0 text-xs"
+          class="text-muted-foreground m-0 text-xs tabular-nums"
           data-testid="overview-fleet-updated"
         >
           {{ $t("overviewUpdatedAt", { time: timeLabel(fleet.snapshotAt) }) }}
@@ -305,7 +305,7 @@ onBeforeUnmount(() => {
                 $t("notAvailable")
               }}</span>
               <time
-                class="text-muted-foreground text-xs"
+                class="text-muted-foreground text-xs tabular-nums"
                 :datetime="operation.updatedAt"
                 >{{ timeLabel(operation.updatedAt) }}</time
               >
@@ -373,7 +373,7 @@ onBeforeUnmount(() => {
               >
               <span v-else class="min-w-0 flex-1" />
               <time
-                class="text-muted-foreground text-xs"
+                class="text-muted-foreground text-xs tabular-nums"
                 :datetime="event.occurredAt"
                 >{{ timeLabel(event.occurredAt) }}</time
               >

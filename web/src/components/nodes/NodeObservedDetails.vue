@@ -31,7 +31,7 @@ const detail = "m-0 min-w-0 text-sm break-words";
 
 <template>
   <section
-    class="bg-card border-border @container mb-6 min-w-0 scroll-mt-4 rounded-xl border p-4 md:p-5"
+    class="bg-card border-border @container mb-6 min-w-0 scroll-mt-4 rounded-xl border p-4 shadow-xs md:p-5"
     aria-labelledby="node-overview-title"
   >
     <h2 id="node-overview-title" class="mb-3 text-base font-semibold">

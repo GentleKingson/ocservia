@@ -84,7 +84,7 @@ function timeLabel(value: string): string {
           },
         ]"
         :key="metric.label"
-        class="bg-card border-border flex items-start justify-between gap-3 rounded-lg border p-4"
+        class="bg-card border-border flex items-start justify-between gap-3 rounded-xl border p-4 shadow-xs"
       >
         <div class="grid gap-2">
           <span class="text-muted-foreground text-sm">{{

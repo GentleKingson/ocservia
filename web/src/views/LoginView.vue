@@ -111,8 +111,15 @@ onMounted(loadMethods);
       class="bg-card border-border w-full max-w-[400px] rounded-xl border p-6 shadow-xs"
       :aria-label="t('loginTitle')"
     >
-      <div class="text-primary flex items-center gap-2.5 text-xl font-semibold">
-        <Activity :size="24" aria-hidden="true" /><span>{{ t("brand") }}</span>
+      <div
+        class="text-foreground flex items-center gap-2.5 text-xl font-semibold"
+      >
+        <span
+          class="from-primary/80 to-primary text-primary-foreground flex size-9 items-center justify-center rounded-[10px] bg-linear-to-b shadow-xs"
+        >
+          <Activity class="size-5" stroke-width="2.4" aria-hidden="true" />
+        </span>
+        <span>{{ t("brand") }}</span>
       </div>
       <h1
         class="text-foreground mt-7 mb-6 text-2xl font-semibold tracking-tight"
@@ -138,7 +145,7 @@ onMounted(loadMethods);
         <Input
           id="login-username"
           v-model="username"
-          class="bg-card h-10"
+          class="h-10"
           name="username"
           autocomplete="username"
           required
@@ -148,7 +155,7 @@ onMounted(loadMethods);
         <Input
           id="login-password"
           v-model="password"
-          class="bg-card h-10"
+          class="h-10"
           name="password"
           type="password"
           autocomplete="current-password"

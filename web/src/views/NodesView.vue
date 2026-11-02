@@ -339,7 +339,7 @@ async function submitRollout(): Promise<void> {
         </p>
         <p
           v-if="fleet.nodes.length === 0"
-          class="bg-card border-border text-muted-foreground grid min-h-40 place-content-center rounded-lg border p-7 text-center text-sm"
+          class="bg-card border-border text-muted-foreground grid min-h-40 place-content-center rounded-xl border p-7 text-center text-sm shadow-xs"
         >
           {{ $t("noNodes") }}
         </p>
@@ -383,7 +383,7 @@ async function submitRollout(): Promise<void> {
           </div>
           <div
             v-if="visibleNodes.length === 0"
-            class="bg-card border-border text-muted-foreground grid min-h-40 place-content-center justify-items-center gap-3 rounded-lg border p-7 text-center text-sm"
+            class="bg-card border-border text-muted-foreground grid min-h-40 place-content-center justify-items-center gap-3 rounded-xl border p-7 text-center text-sm shadow-xs"
           >
             <p>{{ $t("noMatchingNodes") }}</p>
             <Button type="button" variant="outline" @click="clearFilters">
@@ -392,7 +392,7 @@ async function submitRollout(): Promise<void> {
           </div>
           <div
             v-else
-            class="bg-card border-border overflow-hidden rounded-xl border"
+            class="bg-card border-border overflow-hidden rounded-xl border shadow-xs"
           >
             <Table class="min-w-[48rem]">
               <TableHeader>
