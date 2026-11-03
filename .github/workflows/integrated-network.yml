@@ -59,7 +59,7 @@ jobs:
           python3 scripts/probe-integrated-public.py --address "${OCSERVIA_INTEGRATED_TEST_PUBLIC_ADDRESS}" \
             --mode "${PROBE_MODE}" --candidate-sha "${CANDIDATE_SHA}" \
             --output "${RUNNER_TEMP}/public-client/result.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: public-client-${{ matrix.runner }}-${{ github.run_id }}
@@ -94,7 +94,7 @@ jobs:
             --artifacts "${RUNNER_TEMP}/integrated-network"
       - name: Upload scoped evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: integrated-network-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/integrated-network/
