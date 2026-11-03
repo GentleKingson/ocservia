@@ -110,7 +110,7 @@ jobs:
           key: ${{ steps.agent-target-cache.outputs.cache-primary-key }}
       - name: Upload package set
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: agent-packages-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/packages/*
@@ -118,7 +118,7 @@ jobs:
           if-no-files-found: error
       - name: Upload native smoke diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: native-smoke-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -207,7 +207,7 @@ jobs:
         run: scripts/release-controller-image-smoke.sh
       - name: Upload Controller image archives
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: controller-images-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
