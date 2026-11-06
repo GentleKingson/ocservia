@@ -281,6 +281,7 @@ struct EndpointArgs {
     ///
     /// Has no effect unless `--relay-url` is also set.
     #[clap(long)]
+    #[serde(skip_serializing)]
     relay_auth_token: Option<String>,
     /// Disable relays completely.
     #[clap(long, conflicts_with = "relay_url")]
@@ -1368,5 +1369,44 @@ fn fmt_duration(d: Duration) -> impl fmt::Display {
         format!("{}ms", d.as_millis())
     } else {
         format!("{}µs", d.as_micros())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_args_json_omits_relay_auth_token() {
+        let token = "relay-token-canary-\"\\\n";
+        let args = EndpointArgs::try_parse_from([
+            "transfer",
+            "--relay-url",
+            "https://relay.example/",
+            "--relay-auth-token",
+            token,
+        ])
+        .unwrap();
+        let json = serde_json::to_value(Timestamped::now(&args)).unwrap();
+        assert!(json.get("relay_auth_token").is_none());
+        assert!(
+            !json
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|value| value == token)
+        );
+        assert_eq!(json["kind"], "EndpointArgs");
+        assert_eq!(
+            json["relay_url"],
+            serde_json::json!(["https://relay.example/"])
+        );
+        assert!(json["timestamp"].is_string());
+        assert_eq!(args.clone().relay_auth_token.as_deref(), Some(token));
+
+        let without_token = EndpointArgs::try_parse_from(["transfer"]).unwrap();
+        let json = serde_json::to_value(Timestamped::now(&without_token)).unwrap();
+        assert!(json.get("relay_auth_token").is_none());
+        assert!(without_token.relay_auth_token.is_none());
     }
 }

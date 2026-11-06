@@ -173,6 +173,21 @@ jobs:
         run: scripts/bootstrap.sh rust-basic
       - if: needs.ci-relevance.outputs.run_rust == 'true'
         run: scripts/rust-check.sh
+      - name: Vendored iroh security regressions
+        # Archive lock graph, not production evidence; see rust/vendor/iroh/OCSERVIA-PROVENANCE.md.
+        if: needs.ci-relevance.outputs.run_rust == 'true'
+        run: |
+          source scripts/env.sh
+          cd rust
+          cargo test --locked --manifest-path vendor/iroh/Cargo.toml \
+            --no-default-features --features metrics,tls-ring --lib address_lookup::pkarr::tests \
+            | tee "${RUNNER_TEMP}/iroh-pkarr-tests.log"
+          grep -q '^test result: ok. 3 passed;' "${RUNNER_TEMP}/iroh-pkarr-tests.log"
+          cargo test --locked --manifest-path vendor/iroh/Cargo.toml \
+            --no-default-features --features metrics,tls-ring --example transfer \
+            -- --exact tests::endpoint_args_json_omits_relay_auth_token \
+            | tee "${RUNNER_TEMP}/iroh-transfer-tests.log"
+          grep -q '^test result: ok. 1 passed;' "${RUNNER_TEMP}/iroh-transfer-tests.log"
       - name: Vendored iroh patch regressions (Full)
         # Archive lock graph, not production evidence; see rust/vendor/iroh/OCSERVIA-PROVENANCE.md.
         if: needs.ci-relevance.outputs.profile == 'full' && needs.ci-relevance.outputs.run_rust == 'true'
