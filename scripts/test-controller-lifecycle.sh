@@ -1209,7 +1209,7 @@ for action in install upgrade rollback start uninstall uninstall-purge; do
   grep -Fq 'existing MySQL deployment is retired' "${output_log}"
   test ! -e "${retired_mysql_state}/compose.log"
   test ! -e "${retired_mysql_state}/pending-release.json"
-  cmp -s "${integrated_release}" "${retired_mysql_state}/current-release.json"
+  cmp -s "${release_file}" "${retired_mysql_state}/current-release.json"
   cmp -s "${release_file}" "${retired_mysql_state}/previous-release.json"
   test -f "${retired_mysql_state}/deployment-profile.json"
 done
