@@ -159,12 +159,15 @@ test("issues a node-local CSR and downloads a one-time P12", async ({
     `**/api/v1/certificates/${certificateId}:p12`,
     async (route) => {
       p12Requests += 1;
-      const body = route.request().postDataJSON();
+      const body: unknown = route.request().postDataJSON();
+      if (typeof body !== "object" || body === null) {
+        throw new Error("Expected a P12 request object");
+      }
       expect(body).not.toHaveProperty("approval_id");
-      expect(body.artifact_request_id).toMatch(
+      expect("artifact_request_id" in body && body.artifact_request_id).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
       );
-      expect(body.reason).toBe("create support export");
+      expect("reason" in body && body.reason).toBe("create support export");
       await grantResponse;
       await route.fulfill({
         status: 202,

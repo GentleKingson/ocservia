@@ -108,6 +108,7 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-test-') as directory:
     (failed_start_bin / 'docker').write_text('#!/bin/bash\nexit 37\n')
     (failed_start_bin / 'sudo').write_text('''#!/bin/bash
 if [[ "$1" == install ]]; then shift; exec install "$@"; fi
+if [[ "$1" == chmod ]]; then shift; exec chmod "$@"; fi
 [[ "$1" == chown ]]
 ''')
     for name in ('docker', 'sudo'):
@@ -120,7 +121,7 @@ if [[ "$1" == install ]]; then shift; exec install "$@"; fi
                        env={**os.environ, 'RUN_ID': 'negative-start', 'COMPOSE_PROJECT': 'negative-start',
                             'RUNNER_TEMP': str(temp / 'failed-start'), 'ARTIFACT_DIR': str(temp / 'start-private'),
                             'PATH': str(failed_start_bin) + os.pathsep + os.environ['PATH']})
-    assert failed_start.returncode == 37
+    assert failed_start.returncode == 37, failed_start.stderr.decode()
     failure = (temp / 'failed-start/real-e2e-evidence-controller/startup-failure.txt').read_text()
     assert re.fullmatch(r'(exit=37 file=real-e2e-controller.sh line=[0-9]+ callers=[0-9 ]+\n)+', failure)
     build_line = next(i for i, line in enumerate((ROOT / 'scripts/real-e2e-controller.sh').read_text().splitlines(), 1)
@@ -375,6 +376,8 @@ case "${!#}" in
 esac
 ''')
     (binary / 'docker').chmod(0o755)
+    (binary / 'tailscale').write_text('#!/bin/bash\n[[ "$*" == "ip -4" ]] || exit 2\nprintf "100.64.0.1\\n"\n')
+    (binary / 'tailscale').chmod(0o755)
     verified = temp / 'verification'
     for db_node, db_token, ok in [(node + ':pending:' + endpoint, node + ':' + endpoint, True),
                                   (node + ':active:' + endpoint, node + ':' + endpoint, False),
