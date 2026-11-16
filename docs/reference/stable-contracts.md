@@ -17,7 +17,7 @@ Each candidate build is validated against its exact artifacts on the supported a
 | Schema and transport | [`proto/`](../../proto/) defines message field numbers, enums, and gRPC services (see [Schema sources and generation](#schema-sources-and-generation)). Iroh ALPNs are `ocserv-platform/enroll/1` and `ocserv-platform/agent/1`, with enrollment proof version `1.1` and separately negotiated session versions. The Go/`transportd` Unix socket and the `Agent`/`privd` local socket are private interfaces paired within a single release. | Calling Iroh directly from Go, connecting third-party clients to `privd`, or assuming signed commands accept unknown Protobuf fields automatically. |
 | Signing and hashes | [Command authorization v1](../development/command-authorization-v1.md), session and artifact grants, connection fence v2, fence binding v2, and [privd receipt v1](#privd-receipt-v1) use frozen canonical byte transcripts. [Semantic hash v1](../development/command-semantic-hash-v1.md) remains frozen for historical verification while the Controller issues [v2](../development/command-semantic-hash-v2.md). Raw Protobuf wire bytes are never used as canonical signing input. | Mutating an existing hash or transcript version to cover new fields, or inferring semantic hash v2 support from the `command.semantic-hash.v1` capability string. |
 | Versions and durable state | Controller and `transportd` ship from a single release commit, and `Agent`, `privd`, and `upgrader` ship together in one verified node package. Cross-version combinations carry no compatibility guarantee. Upgrades and restarts preserve local journals, the root effect store, HMAC and receipt keys, endpoint identities, and revision/fence floors. | Swapping `Agent` and `privd` binaries independently, or using numeric version comparisons as dispatch authorization. |
-| Database | [Database contract](#database): serialized owner-role migrations, least-privilege runtime role, durable execution receipts, verified SQL checksums, and explicit handling of dirty or failed migrations. PostgreSQL schema numbers and MySQL migration revisions are tracked independently by engine. | Down-migrations, automatic force-clean on dirty schemas, cross-engine data migration, or assuming additive DDL is backward compatible across versions. |
+| Database | [Database contract](#database): PostgreSQL 18.x serialized owner-role migrations, least-privilege runtime role, durable execution receipts, verified SQL checksums, and explicit rejection of unknown or drifted schemas. | Retired backends (including MySQL and MariaDB), down-migrations, automatic force-clean on dirty schemas, cross-engine data migration, or assuming additive DDL is backward compatible across versions. |
 
 ## Commands and recovery
 
@@ -1040,9 +1040,7 @@ state transition separately.
 - Each wire batch is bounded to 512 KiB. High-cardinality session, username,
   and client IP attributes belong only to the node session read model and are
   never attached as metric labels.
-- In PostgreSQL, raw telemetry samples land in monthly table partitions. MySQL
-  uses owner-managed monthly shard tables tracked in a durable shard catalog
-  that runtime writers never create or drop directly.
+- In PostgreSQL, raw telemetry samples land in monthly table partitions.
 - Background scheduler maintenance computes 5-minute and 1-hour rollups and
   enforces the 14-day, 90-day, and 13-month retention windows idempotently.
   Each rollup pass recomputes the full 14-day lateness window starting from the
@@ -1050,11 +1048,11 @@ state transition separately.
   expired rows per rollup table and retires at most one expired month.
   Retention cutoffs are evaluated against server time, cannot advance into the
   future, and always aggregate the oldest retirement candidate before its raw
-  partition or shard is retired.
+  partition is retired.
 - On ingress, the Controller accepts snapshot, metric, and
   security-observation timestamps ranging from 14 days in the past up to five
   minutes in the future. It rejects out-of-window events before selecting a
-  backend partition or shard.
+  partition.
 
 ### Transport ingestion recovery
 
@@ -1087,9 +1085,8 @@ authorized scope.
 
 ### Telemetry upgrade and recovery
 
-Schema setup and upgrades must run through the target backend's owner-only
-initialization path. Migration numbers are not interchangeable across database
-engines, and a Controller binary rollback ([Rollback](../operations/production-deployment.md#rollback))
+Schema setup and upgrades must run through PostgreSQL's owner-only
+initialization path. A Controller binary rollback ([Rollback](../operations/production-deployment.md#rollback))
 provides no cross-version schema compatibility (see
 [Database and recovery matrix](#database-and-recovery-matrix)).
 
@@ -1209,7 +1206,7 @@ Local login depends on the release's complete backend schema, including `local_a
 
 Database errors and malformed password hashes do not count as bad password attempts, and submitting the right password for a disabled account fails login without incrementing the failure counter. Once verification observes an incorrect password, failure recording runs under a detached, bounded context so client request cancellation cannot skip the write. If the caller cancels before verification starts, the reservation is released without recording a failure. A process crash, ambiguous commit, or failed completion leaves the row leased for at most the lease TTL before admission recovers, never silently turning an interrupted check into a password failure. Holders of an expired lease cannot clear newer attempt state or open a session.
 
-Attempt expiration uses the database wall clock. Before allocating capacity for a new login attempt, admission deletes expired rows via the expiry index once their observation window, cooldown period, and active lease have all elapsed. When login traffic is idle, expired rows may sit on disk until the next admission pass, but total table size stays bounded. Brute-forcing random usernames cannot evict active lockout state: once the table reaches capacity, untracked usernames receive a generic 503 response while tracked accounts keep their backoff state. Any database error during cleanup, admission, or completion also fails closed with a generic 503 instead of allowing unbounded password checks. PostgreSQL relies on autovacuum to reclaim dead tuples from these deletes; MySQL does not use autovacuum.
+Attempt expiration uses the database wall clock. Before allocating capacity for a new login attempt, admission deletes expired rows via the expiry index once their observation window, cooldown period, and active lease have all elapsed. When login traffic is idle, expired rows may sit on disk until the next admission pass, but total table size stays bounded. Brute-forcing random usernames cannot evict active lockout state: once the table reaches capacity, untracked usernames receive a generic 503 response while tracked accounts keep their backoff state. Any database error during cleanup, admission, or completion also fails closed with a generic 503 instead of allowing unbounded password checks. PostgreSQL relies on autovacuum to reclaim dead tuples from these deletes.
 
 Administrator password resets and account disables delete the target's account state inside the same transaction that updates the credential, revokes sessions, and appends the audit record, preserving the row if the transaction rolls back. Revalidating the credential epoch and matching the lease token at completion time prevents a slow login check started before the reset from clearing failures or leases recorded afterward.
 
@@ -1380,15 +1377,15 @@ The development principal has no persisted identity, session, identity row, or r
 
 ## Database
 
-The Controller is a modular Go binary backed by one relational database, PostgreSQL by default. Unsupported `OCSERV_DATABASE_BACKEND` values fail startup immediately without falling back to PostgreSQL. For production database admission rules, consult [Database support](../operations/production-deployment.md#database-support).
+The Controller is a modular Go binary backed by a single PostgreSQL 18.x relational database (`postgres` by default, `bundled` or `external`). Unsupported or retired `OCSERV_DATABASE_BACKEND` values (including `mysql` and `mariadb`) fail startup immediately without falling back to PostgreSQL, and unverified cross-engine automatic migration is unsupported. For production database admission and deployment-profile protection rules, consult [Database support](../operations/production-deployment.md#database-support).
 
-Database migrations run in a separate one-shot process invoked with `--migrate-only`. The process uses an owner connection in `OCSERV_DATABASE_URL` and names the unprivileged runtime account in `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives only the runtime role credentials. During the one-shot run, the migrator applies schema changes, verifies audit event authentication, and only then grants ordinary data access to the runtime role, so a failed migration never reaches the grant step. Migration execution serializes schema changes and validates previously applied content. At runtime, the service has read and append access to audit events, plus authenticated compaction of aged detail through dedicated database routines. Both engines grant `SELECT`, `INSERT`, and a column-level `UPDATE(event_hash)` needed by locking reads, while immutable triggers block any actual row modification.
+Database migrations run in a separate one-shot process invoked with `--migrate-only`. The process uses an owner connection in `OCSERV_DATABASE_URL` and names the unprivileged runtime account in `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives only the runtime role credentials. During the one-shot run, the migrator applies schema changes, verifies audit event authentication, and only then grants ordinary data access to the runtime role, so a failed migration never reaches the grant step. Migration execution serializes schema changes and validates previously applied content. At runtime, the service has read and append access to audit events, plus authenticated compaction of aged detail through dedicated database routines. PostgreSQL grants `SELECT`, `INSERT`, and a column-level `UPDATE(event_hash)` needed by locking reads, while immutable triggers block any actual row modification.
 
-PostgreSQL coordinates migrations with an advisory lock and transactional SQL execution. MySQL DDL can commit implicitly, so the MySQL migrator acquires `GET_LOCK` on a dedicated connection and records durable, verified progress after each step. If lock release is uncertain, it discards the connection. Before touching the schema, both engines reject unknown epochs, revisions, checksums, schema drift, and nonempty databases that lack supported provenance. An interrupted MySQL migration must be repaired explicitly with the exact original artifact. The Controller's own migration command never supplies a repair checksum, and neither engine performs automatic force-cleans or downgrades.
+PostgreSQL coordinates migrations with an advisory lock and transactional SQL execution. Before touching the schema, the migrator rejects unknown epochs, revisions, checksums, schema drift, and nonempty databases that lack supported provenance. The Controller's migration command never performs automatic force-cleans or downgrades.
 
-Each database engine maintains two active SQL files: `schema.sql` and `upgrade.sql`. PostgreSQL artifacts live in [`control-plane/migrations/`](../../control-plane/migrations/schema.sql), and MySQL artifacts live in [`control-plane/internal/database/mysql/mysql/`](../../control-plane/internal/database/mysql/mysql/schema.sql). The `schema.sql` headers of the two engines carry the current epoch and revision, so read them there instead of from this document. Migration state is tracked only in `schema_revisions`, with no numbered SQL or JSON migration files and no snapshot descriptors. Schema identity is determined by the epoch, revision, and raw artifact checksums, independent of legacy filename counters or Controller compatibility ranges. The [version policy](../operations/production-deployment.md#version-policy) removed software-version admission gates, but schema-source admission remains mandatory in the migration run and continues to reject unknown epochs, revisions, and checksums.
+PostgreSQL maintains two active SQL files: [`schema.sql`](../../control-plane/migrations/schema.sql) and [`upgrade.sql`](../../control-plane/migrations/upgrade.sql) in `control-plane/migrations/`. The `schema.sql` header carries the current epoch and revision, so read them there instead of from this document. Migration state is tracked only in `schema_revisions`, with no numbered SQL or JSON migration files and no snapshot descriptors. Schema identity is determined by the epoch, revision, and raw artifact checksums, independent of legacy filename counters or Controller compatibility ranges. The [version policy](../operations/production-deployment.md#version-policy) removed software-version admission gates, but schema-source admission remains mandatory in the migration run and continues to reject unknown epochs, revisions, and checksums.
 
-Migration admission, meaning the full SQL checksum and receipt verification, runs only in the owner `--migrate-only` entry point (or the test and development-only `ocserv-db-foundation` tool). Normal Controller startup without `--migrate-only` verifies audit authenticity and checks required telemetry objects and runtime privileges. It does not check receipts, checksums, or schema drift. The `/readyz` endpoint executes a zero-row read against core tables (workspaces, nodes, operations) and checks event-stream health, without reading `schema_revisions`. A passing `/readyz` response therefore indicates runtime connectivity and is not evidence of schema identity.
+Migration admission, meaning the full SQL checksum and receipt verification, runs only in the owner `--migrate-only` entry point. Normal Controller startup without `--migrate-only` verifies audit authenticity and checks required telemetry objects and runtime privileges. It does not check receipts, checksums, or schema drift. The `/readyz` endpoint executes a zero-row read against core tables (workspaces, nodes, operations) and checks event-stream health, without reading `schema_revisions`. A passing `/readyz` response therefore indicates runtime connectivity and is not evidence of schema identity.
 
 ### SQL artifact format 1
 
@@ -1412,7 +1409,7 @@ CREATE TABLE schema_revisions (...);
 -- ocservia:end-step
 ```
 
-Engines are `postgresql` and `mysql`. Epochs are positive decimal integers.
+The supported engine is `postgresql`. Epochs are positive decimal integers.
 Schema artifacts declare their current checkpoint revision and have at least
 one step. Revision zero is the epoch baseline. Step ordinals run
 from `001` through `999` without gaps; names are unique within a revision and
@@ -1481,43 +1478,39 @@ block checksum and step count in the new epoch revision-zero row; its retained
 previous receipt distinguishes it from a fresh schema checkpoint. Step SHA-256
 covers the raw SQL byte range after its marker/metadata through the byte before
 `end-step`. No whitespace or line ending normalization occurs. Database
-admission, journal validation, execution, locking, and repair remain the
-responsibility of each backend.
+admission, journal validation, and transactional execution remain the
+responsibility of the PostgreSQL migration runner.
 
 ### Upgrade checkpoint
 
-`schema.sql` runs only against an empty database; initialization never overwrites, adopts, or cleans an existing database. Nonempty databases must match either the current epoch's known receipt history or the single supported prior checkpoint: `v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 / revision 0. That immutable release is the upgrade anchor as main advances. Databases older than v1.2.0 must upgrade with v1.2.0 first, because a major candidate cannot replay removed historical transitions. The checkpoint is a database contract and is unrelated to the product's maintenance status. See [Database checkpoint release boundary](../development/release-checks.md#database-checkpoint-release-boundary) for the release rules.
+`schema.sql` runs only against an empty database; initialization never overwrites, adopts, or cleans an existing database. Nonempty PostgreSQL databases must match either the current epoch's known receipt history or the single supported prior checkpoint: `v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 / revision 0. That immutable release is the upgrade anchor as main advances. Databases older than v1.2.0 must upgrade with v1.2.0 first, because a major candidate cannot replay removed historical transitions. The checkpoint is a database contract and is unrelated to the product's maintenance status. See [Database checkpoint release boundary](../development/release-checks.md#database-checkpoint-release-boundary) for the release rules.
 
 | Engine | v1.2.0 checkpoint schema receipt |
 | --- | --- |
 | PostgreSQL 18.x | `d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172` |
-| MySQL 8.4 LTS | `3dc39a92ff4b54bff922872fae296843cea8dea1f2d1b36b42d86c9069dcb450` |
 
-Fresh installations and checkpoint-upgraded databases must converge on the same business schema, mandatory seeds, and runtime ACLs, even though their execution receipts differ by engine and path. A fresh MySQL install writes a single schema receipt at the declared revision, derived from `schema.sql`. A MySQL checkpoint upgrade keeps the epoch-1 receipt and appends the epoch transition, its legacy cleanup steps, and each later forward revision. A forward revision that recreates routines such as `audit_compact_detail`, `security_compact_details` or the `audit_events_reject_update` trigger drops their runtime `EXECUTE` grants, so the owner migration's runtime re-authorization must follow every upgrade. On PostgreSQL, the upgrade cleanup deletes the epoch-1 receipt within the same transaction. Never rewrite receipt history to force those tables to look identical.
+Fresh installations and checkpoint-upgraded databases must converge on the same business schema, mandatory seeds, and runtime ACLs, even though their execution receipts differ by path. A fresh PostgreSQL install writes a single schema receipt at the declared revision, derived from `schema.sql`. A checkpoint upgrade verifies the epoch-1 receipt, deletes it within the transition transaction, and records the epoch-2 baseline and each subsequent forward revision. A forward revision that recreates routines such as `audit_compact_detail`, `security_compact_details` or the `audit_events_reject_update` trigger drops their runtime `EXECUTE` grants, so the owner migration's runtime re-authorization must follow every upgrade. Never rewrite receipt history to force those tables to look identical.
 
-PostgreSQL runs initial installation or the checkpoint transition inside a single transaction, and commits each subsequent forward revision in its own transaction. During the checkpoint transition, PostgreSQL verifies the existing schema against the pinned checkpoint fingerprint, validates the target schema, writes the verified epoch baseline, runs the legacy metadata cleanup from `upgrade.sql`, and validates the final state before committing. The cleanup drops `schema_migrations` and `schema_snapshot_origin` and removes the epoch-1 receipt, while leaving `controller_schema_compatibility` untouched and unread by non-test Go code. Any failure rolls the entire transaction back. MySQL verifies its epoch transition first and then executes the cleanup DROP steps as a forward revision without a cross-step transaction. Each MySQL DDL step writes same-row progress and checks the actual before and after object definitions, committing data changes and step progress together. Recovery requires the matching SQL checksum and refuses foreign or partial definitions.
+PostgreSQL runs initial installation or the checkpoint transition inside a single transaction, and commits each subsequent forward revision in its own transaction. During the checkpoint transition, PostgreSQL verifies the existing schema against the pinned checkpoint fingerprint, validates the target schema, writes the verified epoch baseline, runs the legacy metadata cleanup from `upgrade.sql`, and validates the final state before committing. The cleanup drops `schema_migrations` and `schema_snapshot_origin` and removes the epoch-1 receipt, while leaving `controller_schema_compatibility` untouched and unread by non-test Go code. Any failure rolls the entire transaction back.
 
 When adding changes within the current epoch, append forward revisions to `upgrade.sql` without altering already published block bytes, and update `schema.sql` to produce the equivalent fresh schema along with its bound history checksum. Repeated owner maintenance runs may reapply grants and provision calendar-dependent telemetry objects, but they never replay fresh SQL. Verify both the fresh/current revision paths and the fixed release transition with:
 
 ```bash
 bash scripts/database-artifact-policy.sh all
 bash scripts/database-postgres-snapshot.sh check
-bash scripts/database-mysql-snapshot.sh check
 ```
 
-These commands verify the artifacts without modifying tracked files. PostgreSQL's author command can regenerate current SQL from the fixed checkpoint transition. MySQL validates its executable SQL directly. Both backends compare the resulting schema, ACLs, and mandatory seeds between a fresh initialization and an upgrade from the immutable checkpoint, pulling historical fixtures from that Git release tag instead of an archived migration directory. Installation timestamps are generated at runtime, while deterministic seed values must match byte for byte. See [SQL artifact acceptance](../development/release-checks.md#sql-artifact-acceptance) for required failure, repair, and backup/restore test coverage.
+These commands verify the artifacts without modifying tracked files. PostgreSQL's author command can regenerate current SQL from the fixed checkpoint transition, and `check` compares the resulting schema, ACLs, and mandatory seeds between a fresh initialization and an upgrade from the immutable checkpoint, pulling historical fixtures from that Git release tag instead of an archived migration directory. Installation timestamps are generated at runtime, while deterministic seed values must match byte for byte. See [SQL artifact acceptance](../development/release-checks.md#sql-artifact-acceptance) for required failure and backup/restore test coverage.
 
 ### Transactions and stores
 
-Business stores coordinate transaction ownership, atomic audit and domain writes, bounded cleanup, and fencing through `internal/database`. PostgreSQL implements business locks with transaction advisory locks, and MySQL uses `business_locks` row locks. MySQL's migration-only `GET_LOCK` is never used for business transactions. A commit acknowledgement error leaves the transaction outcome unknown, so callers must not blindly replay writes.
+Business stores coordinate transaction ownership, atomic audit and domain writes, bounded cleanup, and fencing through `internal/database`. PostgreSQL implements business locks with transaction advisory locks. A commit acknowledgement error leaves the transaction outcome unknown, so callers must not blindly replay writes.
 
 Within a single business operation, bind every participating domain Store to the same `database.Tx` inside `database.Within`. Never construct a store from the connection pool inside that callback or split a logical transaction across multiple callbacks. `database.Within` does not retry. For database-only claim, completion, reaping, and lease work, use the opt-in `database.WithinRetry` helper, which makes at most three attempts and retries only when the transaction was a deadlock victim or hit a serialization failure with an acknowledged rollback. Connection loss, lock timeouts, ordinary constraint errors, and unknown commit outcomes return immediately without retry, and callbacks passed to `database.WithinRetry` must never perform transport calls or other external mutations. Store methods translate driver errors into backend-neutral categories such as `database.ErrDeadlock` and `database.ErrSerialization`, keeping driver types and SQLSTATE codes out of business packages.
 
 Lease and fence checks read a fresh database wall-clock timestamp after acquiring their locks so time spent waiting on a lock cannot revive an expired term; transaction-stable timestamps remain available for logical ordering. Authority takeovers increment the retained epoch in place instead of deleting and recreating records, so stale holders continue to fail their exact owner, incarnation, connection, and epoch predicates.
 
-MySQL sessions accept only the driver DSN with the `tls` parameter. They enforce UTC, `READ COMMITTED`, strict SQL modes, and `utf8mb4` with the backend's binary no-pad collation, and they truncate Go time values to microseconds. Natural-key uniqueness on MySQL relies on owner-maintained exact-key side tables with guard rows instead of prefix or digest indexes. Domain stores execute natural-key upserts through the `LockExactKey`/`UpsertIdentity` sequence and avoid `ON DUPLICATE KEY UPDATE`, since trigger-enforced conflicts do not behave like native index conflicts.
-
-UUIDs and logical timestamps cross the store boundary as typed Go values. PostgreSQL stores native UUID and timestamp columns. Migrated MySQL domain tables use `VARBINARY(16)` UUIDs with exact 16-byte constraints in unswapped RFC UUID byte order and signed BIGINT microsecond offsets from `2000-01-01 UTC` (with explicit infinity encoding where the contract allows). Migration bookkeeping tables use their own column types. Always check the owning store and appended migration instead of copying SQL across backends or guessing a column's representation from its name. For a concrete workspace preparation example, see [database preparation](../operations/authentication.md#database-preparation).
+UUIDs and logical timestamps cross the store boundary as typed Go values and are stored in native PostgreSQL `uuid` and `timestamptz` columns. Always check the owning store and appended migration instead of guessing a column's representation from its name. For a concrete workspace preparation example, see [database preparation](../operations/authentication.md#database-preparation).
 
 ### Database and recovery matrix
 
@@ -1527,12 +1520,11 @@ Authoritative database requirements live in [Database support](../operations/pro
 | --- | --- | --- |
 | PostgreSQL 18.x bundled | `PG_MAJOR=18 DATABASE_TEST_SCOPE=smoke scripts/database-integration.sh`; `scripts/postgres-backup-restore-smoke.sh` | Base backup, isolated restore verification, and single-instance restart recovery. Does not cover clustered HA, automatic failover, or PITR. |
 | PostgreSQL 18.x external | Same backend checks plus `scripts/external-postgres-backup-restore-smoke.sh` | TLS-verified owner/runtime/backup connections and isolated base restore. Does not manage external HA or PITR. |
-| MySQL 8.4 LTS external | `ENGINE=mysql DATABASE_TEST_SCOPE=smoke bash scripts/database-foundation-integration.sh`; `ENGINE=mysql scripts/mysql-backup-restore-smoke.sh` | Logical dump and isolated restore verification. Bundled MySQL, cross-engine migration, and HA/PITR are not supported. |
-| MySQL bundled | Rejected by the launcher | Not supported in production. |
+| Retired backends (PostgreSQL 17, MySQL, MariaDB) | Rejected fail-closed by startup, Compose, and lifecycle entrypoints | Unsupported; no silent backend switching, data purge, or cross-engine automatic migration. |
 
 Adopting a new database patch release requires reviewing migrations, role permissions, SQL artifacts, and backup/restore behavior before updating the pinned digests, with runtime evidence captured in Business Smoke. Never wipe node SQLite journals to work around a database or package upgrade check.
 
-Additive schema changes do not by themselves guarantee cross-version compatibility, and operators must never edit published migration SQL or discard data to force a binary to start. Likewise, migration receipts are not backups, and an untested backup file is not a verified restore. The repository provides no down-migration SQL, so rolling back the Controller binary never reverses schema changes or guarantees that an older binary can read current database state. Recover through a forward fix or a planned isolated restore by following the [backend-specific recovery](../operations/incident-recovery.md#database-recovery) procedures (PostgreSQL verified backup with isolated restore, or MySQL logical restore), which do not claim HA or PITR equivalence, and review [schema provenance after restore](../operations/incident-recovery.md#schema-provenance-after-restore).
+Additive schema changes do not by themselves guarantee cross-version compatibility, and operators must never edit published migration SQL or discard data to force a binary to start. Likewise, migration receipts are not backups, and an untested backup file is not a verified restore. The repository provides no down-migration SQL, so rolling back the Controller binary never reverses schema changes or guarantees that an older binary can read current database state. Recover through a forward fix or a planned isolated restore by following the [PostgreSQL recovery](../operations/incident-recovery.md#database-recovery) procedure (verified base backup with isolated restore), which does not claim HA or PITR equivalence, and review [schema provenance after restore](../operations/incident-recovery.md#schema-provenance-after-restore).
 
 ## Certificates and Signer
 

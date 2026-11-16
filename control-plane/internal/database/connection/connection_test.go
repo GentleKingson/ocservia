@@ -35,27 +35,26 @@ func TestExternalPostgreSQLTLSContract(t *testing.T) {
 	}
 }
 
-func TestMySQLCompatibleProductionTLSContract(t *testing.T) {
-	for _, backend := range []string{"mysql"} {
-		t.Run(backend, func(t *testing.T) {
-			base := Options{
-				Backend: backend, Environment: "production",
-				URL: "app:secret@tcp(database.example.test:3306)/ocservia?tls=true",
+func TestRejectUnsupportedDatabaseBackends(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		options Options
+	}{
+		{"mysql production", Options{Backend: "mysql", Environment: "production", URL: "app:secret@tcp(database.example.test:3306)/ocservia?tls=true"}},
+		{"mysql development", Options{Backend: "mysql", Environment: "development", URL: "app:secret@tcp(127.0.0.1:3306)/ocservia?tls=false"}},
+		{"mariadb", Options{Backend: "mariadb", Environment: "test", URL: "app:secret@tcp(127.0.0.1:3306)/db?tls=false"}},
+		{"mysql URL with empty backend", Options{Environment: "development", URL: "mysql://app:secret@127.0.0.1:3306/ocservia"}},
+		{"mysql DSN with postgres backend", Options{Backend: "postgres", Environment: "development", URL: "app:secret@tcp(127.0.0.1:3306)/ocservia?tls=false"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateOptions(tc.options)
+			if err == nil {
+				t.Fatalf("unsupported backend option accepted: %+v", tc.options)
 			}
-			if err := ValidateOptions(base); err != nil {
-				t.Fatalf("verified production connection rejected: %v", err)
-			}
-			base.URL = "app:secret@tcp(database.example.test:3306)/ocservia?tls=false"
-			if err := ValidateOptions(base); err == nil {
-				t.Fatal("remote production plaintext accepted")
+			if strings.Contains(err.Error(), "secret") {
+				t.Fatalf("error leaks credentials: %v", err)
 			}
 		})
-	}
-}
-
-func TestRejectMariaDB(t *testing.T) {
-	if err := ValidateOptions(Options{Backend: "mariadb", Environment: "test", URL: "app:secret@tcp(127.0.0.1:3306)/db?tls=false"}); err == nil {
-		t.Fatal("MariaDB accepted")
 	}
 }
 

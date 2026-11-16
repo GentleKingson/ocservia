@@ -15,7 +15,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
@@ -48,24 +47,15 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	}
 	workspace, node, binding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	at, _ := value.FromTime(time.Now().UTC())
-	exec := func(pg, my string, args ...any) {
+	exec := func(query string, args ...any) {
 		t.Helper()
-		query := pg
-		if cfg.DatabaseBackend != "postgres" {
-			query = my
-			for i, arg := range args {
-				if id, ok := arg.(uuid.UUID); ok {
-					args[i] = mysql.UUIDBytes(id)
-				}
-			}
-		}
 		if _, err := owner.Store.Exec(ctx, query, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP assembly fixture',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'HTTP assembly fixture',?,?,?)`, workspace, workspace.String(), at, at)
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'HTTP assembly fixture','active',1,$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,'HTTP assembly fixture','active',1,?,?)`, node, workspace, at, at)
-	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'PlatformAdmin','workspace',?)`, binding, identity, workspace, at)
+	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP assembly fixture',$2,$3,$4)`, workspace, workspace.String(), at, at)
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'HTTP assembly fixture','active',1,$3,$4)`, node, workspace, at, at)
+	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, binding, identity, workspace, at)
 	signer := commandauth.NewSignerFromSeed([32]byte{1})
 	ops := operations.NewBackend(runtime.Store, 3, signer)
 	users := userstate.NewWithSignerBackend(runtime.Store, signer)
@@ -160,7 +150,7 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	if rejected.StatusCode != 429 || rejected.Header.Get("Retry-After") != "7" || rejected.Header.Get("Content-Type") != "application/problem+json" {
 		t.Fatalf("final SSE configuration not used: %d %v", rejected.StatusCode, rejected.Header)
 	}
-	exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, binding)
+	exec(`DELETE FROM role_bindings WHERE id=$1`, binding)
 	denied := call("GET", "/api/v1/nodes/"+node.String())
 	denied.Body.Close()
 	// Without any binding the workspace is invisible, so the node answers 404.

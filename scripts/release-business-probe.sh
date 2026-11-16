@@ -196,7 +196,7 @@ next_stage agent_package_build
 env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
 next_stage controller_image_build
 bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
-for name in gateway control transport backup edge relay signer mysql_backup; do
+for name in gateway control transport backup edge relay signer; do
   docker load -i "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar"
   # Unrelated binfmt handlers could otherwise run a foreign image emulated.
   [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "ghcr.io/gentlekingson/ocservia/$name:$VERSION-linux-$CONTROLLER_ARCH")" == "linux/$CONTROLLER_ARCH" ]]
@@ -307,7 +307,7 @@ args=()
 roles=(gateway control transport backup)
 manifest_options=()
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-  roles+=(edge relay signer mysql_backup)
+  roles+=(edge relay signer)
   manifest_options+=(--manifest-version 2)
 fi
 for name in "${roles[@]}"; do

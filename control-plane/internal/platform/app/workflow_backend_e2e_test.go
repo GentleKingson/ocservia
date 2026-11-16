@@ -31,7 +31,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
@@ -67,16 +66,11 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(owner.Close)
-	installSchedulerEvidence(t, f.ctx, owner, runtimeOptions.Backend, account)
+	installSchedulerEvidence(t, f.ctx, owner)
 	f.workspace = uuid.Must(uuid.NewV7()).String()
 	workspace := uuid.MustParse(f.workspace)
 	at, _ := value.FromTime(time.Now().UTC())
-	if ownerOptions.Backend == "postgres" {
-		_, err = owner.Store.Exec(f.ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'real E2E',$2,$3,$3)`, workspace, f.workspace, at)
-	} else {
-		_, err = owner.Store.Exec(f.ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES(?,'real E2E',?,?,?)`, mysql.UUIDBytes(workspace), f.workspace, at, at)
-	}
-	if err != nil {
+	if _, err = owner.Store.Exec(f.ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'real E2E',$2,$3,$3)`, workspace, f.workspace, at); err != nil {
 		t.Fatal("initialize empty test workspace", err)
 	}
 	adminPassword := "isolated controller E2E administrator password"

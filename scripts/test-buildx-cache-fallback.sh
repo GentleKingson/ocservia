@@ -282,7 +282,7 @@ for arch in amd64 arm64; do
     log="${test_dir}/controller-${arch}-${mode}.log"
     args=()
     filter_env=()
-    names=(gateway control transport backup edge relay signer mysql_backup)
+    names=(gateway control transport backup edge relay signer)
     case "$mode" in
       product) filter_env+=(CONTROLLER_CACHE_IMAGES=$'unknown\ngateway') ;;
       cache) args+=(--cache-only) ;;
@@ -344,7 +344,7 @@ for filter in '' $' \t '; do
     BUILDX_BUILDER=test GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
     CONTROLLER_CACHE_IMAGES="$filter" \
     bash "${ROOT}/scripts/build-release-controller.sh" --cache-only
-  [[ "$(grep -c '^buildx build ' "$log")" == 8 ]]
+  [[ "$(grep -c '^buildx build ' "$log")" == 7 ]]
   filter_case=$((filter_case + 1))
 done
 # Reject malformed filters before even creating a builder.

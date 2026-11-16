@@ -14,7 +14,6 @@ import (
 	"fmt"
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -36,14 +35,12 @@ func startRebindTarget(t *testing.T, source *controllerE2E) (*controllerE2E, str
 		t.Fatal(err)
 	}
 	ownerOptions, runtimeOptions, account := controllerProcessDatabase(t)
-	if ownerOptions.Backend == "postgres" {
-		ownerURL, _ := url.Parse(ownerOptions.URL)
-		ownerURL.Path = "/ocservia_rebind_target"
-		ownerOptions.URL = ownerURL.String()
-		runtimeURL, _ := url.Parse(runtimeOptions.URL)
-		runtimeURL.Path = "/ocservia_rebind_target"
-		runtimeOptions.URL = runtimeURL.String()
-	}
+	ownerURL, _ := url.Parse(ownerOptions.URL)
+	ownerURL.Path = "/ocservia_rebind_target"
+	ownerOptions.URL = ownerURL.String()
+	runtimeURL, _ := url.Parse(runtimeOptions.URL)
+	runtimeURL.Path = "/ocservia_rebind_target"
+	runtimeOptions.URL = runtimeURL.String()
 	f.run(0, 0, nil, "/usr/bin/cp", source.root+"/ocserv-control", f.root+"/ocserv-control")
 	f.run(0, 0, f.environment(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}), f.root+"/ocserv-control", "--migrate-only")
 	owner, err := connection.Open(f.ctx, ownerOptions)
@@ -51,16 +48,11 @@ func startRebindTarget(t *testing.T, source *controllerE2E) (*controllerE2E, str
 		t.Fatal(err)
 	}
 	t.Cleanup(owner.Close)
-	installSchedulerEvidence(t, f.ctx, owner, runtimeOptions.Backend, account)
+	installSchedulerEvidence(t, f.ctx, owner)
 	f.workspace = uuid.Must(uuid.NewV7()).String()
 	workspace := uuid.MustParse(f.workspace)
 	at, _ := value.FromTime(time.Now().UTC())
-	if ownerOptions.Backend == "postgres" {
-		_, err = owner.Store.Exec(f.ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'real E2E',$2,$3,$3)`, workspace, f.workspace, at)
-	} else {
-		_, err = owner.Store.Exec(f.ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES(?,'real E2E',?,?,?)`, mysql.UUIDBytes(workspace), f.workspace, at, at)
-	}
-	if err != nil {
+	if _, err = owner.Store.Exec(f.ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'real E2E',$2,$3,$3)`, workspace, f.workspace, at); err != nil {
 		t.Fatal("initialize empty test workspace", err)
 	}
 	adminPassword := "isolated controller E2E administrator password"
@@ -428,14 +420,8 @@ func (f *controllerE2E) rejectOldRootAuthority(options connection.Options, node 
 		t.Fatal(err)
 	}
 	defer db.Close()
-	query := "SELECT envelope FROM commands WHERE node_id=$1 ORDER BY created_at DESC LIMIT 1"
-	var id any = uuid.MustParse(node)
-	if options.Backend != "postgres" {
-		query = "SELECT envelope FROM commands WHERE node_id=? ORDER BY created_at DESC LIMIT 1"
-		id = mysql.UUIDBytes(uuid.MustParse(node))
-	}
 	var envelope []byte
-	if err = db.Store.QueryRow(f.ctx, query, id).Scan(&envelope); err != nil {
+	if err = db.Store.QueryRow(f.ctx, "SELECT envelope FROM commands WHERE node_id=$1 ORDER BY created_at DESC LIMIT 1", uuid.MustParse(node)).Scan(&envelope); err != nil {
 		t.Fatal(err)
 	}
 	command := new(agentv1.CommandEnvelope)

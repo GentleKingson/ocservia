@@ -76,7 +76,7 @@ jobs:
           source_commit="$(git rev-parse HEAD)"
           for arch in amd64 arm64; do
             args=()
-            for name in gateway control transport backup edge relay signer mysql_backup; do
+            for name in gateway control transport backup edge relay signer; do
               args+=(--image "$name=ghcr.io/gentlekingson/ocservia/$name:v$VERSION")
             done
             node scripts/generate-controller-release-manifest.mjs \

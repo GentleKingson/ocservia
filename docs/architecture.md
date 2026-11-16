@@ -168,7 +168,7 @@ Each domain service owns its business invariants and opens its own transaction. 
 | Parent authorization | `configPlanLookup.Resource` | Resource authorization stays in the parent; mutation authorization is rechecked inside the operation transaction. |
 
 - `platform/app` passes the configured service instances together with the caller's original request or scheduler context, which keeps any leadership fence active. Read-only and validation paths can run without a writer. A nil writer never falls back to another path and never lets a write succeed.
-- All stores that take part in one business operation bind to the same `database.Tx` inside `database.Within`. Business locks are PostgreSQL advisory locks and MySQL `business_locks` rows. A commit acknowledgement error leaves the outcome unknown, so callers do not replay writes blindly. Only database-only claim, completion, reaping, and lease work uses the retrying helper.
+- All stores that take part in one business operation bind to the same `database.Tx` inside `database.Within`. Business locks use PostgreSQL transaction advisory locks. A commit acknowledgement error leaves the outcome unknown, so callers do not replay writes blindly. Only database-only claim, completion, reaping, and lease work uses the retrying helper.
 - Upgrade preparation belongs to Operations. `PrepareAgentUpgrade` and `AgentUpgradeApprovalBinding` resolve the target through `RBACStore.UpgradeNode` and the operator-provisioned release catalog. `Create` still takes the locks, checks versions and replay state, validates node capabilities and attestation, revalidates mutation authority, and enforces the active-upgrade guard. Approving an upgrade binds a trusted catalog entry. It does not promise that the target is newer than the node's build.
 - `configplan.Service.ApprovalBinding` loads the plan through the interpreted `Get` path and checks status and expiry against the service clock. The HTTP layer checks the selected workspace and the node `config.apply` permission. Apply prechecks, desired-revision allocation, and transaction-time authorization stay with their domain owners.
 - Lease and fence checks read a fresh database time after taking their locks. Takeovers increment the retained epoch in place, so stale holders keep failing their owner and epoch predicates.
@@ -227,7 +227,7 @@ Request rules, limits, quota and expiry formats, and authorization checks are in
 The unprivileged Agent sends a bounded, read-only telemetry batch to the Controller on a dedicated unidirectional Iroh stream. transportd forwards the events, and `transportevents.Service.Ingest` validates and stores them.
 
 - The Controller classifies an ingestion failure before it moves the durable event cursor. A transient database error leaves the cursor where it was and retries with backoff. A permanently invalid payload is rolled back, recorded as bounded quarantine metadata without the raw payload, and the cursor advances in the same transaction, so one node cannot stall ingestion for the fleet.
-- PostgreSQL stores raw samples in monthly partitions. MySQL uses owner-managed monthly shard tables that runtime writers never create or drop. The scheduler computes rollups and applies retention.
+- PostgreSQL stores raw samples in monthly partitions, and the scheduler computes rollups and applies retention.
 - The HTTP API computes freshness (`fresh`, `stale`, `never`) at read time, and scheduler maintenance persists the offline transition separately. Session, username, and client IP detail belongs to the node session read model and is never a metric label.
 - The Web console reads fleet state from `GET /api/v1/nodes`, node detail, and the node `sessions` and `telemetry` resources. The event stream only signals that a refetch is due.
 
@@ -344,7 +344,7 @@ flowchart LR
         App --> Domain["domain packages"]
         HTTP --> Domain
         Domain --> DB["internal/database interfaces"]
-        App --> Drivers["database/postgres, mysql, connection"]
+        App --> Drivers["database/postgres, connection"]
         Drivers --> DB
     end
     subgraph Rust["rust/crates"]

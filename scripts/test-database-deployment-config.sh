@@ -6,7 +6,7 @@ work="$(mktemp -d "${HOME}/ocservia-database-deploy.XXXXXX")"
 trap 'rm -rf -- "${work}"' EXIT
 mkdir -m 0700 "${work}/secrets" "${work}/backups"
 for name in tls.crt tls.key postgres-owner-password postgres-app-password postgres-backup-password \
-  postgres.pgpass database-owner-url database-app-url database-backup.cnf database-ca.pem \
+  postgres.pgpass database-owner-url database-app-url database-ca.pem \
   session-key audit-checkpoint-key certificate-signer-token; do
   printf 'test-only\n' >"${work}/secrets/${name}"
   chmod 0444 "${work}/secrets/${name}"
@@ -26,7 +26,7 @@ image="example.invalid/test@sha256:$(printf '%064d' 0)"
 export OCSERV_SECRET_DIR="${work}/secrets" OCSERV_BACKUP_DIR="${work}/backups"
 export OCSERV_GATEWAY_IMAGE="${image}" OCSERV_CONTROL_IMAGE="${image}" OCSERV_TRANSPORT_IMAGE="${image}"
 export OCSERV_BACKUP_IMAGE="${image}" OCSERV_POSTGRES_IMAGE="${image}" OCSERV_OTEL_IMAGE="${image}"
-export OCSERV_DATABASE_BACKUP_IMAGE="${image}" OCSERV_LOCAL_AUTH_ENABLED=true
+export OCSERV_LOCAL_AUTH_ENABLED=true
 export OCSERV_PUBLIC_HOST=controller.example.test OCSERV_AUDIT_EVENT_KEY_ID=test
 OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '%064d' 1)"
 export OCSERV_CONTROLLER_ENDPOINT_ID
@@ -86,53 +86,18 @@ fi
 mv "${work}/database-ca.pem" "${work}/secrets/database-ca.pem"
 
 for launcher in "${ROOT}/deploy/production/compose.sh" "${ROOT}/deploy/compose/compose.sh"; do
-  if OCSERV_DATABASE_BACKEND=mariadb OCSERV_DATABASE_DEPLOYMENT=external \
-    "${launcher}" config --quiet >"${work}/unsupported-backend.log" 2>&1; then
-    echo "removed database backend unexpectedly accepted" >&2
-    exit 1
-  fi
+  for retired in mariadb mysql; do
+    for deployment in bundled external; do
+      if OCSERV_DATABASE_BACKEND="${retired}" OCSERV_DATABASE_DEPLOYMENT="${deployment}" \
+        "${launcher}" config --quiet >"${work}/unsupported-backend.log" 2>&1; then
+        echo "retired database backend ${retired}:${deployment} unexpectedly accepted by ${launcher}" >&2
+        exit 1
+      fi
+    done
+  done
 done
 
-backend=mysql
-OCSERV_DATABASE_BACKEND="${backend}" OCSERV_DATABASE_DEPLOYMENT=external \
-  "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/external-${backend}.json"
-jq -e --arg backend "${backend}" '
-  (.services | has("postgres") | not) and
-  .services.migrate.environment.OCSERV_DATABASE_BACKEND == $backend and
-  .services["control-plane"].environment.OCSERV_DATABASE_BACKEND == $backend and
-  .services.backup.environment.DATABASE_BACKEND == $backend and
-  (.services.backup.healthcheck.test | length > 0) and
-  ([.services["control-plane"].secrets[].source] | index("database_owner_url") | not) and
-  ([.services["control-plane"].secrets[].source] | index("database_ca") != null) and
-  ([.services.migrate.secrets[].source] | index("database_owner_url") != null) and
-  ([.services.backup.secrets[].source] | index("database_backup_config") != null) and
-  ([.services.backup.secrets[].source] | index("database_ca") != null) and
-  (.services.migrate.networks | has("database-egress")) and
-  (.services["control-plane"].networks | has("database-egress")) and
-  (.services.backup.networks | has("database-egress")) and
-  ((.networks["database-egress"].internal // false) == false) and
-  ([.services.backup.volumes[].target] | index("/var/lib/ocservia-backup") != null) and
-  .services.backup.deploy.resources.limits.memory == "536870912"
-' "${work}/external-${backend}.json" >/dev/null
-
-if OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=bundled \
-  "${ROOT}/deploy/production/compose.sh" config --quiet >"${work}/rejected.log" 2>&1; then
-  echo "bundled MySQL unexpectedly accepted" >&2
-  exit 1
-fi
-
-backend=mysql
-OCSERV_DATABASE_BACKEND="${backend}" "${ROOT}/deploy/compose/compose.sh" config --format json >"${work}/dev-${backend}.json"
-jq -e --arg backend "${backend}" '
-  (.services | has("postgres") | not) and .services.database != null and
-  .services.migrate.depends_on.database.condition == "service_healthy" and
-  .services["control-plane"].depends_on.migrate.condition == "service_completed_successfully" and
-  .services["control-plane"].environment.OCSERV_DATABASE_BACKEND == $backend and
-  (.services.database.healthcheck.test | length > 0) and
-  (.volumes | has("database-data"))
-' "${work}/dev-${backend}.json" >/dev/null
-
-for rendered in postgres external-postgres external-mysql; do
+for rendered in postgres external-postgres; do
   jq -e '
     (.services.transportd.networks | keys) == ["application", "observability", "relay-egress"] and
     (.networks["relay-egress"].internal // false) == false and

@@ -323,7 +323,6 @@ jobs:
       PG_MAJOR: ${{ matrix.postgres }}
       ENGINE: ${{ matrix.engine }}
       DATABASE_TEST_SCOPE: ${{ needs.ci-relevance.outputs.database_scope }}
-      DATABASE_SHARD: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -354,19 +353,13 @@ jobs:
             basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
       - name: Enforce SQL artifact window and fixed checkpoint
         run: bash scripts/database-artifact-policy.sh "$ENGINE"
-      - if: matrix.engine == 'postgres'
-        run: scripts/database-integration.sh
-      - if: matrix.engine != 'postgres'
-        run: bash scripts/database-foundation-integration.sh
+      - run: scripts/database-integration.sh
       - name: Check current schema source and independent replay equivalence
-        # The check is engine-wide; one MySQL shard (the shortest) runs it.
-        if: ${{ !matrix.shard || matrix.shard == 'services' }}
-        run: bash "scripts/database-${ENGINE}-snapshot.sh" check
+        run: bash scripts/database-postgres-snapshot.sh check
       - name: Verify PostgreSQL 18 volume lifecycle
-        if: matrix.engine == 'postgres'
         run: bash scripts/test-postgres-volume-layout.sh
       - name: Save database Go objects (one main writer)
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.engine == 'mysql' && steps.go-build-cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.engine == 'postgres' && steps.go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-build
@@ -380,7 +373,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [postgres, mysql]
+        engine: [postgres]
     env:
       ENGINE: ${{ matrix.engine }}
     steps:
@@ -389,11 +382,9 @@ jobs:
           persist-credentials: false
       - run: scripts/bootstrap.sh go-test
       - run: |
-          script=scripts/mysql-backup-restore-smoke.sh
-          if [[ "$ENGINE" == postgres ]]; then script=scripts/external-postgres-backup-restore-smoke.sh; fi
           RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ENGINE}" \
             ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-${ENGINE}" \
-            bash "$script"
+            bash scripts/external-postgres-backup-restore-smoke.sh
       - name: Preserve database recovery evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

@@ -58,8 +58,8 @@ database = jobs.fetch("database-smoke")
 reject("matrix must use the router's Quick/Full selection") unless
   database.fetch("strategy").fetch("matrix") == "${{ fromJSON(needs.ci-relevance.outputs.database_matrix) }}" &&
   database.fetch("env").fetch("DATABASE_TEST_SCOPE") == "${{ needs.ci-relevance.outputs.database_scope }}"
-reject("Full retains recovery on both supported implementations") unless
-  jobs.fetch("database-recovery-full").fetch("strategy").fetch("matrix") == {"engine" => %w[postgres mysql]}
+reject("Full retains recovery on PostgreSQL 18") unless
+  jobs.fetch("database-recovery-full").fetch("strategy").fetch("matrix") == {"engine" => %w[postgres]}
 reject("heavy history must not be a Basic CI job") if jobs.key?("database-history-full")
 reject("Quick and Full must have separate concurrency groups") unless
   workflow.fetch("concurrency").fetch("group").include?("inputs.profile || 'quick'") &&

@@ -30,7 +30,7 @@ install, upgrade, rollback, and uninstall lifecycles.
 | --- | --- | --- |
 | Controller OS/architecture | Linux `amd64` and `arm64` release artifacts | Host table below |
 | Agent native packages | DEB on Ubuntu 22.04/24.04/26.04 and Debian 12/13, RPM on Rocky Linux 9, `amd64`/`arm64` | [Install a managed node](agent-lifecycle.md#install-a-managed-node), [Agent lifecycle](agent-lifecycle.md), [package validation](../development/release-checks.md) |
-| Databases | PostgreSQL 18.x bundled or external; MySQL 8.4 LTS external | [Database support](#database-support) |
+| Databases | PostgreSQL 18.x bundled or external | [Database support](#database-support) |
 | Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, `1.5.0`, and `1.6.0` | See the note below |
 | Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated Relay](#dedicated-relay) |
 | Authentication | Local only, OIDC only, or Local + OIDC | [Production authentication](authentication.md) |
@@ -58,9 +58,9 @@ Controller hosts:
 ### Deployment capability distinctions
 
 Every supported production deployment runs a single Controller instance, one
-relational database, and one dedicated Relay (either on separate hosts in
-Standalone mode or co-located in Integrated mode, with bundled PostgreSQL or
-external PostgreSQL/MySQL), managing one or more node Agents. Controller high
+PostgreSQL 18.x relational database, and one dedicated Relay (either on separate
+hosts in Standalone mode or co-located in Integrated mode, with bundled or
+external PostgreSQL), managing one or more node Agents. Controller high
 availability, multi-relay failover, database replication clusters, automatic
 PostgreSQL failover, and point-in-time recovery (PITR) are outside the
 supported scope. Controller rebind moves nodes between two independent
@@ -83,11 +83,10 @@ conflate:
    [Enroll the node](agent-lifecycle.md#enroll-the-node) and
    [Agent lifecycle](agent-lifecycle.md)).
 3. Backup creation versus verified restoration: scheduled backups produce
-   PostgreSQL base backups or MySQL logical dumps. Restoration is a separate
-   procedure that must be validated in an isolated environment. Neither a
-   completed backup job nor a passing restore-verifier check substitutes for
-   owner-role schema migration admission, and redirecting a live Controller to
-   a restored MySQL instance requires a manual cutover (see
+   PostgreSQL base backups. Restoration is a separate procedure that must be
+   validated in an isolated environment. A completed backup job never
+   substitutes for isolated restore verification and owner-role schema
+   migration admission (see
    [Database backup and restore](incident-recovery.md#database-backup-and-restore)).
 
 ### Version policy
@@ -138,11 +137,11 @@ retaining their respective execution receipts. Empty-database initialization
 never overwrites an existing database.
 
 Release acceptance validates the current candidate across the supported
-architectures, deployment modes, and database engines through security,
-integration, and resilience suites. Beyond the single bounded `v1.2.0` database
-schema transition, historical upgrade, downgrade, and migration paths are not
-tested. Running mismatched component versions can fail or corrupt state even
-without a version-admission gate. Operators must never reverse database
+architectures, deployment modes, and PostgreSQL 18.x database topologies through
+security, integration, and resilience suites. Beyond the single bounded `v1.2.0`
+database schema transition, historical upgrade, downgrade, and migration paths
+are not tested. Running mismatched component versions can fail or corrupt state
+even without a version-admission gate. Operators must never reverse database
 migrations, reset node or Signer identities, or overwrite persistent state to
 force a rollout, and changing deployment topologies requires a clean
 redeployment. The manual installer sets up a fresh deployment and does not
@@ -171,70 +170,58 @@ tag and GitHub Release while retaining the RC tags in history.
 ### Database support
 
 At startup, the production launcher pairs `deploy/production/compose.yaml` with
-a single database descriptor. The default bundled PostgreSQL 18 configuration
-runs the HTTPS gateway, control plane, transport service, PostgreSQL server,
-and backup worker together, keeping database, application, and observability
-traffic on internal Docker networks. Its Compose descriptor sets
-`OCSERV_DATABASE_BUNDLED_POSTGRES=true`. This is the only declaration under
+a single PostgreSQL 18.x database descriptor. The default bundled PostgreSQL 18
+configuration runs the HTTPS gateway, control plane, transport service,
+PostgreSQL server, and backup worker together, keeping database, application,
+and observability traffic on internal Docker networks. Its Compose descriptor
+sets `OCSERV_DATABASE_BUNDLED_POSTGRES=true`. This is the only declaration under
 which a production PostgreSQL URL without `OCSERV_DATABASE_TLS_CA_FILE` may
 target the `postgres` service (otherwise only loopback is accepted).
 
-External database deployments attach database client containers to the
+External PostgreSQL 18 deployments attach database client containers to the
 dedicated non-internal `database-egress` network, and ocservia publishes no
 database port. External PostgreSQL 18 requires `sslmode=verify-full` with
-`database-ca.pem` across owner, runtime, and backup connections. External MySQL
-8.4 LTS requires verified TLS and uses backend-specific logical backups. Bundled
-MySQL is rejected.
+`database-ca.pem` across owner, runtime, and backup connections.
 
 | Backend | Deployment | Production support |
 | --- | --- | --- |
 | PostgreSQL 18 | bundled or external | Yes; bundled remains the default |
-| MySQL 8.4 LTS | external only | Yes |
-| MySQL | bundled | No |
+| MySQL / MariaDB / PostgreSQL 17 | any | Retired and rejected |
 
-Support for PostgreSQL 17 and MariaDB has been removed. Application schema
-migrations never upgrade the database engine or its physical data format, so
-operators running PostgreSQL 17 must complete a controlled major upgrade via
-`pg_upgrade` or dump/reload before starting this Controller, preserving a
-verified backup and rollback copy throughout. PostgreSQL 18 containers mount
-their named volume at `/var/lib/postgresql` with
+Support for MySQL 8.4 LTS, MariaDB, and PostgreSQL 17 has been removed.
+Existing MySQL configurations (`OCSERV_DATABASE_BACKEND=mysql`) and existing
+hosts whose saved `deployment-profile.json` records `"database_backend": "mysql"`
+fail closed in `controller-bootstrap.sh`, `install.sh`, `compose.sh`, and every
+`controller.sh` lifecycle command (`install`, `upgrade`, `rollback`, `start`,
+and `uninstall`, including `uninstall --purge-data`) before modifying host
+packages, Compose stacks, volumes, or saved state, so existing MySQL deployments
+are never silently switched to PostgreSQL, overwritten, or deleted. Unverified
+cross-engine automatic migration is unsupported.
+
+Application schema migrations never upgrade the database engine or its physical
+data format, so operators running PostgreSQL 17 must complete a controlled major
+upgrade via `pg_upgrade` or dump/reload before starting this Controller,
+preserving a verified backup and rollback copy throughout. PostgreSQL 18
+containers mount their named volume at `/var/lib/postgresql` with
 `PGDATA=/var/lib/postgresql/18/docker`. Never mount an existing PostgreSQL 17
 volume into a PostgreSQL 18 container as if it were empty, and keep the old
-volume intact for recovery until the operator-led upgrade is verified. MariaDB
-deployments cannot be switched in place by setting `OCSERV_DATABASE_BACKEND` to
-`mysql`, and this project provides no cross-engine conversion tooling.
+volume intact for recovery until the operator-led upgrade is verified.
 
-To use a non-default database descriptor, select it explicitly:
+To use external PostgreSQL 18 instead of the bundled default, select it
+explicitly:
 
 ```dotenv
 OCSERV_DATABASE_BACKEND=postgres
 OCSERV_DATABASE_DEPLOYMENT=external
 OCSERV_DATABASE_BACKUP_HOST=postgres.example.com
+OCSERV_DATABASE_BACKUP_PORT=5432
 ```
 
-External MySQL example:
-
-```dotenv
-OCSERV_DATABASE_BACKEND=mysql
-OCSERV_DATABASE_DEPLOYMENT=external
-OCSERV_DATABASE_BACKUP_HOST=mysql.example.com
-OCSERV_DATABASE_BACKUP_PORT=3306
-OCSERV_DATABASE_BACKUP_NAME=ocservia
-OCSERV_DATABASE_BACKUP_USER=ocservia_backup
-OCSERV_DATABASE_BACKUP_IMAGE=registry.example.com/ocservia-mysql-backup@sha256:<digest>
-```
-
-When configuring external MySQL, set `external` deployment mode and place
-separate owner and runtime DSNs in `database-owner-url` and `database-app-url`
-alongside `database-ca.pem` and `database-backup.cnf` in the protected secret
-directory. Both DSNs must set `tls=true` against the mounted `database-ca.pem`
-trust root; only `migrate` receives the owner DSN, while the runtime receives
-only the application DSN and CA certificate. Pin the backend-specific backup
-image to an explicit version tag or SHA-256 reference via
-`OCSERV_DATABASE_BACKUP_IMAGE` for standalone v1 manifests, or through the
-selected backend image field in v2 deployment configurations. Snapshot restore,
-PITR, failover, and cross-engine migration remain separate procedures, and no
-PostgreSQL HA or PITR claim applies to MySQL.
+When configuring external PostgreSQL 18, place separate owner and runtime URLs
+(`sslmode=verify-full`) in `database-owner-url` and `database-app-url` alongside
+`database-ca.pem` and `postgres.pgpass` in the protected secret directory. Only
+`migrate` receives the owner URL, while the runtime receives only the
+application URL and CA certificate.
 
 ### Security review posture
 
@@ -277,12 +264,12 @@ PostgreSQL HA or PITR claim applies to MySQL.
 
 Both Standalone and Integrated deployments support only one dedicated Relay and
 require `OCSERV_RELAY_URL_B` to be empty. In a manual installation, the
-database backend (bundled or external PostgreSQL 18, or external MySQL 8.4 LTS)
-and the login mode (Local only, OIDC only, or Local + OIDC) can be chosen
-independently of the deployment mode. Quick mode fixes bundled PostgreSQL and
-Local-only login. At first install, the chosen deployment mode, database
-backend, and TLS mode are recorded in `deployment-profile.json` and cannot be
-changed on an existing installation.
+PostgreSQL 18 deployment (`bundled` or `external`) and the login mode (Local
+only, OIDC only, or Local + OIDC) can be chosen independently of the deployment
+mode. Quick mode fixes bundled PostgreSQL and Local-only login. At first
+install, the chosen deployment mode, database backend and deployment, and TLS
+mode are recorded in `deployment-profile.json` and cannot be changed on an
+existing installation.
 
 The default `standalone` mode connects to a Relay and a Signer hosted elsewhere.
 The `integrated` mode runs the SNI-routing Edge, the Relay, and the production
@@ -377,7 +364,7 @@ variable list. At a minimum, configure:
 | External services | `OCSERV_CERTIFICATE_SIGNER_URL` |
 | Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID` and required `OCSERV_RELAY_URL_A`; leave `OCSERV_RELAY_URL_B` unset or empty (only one dedicated Relay is supported, and a non-empty B value is rejected) |
 | Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, and optional Controller state root |
-| Database | Bundled or external PostgreSQL 18.x, or external MySQL 8.4 LTS |
+| Database | Bundled or external PostgreSQL 18.x |
 
 Token-only node installation also uses the Controller's HTTPS public origin,
 `OCSERV_RELAY_URL_A`, the existing command signing key and the protected file
@@ -427,10 +414,10 @@ Place these files inside the protected directories referenced by `install.env`
 before running the installer:
 
 - HTTPS server certificate and private key.
-- Database owner, runtime, and backup credentials for your chosen database
-  backend.
-- When using external MySQL: `database-ca.pem`, separate owner and runtime DSN
-  files, and `database-backup.cnf`.
+- Database owner, runtime, and backup credentials (`database-owner-url`,
+  `database-app-url`, and `postgres.pgpass`; plus `postgres-password`,
+  `postgres-app-password`, and `postgres-backup-password` for bundled
+  PostgreSQL, or `database-ca.pem` when using external PostgreSQL).
 - Session key and audit keys, plus the OIDC client secret when SSO is enabled.
 - Controller command-signing private key.
 - Certificate Signer bearer token.
@@ -786,11 +773,10 @@ Rollback changes images, never the ledger, CA, node identity or uncertain
 operation state.
 
 Container images and internal service ports come only from the selected
-manifest and versioned templates, with no mutable operator overrides. Integrated
-mode adds no bundled MySQL support, and Local or OIDC authentication
-provisioning works the same as in Standalone mode. There is no automatic
-cross-mode migration, automatic CRL distribution, HA or forced disconnection of
-existing VPN sessions.
+manifest and versioned templates, with no mutable operator overrides. Local or
+OIDC authentication provisioning works the same as in Standalone mode. There is
+no automatic cross-mode migration, automatic CRL distribution, HA or forced
+disconnection of existing VPN sessions.
 
 ### ACME certificates
 
@@ -907,7 +893,7 @@ bash "$bootstrap_file" --quick \
 Quick mode requires a Release that ships `deploy/production/quick-install.sh`,
 that is, a stable or RC release after v1.2.0. Releases up to v1.2.0 reject
 `--quick` before modifying the host. If you need a Standalone topology, an
-external or MySQL database, OIDC authentication, or manual TLS certificates,
+external PostgreSQL database, OIDC authentication, or manual TLS certificates,
 use the manual workflow above.
 
 At the bootstrap launcher layer, the script validates only argument syntax: two distinct
@@ -970,20 +956,23 @@ Release manifests use either the v1 or v2 schema. The v1 schema supports
 standalone installations with six image roles: `gateway`, `control`,
 `transport`, `backup`, `postgres`, and `otel`. The v2 reader keeps the same
 per-architecture filenames and protected local file rules while adding
-`signer_state_version: 1` and four additional image roles (`edge`, `relay`,
-`signer`, and `mysql_backup`), for ten roles in total. Integrated deployments
-require v2 (see [Integrated configuration](#integrated-configuration)), and v2
-selects backend backup image references directly from the manifest
-configuration instead of reading `OCSERV_DATABASE_BACKUP_IMAGE`. Across both
-schemas, eight first-party GHCR images use explicit `vX.Y.Z` tags, while
-PostgreSQL and OpenTelemetry retain pinned third-party references. All ten
-image references must carry explicit version tags or SHA-256 digests.
+`signer_state_version: 1` and three additional image roles (`edge`, `relay`,
+and `signer`), for nine roles in total. Integrated deployments require v2 (see
+[Integrated configuration](#integrated-configuration)), and v2 selects the
+manifest-bound `backup` image reference directly from the manifest
+configuration. Across both schemas, seven first-party GHCR images use explicit
+`vX.Y.Z` tags, while PostgreSQL and OpenTelemetry retain pinned third-party
+references. All nine image references must carry explicit version tags or
+SHA-256 digests.
 
 Manifest validation rejects unknown fields, unrecognized roles or state
 versions, missing required roles, invalid SemVer, platform, or source revisions,
-and noncanonical JSON formatting. Older lifecycle readers reject v2 manifests.
-Manifests never contain secret values. Compose pulls only the images needed by
-the selected services, including the backend's manifest-bound backup image.
+and noncanonical JSON formatting (while historical `current-release.json` and
+`previous-release.json` records saved by earlier v2 releases remain readable
+during PostgreSQL upgrades, starts, and uninstalls if they still carry retired
+`mysql_backup` or `mariadb_backup` image keys). Older lifecycle readers reject
+v2 manifests. Manifests never contain secret values. Compose pulls only the
+images needed by the selected services.
 
 Formal GitHub Releases publish:
 
@@ -1160,20 +1149,18 @@ Controller containers retain only runtime credentials. Keep your
 authentication configuration, session and audit keys, database TLS files, and
 backend/role settings intact across upgrades.
 
-Only a new, verifiably empty database is initialized from the backend's current
+Only a new, verifiably empty database is initialized from the current
 `schema.sql`. Existing databases are validated and advanced strictly through
 unapplied forward migrations and revisions; an updated snapshot file in a new
 release is never a reason to overwrite an existing schema. If schema provenance
-is missing or inconsistent, or if an earlier MySQL initialization was
-interrupted, normal startup stops. Do not erase metadata tables or alter
-checksums to force startup past those checks.
+is missing or inconsistent, normal startup stops. Do not erase metadata tables
+or alter checksums to force startup past those checks.
 
 Policy cleanup requires `DELETE` privilege on `user_policy_enforcements`,
-granted to the configured role on PostgreSQL or to the explicit `user@host`
-account on MySQL. The grant itself is at the table level, but store
-predicates restrict deletion to eligible unfinished records. Other table or
-DDL privileges remain unchanged. Replacing binaries without running the
-migration step will not repair missing grants.
+granted to the configured runtime role on PostgreSQL. The grant itself is at
+the table level, but store predicates restrict deletion to eligible unfinished
+records. Other table or DDL privileges remain unchanged. Replacing binaries
+without running the migration step will not repair missing grants.
 
 After the upgrade completes, confirm that migrations and background maintenance
 run without logging `user_operations.cleanup_failed`. If that error occurs,
@@ -1696,8 +1683,7 @@ manifest:
   `OCSERV_OTEL_IMAGE`) must be exported as version-tagged (`:vX.Y.Z` or
   `:vX.Y.Z-rc.N`) or `@sha256:` references taken from the release manifest in
   use. The same applies to `OCSERV_EDGE_IMAGE`, `OCSERV_RELAY_IMAGE`, and
-  `OCSERV_SIGNER_IMAGE` for Integrated, and to `OCSERV_DATABASE_BACKUP_IMAGE`
-  for MySQL. Never substitute an unreviewed tag.
+  `OCSERV_SIGNER_IMAGE` for Integrated. Never substitute an unreviewed tag.
 - Both the protected secret directory and the backup directory must satisfy
   their ownership and mode contracts (see [Production secrets](#production-secrets)),
   and all required PKI, Controller EndpointID, and relay settings must be

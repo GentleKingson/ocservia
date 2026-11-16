@@ -23,53 +23,15 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 )
 
 func controllerProcessDatabase(t *testing.T) (owner, runtime connection.Options, account string) {
 	t.Helper()
-	ctx := context.Background()
-	if dsn := os.Getenv("OCSERVIA_DATABASE_TEST_DSN"); dsn != "" {
-		options := mysql.Options{Engine: mysql.Engine(os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE")), Environment: "test", DSN: dsn}
-		admin, err := mysql.Open(ctx, options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = admin.Close() })
-		suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
-		name, user := "dbtest_startup_"+suffix, "startup_"+suffix[:20]
-		if _, err := admin.Exec(ctx, "CREATE DATABASE `"+name+"`"); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _, _ = admin.Exec(ctx, "DROP DATABASE `"+name+"`") })
-		if _, err := admin.Exec(ctx, "CREATE USER '"+user+"'@'%' IDENTIFIED BY 'startup-runtime-test-only'"); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _, _ = admin.Exec(ctx, "DROP USER '"+user+"'@'%'") })
-		if _, err := admin.Exec(ctx, "GRANT ALL ON `"+name+"`.* TO 'ocservia_owner'@'%' WITH GRANT OPTION"); err != nil {
-			t.Fatal(err)
-		}
-		cfg, err := driver.ParseDSN(dsn)
-		if err != nil {
-			t.Fatal("invalid fixture DSN")
-		}
-		caFile := os.Getenv("OCSERVIA_DATABASE_TEST_TLS_CA_FILE")
-		if caFile != "" {
-			cfg.TLSConfig = "true"
-		}
-		cfg.DBName, cfg.User, cfg.Passwd = name, "ocservia_owner", "database-e2e-owner-test-only"
-		owner = connection.Options{Backend: string(options.Engine), Environment: "production", URL: cfg.FormatDSN(), CAFile: caFile}
-		cfg.User, cfg.Passwd = user, "startup-runtime-test-only"
-		runtime = owner
-		runtime.URL = cfg.FormatDSN()
-		return owner, runtime, user + "@%"
-	}
 	ownerURL, runtimeURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"), os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if ownerURL == "" || runtimeURL == "" {
-		t.Skip("isolated real database with separate owner/runtime credentials required")
+		t.Skip("isolated real PostgreSQL database with separate owner/runtime credentials required")
 	}
 	return connection.Options{Backend: "postgres", Environment: "test", URL: ownerURL}, connection.Options{Backend: "postgres", Environment: "test", URL: runtimeURL}, "ocservia_app"
 }
@@ -214,38 +176,10 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	defer runtime.Close()
 	if !smoke {
 		t.Run("cleanup-privilege-repair", func(t *testing.T) {
-			checkCleanupCLIRecovery(t, ctx, owner, runtime, runtimeOptions.Backend, account, func() error {
+			checkCleanupCLIRecovery(t, ctx, owner, runtime, account, func() error {
 				return run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only")
 			})
 		})
-		if runtimeOptions.Backend != "postgres" {
-			t.Run("roles-refuse-missing-telemetry-month", func(t *testing.T) {
-				var month []byte
-				if err := owner.Store.QueryRow(ctx, `SELECT table_name FROM telemetry_sample_shards WHERE state='active' AND start_at<=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)) AND end_at>TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))`).Scan(&month); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := owner.Store.Exec(ctx, `UPDATE telemetry_sample_shards SET state='retired' WHERE table_name=?`, month); err != nil {
-					t.Fatal(err)
-				}
-				defer func() {
-					if _, err := owner.Store.Exec(ctx, `UPDATE telemetry_sample_shards SET state='active' WHERE table_name=?`, month); err != nil {
-						t.Error(err)
-					}
-				}()
-				for _, role := range []string{"api", "worker", "scheduler", "all"} {
-					t.Run(role, func(t *testing.T) {
-						checkCtx, stop := context.WithTimeout(ctx, 10*time.Second)
-						defer stop()
-						cmd := exec.CommandContext(checkCtx, binary, "--role="+role)
-						cmd.Env = environment(runtimeOptions, nil)
-						output, err := cmd.CombinedOutput()
-						if err == nil || !bytes.Contains(output, []byte("validate required runtime database capabilities")) {
-							t.Fatalf("role did not refuse missing telemetry storage: %v\n%s", err, output)
-						}
-					})
-				}
-			})
-		}
 	}
 	if _, err := runtime.Store.Exec(ctx, `CREATE TABLE startup_forbidden(id int)`); !errors.Is(err, database.ErrPermission) {
 		t.Fatal("runtime DDL was not denied", err)
@@ -284,31 +218,17 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		t.Fatal(err)
 	}
 	at, _ := value.FromTime(time.Now().UTC())
-	query := `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Controller process',$2,$3,$3)`
-	var workspaceArg any = workspace
-	if runtimeOptions.Backend != "postgres" {
-		query = `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES(?,'Controller process',?,?,?)`
-		workspaceArg = mysql.UUIDBytes(workspace)
-	}
-	args := []any{workspaceArg, workspace.String(), at}
-	if runtimeOptions.Backend != "postgres" {
-		args = append(args, at)
-	}
 	if !smoke {
-		if _, err := runtime.Store.Exec(ctx, query, args...); err != nil {
+		if _, err := runtime.Store.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Controller process',$2,$3,$3)`, workspace, workspace.String(), at); err != nil {
 			t.Fatal("seed workspace", err)
 		}
 	} else {
-		checkSmokeTransactions(t, ctx, runtime.Store, runtimeOptions.Backend, workspaceArg)
+		checkSmokeTransactions(t, ctx, runtime.Store, workspace)
 		if err := run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only"); err != nil {
 			t.Fatal("repeat migration with business data", err)
 		}
-		read := `SELECT name FROM workspaces WHERE id=$1`
-		if runtimeOptions.Backend != "postgres" {
-			read = `SELECT name FROM workspaces WHERE id=?`
-		}
 		var name string
-		if err := runtime.Store.QueryRow(ctx, read, workspaceArg).Scan(&name); err != nil || name != "committed workspace" {
+		if err := runtime.Store.QueryRow(ctx, `SELECT name FROM workspaces WHERE id=$1`, workspace).Scan(&name); err != nil || name != "committed workspace" {
 			t.Fatal("repeat migration changed committed data", name, err)
 		}
 	}
@@ -336,7 +256,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		t.Fatalf("repeat runtime CLI bootstrap: %v\n%s", err, output)
 	}
 	if !production && !smoke {
-		installSchedulerEvidence(t, ctx, owner, runtimeOptions.Backend, account)
+		installSchedulerEvidence(t, ctx, owner)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -529,46 +449,20 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	})
 }
 
-func installSchedulerEvidence(t *testing.T, ctx context.Context, owner *connection.Connection, backend, account string) {
+func installSchedulerEvidence(t *testing.T, ctx context.Context, owner *connection.Connection) {
 	t.Helper()
-	if backend == "postgres" {
-		sql, err := os.ReadFile("../../../../deploy/test-fixtures/scheduler-maintenance.sql")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := owner.Store.Exec(ctx, string(sql)); err != nil {
-			t.Fatal("install PostgreSQL evidence fixture", err)
-		}
-		t.Cleanup(func() {
-			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if _, err := owner.Store.Exec(cleanup, `DROP FUNCTION public.test_record_scheduler_maintenance(uuid,bigint,bigint); DROP TABLE public.test_scheduler_maintenance_history`); err != nil {
-				t.Error("remove PostgreSQL evidence fixture", err)
-			}
-		})
-		return
-	}
-	// Test-only owner objects are installed after immutable schema validation.
-	// Runtime gets EXECUTE on the exact-term recorder, never journal INSERT.
-	for _, sql := range []string{
-		`CREATE TABLE test_scheduler_maintenance_history(maintenance_id BIGINT AUTO_INCREMENT PRIMARY KEY,instance_id VARBINARY(16) NOT NULL,incarnation BIGINT NOT NULL,epoch BIGINT NOT NULL,completed_at BIGINT NOT NULL) ENGINE=InnoDB`,
-		`CREATE PROCEDURE test_record_scheduler_maintenance(IN requested_instance_id VARBINARY(16),IN requested_incarnation BIGINT,IN requested_epoch BIGINT)
-SQL SECURITY DEFINER
-BEGIN
- DECLARE valid_until BIGINT DEFAULT NULL;
- SELECT lease_until INTO valid_until FROM scheduler_leadership WHERE id=1 AND instance_id=requested_instance_id AND incarnation=requested_incarnation AND epoch=requested_epoch LOCK IN SHARE MODE;
- IF valid_until IS NULL OR valid_until<=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)) THEN
-  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='scheduler maintenance term is not the exact live leader';
- END IF;
- INSERT INTO test_scheduler_maintenance_history(instance_id,incarnation,epoch,completed_at) VALUES(requested_instance_id,requested_incarnation,requested_epoch,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)));
-END`,
-	} {
-		if _, err := owner.Store.Exec(ctx, sql); err != nil {
-			t.Fatal("install MySQL evidence fixture", err)
-		}
-	}
-	user, _, _ := strings.Cut(account, "@")
-	if _, err := owner.Store.Exec(ctx, "GRANT EXECUTE ON PROCEDURE test_record_scheduler_maintenance TO '"+user+"'@'%'"); err != nil {
+	sql, err := os.ReadFile("../../../../deploy/test-fixtures/scheduler-maintenance.sql")
+	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := owner.Store.Exec(ctx, string(sql)); err != nil {
+		t.Fatal("install PostgreSQL evidence fixture", err)
+	}
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := owner.Store.Exec(cleanup, `DROP FUNCTION public.test_record_scheduler_maintenance(uuid,bigint,bigint); DROP TABLE public.test_scheduler_maintenance_history`); err != nil {
+			t.Error("remove PostgreSQL evidence fixture", err)
+		}
+	})
 }

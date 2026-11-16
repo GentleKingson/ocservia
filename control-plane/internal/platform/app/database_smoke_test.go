@@ -6,14 +6,12 @@ import (
 	"testing"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/google/uuid"
 )
 
-func checkSmokeTransactions(t *testing.T, ctx context.Context, store database.Backend, backend string, workspace any) {
+func checkSmokeTransactions(t *testing.T, ctx context.Context, store database.Backend, workspace uuid.UUID) {
 	t.Helper()
 	update, read := `UPDATE workspaces SET name=$1 WHERE id=$2`, `SELECT name FROM workspaces WHERE id=$1`
-	if backend != "postgres" {
-		update, read = `UPDATE workspaces SET name=? WHERE id=?`, `SELECT name FROM workspaces WHERE id=?`
-	}
 	rollback := errors.New("rollback smoke transaction")
 	for _, commit := range []bool{true, false} {
 		name := "committed workspace"

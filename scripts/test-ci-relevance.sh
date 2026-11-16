@@ -10,7 +10,7 @@ git -C "${fixture}" config user.email test@example.invalid
 git -C "${fixture}" commit --allow-empty -qm base
 base="$(git -C "${fixture}" rev-parse HEAD)"
 flags=(run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache)
-all_images='gateway control transport backup edge relay signer mysql_backup'
+all_images='gateway control transport backup edge relay signer'
 expect() {
   local out=$1 key=$2 value=$3
   grep -Fxq "${key}=${value}" "${out}" || { cat "${out}" >&2; echo "expected ${key}=${value}" >&2; exit 1; }
@@ -35,14 +35,8 @@ expect_images() {
 check_matrix() {
   local out=$1 profile=$2
   sed -n 's/^database_matrix=//p' "${out}" | jq -e --arg profile "${profile}" '
-    if $profile == "full" then
-      .include == [{"engine":"postgres","postgres":"18","version":"18.6"},
-        {"engine":"mysql","version":"8.4.11","shard":"mysql-cutover"},
-        {"engine":"mysql","version":"8.4.11","shard":"mysql-core"},
-        {"engine":"mysql","version":"8.4.11","shard":"services"}]
-    else
-      .include == [{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.11"}]
-    end' >/dev/null
+    ($profile == "quick" or $profile == "full") and
+    .include == [{"engine":"postgres","postgres":"18","version":"18.6"}]' >/dev/null
 }
 while read -r path selected; do
   git -C "${fixture}" checkout -q --detach "${base}"
@@ -70,9 +64,7 @@ while read -r path selected; do
         control-plane/*|THIRD_PARTY_NOTICES.md) expected_images=control ;;
         rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/crates/*|rust/vendor/*|rust/.cargo/*|rust/transportd.Dockerfile|deploy/production/transportd-relays.sh|deploy/prepare-transport-runtime.sh)
           expected_images=transport ;;
-        deploy/production/backup-entrypoint.sh) expected_images='backup mysql_backup' ;;
-        deploy/production/backup.Dockerfile|scripts/postgres-backup.sh) expected_images=backup ;;
-        deploy/production/backup.mysql.Dockerfile|scripts/mysql-backup.sh) expected_images=mysql_backup ;;
+        deploy/production/backup-entrypoint.sh|deploy/production/backup.Dockerfile|scripts/postgres-backup.sh) expected_images=backup ;;
         deploy/production/edge.Dockerfile) expected_images=edge ;;
         deploy/production/integrated/*) expected_images='gateway edge' ;;
         deploy/production/relay.Dockerfile|deploy/production/relay.Cargo.lock|scripts/build-relay.sh)
@@ -149,14 +141,14 @@ rust/.cargo/config.toml run_rust run_controller_cache
 rust/Cargo.lock run_rust run_controller_cache
 proto/controller.proto run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 control-plane/internal/platform/app/run.go run_go run_database run_controller_cache
-control-plane/internal/database/mysql/backend.go run_go run_database run_controller_cache
+control-plane/internal/database/postgres/backend.go run_go run_database run_controller_cache
 control-plane/internal/api/routes.go run_go run_database run_controller_cache
 control-plane/internal/api/node_boundary_test.go run_go run_database
 control-plane/migrations/cutover_test.go run_go run_database
 control-plane/Dockerfile run_go run_controller_cache
 control-plane/internal/auth/password_blocklist/common-passwords.txt run_go run_database run_controller_cache
-control-plane/migrations/000036.up.sql run_go run_database run_controller_cache
-scripts/database-foundation-integration.sh run_go run_database run_ci_tools
+control-plane/migrations/schema.sql run_go run_database run_controller_cache
+scripts/database-postgres-smoke.sh run_go run_database run_ci_tools
 scripts/go-check.sh run_go run_ci_tools
 signer/http.go run_go run_controller_cache
 signer/store_test.go run_go
@@ -192,7 +184,6 @@ deploy/production/compose.yaml run_ci_tools run_installers
 deploy/production/backup-entrypoint.sh run_ci_tools run_installers run_controller_cache
 deploy/production/gateway.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/backup.Dockerfile run_ci_tools run_installers run_controller_cache
-deploy/production/backup.mysql.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/edge.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/signer.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/future.Dockerfile run_ci_tools run_installers run_controller_cache
@@ -225,7 +216,6 @@ THIRD_PARTY_NOTICES.md run_docs run_controller_cache
 deploy/production/relay.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/integrated/nginx.conf.template run_ci_tools run_installers run_controller_cache
 deploy/production/relay.Cargo.lock run_ci_tools run_installers run_controller_cache
-scripts/mysql-backup.sh run_go run_database run_controller_cache run_ci_tools
 scripts/postgres-backup.sh run_go run_database run_controller_cache run_ci_tools
 deploy/prepare-transport-runtime.sh run_ci_tools run_installers run_controller_cache
 scripts/build-relay.sh run_rust run_ci_tools run_controller_cache

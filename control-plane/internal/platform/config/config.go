@@ -135,8 +135,8 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	if backend, ok := lookup("OCSERV_DATABASE_BACKEND"); ok {
-		if backend != "postgres" && backend != "mysql" {
-			return Config{}, errors.New("OCSERV_DATABASE_BACKEND must be postgres or mysql")
+		if backend != "postgres" {
+			return Config{}, errors.New("OCSERV_DATABASE_BACKEND must be postgres; MySQL and cross-engine migration are unsupported")
 		}
 		cfg.DatabaseBackend = backend
 	}
@@ -394,8 +394,8 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 
 func (c Config) Validate() error {
 	// Empty retains the pre-backend-selector PostgreSQL configuration contract.
-	if c.DatabaseBackend != "" && c.DatabaseBackend != "postgres" && c.DatabaseBackend != "mysql" {
-		return errors.New("OCSERV_DATABASE_BACKEND must be postgres or mysql")
+	if c.DatabaseBackend != "" && c.DatabaseBackend != "postgres" {
+		return errors.New("OCSERV_DATABASE_BACKEND must be postgres; MySQL and cross-engine migration are unsupported")
 	}
 	if (c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) && (!c.LocalAuthEnabled() || c.MigrateOnly || (c.BootstrapLocalAdmin && c.CompleteLocalBootstrap) || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")

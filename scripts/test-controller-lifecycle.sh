@@ -1155,11 +1155,11 @@ cmp -s "${version_release}" "${version_state}/current-release.json"
 
 integrated_release="${fixture}/release/integrated.json"
 jq --arg ref "registry.test/image@${digest}" '.manifest_version = 2 | .signer_state_version = 1 |
-  .images += {edge:$ref, relay:$ref, signer:$ref, mysql_backup:$ref}' \
+  .images += {edge:$ref, relay:$ref, signer:$ref}' \
   "${release_file}" >"${integrated_release}"
 integrated_state="${fixture}/integrated"
 expect_failure "${fixture}/integrated-v1" "${release_file}" "requires a v2 release manifest" false env OCSERV_DEPLOYMENT_MODE=integrated
-for filter in '.signer_state_version = 2' '.extra = true' '.images.extra = .images.signer' 'del(.images.mysql_backup)' '.images.mariadb_backup = .images.mysql_backup' '.database_migration.epoch = 0' '.database_migration.revision = -1' '.database_migration.revision = "0"' '.database_migration.extra = true'; do
+for filter in '.signer_state_version = 2' '.extra = true' '.images.extra = .images.signer' 'del(.images.signer)' '.images.mysql_backup = .images.signer' '.images.mariadb_backup = .images.signer' '.database_migration.epoch = 0' '.database_migration.revision = -1' '.database_migration.revision = "0"' '.database_migration.extra = true'; do
   rejected="${fixture}/release/integrated-rejected.json"
   jq "${filter}" "${integrated_release}" >"${rejected}"
   rejection_state="$(mktemp -d "${fixture}/v2-rejection.XXXXXX")"
@@ -1170,18 +1170,49 @@ for filter in '.signer_state_version = 2' '.extra = true' '.images.extra = .imag
   test ! -e "${rejection_state}/compose.log"
 done
 # Old v2 inventories remain valid saved evidence, including pending-upgrade
-# recovery. They are rejected above as new targets and never enable MariaDB.
-legacy_v2="${fixture}/release/legacy-v2.json"
-jq '.images.mariadb_backup = .images.mysql_backup' "${integrated_release}" >"${legacy_v2}"
-legacy_v2_state="${fixture}/legacy-v2-upgrade"
-seed_upgrade_state "${legacy_v2_state}" "${legacy_v2}"
-cp "${legacy_v2}" "${legacy_v2_state}/current-release.json"
-expect_upgrade_failure "${legacy_v2_state}" "${integrated_release}" 'release smoke failed' env MOCK_SMOKE_EXIT=1
-cmp -s "${legacy_v2}" "${legacy_v2_state}/current-release.json"
-assert_pending_previous_release "${legacy_v2}" "${legacy_v2_state}/pending-release.json"
-run_controller_upgrade "${legacy_v2_state}" "${integrated_release}" env
-cmp -s "${integrated_release}" "${legacy_v2_state}/current-release.json"
-cmp -s "${legacy_v2}" "${legacy_v2_state}/previous-release.json"
+# recovery. They are rejected above as new targets and never enable retired backends.
+for legacy_filter in '.images.mysql_backup = .images.signer' '.images.mysql_backup = .images.signer | .images.mariadb_backup = .images.signer'; do
+  legacy_v2="$(mktemp "${fixture}/release/legacy-v2.XXXXXX.json")"
+  jq "${legacy_filter}" "${integrated_release}" >"${legacy_v2}"
+  legacy_v2_state="$(mktemp -d "${fixture}/legacy-v2-upgrade.XXXXXX")"
+  seed_upgrade_state "${legacy_v2_state}" "${legacy_v2}"
+  cp "${legacy_v2}" "${legacy_v2_state}/current-release.json"
+  expect_upgrade_failure "${legacy_v2_state}" "${integrated_release}" 'release smoke failed' env MOCK_SMOKE_EXIT=1
+  cmp -s "${legacy_v2}" "${legacy_v2_state}/current-release.json"
+  assert_pending_previous_release "${legacy_v2}" "${legacy_v2_state}/pending-release.json"
+  run_controller_upgrade "${legacy_v2_state}" "${integrated_release}" env
+  cmp -s "${integrated_release}" "${legacy_v2_state}/current-release.json"
+  cmp -s "${legacy_v2}" "${legacy_v2_state}/previous-release.json"
+done
+
+# Existing MySQL deployment profiles fail closed on every lifecycle action
+# before any Compose invocation, pending-state write, or data/state purge.
+retired_mysql_state="${fixture}/retired-mysql-profile"
+seed_upgrade_state "${retired_mysql_state}" "${integrated_release}"
+cp "${release_file}" "${retired_mysql_state}/previous-release.json"
+chmod 600 "${retired_mysql_state}/previous-release.json"
+printf '%s\n' '{"database_backend":"mysql","database_deployment":"external","deployment_mode":"standalone"}' \
+  >"${retired_mysql_state}/deployment-profile.json"
+chmod 600 "${retired_mysql_state}/deployment-profile.json"
+for action in install upgrade rollback start uninstall uninstall-purge; do
+  output_log="${retired_mysql_state}/${action}.log"
+  status=0
+  case "${action}" in
+    install) run_controller "${retired_mysql_state}" "${integrated_release}" env >"${output_log}" 2>&1 || status=$? ;;
+    upgrade) run_controller_upgrade "${retired_mysql_state}" "${integrated_release}" env >"${output_log}" 2>&1 || status=$? ;;
+    rollback) run_controller_rollback "${retired_mysql_state}" env >"${output_log}" 2>&1 || status=$? ;;
+    start) run_controller_start "${retired_mysql_state}" >"${output_log}" 2>&1 || status=$? ;;
+    uninstall) run_controller_uninstall "${retired_mysql_state}" >"${output_log}" 2>&1 || status=$? ;;
+    uninstall-purge) run_controller_uninstall "${retired_mysql_state}" --purge-data >"${output_log}" 2>&1 || status=$? ;;
+  esac
+  (( status != 0 )) || { echo "retired MySQL deployment profile accepted on ${action}" >&2; exit 1; }
+  grep -Fq 'existing MySQL deployment is retired' "${output_log}"
+  test ! -e "${retired_mysql_state}/compose.log"
+  test ! -e "${retired_mysql_state}/pending-release.json"
+  cmp -s "${integrated_release}" "${retired_mysql_state}/current-release.json"
+  cmp -s "${release_file}" "${retired_mysql_state}/previous-release.json"
+  test -f "${retired_mysql_state}/deployment-profile.json"
+done
 
 mkdir -m 700 "${integrated_state}"
 if run_controller "${integrated_state}" "${integrated_release}" env OCSERV_DEPLOYMENT_MODE=integrated \
@@ -1199,8 +1230,12 @@ if OCSERV_DEPLOYMENT_MODE=standalone run_controller_start "${integrated_state}" 
   echo "Integrated mode change was accepted" >&2; exit 1
 fi
 grep -Fq 'deployment mode cannot change' "${integrated_state}/failure.log"
-if OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
+if OCSERV_DATABASE_BACKEND=postgres OCSERV_DATABASE_DEPLOYMENT=external run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
   echo "Integrated database switch was accepted" >&2; exit 1
+fi
+grep -Fq 'database deployment cannot change' "${integrated_state}/failure.log"
+if OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
+  echo "Integrated retired MySQL switch was accepted" >&2; exit 1
 fi
 grep -Fq 'database deployment cannot change' "${integrated_state}/failure.log"
 jq -e 'has("tls_mode") | not' "${integrated_state}/deployment-profile.json" >/dev/null

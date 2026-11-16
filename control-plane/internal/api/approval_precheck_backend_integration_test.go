@@ -22,10 +22,10 @@ func TestLocalResetApprovalPrecheckBackendHTTPIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Operator','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'Operator','workspace',?)`, uuid.Must(uuid.NewV7()), f.requester.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
+	f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Operator','workspace',$4)`, uuid.Must(uuid.NewV7()), f.requester.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
 	// An identity without a Local credential must be hidden just like a missing ID.
 	oidcID := uuid.Must(uuid.NewV7())
-	f.exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'precheck-oidc',$2,$3,$4)`, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES(?,'precheck-oidc',?,?,?)`, oidcID, oidcID.String(), value.Timestamp{Valid: true}, value.Timestamp{Valid: true})
+	f.exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'precheck-oidc',$2,$3,$4)`, oidcID, oidcID.String(), value.Timestamp{Valid: true}, value.Timestamp{Valid: true})
 	var deniedBody string
 	for _, tc := range []struct {
 		name string
@@ -45,7 +45,7 @@ func TestLocalResetApprovalPrecheckBackendHTTPIntegration(t *testing.T) {
 			}
 			deniedBody = strings.ReplaceAll(w.Body.String(), tc.id.String(), "<identity>")
 			var count int
-			if err := f.row(`SELECT count(*) FROM approval_requests WHERE requester_id=$1`, `SELECT count(*) FROM approval_requests WHERE requester_id=?`, f.requester.principal.IdentityID).Scan(&count); err != nil || count != 0 {
+			if err := f.row(`SELECT count(*) FROM approval_requests WHERE requester_id=$1`, f.requester.principal.IdentityID).Scan(&count); err != nil || count != 0 {
 				t.Fatalf("denied request persisted an approval: %d %v", count, err)
 			}
 			w = f.call("POST", path, body, "", adminCookie, nil)

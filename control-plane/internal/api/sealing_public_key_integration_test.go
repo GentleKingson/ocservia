@@ -31,7 +31,7 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 	plan := f.plan(true)
 	node := plan.NodeID
 	f.bind(f.requester, node, "UserManager")
-	f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, `DELETE FROM role_bindings WHERE identity_id=? AND workspace_id=?`, f.reader.principal.IdentityID, f.workspace)
+	f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, f.reader.principal.IdentityID, f.workspace)
 	f.bind(f.reader, node, "Viewer")
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -44,8 +44,8 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 	digest := sha256.Sum256(der)
 	endpoint := sha256.Sum256(node[:])
 	at, _ := value.FromTime(time.Now())
-	f.exec(`INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at) VALUES($1,1,1,'browser-key',$2,$3)`, `INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at) VALUES(?,1,1,'browser-key',?,?)`, node, digest[:], at)
-	f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.users.write',true)`, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES(?,'ocserv.users.write',true)`, node)
+	f.exec(`INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at) VALUES($1,1,1,'browser-key',$2,$3)`, node, digest[:], at)
+	f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.users.write',true)`, node)
 	binding := enrollment.UserPasswordSealingKey{WorkspaceID: f.workspace, NodeID: node, EndpointID: hex.EncodeToString(endpoint[:]), Version: 1, Purpose: "user_password", KeyID: "browser-key", PublicKeySHA256: hex.EncodeToString(digest[:]), PublicKeyDER: der}
 	source := &publicKeyFixtureSource{}
 	set := func(b enrollment.UserPasswordSealingKey) { source.data, _ = json.Marshal(b) }
@@ -85,8 +85,8 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 		assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.requester.cookie, nil), 409, "sealing-key-binding-mismatch")
 	}
 	foreignWorkspace, foreignNode := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Foreign key fixture',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Foreign key fixture',?,?,?)`, foreignWorkspace, foreignWorkspace.String(), at, at)
-	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'Foreign key node','active',$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'Foreign key node','active',?,?)`, foreignNode, foreignWorkspace, at, at)
+	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Foreign key fixture',$2,$3,$4)`, foreignWorkspace, foreignWorkspace.String(), at, at)
+	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'Foreign key node','active',$3,$4)`, foreignNode, foreignWorkspace, at, at)
 	assertApplyHTTPProblem(t, f.call("GET", "/api/v1/nodes/"+foreignNode.String()+"/user-password-sealing-key", "", "", f.requester.cookie, nil), 404, "not-found")
 	set(binding)
 	// The same envelope reaches the existing signed command path for creation
@@ -113,7 +113,7 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 		}
 		id := uuid.MustParse(operation.CommandID)
 		var encoded []byte
-		if err := f.row(`SELECT envelope FROM commands WHERE id=$1`, `SELECT envelope FROM commands WHERE id=?`, id).Scan(&encoded); err != nil {
+		if err := f.row(`SELECT envelope FROM commands WHERE id=$1`, id).Scan(&encoded); err != nil {
 			t.Fatal(err)
 		}
 		var envelope agentv1.CommandEnvelope
@@ -134,22 +134,22 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 			t.Fatal("password envelope did not round trip")
 		}
 		clear(plain)
-		f.exec(`UPDATE commands SET state='succeeded' WHERE id=$1`, `UPDATE commands SET state='succeeded' WHERE id=?`, id)
+		f.exec(`UPDATE commands SET state='succeeded' WHERE id=$1`, id)
 	}
 	// Offline keeps enrolled identity; capability withdrawal and endpoint
 	// revocation invalidate the public key even if Signer still has its binding.
-	f.exec(`UPDATE nodes SET status='offline' WHERE id=$1`, `UPDATE nodes SET status='offline' WHERE id=?`, node)
+	f.exec(`UPDATE nodes SET status='offline' WHERE id=$1`, node)
 	if w := f.call("GET", path, "", "", f.requester.cookie, nil); w.Code != 200 {
 		t.Fatal("offline enrolled key unavailable", w.Code)
 	}
-	f.exec(`UPDATE node_capabilities SET approved=false WHERE node_id=$1 AND capability='ocserv.users.write'`, `UPDATE node_capabilities SET approved=false WHERE node_id=? AND capability='ocserv.users.write'`, node)
+	f.exec(`UPDATE node_capabilities SET approved=false WHERE node_id=$1 AND capability='ocserv.users.write'`, node)
 	assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.requester.cookie, nil), 409, "sealing-key-binding-mismatch")
-	f.exec(`UPDATE node_capabilities SET approved=true WHERE node_id=$1 AND capability='ocserv.users.write'`, `UPDATE node_capabilities SET approved=true WHERE node_id=? AND capability='ocserv.users.write'`, node)
-	f.exec(`UPDATE node_endpoint_keys SET state='revoked',revoked_at=$1 WHERE node_id=$2`, `UPDATE node_endpoint_keys SET state='revoked',revoked_at=? WHERE node_id=?`, at, node)
+	f.exec(`UPDATE node_capabilities SET approved=true WHERE node_id=$1 AND capability='ocserv.users.write'`, node)
+	f.exec(`UPDATE node_endpoint_keys SET state='revoked',revoked_at=$1 WHERE node_id=$2`, at, node)
 	assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.requester.cookie, nil), 409, "sealing-key-binding-mismatch")
-	f.exec(`UPDATE node_endpoint_keys SET state='active',revoked_at=NULL WHERE node_id=$1`, `UPDATE node_endpoint_keys SET state='active',revoked_at=NULL WHERE node_id=?`, node)
+	f.exec(`UPDATE node_endpoint_keys SET state='active',revoked_at=NULL WHERE node_id=$1`, node)
 	// A rotated current descriptor invalidates the older Signer binding.
-	f.exec(`UPDATE node_sealing_keys SET key_id='new-key' WHERE node_id=$1 AND purpose=1`, `UPDATE node_sealing_keys SET key_id='new-key' WHERE node_id=? AND purpose=1`, node)
+	f.exec(`UPDATE node_sealing_keys SET key_id='new-key' WHERE node_id=$1 AND purpose=1`, node)
 	assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.requester.cookie, nil), 409, "sealing-key-binding-mismatch")
 	service.EnableUserPasswordPublicKeys(nil)
 	assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.requester.cookie, nil), 503, "sealing-key-unavailable")

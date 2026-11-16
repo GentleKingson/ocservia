@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,31 +13,14 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/identityprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 )
 
-// Fixture SQL is backend-specific; every business action below uses the same
-// service and the restricted runtime connection on all three engines.
-func authSafetySQL(b database.Backend, pg, my string, args []any) (string, []any) {
-	if _, ok := b.(*mysql.Backend); !ok {
-		return pg, args
-	}
-	args = append([]any(nil), args...)
-	for i, arg := range args {
-		if id, ok := arg.(uuid.UUID); ok {
-			args[i] = mysql.UUIDBytes(id)
-		}
-	}
-	return my, args
-}
-
-func authSafetyExec(t *testing.T, b database.Backend, pg, my string, args ...any) {
+func authSafetyExec(t *testing.T, b database.Backend, query string, args ...any) {
 	t.Helper()
-	query, args := authSafetySQL(b, pg, my, args)
 	if _, err := b.Exec(context.Background(), query, args...); err != nil {
 		t.Fatal(err)
 	}
@@ -51,31 +33,23 @@ func authSafetyWorkspace(t *testing.T, owner database.Backend) uuid.UUID {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authSafetyExec(t, owner,
-		`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Authentication safety test',$2,$3,$4)`,
-		`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Authentication safety test',?,?,?)`, id, "auth-safety-"+id.String(), now, now)
+	authSafetyExec(t, owner, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Authentication safety test',$2,$3,$4)`, id, "auth-safety-"+id.String(), now, now)
 	t.Cleanup(func() {
-		authSafetyExec(t, owner, `DELETE FROM local_auth_bootstrap WHERE workspace_id=$1`, `DELETE FROM local_auth_bootstrap WHERE workspace_id=?`, id)
-		authSafetyExec(t, owner, `DELETE FROM role_bindings WHERE workspace_id=$1`, `DELETE FROM role_bindings WHERE workspace_id=?`, id)
+		authSafetyExec(t, owner, `DELETE FROM local_auth_bootstrap WHERE workspace_id=$1`, id)
+		authSafetyExec(t, owner, `DELETE FROM role_bindings WHERE workspace_id=$1`, id)
 	})
 	return id
 }
 
 func authSafetyAuditFailure(t *testing.T, owner database.Backend, workspace uuid.UUID, action string) func() {
 	t.Helper()
-	pg := `ALTER TABLE audit_events ADD CONSTRAINT test_auth_audit_failure CHECK(workspace_id <> '` + workspace.String() + `' OR action <> '` + action + `')`
-	my := `ALTER TABLE audit_events ADD CONSTRAINT test_auth_audit_failure CHECK(workspace_id <> X'` + strings.ReplaceAll(workspace.String(), "-", "") + `' OR action <> '` + action + `')`
-	authSafetyExec(t, owner, pg, my)
+	authSafetyExec(t, owner, `ALTER TABLE audit_events ADD CONSTRAINT test_auth_audit_failure CHECK(workspace_id <> '`+workspace.String()+`' OR action <> '`+action+`')`)
 	removed := false
 	drop := func() {
 		if removed {
 			return
 		}
-		my := `ALTER TABLE audit_events DROP CONSTRAINT test_auth_audit_failure`
-		if os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE") == "mysql" {
-			my = `ALTER TABLE audit_events DROP CHECK test_auth_audit_failure`
-		}
-		authSafetyExec(t, owner, `ALTER TABLE audit_events DROP CONSTRAINT test_auth_audit_failure`, my)
+		authSafetyExec(t, owner, `ALTER TABLE audit_events DROP CONSTRAINT test_auth_audit_failure`)
 		removed = true
 	}
 	t.Cleanup(drop)
@@ -89,8 +63,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	var user string
-	query, _ := authSafetySQL(b, `SELECT current_user`, `SELECT CURRENT_USER()`, nil)
-	if err := b.QueryRow(ctx, query).Scan(&user); err != nil || !strings.HasPrefix(user, "ocservia_app") {
+	if err := b.QueryRow(ctx, `SELECT current_user`).Scan(&user); err != nil || !strings.HasPrefix(user, "ocservia_app") {
 		t.Fatalf("restricted runtime required: %q %v", user, err)
 	}
 	for _, table := range []string{"audit_events", "audit_checkpoints"} {
@@ -107,7 +80,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
-			authSafetyExec(t, b, `DELETE FROM local_auth_attempts WHERE username LIKE 'auth-capacity-%'`, `DELETE FROM local_auth_attempts WHERE username LIKE 'auth-capacity-%'`)
+			authSafetyExec(t, b, `DELETE FROM local_auth_attempts WHERE username LIKE 'auth-capacity-%'`)
 		})
 		results := make(chan error, 16)
 		for i := range cap(results) {
@@ -360,8 +333,7 @@ func TestAuthenticationBackendLegacyIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	authSafetyExec(t, owner,
-		`UPDATE local_auth_bootstrap SET completion_pending=true,completed_at=NULL WHERE workspace_id=$1`,
-		`UPDATE local_auth_bootstrap SET completion_pending=true,completed_at=NULL WHERE workspace_id=?`, wid)
+		`UPDATE local_auth_bootstrap SET completion_pending=true,completed_at=NULL WHERE workspace_id=$1`, wid)
 	before, err := authstore.ReadCredential(ctx, b, name)
 	if err != nil {
 		t.Fatal(err)
@@ -393,7 +365,7 @@ func TestAuthenticationBackendLegacyIntegration(t *testing.T) {
 	if _, err := complete(wid); !errors.Is(err, auth.ErrLocalInitialized) {
 		t.Fatalf("legacy completion ignored an existing elevated identity: %v", err)
 	}
-	authSafetyExec(t, owner, `DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, bindingID)
+	authSafetyExec(t, owner, `DELETE FROM role_bindings WHERE id=$1`, bindingID)
 	if _, err := complete(wid); !errors.Is(err, auth.ErrLocalInitialized) {
 		t.Fatalf("retired completion reopened bootstrap: %v", err)
 	}

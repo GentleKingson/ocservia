@@ -5,14 +5,12 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
@@ -20,8 +18,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The startup harness supplies a dedicated PostgreSQL database or a unique
-// MySQL database/account. These tests never revoke a shared database grant.
+// The startup harness supplies a dedicated PostgreSQL database. These tests
+// never revoke a shared database grant.
 type policyCleanupState struct {
 	owner, runtime *connection.Connection
 	item           userstore.Candidate
@@ -29,7 +27,7 @@ type policyCleanupState struct {
 	account        string
 }
 
-func seedPolicyCleanup(t *testing.T, ctx context.Context, owner, runtime *connection.Connection, backend, account string) *policyCleanupState {
+func seedPolicyCleanup(t *testing.T, ctx context.Context, owner, runtime *connection.Connection, account string) *policyCleanupState {
 	t.Helper()
 	state := &policyCleanupState{owner: owner, runtime: runtime, account: account}
 	workspace, node := uuid.New(), uuid.New()
@@ -42,20 +40,6 @@ func seedPolicyCleanup(t *testing.T, ctx context.Context, owner, runtime *connec
 		`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,'cleanup_orphan',false,1,1,$2,$3,$4)`,
 	}
 	args := [][]any{{workspace, workspace.String(), at, at}, {node, workspace, at, at}, {node, make([]byte, 32), at, at}}
-	if backend != "postgres" {
-		queries = []string{
-			`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES(?,'cleanup',?,?,?)`,
-			`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES(?,?,'cleanup','active',?,?)`,
-			`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES(?,'cleanup_orphan',false,1,1,?,?,?)`,
-		}
-		for _, row := range args {
-			for i, arg := range row {
-				if id, ok := arg.(uuid.UUID); ok {
-					row[i] = mysql.UUIDBytes(id)
-				}
-			}
-		}
-	}
 	for i, query := range queries {
 		if _, err := owner.Store.Exec(ctx, query, args[i]...); err != nil {
 			t.Fatal(err)
@@ -78,16 +62,9 @@ func seedPolicyCleanup(t *testing.T, ctx context.Context, owner, runtime *connec
 	return state
 }
 
-func (s *policyCleanupState) revoke(t *testing.T, ctx context.Context, backend string) {
+func (s *policyCleanupState) revoke(t *testing.T, ctx context.Context) {
 	t.Helper()
 	quoted := pgx.Identifier{s.account}.Sanitize()
-	if backend != "postgres" {
-		user, host, ok := strings.Cut(s.account, "@")
-		if !ok {
-			t.Fatal("fixture account must include host")
-		}
-		quoted = "'" + user + "'@'" + host + "'"
-	}
 	t.Cleanup(func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -113,22 +90,15 @@ func (s *policyCleanupState) delete(ctx context.Context) error {
 	})
 }
 
-func (s *policyCleanupState) assertPermissions(t *testing.T, ctx context.Context, backend string) {
+func (s *policyCleanupState) assertPermissions(t *testing.T, ctx context.Context) {
 	t.Helper()
 	var effective string
 	if err := s.runtime.Store.QueryRow(ctx, `SELECT CURRENT_USER`).Scan(&effective); err != nil || effective != s.account {
 		t.Fatal("unexpected effective runtime identity", effective, err)
 	}
-	if backend == "postgres" {
-		var restricted bool
-		if err := s.runtime.Store.QueryRow(ctx, `SELECT NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolbypassrls AND NOT pg_has_role(current_user,'ocservia_owner','MEMBER') AND has_table_privilege(current_user,'user_policy_enforcements','DELETE') AND NOT has_table_privilege(current_user,'user_policy_enforcements','DELETE WITH GRANT OPTION') FROM pg_roles WHERE rolname=current_user`).Scan(&restricted); err != nil || !restricted {
-			t.Fatal("runtime inherited elevated privileges or lacks cleanup DELETE", restricted, err)
-		}
-	} else {
-		var broad int
-		if err := s.runtime.Store.QueryRow(ctx, `SELECT (SELECT count(*) FROM information_schema.USER_PRIVILEGES WHERE PRIVILEGE_TYPE<>'USAGE')+(SELECT count(*) FROM information_schema.SCHEMA_PRIVILEGES)+(SELECT count(*) FROM information_schema.TABLE_PRIVILEGES WHERE IS_GRANTABLE='YES')`).Scan(&broad); err != nil || broad != 0 {
-			t.Fatal("runtime has global, schema, or grant-option privileges", broad, err)
-		}
+	var restricted bool
+	if err := s.runtime.Store.QueryRow(ctx, `SELECT NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolbypassrls AND NOT pg_has_role(current_user,'ocservia_owner','MEMBER') AND has_table_privilege(current_user,'user_policy_enforcements','DELETE') AND NOT has_table_privilege(current_user,'user_policy_enforcements','DELETE WITH GRANT OPTION') FROM pg_roles WHERE rolname=current_user`).Scan(&restricted); err != nil || !restricted {
+		t.Fatal("runtime inherited elevated privileges or lacks cleanup DELETE", restricted, err)
 	}
 	for _, query := range []string{
 		"DELETE FROM desired_user_policies WHERE false", "DELETE FROM user_policy_mutations WHERE false",
@@ -142,16 +112,10 @@ func (s *policyCleanupState) assertPermissions(t *testing.T, ctx context.Context
 	}
 }
 
-func (s *policyCleanupState) grants(t *testing.T, ctx context.Context, backend string) []string {
+func (s *policyCleanupState) grants(t *testing.T, ctx context.Context) []string {
 	t.Helper()
 	query := `SELECT table_name,privilege_type,is_grantable FROM information_schema.table_privileges WHERE grantee=current_user AND table_schema='public' ORDER BY table_name,privilege_type`
-	var args []any
-	if backend != "postgres" {
-		user, host, _ := strings.Cut(s.account, "@")
-		query = `SELECT TABLE_NAME,PRIVILEGE_TYPE,IS_GRANTABLE FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE=? AND TABLE_SCHEMA=DATABASE() ORDER BY TABLE_NAME,PRIVILEGE_TYPE`
-		args = []any{"'" + user + "'@'" + host + "'"}
-	}
-	rows, err := s.runtime.Store.Query(ctx, query, args...)
+	rows, err := s.runtime.Store.Query(ctx, query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,11 +134,11 @@ func (s *policyCleanupState) grants(t *testing.T, ctx context.Context, backend s
 	return grants
 }
 
-func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *connection.Connection, backend, account string, migrate func() error) {
+func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *connection.Connection, account string, migrate func() error) {
 	t.Helper()
-	state := seedPolicyCleanup(t, ctx, owner, runtime, backend, account)
-	state.assertPermissions(t, ctx, backend)
-	newGrants := state.grants(t, ctx, backend)
+	state := seedPolicyCleanup(t, ctx, owner, runtime, account)
+	state.assertPermissions(t, ctx)
+	newGrants := state.grants(t, ctx)
 	var oldGrants []string
 	for _, grant := range newGrants {
 		if grant != "user_policy_enforcements:DELETE:NO" {
@@ -199,8 +163,8 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 	}); err != nil {
 		t.Fatal(err)
 	}
-	state.revoke(t, ctx, backend)
-	if got := state.grants(t, ctx, backend); !reflect.DeepEqual(got, oldGrants) {
+	state.revoke(t, ctx)
+	if got := state.grants(t, ctx); !reflect.DeepEqual(got, oldGrants) {
 		t.Fatal("old runtime grant fixture differs by more than cleanup DELETE", got)
 	}
 	ticks := make(chan time.Time)
@@ -234,11 +198,7 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 			t.Error("scheduler failed to stop")
 		}
 		// The next lifecycle case must not wait for this fixture's lease.
-		query := `UPDATE scheduler_leadership SET lease_until='-infinity' WHERE id=1`
-		if backend != "postgres" {
-			query = `UPDATE scheduler_leadership SET lease_until=-9223372036854775808 WHERE id=1`
-		}
-		if _, err := owner.Store.Exec(ctx, query); err != nil {
+		if _, err := owner.Store.Exec(ctx, `UPDATE scheduler_leadership SET lease_until='-infinity' WHERE id=1`); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -270,8 +230,8 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 		if err := migrate(); err != nil {
 			t.Fatal("existing CLI reauthorization", i, err)
 		}
-		state.assertPermissions(t, ctx, backend)
-		if got := state.grants(t, ctx, backend); !reflect.DeepEqual(got, newGrants) {
+		state.assertPermissions(t, ctx)
+		if got := state.grants(t, ctx); !reflect.DeepEqual(got, newGrants) {
 			t.Fatal("reauthorization changed unrelated grants", got)
 		}
 	}
@@ -289,13 +249,8 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 		t.Fatal("maintenance did not recover")
 	}
 	var count int
-	query := `SELECT count(*) FROM user_policy_enforcements WHERE node_id=$1`
-	var node any = state.item.NodeID
-	if backend != "postgres" {
-		query, node = `SELECT count(*) FROM user_policy_enforcements WHERE node_id=?`, mysql.UUIDBytes(state.item.NodeID)
-	}
-	if err := runtime.Store.QueryRow(ctx, query, node).Scan(&count); err != nil || count != 0 {
+	if err := runtime.Store.QueryRow(ctx, `SELECT count(*) FROM user_policy_enforcements WHERE node_id=$1`, state.item.NodeID).Scan(&count); err != nil || count != 0 {
 		t.Fatal("old receipt not cleaned", count, err)
 	}
-	t.Logf("%s: restricted runtime cleanup, old-grant CLI repair twice, next-tick maintenance and cancellation verified", backend)
+	t.Log("postgres: restricted runtime cleanup, old-grant CLI repair twice, next-tick maintenance and cancellation verified")
 }

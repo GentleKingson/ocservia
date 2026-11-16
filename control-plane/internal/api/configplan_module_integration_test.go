@@ -24,7 +24,7 @@ import (
 func testConfigRevisionBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) {
 	plan := f.plan(false)
 	f.s = f.newServer(Modules{ConfigPlans: f.s.configPlanLookup.(*configplan.Service), Nodes: telemetry.NewBackend(f.b)})
-	f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Viewer','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'Viewer','workspace',?)`, uuid.Must(uuid.NewV7()), f.requester.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
+	f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Viewer','workspace',$4)`, uuid.Must(uuid.NewV7()), f.requester.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
 	path := "/api/v1/nodes/" + plan.NodeID.String()
 	read := func(want int64) int64 {
 		t.Helper()
@@ -74,7 +74,7 @@ func testConfigRevisionBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) 
 			t.Fatalf("create with revision %d: %d %s", revision, w.Code, w.Body)
 		}
 		var encoded []byte
-		if err := f.row(`SELECT envelope FROM commands WHERE operation_id=$1`, `SELECT envelope FROM commands WHERE operation_id=?`, created.OperationID).Scan(&encoded); err != nil {
+		if err := f.row(`SELECT envelope FROM commands WHERE operation_id=$1`, created.OperationID).Scan(&encoded); err != nil {
 			t.Fatal(err)
 		}
 		var envelope agentv1.CommandEnvelope
@@ -83,18 +83,18 @@ func testConfigRevisionBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) 
 		}
 	}
 	create(read(0), 202)
-	f.exec(`INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES($1,0,11,'',$2)`, `INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES(?,0,11,'',?)`, plan.NodeID, value.Timestamp{Valid: true})
+	f.exec(`INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES($1,0,11,'',$2)`, plan.NodeID, value.Timestamp{Valid: true})
 	create(read(0), 202)
-	f.exec(`UPDATE node_config_state SET revision=7 WHERE node_id=$1`, `UPDATE node_config_state SET revision=7 WHERE node_id=?`, plan.NodeID)
+	f.exec(`UPDATE node_config_state SET revision=7 WHERE node_id=$1`, plan.NodeID)
 	revision := read(7)
 	create(0, 409)
 	create(3, 409)  // node.Version is not the configuration revision.
 	create(11, 409) // desired_revision is not the configuration revision either.
 	create(revision, 202)
-	f.exec(`UPDATE node_config_state SET revision=8 WHERE node_id=$1`, `UPDATE node_config_state SET revision=8 WHERE node_id=?`, plan.NodeID)
+	f.exec(`UPDATE node_config_state SET revision=8 WHERE node_id=$1`, plan.NodeID)
 	create(revision, 409)
 	create(read(8), 202)
-	f.exec(`UPDATE node_config_state SET revision=$1,desired_revision=$2 WHERE node_id=$3`, `UPDATE node_config_state SET revision=?,desired_revision=? WHERE node_id=?`, int64(1<<63-1), int64(1<<63-1), plan.NodeID)
+	f.exec(`UPDATE node_config_state SET revision=$1,desired_revision=$2 WHERE node_id=$3`, int64(1<<63-1), int64(1<<63-1), plan.NodeID)
 	read(1<<63 - 1) // Preserve int64 on the wire; JavaScript must reject unsafe integers.
 }
 
@@ -164,8 +164,8 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 	f.s = f.newServer(Modules{ConfigPlans: plans, Certificates: certs})
 	foreign := uuid.Must(uuid.NewV7())
 	stamp := value.Timestamp{Valid: true}
-	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Secret module',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Secret module',?,?,?)`, foreign, foreign.String(), stamp, stamp)
-	f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'config.tls',true)`, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES(?,'config.tls',true)`, plan.NodeID)
+	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Secret module',$2,$3,$4)`, foreign, foreign.String(), stamp, stamp)
+	f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'config.tls',true)`, plan.NodeID)
 	refs := []uuid.UUID{}
 	for i, scope := range []uuid.UUID{f.workspace, f.workspace, foreign} {
 		keyPath := "vpn/key"
@@ -180,7 +180,7 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 	}
 	// The first and foreign references have explicit secret.use. The middle one does not.
 	for i, scope := range []uuid.UUID{f.workspace, foreign} {
-		f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'ConfigManager','secret_ref',$4,$5)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES(?,?,?,'ConfigManager','secret_ref',?,?)`, uuid.Must(uuid.NewV7()), f.requester.principal.IdentityID, scope, refs[i*2], stamp)
+		f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'ConfigManager','secret_ref',$4,$5)`, uuid.Must(uuid.NewV7()), f.requester.principal.IdentityID, scope, refs[i*2], stamp)
 	}
 	t.Run("secret-denials-stop-before-create", func(t *testing.T) {
 		before := f.counts(plan.NodeID)
@@ -206,7 +206,7 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 		var actor, request, trace, reason, storedKey string
 		var session uuid.UUID
 		pg := `SELECT c.envelope,e.actor_id,e.source_session_id,e.request_id,e.trace_id,e.reason,o.idempotency_key FROM commands c JOIN operations o ON o.id=c.operation_id JOIN audit_events e ON e.resource_id=o.id AND e.action='config.plan' WHERE o.id=$1`
-		if err := f.row(pg, strings.ReplaceAll(pg, "$1", "?"), created.OperationID).Scan(&envelopeBytes, &actor, &session, &request, &trace, &reason, &storedKey); err != nil {
+		if err := f.row(pg, created.OperationID).Scan(&envelopeBytes, &actor, &session, &request, &trace, &reason, &storedKey); err != nil {
 			t.Fatal(err)
 		}
 		var envelope agentv1.CommandEnvelope

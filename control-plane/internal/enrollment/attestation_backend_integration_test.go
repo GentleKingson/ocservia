@@ -49,8 +49,8 @@ func TestAttestationSafetyBackendIntegration(t *testing.T) {
 	identity, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	at, _ := value.FromTime(time.Now().UTC())
 	expires, _ := at.Add(time.Hour)
-	f.exec(t, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'attestation-test',$2,$3,$4)`, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,'attestation-test',?,?,?)`, identity, identity.String(), at, at)
-	f.exec(t, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES(?,?,?,?)`, session, identity, expires, at)
+	f.exec(t, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'attestation-test',$2,$3,$4)`, identity, identity.String(), at, at)
+	f.exec(t, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, session, identity, expires, at)
 	service := privdattestation.NewBackend(f.b)
 	newNode := func() uuid.UUID {
 		t.Helper()
@@ -197,7 +197,7 @@ func TestAttestationSafetyBackendIntegration(t *testing.T) {
 		c := credential(other)
 		r := registration(other, c, newKey())
 		deadline, _ := value.FromTime(time.Now().Add(500 * time.Millisecond))
-		f.exec(t, `UPDATE privd_attestation_enrollment_credentials SET expires_at=$1 WHERE id=$2`, `UPDATE privd_attestation_enrollment_credentials SET expires_at=? WHERE id=?`, deadline, c.ID)
+		f.exec(t, `UPDATE privd_attestation_enrollment_credentials SET expires_at=$1 WHERE id=$2`, deadline, c.ID)
 		lock, err := f.b.Begin(ctx, database.ReadCommitted)
 		if err != nil {
 			t.Fatal(err)
