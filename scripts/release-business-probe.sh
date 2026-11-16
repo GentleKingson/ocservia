@@ -150,8 +150,8 @@ cleanup() {
       resilience_result:(if $code != 0 and $resilience == "PASS" then "FAIL" else $resilience end),
       resilience_scenarios:$resilience_scenarios,
       planned_topology:{hosts:1,architecture:$arch,native_systemd_node:true,relays:1,relay_redundancy:false},
-      operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
-      limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
+      operator_mode:"single_admin",
+      limitations:[],
       not_applicable:["cross-host resilience and performance assessment"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
   if [[ "$relay_ipv4_rule" == true ]]; then
@@ -361,17 +361,12 @@ INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES
  ('${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}','Business Test','business-test',now(),now()),
  ('00000000-0000-7000-8000-000000000072','Other','business-test-other',now(),now());
 SQL
-for role in requester approver; do
-  openssl rand -hex 32 >"${work}/private/${role}-password"
-  sudo install -o 65534 -g 65532 -m 400 "${work}/private/${role}-password" "${OCSERV_SECRET_DIR}/${role}-password"
-done
+openssl rand -hex 32 >"${work}/private/requester-password"
+sudo install -o 65534 -g 65532 -m 400 "${work}/private/requester-password" "${OCSERV_SECRET_DIR}/requester-password"
 compose run --rm --no-deps -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=business-test-requester \
   -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}" \
   -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/requester-password \
-  -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=business-test-approver \
-  -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/secrets/approver-password \
   -v "${OCSERV_SECRET_DIR}/requester-password:/run/secrets/requester-password:ro" \
-  -v "${OCSERV_SECRET_DIR}/approver-password:/run/secrets/approver-password:ro" \
   control-plane --bootstrap-local-admin
 next_stage local_auth
 python3 "${ROOT}/scripts/release-business-api.py" local
@@ -530,7 +525,7 @@ if [[ "${BUSINESS_PROFILE}" == extended ]]; then
   sudo install -o root -g ocserv-agent -m 640 "${work}/private/enrollment-token" /etc/ocservia-agent/enrollment-token
   bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-enrollment.log"
 fi
-# Bootstrap reports only local enrollment; approve() below independently
+# The legacy enrollment fixture reports local enrollment; Admin activation below
 # checks the Controller's pending state before the authorized transition.
 grep -q '^ENROLLED_LOCAL$' "${ARTIFACT_DIR}/managed-enrollment.log"
 grep -q '^SERVICES: NOT_OBSERVED$' "${ARTIFACT_DIR}/managed-enrollment.log"
@@ -573,11 +568,11 @@ write_node_config "/etc/ocservia-agent/config-tls/${config_ref}/v1/server-cert.p
 sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
 sudo systemctl restart ocserv
 sudo systemctl start ocservia-privd
-next_stage node_approval
+next_stage node_activation
 python3 "${ROOT}/scripts/release-business-api.py" approve
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   python3 "$ROOT/scripts/release-production-signer.py" import
-  record production_signer_approved_binding
+  record production_signer_active_binding
 fi
 sudo systemctl enable --now ocservia-privd ocservia-agent
 bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"

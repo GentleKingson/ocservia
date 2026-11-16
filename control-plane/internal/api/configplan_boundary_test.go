@@ -19,6 +19,7 @@ func TestConfigPlanHTTPBoundary(t *testing.T) {
 		internal + "api/httpx":  {"Registrar": true, "WriteJSON": true, "WriteProblem": true, "ParseUUIDv7": true, "DecodeStrictJSON": true, "RequireIdempotencyKey": true},
 		internal + "configplan": {"CreateRequest": true, "ApplyRequest": true, "Plan": true, "Template": true, "ErrInvalid": true, "ErrStaleRevision": true, "ErrCapability": true},
 		internal + "operations": {"Operation": true, "ErrInvalidRequest": true, "ErrStaleRevision": true, "ErrCapabilityMissing": true, "ErrIdempotencyConflict": true, "ErrConfigApplyActive": true},
+		internal + "rbac":       {"ErrForbidden": true},
 		internal + "approvals":  {"ErrNotReady": true},
 		internal + "database":   {"ErrNotFound": true},
 	}

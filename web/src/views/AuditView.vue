@@ -342,14 +342,7 @@ onBeforeUnmount(() => {
                           {{ $t("approvalId") }}
                         </dt>
                         <dd class="m-0 mb-2 break-all sm:mb-0">
-                          <RouterLink
-                            :to="{
-                              name: 'approvals',
-                              params: { approvalId: item.approval_id },
-                            }"
-                            class="text-primary font-mono underline-offset-4 hover:underline"
-                            >{{ item.approval_id }}</RouterLink
-                          >
+                          <code>{{ item.approval_id }}</code>
                         </dd>
                       </template>
                       <template

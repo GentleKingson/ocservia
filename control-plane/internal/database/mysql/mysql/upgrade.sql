@@ -89,3 +89,18 @@ CREATE TRIGGER `audit_events_reject_update` BEFORE UPDATE ON `audit_events` FOR 
 ALTER TABLE `local_auth_attempts` DROP CHECK `local_auth_attempts_local_auth_attempts_username_check`, ADD CONSTRAINT `local_auth_attempts_local_auth_attempts_username_check` CHECK (length(`username`) >= 1 AND length(`username`) <= 128 AND (regexp_like(`username`,'(?-i)\\A[a-z0-9][a-z0-9._-]*\\z') OR regexp_like(`username`,'(?-i)\\Apassword-change:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\z')));
 -- ocservia:end-step
 -- ocservia:end-revision
+-- ocservia:revision=4
+-- ocservia:checkpoint={"checksum":"c5d0b478eea69a41c196b9d9442848263ff2dd4a619744725211cedc05404485","steps":148}
+-- ocservia:step=001:table_agent_rollouts
+-- ocservia:metadata={"kind":"table","object":"agent_rollouts","before":"a84081f92b5188606851515077b5fa341d31a91b27aee1d2fea769e0218f0283","after":"2592ab3a528df49f65d0a9d4d80f9af8d5ac562f05d568687ea2ec2912cd3b85","before_roundtrip_hash":"2aaaba9ac76e6da8dde959b7192014bd78e900dff5f638c7adcfa21723988e7b"}
+ALTER TABLE `agent_rollouts` MODIFY COLUMN `approval_id` varbinary(16) DEFAULT NULL;
+-- ocservia:end-step
+-- ocservia:step=002:table_config_apply_operations
+-- ocservia:metadata={"kind":"table","object":"config_apply_operations","before":"a154f572a0991d968c7ddc671372d6cba272c0ac40c6af5d1e0e7c6d2d3b577a","after":"e308ec0e9dbd01407fa46f63c1fbfcc1fd4d2d156c4ff2e1e47c76bc5b8edcc0"}
+ALTER TABLE `config_apply_operations` MODIFY COLUMN `approval_id` varbinary(16) DEFAULT NULL;
+-- ocservia:end-step
+-- ocservia:step=003:table_node_privd_attestation_keys
+-- ocservia:metadata={"kind":"table","object":"node_privd_attestation_keys","before":"b28c2c04dd1315cf41bdc7d5742ed694d784580dcecb06b1aacfd6914418d241","after":"412002d2619db08689223fedc19807770ffce445913c68e0226ad2f9083ce99a"}
+ALTER TABLE `node_privd_attestation_keys` MODIFY COLUMN `registration_credential_id` varbinary(16) DEFAULT NULL;
+-- ocservia:end-step
+-- ocservia:end-revision

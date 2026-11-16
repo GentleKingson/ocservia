@@ -1,6 +1,6 @@
 # Agent lifecycle
 
-This is the operations manual for a managed node: install, enroll, independent approval, start, upgrade, rollback, rebind, retention and removal.
+This is the operations manual for a managed node: install, enroll, activate, start, upgrade, rollback, rebind, retention and removal.
 
 A managed node is an existing ocserv server with the ocservia node daemons installed alongside it. The local ocserv instance still terminates VPN tunnels and forwards traffic. The ocservia services handle enrollment, health telemetry, and signed administrative commands from the Controller.
 
@@ -8,17 +8,14 @@ The v1.1.0 policy removed the software-version admission checks. That does not g
 
 ## Node states
 
-Package installation, local enrollment, approval and active fleet management are separate stages. The installer reports only host-side progress.
+The token installer completes package installation, registration, activation,
+root-key registration and startup in one run. It prints `ONLINE` only after
+the Controller reports active trust, a registered privd key, an online session
+and fresh telemetry. A local service process alone is not an online result.
 
-| State | Meaning |
-| --- | --- |
-| `ENROLLMENT_READY` | The package is installed and the identity is prepared, but no enrollment token was supplied. Agent and privd are stopped. |
-| `ENROLLED_LOCAL` | The local Node ID is persisted. The Controller registration is `PENDING_APPROVAL` (`pending` in the inventory). The node is not approved, running or online. |
-| Approved | A second authorized principal approved the node and the activation call returned `status: active`. The local services are still stopped until the operator enables them. |
-| `SERVICES_ACTIVE` | Both local systemd units are enabled and active. This describes local state only. |
-| Operational | The Controller shows `trust_status=active`, `connection_state=online` and `freshness=fresh` with a recent heartbeat. |
-
-The installer has no administrator API session, so it reports `CONTROLLER_TRUST_STATUS`, `CONTROLLER_CONNECTION_STATE` and `CONTROLLER_FRESHNESS` as `NOT_OBSERVED`. Local installation success never means the Controller has observed the node. A node is under active management only in the operational state.
+The advanced manual path may stop at `ENROLLMENT_READY` (no token),
+`ENROLLED_LOCAL` (identity registered), or `SERVICES_ACTIVE` (local processes
+running). These intermediate results do not establish Controller reachability.
 
 ## Install a managed node
 
@@ -26,15 +23,50 @@ This section covers the standard package-first installation. Use published node 
 
 ### Requirements
 
-- A deployed Controller reachable through the production Relay (see [Dedicated Relay](production-deployment.md#dedicated-relay)).
-- The Controller's `EndpointID` and the target workspace UUIDv7.
-- A Linux host running systemd with root access and `ocserv` installed (or ready to be managed), on a platform listed in [Supported platforms](production-deployment.md#supported-platforms). Managed nodes use native `.deb` or `.rpm` packages.
-- Protected local files containing the Relay access token and the Controller command verification key.
-- An optional bootstrap token file if you want the installer to complete local enrollment in the same run.
-- A non-root launcher account with `sudo` privileges. The installer elevates individual commands with `sudo`; pass `--root-lifecycle` only when you intend to run the whole script as root.
-- `curl`, `openssl`, `sha256sum`, `awk`, and outbound HTTPS access to GitHub Releases.
-- An authenticated requester API client with permission to create a node bootstrap token and request node approval (SecurityAdmin or PlatformAdmin), and a second authorized principal who can review and approve the request independently.
-- Sealing keys for your chosen workflow: the standard installer generates any missing sealing keys automatically. The advanced manual path requires two distinct sealing private keys already provisioned on the node along with their key IDs and public-key SHA-256 descriptors.
+- A deployed HTTPS Controller and one dedicated production Relay.
+- One Admin session to issue the installation token in the intended Workspace.
+- A supported Linux node with systemd, root access and the ocserv host prerequisites
+  in [Supported platforms](production-deployment.md#supported-platforms).
+- `curl`, `openssl`, `sha256sum`, `awk`, `flock`, Python 3 and outbound HTTPS to
+  the Controller and GitHub Releases. Python uses only its standard library.
+- Host trust for the Controller HTTPS certificate. Install your private CA through
+  the operating system trust mechanism when applicable; never disable TLS checks.
+
+### One-token installation
+
+In Nodes → Install node, enter the node name, environment and matching published
+release. Generate a token, then run the displayed pinned installer command on
+the node:
+
+```bash
+wget --https-only --secure-protocol=TLSv1_2 \
+  https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/managed-node-bootstrap.sh \
+  --output-document=install.sh
+bash ./install.sh --join-token --version vX.Y.Z
+```
+
+Paste the token at the hidden prompt. No administrator cookie, second account,
+Relay secret transfer or manual activation is required. Unattended callers use
+`--join-token-file /protected/token` with a private regular file; never put the
+token itself in argv, URLs or shell history.
+
+The root installer retrieves bounded configuration over verified HTTPS without
+following credential-bearing redirects. It verifies and installs the native
+package, preserves or creates node identity and distinct sealing keys, enrolls
+with a derived Agent-only credential, registers the root-owned privd key,
+starts Agent/privd and polls Controller-observed readiness. The installation
+Token remains root-only; possession of the Agent credential cannot authorize a
+privd key registration or rotation.
+
+For interrupted runs, keep `/var/lib/ocservia-bootstrap` and all node identity,
+sealing and privd key files intact, then run the same pinned installer with
+`--resume-install`. Exact enrollment and key-registration retries return the
+original binding. Expiration still blocks a new enrollment or first key
+registration; inspect the existing node before issuing replacement authority.
+An expired token never permits a different node or replacement privd key.
+
+The following configuration-driven installation remains an advanced manual
+path. Use the token workflow above for unattended first installation.
 
 ### Prepare the node configuration
 
@@ -121,10 +153,10 @@ Once its external endpoint is deployed and verified, the operator-hosted thin fi
 ```text
 bootstrap launcher -> exact vX.Y.Z versioned installer -> HTTPS native package
         -> identity/sealing -> Bootstrap Enrollment -> ENROLLED_LOCAL
-        -> independent approval -> service activation
+        -> Admin activation -> service activation
 ```
 
-The bootstrap launcher and the initial versioned installer and native package downloads rely on HTTPS. Before invoking the package manager, the installer copies the downloaded native package into root-owned staging and verifies that its bytes remain unchanged. That transport check applies only to initial installation; an AgentUpgrade instead verifies against the SHA256 carried in the already-authorized Controller command. Likewise, a Bootstrap Token can create or recover only the same pending node and cannot approve it, keeping package installation, enrollment, approval, and service activation across separate authority boundaries. The fixed Release installer and native package need no source checkout or Git. The bootstrap launcher plays no role in ongoing lifecycle operations.
+The bootstrap launcher and the initial versioned installer and native package downloads rely on HTTPS. Before invoking the package manager, the installer copies the downloaded native package into root-owned staging and verifies that its bytes remain unchanged. That transport check applies only to initial installation; an AgentUpgrade instead verifies against the SHA256 carried in the already-authorized Controller command. The advanced manual `obt1_` token creates or recovers the same pending node and requires Admin activation. The `oit1_` installation token authorizes the complete automatic flow, with a derived Agent credential and separate root-key proof. The fixed Release installer and native package need no source checkout or Git. The bootstrap launcher plays no role in ongoing lifecycle operations.
 
 The verifier copies only the archive into a unique `root:root` mode `0700` directory below `/var/lib/ocservia-upgrade/package-staging`, compares the copied archive SHA256 with the caller-supplied expected digest, rejects unsafe archive paths and member types, and extracts that root-owned copy. Install and upgrade scripts accept only the verified directory printed by the verifier; never extract or run installers from a download directory, and remove the verified staging directory after the lifecycle operation succeeds. `PACKAGE_ARCH` pins the package architecture (`amd64` or `arm64`), which the MANIFEST records as `arch=`. On a real host install (no `DESTDIR`), the verifier also checks host architecture equivalence (`x86_64` for `amd64`, `aarch64` for `arm64`) and rejects a foreign-architecture package before anything is staged.
 
@@ -181,71 +213,45 @@ sudo install -o root -g root -m 0600 p12-password-seal-private.pem \
   /etc/ocservia-agent/p12-password-seal-private.pem
 ```
 
-[Provisioned trust](../reference/stable-contracts.md#provisioned-trust) defines startup verification and key separation. Finish [enrollment](#enroll-the-node) and [independent approval](#approve-the-node) before enabling the services.
+[Provisioned trust](../reference/stable-contracts.md#provisioned-trust) defines startup verification and key separation. Finish [enrollment](#enroll-the-node) and [Admin activation](#approve-the-node) before enabling the services.
 
 ## Enroll the node
 
-Enrolling a managed node binds its persistent EndpointID to a node record on the Controller in a pending state. Enrollment does not activate the node. An operator must complete the separate approval workflow afterward. The rules for the EndpointID, tokens and session grants are in [Enrollment and transport](../reference/stable-contracts.md#enrollment-and-transport).
-
-A Bootstrap Token authorizes a single narrowly scoped enrollment transaction that creates a pending node bound to the presenting EndpointID. Possessing the token does not grant `node.approve`, select approved capabilities, activate the node, or start local services; approval requires a separate content-bound decision by a second authorized principal.
+The default Nodes wizard uses the [one-token workflow](#one-token-installation).
+Its token expires within 15 minutes, binds the chosen Workspace, environment
+and optional node name/EndpointID, and creates exactly one active node. The
+browser retains the token only in the open dialog's memory and clears it on
+expiry, close or Workspace change. A lost issuance response is ambiguous;
+consult audit records or wait for expiry before issuing another token.
 
 ### Use the Nodes page wizard
 
-Open Nodes, then Install node, including when the inventory is empty. This entry prepares the existing installer flow; it does not deploy over SSH or change enrollment or approval permissions.
-
-1. Confirm the current authorized Workspace, then enter:
-
-   - A node name unique within that Workspace (including existing pending nodes).
-   - The environment.
-   - A published matching Controller/Agent Release tag (`vX.Y.Z`, or `vX.Y.Z-rc.N`).
-   - The Controller EndpointID.
-   - One dedicated HTTPS Relay URL.
-   - Three distinct protected file paths on the Agent host.
-
-   The Controller EndpointID is not the new Agent's EndpointID. The UI accepts conservative literal names and paths and rejects newline injection, credential-bearing URLs, query strings and floating versions. It validates the tag format; the administrator must confirm that the matching release exists. A duplicate name can fail during enrollment even if token issuance succeeds. The name is bound to the token; editing `install.env` cannot rename that binding.
-2. Copy the generated `install.env` into a private working directory on the Agent host with mode `0600`. It contains public configuration and file paths only. Node name, Workspace and release are comments. The name and Workspace bind the Bootstrap Token request, and the release is passed explicitly to `--version`. Do not source the file; the installer's strict loader reads it. Existing shell variables take precedence, so check for stale values before running the installer. The pinned installer commands and host requirements are visible before token issuance. Provision the Relay access token and trusted Controller command verification public key first. For a slow first installation on a fresh, unenrolled host with no existing enrollment-token file:
-
-   - Temporarily set `BOOTSTRAP_TOKEN_SOURCE=` in `install.env` and remove any shell override for that variable. Run the displayed pinned installer to download/install the package, check the host and prepare keys.
-   - Wait for `ENROLLMENT_READY`; Agent/privd are still not started. Restore the configured Bootstrap token file path, then issue and save the token as below and rerun the same installer version with the same identity.
-   - Never remove an existing identity or token file to force this path. If a previous enrollment outcome is unknown, use the [recovery flow](#recover-an-uncertain-enrollment-response).
-
-3. Only when the host is ready to enroll, click Create bootstrap token. Its 900-second lifetime starts at issuance, not at first use. This sends one POST with a 900-second TTL and the selected Workspace in both `X-Workspace-ID` and the JSON body. Authorization remains enforced by the Controller. Transfer the displayed token through a protected channel to the configured Bootstrap token file, readable only by its owner (`0600`) and accessible to the installer launcher. Provision the Relay access token and trusted Controller Ed25519 command verification public key PEM at the other paths. All three must be non-empty regular files, not symlinks. Never transfer the Controller private key or an administrator session.
-4. After saving the token, run or rerun the fixed-release installer commands. Download the official `managed-node-bootstrap.sh` Release asset and run `bash ./install.sh --non-interactive --version vX.Y.Z` in the directory holding `install.env`, as a non-root launcher with sudo privileges. The commands contain no token values. Host requirements and package verification remain those in [Install a managed node](#install-a-managed-node).
-5. Record the printed node ID. `ENROLLED_LOCAL` does not mean approved, running or online. Continue with [independent approval](#approve-the-node), then [start and verify the node](#start-and-verify-the-node).
-
-The Web keeps the token only in the mounted dialog's memory. It clears the value on expiry, continuing to instructions, closing, changing Workspace or leaving the page, and ignores late responses from abandoned contexts. There is no token download, persistence or automatic retry. The browser clipboard is outside this lifecycle: if you manually copy the token, clear your clipboard after transferring it securely.
-
-A `403` means the caller lacks authorization; `400` means the request was rejected. A network failure, server failure or unreadable response may have issued a token even when none is displayed. Check Controller audit records or wait for expiry before explicitly starting another issuance. Reopening does not recover an issued token. For an uncertain installation response, follow [enrollment recovery](#recover-an-uncertain-enrollment-response) with the original identity and token binding; never delete identity material to register again.
+Choose Install node, provide name/environment/release, create the token and run
+the displayed command. The installer asks only for the token and completes the
+workflow without a second human decision.
 
 ### Enroll with the API
 
-1. With an authenticated API client, create a short-lived bootstrap token.
+An authenticated Admin may issue the same installation token:
 
-   ```http
-   POST /api/v1/node-bootstrap-tokens
-   X-Workspace-ID: <workspace-uuidv7>
-   Content-Type: application/json
+```http
+POST /api/v1/node-bootstrap-tokens
+X-Workspace-ID: <workspace-uuidv7>
+Content-Type: application/json
 
-   {
-     "workspace_id": "<workspace-uuidv7>",
-     "environment": "production",
-     "expected_node_name": "<node-name>",
-     "reason": "Bootstrap managed node"
-   }
-   ```
+{
+  "workspace_id": "<workspace-uuidv7>",
+  "environment": "production",
+  "expected_node_name": "<node-name>",
+  "installation": true,
+  "reason": "Install managed node"
+}
+```
 
-   Specify a `workspace_id` that the caller is authorized to access; the `X-Workspace-ID` header may be omitted only when the caller belongs to exactly one workspace. The API returns the plaintext `obt1_` token once, and it expires within 15 minutes (`ttl_seconds` may only shorten that window). Including an optional `expected_endpoint_id` pre-binds the token so the Controller rejects any other presenting endpoint before consuming it. Write the token to a protected file, and never expose it in a URL, command-line argument, log, or shared shell history.
-
-2. Point `BOOTSTRAP_TOKEN_SOURCE` at the protected token file and run the version-pinned installer. The installer prepares the local identity, enrolls immediately with the Controller, deletes the plaintext token source after enrollment succeeds, writes `agent.env` atomically, and stops at `ENROLLED_LOCAL` without enabling or starting any service.
-
-   ```bash
-   export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
-   bash install.sh --non-interactive --version vX.Y.Z
-   ```
-
-   The token source must be a non-empty regular file (never a symlink) with no group or world permissions, and you must also supply the Controller, Relay, and command-key inputs listed under [Prepare the node configuration](#prepare-the-node-configuration).
-
-   Record the printed UUIDv7 node ID and continue at [Approve the node](#approve-the-node).
+The response returns the `oit1_` root token once. `ttl_seconds` can shorten the
+15-minute maximum, and `expected_endpoint_id` can pre-bind a known EndpointID.
+Without `installation: true`, the legacy `obt1_` pending-enrollment token remains
+available for the explicit manual and Controller-rebind workflows.
 
 ### Advanced endpoint-bound enrollment
 
@@ -330,67 +336,30 @@ Once local enrollment is confirmed, the installer deletes only its fixed interna
 
 ## Approve the node
 
-Approval needs two independently authenticated principals. A requester creates a content-bound `node.approve` request, a second authorized principal approves it, and the requester then activates the node with the approved request ID. See the [approval principal boundary](../reference/stable-contracts.md#approval-principal-boundary).
+Token installation automatically activates its node. For a legacy pending node,
+an Admin submits the activation directly with its own authenticated session:
 
-1. Once the Agent configuration and production relay path are in place, use the requester account to create a content-bound `node.approve` request:
+```http
+POST /api/v1/nodes/<node-uuidv7>/approval
+Content-Type: application/json
 
-   ```http
-   POST /api/v1/approval-requests
-   X-Workspace-ID: <workspace-uuidv7>
-   Content-Type: application/json
+{
+  "labels": {"environment": "production"},
+  "policy": "<node-policy>",
+  "capabilities": ["<required-advertised-capability>"],
+  "reason": "Activate managed node"
+}
+```
 
-   {
-     "action": "node.approve",
-     "resource_type": "node",
-     "resource_id": "<node-uuidv7>",
-     "reason": "Approve managed node",
-     "ttl_seconds": 600,
-     "node_approval": {
-       "labels": {"environment": "production"},
-       "policy": "<approved-node-policy>",
-       "capabilities": ["<capabilities-approved-for-this-node>"]
-     }
-   }
-   ```
-
-   Record the returned UUIDv7 `id` as `APPROVAL_ID` and its `request_hash` as `APPROVAL_REQUEST_HASH`. Request only the capabilities required by the node's policy, because the independent approver reviews the exact `labels`, `policy`, and `capabilities` in this payload. The requested capabilities must be a non-empty subset of those the node advertised during enrollment.
-
-2. Have a second authorized principal review the request content and approve it by binding the decision to the returned `request_hash`:
-
-   ```http
-   POST /api/v1/approval-requests/<approval-uuidv7>:approve
-   Content-Type: application/json
-
-   {
-     "reason": "Independent node approval review",
-     "expected_request_hash": "<approval-request-hash>"
-   }
-   ```
-
-3. Using the requester account, activate the pending node with the approved request ID:
-
-   ```http
-   POST /api/v1/nodes/<node-uuidv7>/approval
-   X-Approval-ID: <approved-request-uuidv7>
-   Content-Type: application/json
-
-   {
-     "labels": {"environment": "production"},
-     "policy": "<approved-node-policy>",
-     "capabilities": ["<capabilities-approved-for-this-node>"],
-     "reason": "Approve managed node"
-   }
-   ```
-
-   The `labels`, `policy`, and `capabilities` in this activation payload must match the approved `node.approve` request exactly. Keeping the same `reason` string makes the audit trail easier to follow. Node activation always requires a valid approved request UUIDv7 in `X-Approval-ID`; independent approval cannot be bypassed by policy.
-
-A completed activation returns `status: active`. The activation idempotency rules are in [Enrollment](../reference/stable-contracts.md#enrollment). If the API responds with `503` ("Trust update pending"), the approval has already been committed in the database while transport trust synchronization is still catching up. Either wait for background convergence or repeat the identical request with the same `X-Approval-ID`, without creating a second approval request.
-
-If an approval request expires before activation, create a fresh approval request bound to the current content and have an independent approver review it; an expired approval never requires a new node identity. A pending node cannot execute privileged mutations until it has been approved and activated.
+No approval request or `X-Approval-ID` is required. Capabilities must match the
+node's advertised support. A `503 Trust update pending` means activation was
+committed but transport convergence is pending; preserve the node and inspect
+that convergence before retrying. Privileged commands still require root-key
+attestation even when node trust is active.
 
 ### Register the privd attestation key
 
-Privileged mutations need a registered privd result attestation key. Until the key is registered and `privd_result_attestation_v1` is approved, the node remains readable while privileged mutations fail closed. Receipt contents are defined in [Privd receipt v1](../reference/stable-contracts.md#privd-receipt-v1).
+The token installer registers this key automatically. For manual provisioning or recovery, privileged mutations need a registered privd result attestation key. Until the key is registered and `privd_result_attestation_v1` is approved, the node remains readable while privileged mutations fail closed. Receipt contents are defined in [Privd receipt v1](../reference/stable-contracts.md#privd-receipt-v1).
 
 The one-time Controller credential, delivered exclusively to root provisioning, is issued through `POST /api/v1/nodes/{node_id}/privd-attestation-credentials`. The operator runs the installed root-only helper
 
@@ -413,7 +382,7 @@ Key rotation provisions a new key path and credential. The overlap limit and the
 
 ## Start and verify the node
 
-Neither the bootstrap installer nor manual enrollment enables or starts systemd units, and starting the local daemons does not approve the node. After approval and attestation registration, enable and start both services. The node then connects to the Controller and starts accepting signed commands:
+The advanced configuration-driven installer and manual enrollment do not enable or start systemd units, and starting the local daemons does not approve the node. After approval and attestation registration, enable and start both services. The node then connects to the Controller and starts accepting signed commands:
 
 ```bash
 sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
@@ -432,36 +401,18 @@ On an active node, the script reports `SERVICES_ACTIVE`. It does not reinstall t
 
 ## Revoke a node
 
-Node revocation follows the same independent two-principal approval pattern as activation and works from any non-revoked state, including a pending node. You also use this flow on a reachable source Controller when rebinding a node to another Controller.
+An authorized Admin revokes a node directly, including a pending node:
 
-1. As the requester (a principal holding `node.revoke`, such as SecurityAdmin or PlatformAdmin), create a content-bound revocation request:
+```http
+POST /api/v1/nodes/<node-uuidv7>/revocation
+Content-Type: application/json
 
-   ```http
-   POST /api/v1/approval-requests
-   X-Workspace-ID: <workspace-uuidv7>
-   Content-Type: application/json
+{"reason": "Revoke managed node"}
+```
 
-   {
-     "action": "node.revoke",
-     "resource_type": "node",
-     "resource_id": "<node-uuidv7>",
-     "reason": "Revoke managed node",
-     "ttl_seconds": 600
-   }
-   ```
-
-2. Have a different SecurityAdmin or PlatformAdmin verify and approve the returned request hash, as in step 2 of [Approve the node](#approve-the-node).
-3. As the requester, submit the revocation with the approved request ID:
-
-   ```http
-   POST /api/v1/nodes/<node-uuidv7>/revocation
-   X-Approval-ID: <approved-request-uuidv7>
-   Content-Type: application/json
-
-   {"reason": "Revoke managed node"}
-   ```
-
-   The response reports `status: revoked`. If you receive a `503` ("Revocation committed") response, the revocation is already committed in the database but transport trust synchronization is incomplete. Preserve the original Request ID, approval ID, reason, revision and error, and follow [Revocation committed with synchronization pending](incident-recovery.md#revocation-committed-with-synchronization-pending) before retrying or requesting another approval.
+A `503 Revocation committed` response means the database change committed but
+transport synchronization remains pending. Preserve request ID, reason,
+revision and error, and follow [revocation recovery](incident-recovery.md#revocation-committed-with-synchronization-pending).
 
 ## Configuration and TLS operations
 
@@ -469,7 +420,7 @@ The rules for plans, hashes, revisions and node TLS are in [Configuration and no
 
 ### Plan and apply a configuration
 
-Submit complete-profile plans from the Web node detail page. Request a production apply approval only after the plan has validated cleanly and remains unexpired, and have a second principal review it before apply. The plan, approval and apply rules are in [Planning](../reference/stable-contracts.md#planning) and [Apply and rollback](../reference/stable-contracts.md#apply-and-rollback).
+Submit complete-profile plans from the Web node detail page. Apply directly from the authorized Admin session after the plan validates cleanly and remains unexpired. The plan and apply rules are in [Planning](../reference/stable-contracts.md#planning) and [Apply and rollback](../reference/stable-contracts.md#apply-and-rollback).
 
 If privd returns `failed_critical`, an operator must repair and verify the node locally before a recovery workflow can clear the automation lock.
 
@@ -574,7 +525,7 @@ If rollback fails, stop immediately and preserve both the snapshot and host diag
 
 ### Controller-driven single-node upgrade
 
-The console exposes one reconciled upgrade endpoint per node: `POST /api/v1/nodes/{node_id}/agent-upgrade` (RBAC action `agent.upgrade`, Operator role), which accepts only a target version, an approval ID, and a reason alongside a required `Idempotency-Key` header. Callers never supply a URL, file path, or package digest; the Controller looks up the digest in the operator-provisioned release catalog pointed to by `OCSERV_AGENT_RELEASE_MANIFEST` (an absolute path with no default). When that environment variable is unset, the Controller starts without a catalog and returns `503` on the agent-upgrade and agent-rollout endpoints. Enabling Controller-driven AgentUpgrade and rollouts requires a deployment-specific override that mounts the catalog file read-only into the control-plane container, because the shipped production Compose neither sets nor mounts `OCSERV_AGENT_RELEASE_MANIFEST`. The catalog file has this form:
+The console exposes one reconciled upgrade endpoint per node: `POST /api/v1/nodes/{node_id}/agent-upgrade` (RBAC action `agent.upgrade`, Operator role), which accepts a target version and a reason alongside a required `Idempotency-Key` header. Callers never supply a URL, file path, or package digest; the Controller looks up the digest in the operator-provisioned release catalog pointed to by `OCSERV_AGENT_RELEASE_MANIFEST` (an absolute path with no default). When that environment variable is unset, the Controller starts without a catalog and returns `503` on the agent-upgrade and agent-rollout endpoints. Enabling Controller-driven AgentUpgrade and rollouts requires a deployment-specific override that mounts the catalog file read-only into the control-plane container, because the shipped production Compose neither sets nor mounts `OCSERV_AGENT_RELEASE_MANIFEST`. The catalog file has this form:
 
 ```json
 {
@@ -588,11 +539,11 @@ The console exposes one reconciled upgrade endpoint per node: `POST /api/v1/node
 }
 ```
 
-This manifest is the only digest source for the workflow and must list between 1 and 512 unique `(version, architecture)` entries; once `OCSERV_AGENT_RELEASE_MANIFEST` is set, a missing, unreadable, malformed, or ambiguous file aborts Controller startup. The Controller does not synchronize with GitHub or container registries, so preparing an upgrade consists of placing the archive in each node's local spool (see [Durable self-upgrade runner](#durable-self-upgrade-runner)) and adding its exact digest to the manifest. Under the v1.1.0 policy reset, the Controller accepts any explicit trusted target regardless of whether it is lower, equal, or higher than the current version or whether the source version is unknown; version classifications shown in the UI are informational and do not govern execution. Each request must still supply the node's current revision (`If-Match`) and an independent approval bound to the exact `node + version + digest + architecture` release identity.
+This manifest is the only digest source for the workflow and must list between 1 and 512 unique `(version, architecture)` entries; once `OCSERV_AGENT_RELEASE_MANIFEST` is set, a missing, unreadable, malformed, or ambiguous file aborts Controller startup. The Controller does not synchronize with GitHub or container registries, so preparing an upgrade consists of placing the archive in each node's local spool (see [Durable self-upgrade runner](#durable-self-upgrade-runner)) and adding its exact digest to the manifest. Under the v1.1.0 policy reset, the Controller accepts any explicit trusted target regardless of whether it is lower, equal, or higher than the current version or whether the source version is unknown; version classifications shown in the UI are informational and do not govern execution. Each request must still supply the node's current revision (`If-Match`) and preserve the exact `node + version + digest + architecture` release identity.
 
 To dispatch the upgrade, the Controller requires an approved typed-command capability on the node (`ocserv.agent.upgrade.v2` or `ocserv.agent.upgrade.v1`, preferring v2 when both are approved) and binds that exact capability name into the signed command. Nodes advertising only v1 remain eligible despite lacking the former software downgrade fence; the Controller never fabricates capabilities or converts historical payloads. The already-installed runner executes the command, so previously installed code retains its own runtime behavior. Advertising a command capability does not guarantee cross-version safety or certify historical version combinations.
 
-New upgrade operations start in the `queued` state and move to the non-terminal `accepted` state when the Agent acknowledges scheduling (acknowledgement alone never counts as completion). As the upgrader restarts the Agent and privd, the node temporarily disconnects as part of normal progress. The Controller determines terminal outcomes strictly from durable evidence: `succeeded` requires the node to reconnect and report the target Agent version alongside a successful local terminal result from the upgrader; an explicit local failure closes the operation as `failed`; and a matched rollback closes it as `rolled_back`. If an operation remains unresolved when the reconciliation window expires (`OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT`, defaulting to 30 minutes with an accepted startup range of 1 minute to 24 hours; not forwarded by the shipped production Compose unless overridden), the Controller closes it conservatively as `unknown` and marks its command expired to prevent blind retries. Only one upgrade may be active per node at a time, so concurrent requests fail with a conflict until the active operation reaches a terminal state. Every terminal transition appends an audit record capturing the operator, approval identity, source and target versions, and outcome.
+New upgrade operations start in the `queued` state and move to the non-terminal `accepted` state when the Agent acknowledges scheduling (acknowledgement alone never counts as completion). As the upgrader restarts the Agent and privd, the node temporarily disconnects as part of normal progress. The Controller determines terminal outcomes strictly from durable evidence: `succeeded` requires the node to reconnect and report the target Agent version alongside a successful local terminal result from the upgrader; an explicit local failure closes the operation as `failed`; and a matched rollback closes it as `rolled_back`. If an operation remains unresolved when the reconciliation window expires (`OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT`, defaulting to 30 minutes with an accepted startup range of 1 minute to 24 hours; not forwarded by the shipped production Compose unless overridden), the Controller closes it conservatively as `unknown` and marks its command expired to prevent blind retries. Only one upgrade may be active per node at a time, so concurrent requests fail with a conflict until the active operation reaches a terminal state. Every terminal transition appends an audit record capturing the operator, source and target versions, and outcome.
 
 During regular telemetry heartbeats, the Agent queries privd read-only for terminal upgrader outcomes and forwards them to the Controller, which accepts the first report per operation and cross-checks it against the node's observed version before marking the upgrade `succeeded`. Nodes still running an older privd omit these local outcome reports and resolve instead through version observation, explicit failure or rollback paths, or the conservative `unknown` timeout.
 
@@ -608,7 +559,7 @@ All native DEB and RPM packages (`amd64` and `arm64`) include the durable runner
 
 ### Fleet rolling upgrades
 
-`POST /api/v1/agent-rollouts` (RBAC action `agent.upgrade`, Operator role) upgrades a selected set of nodes to a single trusted target version in bounded batches. The creation request takes the target version, node IDs, an optional `batch_size` (defaulting to 5, bounded from 1 to 20), a reason, and an approval ID. Callers cannot set `stop_on_failure` in the request; the server fixes `StopOnFailure = true`, and the referenced `agent.rollout` approval binding covers the target version, sorted node set, batch size, and `stop_on_failure = true`. Every selected node's architecture must have a matching target entry in the operator-provisioned release catalog, and every selected node must advertise an approved `ocserv.agent.upgrade.v1` or `ocserv.agent.upgrade.v2` capability.
+`POST /api/v1/agent-rollouts` (RBAC action `agent.upgrade`, Operator role) upgrades a selected set of nodes to a single trusted target version in bounded batches. The creation request takes the target version, node IDs, an optional `batch_size` (defaulting to 5, bounded from 1 to 20), and a reason. Callers cannot set `stop_on_failure` in the request; the server fixes `StopOnFailure = true`, and the immutable rollout request hash covers the target version, sorted node set, batch size, and `stop_on_failure = true`. Every selected node's architecture must have a matching target entry in the operator-provisioned release catalog, and every selected node must advertise an approved `ocserv.agent.upgrade.v1` or `ocserv.agent.upgrade.v2` capability.
 
 Fleet version badges in the console and the recommended version displayed in Settings come from the operator-pinned `OCSERV_RECOMMENDED_AGENT_VERSION` (SemVer), which classifies observed versions without scheduling any upgrades on its own. Configure it in the Controller section of `install.env` or export it in the invoking shell before running the production installer or bootstrap, so the root lifecycle forwards the resolved value to the migrate and control-plane containers. An explicitly empty export overrides `install.env` and clears the recommendation.
 

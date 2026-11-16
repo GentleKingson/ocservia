@@ -24,6 +24,31 @@ import {
   EnrollmentTokenRequestToJSON,
 } from "../models/EnrollmentTokenRequest";
 import {
+  type GetNodeBootstrapStatus200Response,
+  GetNodeBootstrapStatus200ResponseFromJSON,
+  GetNodeBootstrapStatus200ResponseToJSON,
+} from "../models/GetNodeBootstrapStatus200Response";
+import {
+  type NodeBootstrapAttestationChallenge,
+  NodeBootstrapAttestationChallengeFromJSON,
+  NodeBootstrapAttestationChallengeToJSON,
+} from "../models/NodeBootstrapAttestationChallenge";
+import {
+  type NodeBootstrapAttestationRequest,
+  NodeBootstrapAttestationRequestFromJSON,
+  NodeBootstrapAttestationRequestToJSON,
+} from "../models/NodeBootstrapAttestationRequest";
+import {
+  type NodeBootstrapConfiguration,
+  NodeBootstrapConfigurationFromJSON,
+  NodeBootstrapConfigurationToJSON,
+} from "../models/NodeBootstrapConfiguration";
+import {
+  type NodeBootstrapRegistrationRequest,
+  NodeBootstrapRegistrationRequestFromJSON,
+  NodeBootstrapRegistrationRequestToJSON,
+} from "../models/NodeBootstrapRegistrationRequest";
+import {
   type NodeBootstrapToken,
   NodeBootstrapTokenFromJSON,
   NodeBootstrapTokenToJSON,
@@ -34,10 +59,20 @@ import {
   NodeBootstrapTokenRequestToJSON,
 } from "../models/NodeBootstrapTokenRequest";
 import {
+  type NodeInstallationTokenRequest,
+  NodeInstallationTokenRequestFromJSON,
+  NodeInstallationTokenRequestToJSON,
+} from "../models/NodeInstallationTokenRequest";
+import {
   type Problem,
   ProblemFromJSON,
   ProblemToJSON,
 } from "../models/Problem";
+import {
+  type RegisterNodeBootstrapAttestation201Response,
+  RegisterNodeBootstrapAttestation201ResponseFromJSON,
+  RegisterNodeBootstrapAttestation201ResponseToJSON,
+} from "../models/RegisterNodeBootstrapAttestation201Response";
 
 export interface CreateEnrollmentTokenRequest {
   enrollmentTokenRequest: EnrollmentTokenRequest;
@@ -45,6 +80,22 @@ export interface CreateEnrollmentTokenRequest {
 
 export interface CreateNodeBootstrapTokenRequest {
   nodeBootstrapTokenRequest: NodeBootstrapTokenRequest;
+}
+
+export interface GetNodeBootstrapAttestationChallengeRequest {
+  nodeBootstrapAttestationRequest: NodeBootstrapAttestationRequest;
+}
+
+export interface GetNodeBootstrapConfigurationRequest {
+  nodeInstallationTokenRequest: NodeInstallationTokenRequest;
+}
+
+export interface GetNodeBootstrapStatusRequest {
+  nodeBootstrapAttestationRequest: NodeBootstrapAttestationRequest;
+}
+
+export interface RegisterNodeBootstrapAttestationRequest {
+  nodeBootstrapRegistrationRequest: NodeBootstrapRegistrationRequest;
 }
 
 /**
@@ -187,6 +238,262 @@ export class EnrollmentApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<NodeBootstrapToken> {
     const response = await this.createNodeBootstrapTokenRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for getNodeBootstrapAttestationChallenge without sending the request
+   */
+  async getNodeBootstrapAttestationChallengeRequestOpts(
+    requestParameters: GetNodeBootstrapAttestationChallengeRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeBootstrapAttestationRequest"] == null) {
+      throw new runtime.RequiredError(
+        "nodeBootstrapAttestationRequest",
+        'Required parameter "nodeBootstrapAttestationRequest" was null or undefined when calling getNodeBootstrapAttestationChallenge().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    let urlPath = `/node-bootstrap/attestation`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: NodeBootstrapAttestationRequestToJSON(
+        requestParameters["nodeBootstrapAttestationRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Obtain a root-only privd registration challenge
+   */
+  async getNodeBootstrapAttestationChallengeRaw(
+    requestParameters: GetNodeBootstrapAttestationChallengeRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<NodeBootstrapAttestationChallenge>> {
+    const requestOptions =
+      await this.getNodeBootstrapAttestationChallengeRequestOpts(
+        requestParameters,
+      );
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      NodeBootstrapAttestationChallengeFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Obtain a root-only privd registration challenge
+   */
+  async getNodeBootstrapAttestationChallenge(
+    requestParameters: GetNodeBootstrapAttestationChallengeRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<NodeBootstrapAttestationChallenge> {
+    const response = await this.getNodeBootstrapAttestationChallengeRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for getNodeBootstrapConfiguration without sending the request
+   */
+  async getNodeBootstrapConfigurationRequestOpts(
+    requestParameters: GetNodeBootstrapConfigurationRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeInstallationTokenRequest"] == null) {
+      throw new runtime.RequiredError(
+        "nodeInstallationTokenRequest",
+        'Required parameter "nodeInstallationTokenRequest" was null or undefined when calling getNodeBootstrapConfiguration().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    let urlPath = `/node-bootstrap/config`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: NodeInstallationTokenRequestToJSON(
+        requestParameters["nodeInstallationTokenRequest"],
+      ),
+    };
+  }
+
+  /**
+   * HTTPS only. Keep the installation token root-only; only enrollment_token may be passed to the Agent. Successful retries return the same derived credentials while the token is unexpired; a consumed token remains bound to its original node and endpoint. Responses must never be cached or logged.
+   * Exchange the root installation token for node configuration
+   */
+  async getNodeBootstrapConfigurationRaw(
+    requestParameters: GetNodeBootstrapConfigurationRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<NodeBootstrapConfiguration>> {
+    const requestOptions =
+      await this.getNodeBootstrapConfigurationRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      NodeBootstrapConfigurationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * HTTPS only. Keep the installation token root-only; only enrollment_token may be passed to the Agent. Successful retries return the same derived credentials while the token is unexpired; a consumed token remains bound to its original node and endpoint. Responses must never be cached or logged.
+   * Exchange the root installation token for node configuration
+   */
+  async getNodeBootstrapConfiguration(
+    requestParameters: GetNodeBootstrapConfigurationRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<NodeBootstrapConfiguration> {
+    const response = await this.getNodeBootstrapConfigurationRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for getNodeBootstrapStatus without sending the request
+   */
+  async getNodeBootstrapStatusRequestOpts(
+    requestParameters: GetNodeBootstrapStatusRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeBootstrapAttestationRequest"] == null) {
+      throw new runtime.RequiredError(
+        "nodeBootstrapAttestationRequest",
+        'Required parameter "nodeBootstrapAttestationRequest" was null or undefined when calling getNodeBootstrapStatus().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    let urlPath = `/node-bootstrap/status`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: NodeBootstrapAttestationRequestToJSON(
+        requestParameters["nodeBootstrapAttestationRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Requires the root installation token and its enrolled identity binding. Returns Controller observations so local systemd state alone cannot complete installation.
+   * Verify that the installed node is active and online
+   */
+  async getNodeBootstrapStatusRaw(
+    requestParameters: GetNodeBootstrapStatusRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<GetNodeBootstrapStatus200Response>> {
+    const requestOptions =
+      await this.getNodeBootstrapStatusRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      GetNodeBootstrapStatus200ResponseFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Requires the root installation token and its enrolled identity binding. Returns Controller observations so local systemd state alone cannot complete installation.
+   * Verify that the installed node is active and online
+   */
+  async getNodeBootstrapStatus(
+    requestParameters: GetNodeBootstrapStatusRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<GetNodeBootstrapStatus200Response> {
+    const response = await this.getNodeBootstrapStatusRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for registerNodeBootstrapAttestation without sending the request
+   */
+  async registerNodeBootstrapAttestationRequestOpts(
+    requestParameters: RegisterNodeBootstrapAttestationRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeBootstrapRegistrationRequest"] == null) {
+      throw new runtime.RequiredError(
+        "nodeBootstrapRegistrationRequest",
+        'Required parameter "nodeBootstrapRegistrationRequest" was null or undefined when calling registerNodeBootstrapAttestation().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    let urlPath = `/node-bootstrap/register`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: NodeBootstrapRegistrationRequestToJSON(
+        requestParameters["nodeBootstrapRegistrationRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Atomically binds the verified root key and consumes installation authorization. Recovery may replay only the identical completed registration; it cannot substitute a node or key.
+   * Register the root privd key and complete installation authorization
+   */
+  async registerNodeBootstrapAttestationRaw(
+    requestParameters: RegisterNodeBootstrapAttestationRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<RegisterNodeBootstrapAttestation201Response>> {
+    const requestOptions =
+      await this.registerNodeBootstrapAttestationRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      RegisterNodeBootstrapAttestation201ResponseFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Atomically binds the verified root key and consumes installation authorization. Recovery may replay only the identical completed registration; it cannot substitute a node or key.
+   * Register the root privd key and complete installation authorization
+   */
+  async registerNodeBootstrapAttestation(
+    requestParameters: RegisterNodeBootstrapAttestationRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<RegisterNodeBootstrapAttestation201Response> {
+    const response = await this.registerNodeBootstrapAttestationRaw(
       requestParameters,
       initOverrides,
     );

@@ -22,11 +22,6 @@ func validateBootstrapPasswords(cfg config.Config) error {
 			return err
 		}
 	}
-	if cfg.BootstrapLocalAdmin || cfg.CompleteLocalBootstrap {
-		if err := auth.ValidateNewPassword(cfg.LocalBootstrapApproverPassword); err != nil {
-			return err
-		}
-	}
 
 	return nil
 }

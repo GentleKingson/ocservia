@@ -3,6 +3,7 @@ package api
 // Frozen from e41b9a78e74c5920fe4741061800c1b8e8f56dc1 for routing-module differential tests.
 // Repair PR-11 extends only /api/v1/approval-requests to GET_OR_POST.
 // Repair PR-12 adds only the node public sealing key GET shape.
+// Single-admin installation adds bootstrap routes and removes approval-request routes.
 // Never used by production routing.
 
 import (
@@ -49,13 +50,11 @@ func legacyRouteMethod(path string) (string, bool) {
 		return http.MethodGet, true
 	case "/api/v1/auth/login":
 		return "GET_OR_POST", true
-	case "/api/v1/approval-requests":
-		return "GET_OR_POST", true
 	case "/api/v1/nodes":
 		return http.MethodGet, true
 	case "/api/v1/development/simulations":
 		return http.MethodPost, true
-	case "/api/v1/enrollment-tokens", "/api/v1/node-bootstrap-tokens", "/api/v1/auth/logout", "/api/v1/auth/change-password", "/api/v1/auth/break-glass", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
+	case "/api/v1/node-bootstrap/config", "/api/v1/node-bootstrap/attestation", "/api/v1/node-bootstrap/register", "/api/v1/node-bootstrap/status", "/api/v1/enrollment-tokens", "/api/v1/node-bootstrap-tokens", "/api/v1/auth/logout", "/api/v1/auth/change-password", "/api/v1/auth/break-glass", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
 		return http.MethodPost, true
 	}
 	if path == "/api/v1/secret-provider-refs" {
@@ -143,12 +142,7 @@ func legacyRouteMethod(path string) (string, bool) {
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "operations" && parts[3] != "" && parts[4] == "events" {
 		return http.MethodGet, true
 	}
-	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "approval-requests" && strings.HasSuffix(parts[3], ":approve") {
-		return http.MethodPost, true
-	}
-	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "approval-requests" && parts[3] != "" {
-		return http.MethodGet, true
-	}
+
 	operationID := strings.TrimPrefix(path, "/api/v1/operations/")
 	if operationID != path && operationID != "" && !strings.Contains(operationID, "/") {
 		return http.MethodGet, true

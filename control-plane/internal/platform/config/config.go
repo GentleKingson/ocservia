@@ -35,6 +35,8 @@ const (
 )
 
 type Config struct {
+	InstallationRelayURL     string
+	InstallationRelayToken   string
 	HistoryRetention         historyretention.Policy
 	Role                     Role
 	MigrateOnly              bool
@@ -204,6 +206,14 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		}
 	}
 	setString(lookup, "OCSERV_COMMAND_SIGNING_KEY_FILE", &cfg.CommandSigningKeyFile)
+	setString(lookup, "OCSERV_RELAY_URL_A", &cfg.InstallationRelayURL)
+	if path, ok := lookup("OCSERV_RELAY_ACCESS_TOKEN_FILE"); ok {
+		var err error
+		cfg.InstallationRelayToken, err = readSecretFile(path)
+		if err != nil {
+			return Config{}, errors.New("OCSERV_RELAY_ACCESS_TOKEN_FILE must be a valid secret file")
+		}
+	}
 	setString(lookup, "OCSERV_PPROF_ADDRESS", &cfg.PprofAddress)
 	setString(lookup, "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR", &cfg.TestResultCommitBarrier)
 	setString(lookup, "OCSERV_TEST_PRE_SEND_BARRIER_DIR", &cfg.TestPreSendBarrier)
@@ -352,6 +362,9 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	cfg.BootstrapLocalAdmin = *bootstrap
 	cfg.CompleteLocalBootstrap = *completeBootstrap
+	if cfg.CompleteLocalBootstrap {
+		return Config{}, errors.New("--complete-local-bootstrap is retired; an existing administrator needs no second bootstrap identity")
+	}
 	if _, ok := lookup("OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD"); ok {
 		return Config{}, errors.New("plaintext approver password environment variable is forbidden; use OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE")
 	}
@@ -367,18 +380,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 			return Config{}, errors.New("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE must be a valid secret file")
 		}
 		cfg.LocalBootstrapPassword = password
-		setString(lookup, "OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME", &cfg.LocalBootstrapApproverUsername)
-		approverPath, _ := lookup("OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE")
-		if approverPath == path {
-			return Config{}, errors.New("administrator and approver require separate secret files")
-		}
-		cfg.LocalBootstrapApproverPassword, err = readBootstrapSecret(approverPath)
-		if err != nil {
-			return Config{}, errors.New("OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE must be a valid secret file")
-		}
-		if cfg.LocalBootstrapApproverPassword == password {
-			return Config{}, errors.New("administrator and approver credentials must differ")
-		}
+
 	}
 	cfg.Role = Role(*role)
 	cfg.MigrateOnly = *migrateOnly
@@ -395,7 +397,7 @@ func (c Config) Validate() error {
 	if c.DatabaseBackend != "" && c.DatabaseBackend != "postgres" && c.DatabaseBackend != "mysql" {
 		return errors.New("OCSERV_DATABASE_BACKEND must be postgres or mysql")
 	}
-	if (c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) && (!c.LocalAuthEnabled() || c.MigrateOnly || (c.BootstrapLocalAdmin && c.CompleteLocalBootstrap) || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "" || c.LocalBootstrapApproverUsername == "") {
+	if (c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) && (!c.LocalAuthEnabled() || c.MigrateOnly || (c.BootstrapLocalAdmin && c.CompleteLocalBootstrap) || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")
 	}
 	if c.ProvisionWorkspace && (c.MigrateOnly || c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) {

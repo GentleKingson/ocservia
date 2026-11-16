@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
@@ -43,7 +42,7 @@ func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, issuer stri
 		t.Fatal(err)
 	}
 	config := testHTTPConfig(false)
-	s := newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(postgres.WrapPool(pool)), Approvals: approvals.NewBackend(postgres.WrapPool(pool))})
+	s := newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(postgres.WrapPool(pool))})
 	return s
 }
 
@@ -456,12 +455,12 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 	if err != nil || actor.BreakGlass {
 		t.Fatalf("ordinary principal: %+v %v", actor, err)
 	}
-	workspaceID, targetID, approverID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	workspaceID, targetID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Authentication authorization parity',$2,now(),now())`, workspaceID, "parity-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = pool.Exec(ctx, `DELETE FROM role_bindings WHERE workspace_id=$1`, workspaceID) }()
-	for _, id := range []uuid.UUID{targetID, approverID} {
+	for _, id := range []uuid.UUID{targetID} {
 		if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'https://parity.example',$2,now(),now())`, id, id.String()); err != nil {
 			t.Fatal(err)
 		}
@@ -483,7 +482,7 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 	binding := fmt.Sprintf(`{"identity_id":%q,"workspace_id":%q,"role":"SecurityAdmin","resource_type":"workspace","reason":"Authentication authorization parity"}`, targetID, workspaceID)
 	call("GET", "nodes", "", 403)
 	call("POST", "role-bindings", binding, 403)
-	for id, role := range map[uuid.UUID]string{actor.IdentityID: "PlatformAdmin", approverID: "SecurityAdmin"} {
+	for id, role := range map[uuid.UUID]string{actor.IdentityID: "PlatformAdmin"} {
 		if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,$4,'workspace',now())`, uuid.Must(uuid.NewV7()), id, workspaceID, role); err != nil {
 			t.Fatal(err)
 		}
@@ -491,34 +490,16 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 	if w := call("GET", "workspaces", "", 200); !strings.Contains(w.Body.String(), workspaceID.String()) {
 		t.Fatalf("authorized workspace missing: %s", w.Body)
 	}
-	// An elevated role without an approval conflicts with approval state, an
-	// unknown role is invalid, and repeating a binding conflicts with it.
-	call("POST", "role-bindings", binding, 409)
+	// Admin directly grants elevated roles; duplicates still conflict.
+	call("POST", "role-bindings", binding, 201)
 	call("POST", "role-bindings", strings.Replace(binding, `"SecurityAdmin"`, `"Unknown"`, 1), 400)
 	viewer := strings.Replace(binding, `"SecurityAdmin"`, `"Viewer"`, 1)
 	call("POST", "role-bindings", viewer, 201)
 	if w := call("POST", "role-bindings", viewer, 409); !strings.Contains(w.Body.String(), "role-binding-exists") {
 		t.Fatalf("duplicate binding problem: %s", w.Body)
 	}
-	w := call("POST", "approval-requests", fmt.Sprintf(`{"action":"role_binding.elevate","resource_type":"role_binding","resource_id":%q,"reason":"Authentication authorization parity","ttl_seconds":600,"role_binding":{"identity_id":%q,"role":"SecurityAdmin","resource_type":"workspace"}}`, targetID, targetID), 201)
-	var approval approvals.Approval
-	if err := json.Unmarshal(w.Body.Bytes(), &approval); err != nil {
-		t.Fatal(err)
-	}
-	call("POST", "approval-requests/"+approval.ID.String()+":approve", fmt.Sprintf(`{"reason":"self","expected_request_hash":%q}`, approval.RequestHash), 403)
-	// The independent approver is a database fixture; the requester uses the
-	// real login cookie for every read, approval request and protected mutation.
-	approverSession := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, approverSession, approverID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.approvals.Approve(ctx, approvals.Decision{ApprovalID: approval.ID, ApproverID: approverID, SessionID: approverSession, RequestID: uuid.NewString(), Reason: "independent review", ExpectedRequestHash: approval.RequestHash}); err != nil {
-		t.Fatal(err)
-	}
-	approvedBinding := strings.TrimSuffix(binding, "}") + fmt.Sprintf(`,"approval_id":%q}`, approval.ID)
-	call("POST", "role-bindings", approvedBinding, 201)
-	if w := call("POST", "role-bindings", approvedBinding, 409); !strings.Contains(w.Body.String(), "approval-not-ready") {
-		t.Fatalf("consumed approval problem: %s", w.Body)
+	if w := call("POST", "role-bindings", binding, 409); !strings.Contains(w.Body.String(), "role-binding-exists") {
+		t.Fatalf("duplicate elevated binding: %s", w.Body)
 	}
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND actor_id=$2 AND source_session_id=$3 AND action='role_binding.create' AND result='succeeded'`, workspaceID, actor.IdentityID.String(), actor.SessionID).Scan(&count); err != nil || count != 2 {

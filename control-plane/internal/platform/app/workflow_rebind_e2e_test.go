@@ -63,13 +63,11 @@ func startRebindTarget(t *testing.T, source *controllerE2E) (*controllerE2E, str
 	if err != nil {
 		t.Fatal("initialize empty test workspace", err)
 	}
-	adminPassword, approverPassword := "isolated controller E2E administrator password", "independent controller E2E approver password"
+	adminPassword := "isolated controller E2E administrator password"
 	f.file("admin-password", []byte(adminPassword), 0, 0, 0600)
-	f.file("approver-password", []byte(approverPassword), 0, 0, 0600)
 	f.run(0, 0, f.environment(runtimeOptions, map[string]string{
 		"OCSERV_LOCAL_BOOTSTRAP_USERNAME": "e2e-admin", "OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE": f.root + "/admin-password",
-		"OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID": f.workspace, "OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME": "e2e-approver",
-		"OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE": f.root + "/approver-password",
+		"OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID": f.workspace,
 	}), f.root+"/ocserv-control", "--bootstrap-local-admin")
 
 	controllerPublic, controllerPrivate, err := ed25519.GenerateKey(rand.Reader)
@@ -140,7 +138,6 @@ func startRebindTarget(t *testing.T, source *controllerE2E) (*controllerE2E, str
 		return response.StatusCode == http.StatusOK
 	})
 	f.admin = f.login("e2e-admin", adminPassword)
-	f.approver = f.login("e2e-approver", approverPassword)
 
 	return f, endpointID
 }
@@ -246,8 +243,7 @@ func (f *controllerE2E) rebindWorkflow(oldNode, endpoint, oldController string, 
 		}
 	}
 	if disposition == "revoked" {
-		approval := f.approve("node.revoke", "node", oldNode, nil)
-		f.api(f.admin, "POST", "/api/v1/nodes/"+oldNode+"/revocation", map[string]any{"reason": "explicit Controller replacement"}, map[string]string{"X-Approval-ID": approval}, 200, 503)
+		f.api(f.admin, "POST", "/api/v1/nodes/"+oldNode+"/revocation", map[string]any{"reason": "explicit Controller replacement"}, nil, 200, 503)
 	} else {
 		f.stop("transport")
 		f.stop("controller-all")
@@ -285,9 +281,8 @@ func (f *controllerE2E) rebindWorkflow(oldNode, endpoint, oldController string, 
 	}
 	path := "/api/v1/nodes/" + newNode
 	trust := map[string]any{"labels": map[string]string{"fixture": "real-rebind"}, "policy": "default", "capabilities": capabilities}
-	approval := target.approve("node.approve", "node", newNode, map[string]any{"node_approval": trust})
-	trust["reason"] = "approve rebound node independently"
-	target.api(target.admin, "POST", path+"/approval", trust, map[string]string{"X-Approval-ID": approval}, 200, 503)
+	trust["reason"] = "activate rebound node as Admin"
+	target.api(target.admin, "POST", path+"/approval", trust, nil, 200, 503)
 	credential := target.api(target.admin, "POST", path+"/privd-attestation-credentials", map[string]any{"ttl_seconds": 300, "reason": "register preserved root key"}, nil, 201)
 	registration := f.run(0, 65533, nil, "/usr/local/bin/ocservia-privd", "attestation-registration", f.root+"/privd/state/attestation.key", newNode, e2eString(t, credential, "controller_nonce_hex"), e2eString(t, credential, "credential_context_sha256_hex"))
 	var body map[string]any

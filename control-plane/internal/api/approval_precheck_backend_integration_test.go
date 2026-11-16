@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
@@ -13,7 +14,7 @@ func TestLocalResetApprovalPrecheckBackendHTTPIntegration(t *testing.T) {
 	b, owner := authenticationBackendFixtureWithIsolation(t, true)
 	f := newApplyHTTPFixtureWithBackend(t, b, owner)
 	name := "precheck-" + uuid.NewString()
-	const password = "an independent local approval test password"
+	const password = "a local administration test password"
 	if _, err := f.s.auth.BootstrapLocalAdmin(t.Context(), name, password, f.workspace, name+"-approver", "a separate local approval reviewer password"); err != nil {
 		t.Fatal(err)
 	}
@@ -35,24 +36,25 @@ func TestLocalResetApprovalPrecheckBackendHTTPIntegration(t *testing.T) {
 		{"oidc", oidcID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := fmt.Sprintf(`{"action":"local_user.reset-password","resource_type":"local_user","resource_id":%q,"reason":"restore access","ttl_seconds":300}`, tc.id)
-			w := f.call("POST", "/api/v1/approval-requests", body, "", f.requester.cookie, nil)
+			body := `{"password":"a newly reset local user password"}`
+			path := fmt.Sprintf("/api/v1/local-users/%s:reset-password", tc.id)
+			w := f.call("POST", path, body, "", f.requester.cookie, nil)
 			assertApplyHTTPProblem(t, w, http.StatusForbidden, "forbidden")
-			if deniedBody != "" && deniedBody != w.Body.String() {
+			if deniedBody != "" && deniedBody != strings.ReplaceAll(w.Body.String(), tc.id.String(), "<identity>") {
 				t.Fatalf("credential existence changed denial: %s vs %s", deniedBody, w.Body)
 			}
-			deniedBody = w.Body.String()
+			deniedBody = strings.ReplaceAll(w.Body.String(), tc.id.String(), "<identity>")
 			var count int
 			if err := f.row(`SELECT count(*) FROM approval_requests WHERE requester_id=$1`, `SELECT count(*) FROM approval_requests WHERE requester_id=?`, f.requester.principal.IdentityID).Scan(&count); err != nil || count != 0 {
 				t.Fatalf("denied request persisted an approval: %d %v", count, err)
 			}
-			w = f.call("POST", "/api/v1/approval-requests", body, "", adminCookie, nil)
+			w = f.call("POST", path, body, "", adminCookie, nil)
 			if tc.name == "local" {
-				if w.Code != http.StatusCreated {
-					t.Fatalf("authorized Local reset approval: %d %s", w.Code, w.Body)
+				if w.Code != http.StatusNoContent {
+					t.Fatalf("authorized Local reset: %d %s", w.Code, w.Body)
 				}
 			} else {
-				assertApplyHTTPProblem(t, w, http.StatusNotFound, "not-found")
+				assertApplyHTTPProblem(t, w, http.StatusNotFound, "local-user-mutation")
 			}
 		})
 	}

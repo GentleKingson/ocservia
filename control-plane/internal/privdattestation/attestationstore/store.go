@@ -50,6 +50,7 @@ type VerificationKey struct {
 }
 
 type Store interface {
+	FirstKey(context.Context, uuid.UUID) (string, VerificationKey, error)
 	KeyStateCounts(context.Context) (database.Rows, error)
 	VerificationKey(context.Context, uuid.UUID, string) (VerificationKey, error)
 	// LockActiveNode takes the node row lock for an active or offline node and

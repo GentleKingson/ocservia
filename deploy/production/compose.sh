@@ -196,8 +196,10 @@ if [[ -e "${path}" || -L "${path}" ]]; then
 fi
 for secret in relay-access-token controller-iroh.key; do
   path="${secret_dir}/${secret}"
-  if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%g:%a' "${path}")" != "65532:65532:400" ]]; then
-    echo "${path} must be owned by uid:gid 65532:65532 with mode 0400" >&2
+  mode=400
+  [[ "${secret}" != relay-access-token ]] || mode=440
+  if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%g:%a:%h' "${path}")" != "65532:65532:${mode}:1" ]]; then
+    echo "${path} must be a one-link file owned by uid:gid 65532:65532 with mode 0${mode}" >&2
     exit 2
   fi
 done

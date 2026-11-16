@@ -18,7 +18,6 @@ export async function upgradeNodeAgent(
   node: NodeObservedState,
   targetVersion: string,
   reason: string,
-  approvalId: string,
   signal?: AbortSignal,
 ): Promise<Operation> {
   return operations.upgradeNodeAgent(
@@ -26,7 +25,7 @@ export async function upgradeNodeAgent(
       nodeId: node.id,
       idempotencyKey: newIdempotencyKey(),
       ifMatch: `"revision-${String(node.version)}"`,
-      agentUpgradeRequest: { targetVersion, approvalId, reason },
+      agentUpgradeRequest: { targetVersion, reason },
     },
     requestInit(signal),
   );
@@ -40,7 +39,6 @@ export async function createAgentRollout(
   nodeIds: string[],
   batchSize: number,
   reason: string,
-  approvalId: string,
   signal?: AbortSignal,
 ): Promise<AgentRollout> {
   return operations.createAgentRollout(
@@ -52,7 +50,6 @@ export async function createAgentRollout(
         nodeIds,
         batchSize,
         reason,
-        approvalId,
       },
     },
     requestInit(signal),

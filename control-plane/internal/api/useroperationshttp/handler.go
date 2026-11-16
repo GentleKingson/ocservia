@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
@@ -211,8 +210,6 @@ func (h *Handler) writeUserOperationsError(w http.ResponseWriter, r *http.Reques
 		httpx.WriteProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested user policy or batch does not exist")
 	case errors.Is(err, rbac.ErrForbidden):
 		httpx.WriteProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the principal is not authorized for this operation")
-	case errors.Is(err, approvals.ErrNotReady):
-		httpx.WriteProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/approval-required", "Independent approval is required", "bulk user disable requires a valid approval bound to the batch identifier")
 	default:
 		h.logger.ErrorContext(r.Context(), "user operations request failed", "error", err)
 		httpx.WriteProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "user operations state is temporarily unavailable")

@@ -4,7 +4,7 @@ ocservia provides a central control plane for OpenConnect (ocserv) VPN gateways 
 
 ## Purpose and constraints
 
-Operators use the control plane to verify node trust and reachability, roll out configuration changes without interactive shell access, and reconcile commands whose outcomes become ambiguous. High-risk changes require approval from a second, independently authenticated principal, and disaster recovery preserves node identities alongside the recorded history of state transitions.
+Operators use the control plane to verify node trust and reachability, roll out configuration changes without interactive shell access, and reconcile commands whose outcomes become ambiguous. One workspace Admin can authorize management changes directly, and disaster recovery preserves node identities alongside the recorded history of state transitions.
 
 A supported production deployment consists of one Controller instance, a relational database, a Signer service for certificate issuance, and a single dedicated Relay serving multiple Agents (a non-empty second Relay URL is rejected). Those services can run on separate hosts, or co-locate on the Controller host in Integrated mode. High-availability topologies such as multi-master Controller clusters, redundant Relays, and automated database failover are outside the [supported scope](operations/production-deployment.md#deployment-capability-distinctions); internal lease mechanisms and package modularity do not imply HA support. Production hosts must match the [production support matrix](operations/production-deployment.md#database-support), and development and test fixtures do not expand it.
 
@@ -61,7 +61,7 @@ At runtime, the Go Controller talks to `transportd` over a local Unix domain soc
 ```text
 Operator request
   -> Controller validates and records the request
-  -> high-risk changes wait for independent approval
+  -> authenticated Admin submits management changes directly
   -> Controller sends a signed, fixed operation to the node
   -> node runs the matching local ocserv action
   -> result and audit record return to the Controller
@@ -82,9 +82,9 @@ The table below traces `service:reload`. Other controlled operations share the o
 
 | Hop | Entry point | Owner and boundary |
 | --- | --- | --- |
-| Browser | [`NodeDetailView.vue`](../web/src/views/NodeDetailView.vue) → [`shared/fleet.ts`](../web/src/shared/fleet.ts) `reloadService` → [`api/operations.ts`](../web/src/api/operations.ts) `reloadService` → generated client → [`api/transport.ts`](../web/src/api/transport.ts) | Fleet store tracks operation state; the adapter attaches `Idempotency-Key`, `If-Match`, and approval headers. UI visibility is not authorization. |
+| Browser | [`NodeDetailView.vue`](../web/src/views/NodeDetailView.vue) → [`shared/fleet.ts`](../web/src/shared/fleet.ts) `reloadService` → [`api/operations.ts`](../web/src/api/operations.ts) `reloadService` → generated client → [`api/transport.ts`](../web/src/api/transport.ts) | Fleet store tracks operation state; the adapter attaches `Idempotency-Key`, `If-Match`, and session credentials. UI visibility is not authorization. |
 | HTTP | [`api/routes.go`](../control-plane/internal/api/routes.go) `POST /api/v1/nodes/{node_id}/service:reload` → [`requireOperationAuth`](../control-plane/internal/api/authorization.go) → [`createControlledCommand`](../control-plane/internal/api/operations.go) | Authenticates the caller, runs `validateBrowserMutation` (mutating requests from non-development principals must carry the trusted browser `Origin`), enforces route RBAC and payload validation, and returns HTTP `202` with the staged operation record. |
-| Acceptance | [`operations.Service.Create`](../control-plane/internal/operations/service.go) | A single database transaction verifies the expected node revision, consumes the bound approval, and writes the operation, outbox entry, and audit record. |
+| Acceptance | [`operations.Service.Create`](../control-plane/internal/operations/service.go) | A single database transaction verifies the expected node revision, revalidates session and resource permissions, and writes the operation, outbox entry, and audit record. |
 | Dispatch | [`operations.Worker.dispatch`](../control-plane/internal/operations/worker.go) → [`Service.Claim`](../control-plane/internal/operations/dispatch.go) → `dispatchFenced` → [`transportclient`](../control-plane/internal/transportclient/) | Claims up to 16 jobs and dispatches them serially. Commands carry an owner fence whenever [`startWorker`](../control-plane/internal/platform/app/worker.go) has initialized an owner-session manager (enabled when `OCSERV_CONTROLLER_ENDPOINT_ID` is set, as required in production Compose; only the local simulator path sends unfenced). `MarkSentWithEnvelope` records transmission only. |
 | Transport | [`transportd`](../rust/crates/transportd/src/lib.rs) `send_command` | Unprivileged process that forwards the envelope over the authorized Iroh session. |
 | Node | [`agent` `execute_external_command`](../rust/crates/agent/src/main.rs) → [`CommandExecutor::prepare_external`](../rust/crates/agent/src/lib.rs) → [`command-journal`](../rust/crates/command-journal/src/lib.rs) `accept_command` → `PrivdClient` → [`privd`](../rust/crates/privd/src/lib.rs) `dispatch_attested` | The journal transitions through `Accepted` and `Running` before `privd` runs the compiled action and signs a receipt. A command reaches a terminal state only with a valid `privd` receipt; missing receipts, unclassified `privd` errors, transport drops, or replays of non-terminal entries settle as `Unknown` without re-executing. |
@@ -92,7 +92,13 @@ The table below traces `service:reload`. Other controlled operations share the o
 
 Privileged execution on a managed node is limited to compiled routines inside `privd`, which rejects arbitrary binaries, shell command strings, dynamic systemd unit names, and unconstrained filesystem paths.
 
-Node enrollment uses a separate handshake protocol. A single-use token binds the node's persistent `EndpointID` to a pending inventory record. The node then requires independent two-principal approval before the `Agent` can establish an authenticated control session. Installing the package or starting local services does not grant control-plane access prior to approval; see [enrollment](operations/agent-lifecycle.md#enroll-the-node) and [`enrollment/service.go`](../control-plane/internal/enrollment/service.go).
+Node enrollment uses a separate possession-proof handshake. Installation tokens
+are short-lived and single-use, with retry restricted to the same endpoint and
+recorded key binding. The root installer receives configuration over verified
+HTTPS and gives the Agent only a one-way derived enrollment credential. It
+registers the root-owned privd key, starts services and checks Controller-observed
+online state. Ordinary Agent credentials cannot register a replacement root
+key. See [enrollment](operations/agent-lifecycle.md#enroll-the-node).
 
 ## State and recovery boundaries
 
@@ -125,7 +131,7 @@ Before tuning concurrency settings or splitting services, measure queue depth, m
 - Production deployments pin immutable release tags or container image digests.
 - Managed-node packages are verified against an expected SHA-256 digest (supplied by the operator or a signed Controller upgrade command) before installation; a plain checksum guards against file corruption and does not grant execution authority.
 - Private keys, TLS certificates, relay access tokens, and database or admin credentials are provisioned out of band in protected host directories.
-- High-risk mutations require independent two-principal approval bound to the exact request payload, with self-approval rejected. The system enforces separation across two distinct authenticated principals, credentials, and sessions. Human two-person custody of those credentials remains outside what the software can automatically verify ([approval principal boundary](reference/stable-contracts.md#approval-principal-boundary)).
+- One authenticated workspace Admin can authorize management writes. Transaction-time identity, session and resource checks remain enforced, along with exact operation intent, revisions, idempotency and signed root receipts ([authorization boundary](reference/stable-contracts.md#single-admin-authorization-boundary)).
 - Audit events commit in the same database transaction as the state changes they record.
 - Production rollouts require tested backup restoration and rollback procedures.
 
@@ -146,7 +152,7 @@ The scheduler classifies a failed maintenance session in [`scheduler.go`](../con
 
 Database ownership is split between two entry points. A separate one-shot `--migrate-only` run uses the owner connection to apply schema changes, verify checksums and receipts, check audit event authentication, and only then grant access to the unprivileged runtime role. The long-running process holds only runtime credentials. Normal startup validates the deployment and audit authenticity, and `/readyz` reads the core tables. Neither is evidence of full checksum or receipt verification. The rules are in [Database](reference/stable-contracts.md#database).
 
-The development stack in `deploy/compose` pairs the Controller with a Rust transport stub and a bounded node simulator, and avoids Iroh, ocserv, and privileged execution. The simulator is off unless `OCSERV_LOCAL_SIMULATOR=true` and is rejected in production builds. Development bearer authentication carries no persisted identity, so it cannot create or approve approvals. Production rejects both. The [README](../README.md#try-it-locally) has the commands.
+The development stack in `deploy/compose` pairs the Controller with a Rust transport stub and a bounded node simulator, and avoids Iroh, ocserv, and privileged execution. The simulator is off unless `OCSERV_LOCAL_SIMULATOR=true` and is rejected in production builds. Development bearer authentication carries no persisted identity, so it cannot perform identity-bound administrative mutations. Production rejects both. The [README](../README.md#try-it-locally) has the commands.
 
 ### Domain services and transactions
 
@@ -156,15 +162,15 @@ Each domain service owns its business invariants and opens its own transaction. 
 
 | Consumer | Capability it consumes | Transaction owner |
 | --- | --- | --- |
-| `configplan.Service` | `operationCreator.Create` for Create and Apply | ConfigPlan owns its pre-read transactions. Operations commits command, Plan, outbox, and audit rows and consumes the approval. |
+| `configplan.Service` | `operationCreator.Create` for Create and Apply | ConfigPlan owns its pre-read transactions. Operations commits command, Plan, outbox, and audit rows and revalidates mutation authority. |
 | `useroperations.Service` | `userMutator.Mutate` for monthly reset, enforcement, and batch submission | UserOperations owns policy, claim, and receipt state. UserState commits desired state, command, outbox, and audit rows and checks fencing. |
 | `configplanhttp.Handler` | `Plans.Create/Get/Apply` | The existing domain services. |
-| Parent authorization and approval HTTP | `configPlanLookup.ApprovalBinding/Resource` | Approval creation and decision stay in the parent. Consumption stays in Operations. |
+| Parent authorization | `configPlanLookup.Resource` | Resource authorization stays in the parent; mutation authorization is rechecked inside the operation transaction. |
 
 - `platform/app` passes the configured service instances together with the caller's original request or scheduler context, which keeps any leadership fence active. Read-only and validation paths can run without a writer. A nil writer never falls back to another path and never lets a write succeed.
 - All stores that take part in one business operation bind to the same `database.Tx` inside `database.Within`. Business locks are PostgreSQL advisory locks and MySQL `business_locks` rows. A commit acknowledgement error leaves the outcome unknown, so callers do not replay writes blindly. Only database-only claim, completion, reaping, and lease work uses the retrying helper.
-- Upgrade preparation belongs to Operations. `PrepareAgentUpgrade` and `AgentUpgradeApprovalBinding` resolve the target through `RBACStore.UpgradeNode` and the operator-provisioned release catalog. `Create` still takes the locks, checks versions and replay state, validates node capabilities and attestation, consumes the approval, and enforces the active-upgrade guard. Approving an upgrade binds a trusted catalog entry. It does not promise that the target is newer than the node's build.
-- `configplan.Service.ApprovalBinding` loads the plan through the interpreted `Get` path and checks status and expiry against the service clock. The HTTP layer checks the selected workspace and the node `config.apply` permission. Apply prechecks, desired-revision allocation, and approval consumption stay with their domain owners.
+- Upgrade preparation belongs to Operations. `PrepareAgentUpgrade` and `AgentUpgradeApprovalBinding` resolve the target through `RBACStore.UpgradeNode` and the operator-provisioned release catalog. `Create` still takes the locks, checks versions and replay state, validates node capabilities and attestation, revalidates mutation authority, and enforces the active-upgrade guard. Approving an upgrade binds a trusted catalog entry. It does not promise that the target is newer than the node's build.
+- `configplan.Service.ApprovalBinding` loads the plan through the interpreted `Get` path and checks status and expiry against the service clock. The HTTP layer checks the selected workspace and the node `config.apply` permission. Apply prechecks, desired-revision allocation, and transaction-time authorization stay with their domain owners.
 - Lease and fence checks read a fresh database time after taking their locks. Takeovers increment the retained epoch in place, so stale holders keep failing their owner and epoch predicates.
 
 ### HTTP layer
@@ -211,10 +217,10 @@ Users and groups belong to one node. The Controller persists desired state and t
 - Password ciphertexts are sealed to enrolled node keys, and only privd holds the private keys. Each purpose has its own key pair.
 - The Agent records the last applied desired revision in its journal next to the command result and reports it in telemetry. A resource has converged only when that revision and the public state fingerprint both match desired state.
 - Telemetry ingestion converts per-session byte counters into durable monthly and lifetime usage. The scheduler enforces quota and expiry under its leadership lease by enqueuing typed `user_disable` operations, and re-enables users through deterministic enable operations at the start of a UTC month. Uncertain outcomes follow normal Unknown reconciliation.
-- A batch is a parent record with a bounded list of items. Each item is authorized on its own and creates its own child operation and node command. A disable batch needs independent approval bound to the batch ID and item list.
+- A batch is a parent record with a bounded list of items. Each item is authorized on its own and creates its own child operation and node command. Disable batches retain batch ID, ordered item hash and per-node authorization checks.
 - Rolling back user or group state is a new forward desired-state mutation. Desired and observed rows, Agent journals, the privd desired-effect store, and policy, usage, batch, and enforcement history stay intact.
 
-Request rules, limits, quota and expiry formats, and approval steps are in [Users, groups and policy](reference/stable-contracts.md#users-groups-and-policy).
+Request rules, limits, quota and expiry formats, and authorization checks are in [Users, groups and policy](reference/stable-contracts.md#users-groups-and-policy).
 
 ### Telemetry and fleet views
 
@@ -256,7 +262,7 @@ The unprivileged `ocservia-agent` owns network connectivity and the local SQLite
 
 Managed nodes generate certificate private keys locally and never send them to the Controller. The Controller stores no CA key and no node private key.
 
-- The Controller sends a CSR to the Signer only after an independent, content-bound approval and a verified root privd receipt that binds the certificate, CSR digest, node, command, and effect record. It locks the certificate row and rechecks the digest, approval hash, and key state just before calling the Signer.
+- The Controller sends a CSR to the Signer only after an authorized Admin request and a verified root privd receipt that binds the certificate, CSR digest, node, command, and effect record. It locks the certificate row and rechecks the digest, request hash, and key state just before calling the Signer.
 - The Signer is a separate Go module (`signer/`) and process. It holds only the online issuing intermediate key, its HTTPS key, and a local bbolt ledger of issued certificates, node sealing-key bindings, and audit records. The offline root CA key is never mounted into it. It does not issue the Controller's HTTPS certificate and does not sign Controller commands.
 - The Controller authenticates to the Signer with a Bearer token over verified HTTPS with a private CA bundle. Issuance and revocation commit to the ledger before the Signer replies and are idempotent by certificate ID. An unreachable Signer moves issuance to `signer_unavailable` and revocation to `revocation_unknown`, and neither marks the operation successful.
 - Sealing keys reach the Signer only through an operator-run import. The Controller exports its approved node key descriptors from the database, the node exports its public keys, and `import` checks that both agree. Signer offers no HTTP registration endpoint, and a node cannot register its own keys.
@@ -316,7 +322,7 @@ Each linked document holds the detailed behavioral and compatibility rules for i
 | Runtime and privileges | `transportd` runs unprivileged on the Controller side to handle Iroh networking; `Agent`, `privd`, and `upgrader` run under separate OS accounts and systemd units on managed nodes. | [Transport](#transport), [Agent, privd and upgrader](#agent-privd-and-upgrader), [Agent lifecycle](operations/agent-lifecycle.md) |
 | Web API and Workspace | Views compose feature workflows and shared stores, which call handwritten `api/*.ts` adapters over the generated client. Session and workspace state stay in their canonical stores. | [Web client](#web-client), [Web sessions and workspaces](reference/stable-contracts.md#web-sessions-and-workspaces), [Production authentication](operations/authentication.md) |
 | Users and telemetry | `userstate` and `useroperations` own desired state, policy, and batches. Telemetry ingestion and read models stay in the telemetry packages. | [Users, groups and policy](#users-groups-and-policy), [Telemetry and fleet views](#telemetry-and-fleet-views) |
-| Certificates and Signer | The Controller verifies approval and receipts, and the Signer owns issuing keys and the ledger. | [Certificates, secrets and Signer](#certificates-secrets-and-signer), [Certificates and Signer](reference/stable-contracts.md#certificates-and-signer) |
+| Certificates and Signer | The Controller verifies administrator authority and receipts, and the Signer owns issuing keys and the ledger. | [Certificates, secrets and Signer](#certificates-secrets-and-signer), [Certificates and Signer](reference/stable-contracts.md#certificates-and-signer) |
 | Protocols and generated code | Protobuf (`proto/`) and OpenAPI (`openapi/openapi.yaml`) own wire schemas. Signatures and semantic hashes use versioned canonical transcripts; raw Protobuf wire bytes are never signed directly, and generated code stays isolated from handwritten domain logic. | [Schema sources and generation](reference/stable-contracts.md#schema-sources-and-generation), [Privd receipt v1](reference/stable-contracts.md#privd-receipt-v1), [command authorization](development/command-authorization-v1.md), [semantic hash v2](development/command-semantic-hash-v2.md) |
 | Deployment | Production installs use pinned release artifacts, out-of-band secrets, and the repository's lifecycle scripts. | [Production deployment](operations/production-deployment.md), [Upgrade, rollback and uninstall](operations/production-deployment.md#upgrade-rollback-and-uninstall), [Agent lifecycle](operations/agent-lifecycle.md), [Integrated deployment](#integrated-deployment) |
 | Validation | Changes are verified with the smallest test, lint, or integration suite that covers the affected contract. | [Validation and release](development/release-checks.md#choose-the-validation-scope) |

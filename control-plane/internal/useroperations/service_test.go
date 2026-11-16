@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	"github.com/google/uuid"
 )
@@ -89,15 +88,19 @@ func TestStableSchedulerIdentityAndBatchLimit(t *testing.T) {
 	}
 }
 
-func TestBulkDisableRequiresApproval(t *testing.T) {
+func TestBulkDisableRequiresAuthenticatedActor(t *testing.T) {
 	request := BatchRequest{
 		ID: uuid.Must(uuid.NewV7()), WorkspaceID: uuid.Must(uuid.NewV7()),
 		ActorID: "operator", Reason: "ticket", RequestID: "request",
 		Traceparent: testTraceparent, IdempotencyKey: "batch",
 		Items: []BatchItemRequest{{NodeID: uuid.Must(uuid.NewV7()), Username: "alice", Action: "disable", ExpectedVersion: 1, Authorized: true}},
 	}
-	if err := validateBatchRequest(request); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatalf("disable without independent approval=%v", err)
+	if err := validateBatchRequest(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("disable without identity/session=%v", err)
+	}
+	request.ActorIdentityID, request.ActorSessionID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if err := validateBatchRequest(request); err != nil {
+		t.Fatalf("single administrator batch rejected: %v", err)
 	}
 	request.Items[0].Action = "enable"
 	if err := validateBatchRequest(request); err != nil {

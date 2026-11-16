@@ -238,9 +238,9 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Plan, error) {
 	return plan, nil
 }
 
-// Apply atomically consumes the independent approval and queues the exact validated candidate.
+// Apply queues the exact validated candidate under the caller's authority.
 func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.Operation, bool, error) {
-	if request.PlanID == uuid.Nil || request.ApprovalID == uuid.Nil || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 {
+	if request.PlanID == uuid.Nil || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 {
 		return operations.Operation{}, false, ErrInvalid
 	}
 	plan, err := s.Get(ctx, request.PlanID)

@@ -67,6 +67,10 @@ func (s *Server) registerOperationsRoutes(mux httpx.Registrar, compat *http.Serv
 }
 
 func (s *Server) registerEnrollmentRoutes(mux httpx.Registrar) {
+	mux.HandleFunc("POST /api/v1/node-bootstrap/config", s.installationConfig)
+	mux.HandleFunc("POST /api/v1/node-bootstrap/attestation", s.installationAttestation)
+	mux.HandleFunc("POST /api/v1/node-bootstrap/register", s.installationRegister)
+	mux.HandleFunc("POST /api/v1/node-bootstrap/status", s.installationStatus)
 	mux.HandleFunc("POST /api/v1/enrollment-tokens", s.requireOperationAuth(s.createEnrollmentToken))
 	mux.HandleFunc("POST /api/v1/node-bootstrap-tokens", s.requireOperationAuth(s.createNodeBootstrapToken))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/approval", s.requireOperationAuth(s.approveNode))
@@ -105,10 +109,6 @@ func (s *Server) registerCertificateRoutes(mux httpx.Registrar, compat *http.Ser
 }
 
 func (s *Server) registerAuthorizationRoutes(mux httpx.Registrar, compat *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/approval-requests", s.requireOperationAuth(s.listPendingApprovals))
-	mux.HandleFunc("POST /api/v1/approval-requests", s.requireOperationAuth(s.createApproval))
-	compat.HandleFunc("GET /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.getApproval))
-	compat.HandleFunc("POST /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.approveRequest))
 	mux.HandleFunc("GET /api/v1/audit/events", s.requireOperationAuth(s.listAuditEvents))
 	mux.HandleFunc("POST /api/v1/audit:verify", s.requireOperationAuth(s.verifyAudit))
 	mux.HandleFunc("GET /api/v1/workspaces", s.requireOperationAuth(s.listWorkspaces))

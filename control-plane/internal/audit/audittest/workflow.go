@@ -18,8 +18,8 @@ import (
 )
 
 // Controller exercises public audit and RBAC services with the same runtime
-// backend and transaction, including rollback of a consumed approval.
-func Controller(t *testing.T, b database.Backend, workspace, actor, target uuid.UUID, approve func(uuid.UUID, uuid.UUID, []byte, time.Time) error) {
+// backend and transaction, including rollback of failed mutations and legacy approval consumption.
+func Controller(t *testing.T, b database.Backend, workspace, actor, target, session uuid.UUID, approve func(uuid.UUID, uuid.UUID, []byte, time.Time) error) {
 	t.Helper()
 	ctx := context.Background()
 	m := audit.NewBackendManager(b, bytes.Repeat([]byte{7}, 32))
@@ -64,7 +64,7 @@ func Controller(t *testing.T, b database.Backend, workspace, actor, target uuid.
 	}
 
 	s := rbac.NewBackend(b)
-	request := rbac.BindingRequest{IdentityID: target, WorkspaceID: workspace, ActorID: actor, SessionID: uuid.New(), Role: "Viewer", ResourceType: "workspace", RequestID: uuid.NewString(), Reason: "runtime workflow"}
+	request := rbac.BindingRequest{IdentityID: target, WorkspaceID: workspace, ActorID: actor, SessionID: session, Role: "Viewer", ResourceType: "workspace", RequestID: uuid.NewString(), Reason: "runtime workflow"}
 	if _, err = s.CreateBinding(ctx, request); err != nil {
 		t.Fatal(err)
 	}
@@ -79,43 +79,22 @@ func Controller(t *testing.T, b database.Backend, workspace, actor, target uuid.
 	denied.ActorID = target
 	denied.IdentityID = actor
 	denied.Role = "Operator"
-	if _, err = s.CreateBinding(ctx, denied); !errors.Is(err, rbac.ErrGrantForbidden) {
+	if _, err = s.CreateBinding(ctx, denied); !errors.Is(err, rbac.ErrForbidden) {
 		t.Fatal("grant escalation", err)
 	}
 	if _, err = s.CreateBinding(ctx, request); !errors.Is(err, database.ErrUnique) {
 		t.Fatal("duplicate grant", err)
 	}
 	request.Role = "SecurityAdmin"
-	if _, err = s.CreateBinding(ctx, request); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatal("elevation without approval", err)
-	}
-	request.ApprovalID = uuid.New()
 	hash, _ := rbac.BindingApprovalContent(target, workspace, request.Role, request.ResourceType, uuid.Nil)
-	if err = approve(request.ApprovalID, target, hash, time.Now().Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
 	if _, err = s.CreateBinding(ctx, request); err != nil {
-		t.Fatal("approved elevation", err)
+		t.Fatal("direct elevated grant", err)
 	}
 	if err = s.Authorize(ctx, target, "role_binding.manage", resource, false); err != nil {
 		t.Fatal(err)
 	}
-	// A consumed approval is never reusable, including when the desired grant
-	// already exists and would otherwise report only a duplicate key.
-	if _, err = s.CreateBinding(ctx, request); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatal("approval replay", err)
-	}
-	request.ApprovalID = uuid.New()
-	if err = approve(request.ApprovalID, target, hash, time.Now().Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
 	if _, err = s.CreateBinding(ctx, request); !errors.Is(err, database.ErrUnique) {
-		t.Fatal("duplicate elevation must rollback consumption", err)
-	}
-	if err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-		return approvals.ConsumeBoundTx(ctx, tx, request.ApprovalID, workspace, actor, "role_binding.elevate", "role_binding", target, hash)
-	}); err != nil {
-		t.Fatal("failed binding consumed approval", err)
+		t.Fatal("duplicate elevation", err)
 	}
 
 	blocker, err := b.Begin(ctx, database.ReadCommitted)

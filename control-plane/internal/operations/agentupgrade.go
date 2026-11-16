@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"slices"
 	"strconv"
 	"strings"
@@ -493,6 +494,7 @@ func (s *Service) loadRollout(ctx context.Context, id uuid.UUID) (rolloutRow, er
 // and the rollout id comes from the approval itself so the binding cannot be
 // replayed for a different rollout.
 func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRolloutRequest) (AgentRollout, bool, error) {
+	request.ApprovalID = uuid.Nil
 	if s.releaseCatalog == nil {
 		return AgentRollout{}, false, ErrRolloutUnavailable
 	}
@@ -500,7 +502,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	reason := strings.TrimSpace(request.Reason)
 	if !semanticpayload.ValidAgentUpgradeTargetVersion(target) || reason == "" || len(reason) > 512 ||
 		request.BatchSize < 1 || request.BatchSize > rolloutMaxBatchSize || !request.StopOnFailure ||
-		request.WorkspaceID == uuid.Nil || request.ApprovalID.Version() != 7 ||
+		request.WorkspaceID == uuid.Nil ||
 		request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil ||
 		request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 {
 		return AgentRollout{}, false, ErrRolloutInvalid
@@ -528,6 +530,11 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
+	for _, nodeID := range sorted {
+		if err := rbac.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, "agent.upgrade", rbac.Resource{WorkspaceID: request.WorkspaceID, Type: "node", ID: nodeID}); err != nil {
+			return AgentRollout{}, false, err
+		}
+	}
 	existingID, existingHash, err := store.FindRollout(ctx, request.WorkspaceID, request.IdempotencyKey)
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return AgentRollout{}, false, err
@@ -545,21 +552,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 		}
 		return rolloutFromRow(rollout, rolloutNodeModels(nodes)), true, nil
 	}
-	// The approval row carries the rollout identity: the requester pinned the
-	// exact rollout request at approval time and consumption binds this
-	// rollout to it. A reused, mismatched, or unapproved approval fails
-	// closed.
-	approvedResource, err := store.RolloutApproval(ctx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, requestHash, at)
-	if errors.Is(err, database.ErrNotFound) {
-		return AgentRollout{}, false, approvals.ErrNotReady
-	}
-	if err != nil {
-		return AgentRollout{}, false, fmt.Errorf("lock rollout approval: %w", err)
-	}
-	if approvedResource.Version() != 7 {
-		return AgentRollout{}, false, approvals.ErrNotReady
-	}
-	rolloutID := approvedResource
+	rolloutID := uuid.Must(uuid.NewV7())
 	exclusions := make([]AgentRolloutExclusion, 0, len(sorted))
 	type eligibleNode struct {
 		nodeID uuid.UUID
@@ -611,14 +604,12 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{
 		EventID: auditID, WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID,
 		SessionID: &request.ActorSessionID, Action: "agent.rollout", ResourceType: "agent_rollout",
-		ResourceID: rolloutID, ApprovalID: &request.ApprovalID, RequestID: request.RequestID,
+		ResourceID: rolloutID, RequestID: request.RequestID,
 		TraceID: tracecontext.TraceID(request.Traceparent), Reason: reason, Result: "intent", AfterSummary: summary, At: now,
 	}); err != nil {
 		return AgentRollout{}, false, fmt.Errorf("append agent rollout audit: %w", err)
 	}
-	if err := approvals.ConsumeBoundTx(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "agent.rollout", "batch_operation", rolloutID, requestHash[:]); err != nil {
-		return AgentRollout{}, false, err
-	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return AgentRollout{}, false, fmt.Errorf("commit agent rollout creation: %w", err)
 	}
@@ -1093,8 +1084,6 @@ func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, 
 		return s.recordRolloutNodeSkipped(ctx, rolloutID, node.NodeID, "upgrade_in_progress")
 	case errors.Is(err, ErrNodeUnavailable):
 		return s.recordRolloutNodeSkipped(ctx, rolloutID, node.NodeID, "node_unavailable")
-	case errors.Is(err, approvals.ErrNotReady):
-		return s.recordRolloutNodeSkipped(ctx, rolloutID, node.NodeID, "approval_unavailable")
 	case errors.Is(err, ErrIdempotencyConflict):
 		return s.recordRolloutNodeSkipped(ctx, rolloutID, node.NodeID, "dispatch_conflict")
 	case errors.Is(err, ErrRolloutState):

@@ -21,10 +21,10 @@ func main() {
 	bundled := flag.Bool("bundled-postgres", false, "the URL targets the bundled PostgreSQL service")
 	workspace := flag.String("workspace", "", "expected workspace UUID")
 	node := flag.String("node", "", "expected node UUID")
-	approval := flag.String("approval", "", "consumed enrollment approval UUID")
+	flag.String("approval", "", "deprecated; enrollment exports no longer require approval")
 	endpoint := flag.String("endpoint", "", "expected endpoint hex identity")
 	flag.Parse()
-	fail := func() { fmt.Fprintln(os.Stderr, "approved sealing binding export rejected"); os.Exit(1) }
+	fail := func() { fmt.Fprintln(os.Stderr, "sealing binding export rejected"); os.Exit(1) }
 	dsn, err := readCredentialFile(*dsnFile)
 	if err != nil {
 		fail()
@@ -32,8 +32,7 @@ func main() {
 	defer clear(dsn)
 	w, e1 := uuid.Parse(*workspace)
 	n, e2 := uuid.Parse(*node)
-	a, e3 := uuid.Parse(*approval)
-	if e1 != nil || e2 != nil || e3 != nil || w == uuid.Nil || n == uuid.Nil || a == uuid.Nil {
+	if e1 != nil || e2 != nil || w == uuid.Nil || n == uuid.Nil {
 		fail()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -43,7 +42,7 @@ func main() {
 		fail()
 	}
 	defer db.Close()
-	data, err := enrollment.ExportSealingBinding(ctx, db.Store, w, n, a, *endpoint)
+	data, err := enrollment.ExportSealingBinding(ctx, db.Store, w, n, uuid.Nil, *endpoint)
 	if err != nil {
 		fail()
 	}

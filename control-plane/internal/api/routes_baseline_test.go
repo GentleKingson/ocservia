@@ -63,6 +63,10 @@ POST /api/v1/nodes/{node_id}/agent-upgrade|s.requireOperationAuth(s.upgradeAgent
 GET /api/v1/events|s.requireOperationAuth(s.listEvents)|GET|operation.read
 GET /api/v1/events/stream|s.requireOperationAuth(s.streamEvents)|GET|operation.read
 POST /api/v1/enrollment-tokens|s.requireOperationAuth(s.createEnrollmentToken)|POST|enrollment_token.create
+POST /api/v1/node-bootstrap/config|s.installationConfig|POST|self
+POST /api/v1/node-bootstrap/attestation|s.installationAttestation|POST|self
+POST /api/v1/node-bootstrap/register|s.installationRegister|POST|self
+POST /api/v1/node-bootstrap/status|s.installationStatus|POST|self
 POST /api/v1/node-bootstrap-tokens|s.requireOperationAuth(s.createNodeBootstrapToken)|POST|node_bootstrap_token.create
 POST /api/v1/nodes/{node_id}/approval|s.requireOperationAuth(s.approveNode)|POST|node.approve
 POST /api/v1/nodes/{node_id}/revocation|s.requireOperationAuth(s.revokeNode)|POST|node.revoke
@@ -99,10 +103,6 @@ GET /api/v1/artifacts/{artifact_id}|s.requireOperationAuth(s.downloadArtifact)|G
 POST /api/v1/secret-provider-refs|s.requireOperationAuth(s.createSecretRef)|POST|secret.manage
 GET /api/v1/secret-provider-refs/{secret_ref_id}|s.requireOperationAuth(s.getSecretRef)|GET|secret.read
 POST /api/v1/secret-provider-refs/{secret_ref_action}|s.requireOperationAuth(s.rotateSecretRef)|POST|secret.manage
-GET /api/v1/approval-requests|s.requireOperationAuth(s.listPendingApprovals)|GET, POST|approval.approve
-POST /api/v1/approval-requests|s.requireOperationAuth(s.createApproval)|GET, POST|approval.request
-GET /api/v1/approval-requests/{approval_id}|s.requireOperationAuth(s.getApproval)|GET|approval.approve
-POST /api/v1/approval-requests/{approval_id}|s.requireOperationAuth(s.approveRequest)|POST|approval.approve
 GET /api/v1/audit/events|s.requireOperationAuth(s.listAuditEvents)|GET|audit.read
 POST /api/v1/audit:verify|s.requireOperationAuth(s.verifyAudit)|POST|audit.verify
 GET /api/v1/workspaces|s.requireOperationAuth(s.listWorkspaces)|GET|session
@@ -116,9 +116,7 @@ POST /api/v1/nodes/{node_id}/users/{user_action}
 GET /api/v1/certificates/{certificate_id}
 POST /api/v1/certificates/{certificate_action}
 GET /api/v1/secret-provider-refs/{secret_ref_id}
-POST /api/v1/secret-provider-refs/{secret_ref_action}
-GET /api/v1/approval-requests/{approval_id}
-POST /api/v1/approval-requests/{approval_id}`
+POST /api/v1/secret-provider-refs/{secret_ref_action}`
 
 func baselineServer(t *testing.T, dev bool) *Server {
 	t.Helper()
@@ -304,8 +302,8 @@ func TestHTTPRouteInventory(t *testing.T) {
 	for _, rule := range s.registeredMethods {
 		derived += len(rule.methods)
 	}
-	if derived != 63 || len(s.registeredMethods) != 58 || compatibilityRegistrations != 11 {
-		t.Fatalf("derived registrations/shapes/compatibility = %d/%d/%d, want 63/58/11", derived, len(s.registeredMethods), compatibilityRegistrations)
+	if derived != 65 || len(s.registeredMethods) != 61 || compatibilityRegistrations != 9 {
+		t.Fatalf("derived registrations/shapes/compatibility = %d/%d/%d, want 65/61/9", derived, len(s.registeredMethods), compatibilityRegistrations)
 	}
 	for _, line := range strings.Split(routeBaseline, "\n") {
 		fields := strings.Split(line, "|")
@@ -376,6 +374,8 @@ func TestHTTPRouteInventory(t *testing.T) {
 						detail = "break-glass is not configured"
 					case "s.limitAuthentication(newAuthAdmission(30, 120, 8), s.login)", "s.limitAuthentication(newAuthAdmission(30, 120, 8), s.callback)":
 						detail = "OIDC authentication is not configured"
+					case "s.installationConfig", "s.installationAttestation", "s.installationRegister", "s.installationStatus":
+						detail = "node installation is not enabled"
 					case "s.registerPrivdAttestationKey":
 						detail = "privd attestation provisioning is not enabled"
 					}

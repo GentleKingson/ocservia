@@ -24,6 +24,7 @@ if (( EUID != 0 )); then owner=(sudo); fi
 "${owner[@]}" install -o 0 -g 65532 -m 440 /dev/null "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 "${owner[@]}" chown 65534:65532 "${OCSERV_SECRET_DIR}/audit-event-key" \
   "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem"
+"${owner[@]}" chmod 0440 "${OCSERV_SECRET_DIR}/relay-access-token"
 "${owner[@]}" chown 65532:65532 "${OCSERV_SECRET_DIR}/relay-access-token" \
   "${OCSERV_SECRET_DIR}/controller-iroh.key"
 image="example.invalid/test@sha256:$(printf '%064d' 0)"

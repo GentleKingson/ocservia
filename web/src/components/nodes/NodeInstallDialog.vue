@@ -11,7 +11,6 @@ import {
 } from "../../api/workspace";
 import {
   installCommand,
-  installEnv,
   validInstallConfig,
   validInstallField,
   type NodeInstallConfig,
@@ -27,23 +26,8 @@ const config = ref<NodeInstallConfig>({
   name: "",
   environment: "production",
   release: "",
-  controllerEndpointId: "",
-  relayUrl: "",
-  bootstrapTokenFile: "/protected/node-bootstrap-token",
-  relayAccessTokenFile: "/protected/relay-access-token",
-  controllerCommandVerificationKeyFile:
-    "/protected/controller-command-public.pem",
 });
-const fields: (keyof NodeInstallConfig)[] = [
-  "name",
-  "environment",
-  "release",
-  "controllerEndpointId",
-  "relayUrl",
-  "bootstrapTokenFile",
-  "relayAccessTokenFile",
-  "controllerCommandVerificationKeyFile",
-];
+const fields: (keyof NodeInstallConfig)[] = ["name", "environment", "release"];
 const step = ref(1);
 const workspace = ref<Workspace>();
 const token = ref("");
@@ -51,13 +35,9 @@ const expires = ref("");
 const error = ref("");
 const attempted = ref(false);
 const pending = ref(false);
-const copied = ref(false);
 let active = true;
 let expiryTimer: ReturnType<typeof setTimeout> | undefined;
 const controller = new AbortController();
-const template = computed(() =>
-  installEnv(config.value, workspace.value?.id ?? ""),
-);
 const command = computed(() => installCommand(config.value.release));
 
 function clear(): void {
@@ -85,24 +65,8 @@ onMounted(async () => {
 });
 
 function prepare(): void {
-  if (
-    step.value === 1 &&
-    workspace.value &&
-    validInstallConfig(config.value) &&
-    template.value
-  )
+  if (step.value === 1 && workspace.value && validInstallConfig(config.value))
     step.value = 2;
-}
-async function copyConfig(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(template.value);
-    if (active) {
-      copied.value = true;
-      if (error.value === "installCopyFailed") error.value = "";
-    }
-  } catch {
-    if (active) error.value = "installCopyFailed";
-  }
 }
 async function issue(): Promise<void> {
   if (
@@ -110,7 +74,7 @@ async function issue(): Promise<void> {
     step.value !== 2 ||
     attempted.value ||
     !workspace.value ||
-    !template.value
+    !validInstallConfig(config.value)
   )
     return;
   const context = workspaceContext();
@@ -133,7 +97,7 @@ async function issue(): Promise<void> {
     if (!owned()) return;
     const expiry = result.expiresAt.getTime();
     if (
-      !/^obt1_[A-Za-z0-9_-]{43}$/.test(result.token) ||
+      !/^oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(result.token) ||
       !Number.isFinite(expiry) ||
       expiry <= Date.now()
     ) {
@@ -160,13 +124,6 @@ async function issue(): Promise<void> {
   } finally {
     if (owned()) pending.value = false;
   }
-}
-function next(): void {
-  // The token is displayed only in step 2 and cannot be reopened.
-  token.value = "";
-  clearTimeout(expiryTimer);
-  error.value = "";
-  step.value = 3;
 }
 </script>
 
@@ -204,23 +161,8 @@ function next(): void {
           "
         />
       </FormField>
-      <p class="text-muted-foreground m-0 text-sm">{{ $t("installPaths") }}</p>
     </template>
     <template v-else>
-      <FormField id="install-template" :label="$t('installTemplate')">
-        <Textarea
-          id="install-template"
-          :model-value="template"
-          readonly
-          rows="10"
-          class="font-mono text-xs"
-        />
-      </FormField>
-      <Button type="button" variant="outline" @click="copyConfig">{{
-        $t(copied ? "installCopied" : "installCopy")
-      }}</Button>
-      <p class="m-0 text-sm">{{ $t("installSaveConfig") }}</p>
-      <p class="m-0 text-sm">{{ $t("installFiles") }}</p>
       <FormField id="install-command" :label="$t('installRun')">
         <Textarea
           id="install-command"
@@ -254,34 +196,13 @@ function next(): void {
           </p>
         </template>
       </template>
-      <template v-else>
-        <p class="m-0 text-sm">{{ $t("installLocal") }}</p>
-        <p class="m-0 text-sm">{{ $t("installApproval") }}</p>
-        <a
-          class="text-primary underline"
-          href="https://github.com/GentleKingson/ocservia/blob/main/docs/operations/agent-lifecycle.md#approve-the-node"
-          target="_blank"
-          rel="noopener noreferrer"
-          >{{ $t("installApprovalGuide") }}</a
-        >
-        <pre class="bg-muted m-0 overflow-x-auto rounded-md p-3 text-xs">
-sudo systemctl enable --now \
-  ocservia-privd.service \
-  ocservia-agent.service</pre>
-        <p class="m-0 text-sm">{{ $t("installVerify") }}</p>
-        <p class="m-0 text-sm">{{ $t("installRecovery") }}</p>
-      </template>
     </template>
     <template #footer>
-      <Button v-if="step === 1" type="submit" :disabled="!template">{{
-        $t("installPrepare")
-      }}</Button>
       <Button
-        v-else-if="step === 2"
-        type="button"
-        :disabled="!token"
-        @click="next"
-        >{{ $t("installContinue") }}</Button
+        v-if="step === 1"
+        type="submit"
+        :disabled="!workspace || !validInstallConfig(config)"
+        >{{ $t("installPrepare") }}</Button
       >
       <Button v-else type="button" @click="close">{{
         $t("closeDialog")

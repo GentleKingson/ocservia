@@ -26,6 +26,22 @@ def main():
             business = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(business)
 
+        # Bootstrap needs one administrator. A role-less test identity proves
+        # removing the second approver did not turn authentication into authority.
+        (work / 'private/requester-password').write_text('isolated-test-admin-password')
+        cookie = SimpleNamespace(name='__Host-ocservia_session', secure=True, path='/')
+        with patch.object(business, 'api') as requests, \
+                patch.object(business, 'client', return_value=(None, [cookie])), \
+                patch.object(business, 'sql', return_value='administrator-id'), \
+                patch.object(business, 'record') as record:
+            business.local()
+            calls = requests.call_args_list
+            assert calls[0].args[1]['username'] == 'business-test-requester'
+            assert all('approval' not in call.args[0] for call in calls)
+            assert any(call.args[0] == 'nodes' and call.kwargs.get('role') == 'reader'
+                       and call.kwargs.get('status') == 403 for call in calls)
+            record.assert_called_once_with('local_auth_and_workspace_isolation', identity_ids=['administrator-id'])
+
         # Exercise the driver's real profile branch with external commands
         # stubbed: no native installation, browser, or business mutation here.
         driver = (root / 'scripts/release-business-probe.sh').read_text()
@@ -156,7 +172,7 @@ certutil() { :; }
                 raise AssertionError('stale session accepted after stack restart')
             record.assert_not_called()
 
-        with patch.dict(os.environ, env), patch.object(business, 'approval', return_value='approval'), \
+        with patch.dict(os.environ, env), \
                 patch.object(business, 'api', side_effect=[{'version': 1}, {'id': 'operation'}]) as api_call, \
                 patch.object(business, 'completed', return_value=True), patch.object(business, 'run') as native, \
                 patch.object(business, 'verify_completed_operations') as verify:
@@ -246,13 +262,11 @@ certutil() { :; }
 
         browser_entries = [
             {'name': 'browser_user_mutation', 'operation': {'id': 'operation'}},
-            {'name': 'browser_approved_reload', 'operation': {'id': 'operation'}},
-            {'name': 'browser_consumed_approval_cannot_authorize_new_operation', 'operation_id': 'operation'},
+            {'name': 'browser_direct_admin_reload', 'operation': {'id': 'operation'}},
+            {'name': 'browser_idempotency_rejects_changed_intent', 'operation_id': 'operation'},
             {'name': 'browser_complete_config_apply', 'operation': {'id': 'operation'},
              'plan_id': 'plan', 'materialized_hash': 'newhash'},
             {'name': 'browser_login_workspace_forbidden_refresh', 'status': 'PASS'},
-            {'name': 'browser_bound_approval', 'action': 'service.reload'},
-            {'name': 'browser_bound_approval', 'action': 'config.apply'},
             {'name': 'browser_csp', 'flow_violations': 0, 'flow_console_reports': 0, 'flow_page_errors': 0,
              'control': ['script-src-elem/enforce', 'img-src/enforce']},
         ]
@@ -344,21 +358,19 @@ certutil() { :; }
             record.assert_not_called()
             assert not applied_file.exists()
 
-        # The rollout counts only when the canary succeeded under the bound
-        # approval and the node and installed binaries report the target.
+        # The rollout counts only when the Admin's canary succeeded and
+        # the node and installed binaries report the exact target.
         rollout_env = {**env, 'BUSINESS_PROFILE': 'extended', 'VERSION': '0.0.0', 'ROLLOUT_VERSION': '0.0.1'}
         rollout_file = work / 'evidence/browser-rollout-checkpoints.json'
         rollout_entries = [
-            {'name': 'browser_bound_approval', 'action': 'agent.rollout'},
-            {'name': 'browser_agent_rollout', 'rollout': {'id': 'rollout', 'approval_id': 'approval', 'target_version': '0.0.1'}},
+            {'name': 'browser_agent_rollout', 'rollout': {'id': 'rollout', 'target_version': '0.0.1'}},
             {'name': 'browser_csp', 'flow_violations': 0, 'flow_console_reports': 0, 'flow_page_errors': 0,
              'control': ['script-src-elem/enforce', 'img-src/enforce']},
         ]
         rollout_state = {'agent-rollouts/rollout': {
                              'id': 'rollout', 'state': 'succeeded', 'target_version': '0.0.1', 'stop_on_failure': True,
-                             'approval_id': 'approval',
+                             'approval_id': None,
                              'nodes': [{'node_id': 'node', 'batch': 0, 'state': 'succeeded', 'operation_id': 'upgrade'}]},
-                         'approval-requests/approval': {'status': 'consumed'},
                          'nodes/node': {'connection_state': 'online', 'agent_version': '0.0.1'}}
 
         def binaries(path, _flag):
@@ -370,11 +382,11 @@ certutil() { :; }
             business.rollout_verify()
             assert record.call_args.args[0] == 'agent_rollout_canary_succeeded'
         bad_rollouts = [
-            ('approval', [{**rollout_entries[0], 'action': 'service.reload'}, *rollout_entries[1:]], {}),
-            ('csp', [*rollout_entries[:2], {**rollout_entries[2], 'flow_violations': 1}], {}),
-            ('csp report-only', [*rollout_entries[:2], {**rollout_entries[2], 'control': ['script-src-elem/report', 'img-src/report']}], {}),
+            ('missing rollout', rollout_entries[1:], {}),
+            ('csp', [rollout_entries[0], {**rollout_entries[1], 'flow_violations': 1}], {}),
+            ('csp report-only', [rollout_entries[0], {**rollout_entries[1], 'control': ['script-src-elem/report', 'img-src/report']}], {}),
             ('paused', rollout_entries, {'agent-rollouts/rollout': {**rollout_state['agent-rollouts/rollout'], 'state': 'paused'}}),
-            ('approval not consumed', rollout_entries, {'approval-requests/approval': {'status': 'approved'}}),
+            ('unexpected approval dependency', rollout_entries, {'agent-rollouts/rollout': {**rollout_state['agent-rollouts/rollout'], 'approval_id': 'unexpected'}}),
         ]
         for label, entries, overrides in bad_rollouts:
             rollout_file.write_text(json.dumps(entries))
@@ -464,12 +476,8 @@ certutil() { :; }
                 if path == 'nodes/node':
                     return {'connection_state': 'offline' if state['revoked'] else 'online',
                             'trust_status': 'revoked' if state['revoked'] else 'active', 'version': 7}
-                if path == 'approval-requests':
-                    return {'id': 'pending'}
-                if path.startswith('approval-requests/'):
-                    return {'status': 'consumed' if state['revoked'] and path.endswith('revoke') else 'approved'}
                 if path == 'nodes/node/revocation':
-                    if role == 'requester' and headers.get('X-Approval-ID') == 'revoke' and 'Origin' not in headers:
+                    if role == 'requester' and 'Origin' not in headers:
                         assert status == 200
                         state['revoked'] = True
                         if not synced:
@@ -513,7 +521,6 @@ certutil() { :; }
             with patch.dict(os.environ, env), patch.object(business, 'api', side_effect=fake_api), \
                     patch.object(business, 'sql', side_effect=fake_sql), patch.object(business, 'run', side_effect=fake_run), \
                     patch.object(business, 'owner', return_value={'owner_epoch': 5}), \
-                    patch.object(business, 'approval', side_effect=lambda action, *_: 'revoke' if action == 'node.revoke' else 'stale'), \
                     patch.object(business.time, 'monotonic', side_effect=lambda: clock['now']), \
                     patch.object(business.time, 'sleep', side_effect=lambda delay: clock.update(now=clock['now'] + delay)), \
                     patch.object(business, 'record') as record:
@@ -523,7 +530,7 @@ certutil() { :; }
                     return [c.args[0] for c in record.call_args_list], False
                 return [c.args[0] for c in record.call_args_list], True
         names, passed = revocation_case()
-        assert passed and names == ['revocation_unauthorized_and_unapproved_rejected',
+        assert passed and names == ['revocation_unauthorized_rejected',
                                     'node_revoked_trust_converged_and_disconnected',
                                     'revoked_node_old_authority_without_privd_effect']
         for label, case in [('trust sync pending', {'synced': False}), ('intent not queued', {'queued': False}), ('session readmitted', {'readmitted': '1'}),

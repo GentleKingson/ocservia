@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
@@ -52,7 +51,7 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	requesterID, approverID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now())`, requesterID, requesterID.String(), approverID, approverID.String()); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now())`, requesterID, workspaceID.String()+requesterID.String(), approverID, workspaceID.String()+approverID.String()); err != nil {
 		t.Fatal(err)
 	}
 	fingerprint := make([]byte, 32)
@@ -196,41 +195,30 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE nodes SET status='offline' WHERE id=$1`, nodeID); err != nil {
 		t.Fatal(err)
 	}
-	batchID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	batchID, requesterSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	batchItems := []BatchItemRequest{{NodeID: nodeID, Username: "bob", Action: "disable", ExpectedVersion: 1, Authorized: true}, {NodeID: nodeID, Username: "charlie", Action: "disable", ExpectedVersion: 1, Authorized: false}}
-	batchHash := BatchRequestHash(batchItems)
-	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary)VALUES($1,$2,$3,'user.batch.disable','batch_operation',$4,'integration','approved',$5,'independent',now()+interval '1 hour',now(),now(),$6,$7)`, approvalID, workspaceID, requesterID, batchID, approverID, batchHash[:], `[{"node_id":"`+nodeID.String()+`","username":"bob","action":"disable","expected_version":1},{"node_id":"`+nodeID.String()+`","username":"charlie","action":"disable","expected_version":1}]`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',now())`, uuid.Must(uuid.NewV7()), requesterID, workspaceID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id)VALUES($1,$2,'node',$3)`, approvalID, workspaceID, nodeID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, requesterSession, requesterID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at)VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO approval_batch_items(approval_id,item_index,node_id,username,action,expected_version)VALUES($1,0,$2,'bob','disable',1),($1,1,$2,'charlie','disable',1)`, approvalID, nodeID); err != nil {
-		t.Fatal(err)
-	}
-	batchRequest := BatchRequest{ID: batchID, WorkspaceID: workspaceID, ActorIdentityID: requesterID, ApprovalID: approvalID, ActorID: "operator", Reason: "ticket", RequestID: "request-batch", Traceparent: testTraceparent, IdempotencyKey: "batch-one", Items: batchItems}
-	substituted := batchRequest
-	substituted.Items = append([]BatchItemRequest(nil), batchRequest.Items...)
-	substituted.Items[0].ExpectedVersion = 2
-	if _, _, err := service.CreateBatch(ctx, substituted); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatalf("content-substituted approval err=%v", err)
-	}
+	batchRequest := BatchRequest{ID: batchID, WorkspaceID: workspaceID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ActorID: "operator", Reason: "ticket", RequestID: "request-batch", Traceparent: testTraceparent, IdempotencyKey: "batch-one", Items: batchItems}
 	batch, replayed, err := service.CreateBatch(ctx, batchRequest)
 	if err != nil || replayed || len(batch.Items) != 2 || batch.Items[1].State != "forbidden" {
 		t.Fatalf("create batch=%+v replayed=%v err=%v", batch, replayed, err)
 	}
-	var approvalStatus string
-	if err := pool.QueryRow(ctx, `SELECT status FROM approval_requests WHERE id=$1`, approvalID).Scan(&approvalStatus); err != nil || approvalStatus != "consumed" {
-		t.Fatalf("approval status=%q err=%v", approvalStatus, err)
+	substituted := batchRequest
+	substituted.Items = append([]BatchItemRequest(nil), batchRequest.Items...)
+	substituted.Items[0].ExpectedVersion = 2
+	if _, _, err := service.CreateBatch(ctx, substituted); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("content-substituted replay err=%v", err)
 	}
 	if _, replayed, err := service.CreateBatch(ctx, batchRequest); err != nil || !replayed {
 		t.Fatalf("batch replay=%v err=%v", replayed, err)
 	}
 	batchKey := operationIdempotencyKey("batch", batchID.String(), "0")
-	if _, _, err := service.users.Mutate(ctx, userstate.MutationRequest{NodeID: nodeID, Kind: userstate.UserDisable, Name: "bob", ExpectedVersion: 1, IdempotencyKey: batchKey, TTL: 24 * time.Hour, ActorID: "operator", ActorIdentityID: requesterID, Reason: "ticket", RequestID: "request-batch:0", Traceparent: testTraceparent}); err != nil {
+	if _, _, err := service.users.Mutate(ctx, userstate.MutationRequest{NodeID: nodeID, Kind: userstate.UserDisable, Name: "bob", ExpectedVersion: 1, IdempotencyKey: batchKey, TTL: 24 * time.Hour, ActorID: "operator", ActorIdentityID: requesterID, ActorSessionID: requesterSession, Reason: "ticket", RequestID: "request-batch:0", Traceparent: testTraceparent}); err != nil {
 		t.Fatalf("inject batch post-mutation crash window: %v", err)
 	}
 	crashedOwner := uuid.Must(uuid.NewV7())
@@ -315,7 +303,8 @@ func cleanupIntegration(ctx context.Context, pool *pgxpool.Pool, workspaceID uui
 		`DELETE FROM nodes WHERE workspace_id=$1`,
 		`DELETE FROM role_bindings WHERE workspace_id=$1`,
 		`DELETE FROM workspaces WHERE id=$1`,
-		`DELETE FROM identities WHERE issuer='integration' AND $1::uuid IS NOT NULL`,
+		`DELETE FROM auth_sessions WHERE identity_id IN (SELECT id FROM identities WHERE issuer='integration' AND subject LIKE $1::text || '%')`,
+		`DELETE FROM identities WHERE issuer='integration' AND subject LIKE $1::text || '%'`,
 	}
 	for _, statement := range statements {
 		if _, err := pool.Exec(ctx, statement, workspaceID); err != nil {

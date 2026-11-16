@@ -66,7 +66,6 @@ function rollout(id: string, state: string, workspaceId = "workspace-a") {
     batchSize: 5,
     stopOnFailure: true,
     reason: "rollout",
-    approvalId: "approval",
     createdBy: "operator",
     currentBatch: 0,
     createdAt: "2026-01-01T00:00:00Z",

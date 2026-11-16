@@ -4,21 +4,6 @@ import { expect, test } from "./csp";
 const workspace = "019fc0a4-6d92-765c-a8a1-4af556614fa1";
 const approvalId = "019fc0a4-6d92-765c-a8a1-4af556614fa2";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614fa3";
-const approval = (extra = {}) => ({
-  id: approvalId,
-  workspace_id: workspace,
-  requester_id: "019fc0a4-6d92-765c-a8a1-4af556614fa4",
-  action: "service.reload",
-  resource_type: "node",
-  resource_id: nodeId,
-  reason: "maintenance",
-  status: "pending",
-  request_hash: "cd".repeat(32),
-  request_summary: { action: "service.reload", resource_id: nodeId },
-  created_at: "2026-09-30T00:00:00Z",
-  expires_at: "2099-09-30T01:00:00Z",
-  ...extra,
-});
 const audit = (id: string, action: string, result: string, extra = {}) => ({
   id,
   occurred_at: "2026-10-04T00:00:00Z",
@@ -58,83 +43,6 @@ async function stubShell(page: Page): Promise<Request[]> {
   );
   return writes;
 }
-
-test("explains used and expired deep links without a decision form", async ({
-  page,
-}) => {
-  const writes = await stubShell(page);
-  let current = approval({
-    status: "consumed",
-    approver_id: "019fc0a4-6d92-765c-a8a1-4af556614fa6",
-  });
-  await page.route(`**/api/v1/approval-requests/${approvalId}`, (route) =>
-    route.fulfill({ json: current }),
-  );
-  await page.goto(`/approvals/${approvalId}`);
-  await expect(page.getByTestId("approval-status")).toHaveText("Used");
-  await expect(page.getByTestId("approval-status-help")).toContainText(
-    "resulting operation",
-  );
-  await expect(page.getByRole("button", { name: "Approve" })).toHaveCount(0);
-
-  current = approval({ expires_at: "2020-01-01T00:00:00Z" });
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect(page.getByTestId("approval-status")).toHaveText("Expired");
-  await expect(page.getByRole("button", { name: "Approve" })).toHaveCount(0);
-  expect(writes).toHaveLength(0);
-});
-
-test("does not resend a decision after a conflict and separates approval from execution", async ({
-  page,
-}) => {
-  const writes = await stubShell(page);
-  let approved = false;
-  await page.route(`**/api/v1/approval-requests/${approvalId}`, (route) =>
-    route.fulfill({
-      json: approval(
-        approved
-          ? {
-              status: "approved",
-              approver_id: "019fc0a4-6d92-765c-a8a1-4af556614fa6",
-            }
-          : {},
-      ),
-    }),
-  );
-  await page.route(
-    `**/api/v1/approval-requests/${approvalId}:approve`,
-    (route) => {
-      approved = true;
-      return route.fulfill({
-        status: 409,
-        contentType: "application/problem+json",
-        json: { title: "Conflict", status: 409 },
-      });
-    },
-  );
-  await page.goto(`/approvals/${approvalId}`);
-  await expect(page.getByTestId("approval-status")).toHaveText("Pending");
-  await page.getByLabel("Decision reason").fill("checked");
-  await page
-    .getByLabel("I have reviewed this request and its bound content")
-    .check();
-  await page.getByRole("button", { name: "Approve" }).click();
-  await expect(page.getByRole("alert")).toContainText(
-    "Approval was not confirmed",
-  );
-  await expect(page.getByTestId("approval-status")).toHaveCount(0);
-  expect(writes).toHaveLength(1);
-  expect(writes[0]?.url()).toContain(
-    `/approval-requests/${approvalId}:approve`,
-  );
-
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect(page.getByTestId("approval-status")).toHaveText("Approved");
-  await expect(page.getByTestId("approval-status-help")).toContainText(
-    "Approved, not run",
-  );
-  expect(writes).toHaveLength(1);
-});
 
 test("filters the bounded audit slice locally and links details", async ({
   page,
@@ -190,10 +98,8 @@ test("filters the bounded audit slice locally and links details", async ({
   const toggle = page.getByRole("button", { name: "Details: service.reload" });
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByRole("link", { name: approvalId })).toHaveAttribute(
-    "href",
-    `/approvals/${approvalId}`,
-  );
+  await expect(page.getByText(approvalId, { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: approvalId })).toHaveCount(0);
   await expect(page.getByRole("link", { name: nodeId })).toHaveAttribute(
     "href",
     `/nodes/${nodeId}`,

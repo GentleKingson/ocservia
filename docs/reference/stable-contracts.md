@@ -230,7 +230,7 @@ Four typed commands govern active VPN sessions, IP bans, and the local daemon:
 - `ip_ban.remove` targets one canonical IPv4 or IPv6 address;
 - `service.reload` targets only `ocserv.service`.
 
-Reloading the VPN daemon is a high-risk action, so `service.reload` also requires a matching, unexpired approval record. The requester creates the record, a different authorized principal approves it, and the mutation request passes it in `X-Approval-ID`.
+Reloading the VPN daemon requires the authenticated caller's `service.reload` permission. It does not require a second authorization identity or approval record.
 
 Every mutation request supplies a reason string, a unique `Idempotency-Key`, an optional `ttl_seconds` (1 to 300, defaulting to 60), and the current node revision in `If-Match` or `expected_version`. Session commands must also include the boot ID reported by the node API. When the Controller accepts a request, the endpoint returns `202 Accepted` with an asynchronous Operation record. Clients must render that Operation's persisted lifecycle state and never treat initial queueing or transport dispatch as completed execution.
 
@@ -391,7 +391,7 @@ resolves immutable protected TLS bundles on the node and validates the complete
 native configuration without omitting directives or emitting partial-validation
 warnings. Its validation result returns both the logical candidate hash and the
 exact materialized file hash, which are bound alongside the plan ID, previous
-file hash, revision, and expiry into the subsequent approval record. Nodes that
+file hash, revision, and expiry into the subsequent operation. Nodes that
 do not support the complete profile reject these commands outright with no
 fallback to the legacy profile.
 
@@ -408,20 +408,17 @@ reloads Ocserv.
 
 Calling `GET /config-plans/{plan_id}` returns the candidate hash, operation
 state, validation status, warnings, and a secret-safe diff that omits both
-`SecretRef` keys and active secret values. Operators can request a production
-apply approval only after a plan has validated cleanly and remains unexpired.
-The resulting independent approval record is bound to the candidate hash, node
-ID, expected revision, and expiration time. Neither planning nor apply ever
+`SecretRef` keys and active secret values. An authorized Admin can apply only a plan that has validated cleanly and remains unexpired.
+The operation binds the candidate hash, node ID, expected revision and expiration time. Neither planning nor apply ever
 masks a stale caller revision by re-reading and substituting the current
 revision.
 
 ### Apply and rollback
 
-Applying a configuration requires an unexpired, remotely validated plan paired
-with an independent approval bound to that plan's candidate hash. Within a
+Applying a configuration requires current authorization and an unexpired, remotely validated plan. Within a
 single transaction, the Controller locks the node row, re-verifies the
 configuration revision, validation fingerprint, negotiated capability, and
-automation lock, consumes the approval, and commits the Operation, signed
+automation lock, rechecks the active identity and session, and commits the Operation, signed
 command, outbox entry, audit intent, and apply record. When using the complete
 profile, the apply command also pins the plan ID, logical and materialized
 hashes, previous file hash, revision, and expiry. Root revalidates both the
@@ -491,13 +488,12 @@ progress.
 The protocol keeps three digests distinct: the logical candidate identity
 (which pins the node, directive values, reference UUIDs, versions, and public
 fingerprint bindings), the exact materialized file hash, and the signed command
-semantic hash. Approval records bind the plan ID, both configuration hashes,
-the expected current revision, and the expiration timestamp, and are consumed
-in the same database transaction that creates the command and outbox rows.
-Replaying an apply request with the same HTTP idempotency key returns the
-existing operation. Submitting a new idempotency key cannot reuse an already
-consumed approval. Requester and approver separation follows the
-[approval boundary](#approval-principal-boundary).
+semantic hash. The committed operation binds the plan, both configuration hashes,
+expected current revision and expiry in the same transaction as command, outbox
+and audit. The domain service revalidates the caller's session and resource
+permission. Reusing an idempotency key returns the original operation only for
+the same intent; different content conflicts. A fresh key must still satisfy
+current plan, node revision and active-operation guards.
 
 Wire messages are generated from the Protobuf and OpenAPI contracts, backed by
 shared Go and Rust canonical hash vectors and strict-wire negative tests that
@@ -564,8 +560,7 @@ directives, or hook scripts.
 
 The node detail page in the Web UI submits complete-profile plans. Once a plan
 validates without warnings, it records the logical candidate hash, exact
-materialized file hash, previous file hash, revision, and expiry for review by
-a second principal prior to apply. Replaying an apply request cannot authorize
+materialized file hash, previous file hash, revision, and expiry for the Admin to inspect before apply. Replaying an apply request cannot authorize
 a different operation. During apply, privd re-verifies the TLS bundle and runs
 the native `ocserv` parser over the complete file before atomically replacing
 `/etc/ocserv/ocserv.conf` and reloading the daemon, restoring the exact
@@ -597,14 +592,25 @@ token may be replayed only by that same `EndpointID` while the node remains in
 initial validity window has elapsed; replays from any other endpoint or after
 node approval fail.
 
-Proving possession of a bootstrap token authorizes only creating or recovering
-that bound `PENDING_APPROVAL` record. Activating the node requires an
-authenticated requester to submit a content-bound `node.approve` request, a
-separate authorized principal to approve it, and a subsequent activation call
-carrying that approval ID in `X-Approval-ID`. Enabling the host service remains
-a separate node-side step after Controller approval, so completing bootstrap
-enrollment by itself neither activates capabilities nor opens a
-mutation-capable Agent session.
+For token-only installation, `installation: true` issues an `oit1_` root token
+with an HTTPS Controller origin. The root installer exchanges it through
+`POST /node-bootstrap/config` for pinned Controller identity, public command
+key, Relay configuration and a one-way derived `obt2_` Agent token. Only the
+child-token hash is persisted. Its atomic consumption creates and activates one
+node; EndpointID possession proof and sealing-key bindings remain mandatory.
+The root token never enters Agent-readable files or command arguments.
+
+`POST /node-bootstrap/attestation` produces a node-bound root registration
+challenge; `/node-bootstrap/register` verifies the existing privd signature
+format and registers only the first key. The first registration must complete
+within the original TTL. Exact same-endpoint/same-key recovery remains possible
+after expiry, but a different or revoked key cannot be registered using that
+token. `/node-bootstrap/status` returns only that bound node's readiness. All
+four endpoints are bounded, rate-limited, no-store, credential-authenticated
+without an administrator browser session, and reject Agent child credentials.
+
+Legacy `obt1_` enrollment creates a pending node for the manual and rebind
+paths. An Admin can activate it directly; no independent approval is required.
 
 An alternative manual workflow pre-generates the long-lived endpoint identity
 on the host before requesting a legacy endpoint-bound token. The Agent
@@ -645,19 +651,16 @@ approval. The token file passed to the Agent must be a protected regular file
 root and group-readable by the Agent group). Enrollment prints the pending
 UUIDv7 node ID and exits without opening a mutation-capable Agent session.
 
-To activate a pending node, call `POST /api/v1/nodes/{node_id}/approval` with
-an `X-Approval-ID` header referencing an approved `node.approve` request.
-The approval hash binds the node ID, `EndpointID`, node version, policy,
-labels, and capability set, so the activation request body must supply those
-exact fields along with a non-empty reason. The requested capabilities must be a
-non-empty subset of those advertised during enrollment. Only a
-`PENDING_APPROVAL` node transitions to active; repeating the identical request
-against an already activated node verifies the consumed approval and returns
-idempotently.
+To activate a pending node, an authenticated Admin calls
+`POST /api/v1/nodes/{node_id}/approval` with labels, policy, a nonempty subset
+of advertised capabilities and a reason. No `X-Approval-ID` is required.
+Session and resource authority are revalidated in the transaction. Repeating
+activation must match the existing node configuration rather than alter an
+already active node under a retry.
 
-To revoke a node from any non-revoked state (including `PENDING_APPROVAL`),
-call `POST /api/v1/nodes/{node_id}/revocation` with an `X-Approval-ID` header
-referencing an approved `node.revoke` request and a non-empty reason.
+To revoke a node from any non-revoked state, call
+`POST /api/v1/nodes/{node_id}/revocation` with an authorized session and a
+nonempty reason.
 Revocation is recorded durably in the database, blocks future handshakes, and
 instructs `transportd` to close any active connection. The database transaction
 also queues a durable trust-convergence task, so receiving a `503` from the
@@ -939,7 +942,7 @@ A rebind operation carries a single durable identity that records both its expec
 
 1. Run preflight validation over node identity, independently provisioned target trust, file ownership, and service configuration, including the single dedicated Relay invariant (a non-empty `RELAY_URL_B` in `relays.env` is rejected before enrollment, operation creation, or service shutdown). Free disk space is not checked by the CLI. In-flight or unresolved privileged work does not block the transfer; commit inspects existing evidence and publishes the new binding with mutations quarantined if any prior work remains unresolved.
 2. Stage the target identity directory without altering the active binding, then enroll against the target Controller using the existing Agent endpoint private key and possession-proof protocol.
-3. Verify the target Controller endpoint, pending enrollment status, and newly assigned NodeID in the enrollment response. Enrollment remains separate from independent approval and node activation.
+3. Verify the target Controller endpoint, pending enrollment status, and newly assigned NodeID in the enrollment response. Manual rebind enrollment remains separate from Admin activation.
 4. Quiesce both node services and any privileged upgrade runner, then atomically commit the durable binding selector across all authority and state paths so a crash at any point recovers either the complete source binding or the complete target binding, never a split state.
 5. Start privd followed by the Agent, confirm an authenticated session with the target Controller, mark the source binding as sealed in the operation record without mutating source files, and durably record completion.
 
@@ -969,7 +972,7 @@ Before a command row can be compacted, all of the following must hold:
 - No active lease, sending/Unknown attempt, or Unknown result may exist.
 - No linked configuration, artifact, or upgrade projection may remain unresolved.
 
-Compaction replaces the command and outbox payloads with a non-dispatchable evidence header containing the original envelope digest, while preserving identities, request and idempotency hashes, terminal outcomes, authorization signatures, semantic hashes, revision and fence claims, and privileged result proofs. Configuration-plan payloads and results are kept intact because subsequent approvals and recovery workflows read them directly. Once a command is compacted, late results cannot mutate it and late dispatch bookkeeping cannot restore the full payload.
+Compaction replaces the command and outbox payloads with a non-dispatchable evidence header containing the original envelope digest, while preserving identities, request and idempotency hashes, terminal outcomes, authorization signatures, semantic hashes, revision and fence claims, and privileged result proofs. Configuration-plan payloads and results are kept intact because subsequent applies and recovery workflows read them directly. Once a command is compacted, late results cannot mutate it and late dispatch bookkeeping cannot restore the full payload.
 
 Retired-node cleanup applies only to revoked endpoints that have no unresolved commands or projections. Each pass deletes bounded session snapshots and clears ordinary health and path JSON while preserving the core node row and endpoint revocation records. Audit and security-event compaction follows `OCSERV_AUDIT_RETENTION_DAYS` (default 365, configurable from 90 to 2555 days). In each pass, the worker verifies at most 32 original audit rows before stripping reason strings and before/after summaries, leaving an independently authenticated compact record with every original hash-chain and checkpoint link intact. Any corrupt row or unknown signing key halts the entire batch. Database routines enforce a hard 90-day minimum age and block ordinary runtime table mutations. Up to 32 aged security-event detail payloads per pass are similarly replaced with a digest while retaining identity, severity, and timestamps. Raw telemetry and rollups are untouched by this pass.
 
@@ -1012,7 +1015,7 @@ OCSERV_REBIND_E2E=revoked scripts/database-controller-e2e.sh postgres all
 OCSERV_REBIND_E2E=unreachable scripts/database-controller-e2e.sh postgres all
 ```
 
-Each run provisions two independent Controller databases, transport identities, and command signing keys, routes traffic through the private TLS relays, and executes the installed local rebind CLI against real Agent, privd, and Ocserv binaries. Completing the transfer requires standard bootstrap possession proof, independent approval, and root attestation registration on the target Controller. The suite then confirms that endpoint keys and local business state are byte-for-byte unchanged, a new NodeID and fresh signed session are active after service restart, and a user mutation succeeds under the target Controller. To verify authority isolation, the test brings an unreachable source Controller back online and injects an unexpired source-signed command envelope directly into privd under the Agent UID, asserting that privd rejects the old authority. Finally, the suite triggers the retention worker before and after the configured cutoff and verifies that compacted command identities, proofs, and retired tombstones remain intact.
+Each run provisions two independent Controller databases, transport identities, and command signing keys, routes traffic through the private TLS relays, and executes the installed local rebind CLI against real Agent, privd, and Ocserv binaries. Completing the transfer requires standard bootstrap possession proof, Admin activation, and root attestation registration on the target Controller. The suite then confirms that endpoint keys and local business state are byte-for-byte unchanged, a new NodeID and fresh signed session are active after service restart, and a user mutation succeeds under the target Controller. To verify authority isolation, the test brings an unreachable source Controller back online and injects an unexpired source-signed command envelope directly into privd under the Agent UID, asserting that privd rejects the old authority. Finally, the suite triggers the retention worker before and after the configured cutoff and verifies that compacted command identities, proofs, and retired tombstones remain intact.
 
 ## Telemetry
 
@@ -1155,13 +1158,10 @@ Accounts that have expired or were disabled by an administrator or another polic
 
 User batch operations group a parent batch record with a bounded list of per-user items. Each item is authorized individually and, when permitted, spawns its own child operation and node command. By default, at most 50 remote batch commands may be active globally (configurable from 1 to 500 via `OCSERV_USER_OPERATION_CONCURRENCY`). Worker dispatch reservations are serialized in the database and count only in-flight or unknown commands, so queued commands waiting for an offline node do not tie up global execution slots. The parent batch summary preserves forbidden, failed, unknown, and offline-pending child counts instead of collapsing the batch into a single pass/fail flag. Queued backlog is separately capped at 500 commands per node and 5,000 per workspace. When the backlog is full, the API returns a retryable 503 response.
 
-Any batch that includes at least one disable item requires independent two-principal approval (enforced across two distinct authenticated principals, credentials, and sessions; see the [approval principal boundary](#approval-principal-boundary)). To submit a disable batch:
-
-1. The caller generates a UUIDv7 batch ID and requests approval for `user.batch.disable` on that `batch_operation`, passing the complete ordered `batch_items` array in the approval payload. The approval creation response returns the canonical SHA-256 request hash and the normalized item list.
-2. A different authorized principal inspects `GET /approval-requests/{approval_id}` and submits the approval decision along with `expected_request_hash`.
-3. Once approved, the original caller submits the batch creation request with `X-Approval-ID`. The Controller verifies that both the batch ID and the canonical item list hash match the approval record before consuming it.
-
-Batches containing only enable actions do not require approval.
+Disable batches require the caller's `user.batch.disable` permission for each
+applicable node. The batch UUID, ordered item list and expected versions remain
+bound to the immutable request hash. Submission and authorization checks happen
+within the domain transaction, with no approval request or second identity.
 
 `GET /api/v1/user-operations/metrics` exposes workspace-scoped counters for pending policy enforcements, active batch items, expired worker claims, and unknown items. Configure alerts when `stale_batch_claim_total` remains nonzero across two consecutive scheduler intervals, when `unknown_batch_item_total` rises, or when `policy_pending_total` grows for more than two intervals. Every scheduler pass emits a `user_operations.scheduler.run` trace span and a structured completion log entry. A failed pass emits `alert_kind=user_operations.scheduler_failed`. How the scheduler reacts to each kind of failure is described in [Controller assembly and roles](../architecture.md#controller-assembly-and-roles) and implemented in [`scheduler.go`](../../control-plane/internal/platform/app/scheduler.go).
 
@@ -1183,9 +1183,13 @@ See [production authentication](../operations/authentication.md#configuration-an
 
 Authorization evaluates a subject, workspace, resource type, resource ID, and action against the baseline roles Viewer, Operator, UserManager, ConfigManager, Auditor, SecurityAdmin, and PlatformAdmin. Collection endpoints read `X-Workspace-ID`; if the header is omitted, the server selects the caller's single authorized workspace and rejects the request when zero or multiple workspaces match. Object-addressed routes resolve the target object's owning workspace directly from storage so tampering with an ID in the URL cannot cross workspace boundaries. Hiding buttons in the browser UI never substitutes for authorization; the backend checks are the sole enforcement boundary.
 
-High-risk mutations require an approved request before execution: node activation (`node.approve`), node revocation (`node.revoke`), service reload, configuration apply, certificate issuance, revocation, and private-key export, Agent upgrades and rollouts, batch user disable, elevated role bindings, and Local administrator password resets (`local_user.reset-password`). The caller creates an approval request first, waits for a different authorized principal to approve it, and then submits the mutation with `X-Approval-ID`. Each approval record is bound to a single requester, action, workspace, target resource, content hash, and expiration timestamp, and is consumed atomically inside the business transaction so it cannot be replayed. Holding PlatformAdmin does not bypass independent two-principal approval. That approval enforces two distinct authenticated principals, credentials, and sessions, without proving that two different natural persons hold custody of those credentials (see the [approval principal boundary](#approval-principal-boundary)). The approving principal must hold SecurityAdmin or PlatformAdmin covering every authority resource on the request, granted no later than the request's authority snapshot. The decision, pre-execution validation, and consumption transactions each re-check that the recorded approver is still an enabled identity with that coverage. Each holds a share lock on the identity row, so a concurrent disable is ordered before or after the check. An approval whose approver was disabled or lost coverage can no longer be used, while an already consumed approval remains verifiable as history.
-
-The approval queue (`GET /api/v1/approval-requests`) filters rows by permission before applying the page limit: every authority resource on a returned request must be covered by an active SecurityAdmin or PlatformAdmin binding granted to the caller no later than the request's authority snapshot, and self-authored, expired, already-approved, or consumed requests are excluded. Approval IDs sort in ascending order and remain valid cursors even after a request is decided or expires. Collection responses omit the full content and hash summaries; the immutable detail record is fetched for explicit hash-bound review. The decision and consumption transactions re-evaluate all authority checks independently, so appearing in the list response neither authorizes a decision nor consumes the approval.
+One workspace-scoped `PlatformAdmin` can independently perform every administrative
+operation. There is no mandatory second identity, approval request or
+`X-Approval-ID`. Route-level authorization and transaction-time checks of the
+active identity, session and resource permissions remain separate boundaries.
+Configuration revisions, exact command hashes, idempotency, node ownership
+fences and root-signed receipts still protect execution. Existing approval rows
+and audit references remain historical evidence; they do not authorize new work.
 
 Audit intent records commit in the same transaction as the business write, and terminal Agent command results append a separate follow-up audit event. Every newly inserted audit row authenticates its canonical event hash with a domain-separated application HMAC, while signed checkpoints use a separate key. Audit identities, original hashes and MACs, and checkpoints are immutable, and ordinary UPDATE, DELETE, and TRUNCATE statements are denied at the database level. If an audit insert fails, the enclosing business transaction rolls back.
 
@@ -1197,7 +1201,7 @@ The internal `auth.Service` can run without an OIDC provider. Trusted Go callers
 
 Password hashes live only in `local_credentials`, keyed by `identity_id`. Local identities set their issuer to `local` and their subject to the normalized username (trimmed, lowercased, up to 128 bytes, starting with an ASCII letter or digit and containing only ASCII letters, digits, `.`, `_`, and `-`). The service never links accounts to OIDC identities or matches users by email or display name. Every password write passes through `ValidateNewPassword` inside `hashPassword`, covering initial provisioning, first-admin bootstrap, administrator password resets, self-service password changes, and any future password-setting code path. Historical 1..1024-byte credentials continue to verify as stored; see the [Local password policy](../operations/authentication.md#local-new-password-policy).
 
-Credential hashing uses `golang.org/x/crypto/argon2` Argon2id v19 with an independent 16-byte random salt, a 32-byte tag, and self-contained PHC parameter strings. New hashes are written at 19 MiB memory, two passes, and one lane in line with the [OWASP recommendation](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#argon2id). Verification honors the stored parameters within hard resource caps (at most 64 MiB, five passes, and four lanes). Login attempts for nonexistent usernames run a dummy Argon2id verification at the current write cost to equalize timing. Before inserting a session, Local login re-locks the credential row and rechecks the account's disabled status. Session cookies, AEAD encryption, request authentication, logout, RBAC, approvals, auditing, and break-glass behavior work identically to OIDC sessions.
+Credential hashing uses `golang.org/x/crypto/argon2` Argon2id v19 with an independent 16-byte random salt, a 32-byte tag, and self-contained PHC parameter strings. New hashes are written at 19 MiB memory, two passes, and one lane in line with the [OWASP recommendation](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#argon2id). Verification honors the stored parameters within hard resource caps (at most 64 MiB, five passes, and four lanes). Login attempts for nonexistent usernames run a dummy Argon2id verification at the current write cost to equalize timing. Before inserting a session, Local login re-locks the credential row and rechecks the account's disabled status. Session cookies, AEAD encryption, request authentication, logout, RBAC, auditing, and break-glass behavior work identically to OIDC sessions.
 
 Local login depends on the release's complete backend schema, including `local_auth_attempts` and its expiry index. The runtime database role needs only SELECT/INSERT/UPDATE/DELETE on that table, never Owner or TRUNCATE privileges. Before reading a credential or running the KDF, `AuthenticateLocal` acquires a database-backed single-flight lease in a short transaction, then runs Argon2id verification after committing so no database connection or row lock is held during hashing. Only an observed wrong password records a failed attempt. When authentication succeeds, the session-creation transaction clears the matching lease; password resets and account disables invalidate attempt state inside their own transactions so an in-flight failure from an older credential epoch cannot tarnish the new credential. Self-service password changes use a separate server-built `password-change:<identity UUID>` attempt key that no login username can match, so anonymous login failures never block a signed-in user's change and wrong current passwords back off without locking login. See [Local account failure backoff](../operations/authentication.md#local-account-failure-backoff-r2) for backoff parameters, expiry rules, table capacity, HTTP responses, and upgrade requirements.
 
@@ -1213,23 +1217,34 @@ Administrator password resets and account disables delete the target's account s
 
 Before bootstrapping Local administrators, run database migrations with `--migrate-only` and choose the existing workspace that will own platform Local identity management. RBAC role bindings in this repository are always workspace-scoped, with no global role bindings. Bootstrap therefore requires that workspace's explicit UUIDv7 and binds it permanently. Callers cannot pass a different workspace header on API requests to administer shared Local login identities. Follow the [operator bootstrap procedure](../operations/authentication.md#bootstrap-the-first-local-admin) for backend-specific workspace preparation, secret file mounts, and one-shot CLI invocations.
 
-The bootstrap secret reader strips at most one trailing LF (and preceding CR) under the standard bounded Secret format. It opens the descriptor in nonblocking mode so a FIFO substitution cannot hang the CLI, and it verifies that the opened descriptor is a regular file with private permissions, owned by the bootstrap process, with no final symlink and no hard links. Both passwords must satisfy the shared password policy; there are no default credentials, plaintext password environment variables, or password CLI flags. Bootstrap creates two separate principals with independent credentials and sessions for independent two-principal approval. The system does not verify human two-person custody automatically; it is covered by the [approval principal boundary](#approval-principal-boundary).
+The bootstrap secret reader strips at most one trailing LF (and preceding CR),
+opens the descriptor nonblocking and requires a process-owned regular file with
+private permissions, no final symlink and no hard links. The one password must
+satisfy the shared policy; there are no default credentials, plaintext password
+environment values or password CLI flags.
 
-The bootstrap one-shot command exits without starting HTTP listeners, background workers, or OIDC discovery. Inside a single database transaction, it creates two `local` identities, writes their Argon2id credentials, binds them to `PlatformAdmin` and `SecurityAdmin` in the management workspace, inserts the singleton completion marker, and appends both audit events. If the target workspace is missing or any insert or audit step fails, the transaction rolls back completely. Concurrent or repeated bootstrap runs fail closed, as does any attempt to bootstrap when a Local SecurityAdmin/PlatformAdmin already exists. Disabling a bootstrapped account or rotating its password later leaves the completion marker in place. Normal server startup never reads the bootstrap password files or reconciles credentials from disk. Keep the bootstrap marker table in database backups, and never drop migration records or delete the marker row to force a credential reset.
+The explicit bootstrap command creates one Local identity, its Argon2id
+credential, a workspace-scoped `PlatformAdmin` binding, initialization marker
+and audit event in one transaction, then exits without starting listeners,
+workers or OIDC discovery. Missing workspaces or failed writes roll everything
+back. Concurrent or repeated bootstrap fails closed. Normal startup never reads
+bootstrap passwords or reconciles credentials from disk. Preserve existing
+markers, identities and audit records during upgrades; do not reopen bootstrap
+to recover an account.
 
-The persisted bootstrap marker also governs the legacy single-admin completion path: `completion_pending=true` is set only when the original bootstrapped account remains an active Local workspace PlatformAdmin with its original bootstrap audit event and no other historical elevated role bindings in the workspace; every other database state closes the exception permanently. Running `--complete-local-bootstrap` takes the original administrator username, the fixed management workspace, the current administrator Secret, and a separate new approver Secret. The command verifies the existing administrator's password under standard account lease and backoff protection, rechecks the credential and marker state under the initialization lock, provisions only the new SecurityAdmin account, and atomically marks bootstrap complete with an audit event. It cannot overwrite an existing account or rotate an existing password, and granting any new elevated role closes pending completion permanently. Normal server startup never populates this marker state. Always stop older Controller writers before migrating. At runtime, the service account remains unprivileged (never Owner) and holds only lifecycle-column UPDATE privileges on the bootstrap marker, without DELETE or DDL rights.
+Every administrative Local-user mutation (`/local-users` and its `:disable` and `:reset-password` actions) requires an authenticated session, an exact trusted `Origin` header, and the existing RBAC action `local_user.manage` within the fixed management workspace. Only an existing `PlatformAdmin` in that management workspace holds `local_user.manage` via its wildcard grant; SecurityAdmin, UserManager, and PlatformAdmin bindings in other workspaces are denied. Explicit break-glass sessions remain permitted where policy allows, while development pseudo-principals are always rejected. Creating a Local user assigns no RBAC roles; grant roles afterward through `/role-bindings`, which checks the administrator's grant authority inside the transaction. A successful `POST /auth/change-password` revokes all old sessions, so the caller must log in again.
 
-Every administrative Local-user mutation (`/local-users` and its `:disable` and `:reset-password` actions) requires an authenticated session, an exact trusted `Origin` header, and the existing RBAC action `local_user.manage` within the fixed management workspace. Only an existing `PlatformAdmin` in that management workspace holds `local_user.manage` via its wildcard grant; SecurityAdmin, UserManager, and PlatformAdmin bindings in other workspaces are denied. Explicit break-glass sessions remain permitted where policy allows, while development pseudo-principals are always rejected. Creating a Local user assigns no RBAC roles; grant roles afterward through `/role-bindings`, which continues to require independent two-principal approval for elevated roles. A successful `POST /auth/change-password` revokes all old sessions, so the caller must log in again.
-
-Administrator password resets also require `X-Approval-ID`, from an independently approved `local_user.reset-password` request (see [Local user lifecycle endpoints](../operations/authentication.md#local-user-lifecycle-endpoints) for the request steps). The approval authorizes resetting that identity's password without embedding any cleartext password or hash in the approval record. Consuming the approval, writing the new password hash, revoking active sessions, and recording the audit event all commit in one transaction, and the consumed approval cannot be replayed. Although initial bootstrap provisions the first two Local principals directly, all subsequent elevated role grants and administrator password resets require independent two-principal approval.
+Administrator password resets require a valid management administrator session.
+Writing the new password hash, revoking sessions and appending the audit event
+commit atomically. No second credential or approval record is required.
 
 Self-service password rotation is distinct from `local_user.manage` and requires only a valid, non-Break-glass Local session for the caller's own identity; strict JSON decoding rejects any request body that includes a target identity or workspace field. Failed current-password checks share the login backoff tracker, and new passwords must pass the standard password policy. Inside the transaction, the service locks the identity row, rechecks disabled status, session validity, and the verified credential hash (the credential epoch), fences the attempt lease, writes the new password hash, revokes all sessions for that identity, and appends the audit event. OIDC/Break-glass principals cannot create or hold Local credentials.
 
-Disabling a Local user acquires the initialization/management advisory lock before rechecking the caller's session and management-workspace authority. The service refuses to disable an effective Local elevated account if doing so would leave the management workspace without an active Local PlatformAdmin or with fewer than two distinct active Local workspace approvers. Disabled accounts, identities with missing or inconsistent Local credentials, bindings in other workspaces, and narrower roles do not count toward those minimums, and neither OIDC availability nor temporary Break-glass access satisfies this Local recovery-anchor requirement. Role-binding creation serializes on the same lock. The HTTP API provides no endpoint to delete roles or identities; raw database edits lie outside the supported HTTP boundary.
+Disabling a Local user acquires the initialization/management advisory lock before rechecking the caller's session and management-workspace authority. The service refuses to disable an effective Local elevated account if doing so would leave the management workspace without an active Local PlatformAdmin. Disabled accounts, identities with missing or inconsistent Local credentials, bindings in other workspaces, and narrower roles do not count toward those minimums, and neither OIDC availability nor temporary Break-glass access satisfies this Local recovery-anchor requirement. Role-binding creation serializes on the same lock. The HTTP API provides no endpoint to delete roles or identities; raw database edits lie outside the supported HTTP boundary.
 
-Both disable and administrator password reset revoke all `auth_sessions` rows for the target identity inside the same transaction as the state change and audit write, and `Authenticate` also checks `identities.disabled_at` on every request. A concurrent login that finished Argon2id verification just before the mutation must re-lock the credential row and recheck disabled state before inserting a session. It therefore cannot mint a stale session after the disable or reset commits. Requests that already passed authentication and authorization before commit are not aborted mid-flight. Resetting a password does not re-enable a disabled account. Every successful lifecycle mutation writes the actor, session, target identity, action, request ID, and (for password resets) approval ID to the audit chain.
+Both disable and administrator password reset revoke all `auth_sessions` rows for the target identity inside the same transaction as the state change and audit write, and `Authenticate` also checks `identities.disabled_at` on every request. A concurrent login that finished Argon2id verification just before the mutation must re-lock the credential row and recheck disabled state before inserting a session. It therefore cannot mint a stale session after the disable or reset commits. Requests that already passed authentication and authorization before commit are not aborted mid-flight. Resetting a password does not re-enable a disabled account. Every successful lifecycle mutation writes the actor, session, target identity, action, request ID, to the audit chain.
 
-These resources represent platform console identities and are completely separate from `/nodes/{node_id}/users` VPN accounts. Creating a duplicate normalized username returns 409, malformed input returns 400, and targeting an OIDC/non-Local identity ID returns 404 without modifying the record even if the username or email matches. Account linking, self-registration, and MFA are not supported. If administrators lose access, recover through remaining independently controlled Local accounts and approved password resets, or follow the [backend-specific recovery](../operations/incident-recovery.md#database-recovery) procedure; Bootstrap can never be reopened.
+These resources represent platform console identities and are completely separate from `/nodes/{node_id}/users` VPN accounts. Creating a duplicate normalized username returns 409, malformed input returns 400, and targeting an OIDC/non-Local identity ID returns 404 without modifying the record even if the username or email matches. Account linking, self-registration, and MFA are not supported. If administrators lose access, recover through a remaining authorized administrator and direct password reset, or follow the [backend-specific recovery](../operations/incident-recovery.md#database-recovery) procedure; Bootstrap can never be reopened.
 
 Local identity management follows the OWASP guidelines for [least privilege and deny-by-default authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) and [current-password verification for password changes](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).
 
@@ -1237,15 +1252,35 @@ Local identity management follows the OWASP guidelines for [least privilege and 
 
 Local authentication does not replace the independent offline break-glass mechanism, which keeps its existing credential rotation, critical alerting, audit logging, and short session lifetime rules.
 
-A break-glass session passes route-level RBAC checks so an operator can perform emergency recovery. It cannot act as the independent approver on an approval request, because the break-glass principal holds no persisted role bindings.
+A break-glass session passes route-level RBAC checks so an operator can perform emergency recovery. Its short lifetime, single-use credential and audit requirements also apply to direct management writes.
 
 The break-glass secret and its digest are configured as described in [Break-glass and deployment checks](../operations/authentication.md#break-glass-and-deployment-checks). The digest is unsalted, so the secret's entropy is the only defence against offline guessing if the digest leaks. Each break-glass session expires after 15 minutes, emits a critical alert and workspace audit event on login, and consumes the configured token digest so the credential cannot be used again until the operator rotates the offline secret and updates the digest.
 
-### Approval principal boundary
+<a id="approval-principal-boundary"></a>
+### Single Admin authorization boundary
 
-The Controller enforces, and Business Smoke exercises, two independently authenticated principals (requester and approver) at the credential and session layer, without claiming organizational two-person custody. Each principal authenticates with distinct credentials in its own session and must pass workspace and RBAC checks. Approvals bind to the exact request hash, target resource, and expected revision. Self-approval is rejected with HTTP `403`, and consumed approvals cannot be replayed or widened. Supplying two user IDs without separate authenticated sessions does not satisfy this boundary. The [Local bootstrap procedure](../operations/authentication.md#bootstrap-the-first-local-admin) creates two distinct accounts but cannot verify how many human operators hold those credentials.
+`PlatformAdmin` is the existing Admin role; no new role or authorization mode is
+introduced. It remains workspace-scoped. Lower-privilege roles keep their
+resource/action limits, and hiding a UI action never authorizes a write. New
+operations do not create synthetic self-approved records. Historical approval
+and audit evidence stays intact through forward-only upgrades.
 
-Automated validation suites may drive both principals across separate authenticated sessions, and their reports must record that run as simulated two-principal acceptance. Verifying that two distinct people hold custody of the credentials belongs to an operator's enterprise security procedure outside automated Business Smoke. Production operators must assign requester and approver credentials to different natural persons: one person must not hold credentials for two approval-capable principals, whether through a second Local account, an OIDC identity alongside a Local account, or any other identity source. Regardless of custody model, runtime RBAC, payload-bound approvals, self-approval rejection, and replay protection remain active.
+The security model separates human authorization from machine attestation:
+an authenticated Admin authorizes management or issues a bounded installation
+token; machines then prove their endpoint and root key possession. Automatic
+activation must not let the Agent process register a self-selected privd key.
+
+Official guidance informing this boundary:
+
+| Official source | Applicable control |
+| --- | --- |
+| [Kubernetes TLS bootstrap](https://kubernetes.io/docs/reference/setup-tools/kubeadm/implementation-details/) and [join discovery](https://kubernetes.io/docs/reference/setup-tools/kubeadm/kubeadm-join/) | Automatic node-client approval can be authorized with restricted RBAC; verify the discovery trust anchor before releasing credentials. Kubernetes bootstrap tokens are not inherently single-use. |
+| [SPIRE join-token attestation](https://github.com/spiffe/spire/blob/main/doc/plugin_server_nodeattestor_jointoken.md) and [SPIRE101](https://github.com/spiffe/spire/blob/main/doc/SPIRE101.md) | Server-issued one-time tokens, a short TTL (SPIRE defaults to 600 seconds), and a bound node identity can replace a manual admission decision. |
+| [OWASP authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) and [secrets management](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html) | Deny by default, check each resource, restrict secret visibility, expire credentials, and audit without recording secrets. |
+| [OWASP transaction authorization](https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html) | Atomically consume single-use credentials and preserve exact operation intent and replay protection. |
+
+These references support the selected controls; they do not certify ocservia or
+require a second human identity for every administrative operation.
 
 ### Web sessions and workspaces
 
@@ -1265,7 +1300,7 @@ Workspace selection:
 
 Unconfirmed operations:
 
-- The client never adds automatic mutation retries and never resends a mutation whose response was lost. This covers rollout creation and resume, approval decisions (a lost or rejected decision, including a 409 conflict, clears the detail view and forces a fresh read), and every node workflow request.
+- The client never adds automatic mutation retries and never resends a mutation whose response was lost. This covers rollout creation and resume and every node workflow request.
 - Closing a workflow dialog aborts its in-flight reads and polling loops and resets its transient form state, but never aborts an already-sent mutation request. If an accepted operation or plan ID arrives after the dialog closes, the shared receipt and ticket helpers in `features/node-workflow.ts` record it, so reopening the workflow waits for the in-flight request to settle and then reloads authorized server state. Accepted server operations stay tracked in Fleet after a feature composable is disposed.
 - ConfigPlan workflows capture only a known, nonnegative JavaScript-safe configuration revision from the node detail response. They never substitute node version and never rebase or automatically retry a stale revision.
 - For a standalone node operation, an `unknown` state renders as a warning while Fleet continues polling for convergence. For an Agent upgrade or rollout node item, `unknown` is treated as a terminal failure.
@@ -1291,7 +1326,7 @@ Production method metadata comes directly from ordinary `HandleFunc` registratio
 
 Route patterns must declare an explicit HTTP method, a hostless path, literal path segments, and full-segment `{name}` wildcards. The registrar rejects subtree patterns, remainder wildcards, `{$}`, partially embedded parameters, percent-escaped literals, dot segments, and structurally equivalent routes that differ only by parameter name. Routes sharing an identical path shape may register different HTTP methods while keeping separate authorization guards per method.
 
-Derived route lookup runs ahead of `compatibilityRouteMethod`, including method denials. The compatibility table retains action-dependent paths for Local-user, session, IP-ban, user, certificate, SecretRef, and approval routes, plus the operation-detail prefix rule, but it cannot override method denials derived for `summary` or `queue-metrics`.
+Derived route lookup runs ahead of `compatibilityRouteMethod`, including method denials. The compatibility table retains action-dependent paths for Local-user, session, IP-ban, user, certificate, and SecretRef routes, plus the operation-detail prefix rule, but it cannot override method denials derived for `summary` or `queue-metrics`.
 
 Static routes match the full path string directly. Parameterized routes use Trim/Split matching over `URL.Path` without extra URL decoding or path normalization, passing the original request and parameter names straight through to ServeMux. Registering GET never implicitly enables HEAD. Unknown paths normally return a Problem 404, though certain trailing-slash URLs hit plain-text 404 and doubled leading slashes can return a 307 redirect. Any routing change must preserve authentication and error ordering along with those path-handling differences. `control-plane/internal/api/routes_baseline_test.go` verifies the live route inventory, wrappers, allowed methods, and required permissions directly; historical route counts are not part of the contract.
 
@@ -1305,29 +1340,27 @@ Strict JSON decoding enforces media-type, UTF-8, unknown-field rejection, reject
 
 Both Create and Apply call `httpx.RequireIdempotencyKey` to trim the header and return the standard missing-key Problem when the header is blank.
 
-Validation order differs slightly by action. Create checks service availability before parsing the node ID. Apply validates the plan ID, trimmed idempotency key, JSON body, and approval ID before invoking the domain service. If the backing service is disabled, the request fails at that existing validation step after passing outer authentication, Origin verification, and resource authorization. Create responds with a Plan, and Apply responds with an Operation along with its Location and replay headers. A 202 response confirms that the Controller committed the intent to its database; Agent execution on the node remains asynchronous.
+Validation order differs slightly by action. Create checks service availability before parsing the node ID. Apply validates the plan ID, trimmed idempotency key, JSON body before invoking the domain service. If the backing service is disabled, the request fails at that existing validation step after passing outer authentication, Origin verification, and resource authorization. Create responds with a Plan, and Apply responds with an Operation along with its Location and replay headers. A 202 response confirms that the Controller committed the intent to its database; Agent execution on the node remains asynchronous.
 
 When a candidate configuration references secrets, the handler resolves each secret's workspace and caller permission on every request while preserving the `s.devAuth` bypass in development mode. Plans without secret references do not require the Certificates service to be enabled. Referencing a secret when the Certificates dependency is unconfigured returns 503, and any secret lookup, workspace mismatch, or permission failure returns 403 before Create runs. Inside the domain transaction, the service still revalidates stored configuration state, expected version, and node ownership.
 
 A node's `config_revision` is read from `node_config_state.revision`, which tracks configuration state independently of `nodes.version` and `desired_revision`. If no row exists yet, the revision is reported as zero. Database read errors fail the request. The OpenAPI schema leaves the field optional so clients can tolerate older servers.
 
-Replaying an Apply request for the same Plan and workspace idempotency key reuses the already-committed desired revision and the original command's `expected_version`. A new idempotency key evaluates against live node state. Full intent comparison, revision locking, and approval consumption all occur inside the domain transaction.
-
-Parent approval endpoints obtain `ApprovalBinding/Resource` from the shared ConfigPlan service instance, which evaluates plan validity and expiry and supplies the candidate hash and redacted summary. An unconfigured service or mismatched resource type returns `400 invalid-request`. Unreadable, invalid, expired, and foreign-workspace plans return the same `409 config-plan-not-ready` response before node RBAC checks, which return `403 forbidden` on denial. The `config_plan_summary` payload preserves `plan_id`, `node_id`, `expected_revision`, `candidate_hash`, `materialized_hash`, `current_hash`, `diff_redacted`, and `expires_at`. Approval detail and decision handlers verify all saved authority resources before falling back to the legacy single-resource check. Local password-reset approval requests authorize the action before checking whether the target has a Local credential; unauthorized callers receive the same denial for existing, missing, and non-Local identities.
+Replaying an Apply request for the same Plan and workspace idempotency key reuses the already-committed desired revision and the original command's `expected_version`. A new idempotency key evaluates against live node state. Full intent comparison, revision locking, and resource authorization all occur inside the domain transaction.
 
 ### User policy and batches
 
 User policy writes validate the idempotency key before decoding JSON, require RFC3339 timestamps with trailing Z and domain validation of fractional seconds, preserve `expected_version` from the request body, trim the reason string, and return 200 with revision ETag and replay headers. Idempotent replays read and return the current policy record. Batch creation returns 202 and Location, preserves caller item order and duplicate entries, and relies on strict JSON decoding to reject any client-supplied `authorized` field.
 
-If a batch references a missing or foreign-workspace node, the entire request is rejected up front. Within the caller's workspace, an item that fails node authorization is recorded on the persisted batch as forbidden, and an authorized item targeting a nonexistent user is recorded as failed/not_found. Development-mode per-item authorization bypass keys off the Principal issuer instead of Server devAuth. A missing, malformed, or non-v7 `X-Approval-ID` header is normalized to nil and never grants approval authority. Item binding, ordering, version checks, and approval consumption execute atomically inside the domain transaction.
+If a batch references a missing or foreign-workspace node, the entire request is rejected up front. Within the caller's workspace, an item that fails node authorization is recorded on the persisted batch as forbidden, and an authorized item targeting a nonexistent user is recorded as failed/not_found. Development-mode per-item authorization bypass keys off the Principal issuer instead of Server devAuth. Item binding, ordering, version checks, and resource authorization execute atomically inside the domain transaction.
 
 Batch reads run existence and workspace-membership checks (returning 404 on mismatch) before evaluating the secondary read permission. The principal who created the batch skips only that secondary workspace-wide check after passing the outer route guard. All other callers must hold `operation.read` in the workspace. Holding node-scoped user management permissions does not grant access to workspace-wide user-operation metrics. Unconfigured service capabilities fail closed after the outer authentication and route guard.
 
 ### Upgrade requests
 
-The Operations service owns trusted upgrade target preparation. An unknown node architecture maps to `release-not-trusted` during upgrade execution and `node-not-ready` during approval creation, while node lookup or workspace mismatches return `404 not-found` versus `409 node-not-ready`. Request syntax validation runs ahead of node lookup, architecture resolution, release catalog lookup, and the newer-version check. Creating an approval request does not require the target release to be newer than the node's currently observed version, and single-node upgrade execution may queue work for an offline node, unlike rollout admission.
+The Operations service owns trusted upgrade target preparation. Request syntax validation precedes node lookup, architecture resolution and release catalog lookup. Unknown architecture fails closed. Single-node upgrades may queue work for an offline node, while rollout admission requires readiness.
 
-Idempotent replay of an upgrade request still runs target preparation: if the node's observed version drifted in the meantime, the original intent identity stays the same, but an Agent that has already reached the target version causes the call to return `target-not-newer`. When the Operations service is unconfigured, upgrade approval preparation is disabled. Inside the transaction, version checks, node capabilities, approval consumption, and active-upgrade guards remain with the domain service.
+Idempotent replay still prepares the target and checks current authorization. If the node has already reached the target, it returns `target-not-newer`. Version checks, node capabilities, current session authority and active-upgrade guards remain inside the domain transaction.
 
 ### Event streams
 
@@ -1343,7 +1376,7 @@ Runtime metrics track active and unhealthy watcher counts, query volume, and bac
 
 Development authentication is for local development only and is off by default. Setting `OCSERV_DEV_AUTH` authenticates every request as the development principal and is accepted only when `environment=development` and the HTTP listener is bound to loopback. Non-loopback development stacks must configure an explicit bearer credential in `OCSERV_DEV_AUTH_TOKEN` (at least 32 characters, sent in `Authorization: Bearer`, accepted only when `environment=development`) and pass the same value to the browser development server as `VITE_DEV_AUTH_TOKEN`. Production rejects both modes. `OCSERV_ENVIRONMENT` defaults to `development` only while the HTTP listener is loopback. The Controller refuses to start on a non-loopback listener unless the variable is set explicitly, so a reachable Controller never runs as development by omission.
 
-The development principal has no persisted identity, session, identity row, or role binding, so route-level RBAC checks are bypassed for it (though the event stream still requires a valid workspace). `/local-users` and `/auth/change-password` reject it outright. It cannot create or decide approval requests, which require persisted requester and approver identities, so it cannot execute approval-backed node approval, revocation, or service reload operations. Use the test OIDC provider when working on those identity-bound workflows. The simulation and development runtime routes also require the development principal and a loopback, `localhost`, or `web` Host header, so a rebound browser origin cannot reach them.
+The development principal has no persisted identity, session, identity row, or role binding, so route-level RBAC checks are bypassed for it (though the event stream still requires a valid workspace). `/local-users` and `/auth/change-password` reject it outright. It cannot execute identity-bound administrative mutations, which require a persisted active identity and session. Use the test OIDC provider when working on those identity-bound workflows. The simulation and development runtime routes also require the development principal and a loopback, `localhost`, or `web` Host header, so a rebound browser origin cannot reach them.
 
 ## Database
 
@@ -1505,15 +1538,15 @@ Additive schema changes do not by themselves guarantee cross-version compatibili
 
 ### Certificate lifecycle and CSR attestation
 
-Managed nodes generate certificate private keys locally and never expose them to the control plane. The Controller receives a signed CSR and public-key digest. It forwards the CSR to a configured external PKI signer only after an independent, content-bound approval is recorded.
+Managed nodes generate certificate private keys locally and never expose them to the control plane. The Controller receives a signed CSR and public-key digest. It forwards the CSR to a configured external PKI signer after validating the Admin-authorized, content-bound operation.
 
-The Controller stores neither a CA private key nor any node private key, and a CSR self-signature alone does not prove privileged execution on the node. A request therefore enters `csr_ready` only after the Controller verifies a root privd receipt that binds the certificate ID, CSR and public-key digests, requested-subject digest, node, command, operation, idempotency key, and root effect record. Immediately before calling the external signer, the Controller locks the certificate row and rechecks the exact CSR digest, receipt-bound request and version, node, approval hash, and non-revoked key state. P12 export and certificate-key revocation enforce the same terminal-result attestation rule.
+The Controller stores neither a CA private key nor any node private key, and a CSR self-signature alone does not prove privileged execution on the node. A request therefore enters `csr_ready` only after the Controller verifies a root privd receipt that binds the certificate ID, CSR and public-key digests, requested-subject digest, node, command, operation, idempotency key, and root effect record. Immediately before calling the external signer, the Controller locks the certificate row and rechecks the exact CSR digest, receipt-bound request and version, node, persisted authorization binding, and non-revoked key state. P12 export and certificate-key revocation enforce the same terminal-result attestation rule.
 
 Managed-node certificates and secret sealing are distinct from the Controller's own HTTPS listener certificate (configured via manual files or ACME in Integrated mode), which the Signer neither issues nor serves.
 
 The upstream service must treat signing and revocation as idempotent by certificate ID and support node-targeted secret sealing. The TLS CA bundle authenticates the HTTPS connection only and confers no authority to sign client certificates. See [Signer and certificate materials](../operations/production-deployment.md#signer-and-certificate-materials) for the client variables, file paths, permissions, and runtime settings.
 
-When the signer is unreachable, certificate issuance transitions to `signer_unavailable` (which can be resumed by retrying under the same approval) and revocation transitions to `revocation_unknown` (which a retry may submit again). Both paths return a service-unavailable problem response without marking the operation successful.
+When the signer is unreachable, certificate issuance transitions to `signer_unavailable` (which can be resumed by retrying the same persisted operation) and revocation transitions to `revocation_unknown` (which a retry may submit again). Both paths return a service-unavailable problem response without marking the operation successful.
 
 Thirty days before `not_after`, a certificate enters `expiring` and triggers a high-severity alert. Revocation calls the external signer idempotently first and, once that succeeds, releases the node operation to remove only the UUID-derived node-local key. In the control plane, secret provider records store only the provider name, opaque key path, version, and lifecycle state while the secret values themselves stay in the external provider. Rotating a secret records the new external version and appends an authenticated audit event without copying the secret value into the Controller.
 
@@ -1538,7 +1571,7 @@ Key custody and permissions are partitioned across four roles:
 - The Controller holds neither a CA private key nor any node key, authenticating to Signer through `certificates.HTTPSigner` using a shared Bearer token and the public HTTPS CA bundle.
 - Each managed node keeps its certificate private key and its two sealing private keys (`user_password` and `certificate_p12_password`) restricted to root, exporting only public key material so Signer can seal secrets to those imported public keys.
 
-On the write path, the Controller validates the approval and privd receipt before sending an authenticated HTTPS `POST /sign` or `/sign/revoke` request, and Signer commits the change to its bbolt ledger before replying. Recovery across the two services is coupled: restoring the Signer ledger without the matching issuer CA, or without reconciling Controller certificate state and all subsequent issuances, revocations, key imports, and key disables, leaves the deployment inconsistent (see [Signer backup and restore](../operations/incident-recovery.md#signer-backup-and-restore)). A committed revocation updates the ledger and subsequent CRL exports, while active VPN sessions remain connected until enforced by the verifier.
+On the write path, the Controller validates operation authorization and the privd receipt before sending an authenticated HTTPS `POST /sign` or `/sign/revoke` request, and Signer commits the change to its bbolt ledger before replying. Recovery across the two services is coupled: restoring the Signer ledger without the matching issuer CA, or without reconciling Controller certificate state and all subsequent issuances, revocations, key imports, and key disables, leaves the deployment inconsistent (see [Signer backup and restore](../operations/incident-recovery.md#signer-backup-and-restore)). A committed revocation updates the ledger and subsequent CRL exports, while active VPN sessions remain connected until enforced by the verifier.
 
 Both writes are idempotent by certificate ID. Repeating `/sign` with the same CSR returns the original issuance, and a different CSR returns `409`. Repeating `/sign/revoke` with the same serial and reason returns `204` without changing the original revocation time, a different serial or reason returns `409`, and an unknown ID returns `404`. A `204` therefore does not say which request performed the revocation; the ledger's revocation state and the CRL are authoritative.
 
@@ -1548,7 +1581,7 @@ Normal `serve` startup refuses to run if the ledger is absent, empty, incompatib
 
 ### Policy and durable effects
 
-The `rsa-client-v1-24h` signing policy accepts CSRs using RSA-2048, RSA-3072, or RSA-4096 keys with public exponent 65537, signed with SHA-256, SHA-384, or SHA-512 RSA or RSA-PSS, containing one CN and up to 32 DNS SANs. Both CN and DNS SAN values must be bounded printable ASCII strings free of whitespace and path separators; any non-DNS SAN or other X.509 extension is rejected. Issued certificates carry only digital-signature, key-encipherment, and `clientAuth` usages without CA privileges, are valid for 24h within the issuer's validity window, and are verified against the CA chain before being persisted. Subject authorization, independent approval, and privd receipt validation remain Controller responsibilities, as a CSR self-signature never establishes approval.
+The `rsa-client-v1-24h` signing policy accepts CSRs using RSA-2048, RSA-3072, or RSA-4096 keys with public exponent 65537, signed with SHA-256, SHA-384, or SHA-512 RSA or RSA-PSS, containing one CN and up to 32 DNS SANs. Both CN and DNS SAN values must be bounded printable ASCII strings free of whitespace and path separators; any non-DNS SAN or other X.509 extension is rejected. Issued certificates carry only digital-signature, key-encipherment, and `clientAuth` usages without CA privileges, are valid for 24h within the issuer's validity window, and are verified against the CA chain before being persisted. Subject authorization, operation binding, and privd receipt validation remain Controller responsibilities, as a CSR self-signature never establishes authorization.
 
 Each certificate's unsigned 128-bit UUID is used directly as its positive X.509 serial number, so a single certificate ID can never receive multiple serials. Before returning a response, a single-writer bbolt transaction binds the certificate UUID, exact CSR bytes and digest, issued certificate chain, serial number, and audit record. If the process crashes before that transaction commits, no certificate is exposed externally. If a response is lost after commit, replaying the identical CSR returns the stored certificate chain, while submitting a different CSR for the same ID conflicts even after revocation.
 
@@ -1562,7 +1595,7 @@ The ledger uses state format version 1 backed by bbolt (version pinned in [`sign
 
 Signer provides neither automatic synchronization nor in-place key rotation, and exposes no HTTP endpoint for key registration. Only a protected operator can import or disable node bindings. The steps are in [Trusted public-key transfer](../operations/production-deployment.md#trusted-public-key-transfer). The transfer enforces these rules:
 
-- `/usr/local/bin/ocserv-sealing-export` is an OS-protected administrative CLI that authenticates directly to the database without exposing a public API. The database credential file must be a single-link regular file (mode `0400` or `0600`, 1 to 4096 bytes, owned by root or the process) at an absolute canonical path without symlinks or group- or world-writable ancestors, and is read from the verified file descriptor without a second path lookup. Inside a repeatable-read transaction using the domain stores, the command locks the node row, verifies that the node is active or offline with an active endpoint, reconstructs the approval binding, and confirms its independently approved and consumed state before exporting the persisted key descriptors. It rejects pending or revoked nodes and mismatched identities.
+- `/usr/local/bin/ocserv-sealing-export` is an OS-protected administrative CLI that authenticates directly to the database without exposing a public API. The database credential file must be a single-link regular file (mode `0400` or `0600`, 1 to 4096 bytes, owned by root or the process) at an absolute canonical path without symlinks or group- or world-writable ancestors, and is read from the verified file descriptor without a second path lookup. Inside a repeatable-read transaction using the domain stores, the command locks the node row, verifies that the node is active or offline with an active endpoint, verifies the workspace and endpoint binding before exporting the persisted key descriptors. The OS-protected database credential remains the authority boundary; historical approval fields are optional evidence. It rejects pending or revoked nodes and mismatched identities.
 - The JSON carries no self-authenticating signature, so security depends on file provenance and the trusted operator transfer channel.
 - The Controller export must be under 15 minutes old. `import` verifies that both files agree on identities, purposes, versions, key IDs, and DER hashes across two distinct RSA keys, then atomically commits the provenance record and audit event before you restart Signer. Repeating an identical import is a no-op. Attempting to replace an existing binding fails.
 - Disabled bindings remain permanently recorded in the ledger and cannot be reactivated or overwritten, so a newly enrolled node identity requires a fresh approved import. Revoking a node in the Controller does not automatically disable Signer's offline key mapping, so always complete both Controller retirement and the Signer disable step.
@@ -1595,9 +1628,9 @@ Toolchain setup and the choice of checks are in [Choose the validation scope](..
 
 ### oneOf object-map conversion
 
-`openapi/templates/typescript-fetch/modelOneOf.mustache` is the TypeScript Fetch template from the OpenAPI Generator artifact pinned in [`toolchains.lock`](../../toolchains.lock). The only local changes preserve free-form object-map branches during deserialization and serialization. The upstream template otherwise falls through to `{}`, silently discarding immutable approval content. Array/model branches retain their existing behavior. The upstream source is attributed in [THIRD_PARTY_NOTICES](../../THIRD_PARTY_NOTICES.md).
+`openapi/templates/typescript-fetch/modelOneOf.mustache` is the TypeScript Fetch template from the OpenAPI Generator artifact pinned in [`toolchains.lock`](../../toolchains.lock). The only local changes preserve free-form object-map branches during deserialization and serialization. The upstream template otherwise falls through to `{}`, silently discarding free-form object content. Array/model branches retain their existing behavior. The upstream source is attributed in [THIRD_PARTY_NOTICES](../../THIRD_PARTY_NOTICES.md).
 
-Regenerate with `scripts/generate.sh`. Do not edit generated TypeScript. `web/test/approval-summary.test.ts` covers object content, typed batch arrays and missing content. Recheck this override whenever the generator is upgraded.
+Regenerate with `scripts/generate.sh`. Do not edit generated TypeScript. Generated-client tests cover object content and typed arrays. Recheck this override whenever the generator is upgraded.
 
 ## Upstream adapters
 
@@ -1621,6 +1654,6 @@ Output parsers follow the tagged ocserv source and binary output where older man
 
 Release qualification follows [Release policy](../development/release-checks.md#release-policy). Removed 1.0 compatibility gates are retired by policy and must not be reported as skipped passes.
 
-Across all rollouts, preserve node trust records, negotiated capabilities, independent two-principal approvals, Signer identity and revision counters, local command journals, root receipts, and owner-fence floors. Reconcile any `Unknown` operations before issuing new mutations to the same target. Use only the documented install, upgrade, and rollback entrypoints, without reversing SQL migrations or resetting persistent identities.
+Across all rollouts, preserve node trust records, negotiated capabilities, historical authorization evidence, Signer identity and revision counters, local command journals, root receipts, and owner-fence floors. Reconcile any `Unknown` operations before issuing new mutations to the same target. Use only the documented install, upgrade, and rollback entrypoints, without reversing SQL migrations or resetting persistent identities.
 
 Unrun, failed, skipped, and out-of-scope checks are tracked separately. Any commit change invalidates prior CI results for the affected suites.

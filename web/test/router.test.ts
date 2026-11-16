@@ -46,7 +46,6 @@ describe("web information architecture routes", () => {
         "nodes",
         "node-detail",
         "operations",
-        "approvals",
         "rollout-detail",
         "audit",
         "settings",

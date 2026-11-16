@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -168,6 +169,33 @@ func revisionTwoText(t *testing.T, current mysqlArtifacts) (schema, upgrade stri
 	if !found {
 		t.Fatal("revision 3 missing")
 	}
+	// Reverse revision 4's nullable authorization columns using its pinned
+	// before fingerprints; then the existing revision-2 checksum proves all
+	// reconstructed bytes, including MySQL SHOW CREATE normalization.
+	prior := string(currentSchema)
+	for _, step := range current.upgrade.Revisions[3].Steps {
+		m := current.meta(step)
+		pattern := regexp.MustCompile(`(?s)(-- ocservia:step=[0-9]+:table_` + m.Object + `\n)-- ocservia:metadata=[^\n]+\n(.*?)-- ocservia:end-step`)
+		match := pattern.FindStringSubmatch(prior)
+		if len(match) != 3 {
+			t.Fatal("missing authorization table", m.Object)
+		}
+		column := "approval_id"
+		if m.Object == "node_privd_attestation_keys" {
+			column = "registration_credential_id"
+		}
+		body := strings.Replace(match[2], "`"+column+"` varbinary(16) DEFAULT NULL", "`"+column+"` varbinary(16) NOT NULL", 1)
+		body = regexp.MustCompile("(?m)^(  `[^`]+` (?:longtext|varchar\\([0-9]+\\))) COLLATE utf8mb4_0900_bin").ReplaceAllString(body, "${1}")
+		if m.Object != "agent_rollouts" {
+			body = strings.ReplaceAll(body, ">= -211813488000000000", ">= -(211813488000000000)")
+		}
+		oldMetadata, err := json.Marshal(artifactStepMetadata{Kind: "table", Object: m.Object, After: m.Before, RoundtripHash: m.BeforeRoundtripHash})
+		if err != nil {
+			t.Fatal(err)
+		}
+		prior = strings.Replace(prior, match[0], match[1]+"-- ocservia:metadata="+string(oldMetadata)+"\n"+body+"-- ocservia:end-step", 1)
+	}
+	currentSchema = []byte(strings.Replace(prior, "-- ocservia:revision=4\n", "-- ocservia:revision=3\n", 1))
 	meta := current.meta(current.upgrade.Revisions[2].Steps[0])
 	schema = regexp.MustCompile(`"after":"`+meta.After+`"(,"roundtrip_hash":"[0-9a-f]{64}")?`).ReplaceAllLiteralString(string(currentSchema), `"after":"`+meta.Before+`"`)
 	schema = strings.NewReplacer(
@@ -200,8 +228,8 @@ func revisionOneArtifacts(t *testing.T) (schema, upgrade []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(current.upgrade.Revisions) != 3 {
-		t.Fatal("revision-1 reconstruction is only valid while revision 3 is the head")
+	if len(current.upgrade.Revisions) != 4 {
+		t.Fatal("revision-1 reconstruction is only valid while revision 4 is the head")
 	}
 	text, currentUpgrade := revisionTwoText(t, current)
 	upgradeText, _, found := strings.Cut(currentUpgrade, "-- ocservia:revision=2\n")
@@ -278,12 +306,12 @@ func TestMySQLForwardRevisionMaintenanceClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := baselineReceipts(t, old)
-	for revision := int64(2); revision <= 3; revision++ {
+	for revision := int64(2); revision <= 4; revision++ {
 		head, err := ArtifactChecksum(MySQL, "upgrade", revision)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(after) != 3 || after[0] != prior[0] || !strings.HasPrefix(after[revision-1], fmt.Sprintf("2:%d:%s:verified:", revision, head)) {
+		if len(after) != 4 || after[0] != prior[0] || !strings.HasPrefix(after[revision-1], fmt.Sprintf("2:%d:%s:verified:", revision, head)) {
 			t.Fatal("receipts rewritten or forward revision missing", prior, after)
 		}
 	}
@@ -308,7 +336,7 @@ func TestMySQLFreshMaintenanceClock(t *testing.T) {
 	}
 	assertMaintenanceClock(t, b, options)
 	var count int
-	if err := b.QueryRow(context.Background(), "SELECT COUNT(*) FROM schema_revisions WHERE epoch=2 AND revision=3 AND state='verified'").Scan(&count); err != nil || count != 1 {
-		t.Fatal(fmt.Sprint("fresh revision-3 receipt: ", count, err))
+	if err := b.QueryRow(context.Background(), "SELECT COUNT(*) FROM schema_revisions WHERE epoch=2 AND revision=4 AND state='verified'").Scan(&count); err != nil || count != 1 {
+		t.Fatal(fmt.Sprint("fresh revision-4 receipt: ", count, err))
 	}
 }

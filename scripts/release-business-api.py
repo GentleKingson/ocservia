@@ -98,38 +98,23 @@ def wait_for_relay_outage(node):
     record('single_relay_owner_lease_invalidated')
 
 
-def approval(action, resource_type, resource_id, extra=None):
-    request = api('approval-requests', {'action': action, 'resource_type': resource_type,
-                                      'resource_id': resource_id, 'reason': 'Business test: isolated validation',
-                                      'ttl_seconds': 600, **(extra or {})}, status=201)
-    decision = {'reason': 'Business test: independent identity', 'expected_request_hash': request['request_hash']}
-    api(f"approval-requests/{request['id']}:approve", decision, status=403)
-    if request['request_hash']:
-        invalid_hash = ('0' if request['request_hash'][0] != '0' else '1') + request['request_hash'][1:]
-        api(f"approval-requests/{request['id']}:approve", {**decision, 'expected_request_hash': invalid_hash},
-            role='approver', status=409)
-    api(f"approval-requests/{request['id']}:approve", decision, role='approver')
-    api(f"approval-requests/{request['id']}:approve", decision, role='approver', status=409)
-    approved = api(f"approval-requests/{request['id']}")
-    assert approved['request_hash'] == request['request_hash']
-    record('self_approval_rejected', approval_id=request['id'])
-    record('approval_hash_and_duplicate_decision_rejection', approval_id=request['id'], bound=bool(request['request_hash']))
-    return request['id']
-
-
 def local():
-    for role in ('requester', 'approver'):
-        api('auth/login', {'username': 'business-test-' + role,
-                           'password': (WORK / 'private' / f'{role}-password').read_text().strip()},
-            role=role, status=204)
-        cookies = list(client(role)[1])
-        assert any(c.name == '__Host-ocservia_session' and c.secure and c.path == '/' for c in cookies)
+    api('auth/login', {'username': 'business-test-requester',
+                       'password': (WORK / 'private/requester-password').read_text().strip()},
+        status=204)
+    cookies = list(client('requester')[1])
+    assert any(c.name == '__Host-ocservia_session' and c.secure and c.path == '/' for c in cookies)
     api('auth/login', {'username': 'business-test-requester', 'password': 'incorrect-business-test-password'}, role='wrong', status=401)
     api('nodes', role='anonymous', status=401)
     api('nodes', headers={'X-Workspace-ID': '00000000-0000-7000-8000-000000000072'}, status=403)
     api('nodes')
     ids = sql("SELECT string_agg(id::text, ',' ORDER BY id) FROM identities WHERE issuer='local';").split(',')
-    assert len(ids) == 2 and len(set(ids)) == 2
+    assert len(ids) == 1
+    password = secrets.token_hex(32)
+    (WORK / 'private/reader-password').write_text(password)
+    api('local-users', {'username': 'business-test-reader', 'password': password}, status=201)
+    api('auth/login', {'username': 'business-test-reader', 'password': password}, role='reader', status=204)
+    api('nodes', role='reader', status=403)
     record('local_auth_and_workspace_isolation', identity_ids=ids)
 
 
@@ -280,10 +265,7 @@ def approve():
     assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'pending'
     caps = json.loads(sql(f"SELECT json_agg(capability ORDER BY capability) FROM node_capabilities WHERE node_id='{node}';"))
     binding = {'labels': {}, 'policy': 'standard', 'capabilities': caps}
-    api(f'nodes/{node}/approval', {**binding, 'reason': 'Business test: isolated validation'}, status=400)
-    decision = approval('node.approve', 'node', node, {'node_approval': binding})
-    api(f'nodes/{node}/approval', {**binding, 'reason': 'Business test: isolated validation'}, headers={'X-Approval-ID': decision})
-    (WORK / 'node-approval').write_text(decision)
+    api(f'nodes/{node}/approval', {**binding, 'reason': 'Business test: direct Admin activation'})
     assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'active'
     credential = api(f'nodes/{node}/privd-attestation-credentials',
                      {'ttl_seconds': 300, 'reason': 'Business test: receipt authority'}, status=201)
@@ -363,23 +345,19 @@ def certificate():
     public_before = run('sudo', 'openssl', 'pkey', '-in', key_path, '-pubout')
     restart_node()
     assert public_before == run('sudo', 'openssl', 'pkey', '-in', key_path, '-pubout')
-    issue_approval = approval('certificate.issue', 'certificate', cert['id'])
-    cert = api(cert_path + ':issue', {'approval_id': issue_approval, 'reason': 'Business test: signed CSR'})
+    cert = api(cert_path + ':issue', {'reason': 'Business test: signed CSR'})
     assert cert['state'] == 'issued'
     record('certificate_issued', certificate_id=cert['id'], version=cert['version'])
     # The one-day fixture leaf enters expiring through normal maintenance.
-    # Approve its current revision, not the already superseded issued revision.
+    # Export its current revision, not the already superseded issued revision.
     cert = wait_for('short-lived certificate maintenance',
                     lambda: (value if (value := api(cert_path))['state'] == 'expiring' else None))
     record('certificate_expiring_revision', certificate_id=cert['id'], version=cert['version'])
     reason = 'Business test: one-use P12 export'
     artifact = str(uuid.UUID(int=(int(time.time() * 1000) << 80) | (7 << 76) |
                             (secrets.randbits(12) << 64) | (2 << 62) | secrets.randbits(62)))
-    export_approval = approval('certificate.private_key.export', 'certificate', cert['id'],
-                              {'certificate': {'expected_version': cert['version'], 'purpose': 'certificate_p12',
-                                               'artifact_request_id': artifact, 'reason': reason}})
     grant = api(cert_path + ':p12', {'expected_version': api(node_path)['version'],
-                                   'certificate_version': cert['version'], 'approval_id': export_approval,
+                                   'certificate_version': cert['version'], 'artifact_request_id': artifact,
                                    'reason': reason}, headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
     operation_ids.append(grant['operation']['id'])
     # Credentials stay in the private redaction input, never in the artifact.
@@ -410,10 +388,8 @@ def certificate():
     if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
         subprocess.run(['python3', str(ROOT / 'scripts/release-production-signer.py'), 'before'], check=True)
     reason = 'Business test: revoke issued certificate'
-    revoke_approval = approval('certificate.revoke', 'certificate', cert['id'],
-                              {'certificate': {'expected_version': cert['version'], 'reason': reason}})
     revoked = api(cert_path + ':revoke', {'expected_version': api(node_path)['version'],
-                                        'certificate_version': cert['version'], 'approval_id': revoke_approval,
+                                        'certificate_version': cert['version'],
                                         'reason': reason}, headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
     wait_for('certificate revoked', lambda: api(cert_path)['state'] == 'revoked')
     if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
@@ -433,7 +409,7 @@ def certificate():
 
 
 def browser_prepare():
-    (WORK / 'browser-approval').write_text(approval('service.reload', 'node', os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']))
+    api('nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])
 
 
 def config_prepare():
@@ -524,7 +500,6 @@ def configuration():
                   headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
     plan = wait_for('complete rollback plan', lambda: (value if (value := api('config-plans/' + planned['id']))['state'] == 'succeeded' else None))
     assert plan['validation'] == 'valid' and plan['materialized_hash'] != physical_before
-    approval_id = approval('config.apply', 'config_plan', plan['id'])
     script = WORK / 'reject-new-config-reload'
     script.write_text('#!/bin/sh\nif grep -qx "max-clients = 129" /etc/ocserv/ocserv.conf; then exit 9; fi\nexec /bin/kill -HUP "$1"\n')
     dropin = WORK / 'config-reload-fault.conf'
@@ -534,7 +509,7 @@ def configuration():
     run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '644', str(dropin), '/etc/systemd/system/ocserv.service.d/business-test-config-reload.conf')
     try:
         run('sudo', 'systemctl', 'daemon-reload')
-        operation = api('config-plans/' + plan['id'] + '/apply', {'approval_id': approval_id, 'reason': 'Business test: native rollback'},
+        operation = api('config-plans/' + plan['id'] + '/apply', {'reason': 'Business test: native rollback'},
                         headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
         result = wait_for('exact configuration rollback', lambda: (value if (value := api('operations/' + operation['id'])).get('config_apply_state') == 'rolled_back' else None))
         assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
@@ -614,13 +589,12 @@ def agent_privd_recovery(operations, config_hash):
 
 def authorized_reload(name):
     node = 'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    approval_id = approval('service.reload', 'node', os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])
     deep = os.environ.get('BUSINESS_PROFILE') == 'extended'
     if deep:
         before = run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
     key = secrets.token_hex(16)
     body = {'reason': name, 'ttl_seconds': 300}
-    headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(node)["version"]}"', 'X-Approval-ID': approval_id}
+    headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(node)["version"]}"'}
     operation = api(node + '/service:reload', body, headers=headers, status=202)
     wait_for(name, lambda: completed(operation))
     if not deep:
@@ -711,10 +685,9 @@ def deep_resilience():
     record('deep_transport_recovery')
 
     # The original Controller and its pool stay running throughout the outage.
-    approval_id = approval('service.reload', 'node', os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])
     key = secrets.token_hex(16)
     node = 'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(node)["version"]}"', 'X-Approval-ID': approval_id}
+    headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(node)["version"]}"'}
     try:
         run(str(ROOT / 'deploy/production/compose.sh'), 'stop', 'postgres')
         outage = api('readyz', role='anonymous', status=503)
@@ -745,19 +718,17 @@ def assert_browser_csp(entries, evidence):
 
 def browser_verify():
     entries = json.loads((EVIDENCE / 'browser-checkpoints.json').read_text())
-    required = {'browser_user_mutation', 'browser_approved_reload',
-                'browser_consumed_approval_cannot_authorize_new_operation',
+    required = {'browser_user_mutation', 'browser_direct_admin_reload',
+                'browser_idempotency_rejects_changed_intent',
                 'browser_complete_config_apply', 'browser_login_workspace_forbidden_refresh', 'browser_csp'}
     if os.environ.get('BUSINESS_PROFILE', 'smoke') == 'extended':
         required |= {'browser_certificate_csr', 'browser_certificate_issue_export_one_use',
                      'browser_certificate_revoke'}
     for name in required:
         assert sum(entry['name'] == name for entry in entries) == 1, 'missing or duplicate browser checkpoint: ' + name
-    approvals = {entry['action'] for entry in entries if entry['name'] == 'browser_bound_approval'}
-    assert {'service.reload', 'config.apply'} <= approvals, 'missing browser approval'
     assert next(entry for entry in entries if entry['name'] == 'browser_login_workspace_forbidden_refresh')['status'] == 'PASS'
     assert_browser_csp(entries, 'browser-csp.json')
-    operation_checks = {'browser_user_mutation', 'browser_approved_reload', 'browser_complete_config_apply',
+    operation_checks = {'browser_user_mutation', 'browser_direct_admin_reload', 'browser_complete_config_apply',
                         'browser_certificate_csr', 'browser_certificate_issue_export_one_use', 'browser_certificate_revoke'}
     for entry in entries:
         operation_id = entry.get('operation_id') or entry.get('operation', {}).get('id')
@@ -794,17 +765,15 @@ def rollout_ready():
 
 def rollout_verify():
     entries = json.loads((EVIDENCE / 'browser-rollout-checkpoints.json').read_text())
-    for name in ('browser_bound_approval', 'browser_agent_rollout', 'browser_csp'):
+    for name in ('browser_agent_rollout', 'browser_csp'):
         assert sum(entry['name'] == name for entry in entries) == 1, 'missing or duplicate rollout checkpoint: ' + name
-    assert next(entry for entry in entries if entry['name'] == 'browser_bound_approval')['action'] == 'agent.rollout'
     assert_browser_csp(entries, 'browser-rollout-csp.json')
     node, target = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'], os.environ['ROLLOUT_VERSION']
     created = next(entry for entry in entries if entry['name'] == 'browser_agent_rollout')['rollout']
     rollout = api('agent-rollouts/' + created['id'])
     assert rollout['state'] == 'succeeded' and rollout['target_version'] == target
-    assert rollout['stop_on_failure'] is True and rollout['approval_id'] == created['approval_id']
+    assert rollout['stop_on_failure'] is True and not rollout.get('approval_id')
     assert [(item['node_id'], item['batch'], item['state']) for item in rollout['nodes']] == [(node, 0, 'succeeded')]
-    assert api('approval-requests/' + created['approval_id'])['status'] == 'consumed'
     wait_for('upgraded Agent online', lambda: (value if (value := api('nodes/' + node))['connection_state'] == 'online'
                                                 and value['agent_version'] == target else None))
     for binary in ('ocservia-agent', 'ocservia-privd', 'ocservia-upgrader'):
@@ -942,28 +911,17 @@ def revocation():
     before = owner()
     agent_pid = run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip()
     effects = node_side_effects()
-    # Approved before revocation and never spent: the old authority under test.
-    stale = approval('service.reload', 'node', node)
     path, body = prefix + '/revocation', {'reason': 'Business test: terminal node revocation'}
     api(path, body, role='anonymous', status=401)
+    api(path, body, role='reader', status=403)
     api(path, body, headers={'Origin': 'https://attacker.invalid'}, status=403)
-    api(path, body, status=400)
-    api(path, body, headers={'X-Approval-ID': stale}, status=409)
-    pending = api('approval-requests', {'action': 'node.revoke', 'resource_type': 'node', 'resource_id': node,
-                                        'reason': 'Business test: unapproved revocation', 'ttl_seconds': 600}, status=201)
-    api(path, body, headers={'X-Approval-ID': pending['id']}, status=409)
-    decision = approval('node.revoke', 'node', node)
-    # The approver also holds node.revoke, yet cannot spend the requester's approval.
-    api(path, body, role='approver', headers={'X-Approval-ID': decision}, status=409)
-    assert api('approval-requests/' + decision)['status'] == 'approved'
     assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'active'
-    record('revocation_unauthorized_and_unapproved_rejected', approval_id=decision)
+    record('revocation_unauthorized_rejected')
     started = int(time.time())
     # 200 means the revoked trust and the connection close were both applied in
     # the request. A 503 leaves them to the background worker, which never counts
     # lost ownership as delivery, so it never stands in for them.
-    api(path, body, headers={'X-Approval-ID': decision})
-    assert api('approval-requests/' + decision)['status'] == 'consumed'
+    api(path, body)
     status, revision = sql(f"SELECT status||'|'||authorization_revision FROM nodes WHERE id='{node}';").split('|')
     assert status == 'revoked'
     assert sql(f"SELECT state FROM node_endpoint_keys WHERE node_id='{node}';") == 'revoked'
@@ -983,17 +941,15 @@ def revocation():
     ended = run('sudo', 'journalctl', '--no-pager', '-u', 'ocservia-agent', '--since', f'@{started}', '-o', 'cat').count(
         'controller connection ended')
     assert ended >= 1
-    record('node_revoked_trust_converged_and_disconnected', approval_id=decision,
+    record('node_revoked_trust_converged_and_disconnected',
            authorization_revision=int(revision), agent_session_ends=ended)
     key = secrets.token_hex(16)
     denied = api(prefix + '/service:reload', {'reason': 'Business test: old authority after revocation', 'ttl_seconds': 300},
-                 headers={'Idempotency-Key': key, 'If-Match': f'"revision-{api(prefix)["version"]}"',
-                          'X-Approval-ID': stale}, status=404)
+                 headers={'Idempotency-Key': key, 'If-Match': f'"revision-{api(prefix)["version"]}"'}, status=404)
     assert denied['type'] == 'https://ocservia.dev/problems/not-found'
     assert sql(f"SELECT count(*) FROM operations WHERE workspace_id='{WORKSPACE}' AND idempotency_key='{key}';") == '0'
-    assert api('approval-requests/' + stale)['status'] == 'approved'
     assert node_side_effects() == effects
-    record('revoked_node_old_authority_without_privd_effect', stale_approval_id=stale, side_effects=effects)
+    record('revoked_node_old_authority_without_privd_effect', side_effects=effects)
 
 
 def completed(operation):
@@ -1050,17 +1006,11 @@ def single_relay_recovery(ping, native_session, operations):
     finally:
         run('docker', 'unpause', control)
     relay = os.environ['OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER']
-    reload_approval = approval('service.reload', 'node', node)
-
-    # The bootstrap SecurityAdmin can approve but cannot reload a service.
-    # An approval ID must not grant the approver that missing RBAC permission.
-    denied = api(prefix + '/service:reload', {'reason': 'Business test: isolated validation', 'ttl_seconds': 300},
-                 role='approver', headers={'Idempotency-Key': secrets.token_hex(16),
-                                          'If-Match': f'"revision-{api(prefix)["version"]}"',
-                                          'X-Approval-ID': reload_approval}, status=403)
+    denied = api(prefix + '/service:reload', {'reason': 'Business test: denied reader', 'ttl_seconds': 300},
+                 role='reader', headers={'Idempotency-Key': secrets.token_hex(16),
+                                         'If-Match': f'"revision-{api(prefix)["version"]}"'}, status=403)
     assert denied['type'] == 'https://ocservia.dev/problems/forbidden'
-    assert api('approval-requests/' + reload_approval)['status'] == 'approved'
-    record('approval_does_not_override_approver_rbac', approval_id=reload_approval)
+    record('reader_cannot_reload_service')
 
     def reload_count():
         return run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
@@ -1079,8 +1029,7 @@ def single_relay_recovery(ping, native_session, operations):
         body = {'reason': 'Business test: isolated validation', 'ttl_seconds': 300}
         for _ in range(3):
             revision = api(prefix)['version']
-            headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{revision}"',
-                       'X-Approval-ID': reload_approval}
+            headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{revision}"'}
             pending = api(prefix + '/service:reload', body, headers=headers, status=(202, 409))
             if 'id' in pending:
                 break
@@ -1119,13 +1068,11 @@ def single_relay_recovery(ping, native_session, operations):
            operation_state=recovery_snapshot['database_state'], native_reload_delta=reload_count() - reloads_before)
     replay = api(prefix + '/service:reload', body, headers=headers, status=202)
     assert replay['id'] == pending['id'] and replay['command_id'] == pending['command_id']
-    assert api('approval-requests/' + reload_approval)['status'] == 'consumed'
-    denied = api(prefix + '/service:reload', body,
-                 headers={'Idempotency-Key': secrets.token_hex(16),
-                          'If-Match': f'"revision-{api(prefix)["version"]}"',
-                          'X-Approval-ID': reload_approval}, status=409)
-    assert denied['type'] == 'https://ocservia.dev/problems/approval-required'
-    record('consumed_approval_cannot_authorize_new_operation', approval_id=reload_approval)
+    # Reusing a request key with changed intent must never create another effect.
+    denied = api(prefix + '/service:reload', {**body, 'reason': 'Business test: changed replay intent'},
+                 headers=headers, status=409)
+    assert denied['type'] == 'https://ocservia.dev/problems/idempotency-conflict'
+    record('idempotency_rejects_changed_intent', operation_id=pending['id'])
     operations.append(pending)
     time.sleep(3)
     assert reload_count() == reloads_before + 1

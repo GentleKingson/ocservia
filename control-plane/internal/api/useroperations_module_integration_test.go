@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
@@ -47,7 +45,6 @@ func newUserOperationsHTTPFixture(t *testing.T) userOperationsHTTPFixture {
 		}{{"alice", 1}, {"bob", 3}} {
 			f.exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,$2,true,$3,1,$4,$5,$6)`, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES(?,?,true,?,1,?,?,?)`, node, user.name, user.version, make([]byte, 32), stamp, stamp)
 		}
-		f.bind(f.approver, node, "SecurityAdmin")
 	}
 	f.bind(f.requester, f.node, "UserManager")
 	f.bind(f.reader, f.node, "Viewer")
@@ -102,72 +99,64 @@ func (f userOperationsHTTPFixture) unchanged(before [7]int) {
 	}
 }
 
-func (f userOperationsHTTPFixture) approvalState(id uuid.UUID, want string) {
-	f.t.Helper()
-	var status string
-	if err := f.row(`SELECT status FROM approval_requests WHERE id=$1`, `SELECT status FROM approval_requests WHERE id=?`, id).Scan(&status); err != nil || status != want {
-		f.t.Fatalf("approval status %s want %s: %v", status, want, err)
-	}
-}
-
-func (f userOperationsHTTPFixture) approval(items []useroperations.BatchItemRequest, approve bool) approvals.Approval {
-	f.t.Helper()
-	body, err := json.Marshal(map[string]any{"action": "user.batch.disable", "resource_type": "batch_operation", "batch_items": items, "reason": "independent batch review", "ttl_seconds": 900})
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	w := f.call("POST", "/api/v1/approval-requests", string(body), "", f.requester.cookie, nil)
-	var approval approvals.Approval
-	assertUserJSON(f.t, w, 201, &approval)
-	hash := useroperations.BatchRequestHash(items)
-	if approval.ResourceID.Version() != 7 || approval.RequestHash != hex.EncodeToString(hash[:]) || approval.RequesterID != f.requester.principal.IdentityID || approval.Status != "pending" {
-		f.t.Fatalf("approval binding: %+v", approval)
-	}
-	if approve {
-		decision := fmt.Sprintf(`{"reason":"independent review","expected_request_hash":%q}`, approval.RequestHash)
-		w = f.call("POST", "/api/v1/approval-requests/"+approval.ID.String()+":approve", decision, "", f.approver.cookie, nil)
-		assertUserJSON(f.t, w, 200, &approval)
-		if approval.Status != "approved" || approval.ApproverID == nil || *approval.ApproverID != f.approver.principal.IdentityID || *approval.ApproverID == approval.RequesterID {
-			f.t.Fatal("approval independence", approval)
-		}
-	}
-	return approval
-}
-
-func approvalHeader(id string) func(*http.Request) {
-	return func(r *http.Request) { r.Header.Set("X-Approval-ID", id) }
-}
-
 func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 	// Use the shared Local/Cookie/Origin fixture with restricted runtime. Only
 	// fixture setup and scoped fault injection use owner; no Agent is involved.
 	f := newUserOperationsHTTPFixture(t)
-	t.Run("approval-rollback-submit-replay-scheduler", func(t *testing.T) {
+	t.Run("direct-admin-rollback-submit-replay-scheduler", func(t *testing.T) {
 		f := f
 		f.t = t
 		items := []useroperations.BatchItemRequest{{NodeID: f.node, Username: "alice", Action: "disable", ExpectedVersion: 1}, {NodeID: f.node, Username: "bob", Action: "enable", ExpectedVersion: 3}}
 		body, key := userBatchBody(t, items), uuid.NewString()
 		before := f.counts()
-		for _, header := range []string{"", "bad", uuid.NewString(), uuid.Must(uuid.NewV7()).String()} {
-			assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, approvalHeader(header)), 403, "approval-required")
+		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", body, key, f.reader.cookie, nil), 403, "forbidden")
+		f.unchanged(before)
+		t.Run("atomic-rollback", func(t *testing.T) {
+			f := f
+			f.t = t
+			restore := authSafetyAuditFailure(t, f.owner, f.workspace, "user.batch.create")
+			assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, nil), 503, "database-unavailable")
 			f.unchanged(before)
+			restore()
+		})
+		w := f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, nil)
+		var batch useroperations.Batch
+		assertUserJSON(t, w, 202, &batch)
+		if batch.ID.Version() != 7 || w.Header().Get("Location") != "/api/v1/user-batches/"+batch.ID.String() || w.Header().Get("Idempotency-Replayed") != "" || len(batch.Items) != len(items) {
+			t.Fatal("direct batch identity", w.Header(), batch)
 		}
-		pending := f.approval(items, false)
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, approvalHeader(pending.ID.String())), 403, "approval-required")
-		f.approvalState(pending.ID, "pending")
-		f.unchanged(before)
-		expired := f.approval(items, true)
-		// Expiry is a fixture clock condition, never a direct approval shortcut.
-		f.exec(`UPDATE approval_requests SET created_at=$1,expires_at=$2 WHERE id=$3`, `UPDATE approval_requests SET created_at=?,expires_at=? WHERE id=?`, value.Timestamp{Valid: true}, value.Timestamp{Valid: true, Micros: 1}, expired.ID)
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, approvalHeader(expired.ID.String())), 403, "approval-required")
-		f.approvalState(expired.ID, "approved")
-		f.unchanged(before)
-		persistedMismatch := f.approval(items, true)
-		f.exec(`UPDATE approval_batch_items SET expected_version=expected_version+1 WHERE approval_id=$1 AND item_index=0`, `UPDATE approval_batch_items SET expected_version=expected_version+1 WHERE approval_id=? AND item_index=0`, persistedMismatch.ID)
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, approvalHeader(persistedMismatch.ID.String())), 403, "approval-required")
-		f.approvalState(persistedMismatch.ID, "approved")
-		f.unchanged(before)
-		approval := f.approval(items, true)
+		for i, item := range batch.Items {
+			if item.Index != i || item.NodeID != items[i].NodeID || item.Username != items[i].Username || item.Action != items[i].Action || item.ExpectedVersion != items[i].ExpectedVersion || item.State != "queued" || item.ChildOperationID != nil {
+				t.Fatal("batch intent/order", batch.Items)
+			}
+		}
+		after := f.counts()
+		if want := [7]int{before[0] + 1, before[1] + 2, before[2] + 1, before[3], before[4], before[5], before[6]}; after != want {
+			t.Fatalf("HTTP must only save batch intent: %v want %v", after, want)
+		}
+		var actor, reason, requestID, traceparent, storedKey string
+		var identity, session uuid.UUID
+		var approvalID uuid.NullUUID
+		if err := f.row(`SELECT actor_id,actor_identity_id,actor_session_id,approval_id,reason,request_id,traceparent,idempotency_key FROM batch_operations WHERE id=$1`, `SELECT actor_id,actor_identity_id,actor_session_id,approval_id,reason,request_id,traceparent,idempotency_key FROM batch_operations WHERE id=?`, batch.ID).Scan(&actor, &identity, &session, &approvalID, &reason, &requestID, &traceparent, &storedKey); err != nil || identity != f.requester.principal.IdentityID || actor != identity.String() || session != f.requester.principal.SessionID || approvalID.Valid || reason != "batch HTTP" || requestID != "baseline-request" || storedKey != key || !strings.HasPrefix(traceparent, "00-0123456789abcdef0123456789abcdef-") {
+			t.Fatalf("batch provenance: %s %s %s %s %v", actor, session, requestID, traceparent, err)
+		}
+		var auditActor, auditRequest string
+		var auditSession uuid.UUID
+		var auditApproval uuid.NullUUID
+		if err := f.row(`SELECT actor_id,source_session_id,approval_id,request_id FROM audit_events WHERE resource_id=$1 AND action='user.batch.create'`, `SELECT actor_id,source_session_id,approval_id,request_id FROM audit_events WHERE resource_id=? AND action='user.batch.create'`, batch.ID).Scan(&auditActor, &auditSession, &auditApproval, &auditRequest); err != nil || auditActor != actor || auditSession != session || auditApproval != approvalID || auditRequest != requestID {
+			t.Fatal("batch audit provenance", err)
+		}
+		t.Run("immediate-replay", func(t *testing.T) {
+			f := f
+			f.t = t
+			w := f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, nil)
+			var replay useroperations.Batch
+			assertUserJSON(t, w, 202, &replay)
+			if !reflect.DeepEqual(replay, batch) || w.Header().Get("Idempotency-Replayed") != "true" || w.Header().Get("Location") != "/api/v1/user-batches/"+batch.ID.String() {
+				t.Fatal("batch replay", w.Header(), replay)
+			}
+			f.unchanged(after)
+		})
 		for _, change := range []func([]useroperations.BatchItemRequest){
 			func(v []useroperations.BatchItemRequest) { v[0], v[1] = v[1], v[0] },
 			func(v []useroperations.BatchItemRequest) { v[0].ExpectedVersion++ },
@@ -175,58 +164,8 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 		} {
 			altered := append([]useroperations.BatchItemRequest(nil), items...)
 			change(altered)
-			assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", userBatchBody(t, altered), key, f.requester.cookie, approvalHeader(approval.ID.String())), 403, "approval-required")
-			f.approvalState(approval.ID, "approved")
-			f.unchanged(before)
+			assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", userBatchBody(t, altered), key, f.requester.cookie, nil), 409, "idempotency-conflict")
 		}
-		t.Run("atomic-rollback", func(t *testing.T) {
-			f := f
-			f.t = t
-			restore := authSafetyAuditFailure(t, f.owner, f.workspace, "user.batch.create")
-			assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, approvalHeader(approval.ID.String())), 503, "database-unavailable")
-			f.unchanged(before)
-			f.approvalState(approval.ID, "approved")
-			restore()
-		})
-		w := f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, approvalHeader(" "+approval.ID.String()+" "))
-		var batch useroperations.Batch
-		assertUserJSON(t, w, 202, &batch)
-		if batch.ID != approval.ResourceID || w.Header().Get("Location") != "/api/v1/user-batches/"+batch.ID.String() || w.Header().Get("Idempotency-Replayed") != "" || len(batch.Items) != len(items) {
-			t.Fatal("approved batch identity", w.Header(), batch)
-		}
-		for i, item := range batch.Items {
-			if item.Index != i || item.NodeID != items[i].NodeID || item.Username != items[i].Username || item.Action != items[i].Action || item.ExpectedVersion != items[i].ExpectedVersion || item.State != "queued" || item.ChildOperationID != nil {
-				t.Fatal("batch intent/order", batch.Items)
-			}
-		}
-		f.approvalState(approval.ID, "consumed")
-		after := f.counts()
-		if want := [7]int{before[0] + 1, before[1] + 2, before[2] + 1, before[3], before[4], before[5], before[6]}; after != want {
-			t.Fatalf("HTTP must only save batch intent: %v want %v", after, want)
-		}
-		var actor, reason, requestID, traceparent, storedKey string
-		var identity, session, approvalID uuid.UUID
-		if err := f.row(`SELECT actor_id,actor_identity_id,actor_session_id,approval_id,reason,request_id,traceparent,idempotency_key FROM batch_operations WHERE id=$1`, `SELECT actor_id,actor_identity_id,actor_session_id,approval_id,reason,request_id,traceparent,idempotency_key FROM batch_operations WHERE id=?`, batch.ID).Scan(&actor, &identity, &session, &approvalID, &reason, &requestID, &traceparent, &storedKey); err != nil || identity != f.requester.principal.IdentityID || actor != identity.String() || session != f.requester.principal.SessionID || approvalID != approval.ID || reason != "batch HTTP" || requestID != "baseline-request" || storedKey != key || !strings.HasPrefix(traceparent, "00-0123456789abcdef0123456789abcdef-") {
-			t.Fatalf("batch provenance: %s %s %s %s %v", actor, session, requestID, traceparent, err)
-		}
-		var auditActor, auditRequest string
-		var auditSession, auditApproval uuid.UUID
-		if err := f.row(`SELECT actor_id,source_session_id,approval_id,request_id FROM audit_events WHERE resource_id=$1 AND action='user.batch.create'`, `SELECT actor_id,source_session_id,approval_id,request_id FROM audit_events WHERE resource_id=? AND action='user.batch.create'`, batch.ID).Scan(&auditActor, &auditSession, &auditApproval, &auditRequest); err != nil || auditActor != actor || auditSession != session || auditApproval != approvalID || auditRequest != requestID {
-			t.Fatal("batch audit provenance", err)
-		}
-		t.Run("immediate-replay", func(t *testing.T) {
-			f := f
-			f.t = t
-			w := f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, approvalHeader(approval.ID.String()))
-			var replay useroperations.Batch
-			assertUserJSON(t, w, 202, &replay)
-			if !reflect.DeepEqual(replay, batch) || w.Header().Get("Idempotency-Replayed") != "true" || w.Header().Get("Location") != "/api/v1/user-batches/"+batch.ID.String() {
-				t.Fatal("batch replay", w.Header(), replay)
-			}
-			f.unchanged(after)
-			f.approvalState(approval.ID, "consumed")
-		})
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", body, uuid.NewString(), f.requester.cookie, approvalHeader(approval.ID.String())), 403, "approval-required")
 		f.unchanged(after)
 		// Enter the original Service scheduling path separately from HTTP. A
 		// real lease/fence and real userstate service create the signed child.
@@ -394,7 +333,7 @@ func TestUserOperationsHTTPAssemblyBackendIntegration(t *testing.T) {
 			f := f
 			f.t = t
 			before := f.counts()
-			authorization := Authorization{Authentication: f.s.auth, RBAC: f.s.rbac, Approvals: f.s.approvals, Audit: f.s.audit}
+			authorization := Authorization{Authentication: f.s.auth, RBAC: f.s.rbac, Audit: f.s.audit}
 			f.s = newTestServer(t, testHTTPConfig(false), f.b, Modules{}, Authorization{})
 			assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", "{", "", f.requester.cookie, nil), 401, "unauthenticated")
 			modules := Modules{}

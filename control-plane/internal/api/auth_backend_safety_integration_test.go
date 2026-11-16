@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
@@ -152,7 +151,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 		_, err := s.BootstrapLocalAdmin(ctx, name, password, wid, name+"-approver", approverPassword)
 		return err
 	}
-	drop := authSafetyAuditFailure(t, owner, wid, "local_user.bootstrap-approver")
+	drop := authSafetyAuditFailure(t, owner, wid, "local_user.bootstrap")
 	if err := bootstrap(); err == nil {
 		t.Fatal("partial initialization committed after audit failure")
 	}
@@ -209,16 +208,15 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	}
 	m := audit.NewBackendManager(b, bytes.Repeat([]byte{7}, 32))
 	verified, err := m.Verify(ctx, wid)
-	if err != nil || !verified.Valid || verified.Events != 2 {
+	if err != nil || !verified.Valid || verified.Events != 1 {
 		t.Fatalf("bootstrap audit rollback: %+v %v", verified, err)
 	}
 	_, admin, err := s.AuthenticateLocal(ctx, name, password)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, approver, err := s.AuthenticateLocal(ctx, name+"-approver", approverPassword)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := authstore.ReadCredential(ctx, b, name+"-approver"); !errors.Is(err, database.ErrNotFound) {
+		t.Fatalf("bootstrap provisioned a second identity: %v", err)
 	}
 	if _, err := s.CompleteLocalBootstrap(ctx, name, password, wid, name+"-extra", approverPassword); !errors.Is(err, auth.ErrLocalInitialized) {
 		t.Fatalf("completed bootstrap reopened: %v", err)
@@ -227,16 +225,16 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 		_, err := s.MutateLocalUser(ctx, auth.LocalUserMutation{Action: action, IdentityID: id, ActorID: actor.IdentityID, SessionID: actor.SessionID, WorkspaceID: workspace, ApprovalID: approval, Password: "auth-safety replacement credential", RequestID: uuid.NewString()})
 		return err
 	}
-	for _, id := range []uuid.UUID{admin.IdentityID, approver.IdentityID} {
+	for _, id := range []uuid.UUID{admin.IdentityID} {
 		if err := mutate(admin, "disable", id, wid, uuid.Nil); !errors.Is(err, auth.ErrLocalProtected) {
-			t.Fatalf("last management pair not protected: %v", err)
+			t.Fatalf("last administrator not protected: %v", err)
 		}
 	}
 	roles := rbac.NewBackend(b)
 	if err := roles.Authorize(ctx, admin.IdentityID, "local_user.manage", rbac.Resource{WorkspaceID: other, Type: "workspace"}, false); !errors.Is(err, rbac.ErrForbidden) {
 		t.Fatalf("cross-workspace authorization: %v", err)
 	}
-	if err := mutate(admin, "disable", approver.IdentityID, other, uuid.Nil); !errors.Is(err, auth.ErrLocalInvalid) {
+	if err := mutate(admin, "disable", admin.IdentityID, other, uuid.Nil); !errors.Is(err, auth.ErrLocalInvalid) {
 		t.Fatalf("management workspace changed: %v", err)
 	}
 
@@ -248,28 +246,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approvalService := approvals.NewBackend(b)
-	approve := func(action, kind string, id uuid.UUID, hash []byte, summary []byte) uuid.UUID {
-		t.Helper()
-		request, err := approvalService.Create(ctx, approvals.Request{WorkspaceID: wid, RequesterID: admin.IdentityID, SessionID: admin.SessionID, ResourceID: id, Action: action, ResourceType: kind, Reason: "Authentication safety test review", TTL: time.Hour, RequestID: uuid.NewString(), RequestHash: hash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: wid, Type: "workspace"}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err = approvalService.Approve(ctx, approvals.Decision{ApprovalID: request.ID, ApproverID: approver.IdentityID, SessionID: approver.SessionID, Reason: "independent review", RequestID: uuid.NewString(), ExpectedRequestHash: request.RequestHash}); err != nil {
-			t.Fatal(err)
-		}
-		return request.ID
-	}
-	hash, summary := approvals.GenericBinding("local_user.reset-password", "local_user", memberID)
-	approvalID := approve("local_user.reset-password", "local_user", memberID, hash, summary)
-	for _, key := range [][2]string{{"LOCAL_USER.RESET-PASSWORD", "local_user"}, {"local_user.reset-password ", "local_user"}, {"local_user.reset-password", "LOCAL_USER"}, {"local_user.reset-password", "local_user "}} {
-		err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-			return approvals.ConsumeBoundTx(ctx, tx, approvalID, wid, admin.IdentityID, key[0], key[1], memberID, hash)
-		})
-		if !errors.Is(err, approvals.ErrNotReady) {
-			t.Fatalf("approval identifiers collapsed by collation: %v", err)
-		}
-	}
+	approvalID := uuid.Nil
 	before, err := authstore.ReadCredential(ctx, b, name+"-member")
 	if err != nil {
 		t.Fatal(err)
@@ -285,10 +262,6 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	if _, err := s.Authenticate(ctx, memberCookie); err != nil {
 		t.Fatalf("revocation escaped rollback: %v", err)
 	}
-	request, err := approvalService.Get(ctx, approvalID)
-	if err != nil || request.Status != "approved" {
-		t.Fatalf("approval consumption escaped rollback: %+v %v", request, err)
-	}
 	drop()
 	if err := mutate(admin, "reset-password", memberID, wid, approvalID); err != nil {
 		t.Fatal(err)
@@ -296,12 +269,6 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	if _, err := s.Authenticate(ctx, memberCookie); !errors.Is(err, auth.ErrUnauthenticated) {
 		t.Fatalf("reset retained old session: %v", err)
 	}
-	if err := mutate(admin, "reset-password", memberID, wid, approvalID); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatalf("reset approval replay: %v", err)
-	}
-
-	hash, summary = rbac.BindingApprovalContent(memberID, wid, "PlatformAdmin", "workspace", uuid.Nil)
-	approvalID = approve("role_binding.elevate", "role_binding", memberID, hash, summary)
 	if _, err := roles.CreateBinding(ctx, rbac.BindingRequest{IdentityID: memberID, WorkspaceID: wid, Role: "PlatformAdmin", ResourceType: "workspace", ActorID: admin.IdentityID, SessionID: admin.SessionID, ApprovalID: approvalID, RequestID: uuid.NewString(), Reason: "second independent administrator"}); err != nil {
 		t.Fatal(err)
 	}
@@ -309,17 +276,21 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Two administrators are also a valid independent pair. Once the third
-	// identity is disabled, neither concurrent mutation may remove that pair.
-	if err := mutate(admin, "disable", approver.IdentityID, wid, uuid.Nil); err != nil {
-		t.Fatal(err)
-	}
+	// Concurrent mutual disable must leave one active administrator; the loser
+	// cannot use its now-revoked session to disable the survivor.
 	go func() { results <- mutate(admin, "disable", second.IdentityID, wid, uuid.Nil) }()
 	go func() { results <- mutate(second, "disable", admin.IdentityID, wid, uuid.Nil) }()
+	successfulDisables := 0
 	for range 2 {
-		if err := <-results; !errors.Is(err, auth.ErrLocalProtected) {
-			t.Fatalf("concurrent management pair lost: %v", err)
+		err := <-results
+		if err == nil {
+			successfulDisables++
+		} else if !errors.Is(err, auth.ErrUnauthenticated) && !errors.Is(err, auth.ErrLocalProtected) {
+			t.Fatal(err)
 		}
+	}
+	if successfulDisables != 1 {
+		t.Fatalf("mutual disable successes: %d", successfulDisables)
 	}
 
 	// Exercise the exact OIDC identity store used by createSession, including
@@ -352,7 +323,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 		}
 	}
 	verified, err = m.Verify(ctx, wid)
-	if err != nil || !verified.Valid || verified.Events != 10 {
+	if err != nil || !verified.Valid || verified.Events != 5 {
 		t.Fatalf("transactional lifecycle audit: %+v %v", verified, err)
 	}
 }
@@ -423,13 +394,8 @@ func TestAuthenticationBackendLegacyIntegration(t *testing.T) {
 		t.Fatalf("legacy completion ignored an existing elevated identity: %v", err)
 	}
 	authSafetyExec(t, owner, `DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, bindingID)
-	drop := authSafetyAuditFailure(t, owner, wid, "local_user.bootstrap-approver")
-	if _, err := complete(wid); err == nil {
-		t.Fatal("legacy completion escaped audit rollback")
-	}
-	drop()
-	if completed, err := complete(wid); err != nil || completed != id {
-		t.Fatalf("eligible legacy completion: %s %v", completed, err)
+	if _, err := complete(wid); !errors.Is(err, auth.ErrLocalInitialized) {
+		t.Fatalf("retired completion reopened bootstrap: %v", err)
 	}
 	after, err := authstore.ReadCredential(ctx, b, name)
 	if err != nil || before.Hash != after.Hash || before.ID != after.ID {
@@ -438,8 +404,7 @@ func TestAuthenticationBackendLegacyIntegration(t *testing.T) {
 	if _, err := complete(wid); !errors.Is(err, auth.ErrLocalInitialized) {
 		t.Fatalf("legacy completion was reusable: %v", err)
 	}
-	verified, err := audit.NewBackendManager(b, bytes.Repeat([]byte{7}, 32)).Verify(ctx, wid)
-	if err != nil || !verified.Valid || verified.Events != 1 {
-		t.Fatalf("legacy completion audit: %+v %v", verified, err)
+	if _, err := authstore.ReadCredential(ctx, b, name+"-approver"); !errors.Is(err, database.ErrNotFound) {
+		t.Fatalf("retired completion created an identity: %v", err)
 	}
 }

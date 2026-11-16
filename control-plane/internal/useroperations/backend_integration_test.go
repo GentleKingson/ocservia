@@ -2,7 +2,6 @@ package useroperations
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
@@ -168,17 +166,17 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 		}
 		return at
 	}
-	workspace, node, requester, approver, session, approverSession := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	workspace, node, requester, session := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
 	at, expires := stamp(now), stamp(now.Add(time.Hour))
 	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'policies',$2,now(),now())`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES(?,'policies',?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, workspace, workspace.String())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'policies','active',now(),now())`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES(?,?,'policies','active',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, node, workspace)
 	exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES(?,'ocserv.users.write',true)`, node)
-	for _, id := range []uuid.UUID{requester, approver} {
+	for _, id := range []uuid.UUID{requester} {
 		exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'user-operations',$2,$3,$4)`, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,'user-operations',?,?,?)`, id, id.String(), at, at)
 		exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES(?,?,?,'PlatformAdmin','workspace',?)`, uuid.New(), id, workspace, at)
 	}
-	for _, pair := range [][2]uuid.UUID{{session, requester}, {approverSession, approver}} {
+	for _, pair := range [][2]uuid.UUID{{session, requester}} {
 		exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES(?,?,?,?)`, pair[0], pair[1], expires, at)
 	}
 	for _, name := range []string{"alice", "bob", "charlie", "dave", "expired"} {
@@ -346,26 +344,16 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	exec(`UPDATE nodes SET status='offline' WHERE id=$1`, `UPDATE nodes SET status='offline' WHERE id=?`, node)
 	items := []BatchItemRequest{{NodeID: node, Username: "bob", Action: "disable", ExpectedVersion: 1, Authorized: true}, {NodeID: node, Username: "charlie", Action: "disable", ExpectedVersion: 1, Authorized: false}}
 	batchID := uuid.Must(uuid.NewV7())
-	hash := BatchRequestHash(items)
-	summary, _ := json.Marshal(items)
-	approvalService := approvals.NewBackend(b)
-	pending, err := approvalService.Create(ctx, approvals.Request{WorkspaceID: workspace, RequesterID: requester, ResourceID: batchID, SessionID: session, Action: "user.batch.disable", ResourceType: "batch_operation", Reason: "review batch", TTL: time.Hour, RequestID: uuid.NewString(), RequestHash: hash[:], RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: workspace, Type: "workspace"}}, BatchItems: []approvals.BoundBatchItem{{NodeID: node, Username: "bob", Action: "disable", ExpectedVersion: 1}, {NodeID: node, Username: "charlie", Action: "disable", ExpectedVersion: 1}}})
-	if err != nil {
-		t.Fatal("request approval", err)
-	}
-	if _, err := approvalService.Approve(ctx, approvals.Decision{ApprovalID: pending.ID, ApproverID: approver, SessionID: approverSession, Reason: "reviewed", RequestID: uuid.NewString(), ExpectedRequestHash: pending.RequestHash}); err != nil {
-		t.Fatal("approve", err)
-	}
-	batchRequest := BatchRequest{ID: batchID, WorkspaceID: workspace, ActorIdentityID: requester, ActorSessionID: session, ApprovalID: pending.ID, ActorID: "operator", Reason: "ticket", RequestID: uuid.NewString(), Traceparent: testTraceparent, IdempotencyKey: uuid.NewString(), Items: items}
-	altered := batchRequest
-	altered.Items = append([]BatchItemRequest(nil), items...)
-	altered.Items[0].ExpectedVersion++
-	if _, _, err := s.CreateBatch(ctx, altered); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatal("approval binding", err)
-	}
+	batchRequest := BatchRequest{ID: batchID, WorkspaceID: workspace, ActorIdentityID: requester, ActorSessionID: session, ActorID: "operator", Reason: "ticket", RequestID: uuid.NewString(), Traceparent: testTraceparent, IdempotencyKey: uuid.NewString(), Items: items}
 	batch, replay, err := s.CreateBatch(ctx, batchRequest)
 	if err != nil || replay || len(batch.Items) != 2 || batch.Items[1].State != "forbidden" {
 		t.Fatal("create batch", batch, replay, err)
+	}
+	altered := batchRequest
+	altered.Items = append([]BatchItemRequest(nil), items...)
+	altered.Items[0].ExpectedVersion++
+	if _, _, err := s.CreateBatch(ctx, altered); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatal("idempotency binding", err)
 	}
 	if _, replay, err := s.CreateBatch(ctx, batchRequest); err != nil || !replay {
 		t.Fatal("batch replay", replay, err)
@@ -465,7 +453,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 		mutator.err = nil
 		mutator.requests, mutator.contexts = nil, nil
 	})
-	claimBatch, _, err := s.CreateBatch(ctx, BatchRequest{WorkspaceID: workspace, ActorID: "operator", Reason: "claim checks", RequestID: uuid.NewString(), Traceparent: testTraceparent, IdempotencyKey: uuid.NewString(), Items: []BatchItemRequest{{NodeID: node, Username: "dave", Action: "enable", ExpectedVersion: 1, Authorized: true}, {NodeID: node, Username: "charlie", Action: "enable", ExpectedVersion: 1, Authorized: true}}})
+	claimBatch, _, err := s.CreateBatch(ctx, BatchRequest{WorkspaceID: workspace, ActorIdentityID: requester, ActorSessionID: session, ActorID: "operator", Reason: "claim checks", RequestID: uuid.NewString(), Traceparent: testTraceparent, IdempotencyKey: uuid.NewString(), Items: []BatchItemRequest{{NodeID: node, Username: "dave", Action: "enable", ExpectedVersion: 1, Authorized: true}, {NodeID: node, Username: "charlie", Action: "enable", ExpectedVersion: 1, Authorized: true}}})
 	if err != nil {
 		t.Fatal("claim batch", err)
 	}

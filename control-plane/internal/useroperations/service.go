@@ -8,12 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -285,6 +285,7 @@ func readPolicy(ctx context.Context, store userstore.Store, nodeID uuid.UUID, us
 }
 
 func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch, bool, error) {
+	request.ApprovalID = uuid.Nil
 	if request.ID == uuid.Nil {
 		request.ID = s.newID()
 	}
@@ -301,37 +302,25 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 	if err != nil {
 		return Batch{}, false, err
 	}
-	if hasDisable(request.Items) {
-		approvedID, approvedHash, err := store.BatchApproval(ctx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID)
-		if err != nil {
-			return Batch{}, false, approvals.ErrNotReady
+
+	for _, item := range request.Items {
+		if !item.Authorized {
+			continue
 		}
-		if !slices.Equal(approvedHash, hash[:]) {
-			return Batch{}, false, approvals.ErrNotReady
+		action := "user.manage"
+		if item.Action == "disable" {
+			action = "user.batch.disable"
 		}
-		items, queryErr := store.ApprovalItems(ctx, request.ApprovalID)
-		if queryErr != nil {
-			return Batch{}, false, queryErr
+		if err := rbac.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, action, rbac.Resource{WorkspaceID: request.WorkspaceID, Type: "node", ID: item.NodeID}); err != nil {
+			return Batch{}, false, err
 		}
-		var persisted []BatchItemRequest
-		for _, item := range items {
-			persisted = append(persisted, BatchItemRequest{NodeID: item.NodeID, Username: item.Username, Action: item.Action, ExpectedVersion: item.ExpectedVersion})
-		}
-		if len(persisted) != len(request.Items) || BatchRequestHash(persisted) != hash {
-			return Batch{}, false, approvals.ErrNotReady
-		}
-		request.ID = approvedID
 	}
 	existing, existingHash, err := store.BatchByKey(ctx, request.WorkspaceID, request.IdempotencyKey)
 	if err == nil {
-		if (hasDisable(request.Items) && existing != request.ID) || !slices.Equal(existingHash, hash[:]) {
+		if !slices.Equal(existingHash, hash[:]) {
 			return Batch{}, false, ErrIdempotencyConflict
 		}
-		if hasDisable(request.Items) {
-			if err := approvals.ValidateConsumedBoundTx(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "user.batch.disable", "batch_operation", existing, hash[:]); err != nil {
-				return Batch{}, false, err
-			}
-		}
+
 		if err := commit(ctx, tx); err != nil {
 			return Batch{}, false, err
 		}
@@ -346,11 +335,7 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 	if err != nil {
 		return Batch{}, false, err
 	}
-	if hasDisable(request.Items) {
-		if err := approvals.ConsumeBoundTx(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "user.batch.disable", "batch_operation", id, hash[:]); err != nil {
-			return Batch{}, false, err
-		}
-	}
+
 	if err := store.InsertBatch(ctx, userstore.Batch{ID: id, WorkspaceID: request.WorkspaceID, ActorIdentityID: optionalUUID(request.ActorIdentityID), ActorSessionID: optionalUUID(request.ActorSessionID), ApprovalID: optionalUUID(request.ApprovalID), ActorID: request.ActorID, Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, IdempotencyKey: request.IdempotencyKey, Hash: hash[:], CreatedAt: at, UpdatedAt: at}); err != nil {
 		return Batch{}, false, err
 	}
@@ -744,8 +729,8 @@ func validateBatchRequest(request BatchRequest) error {
 	if request.ID == uuid.Nil || request.ID.Version() != 7 || request.WorkspaceID == uuid.Nil || strings.TrimSpace(request.ActorID) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 || request.RequestID == "" || request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 || tracecontext.TraceID(request.Traceparent) == "" || ValidateBatchItems(request.Items) != nil {
 		return ErrInvalidRequest
 	}
-	if hasDisable(request.Items) && (request.ActorIdentityID == uuid.Nil || request.ApprovalID == uuid.Nil) {
-		return approvals.ErrNotReady
+	if hasDisable(request.Items) && (request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil) {
+		return ErrInvalidRequest
 	}
 	return nil
 }

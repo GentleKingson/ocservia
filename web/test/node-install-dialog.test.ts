@@ -42,15 +42,13 @@ interface View {
   pending: boolean;
   prepare(): void;
   issue(): Promise<void>;
-  next(): void;
   close(): void;
-  copyConfig(): Promise<void>;
 }
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614fa1";
 let context = { id: workspaceId, generation: 1 };
 let unmount: (() => void) | undefined;
 const close = vi.fn();
-const token = "obt1_" + "a".repeat(43);
+const token = "oit1_aHR0cHM6Ly9jb250cm9sbGVyLmV4YW1wbGU." + "a".repeat(43);
 const result = () => ({ token, expiresAt: new Date(Date.now() + 900_000) });
 async function mount() {
   const app = renderer.createApp(
@@ -68,8 +66,6 @@ async function mount() {
   Object.assign(view.config, {
     name: "edge-1",
     release: "v1.2.3",
-    controllerEndpointId: "a".repeat(64),
-    relayUrl: "https://relay.example.com",
   });
   view.prepare();
   return view;
@@ -86,7 +82,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 afterAll(() => vi.unstubAllGlobals());
-it("issues only on click, once, and clears the token on continuing", async () => {
+it("issues only on click, once, and clears the token on closing", async () => {
   const view = await mount();
   expect(mocks.createNodeBootstrapToken).not.toHaveBeenCalled();
   await Promise.all([view.issue(), view.issue()]);
@@ -94,9 +90,8 @@ it("issues only on click, once, and clears the token on continuing", async () =>
   expect(view.expires).toBeTruthy();
   await view.issue();
   expect(mocks.createNodeBootstrapToken).toHaveBeenCalledTimes(1);
-  view.next();
+  view.close();
   expect(view.token).toBe("");
-  expect(view.step).toBe(3);
 });
 it.each(["close", "workspace", "unmount", "pagehide"])(
   "clears received secrets on %s",
@@ -178,20 +173,4 @@ it("clears an expired token without polling or reissuing", async () => {
   expect(view.token).toBe("");
   expect(view.error).toBe("installExpired");
   expect(mocks.createNodeBootstrapToken).toHaveBeenCalledTimes(1);
-});
-
-it("clears a clipboard failure after successful retry without clearing a token error", async () => {
-  const writeText = vi
-    .fn<(text: string) => Promise<void>>()
-    .mockRejectedValueOnce(new Error("clipboard unavailable"))
-    .mockResolvedValue(undefined);
-  vi.stubGlobal("navigator", { clipboard: { writeText } });
-  const view = await mount();
-  await view.copyConfig();
-  expect(view.error).toBe("installCopyFailed");
-  await view.copyConfig();
-  expect(view.error).toBe("");
-  view.error = "installUnknown";
-  await view.copyConfig();
-  expect(view.error).toBe("installUnknown");
 });

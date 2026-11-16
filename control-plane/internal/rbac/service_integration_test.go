@@ -5,9 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
-	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -97,26 +95,10 @@ func TestRoleGrantCannotExceedActorPermissionsIntegration(t *testing.T) {
 	base.ActorID, base.SessionID = platformID, platformSession
 	base.Role = "PlatformAdmin"
 	base.RequestID = uuid.Must(uuid.NewV7()).String()
-	if _, err := service.CreateBinding(ctx, base); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatalf("unapproved PlatformAdmin grant error = %v", err)
-	}
-	hash, summary := BindingApprovalContent(targetID, workspaceID, "PlatformAdmin", "workspace", uuid.Nil)
-	approvalService := approvals.NewBackend(postgres.WrapPool(pool))
-	approval, err := approvalService.Create(ctx, approvals.Request{WorkspaceID: workspaceID, RequesterID: platformID, ResourceID: targetID, Action: "role_binding.elevate", ResourceType: "role_binding", Reason: "independent role elevation", TTL: time.Hour, SessionID: platformSession, RequestID: uuid.Must(uuid.NewV7()).String(), RequestHash: hash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: workspaceID, Type: "workspace", ID: uuid.Nil}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := approvalService.Approve(ctx, approvals.Decision{ApprovalID: approval.ID, ApproverID: targetID, SessionID: reviewerSession, Reason: "circular approval", RequestID: uuid.Must(uuid.NewV7()).String(), ExpectedRequestHash: approval.RequestHash}); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatalf("new target supplied circular approval: %v", err)
-	}
-	if _, err := approvalService.Approve(ctx, approvals.Decision{ApprovalID: approval.ID, ApproverID: reviewerID, SessionID: reviewerSession, Reason: "independent review", RequestID: uuid.Must(uuid.NewV7()).String(), ExpectedRequestHash: approval.RequestHash}); err != nil {
-		t.Fatal(err)
-	}
-	base.ApprovalID = approval.ID
-	base.RequestID = uuid.Must(uuid.NewV7()).String()
 	if _, err := service.CreateBinding(ctx, base); err != nil {
-		t.Fatalf("approved PlatformAdmin grant error = %v", err)
+		t.Fatalf("single administrator grant: %v", err)
 	}
+
 }
 
 func TestResourceTypePreventsUUIDScopeAliasIntegration(t *testing.T) {

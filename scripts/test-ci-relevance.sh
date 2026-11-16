@@ -170,6 +170,7 @@ deploy/production/install.sh run_installers run_ci_tools
 deploy/production/controller-bootstrap.sh run_installers run_ci_tools
 deploy/lib/install-env.sh run_installers run_ci_tools
 deploy/lib/install-ui.sh run_installers run_ci_tools
+deploy/lib/node-bootstrap.sh run_installers run_ci_tools
 deploy/lib/controller-runtime.sh run_installers run_ci_tools
 deploy/production/transportd-relays.sh run_installers run_controller_cache run_ci_tools
 deploy/production/systemd/agent-relays.sh run_installers run_ci_tools
@@ -179,6 +180,7 @@ scripts/release-agent-state-check.sh run_installers run_ci_tools
 scripts/package-agent.sh run_installers run_ci_tools
 scripts/verify-agent-package.sh run_installers run_ci_tools
 scripts/test-managed-node-install.sh run_installers run_ci_tools
+scripts/test-node-bootstrap.py run_installers run_ci_tools
 scripts/test-controller-install.sh run_installers run_ci_tools
 scripts/test-controller-bootstrap.sh run_installers run_ci_tools
 scripts/test-relay-launchers.py run_installers run_ci_tools

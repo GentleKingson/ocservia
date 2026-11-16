@@ -215,7 +215,7 @@ func TestPostgreSQLArtifactCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 1 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != checkpointRef {
+	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 2 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != checkpointRef {
 		t.Fatal("major cutover must use the released immutable checkpoint")
 	}
 	for _, metadata := range []string{`{"catalog_sha256":"` + strings.Repeat("a", 64) + `","unknown":1}`, `{"catalog_sha256":"` + strings.Repeat("a", 64) + `","catalog_sha256":"` + strings.Repeat("a", 64) + `"}`, `{"catalog_sha256":"` + strings.Repeat("A", 64) + `"}`} {

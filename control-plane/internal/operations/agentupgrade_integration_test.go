@@ -58,7 +58,7 @@ func createScheduledUpgrade(t *testing.T, service *Service, pool *pgxpool.Pool, 
 		t.Fatal(err)
 	}
 	request := CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Hour, RequestID: "request-" + key, Traceparent: testTraceparent}
-	approveOperation(t, pool, workspaceID, &request)
+	authorizeOperation(t, pool, workspaceID, &request)
 	operation, replayed, err := service.Create(ctx, request)
 	if err != nil || replayed || operation.State != "queued" {
 		t.Fatalf("create approved upgrade = state %q, replayed %v, err %v", operation.State, replayed, err)
@@ -325,7 +325,7 @@ func TestAgentUpgradeActiveConflictIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := upgradeReconciliationFixture(t)
 	createScheduledUpgrade(t, service, pool, workspaceID, nodeID, "upgrade-active-first")
 	request := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-active-second", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Hour, RequestID: "request-upgrade-active-second", Traceparent: testTraceparent}
-	approveOperation(t, pool, workspaceID, &request)
+	authorizeOperation(t, pool, workspaceID, &request)
 	if _, _, err := service.Create(context.Background(), request); !errors.Is(err, ErrUpgradeActive) {
 		t.Fatalf("second concurrent upgrade error = %v", err)
 	}
@@ -338,7 +338,7 @@ func TestAgentUpgradeActiveConflictIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.IdempotencyKey, request.RequestID = "upgrade-active-third", "request-upgrade-active-third"
-	approveOperation(t, pool, workspaceID, &request)
+	authorizeOperation(t, pool, workspaceID, &request)
 	operation, replayed, err := service.Create(context.Background(), request)
 	if err != nil || replayed || operation.State != "queued" {
 		t.Fatalf("upgrade after terminal predecessor = state %q, replayed %v, err %v", operation.State, replayed, err)

@@ -15,14 +15,15 @@ import (
 )
 
 type artifactStepMetadata struct {
-	Kind           string   `json:"kind"`
-	Object         string   `json:"object"`
-	Before         string   `json:"before"`
-	After          string   `json:"after"`
-	VerifySQL      string   `json:"verify_sql,omitempty"`
-	CheckBeforeSQL string   `json:"check_before_sql,omitempty"`
-	RoundtripHash  string   `json:"roundtrip_hash,omitempty"`
-	Columns        []string `json:"columns,omitempty"`
+	Kind                string   `json:"kind"`
+	Object              string   `json:"object"`
+	Before              string   `json:"before"`
+	After               string   `json:"after"`
+	VerifySQL           string   `json:"verify_sql,omitempty"`
+	CheckBeforeSQL      string   `json:"check_before_sql,omitempty"`
+	RoundtripHash       string   `json:"roundtrip_hash,omitempty"`
+	BeforeRoundtripHash string   `json:"before_roundtrip_hash,omitempty"`
+	Columns             []string `json:"columns,omitempty"`
 }
 
 const artifactCommentPrefix = "ocservia-schema:"
@@ -50,7 +51,7 @@ func decodeArtifactMetadata(s schemaartifact.Step) (artifactStepMetadata, error)
 	if !bytes.Equal(canonical, s.Metadata) || !identifier.MatchString(m.Object) || !strings.HasSuffix(string(s.SQL), ";\n") {
 		return m, ErrChecksum
 	}
-	for _, h := range []string{m.Before, m.After, m.RoundtripHash} {
+	for _, h := range []string{m.Before, m.After, m.RoundtripHash, m.BeforeRoundtripHash} {
 		if h != "" && !validHash(h) {
 			return m, ErrChecksum
 		}
@@ -59,6 +60,9 @@ func decodeArtifactMetadata(s schemaartifact.Step) (artifactStepMetadata, error)
 		if !identifier.MatchString(c) {
 			return m, ErrChecksum
 		}
+	}
+	if m.BeforeRoundtripHash != "" && (m.Kind != "table" || m.Before == "") {
+		return m, ErrChecksum
 	}
 	switch m.Kind {
 	case "table", "trigger", "procedure", "function":
@@ -125,6 +129,11 @@ func parseMySQLArtifacts(schema, upgrade []byte) (mysqlArtifacts, error) {
 		}
 		if m.RoundtripHash != "" {
 			a.roundtrip[m.RoundtripHash] = m.After
+		}
+		if m.BeforeRoundtripHash != "" {
+			// Preserve the prior fresh-install SHOW CREATE fingerprint when a
+			// forward ALTER replaces that table in the current schema artifact.
+			a.roundtrip[m.BeforeRoundtripHash] = m.Before
 		}
 	}
 	final := map[string]step{}

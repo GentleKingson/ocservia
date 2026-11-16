@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
@@ -26,7 +25,7 @@ const createPath = "/api/v1/nodes/" + testID + "/config-plans"
 const getPath = "/api/v1/config-plans/" + testID
 const applyPath = getPath + "/apply"
 const createBody = `{"expected_revision":7,"template":{"name":"unit","directives":[{"name":"tcp-port","value":"${port}"}]},"node_variables":{"port":"443"},"ttl_seconds":900,"reason":"review"}`
-const applyBody = `{"approval_id":"` + testID + `","reason":"apply"}`
+const applyBody = `{"reason":"apply"}`
 
 type fakePlans struct {
 	create func(context.Context, configplan.CreateRequest) (configplan.Plan, bool, error)
@@ -107,7 +106,7 @@ func TestConfigPlanHTTPResponses(t *testing.T) {
 				},
 				apply: func(_ context.Context, got configplan.ApplyRequest) (operations.Operation, bool, error) {
 					calls = append(calls, "apply")
-					want := configplan.ApplyRequest{PlanID: id, ApprovalID: id, IdempotencyKey: "key", ActorID: testInfo.ActorID, ActorIdentityID: testInfo.ActorIdentityID, ActorSessionID: testInfo.ActorSessionID, RequestID: testInfo.RequestID, Traceparent: testInfo.Traceparent, Reason: "apply"}
+					want := configplan.ApplyRequest{PlanID: id, ApprovalID: uuid.Nil, IdempotencyKey: "key", ActorID: testInfo.ActorID, ActorIdentityID: testInfo.ActorIdentityID, ActorSessionID: testInfo.ActorSessionID, RequestID: testInfo.RequestID, Traceparent: testInfo.Traceparent, Reason: "apply"}
 					if got != want {
 						t.Errorf("Apply: %+v, want %+v", got, want)
 					}
@@ -156,7 +155,6 @@ func TestConfigPlanHTTPErrors(t *testing.T) {
 		{configplan.ErrInvalid, 400, "config-plan-invalid", "the template, variables, revision, or lifetime is invalid"},
 		{operations.ErrInvalidRequest, 400, "config-plan-invalid", "the template, variables, revision, or lifetime is invalid"},
 		{configplan.ErrStaleRevision, 409, "stale-revision", "refresh configuration state and plan again"},
-		{approvals.ErrNotReady, 409, "approval-not-ready", "an unexpired independent approval for this exact plan is required"},
 		{configplan.ErrCapability, 409, "capability-unavailable", "the node cannot validate this configuration"},
 		{operations.ErrCapabilityMissing, 409, "capability-unavailable", "the node cannot validate this configuration"},
 		{operations.ErrIdempotencyConflict, 409, "idempotency-conflict", "the idempotency key was used for different configuration content"},
@@ -203,7 +201,7 @@ func TestConfigPlanHTTPValidationOrder(t *testing.T) {
 		{"apply-key-before-disabled", "POST", applyPath, "{", "", "", false, 400, "idempotency-key-required", "Idempotency-Key must be provided"},
 		{"apply-media-before-disabled", "POST", applyPath, "{", "key", "", false, 415, "unsupported-media-type", "Content-Type must be application/json"},
 		{"apply-json-before-disabled", "POST", applyPath, "{", "key", "application/json", false, 400, "invalid-request", "request body is invalid"},
-		{"apply-approval-before-disabled", "POST", applyPath, `{}`, "key", "application/json", false, 400, "invalid-id", "approval_id must be UUIDv7"},
+		{"apply-without-approval-disabled", "POST", applyPath, `{}`, "key", "application/json", false, 503, "service-unavailable", "configuration plan service is unavailable"},
 		{"apply-disabled", "POST", applyPath, applyBody, "key", "application/json", false, 503, "service-unavailable", "configuration plan service is unavailable"},
 		{"apply-identity-body", "POST", applyPath, `{"session_id":"forged"}`, "key", "application/json", true, 400, "invalid-request", "request body is invalid"},
 	} {

@@ -20,6 +20,12 @@ import { mapValues } from "../runtime";
  */
 export interface NodeBootstrapTokenRequest {
   /**
+   * Return a root-only installation token and automatically provision the node. Omit expected_endpoint_id in this mode; the default retains endpoint-bound enrollment and rebind compatibility.
+   * @type {boolean}
+   * @memberof NodeBootstrapTokenRequest
+   */
+  installation?: boolean;
+  /**
    *
    * @type {string}
    * @memberof NodeBootstrapTokenRequest
@@ -90,6 +96,8 @@ export function NodeBootstrapTokenRequestFromJSONTyped(
     return json;
   }
   return {
+    installation:
+      json["installation"] == null ? undefined : json["installation"],
     workspaceId: json["workspace_id"],
     environment: json["environment"],
     expectedNodeName:
@@ -120,6 +128,7 @@ export function NodeBootstrapTokenRequestToJSONTyped(
   }
 
   return {
+    installation: value["installation"],
     workspace_id: value["workspaceId"],
     environment: value["environment"],
     expected_node_name: value["expectedNodeName"],

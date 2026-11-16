@@ -14,6 +14,6 @@ func (s certificateStore) InsertCSR(ctx context.Context, v certificatestore.Pend
 
 func (s certificateStore) InsertArtifact(ctx context.Context, v certificatestore.PendingArtifact) error {
 	_, err := s.Exec(ctx, `INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at,approval_id)
-		VALUES(?,?,?,?,?,?,'certificate_p12','pending',?,?,?,?,?,?)`, UUIDBytes(v.ID), UUIDBytes(v.WorkspaceID), UUIDBytes(v.NodeID), UUIDBytes(v.CertificateID), v.CertificateVersion, UUIDBytes(v.OperationID), v.TokenSHA256, v.RequestHash, v.ExpiresAt, v.CreatedAt, v.CreatedAt, UUIDBytes(v.ApprovalID))
+		VALUES(?,?,?,?,?,?,'certificate_p12','pending',?,?,?,?,?,?)`, UUIDBytes(v.ID), UUIDBytes(v.WorkspaceID), UUIDBytes(v.NodeID), UUIDBytes(v.CertificateID), v.CertificateVersion, UUIDBytes(v.OperationID), v.TokenSHA256, v.RequestHash, v.ExpiresAt, v.CreatedAt, v.CreatedAt, rbacID(v.ApprovalID))
 	return err
 }

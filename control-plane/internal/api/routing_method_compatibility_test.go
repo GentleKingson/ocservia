@@ -90,7 +90,7 @@ func TestOrdinaryHTTPPathBoundaries(t *testing.T) {
 		{"GET", "/api/v1/certificates/invalid:issue", "POST", "method-not-allowed", 405},
 		{"POST", "/api/v1/secret-provider-refs/invalid:rotate", "", "unauthenticated", 401},
 		{"POST", "/api/v1/secret-provider-refs/invalid:unknown", "GET", "method-not-allowed", 405},
-		{"GET", "/api/v1/approval-requests/invalid:approve", "POST", "method-not-allowed", 405},
+		{"GET", "/api/v1/approval-requests/invalid:approve", "", "not-found", 404},
 		{"POST", "/api/v1/local-users/invalid:reset-password", "", "unauthenticated", 401},
 		{"POST", "/api/v1/local-users/invalid:reset-password/", "", "not-found", 404},
 	} {

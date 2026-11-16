@@ -38,7 +38,7 @@ fi
 
 if git -C "${ROOT}" cat-file -e "${base_sha}:openapi/openapi.yaml" 2>/dev/null; then
   git -C "${ROOT}" show "${base_sha}:openapi/openapi.yaml" >"${temporary}/main.yaml"
-  # Normalize only the deliberate fail-closed security migrations in the
+  # Normalize only the deliberate security and single-Admin migrations in the
   # comparison baseline so every unrelated OpenAPI break remains an error.
   (cd "${ROOT}/web" && node --input-type=module - \
     "${temporary}/main.yaml" "${ROOT}/openapi/openapi.yaml" <<'EOF'
@@ -152,9 +152,14 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
 
   for (const name of ["CertificateRevokeRequest", "CertificateP12Request"]) {
     const request = structuredClone(schemas[name]);
-    request.required = ["expected_version", "certificate_version", "approval_id", "reason"];
+    request.required = ["expected_version", "certificate_version", "reason"];
     request.properties.certificate_version = { type: "integer", format: "int64", minimum: 1 };
     request.properties.approval_id = { $ref: "#/components/schemas/UuidV7" };
+    if (name === "CertificateP12Request") {
+      request.required.splice(2, 0, "artifact_request_id");
+      delete request.properties.approval_id;
+      request.properties.artifact_request_id = { $ref: "#/components/schemas/UuidV7" };
+    }
     assertExact(name, candidateSchemas[name], request);
     schemas[name] = request;
   }
@@ -221,20 +226,66 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
     requestSummary,
   );
   schemas.Approval.properties.request_summary = requestSummary;
+
+  // Retire only the independent-approval API. Historical approval schemas
+  // remain checked above; no other route deletion is normalized.
+  for (const path of [
+    "/approval-requests",
+    "/approval-requests/{approval_id}",
+    "/approval-requests/{approval_id}:approve",
+  ]) {
+    assertExact(path, candidateDocument.paths[path], undefined);
+    delete baselineDocument.paths[path];
+  }
+  const passwordResetPath = "/local-users/{identity_id}:reset-password";
+  const passwordReset = baselineDocument.paths[passwordResetPath].post;
+  const resetParameters = passwordReset.parameters.filter(
+    (parameter) => !(parameter.in === "header" && parameter.name === "X-Approval-ID"),
+  );
+  assertExact(
+    "resetLocalUserPassword.parameters",
+    candidateDocument.paths[passwordResetPath]?.post?.parameters,
+    resetParameters,
+  );
+  passwordReset.parameters = resetParameters;
+  for (const name of [
+    "AgentUpgradeRequest", "ConfigApplyRequest", "CertificateIssueRequest",
+    "AgentRolloutCreateRequest", "AgentRollout",
+  ]) {
+    const schema = structuredClone(schemas[name]);
+    schema.required = schema.required.filter((field) => field !== "approval_id");
+    if (name === "AgentRolloutCreateRequest") {
+      schema.description = "The immutable rollout request hash binds target version, sorted node set, batch size and stop-on-failure policy.";
+    }
+    assertExact(name, candidateSchemas[name], schema);
+    schemas[name] = schema;
+  }
+
+  const bootstrapToken = structuredClone(schemas.NodeBootstrapToken);
+  bootstrapToken.properties.token.pattern = "^(obt1_[A-Za-z0-9_-]{43}|oit1_[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]{43})$";
+  assertExact("NodeBootstrapToken", candidateSchemas.NodeBootstrapToken, bootstrapToken);
+  schemas.NodeBootstrapToken = bootstrapToken;
 };
 
 // Prove the allowlist rejects an unrelated breaking change inside a schema
 // that contains an intentional migration.
-const guardCandidate = structuredClone(candidate);
-guardCandidate.components.schemas.CertificateRevokeRequest.properties.reason.maxLength = 127;
-let guardRejected = false;
-try {
-  normalizeSecurityMigrations(structuredClone(baseline), guardCandidate);
-} catch (error) {
-  guardRejected = String(error).includes("CertificateRevokeRequest");
-}
-if (!guardRejected) {
-  throw new Error("OpenAPI security migration allowlist accepted an unrelated schema change");
+for (const [name, mutate] of [
+  ["CertificateRevokeRequest", (schema) => { schema.properties.reason.maxLength = 127; }],
+  ["CertificateP12Request", (schema) => { schema.properties.artifact_request_id = { type: "string" }; }],
+  ["AgentRollout", (schema) => { schema.required = schema.required.filter((field) => field !== "state"); }],
+  ["NodeBootstrapToken", (schema) => { schema.properties.token.pattern = ".*"; }],
+]) {
+  const guardCandidate = structuredClone(candidate);
+  mutate(guardCandidate.components.schemas[name]);
+  let guardRejected = false;
+  try {
+    normalizeSecurityMigrations(structuredClone(baseline), guardCandidate);
+  } catch (error) {
+    guardRejected = String(error).includes(name);
+  }
+  if (!guardRejected) {
+    throw new Error(`OpenAPI migration allowlist accepted an unrelated ${name} change`);
+  }
 }
 
 normalizeSecurityMigrations(baseline, candidate);

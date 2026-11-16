@@ -452,14 +452,12 @@ describe("controlled fleet operations", () => {
     const completion = store.upgradeAgent(
       "2.0.0",
       "monthly maintained release",
-      "019fc0a4-6d92-765c-a8a1-4af556614c77",
     );
     await vi.advanceTimersByTimeAsync(0);
     expect(upgradeNodeAgent).toHaveBeenCalledWith(
       node,
       "2.0.0",
       "monthly maintained release",
-      "019fc0a4-6d92-765c-a8a1-4af556614c77",
       expect.any(AbortSignal),
     );
     expect(store.latestOperation?.state).toBe("accepted");
@@ -483,7 +481,6 @@ describe("controlled fleet operations", () => {
     const completion = store.upgradeAgent(
       "2.0.0",
       "monthly maintained release",
-      "019fc0a4-6d92-765c-a8a1-4af556614c77",
     );
     await vi.advanceTimersByTimeAsync(750);
     await completion;

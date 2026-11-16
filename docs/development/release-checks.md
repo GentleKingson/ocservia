@@ -124,7 +124,7 @@ Pick the entry point that matches the behavior under test:
 The database-backed Go groups over the Controller services and HTTP layer are
 `backend-policy-config`, `backend-policy-useroperations`, `backend-policy-api`,
 `regression-auth` and the startup group. They run over restricted runtime
-database connections and cover signed command intent, approval consumption and
+database connections and cover signed command intent, transactional session/RBAC checks and
 rollback, policy cleanup errors, leadership fencing, HTTP status ordering,
 Secret access denials and first-request server assembly. Owner credentials are
 for schema setup and fault injection only. On MySQL,
@@ -172,7 +172,7 @@ gh workflow run release-upgrade.yml --ref <candidate-branch> -f purpose=ocserv16
 
 After both native jobs pass, the diagnostic reuses Business Smoke on a disposable
 Ubuntu 24.04 ARM64 runner with source-built 1.6.0 binaries and the distribution's
-systemd unit. It requires browser ConfigPlan approval and apply, VPN user
+systemd unit. It requires browser ConfigPlan review and direct Admin apply, VPN user
 creation, a real OpenConnect tunnel, the injected reload-failure rollback with
 exact file-hash restoration and unchanged revision, durable receipts after
 Agent/privd restart, and a fresh working VPN after rollback; a missing rollback
@@ -716,8 +716,8 @@ per-job timings.
 ## Business validation
 
 Business Smoke runs the real Controller, native systemd Agent/privd/ocserv
-services, Local requester and approver browser sign-in, Workspace selection, VPN
-user creation, approval and reload, approved ConfigPlan apply, and an OpenConnect
+services, one Local Admin browser sign-in, Workspace selection, VPN
+user creation, direct reload and ConfigPlan apply, and an OpenConnect
 VPN session. It runs on one disposable native runner (`arch=amd64` or `arm64`;
 Release Check runs both) with one Controller and one dedicated Relay, and every
 production binary, service, Relay and VPN path runs without mocks.
@@ -766,7 +766,7 @@ historical releases. Package scriptlets validate the embedded archive checksum i
 root-owned staging, and managed-node preparation through `SERVICES_ACTIVE` runs
 through the shipped installer.
 
-After the approved positive ConfigPlan apply, both profiles bring up an
+After the direct Admin positive ConfigPlan apply, both profiles bring up an
 OpenConnect tunnel and verify end-to-end ICMP. Manual integration then submits a
 reviewed revision built to fail during ocserv reload, confirms the node restores
 the previous files byte for byte, and establishes a fresh tunnel with working
@@ -774,8 +774,8 @@ ICMP. This tests automatic rollback of a failed apply, not an operator-initiated
 rollback of an active revision. Its final stage builds the next patch version of
 the Agent package, places it in the node's root-owned upgrade spool, recreates the
 Controller with a diagnostics-only Compose override that mounts a release catalog
-(absent from the shipped launcher), and drives a browser-initiated, approved
-one-node canary rollout. The rollout must complete, consume the approval, leave
+(absent from the shipped launcher), and drives a browser-initiated, direct Admin
+one-node canary rollout. The rollout must complete without an approval dependency, leave
 the installed binaries and the live Agent reporting the target version, and
 record zero unexpected CSP violations. Stage durations go to `timings.json`; no
 duration target is a release gate.
@@ -783,11 +783,11 @@ duration target is a release gate.
 GitHub Actions job status is the pass/fail authority. `result.json` records the
 selected scope (`business-smoke` or `integration`, never full release
 acceptance), the diagnostic schema version, overall outcome, stage timings and
-completed checkpoints, with `operator_mode=simulated_two_principals` and human
-custody `NOT_VERIFIED`. Both principals must pass all RBAC, content-binding,
-self-approval and replay assertions; two-person human custody needs separate
-evidence under the
-[approval boundary](../reference/stable-contracts.md#approval-principal-boundary).
+completed checkpoints, with `operator_mode=single_admin`. The Admin performs
+management operations directly. A role-less test user exercises RBAC denials;
+it is not a second authorizing identity. Exact request replay must recover the
+same operation, changed intent with the same idempotency key must fail, and
+native receipts and effects must agree with the recorded operation.
 Checkpoints are written only after their assertions succeed, and unreached
 phases stay NOT RUN. Across retries, keep failed runs, the original run and
 attempt numbers, and the exact candidate SHA. The harness records these limits
@@ -798,7 +798,9 @@ and never scores them as PASS:
 - The private Relay CA is provisioned through the documented protected public CA
   files, and the shipped Compose overlay and native launcher enable the existing
   strict-TLS flag unpatched. The managed-node installer drives enrollment, with
-  preparation, PENDING_APPROVAL and SERVICES_ACTIVE as distinct checkpoints.
+  preparation, pending registration and SERVICES_ACTIVE as distinct checkpoints.
+  This legacy enrollment fixture uses direct Admin activation; the one-token
+  automatic activation path is covered by the Nodes installation wizard suite.
   Smoke registers through a `POST /api/v1/node-bootstrap-tokens` token without an
   EndpointID, handed to the first installer run as a protected
   `BOOTSTRAP_TOKEN_SOURCE`, which reaches `ENROLLED_LOCAL`. The harness checks
@@ -807,12 +809,12 @@ and never scores them as PASS:
   while pending and after activation keep the node ID and identity files.
   Extended keeps the legacy endpoint-bound registration (`ENROLLMENT_READY`, then
   `POST /api/v1/enrollment-tokens`).
-- Requester and approver log in as separate principals with distinct credentials
-  and isolated browser sessions, without devAuth or injected sessions (direct
-  database writes are limited to initial workspace provisioning before Local
-  bootstrap). The suite checks RBAC, workspace authorization, 403 on
-  self-approval, approval content binding and replay rejection. One automated
-  runner cannot prove independent custody by two humans.
+- The initial Local bootstrap creates exactly one Admin. The browser uses that
+  identity without devAuth or injected sessions; the API creates a role-less
+  reader for denial checks. Direct database writes are limited to initial
+  workspace provisioning before Local bootstrap. The suite checks anonymous
+  access, RBAC and workspace denial, request binding and idempotency conflicts.
+  No second login or approval queue authorizes management operations.
 - Extended uses a dedicated HTTPS OIDC fixture for discovery, PKCE, callbacks and
   rejection of invalid issuers, signatures, nonces, codes and state, then
   OIDC-only sign-in, workspace authorization and restart/logout. The Signer
@@ -852,20 +854,18 @@ and never scores them as PASS:
   password authentication establishes a session. Both checkpoints are required,
   and a terminate ending `unknown` fails the run.
 - By default both profiles end with a terminal revocation of the real node (in
-  Extended, after the rollout). Anonymous, foreign-Origin, unapproved,
-  stale-approval and pending-approval requests, and the approver spending the
-  requester's approval, are rejected while the node stays active. The approved
+  Extended, after the rollout). Anonymous, role-less and foreign-Origin
+  requests are rejected while the node stays active. Direct Admin
   revocation must return 200, meaning the request itself applied the revoked
   trust and the connection close. It passes only after all of the following
   hold:
-  - the approval is consumed;
   - the node and its endpoint key read revoked;
   - the request settled the revoked trust convergence task at that revision;
   - no owner lease remains;
   - the node reads offline while the same Agent process stays up and logs the
     ended Controller connection.
 
-  The old reload approval then creates no operation and leaves privd effects, the
+  A new reload request against the revoked node then creates no operation and leaves privd effects, the
   Agent journal, ocserv reloads and node files unchanged. A 503 (synchronization
   left to the background worker) or a timeout fails the run.
 
@@ -907,7 +907,7 @@ validation does not certify native package distribution or high availability.
 
 Release Diagnostics (`release-upgrade.yml`) accepts `terminal=uninstall` as an
 opt-in alternative to the default `terminal=revocation`. Use `purpose=smoke` to
-reuse Bootstrap Token enrollment, pending identity reruns, independent approval,
+reuse Bootstrap Token enrollment, pending identity reruns, direct Admin activation,
 Online convergence, browser configuration apply and the real VPN before removing
 the package. It adds no Basic CI or Release Check E2E requirement and changes no
 production lifecycle behavior.
@@ -1209,8 +1209,8 @@ procedure does not use it.
 ### Scope and recovery profile
 
 This profile checks enrollment and private business across separate VMs with a
-persistent Agent identity, native Agent/privd/ocserv units, independent local
-Requester and Approver identities, privileged config and reload operations, and
+persistent Agent identity, native Agent/privd/ocserv units, one local
+Admin identity, privileged config and reload operations, and
 an OpenConnect client in a local network namespace. Only after B01-B05
 reconciliation does the hosted workflow start R01-R05:
 
@@ -1218,7 +1218,7 @@ reconciliation does the hosted workflow start R01-R05:
   and identity baselines, and the existing VPN session. Agent-owned outbound UDP
   except DNS is rejected with IPv4/IPv6 rules; Tailscale's daemon is unaffected.
 - Stop the sole Relay container. Require verified HTTPS unreachability, owner
-  lease invalidation and offline telemetry before submitting one approved reload.
+  lease invalidation and offline telemetry before submitting one direct Admin reload.
 - Keep the Relay stopped until the Controller proves an unpublished Outbox and no
   sent attempt, and the Node proves no Journal/root execution, no reload,
   unchanged identity/processes and a working original VPN session.
@@ -1251,25 +1251,28 @@ operator steps of the wizard are in
 The Controller builds the current Web and mounts its output read-only at `/srv`
 in the existing loopback HTTPS gateway (production Caddy is unchanged) with a
 disposable certificate that the browser accepts. Playwright uses a disposable
-browser context to log in as the temporary requester, verifies the authorized
+browser context to log in as the temporary Admin, verifies the authorized
 Workspace (the fixture has one, shown as text; multiple-Workspace selection stays
 covered by the Web regressions), fills the install dialog and reads its
 secret-free `install.env`. The configuration travels in the controller-ready
 artifact. The Agent validates its exact literal fields and paths, runs the native
 installer with an explicitly empty bootstrap source, and verifies
 `ENROLLMENT_READY`, persistent identity files and stopped Agent/privd before
-publishing its endpoint. Only then does the Controller reopen the same UI
-configuration and click Create bootstrap token once; a durable attempt marker and
-no retry loop prevent replay after failed or unknown issuance. The request must
-carry the matching Workspace header and body, TTL 900 and no
-`expected_endpoint_id`. The OAEP exchange carries the token, and a mode-0600
-source feeds the same installer with unchanged configuration. The Agent must
-reach `ENROLLED_LOCAL`, retain both identity files and EndpointID, and leave both
-services stopped. Controller SQL checks `node_bootstrap_tokens` using SHA-256 of
-the complete prefixed token, consumption time, Workspace, name and bound
-EndpointID, plus the pending node; it does not reuse enrollment-token SQL.
+publishing its endpoint. The Controller uses the same UI configuration to create
+one installation token;
+a durable attempt marker and no retry loop prevent replay after failed or unknown
+issuance. The request must carry the matching Workspace header and body,
+`installation=true`, TTL 900 and no `expected_endpoint_id`. The OAEP exchange
+carries the `oit1_` token, and a mode-0600 source feeds the native installer through
+`--join-token-file`. The installer securely obtains configuration, registers and
+activates the node, registers its privd attestation key and starts the services
+without a second identity or manual confirmation. It must return `ONLINE`, retain
+the prepared identity files and EndpointID, and remove temporary token material.
+Controller evidence checks the consumed, identity-bound enrollment derived from
+the installation token, active node and registered privd key. This fixture uses
+local same-SHA release inputs; it does not prove public release downloads.
 
-Independent identities, content-bound approval, `X-Approval-ID`, native startup,
+Single Admin authorization, request binding, native startup,
 business checks and Relay recovery remain mandatory, and this mode also records
 active, online, fresh telemetry with a heartbeat no older than 120 seconds.
 Browser execution uses the library API without screenshots, traces, videos,
@@ -1394,7 +1397,7 @@ authorized reload and VPN traffic.
 
 The manual integration profile adds the offline-queue scenario. While the Relay is
 stopped, it confirms the node depends on that Relay, waits for the prior owner
-lease to expire, and verifies that an approved offline command produces no
+lease to expire, and verifies that an authorized offline command produces no
 published outbox record, transmission attempt, Agent journal entry or root side
 effect. Once the same Relay restarts, the queued operation must finish with one
 Agent journal entry, a verified root receipt and one additional native reload.
@@ -1465,8 +1468,7 @@ scenario, and each must finish and pass. Runs without resilience record
 candidate tree; the standalone [network probe](#network-probe) verifies transport
 reachability in isolation and does not exercise the business recovery chain. In
 every scenario the command pipeline still enforces owner/epoch/fence/lease
-validation, the transactional outbox, authorization, independent two-principal
-approvals, signatures, idempotent command IDs, the Agent SQLite journal and privd
+validation, the transactional outbox, session and RBAC authorization, signatures, idempotent command IDs, the Agent SQLite journal and privd
 receipts. A queued offline command proven never sent must never be treated as
 expected Unknown if it fails. Passing these checks does not imply exactly-once
 execution or production RTO/RPO guarantees.
@@ -1550,19 +1552,19 @@ Run verification checks inside an authorized, isolated environment with all depe
 | API adapters, session or Workspace | `test/api-client.test.ts`, generated-auth serialization checks; `node test/run-auth-browser.mjs` against the production build for login/Workspace/SSE races |
 | Configuration/certificate workflows | `test/configuration-feature.test.ts`, `test/certificates-feature.test.ts`, `test/node-config-plan.test.ts`, `test/node-workflows.test.ts`; browser specs `e2e/config-plan.spec.ts`, `e2e/certificate-lifecycle.spec.ts`, `e2e/node-forms.spec.ts` on desktop/mobile |
 | Operations/rollouts | `test/operation-state-tone.test.ts`, `test/rollout-views.test.ts`, `test/nodes-rollout-submit.test.ts`; browser specs `e2e/operations.spec.ts`, `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume; a real one-node rollout runs in [manual integration](#business-validation) |
-| Approvals, audit, overview | Corresponding view/unit tests and browser specs `e2e/approval-queue.spec.ts`, `e2e/approvals-audit.spec.ts`, `e2e/overview.spec.ts`; verify permission, stale/empty states and Workspace switching |
+| Audit, overview | Corresponding view/unit tests and browser specs `e2e/approvals-audit.spec.ts` (audit and absence of approval navigation), `e2e/overview.spec.ts`; verify permission, stale/empty states and Workspace switching |
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
 | ESLint configuration | `npm run lint`, `npx vitest run test/eslint-vue.test.ts` (Vue rules reach SFCs) and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |
 
 `scripts/web-check.sh basic` builds the generated OpenAPI client and runs formatting checks, ESLint, typecheck, Vitest unit tests, the production Vite build, and generated-auth verification. Running `scripts/web-check.sh full` adds the focused authentication browser runner (`test/run-auth-browser.mjs`), while the full Playwright E2E suite requires `npm run test:e2e` or `make e2e`. Neither this runner nor stubbed Playwright specs validate a live Controller, database recovery, or host installation. Specs that exercise the development simulator (`development-simulation` and the first two `overview` tests) require a running backend stack; if the backend is not running, report those specs as not run. To run focused Playwright specs against an already-serving production bundle, export `PLAYWRIGHT_BASE_URL` beforehand.
 
-Playwright projects are named after their browser target: `desktop` runs Chromium, `mobile` emulates an iPhone 13 viewport inside Chromium (and therefore does not provide Safari engine coverage), and `firefox` and `webkit` run the cross-engine subset covering login/Workspace selection, rollouts, node forms, password dialogs, shell/Overview layout, Nodes/detail, Operations, and approvals/audit. `npm run test:e2e` executes all four projects unless filtered with `--project`. `node test/run-auth-browser.mjs` accepts the same `--project` flags (for example `node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`) and exits with an error if a requested browser binary is missing; always report any project whose browser engine is not installed as not run.
+Playwright projects are named after their browser target: `desktop` runs Chromium, `mobile` emulates an iPhone 13 viewport inside Chromium (and therefore does not provide Safari engine coverage), and `firefox` and `webkit` run the cross-engine subset covering login/Workspace selection, rollouts, node forms, password dialogs, shell/Overview layout, Nodes/detail, Operations, and audit. `npm run test:e2e` executes all four projects unless filtered with `--project`. `node test/run-auth-browser.mjs` accepts the same `--project` flags (for example `node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`) and exits with an error if a requested browser binary is missing; always report any project whose browser engine is not installed as not run.
 
 Passing `--gateway` (which requires Docker) serves `dist/` behind the pinned production Caddy image and `deploy/production/Caddyfile` over HTTPS in place of Vite preview. Passing `--gateway=integrated` places the Integrated Edge container (`edge.Dockerfile` base image with the NGINX template and entrypoint from `deploy/production/integrated`) in front of the Integrated Caddyfile at `https://controller.localhost` on `127.0.0.1:443` so Caddy receives traffic only through Edge's SNI router and PROXY protocol. The cross-engine specs import `e2e/csp.ts`, which fails the test on any `securitypolicyviolation` event. `csp-control.spec.ts` also triggers a deliberate inline violation and asserts that the browser blocks it with `disposition=enforce` across every selected project, because the Content Security Policy is enforced without a report endpoint. Playwright's WebKit and Firefox builds do not substitute for testing on minimum supported Safari 16.4 or Firefox 128 releases.
 
 When a pull request modifies shared UI primitives, layout, or styles, include the following evidence in the PR description:
 
-- Before-and-after screenshots captured against identical fixtures at both 1440 px and 390 px widths for overview, nodes, node detail (including missing-node state), operations, rollout, approvals list and detail, audit, settings, and login, confirming that the document itself never scrolls horizontally.
+- Before-and-after screenshots captured against identical fixtures at both 1440 px and 390 px widths for overview, nodes, node detail (including missing-node state), operations, rollout, audit, settings, and login, confirming that the document itself never scrolls horizontally.
 - Verification of the keyboard skip link, desktop sidebar and mobile Sheet navigation, Nodes filter controls and detail links, and dialog open, cancel, and confirm flows returning focus to the triggering element.
 - CSS and JS production bundle size comparisons against the base branch, along with the rationale for any newly added package dependencies.
 - Manual Safari and Firefox test results whenever the change touches browser-sensitive CSS or DOM APIs, since Chromium mobile emulation does not cover those engines.
@@ -1642,7 +1644,7 @@ and `architecture` fields. Before protected staging, architecture verification,
 safe extraction and service lifecycle transitions, the upgrade path checks the
 downloaded archive's SHA-256 against the command and aborts on a mismatch. All
 standard command guarantees stay in force: runtime command authorization,
-independent two-principal approvals, owner/epoch/fence/lease checks,
+transactional session/RBAC checks, owner/epoch/fence/lease checks,
 idempotency, the Agent SQLite journal, privd receipts, Unknown outcome
 reconciliation, semantic payload hashes, command/fence/receipt signatures and
 durable immutable operation intent. The operator-provisioned release catalog
@@ -1855,7 +1857,7 @@ validation gap.
 
 This verifies published downloads and native package installation. Installer
 fault injection uses mocked host commands and is labeled separately; it does not
-repeat browser enrollment, Controller approval or live Relay connectivity. The
+repeat browser enrollment, automatic Controller activation or live Relay connectivity. The
 three-VM wizard run's `RELEASE_ASSET_DOWNLOAD=NOT_TESTED` stays accurate for its
 local same-SHA `v0.0.0` inputs, and only a successful published-RC run closes the
 gap.
@@ -1864,9 +1866,9 @@ gap.
 
 | Behavior | Owner |
 | --- | --- |
-| Native bootstrap-token registration and online node, browser login/Workspace/user creation/approval/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke, amd64 and arm64 with the same checkpoint gate |
+| Native bootstrap-token registration and online node, browser Admin login/Workspace/user creation/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke, amd64 and arm64 with the same checkpoint gate |
 | Controller/transport, Agent/privd, bundled PostgreSQL and sole Relay recovery (no Business-level MySQL recovery) | Business Smoke with `run-resilience=true` |
-| Terminal real-node revocation: rejected unauthorized/unapproved requests, approved revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Business Smoke and manual integration |
+| Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Business Smoke and manual integration |
 | OIDC positive/negative paths; native session disconnect and IP-ban removal; CSR, issue, one-use P12, revoke and persistence (including browser checks); offline queue and exact root effects; one-node browser canary rollout to a locally built next Agent version | Manual integration |
 | DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on amd64/arm64 | Native package build/install smoke (Release Check and Release) |
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products (Release Check and Release) |
@@ -1937,7 +1939,7 @@ enforcement (see [Signer and certificate verification](#signer-and-certificate-v
 Lifecycle verification covers both manifest versions, mode and database overlays,
 pending-state retry, same-mode rollback, and preflight refusal before side
 effects. [Business validation](#business-validation) covers real enrollment,
-independent approval, native privileged effects and browser workflows, and native
+direct Admin authorization, native privileged effects and browser workflows, and native
 product jobs cover both architectures. Missing proof blocks the corresponding
 claim, and historical results in Git history do not count as current acceptance.
 

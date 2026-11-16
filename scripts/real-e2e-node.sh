@@ -105,24 +105,15 @@ EOF
   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${WORK}/controller-ready/command.pub.pem"
   export USER_PASSWORD_SEAL_KEY_ID=business-test-user-seal P12_PASSWORD_SEAL_KEY_ID=business-test-p12-seal ENROLLMENT_ENVIRONMENT=development
   if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
-    install -m 0600 "${ready_dir}/install.env" "${WORK}/install.env"
-    # Validate literals before the native loader reads them; never source the file.
-    python3 - "${WORK}" "${controller}" <<'CONFIG'
-import pathlib, sys
-work = pathlib.Path(sys.argv[1])
-expected = (f"# Node: github-hosted-node\n# Workspace: 019d0000-0000-7000-8000-000000000001\n"
-            f"# Release: v0.0.0\nCONTROLLER_ENDPOINT_ID={sys.argv[2]}\n"
-            f"ENROLLMENT_ENVIRONMENT=development\nRELAY_URL_A={(work/'relay/url').read_text().strip()}\n"
-            f"RELAY_URL_B=\nBOOTSTRAP_TOKEN_SOURCE={work}/secrets/bootstrap-token\n"
-            f"RELAY_ACCESS_TOKEN_SOURCE={work}/relay/token\n"
-            f"CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE={work}/controller-ready/command.pub.pem\n")
-assert (work/'install.env').read_text() == expected
-CONFIG
-    # Explicit empty source delays issuance until host preparation is confirmed.
-    (unset CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B RELAY_ACCESS_TOKEN_SOURCE \
-      CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE ENROLLMENT_ENVIRONMENT
-     cd "${WORK}"
-     BOOTSTRAP_TOKEN_SOURCE='' bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}") \
+    # The Controller is reachable only over the existing CI tailnet. Import
+    # its exchanged test CA; the real installer continues normal TLS checking.
+    sudo install -m 0644 "${ready_dir}/controller-ca.crt" /usr/local/share/ca-certificates/ocservia-real-e2e.crt
+    sudo update-ca-certificates >/dev/null
+    cp "${ready_dir}/install-command" "${WORK}/install-command"
+    cp "${ready_dir}/controller-origin" "${WORK}/controller-origin"
+    # Prepare the existing endpoint so the cross-runner fixture can bind the
+    # token before issuance. This is fixture coordination, not manual approval.
+    BOOTSTRAP_TOKEN_SOURCE='' bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" \
       >"${SECRETS}/managed-prepare.log"
     assert_not_started
     # The runner owns this private evidence file; sudo only reads the root identity.
@@ -185,15 +176,15 @@ enroll() {
   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${WORK}/controller-ready/command.pub.pem"
   export USER_PASSWORD_SEAL_KEY_ID=business-test-user-seal P12_PASSWORD_SEAL_KEY_ID=business-test-p12-seal ENROLLMENT_ENVIRONMENT=development
   if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
-    (unset CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B RELAY_ACCESS_TOKEN_SOURCE \
-      CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE ENROLLMENT_ENVIRONMENT BOOTSTRAP_TOKEN_SOURCE
-     cd "${WORK}"
-     bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}") >"${SECRETS}/enrollment-output"
+    # The runner owns the protected log; sudo executes only the installer.
+    # shellcheck disable=SC2024
+    sudo bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive \
+      --join-token-file "${SECRETS}/bootstrap-token" --version "v${VERSION}" >"${SECRETS}/enrollment-output"
     sudo sha256sum --check --status "${SECRETS}/identity.sha256"
     [[ "$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
       --controller "${controller}" --prepare-enrollment)" == "$(<"${OUTBOX}/agent-endpoint/agent-endpoint-id")" ]]
-    assert_not_started
-    [[ ! -e "${SECRETS}/bootstrap-token" ]]
+    grep -Fxq ONLINE "${SECRETS}/enrollment-output"
+    rm -f -- "${SECRETS}/bootstrap-token"
   else
     bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${SECRETS}/enrollment-output"
   fi
@@ -204,13 +195,15 @@ enroll() {
     return 1
   }
   node_id="${node_ids[0]}"
-  grep -Fxq ENROLLED_LOCAL "${SECRETS}/enrollment-output"
+  if [[ "${NODE_INSTALL_E2E:-false}" != true ]]; then
+    grep -Fxq ENROLLED_LOCAL "${SECRETS}/enrollment-output"
+  fi
   sudo test ! -e /etc/ocservia-agent/enrollment-token
   mkdir -p "${OUTBOX}/enrollment-result"
   printf '%s\n' "${node_id}" >"${OUTBOX}/enrollment-result/node-id"
   runner_instance_id >"${OUTBOX}/enrollment-result/runner-instance"
   if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
-    printf 'ENROLLMENT_READY=PASS\nENROLLED_LOCAL=PASS\nIDENTITY_UNCHANGED=PASS\nSERVICES_NOT_STARTED=PASS\nRELEASE_ASSET_DOWNLOAD=NOT_TESTED\n' \
+    printf 'ENROLLMENT_READY=PASS\nONLINE=PASS\nIDENTITY_UNCHANGED=PASS\nPRIVD_AUTOMATIC_REGISTRATION=PASS\nRELEASE_ASSET_DOWNLOAD=NOT_TESTED\n' \
       >"${RUNNER_TEMP}/real-e2e-evidence-node/node-install.txt"
   fi
 }
@@ -222,6 +215,11 @@ activate_native() {
   endpoint="$(<"${OUTBOX}/agent-endpoint/agent-endpoint-id")"
   [[ "$(jq -r .node_id "${authority_dir}/authority.json")" == "${node}" ]]
   [[ "$(jq -r .agent_endpoint_id "${authority_dir}/authority.json")" == "${endpoint}" ]]
+  if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+    # Only public signature evidence is copied into the runner-owned outbox.
+    # shellcheck disable=SC2024
+    sudo cat /var/lib/ocservia-bootstrap/registration.json >"${WORK}/proof.json"
+  else
   openssl pkeyutl -decrypt -inkey "${WORK}/exchange.key" \
     -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 \
     -in "${authority_dir}/credential.oaep" -out "${SECRETS}/privd-credential"
@@ -232,6 +230,7 @@ activate_native() {
     "$(jq -r .controller_nonce_hex "${authority_dir}/authority.json")" \
     "$(jq -r .credential_context_sha256_hex "${authority_dir}/authority.json")" \
     >"${WORK}/proof.json"
+  fi
   jq -e 'has("credential") | not' "${WORK}/proof.json" >/dev/null
   ref="$(jq -r .secret_ref_id "${authority_dir}/authority.json")"
   expected_key="$(jq -r .secret_ref_key "${authority_dir}/authority.json")"
@@ -325,7 +324,11 @@ cleanup_node() {
     if dpkg-query -W -f='${Status}' ocserv 2>/dev/null | grep -Fxq 'install ok installed'; then
       sudo apt-get purge -y ocserv
     fi
-    sudo rm -rf -- /etc/ocservia-agent /var/lib/ocservia-agent /var/lib/ocservia-privd /etc/ocservia
+    sudo rm -rf -- /etc/ocservia-agent /var/lib/ocservia-agent /var/lib/ocservia-privd /var/lib/ocservia-bootstrap /etc/ocservia
+    if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+      sudo rm -f /usr/local/share/ca-certificates/ocservia-real-e2e.crt
+      sudo update-ca-certificates >/dev/null
+    fi
     sudo rm -f -- /etc/ocserv/business-test.crt /etc/ocserv/business-test.key /etc/ocserv/ocpasswd
     sudo userdel ocservia-vpn 2>/dev/null || true
     sudo groupdel ocservia-vpn 2>/dev/null || true

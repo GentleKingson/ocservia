@@ -2,7 +2,6 @@ import type { Operation } from "@ocservia/api-client";
 import { describe, expect, it } from "vitest";
 
 import {
-  approvalTone,
   auditResultTone,
   operationTone,
   rolloutNodeTone,
@@ -59,13 +58,8 @@ describe("operation state tones", () => {
   });
 });
 
-describe("approval and audit tones", () => {
-  it("never shows an approval as finished work or an intent as success", () => {
-    expect(approvalTone("pending")).toBe("warning");
-    expect(approvalTone("approved")).toBe("success");
-    expect(approvalTone("consumed")).toBe("neutral");
-    expect(approvalTone("rejected")).toBe("danger");
-    expect(approvalTone("expired")).toBe("danger");
+describe("audit tones", () => {
+  it("never shows an intent as success", () => {
     expect(auditResultTone("succeeded")).toBe("success");
     expect(auditResultTone("failed")).toBe("danger");
     expect(auditResultTone("intent")).toBe("neutral");

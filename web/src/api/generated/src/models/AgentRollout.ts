@@ -74,7 +74,7 @@ export interface AgentRollout {
    * @type {string}
    * @memberof AgentRollout
    */
-  approvalId: string;
+  approvalId?: string;
   /**
    *
    * @type {string}
@@ -169,13 +169,6 @@ export function instanceOfAgentRollout(value: object): value is AgentRollout {
     return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
   if (
-    (!("approvalId" in (value as Record<string, any>)) &&
-      !("approval_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["approvalId"] === undefined &&
-      (value as Record<string, any>)["approval_id"] === undefined)
-  )
-    return false;
-  if (
     (!("createdBy" in (value as Record<string, any>)) &&
       !("created_by" in (value as Record<string, any>))) ||
     ((value as Record<string, any>)["createdBy"] === undefined &&
@@ -225,7 +218,7 @@ export function AgentRolloutFromJSONTyped(
     batchSize: json["batch_size"],
     stopOnFailure: json["stop_on_failure"],
     reason: json["reason"],
-    approvalId: json["approval_id"],
+    approvalId: json["approval_id"] == null ? undefined : json["approval_id"],
     createdBy: json["created_by"],
     currentBatch: json["current_batch"],
     pauseCode: json["pause_code"] == null ? undefined : json["pause_code"],

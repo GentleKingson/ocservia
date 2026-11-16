@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
@@ -437,7 +436,6 @@ func TestUserOperationsHTTPErrors(t *testing.T) {
 		{useroperations.ErrNotFound, 404, "not-found", "the requested user policy or batch does not exist"},
 		{database.ErrNotFound, 404, "not-found", "the requested user policy or batch does not exist"},
 		{rbac.ErrForbidden, 403, "forbidden", "the principal is not authorized for this operation"},
-		{approvals.ErrNotReady, 403, "approval-required", "bulk user disable requires a valid approval bound to the batch identifier"},
 		{errors.New("storage"), 503, "database-unavailable", "user operations state is temporarily unavailable"},
 	} {
 		t.Run(tc.err.Error(), func(t *testing.T) {

@@ -484,12 +484,11 @@ fn read_relay_token(path: &Path) -> Result<String, io::Error> {
         .read(true)
         .custom_flags(libc_o_nofollow())
         .open(path)?;
-    validate_key_file(&file, rustix::process::geteuid().as_raw()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "relay token must be owned by the process user with mode 0600 or stricter",
-        )
-    })?;
+    validate_relay_token_file(
+        &file,
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw(),
+    )?;
     let mut raw = Vec::with_capacity(129);
     std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 513), &mut raw)?;
     let raw = Zeroizing::new(raw);
@@ -502,6 +501,29 @@ fn read_relay_token(path: &Path) -> Result<String, io::Error> {
         ));
     }
     Ok(token.to_owned())
+}
+
+// The Controller and transport share only the Relay bearer token. Endpoint
+// identity keys continue through validate_key_file's owner-only checks.
+fn validate_relay_token_file(
+    file: &std::fs::File,
+    expected_owner: u32,
+    expected_group: u32,
+) -> Result<(), io::Error> {
+    let metadata = file.metadata()?;
+    let owner_only = metadata.mode().trailing_zeros() >= 6;
+    let controller_readable = metadata.gid() == expected_group && metadata.mode() & 0o7777 == 0o440;
+    if !metadata.file_type().is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != expected_owner
+        || !(owner_only || controller_readable)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "relay token must be a single-link process-owned file with owner-only permissions or mode 0440 in the process group",
+        ));
+    }
+    Ok(())
 }
 
 fn required_value(
@@ -907,6 +929,33 @@ mod tests {
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).expect("mode");
         assert!(build_relay_mode("custom", urls, Some(&token)).is_err());
         std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn relay_token_sharing_does_not_relax_identity_key_permissions() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-relay-sharing-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("create directory");
+        let path = directory.join("token");
+        std::fs::write(&path, "0123456789abcdef0123456789abcdef").expect("write token");
+        let file = std::fs::File::open(&path).expect("open token");
+        let metadata = file.metadata().expect("metadata");
+        let (uid, gid) = (metadata.uid(), metadata.gid());
+        for mode in [0o400, 0o600, 0o440] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(validate_relay_token_file(&file, uid, gid).is_ok());
+        }
+        assert!(validate_key_file(&file, uid).is_err());
+        assert!(validate_relay_token_file(&file, uid.wrapping_add(1), gid).is_err());
+        assert!(validate_relay_token_file(&file, uid, gid.wrapping_add(1)).is_err());
+        for mode in [0o640, 0o444, 0o644, 0o460] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(validate_relay_token_file(&file, uid, gid).is_err());
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o440)).unwrap();
+        std::fs::hard_link(&path, directory.join("alias")).unwrap();
+        assert!(validate_relay_token_file(&file, uid, gid).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

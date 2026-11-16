@@ -91,7 +91,7 @@ func (s operationStore) InsertRollout(ctx context.Context, v operationstore.Pend
 	if err != nil {
 		return err
 	}
-	_, err = s.Exec(ctx, `INSERT INTO agent_rollouts(id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,idempotency_key,created_at,updated_at) VALUES($1,$2,$3,'queued',$4,true,$5,$6,$7,$8,$9,0,'',$10,$11,$12,$12)`, v.ID, v.WorkspaceID, v.TargetVersion, v.BatchSize, v.Reason, v.ApprovalID, v.RequestHash, v.CreatedBy, v.ActorSession, document, v.IdempotencyKey, v.CreatedAt)
+	_, err = s.Exec(ctx, `INSERT INTO agent_rollouts(id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,idempotency_key,created_at,updated_at) VALUES($1,$2,$3,'queued',$4,true,$5,$6,$7,$8,$9,0,'',$10,$11,$12,$12)`, v.ID, v.WorkspaceID, v.TargetVersion, v.BatchSize, v.Reason, rbacID(v.ApprovalID), v.RequestHash, v.CreatedBy, v.ActorSession, document, v.IdempotencyKey, v.CreatedAt)
 	return err
 }
 

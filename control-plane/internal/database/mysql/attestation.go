@@ -146,7 +146,7 @@ func (s privdAttestationStore) InsertKey(ctx context.Context, k attestationstore
 		predecessor = *k.PredecessorKeyID
 	}
 	_, err = s.tx.Exec(ctx, `INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,predecessor_key_id,registration_credential_id) VALUES(?,?,'ed25519',?,'active',?,?,?,?,?)`,
-		UUIDBytes(k.NodeID), k.KeyID, k.PublicKey, created, created, created, predecessor, UUIDBytes(k.RegistrationCredentialID))
+		UUIDBytes(k.NodeID), k.KeyID, k.PublicKey, created, created, created, predecessor, rbacID(k.RegistrationCredentialID))
 	return err
 }
 
@@ -192,4 +192,14 @@ func (s privdAttestationStore) RevokeKey(ctx context.Context, node uuid.UUID, ke
 		return false, err
 	}
 	return affected == 1, nil
+}
+
+func (s privdAttestationStore) FirstKey(ctx context.Context, node uuid.UUID) (string, attestationstore.VerificationKey, error) {
+	var id string
+	err := s.tx.QueryRow(ctx, `SELECT key_id FROM node_privd_attestation_keys WHERE node_id=? ORDER BY created_at,key_id LIMIT 1`, UUIDBytes(node)).Scan(&id)
+	if err != nil {
+		return "", attestationstore.VerificationKey{}, err
+	}
+	key, err := s.VerificationKey(ctx, node, id)
+	return id, key, err
 }

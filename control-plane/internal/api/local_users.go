@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
@@ -64,8 +63,6 @@ func (s *Server) mutateLocalUser(w http.ResponseWriter, r *http.Request, mutatio
 			status, detail = http.StatusUnauthorized, "the acting session is no longer valid"
 		case errors.Is(err, auth.ErrPasswordPolicy):
 			status, detail = http.StatusBadRequest, err.Error()
-		case errors.Is(err, approvals.ErrNotReady):
-			status, detail = http.StatusConflict, "a matching independent approval is required"
 		case errors.Is(err, auth.ErrLocalInvalid):
 			status, detail = http.StatusBadRequest, "invalid Local username or password"
 		case errors.Is(err, auth.ErrLocalDuplicate):

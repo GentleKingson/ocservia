@@ -14,7 +14,17 @@ OUTBOX="${WORK}/outbox"
 export REAL_E2E_RELAY_DIR="${WORK}/relay"
 WORKSPACE_ID="019d0000-0000-7000-8000-000000000001"
 export OCSERVIA_BUSINESS_TEST_WORK_DIR="${WORK}" OCSERVIA_BUSINESS_TEST_WORKSPACE_ID="${WORKSPACE_ID}"
+export REAL_E2E_CONTROLLER_BIND=127.0.0.1
 export OCSERV_CONTROLLER_PUBLIC_URL=https://localhost:8443
+if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
+  REAL_E2E_CONTROLLER_BIND="$(tailscale ip -4)"
+  python3 - "${REAL_E2E_CONTROLLER_BIND}" <<'ADDRESS'
+import ipaddress, sys
+assert ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network('100.64.0.0/10')
+ADDRESS
+  export REAL_E2E_CONTROLLER_BIND
+  export OCSERV_CONTROLLER_PUBLIC_URL="https://${REAL_E2E_CONTROLLER_BIND}:8443"
+fi
 
 case "${RUN_ID}${COMPOSE_PROJECT}" in
   *[!a-zA-Z0-9._-]*) echo "run or Compose project ID contains unsafe characters" >&2; exit 2 ;;
@@ -68,17 +78,15 @@ start_controller() {
   sudo chown 0:65532 "${SECRETS}/command.pub.pem"
   openssl rand -hex 32 >"${SECRETS}/session-key"
   openssl rand -hex 32 >"${SECRETS}/audit-checkpoint-key"
-  for role in requester approver; do
-    openssl rand -hex 32 >"${WORK}/private/${role}-password"
-    sudo install -m 0400 "${WORK}/private/${role}-password" "${SECRETS}/${role}-password"
-    sudo chown 65534:65532 "${SECRETS}/${role}-password"
-  done
+  openssl rand -hex 32 >"${WORK}/private/requester-password"
+  sudo install -m 0400 "${WORK}/private/requester-password" "${SECRETS}/requester-password"
+  sudo chown 65534:65532 "${SECRETS}/requester-password"
   openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=real-e2e-ca \
     -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign \
     -keyout "${SECRETS}/ca.key" -out "${WORK}/ca.crt" >/dev/null 2>&1
   openssl req -new -newkey rsa:2048 -nodes -subj /CN=localhost \
     -keyout "${TLS_DIR}/tls_private_key" -out "${TLS_DIR}/tls.csr" >/dev/null 2>&1
-  printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' >"${TLS_DIR}/tls.ext"
+  printf 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:%s\nextendedKeyUsage=serverAuth\n' "${REAL_E2E_CONTROLLER_BIND}" >"${TLS_DIR}/tls.ext"
   openssl x509 -req -days 1 -in "${TLS_DIR}/tls.csr" -CA "${WORK}/ca.crt" \
     -CAkey "${SECRETS}/ca.key" -CAcreateserial -extfile "${TLS_DIR}/tls.ext" \
     -out "${TLS_DIR}/tls_certificate" >/dev/null 2>&1
@@ -92,6 +100,7 @@ start_controller() {
   # Only the token is secret inside the read-only transportd mount. Docker
   # mounts the directory directly; the host WORK ancestor remains private.
   sudo chown 65532:65532 "${REAL_E2E_RELAY_DIR}/token"
+  sudo chmod 0440 "${REAL_E2E_RELAY_DIR}/token"
   chmod 0755 "${REAL_E2E_RELAY_DIR}"
   chmod 0444 "${REAL_E2E_RELAY_DIR}/ca.pem"
   OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})"
@@ -155,19 +164,19 @@ WEB
     -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=business-test-requester \
     -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${WORKSPACE_ID}" \
     -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/real-e2e-business/requester-password \
-    -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=business-test-approver \
-    -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/real-e2e-business/approver-password \
     control-plane --bootstrap-local-admin
   compose up --detach gateway
   for _ in {1..30}; do
-    if curl --fail --silent --show-error --max-time 3 --cacert "${WORK}/ca.crt" https://localhost:8443/readyz >/dev/null; then
+    if curl --fail --silent --show-error --max-time 3 --cacert "${WORK}/ca.crt" "${OCSERV_CONTROLLER_PUBLIC_URL}/readyz" >/dev/null; then
       break
     fi
     sleep 1
   done
-  curl --fail --silent --show-error --max-time 3 --cacert "${WORK}/ca.crt" https://localhost:8443/readyz >/dev/null
+  curl --fail --silent --show-error --max-time 3 --cacert "${WORK}/ca.crt" "${OCSERV_CONTROLLER_PUBLIC_URL}/readyz" >/dev/null
   python3 "${ROOT}/scripts/real-e2e-business.py" login
 
+  cp "${WORK}/ca.crt" "${OUTBOX}/controller-ready/controller-ca.crt"
+  printf '%s\n' "${OCSERV_CONTROLLER_PUBLIC_URL}" >"${OUTBOX}/controller-ready/controller-origin"
   printf '%s\n' "${endpoint}" >"${OUTBOX}/controller-ready/controller-endpoint-id"
   if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
     node "${ROOT}/web/test/real-node-install.mjs" prepare

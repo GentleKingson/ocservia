@@ -434,20 +434,16 @@ export const useFleetStore = defineStore("fleet", () => {
     await runOperation((node, signal) => removeIpBan(node, ip, reason, signal));
   }
 
-  async function reload(reason: string, approvalId: string): Promise<void> {
-    await runOperation((node, signal) =>
-      reloadService(node, reason, approvalId, signal),
-    );
+  async function reload(reason: string): Promise<void> {
+    await runOperation((node, signal) => reloadService(node, reason, signal));
   }
 
   async function upgradeAgent(
     targetVersion: string,
     reason: string,
-    approvalId: string,
   ): Promise<void> {
     await runOperation(
-      (node, signal) =>
-        upgradeNodeAgent(node, targetVersion, reason, approvalId, signal),
+      (node, signal) => upgradeNodeAgent(node, targetVersion, reason, signal),
       upgradeTerminalStates,
     );
   }

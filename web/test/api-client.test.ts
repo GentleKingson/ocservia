@@ -456,7 +456,7 @@ describe("domain request contracts", () => {
     });
   });
 
-  it("preserves controlled operation boot binding, TTL and approval headers", async () => {
+  it("preserves controlled operation boot binding and TTL without approval headers", async () => {
     const api = await loadApi();
     const signal = new AbortController().signal;
     const withoutBoot = { ...node };
@@ -474,8 +474,8 @@ describe("domain request contracts", () => {
       boot_id: "boot-a",
     });
     expect(request().signal).toBe(signal);
-    await api.reloadService(node, "requested", "approval-a", signal);
-    expect(request().headers.get("X-Approval-ID")).toBe("approval-a");
+    await api.reloadService(node, "requested", signal);
+    expect(request().headers.get("X-Approval-ID")).toBeNull();
     expect(request().body).toEqual({
       reason: "requested",
       expected_version: 7,
@@ -506,22 +506,17 @@ describe("domain request contracts", () => {
     expect(request().signal).toBe(signal);
     await api.issueCertificate(
       "certificate-a",
-      { approvalId: "approval-a", reason: "requested" },
+      { reason: "requested" },
       signal,
     );
     expect(request().headers.has("Idempotency-Key")).toBe(false);
     expect(request().body).toEqual({
-      approval_id: "approval-a",
       reason: "requested",
     });
     expect(request().signal).toBe(signal);
     fetchMock.mockResolvedValueOnce(json({}, 409));
     await expect(
-      api.applyConfigPlan(
-        "plan-a",
-        { approvalId: "approval-a", reason: "requested" },
-        signal,
-      ),
+      api.applyConfigPlan("plan-a", { reason: "requested" }, signal),
     ).rejects.toMatchObject({ response: { status: 409 } });
     expect(request().headers.get("Idempotency-Key")).toBeTruthy();
     expect(request().signal).toBe(signal);
@@ -531,35 +526,20 @@ describe("domain request contracts", () => {
   it("keeps rollout scope and trusted upgrade selection in their existing requests", async () => {
     const api = await loadApi();
     const signal = new AbortController().signal;
-    await api.upgradeNodeAgent(
-      node,
-      "1.2.3",
-      "requested",
-      "approval-a",
-      signal,
-    );
+    await api.upgradeNodeAgent(node, "1.2.3", "requested", signal);
     expect(request().headers.get("If-Match")).toBe('"revision-7"');
     expect(request().body).toEqual({
       target_version: "1.2.3",
-      approval_id: "approval-a",
       reason: "requested",
     });
     await api.selectWorkspace(beta.id);
-    await api.createAgentRollout(
-      "1.2.3",
-      [node.id],
-      1,
-      "requested",
-      "approval-a",
-      signal,
-    );
+    await api.createAgentRollout("1.2.3", [node.id], 1, "requested", signal);
     expect(request().headers.get("X-Workspace-ID")).toBe(beta.id);
     expect(request().body).toEqual({
       target_version: "1.2.3",
       node_ids: [node.id],
       batch_size: 1,
       reason: "requested",
-      approval_id: "approval-a",
     });
     expect(request().signal).toBe(signal);
     expect(request().headers.get("Idempotency-Key")).toBeTruthy();
