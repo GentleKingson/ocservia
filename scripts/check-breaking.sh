@@ -93,23 +93,6 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
   assertExact("ConfigSecretRef", candidateSchemas.ConfigSecretRef, configSecretRef);
   schemas.ConfigSecretRef = configSecretRef;
 
-  const configPlanSummary = structuredClone(schemas.ConfigPlanApprovalSummary);
-  configPlanSummary.required = [
-    "node_id",
-    "expected_revision",
-    "candidate_hash",
-    "current_hash",
-    "diff_redacted",
-    "expires_at",
-  ];
-  configPlanSummary.properties.diff_redacted = {
-    type: "string",
-    maxLength: 262144,
-    description: "Approver-visible secret-safe diff containing exact secret reference identifiers, providers, and versions without provider keys or values.",
-  };
-  assertExact("ConfigPlanApprovalSummary", candidateSchemas.ConfigPlanApprovalSummary, configPlanSummary);
-  schemas.ConfigPlanApprovalSummary = configPlanSummary;
-
   const sealedSecret = {
     type: "object",
     additionalProperties: false,
@@ -164,71 +147,16 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
     schemas[name] = request;
   }
 
-  const certificateIssueSummary = structuredClone(
-    schemas.CertificateIssueApprovalSummary ?? schemas.CertificateApprovalSummary,
-  );
-  assertExact(
-    "CertificateIssueApprovalSummary",
-    candidateSchemas.CertificateIssueApprovalSummary,
-    certificateIssueSummary,
-  );
-  const certificateActionSummary = {
-    type: "object",
-    additionalProperties: false,
-    required: ["action", "certificate_id", "certificate_version", "node_id"],
-    properties: {
-      action: {
-        type: "string",
-        enum: ["certificate.revoke", "certificate.private_key.export"],
-      },
-      certificate_id: { $ref: "#/components/schemas/UuidV7" },
-      certificate_version: { type: "integer", format: "int64", minimum: 1 },
-      node_id: { $ref: "#/components/schemas/UuidV7" },
-      purpose: { type: "string", maxLength: 512 },
-      artifact_request_id: { $ref: "#/components/schemas/UuidV7" },
-      serial_number: { type: "string", maxLength: 128 },
-      certificate_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
-    },
-  };
-  assertExact(
-    "CertificateActionApprovalSummary",
-    candidateSchemas.CertificateActionApprovalSummary,
-    certificateActionSummary,
-  );
-  const certificateSummary = {
-    oneOf: [
-      { $ref: "#/components/schemas/CertificateIssueApprovalSummary" },
-      { $ref: "#/components/schemas/CertificateActionApprovalSummary" },
-    ],
-  };
-  assertExact("CertificateApprovalSummary", candidateSchemas.CertificateApprovalSummary, certificateSummary);
-  schemas.CertificateIssueApprovalSummary = certificateIssueSummary;
-  schemas.CertificateActionApprovalSummary = certificateActionSummary;
-  schemas.CertificateApprovalSummary = certificateSummary;
-
-  const approvalDecision = structuredClone(schemas.ApprovalDecision);
-  approvalDecision.required = ["reason", "expected_request_hash"];
-  assertExact("ApprovalDecision", candidateSchemas.ApprovalDecision, approvalDecision);
-  schemas.ApprovalDecision = approvalDecision;
-
-  const existingRequestSummary = schemas.Approval.properties.request_summary;
-  const requestSummary = existingRequestSummary.oneOf
-    ? structuredClone(existingRequestSummary)
-    : {
-        oneOf: [
-          structuredClone(existingRequestSummary),
-          { type: "object", additionalProperties: true },
-        ],
-      };
-  assertExact(
-    "Approval.request_summary",
-    candidateSchemas.Approval?.properties?.request_summary,
-    requestSummary,
-  );
-  schemas.Approval.properties.request_summary = requestSummary;
-
-  // Retire only the independent-approval API. Historical approval schemas
-  // remain checked above; no other route deletion is normalized.
+  // Retire only schemas owned by the removed independent-approval API.
+  for (const name of [
+    "ApprovalRequest", "ApprovalDecision", "ApprovalPage", "Approval",
+    "ConfigPlanApprovalSummary", "CertificateApprovalSummary",
+    "CertificateIssueApprovalSummary", "CertificateActionApprovalSummary",
+  ]) {
+    assertExact(name, candidateSchemas[name], undefined);
+    delete schemas[name];
+  }
+  // No other route deletion is normalized.
   for (const path of [
     "/approval-requests",
     "/approval-requests/{approval_id}",
