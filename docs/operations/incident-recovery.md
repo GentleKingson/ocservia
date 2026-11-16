@@ -2,11 +2,10 @@
 
 This is the single backup and recovery manual for database, Signer, identity,
 credential and Unknown command incidents. Supported deployments run a single
-Controller, a single database instance, and one dedicated Relay. The supported
-PostgreSQL and MySQL versions and deployments are defined in
-[Database support](production-deployment.md#database-support). Both Integrated
-and standalone topologies remain supported, as do bundled and external
-databases.
+Controller, a single PostgreSQL 18.x database instance, and one dedicated Relay
+(see [Database support](production-deployment.md#database-support)). Both
+Integrated and standalone topologies remain supported, as do bundled and
+external PostgreSQL deployments.
 
 Out of scope are Controller high availability, multi-Relay failover, database
 replication clusters, PostgreSQL automatic failover, and point-in-time recovery
@@ -59,8 +58,8 @@ Treat these as separate states:
    authorization revision, response and Controller/transportd errors. Use
    `GET /api/v1/nodes/{node_id}` with the original authorized workspace to check
    `trust_status` and `connection_state`; an offline result alone is insufficient.
-2. Through an authorized read-only database connection, inspect the exact node
-   and queued intent. For PostgreSQL, replace the UUID placeholder:
+2. Through an authorized read-only PostgreSQL connection, inspect the exact node
+   and queued intent (replace the UUID placeholder):
 
    ```sql
    SELECT n.id, n.status, n.authorization_revision,
@@ -72,21 +71,6 @@ Treat these as separate states:
    LEFT JOIN node_endpoint_keys e ON e.node_id = n.id
    LEFT JOIN node_trust_convergence q ON q.node_id = n.id
    WHERE n.id = '<node-uuidv7>'::uuid;
-   ```
-
-   For MySQL 8.4, UUIDs use binary storage and timestamps below are raw logical
-   microseconds from `2000-01-01`, with sentinel values for infinities:
-
-   ```sql
-   SELECT HEX(n.id) AS node_id, n.status, n.authorization_revision,
-          e.state AS endpoint_state, HEX(e.endpoint_id) AS endpoint_id,
-          q.desired_state, q.revision, q.reason, q.update_applied,
-          q.close_required, q.close_applied, q.attempts, q.available_at,
-          HEX(q.locked_by) AS locked_by, q.locked_until, q.last_error
-   FROM nodes n
-   LEFT JOIN node_endpoint_keys e ON e.node_id = n.id
-   LEFT JOIN node_trust_convergence q ON q.node_id = n.id
-   WHERE n.id = UNHEX(REPLACE('<node-uuidv7>', '-', ''));
    ```
 
 3. Correlate the exact intent with logs for `converge node trust` and
@@ -111,22 +95,13 @@ request does not repair missing transport evidence.
 
 When a deployment loses its last working administrator, halt application writes and preserve the incident evidence. Recover to a
 verified state that has independently controlled credentials by following the
-authorized [backend-specific recovery procedure](#database-recovery),
+authorized [database recovery procedure](#database-recovery),
 leaving all initialization markers and audit history intact. Before reopening
-traffic, use the protected administrative database connection to revoke all
-active restored sessions. On PostgreSQL, run:
+traffic, use the protected administrative PostgreSQL connection to revoke all
+active restored sessions:
 
 ```sql
 UPDATE auth_sessions SET revoked_at=now() WHERE revoked_at IS NULL;
-```
-
-The current MySQL schema stores session timestamps as a BIGINT microsecond epoch
-counted from 2000-01-01 UTC:
-
-```sql
-UPDATE auth_sessions
-SET revoked_at=TIMESTAMPDIFF(MICROSECOND, '2000-01-01 00:00:00', UTC_TIMESTAMP(6))
-WHERE revoked_at IS NULL;
 ```
 
 Log the offline recovery in the incident and change record, confirm that the
@@ -402,8 +377,8 @@ replace an audit key silently.
 ### PostgreSQL credential rotation
 
 The rotation script below applies only to bundled PostgreSQL deployments;
-external PostgreSQL and MySQL credentials must be rotated through their own
-database administration workflows. Editing `postgres-app-password`,
+external PostgreSQL credentials must be rotated through their own database
+administration workflows. Editing `postgres-app-password`,
 `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` on disk
 does not update the password verifier stored inside PostgreSQL. Against
 `deploy/production/compose.yaml` (or the file named by
@@ -526,11 +501,8 @@ automatic recovery of every Unknown mutation is promised.
 
 Every backup must preserve the full `schema_revisions` table (see
 [Schema provenance after restore](#schema-provenance-after-restore)) and the
-Local bootstrap marker table. The PostgreSQL 18 base backup and the external MySQL 8.4
-logical restore are separate procedures with different tooling. Never run
-PostgreSQL recovery or credential-rotation scripts against MySQL backends. A
-completed backup job alone is never recovery proof without a verified restore.
-The checks that must pass before cutover are the same for both backends and are
+Local bootstrap marker table. A completed backup job alone is never recovery
+proof without a verified restore. The checks that must pass before cutover are
 listed once in [Database recovery](#database-recovery).
 
 ### PostgreSQL
@@ -609,55 +581,6 @@ Neither substitutes for testing an actual production archive.
   migration, and tests the restored runtime account's read and privilege
   boundaries.
 
-### MySQL
-
-Production MySQL operations apply only to external MySQL 8.4 LTS. Bundled
-deployments, other server versions, HA, PITR, storage snapshots, and
-cross-engine migration are not supported under this contract.
-
-Built from `backup.mysql.Dockerfile`, the backup image uses the native MySQL
-client to produce a single-transaction logical dump covering triggers, routines,
-events, binary data, and explicit database creation, without copying a database
-volume. Along with the dump, the worker records the backend and server version
-in metadata, writes SHA-256 checksums, atomically advances `LATEST`, and prunes
-old backups. Database accounts and server-global grants belong to provisioning
-state and do not travel in a schema dump. Operators must recreate them from
-the protected provisioning source and re-run least-privilege checks prior to
-cutover.
-
-Connection settings come from `database-backup.cnf`, a mode-`0444` Compose
-secret in the private launcher-owned secret directory whose `[client]` section
-holds only the dedicated backup user, TLS parameters, and external endpoint.
-The entrypoint copies this file to a mode-`0600` temporary path before calling
-the client. Grant the backup account only the privileges needed to read tables
-and views and to dump triggers, routines, and events; it must never own the
-schema or migration tables. On the pinned client versions, grant `SELECT`,
-`SHOW VIEW`, `TRIGGER`, and `EVENT` on `ocservia.*`, plus the global
-`SHOW_ROUTINE` dynamic privilege required by MySQL 8.4. The `PROCESS` privilege
-is unnecessary because the dump runs with `--no-tablespaces`.
-
-Always restore into a new, isolated MySQL server by running the matching backup
-image with `scripts/mysql-restore-verify.sh`, an absolute path to a completed
-backup directory, and a mode-`0600` target administrator client file. After
-rejecting checksum mismatches, wrong backends, unsafe dump artifacts, or an
-existing target database, the verifier loads the dump and prints a summary of
-the restored state. It checks that `schema_revisions` contains only verified
-rows (including an epoch-2 entry) and that no legacy migration tables exist. It
-also reports the audit authentication shape, identity counts, scheduler epoch,
-idempotency records, and unfinished operations or commands. Passing this script
-alone does not prove the restored database is ready for service. The verifier
-neither compares receipt checksums against the build's SQL artifacts nor
-validates the cryptographic audit chain.
-
-Traffic redirection and command authority remain manual operator gates. Unless
-`--old-writers-fenced` is passed, the restore script exits with status 3 after
-verification. Even with that flag, it rejects an active restored scheduler
-lease and leaves command execution blocked. Then run the matching-build checks
-and the reconciliation in [Database recovery](#database-recovery). This logical
-restore tooling covers recovery of the ocservia schema only; PITR, database
-failover, storage snapshots, and cross-engine migration require separate
-procedures and independent verification evidence.
-
 ### Schema provenance after restore
 
 Every backup must preserve the full `schema_revisions` table, including
@@ -667,38 +590,20 @@ admitted only when the matching build's owner migration run (`--migrate-only`)
 validates it and confirms there are no unknown epochs, revisions, checksums, or
 schema drift. On a restored database, owner migration runs only supported
 forward SQL without replaying `schema.sql`. The receipt histories of fresh and
-checkpoint-upgraded databases, and where to read each backend's current schema
-revision, are in [Upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint)
+checkpoint-upgraded databases, and where to read the current schema revision,
+are in [Upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint)
 and [Database](../reference/stable-contracts.md#database).
 
 The only supported prior upgrade checkpoint is defined in
 [Upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint).
 Restoring a pre-checkpoint backup does not allow adopting or force-cleaning the
-schema. Likewise, any
-PostgreSQL or MySQL instance that already contains user tables or data without a
-trusted receipt is rejected outright instead of being initialized in place.
-Rolling back across a schema change requires restoring a compatible backup paired
-with the matching binary, because reverse SQL migrations are never run against
-an upgraded database.
+schema. Likewise, any PostgreSQL instance that already contains user tables or
+data without a trusted receipt is rejected outright instead of being initialized
+in place. Rolling back across a schema change requires restoring a compatible
+backup paired with the matching binary, because reverse SQL migrations are never
+run against an upgraded database.
 
-When a MySQL migration artifact is interrupted, normal migration runs will
-refuse to proceed. Inside a controlled `test` or `development` recovery
-environment, extract the expected checksum from the exact matching build by
-running `ocserv-db-foundation --mode schema-artifact-checksum` for an
-interrupted initial install or `--mode upgrade-artifact-checksum` for an
-in-flight upgrade, passing `--revision N` to select the logical block (where
-revision zero targets the previous-checkpoint transition). Once reviewed, pass
-that value to `--mode repair --repair-checksum <checksum>`. An interrupted fresh
-installation must finish recovery against its original schema bytes before any
-newer upgrade artifacts are applied. During repair, data changes and journal
-progress commit together in a single InnoDB transaction. DDL steps accept
-only pinned before-and-after schema fingerprints (including cleanup DROP steps,
-which follow the same protocol). Any unexpected objects or partial
-postconditions require manual inspection.
-
-`ocserv-db-foundation` is experimental and refuses to run outside `test` or
-`development`, so those repair flags are not a production recovery path. This
-guide defines no in-place production schema repair. At runtime, the
+This guide defines no in-place production schema repair. At runtime, the
 application database account can read receipts but lacks permission to modify the
 journal or run arbitrary DDL. Never manually update `schema_revisions` to mark
 in-flight work as verified. Legacy manifest or snapshot repair modes and their
@@ -709,15 +614,11 @@ verification.
 
 Start by checking `OCSERV_DATABASE_BACKEND` and `OCSERV_DATABASE_DEPLOYMENT` in
 the active configuration against the
-[production support matrix](production-deployment.md#database-support):
-
-- PostgreSQL: for a transient outage, restart the existing instance; after data
-  loss, follow [verified backup and isolated restore](#restore-a-postgresql-backup).
-  Clustered databases, automatic failover, and PITR readiness fall outside the
-  supported single-instance deployment.
-- MySQL: follow the [logical backup and isolated restore](#mysql)
-  procedure for external MySQL. This workflow does not provide PITR, failover,
-  storage snapshots, or cross-engine migration.
+[production support matrix](production-deployment.md#database-support): for a
+transient PostgreSQL outage, restart the existing instance; after data loss,
+follow [verified backup and isolated restore](#restore-a-postgresql-backup).
+Clustered databases, automatic failover, PITR readiness, and cross-engine
+migration fall outside the supported single-instance deployment.
 
 Before running database recovery, stop certificate and artifact creation,
 reconcile all nonterminal certificate commands, and preserve terminal command
@@ -751,12 +652,11 @@ evidence and initialization markers intact.
 Any restore from a backup rolls back security changes committed after the
 snapshot: revoked sessions, disabled identities, and removed role bindings come
 back, so a stolen session cookie that has not yet expired is accepted again.
-Before reopening user traffic or command dispatch on any restored database, on
-PostgreSQL and MySQL alike:
+Before reopening user traffic or command dispatch on any restored database:
 
 1. On the isolated target, through the protected administrative database
-   connection, revoke every unrevoked session with the backend-specific
-   statement shown in [Lost Local administration authority](#lost-local-administration-authority).
+   connection, revoke every unrevoked session with the statement shown in
+   [Lost Local administration authority](#lost-local-administration-authority).
    Keep the rows and their audit links.
 2. Reapply every identity disable, workspace or resource role removal, and
    security-relevant credential rotation made after the snapshot, using change
@@ -770,13 +670,13 @@ PostgreSQL and MySQL alike:
    requests or dispatch. A consumed approval can return as approved in the
    snapshot; consuming it again can create a new command ID, so node receipt
    deduplication does not replace this step. Through the protected administrative
-   connection, shorten its expiry using the backend-specific statements below.
+   connection, shorten its expiry using the statement below.
    Preserve status, approver, consumption and audit evidence: changing an approved
    row to `expired` without removing its approver violates the schema, and removing
    the approver would discard evidence. Record the affected IDs and original
    expiries in the incident record before updating them.
 
-   PostgreSQL (run the whole block in one connection):
+   Run the whole block in one PostgreSQL connection:
 
    ```sql
    BEGIN;
@@ -785,19 +685,6 @@ PostgreSQL and MySQL alike:
      AND created_at < now() AND expires_at > now();
    SELECT count(*) AS approvals_still_live FROM approval_requests
    WHERE status IN ('pending', 'approved') AND expires_at > now();
-   COMMIT;
-   ```
-
-   MySQL (timestamps are microseconds since 2000; use one connection):
-
-   ```sql
-   START TRANSACTION;
-   SET @recovery_cutoff = TIMESTAMPDIFF(MICROSECOND, '2000-01-01', UTC_TIMESTAMP(6));
-   UPDATE approval_requests SET expires_at = @recovery_cutoff
-   WHERE status IN ('pending', 'approved')
-     AND created_at < @recovery_cutoff AND expires_at > @recovery_cutoff;
-   SELECT count(*) AS approvals_still_live FROM approval_requests
-   WHERE status IN ('pending', 'approved') AND expires_at > @recovery_cutoff;
    COMMIT;
    ```
 

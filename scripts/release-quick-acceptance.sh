@@ -64,7 +64,7 @@ bash "${ROOT}/scripts/build-release-controller.sh" >"${work}/controller-build.lo
 stage=publish
 docker run -d --restart unless-stopped --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 manifest_args=(--image "postgres=${POSTGRES_IMAGE}" --image "otel=${OTEL_IMAGE}")
-roles=(gateway control transport backup edge relay signer mysql_backup)
+roles=(gateway control transport backup edge relay signer)
 for name in "${roles[@]}"; do
   docker load -i "${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
   [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}")" == "linux/${CONTROLLER_ARCH}" ]]

@@ -728,33 +728,47 @@ assert_output "required package 'util-linux-extra' is not installed"
 assert_log_empty "${apt_log}"
 echo "check requires util-linux-extra on Ubuntu 26.04"
 
-# 10g. The backup writer rejects an unprotected backup path before it dumps and
+# 10g. The backup writer rejects an unprotected backup path before it backs up and
 # never reuses an existing staging or output object.
-writer="${ROOT}/scripts/mysql-backup.sh"
+writer="${ROOT}/scripts/postgres-backup.sh"
 writer_bin="${fixture}/writer-bin"
 writer_log="${fixture}/writer.log"
 mkdir -m 700 -- "${writer_bin}"
-cat >"${writer_bin}/mysql" <<'EOF'
+cat >"${writer_bin}/psql" <<'EOF'
 #!/usr/bin/env bash
-printf '8.4.11\tMySQL Community Server - GPL\n'
+printf '180006\n'
 EOF
-cat >"${writer_bin}/mysqldump" <<'EOF'
+cat >"${writer_bin}/pg_basebackup" <<'EOF'
 #!/usr/bin/env bash
-echo mysqldump >>"${WRITER_LOG}"
-echo '-- dump'
+echo pg_basebackup >>"${WRITER_LOG}"
+pgdata=""
+for arg in "$@"; do
+  case "${arg}" in
+    --pgdata=*) pgdata="${arg#--pgdata=}" ;;
+  esac
+done
+mkdir -m 0700 -- "${pgdata}"
+printf 'START WAL LOCATION: 0/01000028 (file 000000010000000000000001)\n' >"${pgdata}/backup_label"
+printf '{"PostgreSQL-Backup-Manifest-Version":1}\n' >"${pgdata}/backup_manifest"
+EOF
+cat >"${writer_bin}/pg_verifybackup" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"${writer_bin}/pg_archivecleanup" <<'EOF'
+#!/usr/bin/env bash
+exit 0
 EOF
 cat >"${writer_bin}/date" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == "-u +%Y%m%dT%H%M%SZ" ]]; then echo 20260101T000000Z; else exec "${WRITER_REAL_DATE}" "$@"; fi
 EOF
-chmod 0755 -- "${writer_bin}/mysql" "${writer_bin}/mysqldump" "${writer_bin}/date"
-printf '[client]\nuser=backup\n' >"${fixture}/writer.cnf"
-chmod 0600 -- "${fixture}/writer.cnf"
+chmod 0755 -- "${writer_bin}/psql" "${writer_bin}/pg_basebackup" "${writer_bin}/pg_verifybackup" "${writer_bin}/pg_archivecleanup" "${writer_bin}/date"
 run_writer() {
   RUN_STATUS=0
   : >"${writer_log}"
-  RUN_OUTPUT="$(env PATH="${writer_bin}:${PATH}" WRITER_LOG="${writer_log}" WRITER_REAL_DATE="$(command -v date)" BACKUP_ROOT="$1" DATABASE_BACKEND=mysql \
-    MYSQL_DATABASE=ocservia MYSQL_CONFIG_FILE="${fixture}/writer.cnf" RUN_ID=writer-test "${writer}" --once 2>&1)" || RUN_STATUS=$?
+  RUN_OUTPUT="$(env PATH="${writer_bin}:${PATH}" WRITER_LOG="${writer_log}" WRITER_REAL_DATE="$(command -v date)" BACKUP_ROOT="$1" \
+    RUN_ID=writer-test "${writer}" --once 2>&1)" || RUN_STATUS=$?
 }
 assert_not_dumped() { assert_log_empty "${writer_log}"; }
 
@@ -765,15 +779,15 @@ run_writer "${wroot}/loose"
 assert_status 1 "a writer root with a loose mode must fail"
 assert_output "mode 0700"
 assert_not_dumped
-install -d -m 0700 -- "${wroot}/loose-logical" "${wroot}/loose-logical/logical"
-chmod 0750 -- "${wroot}/loose-logical/logical"
-run_writer "${wroot}/loose-logical"
-assert_status 1 "a logical directory with a loose mode must fail"
+install -d -m 0700 -- "${wroot}/loose-base" "${wroot}/loose-base/base"
+chmod 0750 -- "${wroot}/loose-base/base"
+run_writer "${wroot}/loose-base"
+assert_status 1 "a base directory with a loose mode must fail"
 assert_not_dumped
-install -d -m 0700 -- "${wroot}/link-target" "${wroot}/link-logical"
-ln -s -- ../link-target "${wroot}/link-logical/logical"
-run_writer "${wroot}/link-logical"
-assert_status 1 "a symlinked logical directory must fail"
+install -d -m 0700 -- "${wroot}/link-target" "${wroot}/link-base"
+ln -s -- ../link-target "${wroot}/link-base/base"
+run_writer "${wroot}/link-base"
+assert_status 1 "a symlinked base directory must fail"
 assert_not_dumped
 ln -s -- link-target "${wroot}/link-root"
 run_writer "${wroot}/link-root"
@@ -788,29 +802,29 @@ if can_root; then
     assert_not_dumped
   fi
 fi
-echo "the backup writer rejects unprotected paths before dumping"
+echo "the backup writer rejects unprotected paths before backing up"
 
-install -d -m 0700 -- "${wroot}/staging" "${wroot}/staging/logical"
-mkdir -- "${wroot}/staging/logical/.20260101T000000Z-writer-test.tmp"
-printf 'keep\n' >"${wroot}/staging/logical/.20260101T000000Z-writer-test.tmp/sentinel"
+install -d -m 0700 -- "${wroot}/staging" "${wroot}/staging/base"
+mkdir -- "${wroot}/staging/base/.20260101T000000Z-writer-test.tmp"
+printf 'keep\n' >"${wroot}/staging/base/.20260101T000000Z-writer-test.tmp/sentinel"
 run_writer "${wroot}/staging"
 assert_status 1 "an existing staging directory must be refused"
 assert_not_dumped
-[[ "$(cat -- "${wroot}/staging/logical/.20260101T000000Z-writer-test.tmp/sentinel")" == keep ]] ||
+[[ "$(cat -- "${wroot}/staging/base/.20260101T000000Z-writer-test.tmp/sentinel")" == keep ]] ||
   die "an existing staging directory was reused or removed"
 [[ ! -e "${wroot}/staging/.backup.lock" ]] || die "a refused backup left its lock"
-install -d -m 0700 -- "${wroot}/staging-link" "${wroot}/staging-link/logical"
-ln -s -- "${wroot}/link-target" "${wroot}/staging-link/logical/.20260101T000000Z-writer-test.tmp"
+install -d -m 0700 -- "${wroot}/staging-link" "${wroot}/staging-link/base"
+ln -s -- "${wroot}/link-target" "${wroot}/staging-link/base/.20260101T000000Z-writer-test.tmp"
 run_writer "${wroot}/staging-link"
 assert_status 1 "a symlinked staging path must be refused"
 assert_not_dumped
-[[ -L "${wroot}/staging-link/logical/.20260101T000000Z-writer-test.tmp" ]] || die "a symlinked staging path was removed"
-install -d -m 0700 -- "${wroot}/final" "${wroot}/final/logical"
-ln -s -- "${wroot}/link-target" "${wroot}/final/logical/20260101T000000Z"
+[[ -L "${wroot}/staging-link/base/.20260101T000000Z-writer-test.tmp" ]] || die "a symlinked staging path was removed"
+install -d -m 0700 -- "${wroot}/final" "${wroot}/final/base"
+ln -s -- "${wroot}/link-target" "${wroot}/final/base/20260101T000000Z"
 run_writer "${wroot}/final"
 assert_status 1 "an existing output object must be refused"
 assert_not_dumped
-install -d -m 0700 -- "${wroot}/latest" "${wroot}/latest/logical" "${wroot}/latest/LATEST"
+install -d -m 0700 -- "${wroot}/latest" "${wroot}/latest/base" "${wroot}/latest/LATEST"
 run_writer "${wroot}/latest"
 assert_status 1 "a LATEST directory must be refused"
 assert_not_dumped
@@ -820,11 +834,11 @@ install -d -m 0700 -- "${wroot}/ok"
 run_writer "${wroot}/ok"
 assert_status 0 "a protected writer root must back up"
 assert_output "backup completed id=20260101T000000Z"
-[[ "$(stat -c '%a' "${wroot}/ok/logical")" == 700 ]] || die "the logical directory must be created with mode 0700"
+[[ "$(stat -c '%a' "${wroot}/ok/base")" == 700 && "$(stat -c '%a' "${wroot}/ok/wal")" == 700 ]] || die "the base and wal directories must be created with mode 0700"
 [[ "$(cat -- "${wroot}/ok/LATEST")" == 20260101T000000Z ]] || die "the LATEST marker was not published"
-[[ -s "${wroot}/ok/logical/20260101T000000Z/database.sql" && -s "${wroot}/ok/logical/20260101T000000Z/SHA256SUMS" ]] ||
+[[ -s "${wroot}/ok/base/20260101T000000Z/backup_manifest" && "$(cat -- "${wroot}/ok/base/20260101T000000Z/OCSERVIA_BACKUP_ID")" == 20260101T000000Z ]] ||
   die "the backup files were not published"
-[[ -z "$(find "${wroot}/ok" -name '.LATEST.*' -o -name '*.tmp')" ]] || die "the writer left temporary objects"
+[[ -z "$(find "${wroot}/ok" -name '.LATEST*' -o -name '*.tmp')" ]] || die "the writer left temporary objects"
 echo "the backup writer backs up under a protected path"
 
 # 11. install refuses to run without root.

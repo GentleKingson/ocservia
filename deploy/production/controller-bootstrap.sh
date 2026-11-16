@@ -41,7 +41,6 @@ INSTALL_ENV_NAMES=(
   OCSERV_DATABASE_BACKUP_PORT
   OCSERV_DATABASE_BACKUP_NAME
   OCSERV_DATABASE_BACKUP_USER
-  OCSERV_DATABASE_BACKUP_IMAGE
   OCSERV_DEPLOYMENT_MODE
   OCSERV_RELAY_PUBLIC_HOST
   OCSERV_RELAY_SECRET_DIR
@@ -442,11 +441,11 @@ collect_inputs() {
       install_ui_prompt OCSERV_PUBLIC_HOST 'Controller DNS name'
       install_ui_prompt OCSERV_CONTROLLER_PUBLIC_URL 'Controller HTTPS URL' "https://${OCSERV_PUBLIC_HOST}"
       install_ui_prompt OCSERV_PUBLIC_ORIGIN 'Authentication public origin' "https://${OCSERV_PUBLIC_HOST}"
-      install_ui_prompt OCSERV_DATABASE_BACKEND 'Database (postgres/mysql)' postgres
-      install_ui_prompt OCSERV_DATABASE_DEPLOYMENT 'Database location (bundled/external)' "$([[ "${OCSERV_DATABASE_BACKEND}" == mysql ]] && echo external || echo bundled)"
+      export OCSERV_DATABASE_BACKEND="${OCSERV_DATABASE_BACKEND:-postgres}"
+      install_ui_prompt OCSERV_DATABASE_DEPLOYMENT 'Database location (bundled/external)' bundled
       if [[ "${OCSERV_DATABASE_DEPLOYMENT}" == external ]]; then
         install_ui_prompt OCSERV_DATABASE_BACKUP_HOST 'Database backup host'
-        install_ui_prompt OCSERV_DATABASE_BACKUP_PORT 'Database backup port' "$([[ "${OCSERV_DATABASE_BACKEND}" == mysql ]] && echo 3306 || echo 5432)"
+        install_ui_prompt OCSERV_DATABASE_BACKUP_PORT 'Database backup port' 5432
         install_ui_prompt OCSERV_DATABASE_BACKUP_NAME 'Database name' ocservia
         install_ui_prompt OCSERV_DATABASE_BACKUP_USER 'Database backup user' ocservia_backup
       fi
@@ -487,6 +486,15 @@ collect_inputs() {
   esac
 }
 
+reject_retired_active_profile() {
+  local state_root="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
+  local profile="${state_root%/}/deployment-profile.json"
+  if [[ -f "${profile}" && ! -L "${profile}" && -r "${profile}" ]] &&
+    grep -Eq '"database_backend"[[:space:]]*:[[:space:]]*"mysql"' "${profile}"; then
+    fail "existing MySQL deployment at ${state_root} is retired; cross-engine automatic migration is unsupported and existing state/data were not modified"
+  fi
+}
+
 validate_manual_inputs() {
   local variable
   [[ "${QUICK}" == false ]] || return 0
@@ -497,7 +505,9 @@ validate_manual_inputs() {
   [[ "${OCSERV_CONTROLLER_ENDPOINT_ID}" =~ ^[0-9a-f]{64}$ ]] || fail "Controller EndpointID must be 64 lowercase hex characters"
   [[ -z "${OCSERV_RELAY_URL_B:-}" ]] || fail "only one dedicated Relay is supported"
   case "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
-    postgres:bundled|postgres:external|mysql:external) ;; *) fail "unsupported database topology" ;;
+    postgres:bundled|postgres:external) ;;
+    mysql:*) fail "MySQL 8.4 LTS support is retired; only PostgreSQL 18.x (bundled or external) is supported and cross-engine automatic migration is unsupported" ;;
+    *) fail "unsupported database topology; only OCSERV_DATABASE_BACKEND=postgres with bundled or external is supported" ;;
   esac
   if [[ "${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == external ]]; then
     [[ -n "${OCSERV_DATABASE_BACKUP_HOST:-}" ]] || fail "OCSERV_DATABASE_BACKUP_HOST is required"
@@ -569,6 +579,7 @@ fi
 
 load_config
 validate_manual_inputs
+reject_retired_active_profile
 if [[ "${QUICK}" == true && "${NON_INTERACTIVE}" == true && " ${QUICK_ARGS[*]} " != *" --root-ca-passphrase-file "* ]]; then
   fail "--non-interactive Quick requires --root-ca-passphrase-file"
 fi

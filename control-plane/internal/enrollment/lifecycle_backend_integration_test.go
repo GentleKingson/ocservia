@@ -18,7 +18,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
@@ -58,22 +57,9 @@ func (f lifecycleFixture) within(t *testing.T, fn func(database.Tx) error) {
 	}
 }
 
-func (f lifecycleFixture) query(pg, my string, args ...any) (string, []any) {
-	if _, ok := f.b.(*mysql.Backend); ok {
-		pg = my
-		for i, arg := range args {
-			if id, ok := arg.(uuid.UUID); ok {
-				args[i] = mysql.UUIDBytes(id)
-			}
-		}
-	}
-	return pg, args
-}
-
-func (f lifecycleFixture) exec(t *testing.T, pg, my string, args ...any) {
+func (f lifecycleFixture) exec(t *testing.T, query string, args ...any) {
 	t.Helper()
-	q, args := f.query(pg, my, args...)
-	if _, err := f.b.Exec(context.Background(), q, args...); err != nil {
+	if _, err := f.b.Exec(context.Background(), query, args...); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -124,9 +110,8 @@ type trustSnapshot struct {
 
 func (f lifecycleFixture) snapshot(t *testing.T, id uuid.UUID) trustSnapshot {
 	t.Helper()
-	q, args := f.query(`SELECT revision,attempts,update_applied,close_required,close_applied,locked_until,available_at,updated_at,locked_by,last_error FROM node_trust_convergence WHERE node_id=$1`, `SELECT revision,attempts,update_applied,close_required,close_applied,locked_until,available_at,updated_at,locked_by,last_error FROM node_trust_convergence WHERE node_id=?`, id)
 	var v trustSnapshot
-	if err := f.b.QueryRow(context.Background(), q, args...).Scan(&v.Revision, &v.Attempts, &v.Update, &v.Required, &v.Close, &v.Until, &v.Available, &v.Updated, &v.Worker, &v.Error); err != nil {
+	if err := f.b.QueryRow(context.Background(), `SELECT revision,attempts,update_applied,close_required,close_applied,locked_until,available_at,updated_at,locked_by,last_error FROM node_trust_convergence WHERE node_id=$1`, id).Scan(&v.Revision, &v.Attempts, &v.Update, &v.Required, &v.Close, &v.Until, &v.Available, &v.Updated, &v.Worker, &v.Error); err != nil {
 		t.Fatal(err)
 	}
 	return v
@@ -165,7 +150,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 		}
 	}
 	t.Run("expired-unclaimed", func(t *testing.T) {
-		f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, `UPDATE node_trust_convergence SET locked_until=? WHERE node_id=?`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+		f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
 		stale(t, v)
 	})
 	t.Run("same-worker-new-attempt", func(t *testing.T) {
@@ -187,8 +172,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		until, _ := at.Add(300 * time.Millisecond)
-		q, args := f.query(`UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, `UPDATE node_trust_convergence SET locked_until=? WHERE node_id=?`, until, v.NodeID)
-		if _, err := lock.Exec(ctx, q, args...); err != nil {
+		if _, err := lock.Exec(ctx, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, until, v.NodeID); err != nil {
 			t.Fatal(err)
 		}
 		waiting, err := f.b.Begin(ctx, database.ReadCommitted)
@@ -243,7 +227,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 			}
 			return s.Release(ctx, v, worker, 0, "close retry")
 		})
-		f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, `UPDATE node_trust_convergence SET available_at=? WHERE node_id=?`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+		f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
 		v = claim(t)
 		if !v.UpdateApplied || !v.CloseRequired || v.CloseApplied {
 			t.Fatal("lost retry progress", v)
@@ -351,7 +335,7 @@ func TestTrustUncertainRPCBackendIntegration(t *testing.T) {
 					// Neither uncertain RPC results nor a subsequent lost owner
 					// can manufacture the missing acknowledgement.
 					if code != codes.OK {
-						f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, `UPDATE node_trust_convergence SET available_at=? WHERE node_id=?`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+						f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
 						transport.update = func(context.Context) error { updates++; return ownersession.ErrNotOwner }
 						transport.close = func(context.Context) error { return ownersession.ErrNotOwner }
 						if worked, err := worker.RunOnce(ctx); !worked || !errors.Is(err, ownersession.ErrNotOwner) {
@@ -646,7 +630,7 @@ func TestTrustSynchronousRevocationBackendIntegration(t *testing.T) {
 	if recorded, err := service.RecordRevocationSynchronized(ctx, trust, v.Reason, true); err != nil || !recorded {
 		t.Fatal(recorded, err)
 	}
-	f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, `UPDATE node_trust_convergence SET available_at=? WHERE node_id=?`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+	f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
 	settled := f.snapshot(t, v.NodeID)
 	if !settled.Update || !settled.Close {
 		t.Fatal("synchronous revocation not settled", settled)

@@ -12,7 +12,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
@@ -24,24 +23,15 @@ import (
 func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	backend := authenticationBackend(t)
 	ctx := context.Background()
-	_, mysqlEngine := backend.(*mysql.Backend)
-	exec := func(pg, my string, args ...any) {
+	exec := func(query string, args ...any) {
 		t.Helper()
-		if mysqlEngine {
-			pg = my
-			for i, arg := range args {
-				if id, ok := arg.(uuid.UUID); ok {
-					args[i] = mysql.UUIDBytes(id)
-				}
-			}
-		}
-		if _, err := backend.Exec(ctx, pg, args...); err != nil {
+		if _, err := backend.Exec(ctx, query, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
 	workspace, other := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	for _, id := range []uuid.UUID{workspace, other} {
-		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Read API',$2,now(),now())`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Read API',?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, id, "read-"+id.String())
+		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Read API',$2,now(),now())`, id, "read-"+id.String())
 	}
 	service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
@@ -54,7 +44,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	}
 	at, _ := value.FromTime(time.Now().UTC())
 	bindingID := uuid.Must(uuid.NewV7())
-	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'PlatformAdmin','workspace',?)`, bindingID, identity, workspace, at)
+	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, bindingID, identity, workspace, at)
 	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(backend)})
 	server.EnableTransportEvents(transportevents.NewBackend(backend, nil))
 	server.devAuthToken = "read-backend-development-token-32-characters"
@@ -102,9 +92,9 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	for _, stamp := range stamps {
 		id := uuid.Must(uuid.NewV7())
 		auditIDs = append(auditIDs, id)
-		exec(`INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES($1,$2,$3,'system','fixture','reader.fixture','workspace','read-api','succeeded',$4)`, `INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES(?,?,?,'system','fixture','reader.fixture','workspace','read-api','succeeded',?)`, id, workspace, stamp, make([]byte, 32))
+		exec(`INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES($1,$2,$3,'system','fixture','reader.fixture','workspace','read-api','succeeded',$4)`, id, workspace, stamp, make([]byte, 32))
 	}
-	exec(`INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES($1,$2,$3,'system','fixture','hidden.fixture','workspace','read-api','succeeded',$4)`, `INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES(?,?,?,'system','fixture','hidden.fixture','workspace','read-api','succeeded',?)`, uuid.Must(uuid.NewV7()), other, stamps[2], make([]byte, 32))
+	exec(`INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES($1,$2,$3,'system','fixture','hidden.fixture','workspace','read-api','succeeded',$4)`, uuid.Must(uuid.NewV7()), other, stamps[2], make([]byte, 32))
 	var page struct {
 		Items []map[string]json.RawMessage `json:"items"`
 	}
@@ -133,7 +123,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	}
 
 	node := uuid.Must(uuid.NewV7())
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'read node','active',now(),now())`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'read node','active',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, node, workspace)
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'read node','active',now(),now())`, node, workspace)
 	store, err := rbacstore.From(backend)
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +138,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	if _, _, _, err := readUpgradeNode(uuid.Must(uuid.NewV7())); !errors.Is(err, database.ErrNotFound) {
 		t.Fatalf("missing upgrade target: %v", err)
 	}
-	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$2,'read-api',$3,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$2)`, "INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,`system`,path,last_heartbeat_at) VALUES(?,? ,?,'read-api',?,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',?)", readSnapshotArgs(mysqlEngine, node, stamps[0])...)
+	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$2,'read-api',$3,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$2)`, node, stamps[0], uuid.Must(uuid.NewV7()))
 	if scope, architecture, version, err := readUpgradeNode(node); err != nil || scope != workspace || architecture != "amd64" || version != "1.0.0" {
 		t.Fatalf("observed upgrade target: %s %q %q %v", scope, architecture, version, err)
 	}
@@ -181,7 +171,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	}
 	get("/readyz", uuid.Nil, nil, http.StatusOK)
 	get("/readyz", uuid.Nil, nil, http.StatusOK)
-	exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, bindingID)
+	exec(`DELETE FROM role_bindings WHERE id=$1`, bindingID)
 	w = get("/api/v1/workspaces", uuid.Nil, cookie, http.StatusOK)
 	if err := json.Unmarshal(w.Body.Bytes(), &workspaces); err != nil || len(workspaces.Items) != 0 {
 		t.Fatalf("empty authorized workspaces: %s %v", w.Body, err)
@@ -206,12 +196,4 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &metrics); err != nil || metrics.Available || len(metrics.Keys) != 3 {
 		t.Fatalf("unavailable metrics: %s %v", w.Body, err)
 	}
-}
-
-func readSnapshotArgs(mysqlEngine bool, node uuid.UUID, stamp value.Timestamp) []any {
-	instance := uuid.Must(uuid.NewV7())
-	if mysqlEngine {
-		return []any{node, stamp, stamp, instance, stamp}
-	}
-	return []any{node, stamp, instance}
 }

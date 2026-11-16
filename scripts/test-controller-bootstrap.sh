@@ -136,6 +136,15 @@ grep -Fq 'has no IPv4' "${fixture}/output"
 if PORT_BUSY=true run "${quick[@]}" >"${fixture}/output" 2>&1; then exit 1; fi
 grep -Fq 'already in use' "${fixture}/output"
 [[ ! -e "${fixture}/quick-releases" ]]
+if OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external OCSERV_DATABASE_BACKUP_HOST=db.example.test \
+  run --non-interactive >"${fixture}/output" 2>&1; then exit 1; fi
+grep -Fq 'MySQL 8.4 LTS support is retired' "${fixture}/output"
+mkdir -p "${fixture}/mysql-state"
+printf '%s\n' '{"database_backend":"mysql","database_deployment":"external","deployment_mode":"standalone"}' \
+  >"${fixture}/mysql-state/deployment-profile.json"
+if OCSERV_CONTROLLER_STATE_ROOT="${fixture}/mysql-state" run --non-interactive >"${fixture}/output" 2>&1; then exit 1; fi
+grep -Fq 'existing MySQL deployment' "${fixture}/output"
+[[ ! -e "${fixture}/quick-releases" ]]
 # Actual pseudo-terminal: defaults, cancellation and equivalent Quick handoff.
 python3 - "${bootstrap}" "${bin}" "${fixture}" <<'PTY'
 import os, pty, select, subprocess, sys, time
@@ -145,7 +154,7 @@ def wizard(confirmation, preset="quick"):
     env = dict(os.environ, PATH=bindir, OCSERV_CONTROLLER_SOURCE_ROOT=root+'/wizard-releases')
     child = subprocess.Popen(['bash', script], stdin=slave, stdout=slave, stderr=slave, cwd=root+'/config', env=env)
     os.close(slave)
-    answers = ('\nvpn.example.test\nrelay.example.test\nops@example.test\n\n\n' if preset == 'quick' else 'manual\n'+'\n'*14)
+    answers = ('\nvpn.example.test\nrelay.example.test\nops@example.test\n\n\n' if preset == 'quick' else 'manual\n'+'\n'*13)
     os.write(master, (answers+confirmation+'\n').encode())
     output = b''
     deadline = time.monotonic()+20

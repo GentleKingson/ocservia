@@ -208,11 +208,11 @@ for name in issuer-chain.pem issuer-key.pem tls-cert.pem tls-key.pem api-token t
 done
 chmod 444 "${OCSERV_SIGNER_SECRET_DIR}/tls-ca.pem"
 "${owner[@]}" chown 65532:65532 "${OCSERV_SIGNER_SECRET_DIR}" "${OCSERV_SIGNER_STATE_DIR}"
-for name in database-ca.pem database-backup.cnf oidc-client-secret; do
+for name in database-ca.pem oidc-client-secret; do
   cp "${OCSERV_SECRET_DIR}/certificate-signer-token" "${OCSERV_SECRET_DIR}/${name}"
 done
-export OCSERV_DATABASE_BACKUP_HOST=database.example.com OCSERV_DATABASE_BACKUP_IMAGE="${image}"
-for backend in postgres:bundled postgres:external mysql:external; do
+export OCSERV_DATABASE_BACKUP_HOST=database.example.com
+for backend in postgres:bundled postgres:external; do
   export OCSERV_DATABASE_BACKEND="${backend%:*}" OCSERV_DATABASE_DEPLOYMENT="${backend#*:}"
   for auth in local oidc combined; do
     export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_OIDC_ISSUER='' OCSERV_OIDC_CLIENT_ID='' OCSERV_OIDC_REDIRECT_URL=''
@@ -233,12 +233,13 @@ for backend in postgres:bundled postgres:external mysql:external; do
     ' "${work}/integrated.json" >/dev/null
   done
 done
+expect_failure env OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_RELAY_PUBLIC_HOST=controller.example.com "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_RELAY_URL_B=https://second.example.com "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_AUTH_TRUSTED_PROXY_CIDRS= "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_CERTIFICATE_SIGNER_URL=https://elsewhere.test/sign "${ROOT}/deploy/production/compose.sh" config --quiet
 OCSERV_SIGNER_IMAGE=example.invalid/signer:v1.2.0-rc.1 \
-  OCSERV_DATABASE_BACKUP_IMAGE=example.invalid/backup:v1.2.0-rc.1 \
+  OCSERV_BACKUP_IMAGE=example.invalid/backup:v1.2.0-rc.1 \
   "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_SIGNER_IMAGE=signer:latest "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure "${ROOT}/deploy/production/compose.sh" up --build

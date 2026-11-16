@@ -26,7 +26,7 @@ func TestNoNewBusinessDriverLeaks(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(rel, "control-plane/internal/database/postgres/") || strings.HasPrefix(rel, "control-plane/internal/database/mysql/") {
+		if strings.HasPrefix(rel, "control-plane/internal/database/postgres/") {
 			return nil
 		}
 		// The composition root selects drivers and owns migration connections;
@@ -52,7 +52,7 @@ func TestNoNewBusinessDriverLeaks(t *testing.T) {
 			if strings.HasSuffix(name, "/internal/attestationtest") || strings.HasSuffix(name, "/database/semantictest") {
 				t.Errorf("test fixture imported by business code: %s", rel)
 			}
-			if !strings.HasPrefix(name, "github.com/jackc/") && !strings.HasPrefix(name, "database/sql") && !strings.Contains(name, "/database/postgres") && !strings.Contains(name, "/database/mysql") && !strings.Contains(name, "go-sql-driver") {
+			if !strings.HasPrefix(name, "github.com/jackc/") && !strings.HasPrefix(name, "database/sql") && !strings.Contains(name, "/database/postgres") {
 				continue
 			}
 			counts[rel+":"+strconv.Quote(name)]++

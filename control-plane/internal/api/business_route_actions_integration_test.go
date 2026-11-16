@@ -39,12 +39,12 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 	f.bind(manager, plan.NodeID, "UserManager")
 	other, sibling, foreign := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	stamp := value.Timestamp{Valid: true}
-	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Business routes',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Business routes',?,?,?)`, other, other.String(), stamp, stamp)
+	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Business routes',$2,$3,$4)`, other, other.String(), stamp, stamp)
 	for _, node := range []struct{ id, workspace uuid.UUID }{{sibling, f.workspace}, {foreign, other}} {
-		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,$4,$5)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,?,'active',1,?,?)`, node.id, node.workspace, node.id.String(), stamp, stamp)
+		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,$4,$5)`, node.id, node.workspace, node.id.String(), stamp, stamp)
 	}
 	for _, node := range []uuid.UUID{plan.NodeID, sibling, foreign} {
-		f.exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,'alice',true,1,1,$2,$3,$4)`, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES(?,'alice',true,1,1,?,?,?)`, node, make([]byte, 32), stamp, stamp)
+		f.exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,'alice',true,1,1,$2,$3,$4)`, node, make([]byte, 32), stamp, stamp)
 	}
 	nodePath := "/api/v1/nodes/" + plan.NodeID.String()
 	policyPath, planPath := nodePath+"/users/alice/policy", "/api/v1/config-plans/"+plan.ID.String()
@@ -74,7 +74,7 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 	}
 	var actorID string
 	var sessionID uuid.UUID
-	if err := f.row(`SELECT actor_id,source_session_id FROM audit_events WHERE node_id=$1 AND action='user.policy.set'`, `SELECT actor_id,source_session_id FROM audit_events WHERE node_id=? AND action='user.policy.set'`, plan.NodeID).Scan(&actorID, &sessionID); err != nil || actorID != manager.principal.IdentityID.String() || sessionID != manager.principal.SessionID {
+	if err := f.row(`SELECT actor_id,source_session_id FROM audit_events WHERE node_id=$1 AND action='user.policy.set'`, plan.NodeID).Scan(&actorID, &sessionID); err != nil || actorID != manager.principal.IdentityID.String() || sessionID != manager.principal.SessionID {
 		t.Fatalf("policy audit identity/session: %s %s %v", actorID, sessionID, err)
 	}
 	w = f.call("POST", "/api/v1/user-batches", batchBody(plan.NodeID), uuid.NewString(), manager.cookie, nil)
@@ -91,17 +91,17 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 	counts := func(t *testing.T) [9]int {
 		t.Helper()
 		var result [9]int
-		queries := [][2]string{
-			{`SELECT count(*) FROM operations WHERE workspace_id=$1`, `SELECT count(*) FROM operations WHERE workspace_id=?`},
-			{`SELECT count(*) FROM commands WHERE workspace_id=$1`, `SELECT count(*) FROM commands WHERE workspace_id=?`},
-			{`SELECT count(*) FROM config_plans WHERE workspace_id=$1`, `SELECT count(*) FROM config_plans WHERE workspace_id=?`},
-			{`SELECT count(*) FROM config_apply_operations WHERE workspace_id=$1`, `SELECT count(*) FROM config_apply_operations WHERE workspace_id=?`},
-			{`SELECT count(*) FROM user_policy_mutations WHERE workspace_id=$1`, `SELECT count(*) FROM user_policy_mutations WHERE workspace_id=?`},
-			{`SELECT count(*) FROM batch_operations WHERE workspace_id=$1`, `SELECT count(*) FROM batch_operations WHERE workspace_id=?`},
-			{`SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE c.workspace_id=$1`, `SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE c.workspace_id=?`},
+		queries := []string{
+			`SELECT count(*) FROM operations WHERE workspace_id=$1`,
+			`SELECT count(*) FROM commands WHERE workspace_id=$1`,
+			`SELECT count(*) FROM config_plans WHERE workspace_id=$1`,
+			`SELECT count(*) FROM config_apply_operations WHERE workspace_id=$1`,
+			`SELECT count(*) FROM user_policy_mutations WHERE workspace_id=$1`,
+			`SELECT count(*) FROM batch_operations WHERE workspace_id=$1`,
+			`SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE c.workspace_id=$1`,
 		}
 		for i, query := range queries {
-			if err := f.row(query[0], query[1], f.workspace).Scan(&result[i]); err != nil {
+			if err := f.row(query, f.workspace).Scan(&result[i]); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -117,8 +117,8 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 	bindWorkspace := func(t *testing.T, actor applyHTTPActor, scope uuid.UUID, role string) uuid.UUID {
 		t.Helper()
 		id := uuid.Must(uuid.NewV7())
-		f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,$4,'workspace',$5)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,?,'workspace',?)`, id, actor.principal.IdentityID, scope, role, stamp)
-		t.Cleanup(func() { f.exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, id) })
+		f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,$4,'workspace',$5)`, id, actor.principal.IdentityID, scope, role, stamp)
+		t.Cleanup(func() { f.exec(`DELETE FROM role_bindings WHERE id=$1`, id) })
 		return id
 	}
 	misleading := func(r *http.Request) {
@@ -194,7 +194,7 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 		foreignPlan := g.plan(false)
 		before[7]++ // The foreign-workspace fixture deliberately creates one Plan.
 		for _, actor := range []applyHTTPActor{f.reader, manager} {
-			f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, `DELETE FROM role_bindings WHERE identity_id=? AND workspace_id=?`, actor.principal.IdentityID, other)
+			f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, actor.principal.IdentityID, other)
 		}
 		assertApplyHTTPProblem(t, f.call("GET", "/api/v1/config-plans/"+foreignPlan.ID.String(), "", "", f.reader.cookie, nil), 404, "not-found")
 		// A single node-scoped workspace is selectable, but metrics still require
@@ -295,7 +295,7 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 			assertApplyHTTPProblem(t, f.call("POST", nodePath+"/config-plans", body, uuid.NewString(), f.requester.cookie, nil), 403, "forbidden")
 			// A node ConfigManager has config.plan, not access to arbitrary secrets.
 			binding := uuid.Must(uuid.NewV7())
-			f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'ConfigManager','secret_ref',$4,$5)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES(?,?,?,'ConfigManager','secret_ref',?,?)`, binding, f.requester.principal.IdentityID, scope, ref.ID, stamp)
+			f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'ConfigManager','secret_ref',$4,$5)`, binding, f.requester.principal.IdentityID, scope, ref.ID, stamp)
 			w := f.call("POST", nodePath+"/config-plans", body, uuid.NewString(), f.requester.cookie, nil)
 			if scope == f.workspace {
 				assertApplyHTTPProblem(t, w, 400, "config-plan-invalid")
@@ -357,12 +357,12 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 		if !f.s.revalidateEventStream(t.Context(), r, f.reader.principal) {
 			t.Fatal("authorized SSE rejected")
 		}
-		f.exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, binding)
+		f.exec(`DELETE FROM role_bindings WHERE id=$1`, binding)
 		if f.s.revalidateEventStream(t.Context(), r, f.reader.principal) {
 			t.Fatal("revoked workspace permission retained by SSE")
 		}
 		bindWorkspace(t, f.reader, f.workspace, "Viewer")
-		f.exec(`UPDATE auth_sessions SET revoked_at=$1 WHERE id=$2`, `UPDATE auth_sessions SET revoked_at=? WHERE id=?`, stamp, f.reader.principal.SessionID)
+		f.exec(`UPDATE auth_sessions SET revoked_at=$1 WHERE id=$2`, stamp, f.reader.principal.SessionID)
 		if f.s.revalidateEventStream(t.Context(), r, f.reader.principal) {
 			t.Fatal("revoked session retained by SSE")
 		}

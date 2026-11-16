@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/google/uuid"
@@ -40,7 +39,6 @@ type Store interface {
 type Connection struct {
 	Store Store
 	pg    *pgxpool.Pool
-	mysql *mysql.Backend
 }
 
 func postgresURL(options Options) (string, error) {
@@ -105,13 +103,8 @@ func ValidateOptions(options Options) error {
 	case "", "postgres":
 		_, err := postgresURL(options)
 		return err
-	case "mysql":
-		if options.BundledPostgres {
-			return errors.New("bundled PostgreSQL cannot be declared for MySQL")
-		}
-		return mysql.ValidateOptions(mysql.Options{Engine: mysql.Engine(options.Backend), Environment: options.Environment, DSN: options.URL, CAFile: options.CAFile})
 	default:
-		return errors.New("unsupported Controller database backend")
+		return errors.New("unsupported Controller database backend; only postgres is supported and cross-engine migration is unsupported")
 	}
 }
 
@@ -119,26 +112,15 @@ func Open(ctx context.Context, options Options) (*Connection, error) {
 	if err := ValidateOptions(options); err != nil {
 		return nil, err
 	}
-	switch options.Backend {
-	case "", "postgres":
-		databaseURL, err := postgresURL(options)
-		if err != nil {
-			return nil, err
-		}
-		pool, err := migrations.Open(ctx, databaseURL)
-		if err != nil {
-			return nil, err
-		}
-		return &Connection{Store: postgres.WrapPool(pool), pg: pool}, nil
-	case "mysql":
-		backend, err := mysql.Open(ctx, mysql.Options{Engine: mysql.Engine(options.Backend), Environment: options.Environment, DSN: options.URL, CAFile: options.CAFile})
-		if err != nil {
-			return nil, err
-		}
-		return &Connection{Store: backend, mysql: backend}, nil
-	default:
-		return nil, errors.New("unsupported Controller database backend")
+	databaseURL, err := postgresURL(options)
+	if err != nil {
+		return nil, err
 	}
+	pool, err := migrations.Open(ctx, databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	return &Connection{Store: postgres.WrapPool(pool), pg: pool}, nil
 }
 
 // ValidateDeployment runs connection-level deployment gates before migrations.
@@ -154,48 +136,25 @@ func (c *Connection) ValidateDeployment(ctx context.Context) error {
 func (c *Connection) Close() {
 	if c.pg != nil {
 		c.pg.Close()
-	} else {
-		_ = c.mysql.Close()
 	}
 }
 
 func (c *Connection) Migrate(ctx context.Context) error {
-	if c.pg != nil {
-		return migrations.Migrate(ctx, c.pg)
-	}
-	// MySQL's immutable chain includes its own guarded audit-copy validation.
-	// Normal startup never repairs an interrupted revision implicitly.
-	if err := c.mysql.Migrate(ctx, ""); err != nil {
-		return err
-	}
-	return c.mysql.PrepareControllerTelemetry(ctx)
+	return migrations.Migrate(ctx, c.pg)
 }
 
 func (c *Connection) GrantRuntimePrivileges(ctx context.Context, account string) error {
-	if c.pg != nil {
-		return migrations.GrantRuntimePrivileges(ctx, c.pg, account)
-	}
-	return c.mysql.GrantRuntimePrivileges(ctx, account)
+	return migrations.GrantRuntimePrivileges(ctx, c.pg, account)
 }
 
 // ProvisionManagementWorkspace returns the "administration" workspace, creating
 // it only on a database that has no workspace yet. The slug is unique, so a
 // concurrent run fails instead of creating a second workspace.
 func (c *Connection) ProvisionManagementWorkspace(ctx context.Context) (id uuid.UUID, created bool, err error) {
-	insert := `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Administration','administration',$2,$2)`
-	if c.mysql != nil {
-		insert = `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Administration','administration',?,?)`
-	}
+	const insert = `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Administration','administration',$2,$2)`
 	err = database.Within(ctx, c.Store, database.DefaultIsolation, func(tx database.Tx) error {
-		find := `SELECT id FROM workspaces WHERE slug='administration'`
-		var err error
-		if c.mysql != nil {
-			var raw []byte
-			if err = tx.QueryRow(ctx, find).Scan(&raw); err == nil {
-				id, err = uuid.FromBytes(raw)
-				return err
-			}
-		} else if err = tx.QueryRow(ctx, find).Scan(&id); err == nil {
+		err := tx.QueryRow(ctx, `SELECT id FROM workspaces WHERE slug='administration'`).Scan(&id)
+		if err == nil {
 			return nil
 		}
 		if !errors.Is(err, database.ErrNotFound) {
@@ -213,11 +172,7 @@ func (c *Connection) ProvisionManagementWorkspace(ctx context.Context) (id uuid.
 			return err
 		}
 		id, created = uuid.Must(uuid.NewV7()), true
-		if c.mysql != nil {
-			_, err = tx.Exec(ctx, insert, mysql.UUIDBytes(id), at, at)
-		} else {
-			_, err = tx.Exec(ctx, insert, id, at)
-		}
+		_, err = tx.Exec(ctx, insert, id, at)
 		return err
 	})
 	return id, created, err
@@ -228,9 +183,6 @@ func (c *Connection) ProvisionManagementWorkspace(ctx context.Context) (id uuid.
 func (c *Connection) ValidateRuntime(ctx context.Context) error {
 	if err := database.Require(c.Store, database.Transactions, database.RowLocks); err != nil {
 		return err
-	}
-	if c.mysql != nil {
-		return c.mysql.ValidateTelemetryRuntime(ctx)
 	}
 	return postgres.WrapPool(c.pg).ValidateTelemetryRuntime(ctx)
 }

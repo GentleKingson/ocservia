@@ -21,7 +21,6 @@ grep -Fq 'automation_locked' "${ROOT}/control-plane/migrations/schema.sql"
 grep -Fq 'atomic_replace(&stage_path, &self.resources.config)' "${ROOT}/rust/crates/ocserv-adapter/src/lib.rs"
 grep -Fq 'sync_directory(parent).await' "${ROOT}/rust/crates/ocserv-adapter/src/lib.rs"
 grep -Fq 'config_apply.rollback_failed' "${ROOT}/control-plane/internal/database/postgres/command_result.go"
-grep -Fq 'config_apply.rollback_failed' "${ROOT}/control-plane/internal/database/mysql/command_result.go"
 
 if grep -REnE 'caller_path|target_path|shell[.]exec|command[.]run|occtl[.]raw|systemctl[.]raw' \
   "${ROOT}/control-plane/internal/configplan" \

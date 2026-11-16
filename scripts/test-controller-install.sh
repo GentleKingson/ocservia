@@ -881,6 +881,37 @@ assert_status 0 "statically quoted install.env values must load"
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-quoted.example.test"
 echo "one static quote layer is stripped without expansion"
 
+# 8i. retired MySQL backend configuration and existing MySQL deployment profiles fail closed before host bootstrap or download.
+reset_logs
+reset_checkout
+install_docker_client_stub
+EXTRA_ENV=(OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external)
+capture
+EXTRA_ENV=()
+assert_status 1 "OCSERV_DATABASE_BACKEND=mysql must fail closed"
+assert_output "MySQL 8.4 LTS support is retired"
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+assert_log_empty "${controller_log}"
+
+reset_logs
+reset_checkout
+install_docker_client_stub
+mkdir -p -- "${state_root}"
+chmod 0700 -- "${state_root}"
+printf '%s\n' '{"database_backend":"mysql","database_deployment":"external","deployment_mode":"standalone"}' \
+  >"${state_root}/deployment-profile.json"
+chmod 0600 -- "${state_root}/deployment-profile.json"
+capture
+assert_status 1 "existing MySQL deployment profile must fail closed before host bootstrap"
+assert_output "existing MySQL deployment"
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+assert_log_empty "${controller_log}"
+[[ -f "${state_root}/deployment-profile.json" ]] || die "existing MySQL deployment profile was removed"
+rm -rf -- "${state_root}"
+echo "retired MySQL configuration and active MySQL profiles fail closed without host mutation"
+
 reset_logs
 reset_checkout
 install_docker_client_stub

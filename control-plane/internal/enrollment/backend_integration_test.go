@@ -20,14 +20,12 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
-	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -37,53 +35,12 @@ import (
 func enrollmentBackend(t *testing.T) database.Backend {
 	t.Helper()
 	ctx := context.Background()
-	if dsn := os.Getenv("OCSERVIA_DATABASE_TEST_DSN"); dsn != "" {
-		options := mysql.Options{Engine: mysql.Engine(os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE")), Environment: "test", DSN: dsn}
-		admin, err := mysql.Open(ctx, options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = admin.Close() })
-		name := "dbtest_enrollment_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-		if _, err := admin.Exec(ctx, "CREATE DATABASE `"+name+"`"); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _, _ = admin.Exec(ctx, "DROP DATABASE `"+name+"`") })
-		if _, err := admin.Exec(ctx, "GRANT ALL ON `"+name+"`.* TO 'ocservia_owner'@'%' WITH GRANT OPTION"); err != nil {
-			t.Fatal(err)
-		}
-		cfg, err := driver.ParseDSN(dsn)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg.DBName, cfg.User, cfg.Passwd = name, "ocservia_owner", "database-e2e-owner-test-only"
-		options.DSN = cfg.FormatDSN()
-		owner, err := mysql.Open(ctx, options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = owner.Close() })
-		if err := owner.Migrate(ctx, ""); err != nil {
-			t.Fatal(err)
-		}
-		if err := owner.GrantTestPrivileges(ctx); err != nil {
-			t.Fatal(err)
-		}
-		cfg.User, cfg.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
-		options.DSN = cfg.FormatDSN()
-		backend, err := mysql.Open(ctx, options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = backend.Close() })
-		return backend
-	}
 	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("real PostgreSQL or configured database test backend required")
+		t.Skip("real PostgreSQL required")
 	}
-	// Claims are global, so each fixture needs its own database, just as on
-	// MySQL. Otherwise a worker can claim another test's pending intent.
+	// Claims are global, so each fixture needs its own database. Otherwise a
+	// worker can claim another test's pending intent.
 	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
 	if ownerURL == "" {
 		t.Fatal("owner URL required for isolated enrollment database")
@@ -133,23 +90,14 @@ func enrollmentBackend(t *testing.T) database.Backend {
 func TestEnrollmentBackendIntegration(t *testing.T) {
 	b := enrollmentBackend(t)
 	ctx := context.Background()
-	_, my := b.(*mysql.Backend)
-	exec := func(pg, sql string, args ...any) {
+	exec := func(query string, args ...any) {
 		t.Helper()
-		if my {
-			pg = sql
-			for i, v := range args {
-				if id, ok := v.(uuid.UUID); ok {
-					args[i] = mysql.UUIDBytes(id)
-				}
-			}
-		}
-		if _, err := b.Exec(ctx, pg, args...); err != nil {
+		if _, err := b.Exec(ctx, query, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
 	workspace := uuid.New()
-	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'enrollment',$2,now(),now())`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES(?,'enrollment',?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, workspace, workspace.String())
+	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'enrollment',$2,now(),now())`, workspace, workspace.String())
 	signer, err := commandauth.NewRandomSigner()
 	if err != nil {
 		t.Fatal(err)
@@ -211,9 +159,9 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	at, _ := value.FromTime(time.Now().UTC())
 	expires, _ := at.Add(time.Hour)
 	requester, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'enrollment',$2,$3,$4)`, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,'enrollment',?,?,?)`, requester, requester.String(), at, at)
-	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES(?,?,?,'PlatformAdmin','workspace',?)`, uuid.Must(uuid.NewV7()), requester, workspace, at)
-	exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES(?,?,?,?)`, session, requester, expires, at)
+	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'enrollment',$2,$3,$4)`, requester, requester.String(), at, at)
+	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, uuid.Must(uuid.NewV7()), requester, workspace, at)
+	exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, session, requester, expires, at)
 	approval := Approval{NodeID: node, Policy: "standard", Capabilities: capabilities, ActorID: requester.String(), IdentityID: requester, SessionID: session, Reason: "activate", RequestID: uuid.NewString()}
 	if _, err := ExportSealingBinding(ctx, b, workspace, node, approval.ApprovalID, hex.EncodeToString(endpoint)); err == nil {
 		t.Fatal("pending enrollment exported")
@@ -388,7 +336,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}
 	bootstrapRequest := enrollmentRequest(bootstrap.Value, bootstrapEndpoint)
 	negative, positive := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, value.Timestamp{Valid: true, Micros: value.PositiveInfinity}
-	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, `UPDATE node_bootstrap_tokens SET created_at=?,expires_at=? WHERE id=?`, negative, positive, bootstrap.ID)
+	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, negative, positive, bootstrap.ID)
 	if err := s.ValidateEnrollment(ctx, bootstrapRequest); err != nil {
 		t.Fatal("logical bootstrap expiry", err)
 	}
@@ -396,7 +344,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exec(`UPDATE node_bootstrap_tokens SET consumed_at=$1,expires_at=$2 WHERE id=$3`, `UPDATE node_bootstrap_tokens SET consumed_at=?,expires_at=? WHERE id=?`, positive, value.Timestamp{Valid: true, Micros: value.MinTimestamp}, bootstrap.ID)
+	exec(`UPDATE node_bootstrap_tokens SET consumed_at=$1,expires_at=$2 WHERE id=$3`, positive, value.Timestamp{Valid: true, Micros: value.MinTimestamp}, bootstrap.ID)
 	if replay, err := s.Enroll(ctx, bootstrapRequest); err != nil || !bytes.Equal(replay.GetNodeId(), bootstrapped.GetNodeId()) {
 		t.Fatal("bound bootstrap retry with expired token", replay, err)
 	}
@@ -405,13 +353,13 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}
 	wideEndpoint := endpointFixture(104)
 	wide := createToken(t, s, workspace, wideEndpoint)
-	exec(`UPDATE enrollment_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, `UPDATE enrollment_tokens SET created_at=?,expires_at=? WHERE id=?`, negative, value.Timestamp{Valid: true, Micros: value.EndTimestamp - 1}, wide.ID)
+	exec(`UPDATE enrollment_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, negative, value.Timestamp{Valid: true, Micros: value.EndTimestamp - 1}, wide.ID)
 	if _, err := s.Enroll(ctx, enrollmentRequest(wide.Value, wideEndpoint)); err != nil {
 		t.Fatal("full finite token expiry", err)
 	}
 	legacy, legacyEndpoint := uuid.New(), endpointFixture(105)
 	legacyName := "legacy-" + legacy.String()
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,$3,'pending',now(),now())`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES(?,?,?,'pending',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, legacy, workspace, legacyName)
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,$3,'pending',now(),now())`, legacy, workspace, legacyName)
 	legacyToken, err := s.CreateToken(ctx, TokenSpec{WorkspaceID: workspace, Environment: "test", ExpectedNodeName: legacyName, ExpectedEndpointID: legacyEndpoint, ActorID: "operator", Reason: "legacy enrollment", RequestID: uuid.NewString()})
 	if err != nil {
 		t.Fatal(err)

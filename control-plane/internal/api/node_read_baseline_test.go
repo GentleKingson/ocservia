@@ -43,11 +43,11 @@ func assertBaselineJSON(t *testing.T, w *httptest.ResponseRecorder, want string)
 func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	b := authenticationBackend(t)
 	ctx := context.Background()
-	exec := func(pg, my string, args ...any) { t.Helper(); authSafetyExec(t, b, pg, my, args...) }
+	exec := func(query string, args ...any) { t.Helper(); authSafetyExec(t, b, query, args...) }
 	ws, other := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	stamp := value.Timestamp{Valid: true, Micros: 0}
 	for _, id := range []uuid.UUID{ws, other} {
-		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP baseline',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'HTTP baseline',?,?,?)`, id, "baseline-"+id.String(), stamp, stamp)
+		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP baseline',$2,$3,$4)`, id, "baseline-"+id.String(), stamp, stamp)
 	}
 	authn, err := auth.NewBackend(b, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
@@ -59,7 +59,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding := uuid.Must(uuid.NewV7())
-	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'PlatformAdmin','workspace',?)`, binding, identity, ws, stamp)
+	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, binding, identity, ws, stamp)
 	authorization := Authorization{Authentication: authn, RBAC: rbac.NewBackend(b)}
 	var disabled *telemetry.Service
 	s := newTestServer(t, testHTTPConfig(false), b, Modules{Nodes: disabled}, authorization)
@@ -89,7 +89,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 			scope = other
 		}
 		ids = append(ids, id)
-		exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',7,$4,$5)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,?,'active',7,?,?)`, id, scope, "node-"+id.String(), stamp, stamp)
+		exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',7,$4,$5)`, id, scope, "node-"+id.String(), stamp, stamp)
 	}
 	nodePath := "/api/v1/nodes/" + ids[0].String()
 	nodeJSON := func(id uuid.UUID, sessions int) string {
@@ -161,7 +161,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	}
 	// A rollup needs no raw-history partition and keeps time independent of the
 	// wall clock. Omitted since excludes this old point; -infinity includes it.
-	exec(`INSERT INTO telemetry_rollups_5m(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) VALUES($1,'cpu_usage_ratio',$2,2,1,3,2)`, `INSERT INTO telemetry_rollups_5m(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) VALUES(?,'cpu_usage_ratio',?,2,1,3,2)`, ids[0], stamp)
+	exec(`INSERT INTO telemetry_rollups_5m(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) VALUES($1,'cpu_usage_ratio',$2,2,1,3,2)`, ids[0], stamp)
 	assertBaselineJSON(t, get(nodePath+"/telemetry?metric=cpu_usage_ratio", ws, cookie), `{"items":[],"resolution":"5m"}`)
 	assertBaselineJSON(t, get(nodePath+"/telemetry?metric=cpu_usage_ratio&since=-infinity", ws, cookie), `{"items":[{"at":"2000-01-01T00:00:00Z","metric":"cpu_usage_ratio","count":2,"minimum":1,"maximum":3,"average":2}],"resolution":"5m"}`)
 	for _, resolution := range []string{"raw", "1h"} {
@@ -198,7 +198,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	for _, scope := range []uuid.UUID{other, uuid.Must(uuid.NewV7())} {
 		assertBaselineProblem(t, get("/api/v1/nodes", scope, cookie), "/api/v1/nodes", 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
 	}
-	exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, binding)
+	exec(`DELETE FROM role_bindings WHERE id=$1`, binding)
 	assertBaselineProblem(t, get("/api/v1/nodes", ws, cookie), "/api/v1/nodes", 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
 	for _, path := range []string{nodePath, nodePath + "/sessions", nodePath + "/ip-bans", nodePath + "/telemetry"} {
 		assertBaselineProblem(t, get(path, ws, cookie), path, 404, "not-found", "Resource not found", "the requested resource does not exist")
@@ -209,7 +209,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 
 	// A node-scoped Viewer can read only its own node, including when the
 	// caller supplies a misleading workspace or action header.
-	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'Viewer','node',$4,$5)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES(?,?,?,'Viewer','node',?,?)`, binding, identity, ws, ids[0], stamp)
+	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'Viewer','node',$4,$5)`, binding, identity, ws, ids[0], stamp)
 	for _, suffix := range []string{"", "/sessions", "/ip-bans", "/telemetry?metric=cpu_usage_ratio"} {
 		if w := get(nodePath+suffix, other, cookie); w.Code != 200 {
 			t.Fatalf("node-scoped read: %d %s", w.Code, w.Body)
@@ -262,8 +262,8 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	}
 
 	t.Run("action-permissions", func(t *testing.T) {
-		exec := func(pg, my string, args ...any) { t.Helper(); authSafetyExec(t, b, pg, my, args...) }
-		exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES(?,'ocserv.users.write',true)`, ids[0])
+		exec := func(query string, args ...any) { t.Helper(); authSafetyExec(t, b, query, args...) }
+		exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, ids[0])
 		w := get(nodePath, ws, cookie)
 		var node telemetry.Node
 		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &node) != nil {
@@ -272,8 +272,8 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		if node.EffectiveActions["user.manage"].Allowed || node.EffectiveActions["user.manage"].Reason != "forbidden" {
 			t.Fatalf("Viewer gained action: %+v", node.EffectiveActions)
 		}
-		exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, binding)
-		exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'UserManager','node',$4,$5)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES(?,?,?,'UserManager','node',?,?)`, binding, identity, ws, ids[0], stamp)
+		exec(`DELETE FROM role_bindings WHERE id=$1`, binding)
+		exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'UserManager','node',$4,$5)`, binding, identity, ws, ids[0], stamp)
 		w = get(nodePath, ws, cookie)
 		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &node) != nil || !node.EffectiveActions["user.manage"].Allowed {
 			t.Fatalf("node-scoped UserManager lost action: %d %s", w.Code, w.Body)
@@ -281,8 +281,8 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		if node.EffectiveActions["group.manage"].Allowed {
 			t.Fatal("missing group capability became available")
 		}
-		exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, binding)
-		exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'Viewer','node',$4,$5)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES(?,?,?,'Viewer','node',?,?)`, binding, identity, ws, ids[0], stamp)
+		exec(`DELETE FROM role_bindings WHERE id=$1`, binding)
+		exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'Viewer','node',$4,$5)`, binding, identity, ws, ids[0], stamp)
 	})
 
 	t.Run("configured-service", func(t *testing.T) {
@@ -300,8 +300,8 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$3,'module',$4,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$5)`, "INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,`system`,path,last_heartbeat_at) VALUES(?,?,?,'module',?,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',?)", ids[0], now, now, uuid.Must(uuid.NewV7()), now)
-		exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES(?,'ocserv.agent.upgrade.v2',true)`, ids[0])
+		exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$3,'module',$4,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$5)`, ids[0], now, now, uuid.Must(uuid.NewV7()), now)
+		exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, ids[0])
 		configured := telemetry.NewWithRecommendedAgentVersionBackend(b, "2.0.0")
 		configured.EnableAgentUpgradeEligibility(catalog)
 		server := newTestServer(t, testHTTPConfig(false), b, Modules{Nodes: configured}, authorization)

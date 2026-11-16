@@ -255,8 +255,7 @@ operator, use the externally governed database administration path:
    email, and confirm it is not a Break-glass or Local recovery identity.
 3. In one transaction, lock that identity row, set `disabled_at` and
    `updated_at`, and set `revoked_at` on every unrevoked `auth_sessions` row of
-   that identity. Use the target backend's own time and UUID encodings; do not
-   copy PostgreSQL statements to MySQL.
+   that identity.
 4. Instead of step 3, to remove only one workspace's access, delete every
    `role_bindings` row for that identity and `workspace_id` in one transaction
    (an identity can hold several roles and resource-scoped bindings there, and
@@ -267,13 +266,12 @@ operator, use the externally governed database administration path:
 5. Record the action in the incident record. Keep the identity row and its
    audit history; do not delete or rewrite audit records.
 
-Session validation on both backends requires an unrevoked session and an
-identity without `disabled_at`, and an OIDC callback for a disabled identity
-does not re-enable it, so the old sessions stop at the next request and new
-logins fail. Requests already authorized before the commit are not undone, and
-revoking an identity does not cancel commands already signed for nodes.
-Shortening `OCSERV_SESSION_TTL` narrows exposure but replaces none of these
-steps.
+Session validation requires an unrevoked session and an identity without
+`disabled_at`, and an OIDC callback for a disabled identity does not re-enable
+it, so the old sessions stop at the next request and new logins fail. Requests
+already authorized before the commit are not undone, and revoking an identity
+does not cancel commands already signed for nodes. Shortening
+`OCSERV_SESSION_TTL` narrows exposure but replaces none of these steps.
 
 ### Correcting a historical issuer configuration
 
@@ -316,8 +314,8 @@ host, because Quick reruns accept an already-initialized database.
    the Integrated environment exported.
 2. Obtain the UUIDv7 of the management workspace. `--bootstrap-local-admin`
    requires an existing workspace, so an authorized database operator must
-   provision one first when starting from an empty database. The owner one-shot
-   handles both PostgreSQL and MySQL:
+   provision one first when starting from an empty database. Run the PostgreSQL
+   owner one-shot:
 
    ```bash
    deploy/production/compose.sh run --rm --no-deps migrate --provision-management-workspace
@@ -328,10 +326,9 @@ host, because Quick reruns accept an already-initialized database.
    `workspace_id` in the `management workspace ready` log line. Rerunning it
    returns the same workspace, but running it when other workspaces already
    exist without `administration` fails closed. You can also insert the row
-   manually by following [database preparation](#database-preparation) below
-   (note that the PostgreSQL SQL is not portable to MySQL). Record the
-   resulting UUID, as bootstrap permanently binds Local identity management to
-   that workspace regardless of later API headers.
+   manually by following [database preparation](#database-preparation) below.
+   Record the resulting UUID, as bootstrap permanently binds Local identity
+   management to that workspace regardless of later API headers.
 3. Provision one administrator password from your secret manager into
    `OCSERV_SECRET_DIR/local-bootstrap-password`. It must be a regular file
    without symlinks or hard links, owned by the one-shot process UID with mode
@@ -361,7 +358,7 @@ and backups) are in
 
 ### Database preparation
 
-When preparing the database manually, connect with the administrative owner
+When preparing PostgreSQL manually, connect with the administrative owner
 role over a protected connection (using verified TLS for external databases and
 credentials retrieved from your secret manager, never passed on the command
 line). Reserve the owner connection for schema migration and workspace
@@ -395,42 +392,8 @@ INSERT INTO workspaces (id, name, slug, created_at, updated_at)
 VALUES ('<management-workspace-uuidv7>', 'Administration', 'administration', now(), now());
 ```
 
-#### MySQL
-
-Inspect the sole schema journal after owner migration succeeds:
-
-```sql
-SELECT epoch, revision, checksum, state, step
-FROM schema_revisions ORDER BY epoch, revision;
-```
-
-Every required row must be in the `verified` state and match the installed SQL
-artifacts. A fresh epoch-2 initialization records revision 2. A
-checkpoint upgrade verifies revision 0 before applying the journaled cleanup at
-revision 1 and the maintenance-clock update at revision 2. Any row left in
-`running` requires exact artifact repair and must
-not be edited manually. Owner migration verifies both the live schema and
-runtime privileges; runtime startup checks telemetry structures and
-permissions; and readiness checks core read queries and stream health. The
-`epoch` and `revision` columns identify backend SQL artifacts and do not map to
-PostgreSQL legacy migration numbers or a Controller compatibility range.
-
-In the current migrated MySQL schema, workspace IDs use `VARBINARY(16)` with an
-exact 16-byte length constraint in unswapped RFC UUID byte order, and workspace
-timestamps are signed `BIGINT` microseconds since `2000-01-01 00:00:00 UTC` (do
-not pass Unix seconds or SQL date/time strings). Pass the same UUIDv7 string to
-`OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID` in step 3:
-
-```sql
-SET @workspace_id = UNHEX(REPLACE('<management-workspace-uuidv7>', '-', ''));
-SET @created_at = TIMESTAMPDIFF(MICROSECOND, '2000-01-01 00:00:00', UTC_TIMESTAMP(6));
-INSERT INTO workspaces (id, name, slug, created_at, updated_at)
-VALUES (@workspace_id, 'Administration', 'administration', @created_at, @created_at);
-```
-
-Never insert swapped UUID bytes or call `now()` directly into `BIGINT`
-timestamp columns, and do not run this current-schema statement against an
-unmigrated or pre-checkpoint database. After completing either database branch,
+Do not run this current-schema statement against an unmigrated or
+pre-checkpoint database. After creating or confirming the management workspace,
 return to step 3 of the bootstrap procedure above.
 
 ### Upgrading an existing installation

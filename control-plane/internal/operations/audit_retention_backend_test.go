@@ -57,7 +57,7 @@ func TestAuditRetentionBackendIntegration(t *testing.T) {
 	oldStamp, _ := value.FromTime(old)
 	nowStamp, _ := value.FromTime(time.Now().UTC())
 	for _, at := range []value.Timestamp{oldStamp, nowStamp} {
-		f.exec(t, `INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail)VALUES($1,$2,$3,'warning','retention.test','{"detail":true}')`, `INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail)VALUES(?,?,?,'warning','retention.test','{"detail":true}')`, uuid.New(), node, at)
+		f.exec(t, `INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail)VALUES($1,$2,$3,'warning','retention.test','{"detail":true}')`, uuid.New(), node, at)
 	}
 	if err := manager.CheckpointAll(ctx); err != nil {
 		t.Fatal(err)
@@ -79,15 +79,14 @@ func TestAuditRetentionBackendIntegration(t *testing.T) {
 	}
 	assertChain(32)
 	var originalMAC []byte
-	q, args := f.query(`SELECT event_mac FROM audit_events WHERE id=$1`, `SELECT event_mac FROM audit_events WHERE id=?`, []any{ids[34]})
-	if err := f.owner.QueryRow(ctx, q, args...).Scan(&originalMAC); err != nil {
+	if err := f.owner.QueryRow(ctx, `SELECT event_mac FROM audit_events WHERE id=$1`, ids[34]).Scan(&originalMAC); err != nil {
 		t.Fatal(err)
 	}
 	f.replaceAuditEvidence(t, ids[34], "event_mac", bytes.Repeat([]byte{0}, 32))
 	if err := manager.CompactDetails(ctx, 365); err == nil {
 		t.Fatal("corrupt original record compacted")
 	}
-	if n := f.count(t, `SELECT count(*) FROM audit_events WHERE details_compacted_at IS NOT NULL`, `SELECT count(*) FROM audit_events WHERE details_compacted_at IS NOT NULL`); n != 32 {
+	if n := f.count(t, `SELECT count(*) FROM audit_events WHERE details_compacted_at IS NOT NULL`); n != 32 {
 		t.Fatal("corrupt batch partially committed")
 	}
 	f.replaceAuditEvidence(t, ids[34], "event_mac", originalMAC)
@@ -100,15 +99,14 @@ func TestAuditRetentionBackendIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertChain(35)
-	if n := f.count(t, `SELECT count(*) FROM telemetry_security_events WHERE details_compacted_at IS NOT NULL AND octet_length(detail_sha256)=32`, `SELECT count(*) FROM telemetry_security_events WHERE details_compacted_at IS NOT NULL AND OCTET_LENGTH(detail_sha256)=32`); n != 1 {
+	if n := f.count(t, `SELECT count(*) FROM telemetry_security_events WHERE details_compacted_at IS NOT NULL AND octet_length(detail_sha256)=32`); n != 1 {
 		t.Fatal("security cutoff", n)
 	}
-	if n := f.count(t, `SELECT count(*) FROM audit_events WHERE reason='aged detail'`, `SELECT count(*) FROM audit_events WHERE BINARY reason=BINARY 'aged detail'`); n != 1 {
+	if n := f.count(t, `SELECT count(*) FROM audit_events WHERE reason='aged detail'`); n != 1 {
 		t.Fatal("fresh audit detail removed", n)
 	}
 	// Normal runtime writes cannot bypass the narrow database procedure.
-	for _, queries := range [][2]string{{`UPDATE audit_events SET event_hash=event_hash`, `UPDATE audit_events SET event_hash=event_hash`}, {`DELETE FROM audit_events`, `DELETE FROM audit_events`}, {`TRUNCATE audit_events`, `TRUNCATE audit_events`}} {
-		q, _ := f.query(queries[0], queries[1], nil)
+	for _, q := range []string{`UPDATE audit_events SET event_hash=event_hash`, `DELETE FROM audit_events`, `TRUNCATE audit_events`} {
 		if _, err := f.backend.Exec(ctx, q); err == nil {
 			t.Fatal("direct audit mutation accepted", q)
 		}
@@ -125,17 +123,7 @@ func (f *outboxFixture) replaceAuditEvidence(t *testing.T, id uuid.UUID, field s
 	if field != "event_mac" && field != "compaction_mac" {
 		t.Fatal("invalid test evidence field")
 	}
-	if !f.mysql {
-		f.exec(t, `ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only`, ``)
-		defer f.exec(t, `ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only`, ``)
-	} else {
-		var restore string
-		var name, mode, charset, collation, databaseCollation, created any
-		if err := f.owner.QueryRow(context.Background(), `SHOW CREATE TRIGGER audit_events_reject_update`).Scan(&name, &mode, &restore, &charset, &collation, &databaseCollation, &created); err != nil {
-			t.Fatal(err)
-		}
-		f.exec(t, ``, `DROP TRIGGER audit_events_reject_update`)
-		defer f.exec(t, ``, restore)
-	}
-	f.exec(t, `UPDATE audit_events SET `+field+`=$1 WHERE id=$2`, `UPDATE audit_events SET `+field+`=? WHERE id=?`, data, id)
+	f.exec(t, `ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only`)
+	defer f.exec(t, `ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only`)
+	f.exec(t, `UPDATE audit_events SET `+field+`=$1 WHERE id=$2`, data, id)
 }

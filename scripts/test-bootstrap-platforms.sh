@@ -161,7 +161,7 @@ Dir.mktmpdir('bootstrap-platforms-') do |tmp|
   # Minimal PATHs prove each real entrypoint fails before tests or containers.
   work = "#{tmp}/missing-tools"
   FileUtils.mkdir_p("#{work}/scripts")
-  %w[env.sh go-test-environment.sh go-check.sh required-go-tests.sh test-required-go-tests.sh test-bootstrap-profiles.sh database-integration.sh database-foundation-integration.sh].each do |name|
+  %w[env.sh go-test-environment.sh go-check.sh required-go-tests.sh test-required-go-tests.sh test-bootstrap-profiles.sh database-integration.sh database-postgres-smoke.sh].each do |name|
     FileUtils.cp("#{root}/scripts/#{name}", "#{work}/scripts/")
   end
   bin = "#{work}/bin"
@@ -180,12 +180,12 @@ Dir.mktmpdir('bootstrap-platforms-') do |tmp|
   %w[gofmt jq setsid tee ruby python3 openssl curl sha256sum patch timeout].each { |name| script("#{bin}/#{name}", 'exit 0') }
   script("#{bin}/docker", '[[ "${FIXTURE_DOCKER:-0}" == 0 ]]')
   script("#{bin}/cc", 'exit 1')
-  env = {'PATH' => bin, 'FIXTURE_LAUNCHED' => "#{work}/launched", 'DATABASE_TEST_SCOPE' => 'regression', 'ENGINE' => 'mysql'}
+  env = {'PATH' => bin, 'FIXTURE_LAUNCHED' => "#{work}/launched", 'DATABASE_TEST_SCOPE' => 'regression'}
   [ ['go-check.sh', 'standard', 'go'], ['go-check.sh', 'standard', 'gofmt'],
     ['required-go-tests.sh', 'unit', 'setsid'], ['test-required-go-tests.sh', nil, 'ruby'],
     ['test-bootstrap-profiles.sh', nil, 'ruby'], ['database-integration.sh', nil, 'ruby'],
-    ['database-integration.sh', nil, 'python3'], ['database-foundation-integration.sh', nil, 'openssl'],
-    ['database-foundation-integration.sh', nil, 'docker'] ].each do |name, argument, missing|
+    ['database-integration.sh', nil, 'python3'], ['database-postgres-smoke.sh', nil, 'python3'],
+    ['database-postgres-smoke.sh', nil, 'docker'] ].each do |name, argument, missing|
     File.rename("#{bin}/#{missing}", "#{bin}/hidden-#{missing}")
     run(env, bash, "#{work}/scripts/#{name}", *[argument].compact, error: "required test command is missing: #{missing}")
     File.rename("#{bin}/hidden-#{missing}", "#{bin}/#{missing}")
@@ -193,7 +193,7 @@ Dir.mktmpdir('bootstrap-platforms-') do |tmp|
   run(env.merge('FIXTURE_CGO' => '0'), bash, "#{work}/scripts/go-check.sh", 'race', error: '-race requires CGO_ENABLED=1')
   run(env.merge('FIXTURE_CC' => 'missing-cc'), bash, "#{work}/scripts/go-check.sh", 'race', error: 'required test command is missing: missing-cc')
   run(env, bash, "#{work}/scripts/go-check.sh", 'race', error: 'C compiler that can compile and link')
-  run(env.merge('FIXTURE_DOCKER' => '1'), bash, "#{work}/scripts/database-foundation-integration.sh", error: 'access to a running Docker daemon')
+  run(env.merge('FIXTURE_DOCKER' => '1'), bash, "#{work}/scripts/database-postgres-smoke.sh", error: 'access to a running Docker daemon')
   # Full PostgreSQL needs sha256sum, not the unused shasum fallback. This PATH
   # has no shasum; stop at the injected Docker error after command preflight.
   %w[18 all].each do |major|

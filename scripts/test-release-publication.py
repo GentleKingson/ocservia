@@ -115,7 +115,7 @@ class PublicationTest(unittest.TestCase):
             self.assertIn('draft=false', args)
             self.assertIn('make_latest=' + ('false' if self.release['prerelease'] else 'true'), args)
             self.assertEqual(len(self.remote_assets), 18)
-            self.assertEqual(len(self.remote_images), 24)
+            self.assertEqual(len(self.remote_images), 21)
             if self.fault == 'publish':
                 raise subprocess.CalledProcessError(1, args)
             self.published = True
@@ -132,14 +132,14 @@ class PublicationTest(unittest.TestCase):
     def test_complete_draft_to_immutable_release(self):
         self.finish()
         self.assertTrue(self.published)
-        self.assertIn('18 assets, 24 verified image tags', (self.root / 'summary').read_text())
+        self.assertIn('18 assets, 21 verified image tags', (self.root / 'summary').read_text())
 
     def test_blob_error_retries_the_same_image_before_publication(self):
         self.push_failures = 1
         with patch('time.sleep') as sleep:
             self.finish()
         pushes = [args for args in self.calls if args[:2] == ('docker', 'push')]
-        self.assertEqual(len(pushes), 17)
+        self.assertEqual(len(pushes), 15)
         self.assertEqual(pushes[0], pushes[1])
         sleep.assert_called_once_with(5)
         self.assertTrue(self.published)
@@ -192,7 +192,7 @@ class PublicationTest(unittest.TestCase):
     def test_preflight_checks_every_tag_and_rejects_each_collision(self):
         with patch.object(pub, 'api', return_value=[[]]), patch.object(pub, 'manifest', return_value=None) as registry:
             pub.preflight('test/repo', TAG, self.images)
-            self.assertEqual(registry.call_count, 24)
+            self.assertEqual(registry.call_count, 21)
         for name in pub.ROLES:
             for suffix in ('', '-amd64', '-arm64'):
                 with patch.object(pub, 'api', return_value=[[]]), patch.object(pub, 'manifest', side_effect=self.manifest):

@@ -37,13 +37,13 @@ func newUserOperationsHTTPFixture(t *testing.T) userOperationsHTTPFixture {
 	f.node, f.sibling = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	for _, node := range []uuid.UUID{f.node, f.sibling} {
 		stamp := value.Timestamp{Valid: true}
-		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,$4,$5)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,?,'active',1,?,?)`, node, f.workspace, node.String(), stamp, stamp)
-		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.users.write',true)`, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES(?,'ocserv.users.write',true)`, node)
+		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,$4,$5)`, node, f.workspace, node.String(), stamp, stamp)
+		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.users.write',true)`, node)
 		for _, user := range []struct {
 			name    string
 			version int64
 		}{{"alice", 1}, {"bob", 3}} {
-			f.exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,$2,true,$3,1,$4,$5,$6)`, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES(?,?,true,?,1,?,?,?)`, node, user.name, user.version, make([]byte, 32), stamp, stamp)
+			f.exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,$2,true,$3,1,$4,$5,$6)`, node, user.name, user.version, make([]byte, 32), stamp, stamp)
 		}
 	}
 	f.bind(f.requester, f.node, "UserManager")
@@ -75,17 +75,17 @@ func assertUserJSON(t *testing.T, w *httptest.ResponseRecorder, status int, targ
 func (f userOperationsHTTPFixture) counts() [7]int {
 	f.t.Helper()
 	var counts [7]int
-	queries := [][2]string{
-		{`SELECT count(*) FROM batch_operations WHERE workspace_id=$1`, `SELECT count(*) FROM batch_operations WHERE workspace_id=?`},
-		{`SELECT count(*) FROM batch_operation_items i JOIN batch_operations b ON b.id=i.batch_id WHERE b.workspace_id=$1`, `SELECT count(*) FROM batch_operation_items i JOIN batch_operations b ON b.id=i.batch_id WHERE b.workspace_id=?`},
-		{`SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND action IN ('user.batch.create','user.policy.set')`, `SELECT count(*) FROM audit_events WHERE workspace_id=? AND action IN ('user.batch.create','user.policy.set')`},
-		{`SELECT count(*) FROM user_policy_mutations WHERE workspace_id=$1`, `SELECT count(*) FROM user_policy_mutations WHERE workspace_id=?`},
-		{`SELECT count(*) FROM operations WHERE workspace_id=$1`, `SELECT count(*) FROM operations WHERE workspace_id=?`},
-		{`SELECT count(*) FROM commands WHERE workspace_id=$1`, `SELECT count(*) FROM commands WHERE workspace_id=?`},
-		{`SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE c.workspace_id=$1`, `SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE c.workspace_id=?`},
+	queries := []string{
+		`SELECT count(*) FROM batch_operations WHERE workspace_id=$1`,
+		`SELECT count(*) FROM batch_operation_items i JOIN batch_operations b ON b.id=i.batch_id WHERE b.workspace_id=$1`,
+		`SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND action IN ('user.batch.create','user.policy.set')`,
+		`SELECT count(*) FROM user_policy_mutations WHERE workspace_id=$1`,
+		`SELECT count(*) FROM operations WHERE workspace_id=$1`,
+		`SELECT count(*) FROM commands WHERE workspace_id=$1`,
+		`SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE c.workspace_id=$1`,
 	}
 	for i, q := range queries {
-		if err := f.row(q[0], q[1], f.workspace).Scan(&counts[i]); err != nil {
+		if err := f.row(q, f.workspace).Scan(&counts[i]); err != nil {
 			f.t.Fatal(err)
 		}
 	}
@@ -137,13 +137,13 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 		var actor, reason, requestID, traceparent, storedKey string
 		var identity, session uuid.UUID
 		var approvalID uuid.NullUUID
-		if err := f.row(`SELECT actor_id,actor_identity_id,actor_session_id,approval_id,reason,request_id,traceparent,idempotency_key FROM batch_operations WHERE id=$1`, `SELECT actor_id,actor_identity_id,actor_session_id,approval_id,reason,request_id,traceparent,idempotency_key FROM batch_operations WHERE id=?`, batch.ID).Scan(&actor, &identity, &session, &approvalID, &reason, &requestID, &traceparent, &storedKey); err != nil || identity != f.requester.principal.IdentityID || actor != identity.String() || session != f.requester.principal.SessionID || approvalID.Valid || reason != "batch HTTP" || requestID != "baseline-request" || storedKey != key || !strings.HasPrefix(traceparent, "00-0123456789abcdef0123456789abcdef-") {
+		if err := f.row(`SELECT actor_id,actor_identity_id,actor_session_id,approval_id,reason,request_id,traceparent,idempotency_key FROM batch_operations WHERE id=$1`, batch.ID).Scan(&actor, &identity, &session, &approvalID, &reason, &requestID, &traceparent, &storedKey); err != nil || identity != f.requester.principal.IdentityID || actor != identity.String() || session != f.requester.principal.SessionID || approvalID.Valid || reason != "batch HTTP" || requestID != "baseline-request" || storedKey != key || !strings.HasPrefix(traceparent, "00-0123456789abcdef0123456789abcdef-") {
 			t.Fatalf("batch provenance: %s %s %s %s %v", actor, session, requestID, traceparent, err)
 		}
 		var auditActor, auditRequest string
 		var auditSession uuid.UUID
 		var auditApproval uuid.NullUUID
-		if err := f.row(`SELECT actor_id,source_session_id,approval_id,request_id FROM audit_events WHERE resource_id=$1 AND action='user.batch.create'`, `SELECT actor_id,source_session_id,approval_id,request_id FROM audit_events WHERE resource_id=? AND action='user.batch.create'`, batch.ID).Scan(&auditActor, &auditSession, &auditApproval, &auditRequest); err != nil || auditActor != actor || auditSession != session || auditApproval != approvalID || auditRequest != requestID {
+		if err := f.row(`SELECT actor_id,source_session_id,approval_id,request_id FROM audit_events WHERE resource_id=$1 AND action='user.batch.create'`, batch.ID).Scan(&auditActor, &auditSession, &auditApproval, &auditRequest); err != nil || auditActor != actor || auditSession != session || auditApproval != approvalID || auditRequest != requestID {
 			t.Fatal("batch audit provenance", err)
 		}
 		t.Run("immediate-replay", func(t *testing.T) {
@@ -189,7 +189,7 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 		var command uuid.UUID
 		var childRequest, childKey, commandKey, commandTrace, action string
 		var encoded []byte
-		if err := f.row(`SELECT o.request_id,o.idempotency_key,c.id,c.idempotency_key,c.traceparent,c.payload_type,c.envelope FROM operations o JOIN commands c ON c.operation_id=o.id WHERE o.id=$1`, `SELECT o.request_id,o.idempotency_key,c.id,c.idempotency_key,c.traceparent,c.payload_type,c.envelope FROM operations o JOIN commands c ON c.operation_id=o.id WHERE o.id=?`, child).Scan(&childRequest, &childKey, &command, &commandKey, &commandTrace, &action, &encoded); err != nil {
+		if err := f.row(`SELECT o.request_id,o.idempotency_key,c.id,c.idempotency_key,c.traceparent,c.payload_type,c.envelope FROM operations o JOIN commands c ON c.operation_id=o.id WHERE o.id=$1`, child).Scan(&childRequest, &childKey, &command, &commandKey, &commandTrace, &action, &encoded); err != nil {
 			t.Fatal(err)
 		}
 		digest := sha256.Sum256([]byte("batch\x00" + batch.ID.String() + "\x000"))
@@ -201,10 +201,10 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 			t.Fatal("signed command", err, &envelope)
 		}
 		var outbox, audits int
-		if err := f.row(`SELECT count(*) FROM outbox_events WHERE command_id=$1`, `SELECT count(*) FROM outbox_events WHERE command_id=?`, command).Scan(&outbox); err != nil || outbox != 1 {
+		if err := f.row(`SELECT count(*) FROM outbox_events WHERE command_id=$1`, command).Scan(&outbox); err != nil || outbox != 1 {
 			t.Fatal("outbox", outbox, err)
 		}
-		if err := f.row(`SELECT count(*) FROM audit_events WHERE resource_id=$1 AND command_id=$2 AND actor_id=$3 AND source_session_id=$4 AND request_id=$5 AND action='user.disable'`, `SELECT count(*) FROM audit_events WHERE resource_id=? AND command_id=? AND actor_id=? AND source_session_id=? AND request_id=? AND action='user.disable'`, child, command, actor, session, childRequest).Scan(&audits); err != nil || audits != 1 {
+		if err := f.row(`SELECT count(*) FROM audit_events WHERE resource_id=$1 AND command_id=$2 AND actor_id=$3 AND source_session_id=$4 AND request_id=$5 AND action='user.disable'`, child, command, actor, session, childRequest).Scan(&audits); err != nil || audits != 1 {
 			t.Fatal("child audit", audits, err)
 		}
 		if err := f.service.RunOnce(ctx); err != nil {
@@ -217,7 +217,7 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 			t.Fatal("scheduler replaced existing child", stored, err)
 		}
 		var sameKey int
-		if err := f.row(`SELECT count(*) FROM commands WHERE workspace_id=$1 AND idempotency_key=$2`, `SELECT count(*) FROM commands WHERE workspace_id=? AND idempotency_key=?`, f.workspace, childKey).Scan(&sameKey); err != nil || sameKey != 1 {
+		if err := f.row(`SELECT count(*) FROM commands WHERE workspace_id=$1 AND idempotency_key=$2`, f.workspace, childKey).Scan(&sameKey); err != nil || sameKey != 1 {
 			t.Fatal("scheduler duplicated first child", sameKey, err)
 		}
 	})
@@ -311,13 +311,13 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 		assertUserJSON(t, f.call("GET", path, "", "", f.requester.cookie, nil), 200, nil)
 		assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.reader.cookie, nil), 403, "forbidden")
 		assertApplyHTTPProblem(t, f.call("GET", "/api/v1/user-operations/metrics", "", "", f.requester.cookie, nil), 403, "forbidden")
-		f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Viewer','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'Viewer','workspace',?)`, uuid.Must(uuid.NewV7()), f.reader.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
+		f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Viewer','workspace',$4)`, uuid.Must(uuid.NewV7()), f.reader.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
 		assertUserJSON(t, f.call("GET", path, "", "", f.reader.cookie, nil), 200, nil)
 		assertUserJSON(t, f.call("GET", "/api/v1/user-operations/metrics", "", "", f.reader.cookie, nil), 200, nil)
-		f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, `DELETE FROM role_bindings WHERE identity_id=? AND workspace_id=?`, f.requester.principal.IdentityID, f.workspace)
+		f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, f.requester.principal.IdentityID, f.workspace)
 		assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.requester.cookie, nil), 403, "forbidden")
 		f.bind(f.requester, f.node, "UserManager")
-		f.exec(`UPDATE auth_sessions SET revoked_at=$1 WHERE id=$2`, `UPDATE auth_sessions SET revoked_at=? WHERE id=?`, value.Timestamp{Valid: true}, f.requester.principal.SessionID)
+		f.exec(`UPDATE auth_sessions SET revoked_at=$1 WHERE id=$2`, value.Timestamp{Valid: true}, f.requester.principal.SessionID)
 		assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.requester.cookie, nil), 401, "unauthenticated")
 		f.unchanged(after)
 	})
@@ -325,7 +325,7 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 
 func TestUserOperationsHTTPAssemblyBackendIntegration(t *testing.T) {
 	f := newUserOperationsHTTPFixture(t)
-	f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Viewer','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'Viewer','workspace',?)`, uuid.Must(uuid.NewV7()), f.reader.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
+	f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Viewer','workspace',$4)`, uuid.Must(uuid.NewV7()), f.reader.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
 	path := "/api/v1/nodes/" + f.node.String() + "/users/alice/policy"
 	body := userBatchBody(t, []useroperations.BatchItemRequest{{NodeID: f.node, Username: "alice", Action: "enable", ExpectedVersion: 1}})
 	for _, enabled := range []bool{false, true} {

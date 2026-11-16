@@ -58,7 +58,6 @@ ROOT_LIFECYCLE_ENV_NAMES=(
   OCSERV_DATABASE_BACKUP_PORT
   OCSERV_DATABASE_BACKUP_NAME
   OCSERV_DATABASE_BACKUP_USER
-  OCSERV_DATABASE_BACKUP_IMAGE
   OCSERV_DEPLOYMENT_MODE
   OCSERV_RELAY_PUBLIC_HOST
   OCSERV_RELAY_SECRET_DIR
@@ -137,7 +136,6 @@ if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
     OCSERV_DATABASE_BACKUP_PORT \
     OCSERV_DATABASE_BACKUP_NAME \
     OCSERV_DATABASE_BACKUP_USER \
-    OCSERV_DATABASE_BACKUP_IMAGE \
     OCSERV_DEPLOYMENT_MODE \
     OCSERV_RELAY_PUBLIC_HOST \
     OCSERV_RELAY_SECRET_DIR \
@@ -176,6 +174,11 @@ fi
 # Every configuration-derived variable is computed only after the
 # configuration sources above are final.
 [[ -z "${OCSERV_RELAY_URL_B:-}" ]] || fail 'only one dedicated Relay is supported; leave OCSERV_RELAY_URL_B empty'
+case "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
+  postgres:bundled|postgres:external) ;;
+  mysql:*) fail 'MySQL 8.4 LTS support is retired; only PostgreSQL 18.x (bundled or external) is supported and cross-engine automatic migration is unsupported' ;;
+  *) fail 'unsupported database configuration; only OCSERV_DATABASE_BACKEND=postgres with OCSERV_DATABASE_DEPLOYMENT=bundled or external is supported' ;;
+esac
 STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
 if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated && "${ROOT_LIFECYCLE}" != true ]] && (( EUID != 0 )); then
   fail "Integrated requires --root-lifecycle for private Signer custody"
@@ -330,12 +333,22 @@ download_release_bundle() {
   echo "release bundle stored: ${BUNDLE_DIR}"
 }
 
+reject_retired_active_profile() {
+  local profile="${STATE_ROOT%/}/deployment-profile.json"
+  if [[ -f "${profile}" && ! -L "${profile}" && -r "${profile}" ]] &&
+    grep -Eq '"database_backend"[[:space:]]*:[[:space:]]*"mysql"' "${profile}"; then
+    fail "existing MySQL deployment at ${STATE_ROOT} is retired; cross-engine automatic migration is unsupported and existing state/data were not modified"
+  fi
+}
+
 resolve_release_identity
 resolve_architecture
+reject_retired_active_profile
 verify_fresh_host_launcher_path
 
 run_host_bootstrap
 validate_state_root
+reject_retired_active_profile
 download_release_bundle
 
 exec "${CONTROLLER}" install \

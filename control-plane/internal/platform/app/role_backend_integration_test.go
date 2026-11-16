@@ -93,7 +93,7 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
-	installSchedulerEvidence(t, ctx, owner, runtimeOptions.Backend, account)
+	installSchedulerEvidence(t, ctx, owner)
 	t.Run("HTTP-assembly", func(t *testing.T) {
 		testHTTPServerAssembly(t, runtimeConfig(t, runtimeOptions), owner, runtime)
 	})
@@ -107,8 +107,8 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 			if cfg.RunsScheduler() {
 				cfg.TestSchedulerEvidence = true
 				if role == config.RoleAll {
-					cleanup = seedPolicyCleanup(t, ctx, owner, runtime, runtimeOptions.Backend, account)
-					cleanup.revoke(t, ctx, runtimeOptions.Backend)
+					cleanup = seedPolicyCleanup(t, ctx, owner, runtime, account)
+					cleanup.revoke(t, ctx)
 				}
 				if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM test_scheduler_maintenance_history`).Scan(&completedBefore); err != nil {
 					t.Fatal(err)
@@ -239,11 +239,7 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 			}
 			if cfg.RunsScheduler() {
 				// Run has joined its renewal loop; only expire this fixture's lease.
-				query := `UPDATE scheduler_leadership SET lease_until='-infinity' WHERE id=1`
-				if runtimeOptions.Backend != "postgres" {
-					query = `UPDATE scheduler_leadership SET lease_until=-9223372036854775808 WHERE id=1`
-				}
-				if _, err := owner.Store.Exec(ctx, query); err != nil {
+				if _, err := owner.Store.Exec(ctx, `UPDATE scheduler_leadership SET lease_until='-infinity' WHERE id=1`); err != nil {
 					t.Fatal(err)
 				}
 			}

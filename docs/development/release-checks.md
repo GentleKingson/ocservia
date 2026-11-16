@@ -93,26 +93,23 @@ the installer or release self-tests, or manual acceptance harnesses.
 Pick the entry point that matches the behavior under test:
 
 - Quick database feedback:
-  `DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh` and
-  `DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh`.
+  `DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh`.
   PostgreSQL smoke runs `TestDatabaseCoreSmoke`,
   `TestDatabaseInitializationSmoke`, the enrollment restart check, and the
-  `postgres-snapshot` inventory; MySQL smoke runs the first three and omits
-  `mysql-snapshot`. The local smoke commands do not run the v1.2.0 checkpoint
-  comparison that CI adds (see [SQL artifact acceptance](#sql-artifact-acceptance)).
+  `postgres-snapshot` inventory. The local smoke command does not run the
+  v1.2.0 checkpoint comparison that CI adds (see
+  [SQL artifact acceptance](#sql-artifact-acceptance)).
 - Full database migrations and failure scenarios: `make database-integration`
-  (PostgreSQL, where `PG_MAJOR=all` and `18` both target PostgreSQL 18), and for
-  MySQL
-  `DATABASE_TEST_SCOPE=full ENGINE=mysql bash scripts/database-foundation-integration.sh`.
+  (PostgreSQL, where `PG_MAJOR=all` and `18` both target PostgreSQL 18).
 - Local Go and transport integration: `make integration` runs
   `scripts/development-simulation-integration.sh`, pairing the `control-plane` binary with
   a PostgreSQL container and the Rust `ocservia-transportd-stub` over local
-  Unix sockets, without MySQL, real `transportd`, an Agent, a Relay, or a node.
+  Unix sockets, without real `transportd`, an Agent, a Relay, or a node.
 - Browser and runtime stack: `make e2e` runs `scripts/e2e.sh` (PostgreSQL,
   `transportd-stub`, Controller and Web under Docker Compose, then the
-  Playwright `e2e` service); it does not exercise MySQL or a native node.
+  Playwright `e2e` service); it does not exercise a native node.
 - Real processes without a native host:
-  `scripts/database-controller-e2e.sh <postgres|mysql> [all|split]` runs
+  `scripts/database-controller-e2e.sh postgres [all|split]` runs
   `TestControllerTransportBackendE2E` with the real Controller, `transportd`,
   Agent, `privd`, Relay, and ocserv in one container (no systemd PID 1, no
   managed-node installer). It is manual and outside CI; native systemd behavior
@@ -127,12 +124,9 @@ The database-backed Go groups over the Controller services and HTTP layer are
 database connections and cover signed command intent, transactional session/RBAC checks and
 rollback, policy cleanup errors, leadership fencing, HTTP status ordering,
 Secret access denials and first-request server assembly. Owner credentials are
-for schema setup and fault injection only. On MySQL,
-`TestRealConfigurationReadAndIntent/consumer-service-chain` covers the
-ConfigPlan-to-Operations path. Every required case must execute: skipped
-database tests do not satisfy acceptance, passing on PostgreSQL does not prove
-MySQL, and HTTP intent tests do not verify Agent execution, package
-installation or release readiness.
+for schema setup and fault injection only. Every required case must execute:
+skipped database tests do not satisfy acceptance, and HTTP intent tests do not
+verify Agent execution, package installation or release readiness.
 
 ### Ocserv 1.6.0 compatibility
 
@@ -237,34 +231,28 @@ are still caught.
 
 ### SQL artifact acceptance
 
-`scripts/database-artifact-policy.sh all` verifies that each engine directory
+`scripts/database-artifact-policy.sh all` verifies that `control-plane/migrations`
 contains only `schema.sql` and `upgrade.sql`, that no legacy migration manifests
-remain, and that the shared marker parser and backend metadata checks pass. The
-prior release checkpoint stays pinned to v1.2.0 regardless of newer commits on
-main.
+or retired `control-plane/internal/database/mysql` sources remain, and that the
+shared marker parser and PostgreSQL metadata checks pass. The prior release
+checkpoint stays pinned to v1.2.0 regardless of newer commits on main.
 
-In `scripts/required-go-tests.txt`, the `postgres-snapshot` and `mysql-snapshot`
-inventories require live database execution where every listed test runs and
-passes with zero skips. `postgres-snapshot` runs in PostgreSQL smoke and Full
-CI. `mysql-snapshot` belongs to `backend-mysql-full` (`mysql-cutover` shard) and
-runs only in Full CI, so any change to MySQL `schema.sql`, `upgrade.sql`, or the
-migration runner needs a Full run before merge. Together the snapshot suites
-verify schema, ACL and seed equivalence between a fresh install and an upgrade
-from the v1.2.0 checkpoint, forward-only upgrades, zero-mutation rejection of
-unknown or tampered databases, raw checksum tampering detection, PostgreSQL
-transactional rollback and locking, and MySQL subprocess kill and recovery
-across fresh-install, transition and cleanup boundaries. Never substitute a
-database-free run for them.
+In `scripts/required-go-tests.txt`, the `postgres-snapshot` inventory requires
+live PostgreSQL 18 execution where every listed test runs and passes with zero
+skips across both PostgreSQL smoke and Full CI. The snapshot suite verifies
+schema, ACL and seed equivalence between a fresh install and an upgrade from
+the v1.2.0 checkpoint, forward-only upgrades, zero-mutation rejection of unknown
+or tampered databases, raw checksum tampering detection, and PostgreSQL
+transactional rollback and locking. Never substitute a database-free run for it.
 
 Every database CI job fetches the v1.2.0 release history and runs
-`database-<engine>-snapshot.sh check` (in Full CI, MySQL runs it once, in the
-`services` shard). Full Basic CI also runs the physical PostgreSQL (external
-topology) and logical MySQL backup/restore smoke scripts
-(`external-postgres-backup-restore-smoke.sh` and
-`mysql-backup-restore-smoke.sh`), confirming that migration receipts survive
-backup, restore and repeated migration, and that restored PostgreSQL enforces
-runtime read access and owner-only DDL. Audit log authenticity, checkpointed-tail
-transitions and compaction remain required business checks.
+`database-postgres-snapshot.sh check`. Full Basic CI also runs the physical
+PostgreSQL (external topology) backup/restore smoke script
+(`external-postgres-backup-restore-smoke.sh`), confirming that migration
+receipts survive backup, restore and repeated migration, and that restored
+PostgreSQL enforces runtime read access and owner-only DDL. Audit log
+authenticity, checkpointed-tail transitions and compaction remain required
+business checks.
 
 Before cutting over a major database change, qualify the exact candidate commit
 through Full Basic CI, Security, Business integration (with the production Signer
@@ -380,7 +368,6 @@ that, prepare only what the entrypoint you run requires:
 | `go-check.sh race` (also the race part of `full`) | `CGO_ENABLED=1`, a C compiler selected by `go env CC`, linker and C development headers; no Docker requirement |
 | `database-integration.sh` smoke (delegates to `database-postgres-smoke.sh`) | Go, jq, setsid, Python 3, Docker CLI and daemon, and the race prerequisites (cgo, C compiler) |
 | `database-integration.sh` manual regression/full | The smoke set plus Ruby, curl, sha256sum |
-| `database-foundation-integration.sh` (MySQL) | Go, jq, setsid, Python 3, OpenSSL with `req -addext`, Docker CLI and daemon and the race prerequisites in every scope; full scope also needs `timeout` |
 
 If a required command is missing, the Docker daemon is unreachable, cgo is
 disabled, or the C toolchain cannot link a test binary, the scripts exit nonzero
@@ -395,10 +382,10 @@ Database runs start disposable loopback-bound containers with generated
 test-only owner and runtime credentials; never pass production credentials or
 print DSNs to logs. If you invoke the `database-*` required-test groups
 directly, set both `OCSERV_TEST_DATABASE_URL` and
-`OCSERV_TEST_OWNER_DATABASE_URL`; the MySQL wrapper scripts populate their
-`OCSERVIA_DATABASE_TEST_*` variables. Only the required-case summaries count as acceptance evidence
-(synthetic selector JSON does not), and passing the PostgreSQL 18 and MySQL
-smoke suites does not certify the full database scope or release readiness.
+`OCSERV_TEST_OWNER_DATABASE_URL`. Only the required-case summaries count as
+acceptance evidence (synthetic selector JSON does not), and passing the
+PostgreSQL 18 smoke suite does not certify the full database scope or release
+readiness.
 
 #### Native preparation and execution
 
@@ -467,7 +454,6 @@ docker run --rm --init --name "$(basename "$task")-validation" \
     bash scripts/test-bootstrap-profiles.sh
     scripts/go-check.sh standard
     DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh
-    ENGINE=mysql DATABASE_TEST_SCOPE=smoke bash scripts/database-foundation-integration.sh
     scripts/docs-check.sh
     git diff --check
   '
@@ -514,8 +500,8 @@ The workflow file defines the matrices. The jobs and what they own:
 | `rust` | `rust-check.sh` when routing selects Rust; Full also runs the focused vendored iroh patch tests against the lock in [`rust/vendor/iroh/OCSERVIA-PROVENANCE.md`](../../rust/vendor/iroh/OCSERVIA-PROVENANCE.md); installer and Relay-launcher self-tests when routing selects installers |
 | `web` | `web-check.sh basic`; no browser installation |
 | `web-browser` | Stubbed production-build browser regressions through `web/test/run-auth-browser.mjs`; Full also serves the build through the Standalone and Integrated gateways with CSP enforcement checks. A missing browser or non-declared skip fails the job |
-| `database-smoke` | PostgreSQL 18.x and MySQL 8.4 LTS; Quick runs smoke, Full runs full database acceptance (MySQL in three `DATABASE_SHARD` legs); both enforce the SQL artifact window and snapshot equivalence (see [SQL artifact acceptance](#sql-artifact-acceptance)) |
-| `database-recovery-full` | PostgreSQL physical and MySQL logical backup/restore with snapshot provenance, Full only |
+| `database-smoke` | PostgreSQL 18.x; Quick runs smoke, Full runs full database acceptance; both enforce the SQL artifact window and snapshot equivalence (see [SQL artifact acceptance](#sql-artifact-acceptance)) |
+| `database-recovery-full` | Bundled and external PostgreSQL physical backup/restore with snapshot provenance, Full only |
 | `Basic CI Result` | Always checks routing and the selected job results |
 
 Database service images stay pinned to exact patches and digests.
@@ -525,10 +511,10 @@ administrator, checks transaction commit, rollback and isolation, and keeps a
 runtime DDL denial check so the Controller cannot pass with owner credentials.
 Smoke runs use `-count=1`, and explicit inventories fail if a required case is
 skipped (`required-go-tests.sh --smoke <package> <test>` checks only that the
-named top-level test ran and passed). The `mysql-snapshot` crash and rejection
-cases run only under Full, so pull requests that touch MySQL `schema.sql`,
-`upgrade.sql` or the migration runner should run a candidate Full workflow
-before merging.
+named top-level test ran and passed). Pull requests that touch PostgreSQL
+`schema.sql`, `upgrade.sql` or the migration runner should also run a candidate
+Full workflow before merging so `database-recovery-full` and full database
+acceptance execute.
 
 The required check is `Basic CI Result` (job `basic-ci-result`). It passes only
 when path routing succeeds, every selected job passes, and every unselected job
@@ -554,7 +540,7 @@ source of the exact rule order. In outline:
   selects `docs` alone, apart from exceptions named in the script.
 - `web/*` selects `web` (browser-relevant paths also `web-browser`), `rust/*`
   selects `rust`, and `control-plane/{cmd,migrations,internal}/*`, Go locks and
-  the database scripts select `go` plus database smoke on both engines.
+  the database scripts select `go` plus PostgreSQL database smoke.
 - Installer, release, package, Controller and Agent-upgrade scripts, release
   workflows and `deploy/{package,systemd,bootstrap,managed-node,production}`
   select the release contract suite and installer self-tests.
@@ -599,9 +585,10 @@ the Quick profile. Path routing never escalates Quick to Full.
 
 Manual dispatches bypass path routing: docs, go, rust, web, web-browser and
 database jobs always run, along with source-style and contract checks in the
-existing Go job. Installer self-tests and Controller cache refresh stay off. A manual Full run adds the PostgreSQL leg plus three
-MySQL shards and `database-recovery-full`; a manual Quick run uses PostgreSQL and
-one MySQL smoke leg. Controller cache refresh runs only on pushes to main when
+existing Go job. Installer self-tests and Controller cache refresh stay off. A
+manual Full run executes the full PostgreSQL database suite and
+`database-recovery-full`; a manual Quick run executes the PostgreSQL smoke leg.
+Controller cache refresh runs only on pushes to main when
 routing sets `run_controller_cache`. It refreshes the union of the changed
 images' Dockerfile inputs on both native architectures, selects all images for
 shared build machinery and unknown paths, falls back to all images on an empty
@@ -664,7 +651,6 @@ environment that has their dependencies. They are distinct from Full CI:
 ```bash
 # In an authorized isolated environment with the required dependencies; expensive opt-in checks:
 DATABASE_TEST_SCOPE=full PG_MAJOR=all scripts/database-integration.sh
-DATABASE_TEST_SCOPE=full ENGINE=mysql bash scripts/database-foundation-integration.sh
 scripts/go-check.sh race
 scripts/web-check.sh full
 ```
@@ -694,17 +680,18 @@ VMs:
   two-machine enrollment and the hosted `real-e2e.yml` (see
   [Real three-VM acceptance](#real-three-vm-acceptance)).
 
-To reproduce the Go unit checks, Quick database smoke and the Full-only MySQL
-backup/restore smoke, run these against the candidate commit in an authorized,
-isolated environment. They omit docs, Rust, Web, the SQL artifact-window and
-snapshot steps, the PostgreSQL volume-layout check and the full database suites:
+To reproduce the Go unit checks, Quick database smoke and the Full-only
+PostgreSQL backup/restore smoke scripts, run these against the candidate commit
+in an authorized, isolated environment. They omit docs, Rust, Web, the SQL
+artifact-window and snapshot steps, the PostgreSQL volume-layout check and the
+full database suite:
 
 ```bash
 scripts/bootstrap.sh go-test
 scripts/go-check.sh standard
 DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh
-DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh
-RUN_ID=local-mysql ARTIFACT_DIR="$PWD/.cache/recovery-mysql" ENGINE=mysql bash scripts/mysql-backup-restore-smoke.sh
+RUN_ID=local-pg ARTIFACT_DIR="$PWD/.cache/recovery-pg" PG_MAJOR=18 bash scripts/postgres-backup-restore-smoke.sh
+RUN_ID=local-ext-pg ARTIFACT_DIR="$PWD/.cache/recovery-ext-pg" PG_MAJOR=18 bash scripts/external-postgres-backup-restore-smoke.sh
 ```
 
 With authorization to trigger remote workflows, run the candidate branch with
@@ -880,10 +867,10 @@ is confirmed.
 `result.json` also records `resilience_requested`, `resilience_result` and
 per-scenario checkpoints. With recovery enabled, acceptance requires one PASS for
 each of four scenarios: the Controller stack (which in Smoke includes
-transport), the Agent/privd stack, bundled PostgreSQL and the sole Relay. There
-is no Business-level MySQL recovery scenario. Missing fields or checkpoints,
-cancellation, test failures and unexpected skips block acceptance; runs without
-recovery record SKIPPED.
+transport), the Agent/privd stack, bundled PostgreSQL and the sole Relay.
+External PostgreSQL deployments have no Business-level recovery scenario.
+Missing fields or checkpoints, cancellation, test failures and unexpected skips
+block acceptance; runs without recovery record SKIPPED.
 
 Sanitized diagnostic artifacts keep the environment inventory, stage timings and
 exit status for seven days on passing and failing runs; manual integration adds
@@ -1448,7 +1435,7 @@ Manual Release Check invokes Integrated Business Smoke with `run-resilience=true
 | --- | --- | --- |
 | R1 Controller stack | Business Smoke with `run-resilience` | Restart Controller and transport together; both ready, fresh Agent session and new authorized business succeeds. |
 | R2 Agent stack | Same smoke environment | One systemd restart transaction for privd and its dependent Agent; both active, fresh session and unchanged identity. |
-| R3 Database interruption | Same smoke environment | Stop the bundled PostgreSQL container, require database-unavailable readiness, start it, recover readiness and Agent connectivity, then complete normal business. No outage mutation. MySQL and external databases have no Business-level recovery check. |
+| R3 Database interruption | Same smoke environment | Stop the bundled PostgreSQL container, require database-unavailable readiness, start it, recover readiness and Agent connectivity, then complete normal business. No outage mutation. External PostgreSQL databases have no Business-level recovery check. |
 | R4 Sole Relay interruption | Same smoke environment | Stop the only Relay, observe Agent offline with direct UDP blocked, restart Relay, acquire a fresh session and recover authorized business and VPN traffic. |
 
 The extended manual integration profile replaces R1 through R4 with deeper
@@ -1456,8 +1443,9 @@ variants: separate Controller and transport restarts, mutations submitted during
 the outage, unsent offline queueing, idempotent replay, exact native reload
 counts, and cross-checks across the API, database, Agent journal and root
 receipts. Release Smoke does not require them. Full CI separately runs the full
-database suite and the PostgreSQL and MySQL backup/restore smoke scripts, which
-validate database-level recovery but not Controller, Agent or Relay restarts.
+database suite and the bundled and external PostgreSQL backup/restore smoke
+scripts, which validate database-level recovery but not Controller, Agent or
+Relay restarts.
 
 Acceptance relies on the Business job status and the scenario checkpoints in
 `result.json`; sanitized failure diagnostics are kept as seven-day Actions
@@ -1765,8 +1753,9 @@ commits landing on main do not shift that checkpoint.
 
 Any major database change must pass the
 [SQL artifact acceptance checks](#sql-artifact-acceptance), including
-fresh-install versus checkpoint-upgrade equivalence and both backup/restore smoke
-paths. A build-only Release run can validate package construction ahead of time,
+fresh-install versus checkpoint-upgrade equivalence and both bundled and
+external PostgreSQL backup/restore smoke paths. A build-only Release run can
+validate package construction ahead of time,
 but a major release still needs a passing Release Check on the exact merged main
 commit before the operator tags it. Branch diagnostic runs and earlier release
 results do not satisfy that gate.
@@ -1867,7 +1856,7 @@ gap.
 | Behavior | Owner |
 | --- | --- |
 | Native bootstrap-token registration and online node, browser Admin login/Workspace/user creation/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke, amd64 and arm64 with the same checkpoint gate |
-| Controller/transport, Agent/privd, bundled PostgreSQL and sole Relay recovery (no Business-level MySQL recovery) | Business Smoke with `run-resilience=true` |
+| Controller/transport, Agent/privd, bundled PostgreSQL and sole Relay recovery (external PostgreSQL has no Business-level recovery) | Business Smoke with `run-resilience=true` |
 | Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Business Smoke and manual integration |
 | OIDC positive/negative paths; native session disconnect and IP-ban removal; CSR, issue, one-use P12, revoke and persistence (including browser checks); offline queue and exact root effects; one-node browser canary rollout to a locally built next Agent version | Manual integration |
 | DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on amd64/arm64 | Native package build/install smoke (Release Check and Release) |

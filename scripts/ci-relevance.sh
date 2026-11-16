@@ -21,7 +21,7 @@ for flag in "${flags[@]}"; do printf -v "${flag}" false; done
 reason=recognized_paths
 changed=()
 ci_suites=()
-controller_images=(gateway control transport backup edge relay signer mysql_backup)
+controller_images=(gateway control transport backup edge relay signer)
 controller_cache_images=()
 
 tools_suite() {
@@ -101,7 +101,7 @@ classify_path() {
     scripts/rollback-agent.sh|scripts/uninstall-agent.sh|deploy/package/*|deploy/systemd/*|\
     deploy/bootstrap/*|deploy/managed-node/*|deploy/production/*|deploy/prepare-transport-runtime.sh)
       tools_suite release; run_installers=true ;;
-    deploy/compose/*|deploy/database-e2e/*|scripts/*database*|scripts/*mysql*|scripts/*postgres*|\
+    deploy/compose/*|deploy/database-e2e/*|scripts/*database*|scripts/*postgres*|\
     scripts/*-backup-restore-smoke.sh)
       run_go=true; run_database=true ;;
     # test-release-workflows.rb (release suite) reads the Release notes config.
@@ -148,7 +148,7 @@ classify_path() {
   # (build context is the repository root) and the builder/cache machinery itself.
   case "${path}" in
     # Go builds exclude these files; current embeds name only SQL/password data.
-    # Keep their Go/DB checks above, but avoid refreshing eight production images
+    # Keep their Go/DB checks above, but avoid refreshing seven production images
     # on both architectures. A mixed production change still selects the cache.
     control-plane/*_test.go|signer/*_test.go) ;;
     # vite build starts at index.html and Tailwind scans only web/src, so these
@@ -161,11 +161,8 @@ classify_path() {
     rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/.cargo/*|rust/vendor/*|rust/crates/*|\
     rust/transportd.Dockerfile|deploy/production/transportd-relays.sh|deploy/prepare-transport-runtime.sh)
       select_controller_images transport ;;
-    deploy/production/backup.Dockerfile|scripts/postgres-backup.sh)
+    deploy/production/backup.Dockerfile|deploy/production/backup-entrypoint.sh|scripts/postgres-backup.sh)
       select_controller_images backup ;;
-    deploy/production/backup.mysql.Dockerfile|scripts/mysql-server-check.sh|scripts/mysql-backup.sh|scripts/mysql-restore-verify.sh)
-      select_controller_images mysql_backup ;;
-    deploy/production/backup-entrypoint.sh) select_controller_images backup mysql_backup ;;
     deploy/production/edge.Dockerfile) select_controller_images edge ;;
     deploy/production/integrated/*) select_controller_images gateway edge ;;
     deploy/production/relay.Dockerfile|scripts/build-relay.sh|\
@@ -229,11 +226,7 @@ else
   fi
 fi
 
-matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.11"}]}'
-if [[ "${database_scope}" == full ]]; then
-  # MySQL full acceptance is the critical path; its complementary shards run in parallel.
-  matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.11","shard":"mysql-cutover"},{"engine":"mysql","version":"8.4.11","shard":"mysql-core"},{"engine":"mysql","version":"8.4.11","shard":"services"}]}'
-fi
+matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"}]}'
 
 {
   printf 'database_matrix=%s\n' "${matrix}"

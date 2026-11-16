@@ -85,8 +85,8 @@ func Workflow(t *testing.T, b database.Backend, workspace, requester, approver, 
 	if err != nil || stored.Status != "consumed" || stored.RequestHash != pending.RequestHash {
 		t.Fatalf("stored approval: %+v %v", stored, err)
 	}
-	// PostgreSQL JSONB accepts decimal exponents outside MySQL native JSON's
-	// double range. Exercise the real Create/Get path, including duplicate keys.
+	// PostgreSQL JSONB accepts large decimal exponents and duplicate keys.
+	// Exercise the real Create/Get path without IEEE-754 float64 truncation.
 	request.RequestSummary = []byte("\t {\"number\":1e1000,\"duplicate\":0,\"duplicate\":1.2300}")
 	digest := sha256.Sum256(request.RequestSummary)
 	request.RequestHash = digest[:]

@@ -41,7 +41,7 @@ func TestUserOperationsHTTPBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if path == "reflect" || path == "unsafe" || strings.HasPrefix(path, "database/") || strings.HasPrefix(path, "github.com/jackc/") || strings.HasPrefix(path, "github.com/go-sql-driver/") {
+			if path == "reflect" || path == "unsafe" || strings.HasPrefix(path, "database/") || strings.HasPrefix(path, "github.com/jackc/") {
 				t.Errorf("%s: forbidden dependency %s", name, path)
 			}
 			if !strings.HasPrefix(path, internal) {
