@@ -13,7 +13,7 @@ replication clusters, PostgreSQL automatic failover, and point-in-time recovery
 (PITR) readiness. Standard backups, backup verification, and isolated restores
 remain supported. Across all recovery scenarios, the command pipeline still
 enforces owner/epoch/fence/lease validation, the transactional outbox,
-authorization, independent two-principal approvals, cryptographic signatures,
+authorization, cryptographic signatures,
 idempotent command IDs, the Agent SQLite journal, and privd receipts. Passing
 recovery checks does not imply general exactly-once execution or production
 RTO/RPO guarantees.
@@ -102,15 +102,14 @@ Treat these as separate states:
    guaranteed automatic recovery interval. A restart can restore revoked trust
    admission checks without proving that an earlier close completed.
 
-Do not blindly resubmit an uncertain request, create another approval, replace
+Do not blindly resubmit an uncertain request, replace
 the revoked Agent identity, bypass fencing, or directly update/delete convergence
-records. The original consumed approval permits only the existing authorized
-replay rules; it does not grant new authority or repair missing transport evidence.
+records. The original intent permits only the existing authorized replay rules; a new
+request does not repair missing transport evidence.
 
 ## Lost Local administration authority
 
-When a deployment loses its last working administrator and independent approver
-pair, halt application writes and preserve the incident evidence. Recover to a
+When a deployment loses its last working administrator, halt application writes and preserve the incident evidence. Recover to a
 verified state that has independently controlled credentials by following the
 authorized [backend-specific recovery procedure](#database-recovery),
 leaving all initialization markers and audit history intact. Before reopening
@@ -130,8 +129,8 @@ SET revoked_at=TIMESTAMPDIFF(MICROSECOND, '2000-01-01 00:00:00', UTC_TIMESTAMP(6
 WHERE revoked_at IS NULL;
 ```
 
-Log the offline recovery in the incident and change record, confirm that both
-administrative logins work with intact approval separation, and rotate any
+Log the offline recovery in the incident and change record, confirm that the
+administrator login and direct authorized operations work, and rotate any
 exposed credentials through standard rotation flows. Ocservia provides no
 generic account-unlock CLI or unauthenticated HTTP recovery endpoint, and
 operators must never delete or edit the Bootstrap marker to force
@@ -160,7 +159,7 @@ merges or migrates during login.
 When an existing deployment requires a separately approved issuer migration:
 
 1. Open a maintenance window and stop login and session writes on the affected
-   deployment. Record the change ticket, operator, approver, exact old and new
+   deployment. Record the change ticket, operator, exact old and new
    issuer strings, and the explicit list of identity IDs and subjects in scope.
    Gather independent IdP evidence proving that each subject still belongs to
    the same person; a matching email address or display name is not sufficient
@@ -201,7 +200,7 @@ An unexpected ledger write failure latches the Signer closed: `/healthz` and
 every authenticated signing, revocation and sealing request return `503` until
 the process restarts. This is deliberate; do not bypass it.
 
-1. Pause certificate issuance, revocation and P12 export approvals while the
+1. Pause certificate issuance, revocation and P12 export requests while the
    Signer is down.
 2. Read the Signer logs and repair the cause on the state volume: free space,
    ownership by the runtime UID, mode `0700` on the state directory and `0600`
@@ -214,7 +213,7 @@ the process restarts. This is deliberate; do not bypass it.
    affected Controller operations. Signer writes are idempotent by certificate
    ID, so a retry returns the original result for any request that had already
    committed. While the Signer is unreachable, certificate issuance moves to
-   `signer_unavailable` (resumed by retrying under the same approval) and
+   `signer_unavailable` (resumed by retrying the same recorded actor and request hash) and
    revocation moves to `revocation_unknown` (a retry may submit it again). Both
    return a service-unavailable problem response without marking the operation
    successful.
@@ -391,7 +390,7 @@ mode `0400`, then derive and verify the Controller EndpointID before starting
 transportd. Never generate a replacement key silently. If the key backup is
 unavailable or fails the EndpointID check, leave transport offline, revoke trust
 in the old EndpointID, generate a new protected key, and re-enroll every node
-through the standard approval workflow. Record both the old and new EndpointIDs
+through the authenticated Admin workflow. Record both the old and new EndpointIDs
 along with the trust transition in the incident record.
 
 The session encryption key, audit checkpoint key, and audit event key (paired
@@ -765,8 +764,9 @@ PostgreSQL and MySQL alike:
    following [Revoking an OIDC identity or role](authentication.md#revoking-an-oidc-identity-or-role).
    Revoking sessions does not replace this step: a principal that can still
    sign in at the IdP regains every role binding the snapshot holds. Keep at
-   least one working administrator and an independent approver.
-3. Invalidate every restored `pending` or `approved` approval before allowing
+   least one working administrator.
+3. When restoring a release that still executes historical approval workflows,
+   invalidate every restored `pending` or `approved` approval before allowing
    requests or dispatch. A consumed approval can return as approved in the
    snapshot; consuming it again can create a new command ID, so node receipt
    deduplication does not replace this step. Through the protected administrative
@@ -804,7 +804,7 @@ PostgreSQL and MySQL alike:
    `approvals_still_live` must be zero. Rows created at or after the cutoff remain
    untouched to preserve `expires_at > created_at`; keep traffic blocked and
    reconcile the database clock and snapshot history if any remain. Fresh work
-   requires a new request and independent approval after recovery. Expiring an
+   requires a new authenticated Admin request after recovery. Expiring an
    approval does not undo an already-dispatched command: reconcile its result
    separately and never replay an Unknown write.
 4. Reapply post-snapshot node and `privd` attestation-key revocations from
@@ -814,7 +814,7 @@ PostgreSQL and MySQL alike:
    has received the revoked trust state before reconnecting nodes. Updating only
    `nodes.status` is insufficient. Keep affected nodes and receipt processing
    isolated when the revocation history cannot be established.
-5. Reconcile `local_auth_bootstrap` completion, administrator/independent-approver
+5. Reconcile `local_auth_bootstrap` completion, administrator
    identities, and `break_glass_uses` consumption and `rotation_required` markers
    against records outside the snapshot. Preserve initialization and consumption
    evidence; do not delete markers or reopen bootstrap to regain access. Rotate

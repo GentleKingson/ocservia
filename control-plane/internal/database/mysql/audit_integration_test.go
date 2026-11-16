@@ -52,7 +52,11 @@ func TestRealAuditRBACController(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	audittest.Controller(t, b, workspace, actor, target, func(id, resource uuid.UUID, hash []byte, expiry time.Time) error {
+	session := uuid.New()
+	if _, err = owner.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES(?,?,?,?)`, UUIDBytes(session), UUIDBytes(actor), fixtureTimestamp(t, now.Add(time.Hour)), stamp); err != nil {
+		t.Fatal(err)
+	}
+	audittest.Controller(t, b, workspace, actor, target, session, func(id, resource uuid.UUID, hash []byte, expiry time.Time) error {
 		expires, _ := value.FromTime(expiry)
 		created, _ := value.FromTime(expiry.Add(-time.Hour))
 		_, err := owner.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES(?,?,?,'role_binding.elevate','role_binding',?,'test','approved',?,'test',?,?,?,?,?)`, UUIDBytes(id), UUIDBytes(workspace), UUIDBytes(actor), UUIDBytes(resource), UUIDBytes(approver), expires, fixtureTimestamp(t, expiry.Add(-time.Minute)), created, hash, `{}`)

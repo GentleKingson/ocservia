@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// configPlanLookup is the read-only view used by authorization and approvals.
+// configPlanLookup is the read-only view used by resource authorization.
 type configPlanLookup interface {
 	ApprovalBinding(context.Context, uuid.UUID) (configplan.ApprovalBinding, error)
 	Resource(context.Context, uuid.UUID) (workspaceID, nodeID uuid.UUID, err error)

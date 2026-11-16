@@ -125,13 +125,11 @@ export async function removeIpBan(
 export async function reloadService(
   node: NodeObservedState,
   reason: string,
-  approvalId: string,
   signal?: AbortSignal,
 ): Promise<Operation> {
   return operations.reloadNodeService(
     {
       nodeId: node.id,
-      xApprovalID: approvalId,
       ...controlledRequest(node, reason),
     },
     requestInit(signal),

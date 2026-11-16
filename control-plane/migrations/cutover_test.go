@@ -72,18 +72,24 @@ func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		expected, _ := a.catalog(1)
+		expected, err := a.catalog(a.schema.Baseline.Number)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := validateStaticSchema(ctx, pool, expected); err != nil {
 			t.Fatal(err)
 		}
 		rows, err := readRevisionReceipts(ctx, pool)
 		// The cutover lands on the new baseline; later revisions then execute on
 		// top of it, while a fresh install records only the current checkpoint.
-		if pool == upgraded && (err != nil || len(rows) != 2 || rows[0].epoch != 2 || rows[0].revision != 0 || !matchesReceipt(rows[0], a.upgrade.Base.Checksum, a.upgrade.Base.Steps)) {
+		if pool == upgraded && (err != nil || len(rows) != len(a.upgrade.Revisions)+1 || rows[0].epoch != 2 || rows[0].revision != 0 || !matchesReceipt(rows[0], a.upgrade.Base.Checksum, a.upgrade.Base.Steps)) {
 			t.Fatal("new baseline differs from fresh", rows, err)
 		}
-		if err != nil || rows[len(rows)-1].epoch != 2 || rows[len(rows)-1].revision != 1 {
+		if err != nil || len(rows) == 0 || rows[len(rows)-1].epoch != 2 || rows[len(rows)-1].revision != a.schema.Baseline.Number {
 			t.Fatal("new baseline differs from fresh", rows, err)
+		}
+		if pool == fresh && len(rows) != 1 {
+			t.Fatal("fresh install fabricated execution history", rows)
 		}
 		var legacy bool
 		if err := pool.QueryRow(ctx, "SELECT to_regclass('public.schema_migrations') IS NOT NULL OR to_regclass('public.schema_snapshot_origin') IS NOT NULL").Scan(&legacy); err != nil || legacy {

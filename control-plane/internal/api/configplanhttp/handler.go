@@ -2,11 +2,11 @@ package configplanhttp
 
 import (
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"net/http"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -127,11 +127,7 @@ func (h *Handler) applyConfigPlan(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeStrictJSON(w, r, &body) {
 		return
 	}
-	approvalID, err := httpx.ParseUUIDv7(body.ApprovalID)
-	if err != nil {
-		httpx.WriteProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "approval_id must be UUIDv7")
-		return
-	}
+	approvalID, _ := uuid.Parse(body.ApprovalID)
 	if !h.requirePlans(w, r) {
 		return
 	}
@@ -150,12 +146,12 @@ func (h *Handler) applyConfigPlan(w http.ResponseWriter, r *http.Request) {
 
 func writeConfigPlanError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, rbac.ErrForbidden):
+		httpx.WriteProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, configplan.ErrInvalid), errors.Is(err, operations.ErrInvalidRequest):
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/config-plan-invalid", "Configuration plan is invalid", "the template, variables, revision, or lifetime is invalid")
 	case errors.Is(err, configplan.ErrStaleRevision), errors.Is(err, operations.ErrStaleRevision):
 		httpx.WriteProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/stale-revision", "Configuration revision is stale", "refresh configuration state and plan again")
-	case errors.Is(err, approvals.ErrNotReady):
-		httpx.WriteProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-not-ready", "Approval is not ready", "an unexpired independent approval for this exact plan is required")
 	case errors.Is(err, configplan.ErrCapability), errors.Is(err, operations.ErrCapabilityMissing):
 		httpx.WriteProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/capability-unavailable", "Capability is unavailable", "the node cannot validate this configuration")
 	case errors.Is(err, operations.ErrIdempotencyConflict):

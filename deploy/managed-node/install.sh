@@ -1,62 +1,17 @@
 #!/usr/bin/env bash
-# Thin one-command orchestrator for a production managed node.
+# Install a pinned native package and enroll a managed node.
+# --join-token accepts the Controller's root-only installation token at a hidden
+# prompt. --join-token-file accepts a protected file for unattended installation.
+# The token authenticates HTTPS configuration retrieval, derives a separate
+# Agent-only enrollment token, and binds root privd registration to that node.
+# Services start automatically only after the exact privd key is registered;
+# success requires Controller-observed online state and fresh telemetry.
+# --resume-install reuses /var/lib/ocservia-bootstrap and the existing identity.
+# Failed or ambiguous responses never regenerate identities or rotate keys.
 #
-# Scope: install an exact vX.Y.Z release package-first. With --version the
-# release is pinned on the command line and this script is a self-contained
-# Versioned installer: one file, no Git checkout, and no repository sibling files.
-# Released copies embed their exact tag. Unstamped source copies retain
-# the explicit legacy CLI Git-tag compatibility path. Both paths run the
-# platform preflight, download the
-# matching native package over HTTPS and freezes it in root-owned staging
-# BEFORE any package manager runs as root, installs the native package with
-# the production relay request marker, prepares the production node state (sealing keys, relay
-# configuration, relay access token, Controller command verification key,
-# persistent identity), and either uses a protected bootstrap token source
-# immediately or stops at ENROLLMENT_READY.
-# When the operator provisions either token source,
-# rerunning this same entrypoint completes enrollment, atomically writes the
-# final /etc/ocservia-agent/agent.env, consumes the one-time token file, and
-# stops at ENROLLED_LOCAL.
-#
-# Reruns converge without repeating completed work: when the native package
-# of this exact release is already installed under the production relay
-# contract, the package download and staging are skipped (the package
-# manager invocation no longer happens), and an already-enrolled node is
-# never enrolled again. Once agent.env carries the final NODE_ID, the bootstrap enters a validation-only
-# mode for everything the running services load: the persistent identity
-# files must exist and pass the Agent's own identity validation (agent
-# ownership, owner-only permissions, the 32-byte endpoint key, and the
-# controller pin still matching the configured Controller), the EndpointID
-# the identity loader derives must equal the AGENT_ENDPOINT_ID enrollment
-# binding persisted in agent.env at enrollment (a substituted-but-valid
-# endpoint key cannot silently take the Controller enrollment binding), both
-# sealing private keys must re-derive exactly the fingerprints pinned in
-# agent.env,
-# and the relay configuration, relay access token, and Controller command
-# verification key must already exist and validate (the command key as an
-# Ed25519 anchor under root-controlled ancestry) — or the rerun fails closed.
-# It never regenerates identity or sealing keys and never installs or
-# replaces relay or command trust material; the Controller-side enrollment
-# binding and the command authorization anchor only change through
-# deliberate operations.
-# After the independent approval, activation stays a deliberate operator
-# action outside this bootstrap (systemctl enable --now
-# ocservia-privd.service ocservia-agent.service); a rerun then only observes
-# the enabled+active services and reports SERVICES_ACTIVE. There is no local
-# approval signal a bootstrap could act on without Controller credentials:
-# pending nodes are absent from relay admission, and the only in-protocol
-# confirmation of approval is the Agent's accepted session, which requires
-# the service the operator has not enabled yet.
-#
-# This script never reimplements the verified package lifecycle, the
-# enrollment protocol, or the approval boundary: the native package
-# scriptlets (postinst/preremove), the Agent CLI (--prepare-enrollment /
-# --enrollment-token-file), and the Controller's possession-proof enrollment
-# contract remain the authorities. It never approves a node, never creates or
-# auto-approves an approval request, never places Controller administrator
-# credentials on the node, and never initially enables or starts Agent/privd.
-# The package lifecycle enables/starts the retention timer and may restart
-# already-running Agent/privd during an upgrade.
+# The legacy manually supplied configuration path remains supported. Its tokens
+# only enroll a node; operators using that path provision privd trust separately.
+# No Controller administrator credentials are ever installed on a node.
 #
 # Native package first: the default install path is the release .deb on the
 # Debian family and the release .rpm on Rocky Linux 9. The archive
@@ -112,8 +67,14 @@ readonly DEFAULT_VERSION=""
 SCRIPT_LIB="$(dirname "${BASH_SOURCE[0]}")/../lib"
 # shellcheck source=deploy/lib/install-ui.sh
 source "${SCRIPT_LIB}/install-ui.sh" # release-embed
+# shellcheck source=deploy/lib/node-bootstrap.sh
+source "${SCRIPT_LIB}/node-bootstrap.sh" # release-embed
 INTERACTIVE=false
 NON_INTERACTIVE=false
+JOIN_MODE=false
+JOIN_TOKEN_FILE=""
+JOIN_STATE_DIR=""
+JOIN_ORIGIN=""
 (($# != 0)) || INTERACTIVE=true
 CONFIG_FILE="${PWD}/install.env"
 
@@ -192,7 +153,8 @@ fail() {
 
 usage() {
   echo "No arguments: interactive wizard (TTY required). --non-interactive: unattended, no prompts." >&2
-  echo "Options: --config PATH (default ./install.env), --version vX.Y.Z (Release default embedded)." >&2
+  echo "Options: --join-token (hidden prompt), --join-token-file PATH, --resume-install, --version vX.Y.Z." >&2
+  echo "Legacy manual inputs: --config PATH (default ./install.env)." >&2
   echo "usage: deploy/managed-node/install.sh [--version vX.Y.Z] [--root-lifecycle] (the node configuration comes from the operator session or ./install.env)" >&2
   exit 2
 }
@@ -205,6 +167,17 @@ usage() {
 version_seen=false
 while (($# > 0)); do
   case "$1" in
+    --join-token)
+      [[ "${JOIN_MODE}" == false ]] || fail "choose one installation token source"
+      JOIN_MODE=true; ROOT_LIFECYCLE=true; shift ;;
+    --join-token-file)
+      [[ "${JOIN_MODE}" == false ]] || fail "choose one installation token source"
+      (($# >= 2)) || fail "--join-token-file requires a protected file"
+      [[ -f "$2" && ! -L "$2" ]] || fail "--join-token-file requires a regular file, not a symlink"
+      JOIN_MODE=true; ROOT_LIFECYCLE=true; JOIN_TOKEN_FILE="$(realpath -- "$2")"; shift 2 ;;
+    --resume-install)
+      [[ "${JOIN_MODE}" == false ]] || fail "choose one installation token source"
+      JOIN_MODE=true; ROOT_LIFECYCLE=true; JOIN_TOKEN_FILE=resume; shift ;;
     --interactive) INTERACTIVE=true; shift ;;
     --non-interactive) NON_INTERACTIVE=true; shift ;;
     --config)
@@ -227,6 +200,10 @@ while (($# > 0)); do
       ;;
   esac
 done
+if [[ "${JOIN_MODE}" == true ]]; then
+  INTERACTIVE=false
+  [[ "${NON_INTERACTIVE}" == false || -n "${JOIN_TOKEN_FILE}" ]] || fail "unattended token install requires --join-token-file or --resume-install"
+fi
 [[ "${NON_INTERACTIVE}" == false || "${INTERACTIVE}" == false ]] || fail "conflicting installation modes"
 [[ "${INTERACTIVE}" == false ]] || install_ui_require_tty
 if [[ -n "${VERSION}" ]]; then
@@ -387,7 +364,7 @@ install_env_load() {
   fi
 }
 
-if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
+if [[ "${JOIN_MODE}" == false && -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
   install_env_load "${CONFIG_FILE}" \
     BOOTSTRAP_TOKEN_SOURCE \
     CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
@@ -444,6 +421,13 @@ forward_root_lifecycle() {
   local variable allowed
   local -a forwarded_environment=()
   local -a reexec_arguments=(--root-lifecycle)
+  if [[ "${JOIN_MODE}" == true ]]; then
+    case "${JOIN_TOKEN_FILE}" in
+      resume) reexec_arguments+=(--resume-install) ;;
+      "") reexec_arguments+=(--join-token) ;;
+      *) reexec_arguments+=(--join-token-file "${JOIN_TOKEN_FILE}") ;;
+    esac
+  fi
   [[ "${NON_INTERACTIVE}" == false ]] || reexec_arguments+=(--non-interactive)
   # The --version pin is operator-chosen public release identity, not node
   # configuration: it re-crosses the privilege boundary as the same explicit
@@ -899,6 +883,7 @@ validate_enrolled_identity() {
     fail "the Agent did not print a valid EndpointID while validating the enrolled identity"
   [[ "${endpoint_id}" == "${enrolled_endpoint_id}" ]] ||
     fail "the enrolled identity now presents EndpointID ${endpoint_id} but the enrolled ${AGENT_ENV_FILE} pins ${enrolled_endpoint_id}; a replaced endpoint secret key cannot silently take the Controller enrollment binding — restore the identity material or re-enroll as a new node deliberately (docs/operations/agent-lifecycle.md#enroll-the-node)"
+  ENDPOINT_ID="${endpoint_id}"
   echo "enrolled persistent identity validated; EndpointID: ${endpoint_id}"
 }
 
@@ -1117,6 +1102,10 @@ converge_enrollment() {
   fi
   if [[ -n "${ENROLLED_NODE_ID}" ]]; then
     cleanup_enrollment_copy
+    if [[ "${JOIN_MODE}" == true ]]; then
+      node_bootstrap_complete "${ENROLLED_NODE_ID}"
+      return
+    fi
     if services_enabled_and_active; then
       print_services_active "${ENROLLED_NODE_ID}"
     else
@@ -1166,7 +1155,11 @@ converge_enrollment() {
     priv rm -f -- "${BOOTSTRAP_TOKEN_SOURCE}"
   fi
   echo "enrollment complete; final ${AGENT_ENV_FILE} written and the one-time token file consumed"
-  print_enrolled_local "${node_id}"
+  if [[ "${JOIN_MODE}" == true ]]; then
+    node_bootstrap_complete "${node_id}"
+  else
+    print_enrolled_local "${node_id}"
+  fi
 }
 
 # Preserve CLI root-lifecycle validation of root-readable protected inputs.
@@ -1180,6 +1173,9 @@ resolve_release_identity
 resolve_architecture
 detect_platform
 require_commands
+if [[ "${JOIN_MODE}" == true ]]; then
+  node_bootstrap_prepare
+fi
 if [[ "${INTERACTIVE}" == true ]]; then
   echo 'Agent installation preserves existing identity; approval and initial service activation remain separate.'
   install_ui_prompt CONTROLLER_ENDPOINT_ID 'Controller EndpointID (64 lowercase hex)'

@@ -295,7 +295,8 @@ describe("OpenAPI invariants", () => {
     expect(
       document.components?.schemas?.NodeBootstrapToken?.properties?.token,
     ).toMatchObject({
-      pattern: "^obt1_[A-Za-z0-9_-]{43}$",
+      pattern:
+        "^(obt1_[A-Za-z0-9_-]{43}|oit1_[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]{43})$",
       readOnly: true,
     });
     expect(
@@ -344,7 +345,6 @@ describe("OpenAPI invariants", () => {
 
     expect(schemas?.AgentUpgradeRequest?.required).toEqual([
       "target_version",
-      "approval_id",
       "reason",
     ]);
     expect(

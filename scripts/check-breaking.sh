@@ -38,7 +38,7 @@ fi
 
 if git -C "${ROOT}" cat-file -e "${base_sha}:openapi/openapi.yaml" 2>/dev/null; then
   git -C "${ROOT}" show "${base_sha}:openapi/openapi.yaml" >"${temporary}/main.yaml"
-  # Normalize only the deliberate fail-closed security migrations in the
+  # Normalize only the deliberate security and single-Admin migrations in the
   # comparison baseline so every unrelated OpenAPI break remains an error.
   (cd "${ROOT}/web" && node --input-type=module - \
     "${temporary}/main.yaml" "${ROOT}/openapi/openapi.yaml" <<'EOF'
@@ -93,23 +93,6 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
   assertExact("ConfigSecretRef", candidateSchemas.ConfigSecretRef, configSecretRef);
   schemas.ConfigSecretRef = configSecretRef;
 
-  const configPlanSummary = structuredClone(schemas.ConfigPlanApprovalSummary);
-  configPlanSummary.required = [
-    "node_id",
-    "expected_revision",
-    "candidate_hash",
-    "current_hash",
-    "diff_redacted",
-    "expires_at",
-  ];
-  configPlanSummary.properties.diff_redacted = {
-    type: "string",
-    maxLength: 262144,
-    description: "Approver-visible secret-safe diff containing exact secret reference identifiers, providers, and versions without provider keys or values.",
-  };
-  assertExact("ConfigPlanApprovalSummary", candidateSchemas.ConfigPlanApprovalSummary, configPlanSummary);
-  schemas.ConfigPlanApprovalSummary = configPlanSummary;
-
   const sealedSecret = {
     type: "object",
     additionalProperties: false,
@@ -152,89 +135,85 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
 
   for (const name of ["CertificateRevokeRequest", "CertificateP12Request"]) {
     const request = structuredClone(schemas[name]);
-    request.required = ["expected_version", "certificate_version", "approval_id", "reason"];
+    request.required = ["expected_version", "certificate_version", "reason"];
     request.properties.certificate_version = { type: "integer", format: "int64", minimum: 1 };
     request.properties.approval_id = { $ref: "#/components/schemas/UuidV7" };
+    if (name === "CertificateP12Request") {
+      request.required.splice(2, 0, "artifact_request_id");
+      delete request.properties.approval_id;
+      request.properties.artifact_request_id = { $ref: "#/components/schemas/UuidV7" };
+    }
     assertExact(name, candidateSchemas[name], request);
     schemas[name] = request;
   }
 
-  const certificateIssueSummary = structuredClone(
-    schemas.CertificateIssueApprovalSummary ?? schemas.CertificateApprovalSummary,
+  // Retire only schemas owned by the removed independent-approval API.
+  for (const name of [
+    "ApprovalRequest", "ApprovalDecision", "ApprovalPage", "Approval",
+    "ConfigPlanApprovalSummary", "CertificateApprovalSummary",
+    "CertificateIssueApprovalSummary", "CertificateActionApprovalSummary",
+  ]) {
+    assertExact(name, candidateSchemas[name], undefined);
+    delete schemas[name];
+  }
+  // No other route deletion is normalized.
+  for (const path of [
+    "/approval-requests",
+    "/approval-requests/{approval_id}",
+    "/approval-requests/{approval_id}:approve",
+  ]) {
+    assertExact(path, candidateDocument.paths[path], undefined);
+    delete baselineDocument.paths[path];
+  }
+  const passwordResetPath = "/local-users/{identity_id}:reset-password";
+  const passwordReset = baselineDocument.paths[passwordResetPath].post;
+  const resetParameters = passwordReset.parameters.filter(
+    (parameter) => !(parameter.in === "header" && parameter.name === "X-Approval-ID"),
   );
   assertExact(
-    "CertificateIssueApprovalSummary",
-    candidateSchemas.CertificateIssueApprovalSummary,
-    certificateIssueSummary,
+    "resetLocalUserPassword.parameters",
+    candidateDocument.paths[passwordResetPath]?.post?.parameters,
+    resetParameters,
   );
-  const certificateActionSummary = {
-    type: "object",
-    additionalProperties: false,
-    required: ["action", "certificate_id", "certificate_version", "node_id"],
-    properties: {
-      action: {
-        type: "string",
-        enum: ["certificate.revoke", "certificate.private_key.export"],
-      },
-      certificate_id: { $ref: "#/components/schemas/UuidV7" },
-      certificate_version: { type: "integer", format: "int64", minimum: 1 },
-      node_id: { $ref: "#/components/schemas/UuidV7" },
-      purpose: { type: "string", maxLength: 512 },
-      artifact_request_id: { $ref: "#/components/schemas/UuidV7" },
-      serial_number: { type: "string", maxLength: 128 },
-      certificate_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
-    },
-  };
-  assertExact(
-    "CertificateActionApprovalSummary",
-    candidateSchemas.CertificateActionApprovalSummary,
-    certificateActionSummary,
-  );
-  const certificateSummary = {
-    oneOf: [
-      { $ref: "#/components/schemas/CertificateIssueApprovalSummary" },
-      { $ref: "#/components/schemas/CertificateActionApprovalSummary" },
-    ],
-  };
-  assertExact("CertificateApprovalSummary", candidateSchemas.CertificateApprovalSummary, certificateSummary);
-  schemas.CertificateIssueApprovalSummary = certificateIssueSummary;
-  schemas.CertificateActionApprovalSummary = certificateActionSummary;
-  schemas.CertificateApprovalSummary = certificateSummary;
+  passwordReset.parameters = resetParameters;
+  for (const name of [
+    "AgentUpgradeRequest", "ConfigApplyRequest", "CertificateIssueRequest",
+    "AgentRolloutCreateRequest", "AgentRollout",
+  ]) {
+    const schema = structuredClone(schemas[name]);
+    schema.required = schema.required.filter((field) => field !== "approval_id");
+    if (name === "AgentRolloutCreateRequest") {
+      schema.description = "The immutable rollout request hash binds target version, sorted node set, batch size and stop-on-failure policy.";
+    }
+    assertExact(name, candidateSchemas[name], schema);
+    schemas[name] = schema;
+  }
 
-  const approvalDecision = structuredClone(schemas.ApprovalDecision);
-  approvalDecision.required = ["reason", "expected_request_hash"];
-  assertExact("ApprovalDecision", candidateSchemas.ApprovalDecision, approvalDecision);
-  schemas.ApprovalDecision = approvalDecision;
-
-  const existingRequestSummary = schemas.Approval.properties.request_summary;
-  const requestSummary = existingRequestSummary.oneOf
-    ? structuredClone(existingRequestSummary)
-    : {
-        oneOf: [
-          structuredClone(existingRequestSummary),
-          { type: "object", additionalProperties: true },
-        ],
-      };
-  assertExact(
-    "Approval.request_summary",
-    candidateSchemas.Approval?.properties?.request_summary,
-    requestSummary,
-  );
-  schemas.Approval.properties.request_summary = requestSummary;
+  const bootstrapToken = structuredClone(schemas.NodeBootstrapToken);
+  bootstrapToken.properties.token.pattern = "^(obt1_[A-Za-z0-9_-]{43}|oit1_[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]{43})$";
+  assertExact("NodeBootstrapToken", candidateSchemas.NodeBootstrapToken, bootstrapToken);
+  schemas.NodeBootstrapToken = bootstrapToken;
 };
 
 // Prove the allowlist rejects an unrelated breaking change inside a schema
 // that contains an intentional migration.
-const guardCandidate = structuredClone(candidate);
-guardCandidate.components.schemas.CertificateRevokeRequest.properties.reason.maxLength = 127;
-let guardRejected = false;
-try {
-  normalizeSecurityMigrations(structuredClone(baseline), guardCandidate);
-} catch (error) {
-  guardRejected = String(error).includes("CertificateRevokeRequest");
-}
-if (!guardRejected) {
-  throw new Error("OpenAPI security migration allowlist accepted an unrelated schema change");
+for (const [name, mutate] of [
+  ["CertificateRevokeRequest", (schema) => { schema.properties.reason.maxLength = 127; }],
+  ["CertificateP12Request", (schema) => { schema.properties.artifact_request_id = { type: "string" }; }],
+  ["AgentRollout", (schema) => { schema.required = schema.required.filter((field) => field !== "state"); }],
+  ["NodeBootstrapToken", (schema) => { schema.properties.token.pattern = ".*"; }],
+]) {
+  const guardCandidate = structuredClone(candidate);
+  mutate(guardCandidate.components.schemas[name]);
+  let guardRejected = false;
+  try {
+    normalizeSecurityMigrations(structuredClone(baseline), guardCandidate);
+  } catch (error) {
+    guardRejected = String(error).includes(name);
+  }
+  if (!guardRejected) {
+    throw new Error(`OpenAPI migration allowlist accepted an unrelated ${name} change`);
+  }
 }
 
 normalizeSecurityMigrations(baseline, candidate);

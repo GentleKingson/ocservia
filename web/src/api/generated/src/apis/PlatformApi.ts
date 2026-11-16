@@ -109,7 +109,6 @@ export interface LoginLocalRequest {
 
 export interface ResetLocalUserPasswordOperationRequest {
   identityId: string;
-  xApprovalID: string;
   resetLocalUserPasswordRequest: ResetLocalUserPasswordRequest;
 }
 
@@ -196,7 +195,7 @@ export class PlatformApi extends runtime.BaseAPI {
   }
 
   /**
-   * Requires exact Origin and a valid non-break-glass Local session. No target identity or workspace may be submitted. Verifies the current password under the shared Local account attempt protection and applies the new-password policy. Credential version, disabled state and session validity are rechecked in the transaction. Success atomically changes the password, revokes all sessions and appends audit; the caller must log in again. OIDC and Break-glass sessions cannot use this endpoint. Administrator reset-password remains independently approved.
+   * Requires exact Origin and a valid non-break-glass Local session. No target identity or workspace may be submitted. Verifies the current password under the shared Local account attempt protection and applies the new-password policy. Credential version, disabled state and session validity are rechecked in the transaction. Success atomically changes the password, revokes all sessions and appends audit; the caller must log in again. OIDC and Break-glass sessions cannot use this endpoint. Administrator reset-password requires Admin authority.
    * Change the current Local session owner\'s password
    */
   async changeLocalPasswordRaw(
@@ -211,7 +210,7 @@ export class PlatformApi extends runtime.BaseAPI {
   }
 
   /**
-   * Requires exact Origin and a valid non-break-glass Local session. No target identity or workspace may be submitted. Verifies the current password under the shared Local account attempt protection and applies the new-password policy. Credential version, disabled state and session validity are rechecked in the transaction. Success atomically changes the password, revokes all sessions and appends audit; the caller must log in again. OIDC and Break-glass sessions cannot use this endpoint. Administrator reset-password remains independently approved.
+   * Requires exact Origin and a valid non-break-glass Local session. No target identity or workspace may be submitted. Verifies the current password under the shared Local account attempt protection and applies the new-password policy. Credential version, disabled state and session validity are rechecked in the transaction. Success atomically changes the password, revokes all sessions and appends audit; the caller must log in again. OIDC and Break-glass sessions cannot use this endpoint. Administrator reset-password requires Admin authority.
    * Change the current Local session owner\'s password
    */
   async changeLocalPassword(
@@ -492,7 +491,7 @@ export class PlatformApi extends runtime.BaseAPI {
   }
 
   /**
-   * Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes. Returns 409 when disabling an effective elevated Local identity would leave no active Local workspace PlatformAdmin or fewer than two distinct active Local workspace approvers. Disabled identities and bindings in other workspaces or narrower resource scopes do not count. Protection and disable are serialized in one transaction.
+   * Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes. Returns 409 when disabling an effective elevated Local identity would leave no active Local workspace PlatformAdmin. Disabled identities and bindings in other workspaces or narrower resource scopes do not count. Protection and disable are serialized in one transaction.
    * Disable a platform Local login identity and revoke all its sessions
    */
   async disableLocalUserRaw(
@@ -507,7 +506,7 @@ export class PlatformApi extends runtime.BaseAPI {
   }
 
   /**
-   * Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes. Returns 409 when disabling an effective elevated Local identity would leave no active Local workspace PlatformAdmin or fewer than two distinct active Local workspace approvers. Disabled identities and bindings in other workspaces or narrower resource scopes do not count. Protection and disable are serialized in one transaction.
+   * Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes. Returns 409 when disabling an effective elevated Local identity would leave no active Local workspace PlatformAdmin. Disabled identities and bindings in other workspaces or narrower resource scopes do not count. Protection and disable are serialized in one transaction.
    * Disable a platform Local login identity and revoke all its sessions
    */
   async disableLocalUser(
@@ -852,13 +851,6 @@ export class PlatformApi extends runtime.BaseAPI {
       );
     }
 
-    if (requestParameters["xApprovalID"] == null) {
-      throw new runtime.RequiredError(
-        "xApprovalID",
-        'Required parameter "xApprovalID" was null or undefined when calling resetLocalUserPassword().',
-      );
-    }
-
     if (requestParameters["resetLocalUserPasswordRequest"] == null) {
       throw new runtime.RequiredError(
         "resetLocalUserPasswordRequest",
@@ -871,12 +863,6 @@ export class PlatformApi extends runtime.BaseAPI {
     const headerParameters: runtime.HTTPHeaders = {};
 
     headerParameters["Content-Type"] = "application/json";
-
-    if (requestParameters["xApprovalID"] != null) {
-      headerParameters["X-Approval-ID"] = String(
-        requestParameters["xApprovalID"],
-      );
-    }
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
@@ -905,7 +891,7 @@ export class PlatformApi extends runtime.BaseAPI {
   }
 
   /**
-   * Requires exact Origin, local_user.manage in the fixed management workspace, and an independent one-use approval for action local_user.reset-password, resource_type local_user and this identity ID. Approval authorizes credential replacement without storing password content. Does not re-enable a disabled identity. OIDC identities return 404.
+   * Requires exact Origin and local_user.manage in the fixed management workspace. The active session and Admin authority are rechecked in the transaction. Does not re-enable a disabled identity. OIDC identities return 404.
    * Reset a platform Local password and revoke all its sessions
    */
   async resetLocalUserPasswordRaw(
@@ -920,7 +906,7 @@ export class PlatformApi extends runtime.BaseAPI {
   }
 
   /**
-   * Requires exact Origin, local_user.manage in the fixed management workspace, and an independent one-use approval for action local_user.reset-password, resource_type local_user and this identity ID. Approval authorizes credential replacement without storing password content. Does not re-enable a disabled identity. OIDC identities return 404.
+   * Requires exact Origin and local_user.manage in the fixed management workspace. The active session and Admin authority are rechecked in the transaction. Does not re-enable a disabled identity. OIDC identities return 404.
    * Reset a platform Local password and revoke all its sessions
    */
   async resetLocalUserPassword(

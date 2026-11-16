@@ -84,7 +84,7 @@ func (s configurationStore) InsertPlan(ctx context.Context, v configurationstore
 }
 
 func (s configurationStore) InsertApply(ctx context.Context, v configurationstore.PendingApply) error {
-	_, err := s.Exec(ctx, `INSERT INTO config_apply_operations(operation_id,workspace_id,node_id,plan_id,approval_id,expected_revision,desired_revision,candidate_hash,previous_hash,state,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,$10)`, v.ID, v.WorkspaceID, v.NodeID, v.PlanID, v.ApprovalID, v.ExpectedRevision, v.DesiredRevision, v.CandidateHash, v.PreviousHash, v.CreatedAt)
+	_, err := s.Exec(ctx, `INSERT INTO config_apply_operations(operation_id,workspace_id,node_id,plan_id,approval_id,expected_revision,desired_revision,candidate_hash,previous_hash,state,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,$10)`, v.ID, v.WorkspaceID, v.NodeID, v.PlanID, rbacID(v.ApprovalID), v.ExpectedRevision, v.DesiredRevision, v.CandidateHash, v.PreviousHash, v.CreatedAt)
 	return err
 }
 

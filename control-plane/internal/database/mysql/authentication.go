@@ -96,7 +96,7 @@ func (s authenticationStore) LockLocalIdentity(ctx context.Context, id uuid.UUID
 }
 func (s authenticationStore) Protected(ctx context.Context, workspace, id uuid.UUID) (bool, error) {
 	var yes bool
-	err := s.tx.QueryRow(ctx, `WITH effective AS (SELECT DISTINCT i.id,b.role_name FROM identities i JOIN local_credentials c ON c.identity_id=i.id JOIN role_bindings b ON b.identity_id=i.id WHERE i.disabled_at IS NULL AND CAST(i.issuer AS BINARY)=_binary'local' AND CAST(i.subject AS BINARY)=CAST(c.username AS BINARY) AND b.workspace_id=? AND b.resource_type='workspace' AND b.role_name IN ('PlatformAdmin','SecurityAdmin')) SELECT EXISTS(SELECT 1 FROM effective WHERE id=?) AND (NOT EXISTS(SELECT 1 FROM effective WHERE id<>? AND role_name='PlatformAdmin') OR (SELECT count(DISTINCT id) FROM effective WHERE id<>?)<2)`, UUIDBytes(workspace), UUIDBytes(id), UUIDBytes(id), UUIDBytes(id)).Scan(&yes)
+	err := s.tx.QueryRow(ctx, `WITH effective AS (SELECT DISTINCT i.id,b.role_name FROM identities i JOIN local_credentials c ON c.identity_id=i.id JOIN role_bindings b ON b.identity_id=i.id WHERE i.disabled_at IS NULL AND CAST(i.issuer AS BINARY)=_binary'local' AND CAST(i.subject AS BINARY)=CAST(c.username AS BINARY) AND b.workspace_id=? AND b.resource_type='workspace' AND b.role_name='PlatformAdmin') SELECT EXISTS(SELECT 1 FROM effective WHERE id=?) AND (NOT EXISTS(SELECT 1 FROM effective WHERE id<>? AND role_name='PlatformAdmin'))`, UUIDBytes(workspace), UUIDBytes(id), UUIDBytes(id)).Scan(&yes)
 	return yes, err
 }
 func (s authenticationStore) Disable(ctx context.Context, id uuid.UUID, now time.Time) error {

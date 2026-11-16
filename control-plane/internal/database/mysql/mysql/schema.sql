@@ -2,8 +2,8 @@
 -- ocservia:format=1
 -- ocservia:engine=mysql
 -- ocservia:epoch=2
--- ocservia:revision=3
--- ocservia:history-sha256=551474f88b64412cce0f39e66bccfdf911b56f7ae2c2adb9c160b8ad94142218
+-- ocservia:revision=4
+-- ocservia:history-sha256=53e8fe96466a61593202273435c6f1c298808bc776c70f5302d721afca7ec74a
 
 -- ocservia:step=001:table_business_locks
 -- ocservia:metadata={"kind":"table","object":"business_locks","before":"","after":"9f4b1ecbaf1f861998bf97284c47c8374b8877585d5525785b462410bfc1900f"}
@@ -988,22 +988,22 @@ CREATE TABLE `user_usage_cursors` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 -- ocservia:end-step
 -- ocservia:step=047:table_agent_rollouts
--- ocservia:metadata={"kind":"table","object":"agent_rollouts","before":"","after":"a84081f92b5188606851515077b5fa341d31a91b27aee1d2fea769e0218f0283","roundtrip_hash":"2aaaba9ac76e6da8dde959b7192014bd78e900dff5f638c7adcfa21723988e7b"}
+-- ocservia:metadata={"kind":"table","object":"agent_rollouts","before":"","after":"2592ab3a528df49f65d0a9d4d80f9af8d5ac562f05d568687ea2ec2912cd3b85","roundtrip_hash":"a5d4054e19f9951e905779961b119097221e063f09a86918a87b7cf73a7f811d"}
 CREATE TABLE `agent_rollouts` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
-  `target_version` longtext NOT NULL,
-  `state` longtext NOT NULL DEFAULT (_utf8mb4'queued'),
+  `target_version` longtext COLLATE utf8mb4_0900_bin NOT NULL,
+  `state` longtext COLLATE utf8mb4_0900_bin NOT NULL DEFAULT (_utf8mb4'queued'),
   `batch_size` int NOT NULL,
   `stop_on_failure` tinyint(1) NOT NULL DEFAULT '1',
-  `reason` longtext NOT NULL,
-  `approval_id` varbinary(16) NOT NULL,
+  `reason` longtext COLLATE utf8mb4_0900_bin NOT NULL,
+  `approval_id` varbinary(16) DEFAULT NULL,
   `request_hash` longblob NOT NULL,
   `created_by` varbinary(16) NOT NULL,
   `actor_session_id` varbinary(16) NOT NULL,
   `current_batch` int NOT NULL DEFAULT '0',
-  `pause_code` longtext NOT NULL DEFAULT (_utf8mb4''),
-  `idempotency_key` varchar(191) NOT NULL,
+  `pause_code` longtext COLLATE utf8mb4_0900_bin NOT NULL DEFAULT (_utf8mb4''),
+  `idempotency_key` varchar(191) COLLATE utf8mb4_0900_bin NOT NULL,
   `created_at` bigint NOT NULL,
   `updated_at` bigint NOT NULL,
   `exclusions` longblob NOT NULL DEFAULT (_utf8mb4'[]'),
@@ -1616,16 +1616,16 @@ CREATE TABLE `node_observed_snapshots` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 -- ocservia:end-step
 -- ocservia:step=070:table_node_privd_attestation_keys
--- ocservia:metadata={"kind":"table","object":"node_privd_attestation_keys","before":"","after":"b28c2c04dd1315cf41bdc7d5742ed694d784580dcecb06b1aacfd6914418d241"}
+-- ocservia:metadata={"kind":"table","object":"node_privd_attestation_keys","before":"","after":"412002d2619db08689223fedc19807770ffce445913c68e0226ad2f9083ce99a","roundtrip_hash":"ed77eb5194cbbbdf81ce70f58fbe440cdae2fdbb9a8b0f8ab81422a2f353cda8"}
 CREATE TABLE `node_privd_attestation_keys` (
   `node_id` varbinary(16) NOT NULL,
-  `key_id` varchar(191) NOT NULL,
-  `algorithm` longtext NOT NULL,
+  `key_id` varchar(191) COLLATE utf8mb4_0900_bin NOT NULL,
+  `algorithm` longtext COLLATE utf8mb4_0900_bin NOT NULL,
   `public_key` varbinary(512) NOT NULL,
-  `state` varchar(191) NOT NULL,
-  `predecessor_key_id` longtext,
-  `successor_key_id` longtext,
-  `registration_credential_id` varbinary(16) NOT NULL,
+  `state` varchar(191) COLLATE utf8mb4_0900_bin NOT NULL,
+  `predecessor_key_id` longtext COLLATE utf8mb4_0900_bin,
+  `successor_key_id` longtext COLLATE utf8mb4_0900_bin,
+  `registration_credential_id` varbinary(16) DEFAULT NULL,
   `created_at` bigint NOT NULL,
   `approved_at` bigint NOT NULL,
   `activated_at` bigint NOT NULL,
@@ -1638,11 +1638,11 @@ CREATE TABLE `node_privd_attestation_keys` (
   KEY `node_privd_attestation_keys_active_idx` (`node_id`,`state`,`activated_at`),
   CONSTRAINT `node_privd_attestation_keys_node_id_fkey` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`) ON DELETE CASCADE,
   CONSTRAINT `node_privd_attestation_keys_registration_credential_id_fkey` FOREIGN KEY (`registration_credential_id`) REFERENCES `privd_attestation_enrollment_credentials` (`id`),
-  CONSTRAINT `node_privd_attestation_keys_activated_at_range` CHECK (((`activated_at` is null) or (`activated_at` in (-(9223372036854775808),9223372036854775807)) or ((`activated_at` >= -(211813488000000000)) and (`activated_at` < 9223371331200000000)))),
-  CONSTRAINT `node_privd_attestation_keys_approved_at_range` CHECK (((`approved_at` is null) or (`approved_at` in (-(9223372036854775808),9223372036854775807)) or ((`approved_at` >= -(211813488000000000)) and (`approved_at` < 9223371331200000000)))),
+  CONSTRAINT `node_privd_attestation_keys_activated_at_range` CHECK (((`activated_at` is null) or (`activated_at` in (-(9223372036854775808),9223372036854775807)) or ((`activated_at` >= -211813488000000000) and (`activated_at` < 9223371331200000000)))),
+  CONSTRAINT `node_privd_attestation_keys_approved_at_range` CHECK (((`approved_at` is null) or (`approved_at` in (-(9223372036854775808),9223372036854775807)) or ((`approved_at` >= -211813488000000000) and (`approved_at` < 9223371331200000000)))),
   CONSTRAINT `node_privd_attestation_keys_chk_1` CHECK ((length(`node_id`) = 16)),
   CONSTRAINT `node_privd_attestation_keys_chk_2` CHECK ((length(`registration_credential_id`) = 16)),
-  CONSTRAINT `node_privd_attestation_keys_created_at_range` CHECK (((`created_at` is null) or (`created_at` in (-(9223372036854775808),9223372036854775807)) or ((`created_at` >= -(211813488000000000)) and (`created_at` < 9223371331200000000)))),
+  CONSTRAINT `node_privd_attestation_keys_created_at_range` CHECK (((`created_at` is null) or (`created_at` in (-(9223372036854775808),9223372036854775807)) or ((`created_at` >= -211813488000000000) and (`created_at` < 9223371331200000000)))),
   CONSTRAINT `node_privd_attestation_keys_node_privd_attestation__57a7fe3617d1` CHECK (regexp_like(`key_id`,_utf8mb4'(?-i)\\Aed25519-sha256:[0-9a-f]{64}\\z')),
   CONSTRAINT `node_privd_attestation_keys_node_privd_attestation__af8dc9110f78` CHECK ((`state` in (_utf8mb4'pending',_utf8mb4'active',_utf8mb4'revoked'))),
   CONSTRAINT `node_privd_attestation_keys_node_privd_attestation__bcd0db2625e4` CHECK ((`algorithm` = _utf8mb4'ed25519')),
@@ -1651,9 +1651,9 @@ CREATE TABLE `node_privd_attestation_keys` (
   CONSTRAINT `node_privd_attestation_keys_node_privd_attestation_keys_check1` CHECK (((`state` = _utf8mb4'revoked') = (`revoked_at` is not null))),
   CONSTRAINT `node_privd_attestation_keys_node_privd_attestation_keys_check2` CHECK (((`predecessor_key_id` is null) or (`predecessor_key_id` <> `key_id`))),
   CONSTRAINT `node_privd_attestation_keys_node_privd_attestation_keys_check3` CHECK (((`successor_key_id` is null) or (`successor_key_id` <> `key_id`))),
-  CONSTRAINT `node_privd_attestation_keys_revoked_at_range` CHECK (((`revoked_at` is null) or (`revoked_at` in (-(9223372036854775808),9223372036854775807)) or ((`revoked_at` >= -(211813488000000000)) and (`revoked_at` < 9223371331200000000)))),
+  CONSTRAINT `node_privd_attestation_keys_revoked_at_range` CHECK (((`revoked_at` is null) or (`revoked_at` in (-(9223372036854775808),9223372036854775807)) or ((`revoked_at` >= -211813488000000000) and (`revoked_at` < 9223371331200000000)))),
   CONSTRAINT `node_privd_attestation_keys_text_no_nul` CHECK (((locate(0x00,cast(`key_id` as char charset binary)) = 0) and (locate(0x00,cast(`algorithm` as char charset binary)) = 0) and (locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`predecessor_key_id` as char charset binary)) = 0) and (locate(0x00,cast(`successor_key_id` as char charset binary)) = 0))),
-  CONSTRAINT `node_privd_attestation_keys_valid_until_range` CHECK (((`valid_until` is null) or (`valid_until` in (-(9223372036854775808),9223372036854775807)) or ((`valid_until` >= -(211813488000000000)) and (`valid_until` < 9223371331200000000))))
+  CONSTRAINT `node_privd_attestation_keys_valid_until_range` CHECK (((`valid_until` is null) or (`valid_until` in (-(9223372036854775808),9223372036854775807)) or ((`valid_until` >= -211813488000000000) and (`valid_until` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 -- ocservia:end-step
 -- ocservia:step=071:table_node_sealing_keys
@@ -2004,19 +2004,19 @@ CREATE TABLE `command_attempts` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 -- ocservia:end-step
 -- ocservia:step=081:table_config_apply_operations
--- ocservia:metadata={"kind":"table","object":"config_apply_operations","before":"","after":"a154f572a0991d968c7ddc671372d6cba272c0ac40c6af5d1e0e7c6d2d3b577a"}
+-- ocservia:metadata={"kind":"table","object":"config_apply_operations","before":"","after":"e308ec0e9dbd01407fa46f63c1fbfcc1fd4d2d156c4ff2e1e47c76bc5b8edcc0","roundtrip_hash":"5303472b6506af17cfb7d769e17469e19b9ed662742dfbdc59dac2c4adc08ee3"}
 CREATE TABLE `config_apply_operations` (
   `operation_id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
   `node_id` varbinary(16) NOT NULL,
   `plan_id` varbinary(16) NOT NULL,
-  `approval_id` varbinary(16) NOT NULL,
+  `approval_id` varbinary(16) DEFAULT NULL,
   `expected_revision` bigint NOT NULL,
   `desired_revision` bigint NOT NULL,
   `candidate_hash` longblob NOT NULL,
   `previous_hash` longblob NOT NULL,
-  `state` longtext NOT NULL,
-  `failure_code` longtext,
+  `state` longtext COLLATE utf8mb4_0900_bin NOT NULL,
+  `failure_code` longtext COLLATE utf8mb4_0900_bin,
   `partial_2c23369cc864` tinyint GENERATED ALWAYS AS ((case when (`state` in (_utf8mb4'queued',_utf8mb4'dispatched',_utf8mb4'accepted',_utf8mb4'running',_utf8mb4'unknown')) then 1 else NULL end)) STORED,
   `created_at` bigint NOT NULL,
   `updated_at` bigint NOT NULL,
@@ -2043,9 +2043,9 @@ CREATE TABLE `config_apply_operations` (
   CONSTRAINT `config_apply_operations_config_apply_operations_fai_1d828f15deb0` CHECK (((`failure_code` is null) or ((char_length(`failure_code`) >= 1) and (char_length(`failure_code`) <= 128)))),
   CONSTRAINT `config_apply_operations_config_apply_operations_pre_a038d201542b` CHECK ((length(`previous_hash`) = 32)),
   CONSTRAINT `config_apply_operations_config_apply_operations_state_check` CHECK ((`state` in (_utf8mb4'queued',_utf8mb4'dispatched',_utf8mb4'accepted',_utf8mb4'running',_utf8mb4'succeeded',_utf8mb4'failed',_utf8mb4'rolled_back',_utf8mb4'failed_critical',_utf8mb4'unknown',_utf8mb4'expired'))),
-  CONSTRAINT `config_apply_operations_created_at_range` CHECK (((`created_at` is null) or (`created_at` in (-(9223372036854775808),9223372036854775807)) or ((`created_at` >= -(211813488000000000)) and (`created_at` < 9223371331200000000)))),
+  CONSTRAINT `config_apply_operations_created_at_range` CHECK (((`created_at` is null) or (`created_at` in (-(9223372036854775808),9223372036854775807)) or ((`created_at` >= -211813488000000000) and (`created_at` < 9223371331200000000)))),
   CONSTRAINT `config_apply_operations_text_no_nul` CHECK (((locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`failure_code` as char charset binary)) = 0))),
-  CONSTRAINT `config_apply_operations_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
+  CONSTRAINT `config_apply_operations_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -211813488000000000) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 -- ocservia:end-step
 -- ocservia:step=082:table_desired_user_policies

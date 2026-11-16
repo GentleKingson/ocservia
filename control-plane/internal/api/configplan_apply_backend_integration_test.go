@@ -15,7 +15,6 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
@@ -37,12 +36,12 @@ type applyHTTPActor struct {
 }
 
 type applyHTTPFixture struct {
-	t                           *testing.T
-	b, owner                    database.Backend
-	s                           *Server
-	signer                      *commandauth.Signer
-	workspace                   uuid.UUID
-	requester, approver, reader applyHTTPActor
+	t                 *testing.T
+	b, owner          database.Backend
+	s                 *Server
+	signer            *commandauth.Signer
+	workspace         uuid.UUID
+	requester, reader applyHTTPActor
 }
 
 func newApplyHTTPFixture(t *testing.T) applyHTTPFixture {
@@ -67,7 +66,7 @@ func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) app
 	}
 	signer := commandauth.NewSignerFromSeed([32]byte{4})
 	ops := operations.NewBackend(b, 50, signer)
-	s := newTestServer(t, testHTTPConfig(false), b, Modules{ConfigPlans: configplan.NewBackend(b, ops)}, Authorization{Authentication: authn, RBAC: rbac.NewBackend(b), Approvals: approvals.NewBackend(b)})
+	s := newTestServer(t, testHTTPConfig(false), b, Modules{ConfigPlans: configplan.NewBackend(b, ops)}, Authorization{Authentication: authn, RBAC: rbac.NewBackend(b)})
 	s.EnableOperations(ops)
 	f := applyHTTPFixture{t: t, b: b, owner: owner, s: s, signer: signer, workspace: uuid.Must(uuid.NewV7())}
 	stamp, err := value.FromTime(time.Now().UTC())
@@ -92,14 +91,14 @@ func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) app
 		}
 		return applyHTTPActor{cookie: cookie, principal: principal}
 	}
-	f.requester, f.approver, f.reader = login(), login(), login()
+	f.requester, f.reader = login(), login()
 	return f
 }
 
 // Construct another Server over the same persisted fixture and shared services.
 // Each scenario owns new modules, admission counters and hubs.
 func (f applyHTTPFixture) newServer(modules Modules) *Server {
-	s := newTestServer(f.t, testHTTPConfig(false), f.b, modules, Authorization{Authentication: f.s.auth, RBAC: f.s.rbac, Approvals: f.s.approvals, Audit: f.s.audit})
+	s := newTestServer(f.t, testHTTPConfig(false), f.b, modules, Authorization{Authentication: f.s.auth, RBAC: f.s.rbac, Audit: f.s.audit})
 	s.EnableOperations(f.s.operations)
 	return s
 }
@@ -166,9 +165,6 @@ func (f applyHTTPFixture) plan(validated bool) configplan.Plan {
 	}
 	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',3,$4,$5)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,?,'active',3,?,?)`, node, f.workspace, "apply-"+node.String(), at, at)
 	f.bind(f.requester, node, "ConfigManager")
-	// The requester may review approvals, but independence still forbids self-approval.
-	f.bind(f.requester, node, "SecurityAdmin")
-	f.bind(f.approver, node, "SecurityAdmin")
 	f.bind(f.reader, node, "SecurityAdmin")
 	endpoint := sha256.Sum256(node[:])
 	private := ed25519.NewKeyFromSeed(endpoint[:])
@@ -221,24 +217,8 @@ func (f applyHTTPFixture) plan(validated bool) configplan.Plan {
 	return plan
 }
 
-func (f applyHTTPFixture) approval(plan configplan.Plan, approve bool) approvals.Approval {
-	f.t.Helper()
-	w := f.call("POST", "/api/v1/approval-requests", fmt.Sprintf(`{"action":"config.apply","resource_type":"config_plan","resource_id":%q,"reason":"review candidate","ttl_seconds":900}`, plan.ID), "", f.requester.cookie, nil)
-	var approval approvals.Approval
-	if w.Code != 201 || json.Unmarshal(w.Body.Bytes(), &approval) != nil || approval.RequestHash != plan.CandidateHash || approval.ResourceID != plan.ID {
-		f.t.Fatalf("request approval: %d %s", w.Code, w.Body)
-	}
-	if approve {
-		w = f.call("POST", "/api/v1/approval-requests/"+approval.ID.String()+":approve", fmt.Sprintf(`{"reason":"independently reviewed","expected_request_hash":%q}`, approval.RequestHash), "", f.approver.cookie, nil)
-		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &approval) != nil || approval.Status != "approved" || approval.ApproverID == nil || *approval.ApproverID != f.approver.principal.IdentityID {
-			f.t.Fatalf("approve: %d %s", w.Code, w.Body)
-		}
-	}
-	return approval
-}
-
-func applyHTTPBody(approval uuid.UUID) string {
-	return fmt.Sprintf(`{"approval_id":%q,"reason":"apply reviewed configuration"}`, approval)
+func applyHTTPBody() string {
+	return `{"reason":"apply reviewed configuration"}`
 }
 
 func (f applyHTTPFixture) counts(node uuid.UUID) [5]int {
@@ -259,17 +239,12 @@ func (f applyHTTPFixture) counts(node uuid.UUID) [5]int {
 	return counts
 }
 
-func (f applyHTTPFixture) unchanged(plan configplan.Plan, before [5]int, approval approvals.Approval) {
+func (f applyHTTPFixture) unchanged(plan configplan.Plan, before [5]int) {
 	f.t.Helper()
 	if got := f.counts(plan.NodeID); got != before {
 		f.t.Fatalf("business intent changed: %v -> %v", before, got)
 	}
-	if approval.ID != uuid.Nil {
-		var status string
-		if err := f.row(`SELECT status FROM approval_requests WHERE id=$1`, `SELECT status FROM approval_requests WHERE id=?`, approval.ID).Scan(&status); err != nil || status != approval.Status {
-			f.t.Fatalf("approval changed: %s -> %s: %v", approval.Status, status, err)
-		}
-	}
+
 }
 
 func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
@@ -278,14 +253,14 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 		f := root
 		f.t = t
 		plan := f.plan(true)
-		approval := f.approval(plan, true)
+
 		before := f.counts(plan.NodeID)
 		server := httptest.NewServer(f.s.http.Handler)
 		defer server.Close()
 		client := server.Client()
 		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		for _, tc := range applyHTTPPathBoundaries(plan.ID.String()) {
-			r, err := http.NewRequest("POST", server.URL+tc.path, strings.NewReader(applyHTTPBody(approval.ID)))
+			r, err := http.NewRequest("POST", server.URL+tc.path, strings.NewReader(applyHTTPBody()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -302,18 +277,18 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			if err != nil || response.StatusCode != tc.status || response.Header.Get("Location") != tc.location {
 				t.Fatalf("path %s: %d %v %s %v", tc.path, response.StatusCode, response.Header, body, err)
 			}
-			f.unchanged(plan, before, approval)
+			f.unchanged(plan, before)
 		}
 		encoded := "/api/v1/config-plans/%30" + plan.ID.String()[1:] + "/apply"
-		assertApplyHTTPProblem(t, f.call("POST", encoded, applyHTTPBody(approval.ID), "", f.requester.cookie, nil), 400, "idempotency-key-required")
-		f.unchanged(plan, before, approval)
+		assertApplyHTTPProblem(t, f.call("POST", encoded, applyHTTPBody(), "", f.requester.cookie, nil), 400, "idempotency-key-required")
+		f.unchanged(plan, before)
 	})
 	t.Run("authorization-and-input", func(t *testing.T) {
 		f := root
 		f.t = t
 		plan := f.plan(true)
-		approval := f.approval(plan, true)
-		path, body := "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(approval.ID)
+
+		path, body := "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody()
 		before := f.counts(plan.NodeID)
 		for _, tc := range []struct {
 			name, body, key, kind string
@@ -329,7 +304,6 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			{name: "missing-key", body: body, kind: "idempotency-key-required", status: 400, cookie: f.requester.cookie},
 			{name: "invalid-json", body: `{`, key: "denied", kind: "invalid-request", status: 400, cookie: f.requester.cookie},
 			{name: "unknown-field", body: strings.TrimSuffix(body, "}") + `,"candidate":"replacement"}`, key: "denied", kind: "invalid-request", status: 400, cookie: f.requester.cookie},
-			{name: "invalid-approval", body: `{"approval_id":"invalid","reason":"reviewed"}`, key: "denied", kind: "invalid-id", status: 400, cookie: f.requester.cookie},
 			{name: "wrong-content-type", body: body, key: "denied", kind: "unsupported-media-type", status: 415, cookie: f.requester.cookie, mutate: func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -340,7 +314,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 				if tc.status == 401 && w.Header().Get("WWW-Authenticate") != "OIDC" {
 					t.Fatal("missing challenge")
 				}
-				g.unchanged(plan, before, approval)
+				g.unchanged(plan, before)
 			})
 		}
 		read := f.call("GET", "/api/v1/config-plans/"+plan.ID.String(), "", "", f.reader.cookie, nil)
@@ -359,77 +333,55 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			if w.Header().Get("WWW-Authenticate") != "OIDC" {
 				t.Fatal("missing challenge")
 			}
-			g.unchanged(plan, before, approval)
+			g.unchanged(plan, before)
 		})
 		for _, id := range []string{"invalid", uuid.NewString(), uuid.Must(uuid.NewV7()).String()} {
 			badPath := "/api/v1/config-plans/" + id + "/apply"
 			assertApplyHTTPProblem(t, f.call("POST", badPath, body, "denied", nil, nil), 401, "unauthenticated")
 			assertApplyHTTPProblem(t, f.call("POST", badPath, body, "denied", f.requester.cookie, nil), 404, "not-found")
 		}
-		f.unchanged(plan, before, approval)
+		f.unchanged(plan, before)
 	})
 	t.Run("resource-boundaries", func(t *testing.T) {
 		f := root
 		f.t = t
 		plan := f.plan(true)
-		approval := f.approval(plan, true)
+
 		before := f.counts(plan.NodeID)
 		f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND resource_id=$2`, `DELETE FROM role_bindings WHERE identity_id=? AND resource_id=?`, f.requester.principal.IdentityID, plan.NodeID)
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(approval.ID), "denied", f.requester.cookie, nil), 403, "forbidden")
-		f.unchanged(plan, before, approval)
+		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(), "denied", f.requester.cookie, nil), 403, "forbidden")
+		f.unchanged(plan, before)
 		f.bind(f.requester, plan.NodeID, "ConfigManager")
 		foreign := uuid.Must(uuid.NewV7())
 		f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'foreign',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'foreign',?,?,?)`, foreign, foreign.String(), value.Timestamp{Valid: true}, value.Timestamp{Valid: true})
 		g := f
 		g.workspace = foreign
 		foreignPlan := g.plan(true)
-		foreignApproval := g.approval(foreignPlan, true)
+
 		foreignBefore := g.counts(foreignPlan.NodeID)
 		g.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, `DELETE FROM role_bindings WHERE identity_id=? AND workspace_id=?`, f.requester.principal.IdentityID, foreign)
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/config-plans/"+foreignPlan.ID.String()+"/apply", applyHTTPBody(foreignApproval.ID), "denied", f.requester.cookie, nil), 404, "not-found")
-		g.unchanged(foreignPlan, foreignBefore, foreignApproval)
+		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/config-plans/"+foreignPlan.ID.String()+"/apply", applyHTTPBody(), "denied", f.requester.cookie, nil), 404, "not-found")
+		g.unchanged(foreignPlan, foreignBefore)
 		// A misleading header cannot move the authorized Plan to another workspace.
 		key := uuid.NewString()
-		w := f.call("POST", "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(approval.ID), key, f.requester.cookie, func(r *http.Request) { r.Header.Set("X-Workspace-ID", foreign.String()) })
-		f.submitted(w, plan, approval, key)
+		w := f.call("POST", "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(), key, f.requester.cookie, func(r *http.Request) { r.Header.Set("X-Workspace-ID", foreign.String()) })
+		f.submitted(w, plan, key)
 	})
-	t.Run("plan-and-approval-rejections", func(t *testing.T) {
-		for _, name := range []string{"unvalidated", "expired-plan", "stale-revision", "pending-approval", "expired-approval", "self-approval", "other-plan", "other-content"} {
+	t.Run("plan-rejections", func(t *testing.T) {
+		for _, name := range []string{"unvalidated", "expired-plan", "stale-revision"} {
 			t.Run(name, func(t *testing.T) {
 				f := root
 				f.t = t
 				plan := f.plan(name != "unvalidated")
-				approval := approvals.Approval{ID: uuid.Must(uuid.NewV7())}
-				if name != "unvalidated" {
-					approval = f.approval(plan, name != "pending-approval" && name != "self-approval")
-				}
-				kind := "approval-not-ready"
 				switch name {
-				case "unvalidated":
-					kind = "stale-revision"
 				case "expired-plan":
-					kind = "stale-revision"
 					f.exec(`UPDATE config_plans SET expires_at=$1 WHERE id=$2`, `UPDATE config_plans SET expires_at=? WHERE id=?`, value.Timestamp{Valid: true}, plan.ID)
 				case "stale-revision":
-					kind = "stale-revision"
 					f.exec(`INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES($1,1,1,'',$2)`, `INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES(?,1,1,'',?)`, plan.NodeID, value.Timestamp{Valid: true})
-				case "expired-approval":
-					f.exec(`UPDATE approval_requests SET created_at=$1,expires_at=$2 WHERE id=$3`, `UPDATE approval_requests SET created_at=?,expires_at=? WHERE id=?`, value.Timestamp{Valid: true}, value.Timestamp{Valid: true, Micros: 1}, approval.ID)
-				case "self-approval":
-					w := f.call("POST", "/api/v1/approval-requests/"+approval.ID.String()+":approve", fmt.Sprintf(`{"reason":"self","expected_request_hash":%q}`, approval.RequestHash), "", f.requester.cookie, nil)
-					assertApplyHTTPProblem(t, w, 403, "self-approval-forbidden")
-				case "other-plan":
-					approval = f.approval(f.plan(true), true)
-				case "other-content":
-					f.exec(`UPDATE approval_requests SET request_hash=$1 WHERE id=$2`, `UPDATE approval_requests SET request_hash=? WHERE id=?`, bytes.Repeat([]byte{0x55}, 32), approval.ID)
 				}
 				before := f.counts(plan.NodeID)
-				w := f.call("POST", "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(approval.ID), uuid.NewString(), f.requester.cookie, nil)
-				assertApplyHTTPProblem(t, w, 409, kind)
-				if name == "unvalidated" {
-					approval.ID = uuid.Nil
-				}
-				f.unchanged(plan, before, approval)
+				assertApplyHTTPProblem(t, f.call("POST", "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(), uuid.NewString(), f.requester.cookie, nil), 409, "stale-revision")
+				f.unchanged(plan, before)
 			})
 		}
 	})
@@ -440,8 +392,8 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 		f.workspace = uuid.Must(uuid.NewV7())
 		f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Apply rollback',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Apply rollback',?,?,?)`, f.workspace, f.workspace.String(), value.Timestamp{Valid: true}, value.Timestamp{Valid: true})
 		plan := f.plan(true)
-		approval := f.approval(plan, true)
-		path, body, key := "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(approval.ID), uuid.NewString()
+
+		path, body, key := "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(), uuid.NewString()
 		before := f.counts(plan.NodeID)
 		t.Run("atomic-rollback", func(t *testing.T) {
 			g := f
@@ -449,7 +401,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			restore := authSafetyAuditFailure(t, g.owner, g.workspace, "config.apply")
 			w := g.call("POST", path, body, key, g.requester.cookie, nil)
 			assertApplyHTTPProblem(t, w, 503, "config-plan-unavailable")
-			g.unchanged(plan, before, approval)
+			g.unchanged(plan, before)
 			var desired int64
 			if err := g.row(`SELECT COALESCE((SELECT desired_revision FROM node_config_state WHERE node_id=$1),0)`, `SELECT COALESCE((SELECT desired_revision FROM node_config_state WHERE node_id=?),0)`, plan.NodeID).Scan(&desired); err != nil || desired != 0 {
 				t.Fatalf("revision rollback: %d %v", desired, err)
@@ -457,14 +409,13 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			restore()
 		})
 		w := f.call("POST", path, body, key, f.requester.cookie, nil)
-		op := f.submitted(w, plan, approval, key)
+		op := f.submitted(w, plan, key)
 		after := f.counts(plan.NodeID)
 		for i, delta := range [5]int{1, 1, 1, 1, 1} {
 			if after[i] != before[i]+delta {
 				t.Fatalf("commit counts: %v -> %v", before, after)
 			}
 		}
-		approval.Status = "consumed"
 		t.Run("immediate-replay", func(t *testing.T) {
 			g := f
 			g.t = t
@@ -473,7 +424,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			if w.Code != 202 || w.Header().Get("Idempotency-Replayed") != "true" || w.Header().Get("Location") != "/api/v1/operations/"+op.ID || json.Unmarshal(w.Body.Bytes(), &replay) != nil || replay.ID != op.ID {
 				t.Fatalf("immediate replay: %d %v %s", w.Code, w.Header(), w.Body)
 			}
-			g.unchanged(plan, after, approval)
+			g.unchanged(plan, after)
 		})
 		t.Run("node-version-drift-replay", func(t *testing.T) {
 			g := f
@@ -502,29 +453,25 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			if w.Code != 202 || w.Header().Get("Idempotency-Replayed") != "true" || w.Header().Get("Location") != "/api/v1/operations/"+op.ID || json.Unmarshal(w.Body.Bytes(), &replay) != nil || replay.ID != op.ID {
 				t.Fatalf("node version drift replay: %d %v %s", w.Code, w.Header(), w.Body)
 			}
-			g.unchanged(plan, after, approval)
+			g.unchanged(plan, after)
 		})
 		assertApplyHTTPProblem(t, f.call("POST", path, strings.Replace(body, "apply reviewed configuration", "different intent", 1), key, f.requester.cookie, nil), 409, "idempotency-conflict")
 		f.bind(f.reader, plan.NodeID, "ConfigManager")
 		assertApplyHTTPProblem(t, f.call("POST", path, body, key, f.reader.cookie, nil), 409, "idempotency-conflict")
-		freshApproval := f.approval(plan, true)
-		assertApplyHTTPProblem(t, f.call("POST", path, applyHTTPBody(freshApproval.ID), key, f.requester.cookie, nil), 409, "idempotency-conflict")
-		assertApplyHTTPProblem(t, f.call("POST", path, applyHTTPBody(freshApproval.ID), uuid.NewString(), f.requester.cookie, nil), 409, "config-apply-active")
-		f.unchanged(plan, after, freshApproval)
+
+		assertApplyHTTPProblem(t, f.call("POST", path, applyHTTPBody(), uuid.NewString(), f.requester.cookie, nil), 409, "config-apply-active")
+		f.unchanged(plan, after)
 		otherPlan := f.plan(true)
-		otherApproval := f.approval(otherPlan, true)
+
 		otherBefore := f.counts(otherPlan.NodeID)
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/config-plans/"+otherPlan.ID.String()+"/apply", applyHTTPBody(otherApproval.ID), key, f.requester.cookie, nil), 409, "idempotency-conflict")
-		f.unchanged(otherPlan, otherBefore, otherApproval)
-		f.unchanged(plan, after, approval)
-		// Isolate approval reuse from the active-Apply guard, without unconsuming it.
-		f.exec(`UPDATE config_apply_operations SET state='failed' WHERE operation_id=$1`, `UPDATE config_apply_operations SET state='failed' WHERE operation_id=?`, uuid.MustParse(op.ID))
-		assertApplyHTTPProblem(t, f.call("POST", path, body, uuid.NewString(), f.requester.cookie, nil), 409, "approval-not-ready")
-		f.unchanged(plan, after, approval)
+		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/config-plans/"+otherPlan.ID.String()+"/apply", applyHTTPBody(), key, f.requester.cookie, nil), 409, "idempotency-conflict")
+		f.unchanged(otherPlan, otherBefore)
+		f.unchanged(plan, after)
+
 	})
 }
 
-func (f applyHTTPFixture) submitted(w *httptest.ResponseRecorder, plan configplan.Plan, approval approvals.Approval, key string) operations.Operation {
+func (f applyHTTPFixture) submitted(w *httptest.ResponseRecorder, plan configplan.Plan, key string) operations.Operation {
 	f.t.Helper()
 	var op operations.Operation
 	if w.Code != 202 || w.Header().Get("Content-Type") != "application/json" || w.Header().Get("Idempotency-Replayed") != "" || json.Unmarshal(w.Body.Bytes(), &op) != nil || op.State != "queued" || op.ConfigApplyState != "queued" || op.NodeID == nil || *op.NodeID != plan.NodeID.String() {
@@ -539,13 +486,14 @@ func (f applyHTTPFixture) submitted(w *httptest.ResponseRecorder, plan configpla
 	if read.Code != 200 || json.Unmarshal(read.Body.Bytes(), &got) != nil || got.ID != op.ID || got.NodeID == nil || *got.NodeID != plan.NodeID.String() {
 		f.t.Fatalf("Operation read: %d %s", read.Code, read.Body)
 	}
-	var planID, approvalID, node, workspace, session, command uuid.UUID
+	var planID, node, workspace, session, command uuid.UUID
+	var approvalID any
 	var expected, desired int64
 	var candidateHash, previousHash, envelopeBytes []byte
-	var status, actor, reason, request, trace, idempotency string
-	pg := `SELECT x.plan_id,x.approval_id,x.node_id,x.workspace_id,x.expected_revision,x.desired_revision,x.candidate_hash,x.previous_hash,c.envelope,a.status,e.actor_id,e.source_session_id,e.command_id,e.reason,e.request_id,e.trace_id,o.idempotency_key FROM config_apply_operations x JOIN operations o ON o.id=x.operation_id JOIN commands c ON c.operation_id=o.id JOIN approval_requests a ON a.id=x.approval_id JOIN audit_events e ON e.resource_id=o.id AND e.action='config.apply' WHERE o.id=$1`
+	var actor, reason, request, trace, idempotency string
+	pg := `SELECT x.plan_id,x.approval_id,x.node_id,x.workspace_id,x.expected_revision,x.desired_revision,x.candidate_hash,x.previous_hash,c.envelope,e.actor_id,e.source_session_id,e.command_id,e.reason,e.request_id,e.trace_id,o.idempotency_key FROM config_apply_operations x JOIN operations o ON o.id=x.operation_id JOIN commands c ON c.operation_id=o.id JOIN audit_events e ON e.resource_id=o.id AND e.action='config.apply' WHERE o.id=$1`
 	my := strings.ReplaceAll(pg, "$1", "?")
-	if err := f.row(pg, my, uuid.MustParse(op.ID)).Scan(&planID, &approvalID, &node, &workspace, &expected, &desired, &candidateHash, &previousHash, &envelopeBytes, &status, &actor, &session, &command, &reason, &request, &trace, &idempotency); err != nil {
+	if err := f.row(pg, my, uuid.MustParse(op.ID)).Scan(&planID, &approvalID, &node, &workspace, &expected, &desired, &candidateHash, &previousHash, &envelopeBytes, &actor, &session, &command, &reason, &request, &trace, &idempotency); err != nil {
 		f.t.Fatal(err)
 	}
 	var envelope agentv1.CommandEnvelope
@@ -557,12 +505,12 @@ func (f applyHTTPFixture) submitted(w *httptest.ResponseRecorder, plan configpla
 		f.t.Fatal(err)
 	}
 	canonical, err := commandauth.CanonicalV1(claims)
-	if err != nil || !ed25519.Verify(f.signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) || claims.ApprovalID == nil || *claims.ApprovalID != [16]byte(approval.ID) || claims.ApprovalRequestSHA256 == nil || fmt.Sprintf("%x", *claims.ApprovalRequestSHA256) != plan.CandidateHash {
-		f.t.Fatalf("command authorization/approval proof: %+v %v", claims, err)
+	if err != nil || !ed25519.Verify(f.signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) || claims.ApprovalID != nil || claims.ApprovalRequestSHA256 != nil {
+		f.t.Fatalf("single-admin command authorization: %+v %v", claims, err)
 	}
 	apply := envelope.GetConfigApply()
 	wantCandidate := []byte("# generated by ocservia config-plan/v1\ntcp-port = 443\n")
-	if planID != plan.ID || approvalID != approval.ID || node != plan.NodeID || workspace != plan.WorkspaceID || expected != plan.ExpectedRevision || desired != 1 || fmt.Sprintf("%x", candidateHash) != plan.CandidateHash || fmt.Sprintf("%x", previousHash) != plan.CurrentHash || status != "consumed" || actor != f.requester.principal.IdentityID.String() || session != f.requester.principal.SessionID || reason != "apply reviewed configuration" || request != "baseline-request" || trace != "0123456789abcdef0123456789abcdef" || idempotency != key || apply == nil || !bytes.Equal(apply.GetCandidate(), wantCandidate) || !bytes.Equal(apply.GetCandidateHash(), candidateHash) || !bytes.Equal(apply.GetExpectedCurrentHash(), previousHash) || apply.GetDesiredRevision() != uint64(desired) || !bytes.Equal(envelope.GetNodeId(), node[:]) || !bytes.Equal(envelope.GetCommandId(), command[:]) || envelope.GetActorId() != actor || envelope.GetReason() != reason || !strings.Contains(envelope.GetTraceparent(), trace) {
+	if planID != plan.ID || approvalID != nil || node != plan.NodeID || workspace != plan.WorkspaceID || expected != plan.ExpectedRevision || desired != 1 || fmt.Sprintf("%x", candidateHash) != plan.CandidateHash || fmt.Sprintf("%x", previousHash) != plan.CurrentHash || actor != f.requester.principal.IdentityID.String() || session != f.requester.principal.SessionID || reason != "apply reviewed configuration" || request != "baseline-request" || trace != "0123456789abcdef0123456789abcdef" || idempotency != key || apply == nil || !bytes.Equal(apply.GetCandidate(), wantCandidate) || !bytes.Equal(apply.GetCandidateHash(), candidateHash) || !bytes.Equal(apply.GetExpectedCurrentHash(), previousHash) || apply.GetDesiredRevision() != uint64(desired) || !bytes.Equal(envelope.GetNodeId(), node[:]) || !bytes.Equal(envelope.GetCommandId(), command[:]) || envelope.GetActorId() != actor || envelope.GetReason() != reason || !strings.Contains(envelope.GetTraceparent(), trace) {
 		f.t.Fatalf("Apply associations or signed command differ: op=%+v envelope=%v actor=%s session=%s", op, &envelope, actor, session)
 	}
 	return op

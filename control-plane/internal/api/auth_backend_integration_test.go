@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
@@ -169,7 +168,7 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if _, err = service.CreateLocalCredential(ctx, name, password); !errors.Is(err, database.ErrUnique) {
 		t.Fatalf("duplicate credential: %v", err)
 	}
-	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(backend), Approvals: approvals.NewBackend(backend)})
+	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(backend)})
 	login := func(password string) *httptest.ResponseRecorder {
 		return authHTTPRequest(server, "POST", "login", `{"username":"`+name+`","password":"`+password+`"}`, authTestOrigin)
 	}
@@ -278,16 +277,12 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 			t.Fatalf("missing node authorization: %d %s", w.Code, w.Body)
 		}
 	}
-	approvalHeader := ""
 	call := func(path, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("POST", path, strings.NewReader(body))
 		r.Header.Set("Origin", authTestOrigin)
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("X-Request-ID", uuid.NewString())
 		r.Header.Set("X-Workspace-ID", workspace.String())
-		if approvalHeader != "" {
-			r.Header.Set("X-Approval-ID", approvalHeader)
-		}
 		r.AddCookie(cookie)
 		w := httptest.NewRecorder()
 		server.http.Handler.ServeHTTP(w, r)
@@ -323,39 +318,17 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requested := call("/api/v1/approval-requests", `{"action":"local_user.reset-password","resource_type":"local_user","resource_id":"`+member.IdentityID.String()+`","reason":"restore local access","ttl_seconds":300}`, adminCookie)
-	if requested.Code != http.StatusCreated {
-		t.Fatalf("HTTP approval request: %d %s", requested.Code, requested.Body)
+	if retired := call("/api/v1/approval-requests", `{}`, adminCookie); retired.Code != http.StatusNotFound {
+		t.Fatalf("retired approval API remained reachable: %d", retired.Code)
 	}
-	var approval approvals.Approval
-	if err = json.Unmarshal(requested.Body.Bytes(), &approval); err != nil {
-		t.Fatal(err)
-	}
-	decision := `{"reason":"independent review","expected_request_hash":"` + approval.RequestHash + `"}`
-	path := "/api/v1/approval-requests/" + approval.ID.String() + ":approve"
-	if self := call(path, decision, adminCookie); self.Code != http.StatusForbidden {
-		t.Fatalf("HTTP self approval: %d %s", self.Code, self.Body)
-	}
-	approverCookie, _, err := service.AuthenticateLocal(ctx, "approver-"+name, "a separate independent approver password")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if approved := call(path, decision, approverCookie); approved.Code != http.StatusOK {
-		t.Fatalf("HTTP approval: %d %s", approved.Code, approved.Body)
-	}
-	approvalHeader = approval.ID.String()
-	resetPassword := "an independently approved replacement password"
+	resetPassword := "a single administrator replacement password"
 	reset := call("/api/v1/local-users/"+member.IdentityID.String()+":reset-password", `{"password":"`+resetPassword+`"}`, adminCookie)
 	if reset.Code != http.StatusNoContent {
-		t.Fatalf("HTTP approved reset: %d %s", reset.Code, reset.Body)
+		t.Fatalf("HTTP administrator reset: %d %s", reset.Code, reset.Body)
 	}
 	if _, err = service.Authenticate(ctx, memberCookie); !errors.Is(err, auth.ErrUnauthenticated) {
 		t.Fatalf("reset left session active: %v", err)
 	}
-	if replay := call("/api/v1/local-users/"+member.IdentityID.String()+":reset-password", `{"password":"`+newPassword+`"}`, adminCookie); replay.Code != http.StatusConflict {
-		t.Fatalf("HTTP approval replay: %d %s", replay.Code, replay.Body)
-	}
-	approvalHeader = ""
 	memberCookie, _, err = service.AuthenticateLocal(ctx, memberName, resetPassword)
 	if err != nil {
 		t.Fatal(err)

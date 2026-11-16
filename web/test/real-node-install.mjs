@@ -31,24 +31,10 @@ async function main() {
       },
     );
   }
-  const agent = path.join(
-    process.env.RUNNER_TEMP,
-    `ocservia-real-e2e-node-${process.env.RUN_ID}`,
-  );
   const fields = {
     name: "github-hosted-node",
     environment: "development",
     release: "v0.0.0",
-    controllerEndpointId: await read(
-      path.join(state, "controller-endpoint-id"),
-    ),
-    relayUrl: await read(path.join(work, "relay/url")),
-    bootstrapTokenFile: path.join(agent, "secrets/bootstrap-token"),
-    relayAccessTokenFile: path.join(agent, "relay/token"),
-    controllerCommandVerificationKeyFile: path.join(
-      agent,
-      "controller-ready/command.pub.pem",
-    ),
   };
   process.env.TMPDIR = path.join(work, "private/browser");
   await mkdir(process.env.TMPDIR, { recursive: true, mode: 0o700 });
@@ -56,7 +42,7 @@ async function main() {
   try {
     // Disposable local test CA; HTTPS and the real secure cookie remain in use.
     const context = await browser.newContext({
-      baseURL: "https://localhost:8443",
+      baseURL: process.env.OCSERV_CONTROLLER_PUBLIC_URL,
       ignoreHTTPSErrors: true,
       serviceWorkers: "block",
     });
@@ -97,21 +83,22 @@ async function main() {
     for (const [key, value] of Object.entries(fields)) {
       await page.locator(`#install-${key}`).fill(value);
     }
-    await page
-      .getByRole("button", { name: "Prepare install.env", exact: true })
-      .click();
-    const config = await page
-      .getByLabel("install.env (no secrets)", { exact: true })
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    const command = await page
+      .getByLabel("Run on the Agent host", { exact: true })
       .inputValue();
-    // An exact literal allowlist also excludes injected keys, expansions and secrets.
-    const expected = `# Node: ${fields.name}\n# Workspace: ${workspace}\n# Release: ${fields.release}\nCONTROLLER_ENDPOINT_ID=${fields.controllerEndpointId}\nENROLLMENT_ENVIRONMENT=development\nRELAY_URL_A=${fields.relayUrl}\nRELAY_URL_B=\nBOOTSTRAP_TOKEN_SOURCE=${fields.bootstrapTokenFile}\nRELAY_ACCESS_TOKEN_SOURCE=${fields.relayAccessTokenFile}\nCONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fields.controllerCommandVerificationKeyFile}\n`;
-    check(config === expected && posts.length === 0);
-    const configPath = path.join(work, "outbox/controller-ready/install.env");
+    check(
+      command.includes("--join-token --version v0.0.0") && posts.length === 0,
+    );
+    const commandPath = path.join(
+      work,
+      "outbox/controller-ready/install-command",
+    );
     if (phase === "prepare") {
-      await writeFile(configPath, config, { flag: "wx", mode: 0o600 });
+      await writeFile(commandPath, command, { flag: "wx", mode: 0o600 });
       return;
     }
-    check(config === (await readFile(configPath, "utf8")));
+    check(command === (await readFile(commandPath, "utf8")));
     const responsePromise = page.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === "/api/v1/node-bootstrap-tokens" &&
@@ -133,6 +120,7 @@ async function main() {
         JSON.stringify([
           "environment",
           "expected_node_name",
+          "installation",
           "reason",
           "ttl_seconds",
           "workspace_id",
@@ -140,12 +128,13 @@ async function main() {
     );
     check(
       body.workspace_id === workspace &&
+        body.installation === true &&
         body.ttl_seconds === 900 &&
         body.environment === fields.environment &&
         body.expected_node_name === fields.name,
     );
     const result = await response.json();
-    check(/^obt1_[A-Za-z0-9_-]{43}$/.test(result.token));
+    check(/^oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(result.token));
     check(
       /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
         result.id,
@@ -162,7 +151,7 @@ async function main() {
         .isDisabled(),
     );
     check(
-      !config.includes(result.token) &&
+      !command.includes(result.token) &&
         !logs.includes(result.token) &&
         !page.url().includes(result.token),
     );
@@ -185,14 +174,18 @@ async function main() {
     });
     await writeFile(
       path.join(state, "bootstrap-token-sha256"),
-      createHash("sha256").update(result.token).digest("hex") + "\n",
+      createHash("sha256")
+        .update(
+          "obt2_" +
+            createHash("sha256")
+              .update("ocservia/install-enrollment/v1\0" + result.token)
+              .digest("base64url"),
+        )
+        .digest("hex") + "\n",
       { mode: 0o600 },
     );
     await page
-      .getByRole("button", {
-        name: "Token saved — installation instructions",
-        exact: true,
-      })
+      .getByRole("button", { name: "Close dialog", exact: true })
       .click();
     check((await tokenField.count()) === 0 && posts.length === 1);
     const evidence = path.join(
@@ -203,7 +196,7 @@ async function main() {
       evidence,
       JSON.stringify({
         login: true,
-        config: true,
+        automatic_configuration: true,
         bootstrap_posts: posts.length,
         workspace_match: true,
         ttl_seconds: 900,

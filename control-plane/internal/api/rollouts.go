@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
@@ -44,11 +43,7 @@ func (s *Server) createAgentRollout(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the agent rollout request must be a JSON object")
 		return
 	}
-	approval, approvalErr := uuid.Parse(strings.TrimSpace(body.ApprovalID))
-	if approvalErr != nil || approval.Version() != 7 {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "approval_id must be a UUIDv7")
-		return
-	}
+	approval := uuid.Nil
 	nodeIDs := make([]uuid.UUID, 0, len(body.NodeIDs))
 	for _, raw := range body.NodeIDs {
 		nodeID, err := uuid.Parse(strings.TrimSpace(raw))
@@ -193,6 +188,8 @@ func (s *Server) resumeAgentRollout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeRolloutError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, rbac.ErrForbidden):
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, operations.ErrRolloutInvalid):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the agent rollout request is invalid")
 	case errors.Is(err, operations.ErrIdempotencyConflict):
@@ -203,8 +200,6 @@ func (s *Server) writeRolloutError(w http.ResponseWriter, r *http.Request, err e
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/rollout-state", "Rollout state is invalid", "only a paused rollout can be resumed")
 	case errors.Is(err, operations.ErrRolloutUnavailable):
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "rollout orchestration is unavailable")
-	case errors.Is(err, approvals.ErrNotReady):
-		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "the approval is expired, consumed, or does not match the rollout request")
 	case errors.Is(err, database.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested rollout does not exist")
 	default:

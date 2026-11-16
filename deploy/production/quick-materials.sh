@@ -179,7 +179,7 @@ done
 printf 'postgres:5432:*:ocservia_backup:%s\n' "$(tr -d '\n' <"${secret_dir}/postgres-backup-password")" |
   put "${secret_dir}/postgres.pgpass" 0:0 0444
 random_hex | put "${secret_dir}/audit-event-key" 65534:65532 0400
-random_hex | put "${secret_dir}/relay-access-token" 65532:65532 0400
+random_hex | put "${secret_dir}/relay-access-token" 65532:65532 0440
 if [[ ! -e "${secret_dir}/controller-command-signing-key.pem" ]]; then
   openssl genpkey -algorithm ED25519 -out "${work}/command.pem" 2>/dev/null
   place "${work}/command.pem" "${secret_dir}/controller-command-signing-key.pem" 65534:65532 0400

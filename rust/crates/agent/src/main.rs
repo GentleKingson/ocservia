@@ -2788,7 +2788,12 @@ fn read_enrollment_token(path: &Path) -> Result<String, io::Error> {
     let token = std::str::from_utf8(&raw)
         .map_err(|_| invalid("enrollment token must be UTF-8"))?
         .trim_end_matches(['\n', '\r']);
-    let encoded = token.strip_prefix("obt1_").unwrap_or(token);
+    // The root installation token is never accepted by the Agent. Only its
+    // one-way derived obt2_ child may cross this boundary.
+    let encoded = token
+        .strip_prefix("obt1_")
+        .or_else(|| token.strip_prefix("obt2_"))
+        .unwrap_or(token);
     if encoded.len() != 43
         || !encoded
             .bytes()
@@ -5161,7 +5166,11 @@ mod tests {
             valid_token
         );
 
-        for value in [format!("obt1_{valid_token}"), valid_token.clone()] {
+        for value in [
+            format!("obt1_{valid_token}"),
+            format!("obt2_{valid_token}"),
+            valid_token.clone(),
+        ] {
             std::fs::write(&token, format!("{value}\r\n")).expect("write supported token");
             assert_eq!(
                 read_enrollment_token(&token).expect("supported token"),
@@ -5169,7 +5178,8 @@ mod tests {
             );
         }
         for value in [
-            format!("obt2_{valid_token}"),
+            format!("oit1_{valid_token}"),
+            format!("obt3_{valid_token}"),
             format!("obt1_{valid_token}extra"),
             "obt1_short".to_owned(),
         ] {

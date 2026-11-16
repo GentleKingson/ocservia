@@ -78,7 +78,7 @@ conflate:
 2. Package installation versus active online management: installing the node
    package and leaving its services stopped does not put a host under fleet
    management. A node is actively managed only after completing enrollment,
-   receiving Controller approval, starting the matched `Agent` and `privd`
+   receiving Controller activation, starting the matched `Agent` and `privd`
    daemons, and establishing an authorized transport session (see
    [Enroll the node](agent-lifecycle.md#enroll-the-node) and
    [Agent lifecycle](agent-lifecycle.md)).
@@ -120,7 +120,7 @@ that settle in an `Unknown` state must be handled through
 Removing software-version admission does not relax runtime security or state
 invariants. Command signatures, trusted keys, Controller-authorized upgrade
 digests and target architectures, negotiated command capabilities, RBAC and
-independent two-principal approvals, idempotency, replay protection, owner
+authenticated Admin authorization, idempotency, replay protection, owner
 fences, Signer identity and monotonic revisions, and atomic database
 transactions all remain mandatory. Removing legacy deployment auto-conversion
 likewise means removing the automatic network, configuration, and data
@@ -302,7 +302,7 @@ interchangeable.
 | Configuration | You write `./install.env` | Ignores `./install.env`; writes `/etc/ocservia/install.env` |
 | Secrets and keys | You provision every protected file | Generated, including Signer material |
 | Choices | Any supported combination above | Integrated, bundled PostgreSQL, ACME, Local authentication |
-| First administrators | One-shot Local bootstrap, or OIDC | `initial-admin` and `initial-approver` |
+| First administrators | One-shot Local bootstrap, or OIDC | `initial-admin` |
 
 ## Prepare the configuration
 
@@ -379,6 +379,13 @@ variable list. At a minimum, configure:
 | Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, and optional Controller state root |
 | Database | Bundled or external PostgreSQL 18.x, or external MySQL 8.4 LTS |
 
+Token-only node installation also uses the Controller's HTTPS public origin,
+`OCSERV_RELAY_URL_A`, the existing command signing key and the protected file
+selected by `OCSERV_RELAY_ACCESS_TOKEN_FILE`. Production Compose mounts the
+Relay credential read-only into the Controller. Keep it out of plaintext
+environment values. The installer host must trust the Controller certificate;
+automatic enrollment never disables certificate verification.
+
 For an Integrated deployment, set `OCSERV_DEPLOYMENT_MODE=integrated` together
 with the Relay and Signer settings in
 [Integrated configuration](#integrated-configuration). Leave out the external
@@ -435,7 +442,8 @@ before running the installer:
 | `OCSERV_SECRET_DIR` | Launcher | `0700`; private parent prevents host traversal |
 | General secrets, including session, OIDC and enabled OTEL files | Launcher | `0444`; only explicitly mounted services receive them |
 | `controller-command-signing-key.pem`, `audit-event-key` | `65534:65532` | `0400`; audit loader also rejects hard links and unsafe container ancestry |
-| `controller-iroh.key`, `relay-access-token` | `65532:65532` | `0400` |
+| `controller-iroh.key` | `65532:65532` | `0400` |
+| `relay-access-token` (Controller host) | `65532:65532` | `0440`, one-link; Controller and transport receive read-only mounts |
 | `controller-command-verification-key.pem` | `0:65532` | `0440`, one-link regular file |
 | Optional `relay-ca.pem` | `0:0` | `0444`, nonempty one-link regular file |
 | `OCSERV_BACKUP_DIR` | `999:999` | `0700`, no symlinks |
@@ -659,9 +667,8 @@ validates the CA chain during startup.
 
 #### Trusted public-key transfer
 
-After first login, enroll and independently approve the real node, using a
-separate requester and approver principal and never self-approval. Export its
-two distinct public sealing keys locally and the consumed approval binding from
+After first login, install the node with a one-time installation token. Export its
+two distinct public sealing keys locally and its active identity binding from
 the Controller. Private node keys stay on the node. Pause affected node
 mutations before modifying sealing-key mappings. The rules this transfer
 enforces are in
@@ -676,11 +683,10 @@ enforces are in
 2. On the Controller host, run `/usr/local/bin/ocserv-sealing-export` with
    `--database-url-file`, `--backend`, `--database-ca-file` for an external
    database or `--bundled-postgres` for bundled PostgreSQL, and the
-   independently verified `--workspace`, `--node`, `--endpoint`, and
-   `--approval` flags.
+   verified `--workspace`, `--node`, and `--endpoint` flags.
 3. Copy both the Controller export and the node export over an authenticated
    operator channel into owner-only regular files on the Signer host. Never
-   accept an approval JSON file originating from the node itself.
+   accept a Controller identity export originating from the node itself.
 4. Stop Signer and run `import --approved /path/controller.json
    --public /path/node.json --workspace UUID --node UUID --endpoint HEX` with
    the configured CA and state flags, then restart Signer. Verify both the
@@ -689,7 +695,7 @@ enforces are in
    pending work, stop Signer, run `disable --node UUID`, and restart Signer.
 
 Node retirement is a separate procedure that starts with the Controller online:
-reconcile pending operations, request and independently approve retirement
+reconcile pending operations, retire the node as Admin
 through the Controller, then stop affected mutations and Signer before running
 `disable` (the `signer_admin` helper is defined in
 [Back up the ledger](incident-recovery.md#back-up-the-ledger)).
@@ -943,7 +949,7 @@ After the preflight succeeds, the versioned installer invokes the release's
    PostgreSQL, ACME, and Local authentication).
 4. Runs `install.sh --root-lifecycle`.
 5. Provisions the management workspace.
-6. Creates the Local administrators `initial-admin` and `initial-approver`.
+6. Creates the Local administrator `initial-admin`.
 
 The generated passwords are written only to root-owned files under
 `/root/ocservia-initial-credentials`. Distribute the two accounts to different

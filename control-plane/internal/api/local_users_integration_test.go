@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
@@ -75,10 +74,8 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	}()
 	username := "bootstrap-" + uuid.NewString()
 	const password = "local-user-password-log-bait"
-	const approverPassword = "independent-local-user-approver-secret"
-	approverName := "approver-" + username
 	bootstrap := func(name, secret string) (uuid.UUID, error) {
-		return svc.BootstrapLocalAdmin(ctx, name, secret, workspaceID, approverName, approverPassword)
+		return svc.BootstrapLocalAdmin(ctx, name, secret, workspaceID, "", "")
 	}
 	if _, err := bootstrap(username, password); err == nil {
 		t.Fatal("bootstrap with missing workspace succeeded")
@@ -122,7 +119,7 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	var logs bytes.Buffer
 	config := testHTTPConfig(false)
 	config.Address, config.BrowserOrigin = "", "https://console.example"
-	server, err := NewServer(config, postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewJSONHandler(&logs, nil)), Modules{}, Authorization{Authentication: svc, RBAC: rbac.NewBackend(postgres.WrapPool(pool)), Approvals: approvals.NewBackend(postgres.WrapPool(pool))})
+	server, err := NewServer(config, postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewJSONHandler(&logs, nil)), Modules{}, Authorization{Authentication: svc, RBAC: rbac.NewBackend(postgres.WrapPool(pool))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,27 +213,11 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	}
 	expect(call("local-users/"+id.String()+":disable", `{}`, memberCookie, "https://console.example", ""), 403)
 	resetPath := "local-users/" + id.String() + ":reset-password"
-	expect(call(resetPath, `{"password":"local-user-replacement-password"}`, adminCookie, "https://console.example", ""), 409)
-	// The independent approver comes only from the production one-shot path.
-	approverCookie, _, err := svc.AuthenticateLocal(ctx, approverName, approverPassword)
-	if err != nil {
-		t.Fatal(err)
-	}
-	expect(call("local-users", body, approverCookie, "https://console.example", ""), 403)
-	w = call("approval-requests", fmt.Sprintf(`{"action":"local_user.reset-password","resource_type":"local_user","resource_id":%q,"reason":"rotate credential","ttl_seconds":600}`, id), adminCookie, "https://console.example", "")
-	expect(w, 201)
-	var approval approvals.Approval
-	if err := json.Unmarshal(w.Body.Bytes(), &approval); err != nil {
-		t.Fatal(err)
-	}
-	decision := fmt.Sprintf(`{"reason":"verified request","expected_request_hash":%q}`, approval.RequestHash)
-	expect(call("approval-requests/"+approval.ID.String()+":approve", decision, adminCookie, "https://console.example", ""), 403)
-	expect(call("approval-requests/"+approval.ID.String()+":approve", decision, approverCookie, "https://console.example", ""), 200)
 	var before, after string
 	state := func() string {
 		t.Helper()
 		var value string
-		if err := pool.QueryRow(ctx, `SELECT json_build_array((SELECT row_to_json(c) FROM local_credentials c WHERE identity_id=$1),(SELECT json_agg(s ORDER BY id) FROM auth_sessions s WHERE identity_id=$1),(SELECT row_to_json(a) FROM approval_requests a WHERE id=$2),(SELECT count(*) FROM audit_events WHERE workspace_id=$3),(SELECT row_to_json(i) FROM identities i WHERE id=$1),(SELECT count(*) FROM identities),(SELECT count(*) FROM local_credentials),(SELECT count(*) FROM role_bindings),(SELECT count(*) FROM auth_sessions))::text`, id, approval.ID, workspaceID).Scan(&value); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT json_build_array((SELECT row_to_json(c) FROM local_credentials c WHERE identity_id=$1),(SELECT json_agg(s ORDER BY id) FROM auth_sessions s WHERE identity_id=$1),(SELECT count(*) FROM audit_events WHERE workspace_id=$2),(SELECT row_to_json(i) FROM identities i WHERE id=$1),(SELECT count(*) FROM identities),(SELECT count(*) FROM local_credentials),(SELECT count(*) FROM role_bindings),(SELECT count(*) FROM auth_sessions))::text`, id, workspaceID).Scan(&value); err != nil {
 			t.Fatal(err)
 		}
 		return value
@@ -249,7 +230,7 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 			{resetPath, `{"password":"` + invalidPassword + `"}`},
 		} {
 			before = state()
-			response := call(request.path, request.body, adminCookie, "https://console.example", approval.ID.String())
+			response := call(request.path, request.body, adminCookie, "https://console.example", "")
 			expect(response, 400)
 			if strings.Contains(response.Body.String(), "otherwise-valid-password") {
 				t.Fatal("invalid UTF-8 response disclosed password")
@@ -260,7 +241,7 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 		}
 	}
 	before = state()
-	expect(call(resetPath, fmt.Sprintf(`{"password":%q}`, weakPassword), adminCookie, "https://console.example", approval.ID.String()), 400)
+	expect(call(resetPath, fmt.Sprintf(`{"password":%q}`, weakPassword), adminCookie, "https://console.example", ""), 400)
 	after = state()
 	if before != after {
 		t.Fatal("policy rejection changed credential, sessions, approval or audit")
@@ -285,7 +266,7 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 		}
 	}
 	seedAttempt()
-	expect(call(resetPath, `{"password":"local-user-replacement-password"}`, adminCookie, "https://console.example", approval.ID.String()), 500)
+	expect(call(resetPath, `{"password":"local-user-replacement-password"}`, adminCookie, "https://console.example", ""), 500)
 	attemptCount(1)
 	if _, err := svc.Authenticate(ctx, memberCookie); err != nil {
 		t.Fatalf("failed reset revoked session: %v", err)
@@ -293,9 +274,8 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	if _, err := owner.Exec(ctx, `ALTER TABLE audit_events DROP CONSTRAINT test_local_user_reset_audit_failure`); err != nil {
 		t.Fatal(err)
 	}
-	expect(call(resetPath, `{"password":"local-user-replacement-password"}`, adminCookie, "https://console.example", approval.ID.String()), 204)
+	expect(call(resetPath, `{"password":"local-user-replacement-password"}`, adminCookie, "https://console.example", ""), 204)
 	attemptCount(0)
-	expect(call(resetPath, `{"password":"replay-password"}`, adminCookie, "https://console.example", approval.ID.String()), 409)
 	if _, err := svc.Authenticate(ctx, memberCookie); !errors.Is(err, auth.ErrUnauthenticated) {
 		t.Fatalf("reset session not revoked: %v", err)
 	}
@@ -335,11 +315,6 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND resource_id=$2 AND action IN ('local_user.create','local_user.disable','local_user.reset-password') AND actor_id=$3 AND source_session_id IS NOT NULL AND result='succeeded'`, workspaceID, id, adminID.String()).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("mutation audits: %d %v", count, err)
 	}
-	var approverID uuid.UUID
-	if err := pool.QueryRow(ctx, `SELECT approver_identity_id FROM local_auth_bootstrap WHERE singleton`).Scan(&approverID); err != nil {
-		t.Fatal(err)
-	}
-	expect(call("local-users/"+approverID.String()+":disable", `{}`, adminCookie, "https://console.example", ""), 409)
 	var auditJSON string
 	if err := pool.QueryRow(ctx, `SELECT json_agg(a)::text FROM audit_events a WHERE workspace_id=$1`, workspaceID).Scan(&auditJSON); err != nil {
 		t.Fatal(err)

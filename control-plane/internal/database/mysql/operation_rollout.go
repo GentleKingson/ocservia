@@ -91,7 +91,7 @@ func (s operationStore) InsertRollout(ctx context.Context, v operationstore.Pend
 	if err != nil {
 		return err
 	}
-	_, err = s.Exec(ctx, `INSERT INTO agent_rollouts(id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,idempotency_key,created_at,updated_at) VALUES(?,?,?,'queued',?,true,?,?,?,?,?,0,'',?,?,?,?)`, UUIDBytes(v.ID), UUIDBytes(v.WorkspaceID), v.TargetVersion, v.BatchSize, v.Reason, UUIDBytes(v.ApprovalID), v.RequestHash, UUIDBytes(v.CreatedBy), UUIDBytes(v.ActorSession), document, v.IdempotencyKey, v.CreatedAt, v.CreatedAt)
+	_, err = s.Exec(ctx, `INSERT INTO agent_rollouts(id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,idempotency_key,created_at,updated_at) VALUES(?,?,?,'queued',?,true,?,?,?,?,?,0,'',?,?,?,?)`, UUIDBytes(v.ID), UUIDBytes(v.WorkspaceID), v.TargetVersion, v.BatchSize, v.Reason, rbacID(v.ApprovalID), v.RequestHash, UUIDBytes(v.CreatedBy), UUIDBytes(v.ActorSession), document, v.IdempotencyKey, v.CreatedAt, v.CreatedAt)
 	return err
 }
 

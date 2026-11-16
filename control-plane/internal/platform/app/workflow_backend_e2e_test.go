@@ -79,13 +79,11 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal("initialize empty test workspace", err)
 	}
-	adminPassword, approverPassword := "isolated controller E2E administrator password", "independent controller E2E approver password"
+	adminPassword := "isolated controller E2E administrator password"
 	f.file("admin-password", []byte(adminPassword), 0, 0, 0600)
-	f.file("approver-password", []byte(approverPassword), 0, 0, 0600)
 	f.run(0, 0, f.environment(runtimeOptions, map[string]string{
 		"OCSERV_LOCAL_BOOTSTRAP_USERNAME": "e2e-admin", "OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE": f.root + "/admin-password",
-		"OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID": f.workspace, "OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME": "e2e-approver",
-		"OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE": f.root + "/approver-password",
+		"OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID": f.workspace,
 	}), f.root+"/ocserv-control", "--bootstrap-local-admin")
 
 	controllerPublic, controllerPrivate, err := ed25519.GenerateKey(rand.Reader)
@@ -151,7 +149,6 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		return response.StatusCode == http.StatusOK
 	})
 	f.admin = f.login("e2e-admin", adminPassword)
-	f.approver = f.login("e2e-approver", approverPassword)
 
 	identityDirectory, journalPath, privdSocket := f.root+"/agent/identity", f.root+"/agent/journal.db", f.root+"/privd/privd.sock"
 	if os.Getenv("OCSERV_REBIND_E2E") != "" {
@@ -191,9 +188,8 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	}
 	nodePath := "/api/v1/nodes/" + nodeID
 	trust := map[string]any{"labels": map[string]string{"fixture": "real-process"}, "policy": "default", "capabilities": capabilities}
-	approval := f.approve("node.approve", "node", nodeID, map[string]any{"node_approval": trust})
 	trust["reason"] = "activate authenticated real Agent"
-	f.api(f.admin, "POST", nodePath+"/approval", trust, map[string]string{"X-Approval-ID": approval}, http.StatusOK, http.StatusServiceUnavailable)
+	f.api(f.admin, "POST", nodePath+"/approval", trust, nil, http.StatusOK, http.StatusServiceUnavailable)
 	credential := f.api(f.admin, "POST", nodePath+"/privd-attestation-credentials", map[string]any{"ttl_seconds": 300, "reason": "provision real root key"}, nil, http.StatusCreated)
 	attestationKey := f.root + "/privd/state/attestation.key"
 	registration := f.run(0, 65533, nil, "/usr/local/bin/ocservia-privd", "attestation-registration", attestationKey, nodeID, e2eString(t, credential, "controller_nonce_hex"), e2eString(t, credential, "credential_context_sha256_hex"))
@@ -289,7 +285,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		t.Fatal("HTTP port survived Controller exit", err)
 	}
 	listener.Close()
-	t.Log("real CLI, independent local identities, one dedicated TLS Relay, enrollment, root attestation, fenced certificate lifecycle and one-use artifact passed")
+	t.Log("real CLI, single local Admin, one dedicated TLS Relay, enrollment, root attestation, fenced certificate lifecycle and one-use artifact passed")
 	t.Log("all Controller roles drained after SIGTERM with real Agent/transport still running; Trust socket and HTTP port released")
 }
 
@@ -298,7 +294,7 @@ type controllerE2E struct {
 	ctx                              context.Context
 	root, artifacts, workspace, base string
 	client                           *http.Client
-	admin, approver                  *http.Cookie
+	admin                            *http.Cookie
 	relays                           []string
 	sealKeys                         map[string]*rsa.PrivateKey
 	processes                        []*e2eProcess
@@ -603,20 +599,6 @@ func (f *controllerE2E) login(username, password string) *http.Cookie {
 	return response.Cookies()[0]
 }
 
-func (f *controllerE2E) approve(action, resourceType, id string, extra map[string]any) string {
-	f.t.Helper()
-	body := map[string]any{"action": action, "resource_type": resourceType, "resource_id": id, "ttl_seconds": 600, "reason": "independent real process acceptance approval"}
-	for k, v := range extra {
-		body[k] = v
-	}
-	approval := f.api(f.admin, "POST", "/api/v1/approval-requests", body, nil, http.StatusCreated)
-	approvalID := e2eString(f.t, approval, "id")
-	decision := map[string]any{"reason": "independently reviewed exact content", "expected_request_hash": e2eString(f.t, approval, "request_hash")}
-	f.api(f.admin, "POST", "/api/v1/approval-requests/"+approvalID+":approve", decision, nil, http.StatusForbidden)
-	f.api(f.approver, "POST", "/api/v1/approval-requests/"+approvalID+":approve", decision, nil, http.StatusOK)
-	return approvalID
-}
-
 func (f *controllerE2E) startRelays() {
 	f.t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -812,15 +794,21 @@ func (f *controllerE2E) certificateWorkflow(nodePath string) {
 	if f.recoverNode != nil {
 		f.recoverNode()
 	}
-	approval := f.approve("certificate.issue", "certificate", id, nil)
-	certificate = f.api(f.admin, "POST", path+":issue", map[string]any{"approval_id": approval, "reason": "sign verified root CSR"}, nil, 200)
+	certificate = f.api(f.admin, "POST", path+":issue", map[string]any{"reason": "sign verified root CSR"}, nil, 200)
 	if certificate["state"] != "issued" {
 		f.t.Fatal("certificate was not issued")
 	}
-	reason := "export one-time P12 after independent approval"
+	reason := "export one-time P12 as Admin"
 	artifactID := uuid.Must(uuid.NewV7()).String()
-	approval = f.approve("certificate.private_key.export", "certificate", id, map[string]any{"certificate": map[string]any{"expected_version": certificate["version"], "purpose": "certificate_p12", "artifact_request_id": artifactID, "reason": reason}})
-	grant := f.api(f.admin, "POST", path+":p12", map[string]any{"expected_version": nodeVersion(), "certificate_version": certificate["version"], "approval_id": approval, "reason": reason}, map[string]string{"Idempotency-Key": uuid.NewString()}, http.StatusAccepted)
+	p12Request := map[string]any{"expected_version": nodeVersion(), "certificate_version": certificate["version"], "artifact_request_id": artifactID, "reason": reason}
+	p12Headers := map[string]string{"Idempotency-Key": uuid.NewString()}
+	grant := f.api(f.admin, "POST", path+":p12", p12Request, p12Headers, http.StatusAccepted)
+	p12Replay := f.api(f.admin, "POST", path+":p12", p12Request, p12Headers, http.StatusAccepted)
+	if p12Replay["artifact_id"] != grant["artifact_id"] || p12Replay["password"] != nil || p12Replay["download_token"] != nil {
+		f.t.Fatal("P12 replay changed artifact or disclosed one-time credentials")
+	}
+	p12Request["artifact_request_id"] = uuid.Must(uuid.NewV7()).String()
+	f.api(f.admin, "POST", path+":p12", p12Request, p12Headers, http.StatusConflict)
 	operation, ok := grant["operation"].(map[string]any)
 	if !ok {
 		f.t.Fatal("P12 operation missing")
@@ -847,8 +835,13 @@ func (f *controllerE2E) certificateWorkflow(nodePath string) {
 	f.run(0, 0, nil, "/usr/bin/openssl", "pkcs12", "-in", p12Path, "-passin", "file:"+passwordPath, "-noout")
 	f.api(f.admin, "GET", artifactPath, nil, downloadHeaders, http.StatusForbidden)
 	reason = "revoke real issued certificate"
-	approval = f.approve("certificate.revoke", "certificate", id, map[string]any{"certificate": map[string]any{"expected_version": certificate["version"], "reason": reason}})
-	f.api(f.admin, "POST", path+":revoke", map[string]any{"expected_version": nodeVersion(), "certificate_version": certificate["version"], "approval_id": approval, "reason": reason}, map[string]string{"Idempotency-Key": uuid.NewString()}, http.StatusAccepted)
+	revokeRequest := map[string]any{"expected_version": nodeVersion(), "certificate_version": certificate["version"], "reason": reason}
+	revokeHeaders := map[string]string{"Idempotency-Key": uuid.NewString()}
+	revocation := f.api(f.admin, "POST", path+":revoke", revokeRequest, revokeHeaders, http.StatusAccepted)
+	revocationReplay := f.api(f.admin, "POST", path+":revoke", revokeRequest, revokeHeaders, http.StatusAccepted)
+	if revocationReplay["id"] != revocation["id"] {
+		f.t.Fatal("revocation replay changed operation identity")
+	}
 	f.wait("root certificate revocation", func() bool { return f.api(f.admin, "GET", path, nil, nil, 200)["state"] == "revoked" })
 	list := f.api(f.admin, "GET", nodePath+"/certificates", nil, nil, 200)
 	encoded, _ := json.Marshal(list)
@@ -858,5 +851,5 @@ func (f *controllerE2E) certificateWorkflow(nodePath string) {
 	if json.Unmarshal(encoded, &decoded) != nil || len(decoded.Items) != 1 || decoded.Items[0].State != "revoked" {
 		f.t.Fatal("certificate list did not reflect completed lifecycle")
 	}
-	f.t.Log("real root-attested CSR, independent issue/export/revoke approvals, signed chain, P12 and one-use artifact passed")
+	f.t.Log("real root-attested CSR, direct Admin issue/export/revoke, signed chain, P12 and one-use artifact passed")
 }

@@ -58,15 +58,8 @@ try {
     baseURL: origin,
     locale: "en-US",
   });
-  const approver = await browser.newContext({
-    baseURL: origin,
-    locale: "en-US",
-  });
   await collectCsp(context, "flow");
-  await collectCsp(approver, "flow");
   const page = await context.newPage();
-  const approvalPage = await approver.newPage();
-  const requesterApprovalPage = await context.newPage();
   const headers = { Origin: origin, "X-Workspace-ID": workspace };
   async function selectBrowserWorkspace(currentPage) {
     // Wait for the authorized list before deciding whether a selector exists.
@@ -89,107 +82,6 @@ try {
       )
       .toBe(workspace);
   }
-  await approvalPage.goto("/approvals");
-  await expect(approvalPage).toHaveURL(/\/login$/);
-  await approvalPage
-    .getByLabel("Username", { exact: true })
-    .fill("business-test-approver");
-  await approvalPage
-    .getByLabel("Password", { exact: true })
-    .fill(fs.readFileSync(`${work}/private/approver-password`, "utf8").trim());
-  await approvalPage
-    .getByRole("button", { name: "Sign in", exact: true })
-    .click();
-  await selectBrowserWorkspace(approvalPage);
-  async function reviewInBrowser(value) {
-    const path = `/approvals/${value.id}`;
-    await requesterApprovalPage.goto(path);
-    await selectBrowserWorkspace(requesterApprovalPage);
-    await expect(requesterApprovalPage.getByTestId("approval-hash")).toHaveText(
-      value.request_hash,
-    );
-    await requesterApprovalPage
-      .getByLabel("Decision reason")
-      .fill("Business test: self-approval must fail");
-    await requesterApprovalPage.getByRole("checkbox").check();
-    const self = requesterApprovalPage.waitForResponse((response) =>
-      response.url().endsWith(`/approval-requests/${value.id}:approve`),
-    );
-    await requesterApprovalPage
-      .getByRole("button", { name: "Approve", exact: true })
-      .click();
-    expect((await self).status()).toBe(403);
-    await expect(requesterApprovalPage.getByRole("alert")).toContainText(
-      "Approval denied",
-    );
-
-    await approvalPage.goto(path);
-    await expect(approvalPage.getByTestId("approval-hash")).toHaveText(
-      value.request_hash,
-    );
-    const summary =
-      value.config_plan_summary ??
-      value.certificate_summary ??
-      value.request_summary;
-    expect(
-      JSON.parse(
-        await approvalPage.getByTestId("approval-summary").innerText(),
-      ),
-    ).toEqual(summary);
-    await approvalPage
-      .getByLabel("Decision reason")
-      .fill("Business test: separate authenticated principal");
-    await approvalPage.getByRole("checkbox").check();
-    const decision = approvalPage.waitForResponse((response) =>
-      response.url().endsWith(`/approval-requests/${value.id}:approve`),
-    );
-    await approvalPage
-      .getByRole("button", { name: "Approve", exact: true })
-      .click();
-    const response = await decision;
-    expect(response.status()).toBe(200);
-    expect(response.request().postDataJSON().expected_request_hash).toBe(
-      value.request_hash,
-    );
-    const accepted = await response.json();
-    expect(accepted.requester_id).not.toBe(accepted.approver_id);
-    await expect(approvalPage.getByTestId("approval-status")).toHaveText(
-      "Approved",
-    );
-    await approvalPage.reload();
-    await expect(approvalPage.getByTestId("approval-status")).toHaveText(
-      "Approved",
-    );
-    await expect(
-      approvalPage.getByRole("button", { name: "Approve", exact: true }),
-    ).toHaveCount(0);
-    observations.push({
-      name: "browser_bound_approval",
-      approval_id: value.id,
-      action: value.action,
-      request_hash: value.request_hash,
-      requester_id: accepted.requester_id,
-      approver_id: accepted.approver_id,
-      human_custody: "NOT_VERIFIED",
-    });
-    return value.id;
-  }
-  async function approval(action, cert, extra = {}) {
-    const response = await context.request.post("/api/v1/approval-requests", {
-      headers,
-      data: {
-        action,
-        resource_type: "certificate",
-        resource_id: cert.id,
-        reason: "Business test: browser approval",
-        ttl_seconds: 600,
-        ...extra,
-      },
-    });
-    expect(response.status()).toBe(201);
-    const value = await response.json();
-    return reviewInBrowser(value);
-  }
   await page.goto(`/nodes/${node}`);
   await expect(page).toHaveURL(/\/login$/);
   await page
@@ -204,28 +96,6 @@ try {
     // The probe placed the next Agent release in the node spool and recreated
     // the Controller with its catalog; the console drives the canary rollout.
     const target = process.env.ROLLOUT_VERSION;
-    const rolloutApproval = await context.request.post(
-      "/api/v1/approval-requests",
-      {
-        headers,
-        data: {
-          action: "agent.rollout",
-          resource_type: "batch_operation",
-          reason: "Business test: browser rolling upgrade review",
-          ttl_seconds: 600,
-          agent_rollout: {
-            target_version: target,
-            node_ids: [node],
-            batch_size: 5,
-            stop_on_failure: true,
-          },
-        },
-      },
-    );
-    expect(rolloutApproval.status()).toBe(201);
-    const rolloutApprovalId = await reviewInBrowser(
-      await rolloutApproval.json(),
-    );
     await page.goto("/nodes");
     await page
       .getByRole("checkbox", {
@@ -240,7 +110,6 @@ try {
     await page
       .locator("#rollout-reason")
       .fill("Business test: browser rolling upgrade");
-    await page.locator("#rollout-approval").fill(rolloutApprovalId);
     const starting = page.waitForResponse(
       (response) =>
         response.url().endsWith("/agent-rollouts") &&
@@ -265,7 +134,6 @@ try {
       name: "browser_agent_rollout",
       rollout: {
         id: created.id,
-        approval_id: created.approval_id,
         target_version: created.target_version,
       },
     });
@@ -316,45 +184,10 @@ try {
       fullPage: true,
     });
 
-    const reloadApprovalResponse = await context.request.post(
-      "/api/v1/approval-requests",
-      {
-        headers,
-        data: {
-          action: "service.reload",
-          resource_type: "node",
-          resource_id: node,
-          reason: "Business test: browser reload review",
-          ttl_seconds: 600,
-        },
-      },
-    );
-    expect(reloadApprovalResponse.status()).toBe(201);
-    const reloadApprovalId = await reviewInBrowser(
-      await reloadApprovalResponse.json(),
-    );
-    await approvalPage.screenshot({
-      path: `${process.env.ARTIFACT_DIR}/browser-approval.png`,
-      fullPage: true,
-    });
-    await approvalPage.setViewportSize({ width: 390, height: 844 });
-    await expect
-      .poll(() =>
-        approvalPage.evaluate(
-          () => document.documentElement.scrollWidth <= window.innerWidth,
-        ),
-      )
-      .toBe(true);
-    await approvalPage.screenshot({
-      path: `${process.env.ARTIFACT_DIR}/browser-approval-mobile.png`,
-      fullPage: true,
-    });
-    await approvalPage.setViewportSize({ width: 1280, height: 720 });
     await page.getByTitle("Reload Ocserv", { exact: true }).click();
     await page
       .getByLabel("Reason", { exact: true })
-      .fill("Business test: browser approved reload");
-    await page.getByLabel("Approval ID").fill(reloadApprovalId);
+      .fill("Business test: browser direct Admin reload");
     const reloaded = page.waitForResponse(
       (response) =>
         response.url().endsWith(`/nodes/${node}/service:reload`) &&
@@ -367,14 +200,16 @@ try {
     await expect(page.getByTestId("operation-state")).toHaveText("Succeeded", {
       timeout: 120000,
     });
-    observations.push({ name: "browser_approved_reload", operation: reload });
+    observations.push({
+      name: "browser_direct_admin_reload",
+      operation: reload,
+    });
     const reloadRequest = reloadResponse.request();
     const reloadHeaders = await reloadRequest.allHeaders();
     const replayHeaders = {
       ...headers,
       "Idempotency-Key": reloadHeaders["idempotency-key"],
       "If-Match": reloadHeaders["if-match"],
-      "X-Approval-ID": reloadApprovalId,
     };
     const knownReplay = await context.request.post(reloadRequest.url(), {
       headers: replayHeaders,
@@ -384,25 +219,21 @@ try {
     const replayed = await knownReplay.json();
     expect(replayed.id).toBe(reload.id);
     expect(replayed.command_id).toBe(reload.command_id);
-    const currentNode = await (
-      await context.request.get(`/api/v1/nodes/${node}`, { headers })
-    ).json();
-    const spent = await context.request.post(reloadRequest.url(), {
-      headers: {
-        ...replayHeaders,
-        "Idempotency-Key": crypto.randomUUID(),
-        "If-Match": `"revision-${currentNode.version}"`,
+    expect(reloadHeaders["x-approval-id"]).toBeUndefined();
+    const changed = await context.request.post(reloadRequest.url(), {
+      headers: replayHeaders,
+      data: {
+        ...reloadRequest.postDataJSON(),
+        reason: "Business test: changed replay intent",
       },
-      data: reloadRequest.postDataJSON(),
     });
-    expect(spent.status()).toBe(409);
-    expect((await spent.json()).type).toBe(
-      "https://ocservia.dev/problems/approval-required",
+    expect(changed.status()).toBe(409);
+    expect((await changed.json()).type).toBe(
+      "https://ocservia.dev/problems/idempotency-conflict",
     );
     observations.push({
-      name: "browser_consumed_approval_cannot_authorize_new_operation",
+      name: "browser_idempotency_rejects_changed_intent",
       operation_id: reload.id,
-      approval_id: reloadApprovalId,
     });
 
     const reference = JSON.parse(
@@ -477,24 +308,6 @@ try {
       path: `${process.env.ARTIFACT_DIR}/browser-config-result-mobile.png`,
     });
     await page.setViewportSize({ width: 1280, height: 720 });
-    const configApproval = await context.request.post(
-      "/api/v1/approval-requests",
-      {
-        headers,
-        data: {
-          action: "config.apply",
-          resource_type: "config_plan",
-          resource_id: plan.id,
-          reason: "Business test: browser complete plan review",
-          ttl_seconds: 600,
-        },
-      },
-    );
-    expect(configApproval.status()).toBe(201);
-    const configApprovalId = await reviewInBrowser(await configApproval.json());
-    await page
-      .getByLabel("Approval ID", { exact: true })
-      .fill(configApprovalId);
     await page
       .locator("#config-apply-reason")
       .fill("Business test: browser exact materialization");
@@ -571,9 +384,6 @@ try {
         fullPage: true,
       });
       await page
-        .getByLabel("Approval ID")
-        .fill(await approval("certificate.issue", certificate));
-      await page
         .getByLabel("Reason", { exact: true })
         .fill("Business test: browser issue");
       const issuing = page.waitForResponse((response) =>
@@ -586,7 +396,7 @@ try {
       expect(issueResponse.status()).toBe(200);
       let issued = await issueResponse.json();
       await expect(page.getByText("issued", { exact: true })).toBeVisible();
-      await expect(page.getByLabel("Approval ID")).toBeVisible();
+      await expect(page.getByLabel("Approval ID")).toHaveCount(0);
       await expect
         .poll(
           async () => {
@@ -604,28 +414,7 @@ try {
       await page.getByRole("button", { name: "Cancel", exact: true }).click();
       await page.getByTitle("Certificate lifecycle", { exact: true }).click();
       await expect(page.getByText("expiring", { exact: true })).toBeVisible();
-      const id =
-        (BigInt(Date.now()) << 80n) |
-        (7n << 76n) |
-        ((BigInt(`0x${crypto.randomBytes(2).toString("hex")}`) % 4096n) <<
-          64n) |
-        (2n << 62n) |
-        (BigInt(`0x${crypto.randomBytes(8).toString("hex")}`) % (1n << 62n));
-      const artifact = id
-        .toString(16)
-        .padStart(32, "0")
-        .replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
       const reason = "Business test: browser export";
-      await page.getByLabel("Approval ID").fill(
-        await approval("certificate.private_key.export", issued, {
-          certificate: {
-            expected_version: issued.version,
-            purpose: "certificate_p12",
-            artifact_request_id: artifact,
-            reason,
-          },
-        }),
-      );
       await page.getByLabel("Reason", { exact: true }).fill(reason);
       const exporting = page.waitForResponse((response) =>
         response.url().endsWith(`/certificates/${certificate.id}:p12`),
@@ -635,6 +424,14 @@ try {
         .click();
       const exportResponse = await exporting;
       expect(exportResponse.status()).toBe(202);
+      expect(
+        exportResponse.request().postDataJSON().artifact_request_id,
+      ).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(
+        exportResponse.request().postDataJSON().approval_id,
+      ).toBeUndefined();
       const grant = await exportResponse.json();
       fs.writeFileSync(`${work}/private/browser-p12-password`, grant.password, {
         mode: 0o600,
@@ -675,14 +472,6 @@ try {
         operation: grant.operation,
       });
       const revokeReason = "Business test: browser revoke";
-      await page.getByLabel("Approval ID").fill(
-        await approval("certificate.revoke", issued, {
-          certificate: {
-            expected_version: issued.version,
-            reason: revokeReason,
-          },
-        }),
-      );
       await page.getByLabel("Reason", { exact: true }).fill(revokeReason);
       const revoking = page.waitForResponse((response) =>
         response.url().endsWith(`/certificates/${certificate.id}:revoke`),
@@ -727,11 +516,7 @@ try {
     )
     .toBe(true);
   // Closed contexts report nothing more, so the counts below are final.
-  await Promise.all([
-    context.close(),
-    approver.close(),
-    controlContext.close(),
-  ]);
+  await Promise.all([context.close(), controlContext.close()]);
   const flow = (list) => list.filter((entry) => entry.phase === "flow").length;
   observations.push({
     name: "browser_csp",

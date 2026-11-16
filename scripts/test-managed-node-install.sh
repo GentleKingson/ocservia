@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+python3 "${ROOT}/scripts/test-node-bootstrap.py"
 INSTALL="${INSTALLER_UNDER_TEST:-${ROOT}/deploy/managed-node/install.sh}"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 VERSION="${TEST_RELEASE_VERSION:-0.2.1}"
@@ -510,6 +511,7 @@ cp -- "${INSTALL}" "${repo}/deploy/managed-node/install.sh"
 # below retains its actual stamp and exercises the normal Release path.
 sed -i '/^readonly DEFAULT_VERSION=/c\readonly DEFAULT_VERSION=""' "${repo}/deploy/managed-node/install.sh"
 cp -- "${ROOT}/deploy/lib/install-ui.sh" "${repo}/deploy/lib/install-ui.sh"
+cp -- "${ROOT}/deploy/lib/node-bootstrap.sh" "${repo}/deploy/lib/node-bootstrap.sh"
 cp -- "${ROOT}/deploy/lib/install-env.sh" "${repo}/deploy/lib/install-env.sh"
 cp -- "${ROOT}/.gitignore" "${repo}/.gitignore"
 git -C "${repo}" init -q
@@ -682,6 +684,19 @@ assert_status 2 "--version without a value must be a usage error"
 capture --version "v${VERSION}" --version "v${VERSION}"
 assert_status 2 "a duplicate --version must be a usage error"
 echo "usage errors fail with status 2"
+capture --join-token --resume-install
+assert_status 1
+assert_output "choose one installation token source"
+capture --join-token
+assert_status 1
+assert_output "unattended token install requires"
+printf 'not-a-real-token\n' >"${fixture}/join-token-input"
+chmod 0600 "${fixture}/join-token-input"
+ln -s "${fixture}/join-token-input" "${fixture}/join-token-link"
+capture --join-token-file "${fixture}/join-token-link"
+assert_status 1
+assert_output "requires a regular file, not a symlink"
+echo "token source selection fails closed before any root or network action"
 
 # 2. a non-tag checkout is rejected before any host mutation.
 scenario

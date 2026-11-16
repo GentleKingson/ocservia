@@ -23,6 +23,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -380,8 +381,8 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if bindingErr != nil {
 		t.Fatal(bindingErr)
 	}
-	approvalID, identityID, sessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
-	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "changed"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "tampered approval content", RequestID: uuid.Must(uuid.NewV7()).String()}); !errors.Is(err, approvals.ErrNotReady) {
+	approvalID, identityID, sessionID := managementMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
+	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "changed"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: uuid.Must(uuid.NewV7()), SessionID: sessionID, Reason: "tampered approval content", RequestID: uuid.Must(uuid.NewV7()).String()}); !errors.Is(err, rbac.ErrForbidden) {
 		t.Fatalf("changed node approval content err=%v", err)
 	}
 	trust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "approve fixture", RequestID: uuid.Must(uuid.NewV7()).String()})
@@ -477,10 +478,10 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
 		t.Fatalf("offline authorization = %v, %v", response, err)
 	}
-	if retryTrust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "retry approval", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil || retryTrust.NodeID != nodeID {
+	if retryTrust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "retry approval", RequestID: uuid.Must(uuid.NewV7()).String()}); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("offline approval retry = %v, %v", retryTrust, err)
 	}
-	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: uuid.Must(uuid.NewV7()), IdentityID: identityID, SessionID: sessionID, Reason: "invalid retry approval", RequestID: uuid.Must(uuid.NewV7()).String()}); !errors.Is(err, approvals.ErrNotReady) {
+	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: uuid.Must(uuid.NewV7()), IdentityID: identityID, SessionID: sessionID, Reason: "invalid retry approval", RequestID: uuid.Must(uuid.NewV7()).String()}); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("offline approval with unrelated credential error = %v", err)
 	}
 	handshake.Time = timestamppb.New(time.Now().Add(-MaxClockSkew - time.Second))
@@ -489,11 +490,11 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 		t.Fatalf("clock skew authorization = %v, %v", response, err)
 	}
 	revokeHash, revokeSummary := approvals.GenericBinding("node.revoke", "node", nodeID)
-	revokeApprovalID, revokeIdentityID, revokeSessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.revoke", revokeHash, revokeSummary)
+	revokeApprovalID, revokeIdentityID, revokeSessionID := managementMetadata(t, pool, workspaceID, nodeID, "node.revoke", revokeHash, revokeSummary)
 	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: revokeIdentityID.String(), ApprovalID: revokeApprovalID, IdentityID: revokeIdentityID, SessionID: revokeSessionID, Reason: "revoke fixture", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: revokeIdentityID.String(), ApprovalID: uuid.Must(uuid.NewV7()), IdentityID: revokeIdentityID, SessionID: revokeSessionID, Reason: "invalid retry revocation", RequestID: uuid.Must(uuid.NewV7()).String()}); !errors.Is(err, approvals.ErrNotReady) {
+	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: revokeIdentityID.String(), ApprovalID: uuid.Nil, IdentityID: uuid.Must(uuid.NewV7()), SessionID: revokeSessionID, Reason: "invalid retry revocation", RequestID: uuid.Must(uuid.NewV7()).String()}); !errors.Is(err, rbac.ErrForbidden) {
 		t.Fatalf("revoked node with unrelated credential error = %v", err)
 	}
 	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: revokeIdentityID.String(), ApprovalID: revokeApprovalID, IdentityID: revokeIdentityID, SessionID: revokeSessionID, Reason: "retry revocation", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
@@ -821,25 +822,19 @@ func cleanupWorkspace(ctx context.Context, pool *pgxpool.Pool, workspaceID uuid.
 	_, _ = pool.Exec(ctx, `DELETE FROM workspaces WHERE id=$1`, workspaceID)
 }
 
-func approvedMetadata(t *testing.T, pool *pgxpool.Pool, workspaceID, resourceID uuid.UUID, action string, requestHash []byte, requestSummary []byte) (uuid.UUID, uuid.UUID, uuid.UUID) {
+func managementMetadata(t *testing.T, pool *pgxpool.Pool, workspaceID, resourceID uuid.UUID, action string, requestHash []byte, requestSummary []byte) (uuid.UUID, uuid.UUID, uuid.UUID) {
 	t.Helper()
-	requesterID, approverID, sessionID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(context.Background(), `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, requesterID, "requester-"+requesterID.String(), approverID, "approver-"+approverID.String()); err != nil {
+	identity, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now())`, identity, identity.String()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(context.Background(), `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, sessionID, requesterID); err != nil {
+	if _, err := pool.Exec(context.Background(), `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, session, identity); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,$4,'node',$5,'integration','approved',$6,'independent',now()+interval '1 hour',now(),now(),$7,$8)`, approvalID, workspaceID, requesterID, action, resourceID, approverID, requestHash, requestSummary); err != nil {
+	if _, err := pool.Exec(context.Background(), `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_by,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$2,now())`, uuid.Must(uuid.NewV7()), identity, workspaceID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(context.Background(), `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3)`, approvalID, workspaceID, resourceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(context.Background(), `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID); err != nil {
-		t.Fatal(err)
-	}
-	return approvalID, requesterID, sessionID
+	return uuid.Nil, identity, session
 }
 
 // TestAuthorizeSessionDeduplicatesFencingCapabilityIntegration approves an
@@ -881,7 +876,7 @@ func TestAuthorizeSessionDeduplicatesFencingCapabilityIntegration(t *testing.T) 
 	if err != nil {
 		t.Fatalf("approval binding including the advertised fencing capability: %v", err)
 	}
-	approvalID, identityID, sessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
+	approvalID, identityID, sessionID := managementMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
 	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: nil, Policy: "standard", Capabilities: []string{"ocserv.status.read", "ocserv.fencing.v2"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "approve all advertised", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
 		t.Fatalf("approve all advertised capabilities: %v", err)
 	}
@@ -949,7 +944,7 @@ func TestAuthorizeSessionOwnerContentionForcesRetryIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approvalID, identityID, sessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
+	approvalID, identityID, sessionID := managementMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
 	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: nil, Policy: "standard", Capabilities: []string{"ocserv.fencing.v2", "ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "owner contention fixture", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -1076,7 +1071,7 @@ func TestAuthorizeSessionCommitFailureClosesOpenedSessionIntegration(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	approvalID, identityID, sessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
+	approvalID, identityID, sessionID := managementMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
 	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: nil, Policy: "standard", Capabilities: []string{"ocserv.fencing.v2"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "commit cleanup fixture", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
 		t.Fatalf("approve: %v", err)
 	}

@@ -85,7 +85,6 @@ async function mount(): Promise<View> {
   view.selected = ["node-a"];
   view.rolloutDialog = true;
   view.rolloutReason = "first";
-  view.rolloutApprovalId = "approval";
   return view;
 }
 function created() {
@@ -167,7 +166,7 @@ it("shows a definite server rejection by its Problem type", async () => {
   mocks.createAgentRollout.mockRejectedValueOnce(
     rejection(
       JSON.stringify({
-        type: "https://ocservia.dev/problems/approval-required",
+        type: "https://ocservia.dev/problems/forbidden",
         title: "Approval required",
         status: 409,
       }),
@@ -194,7 +193,7 @@ it("shows a definite server rejection by its Problem type", async () => {
   );
   const view = await mount();
   await view.submitRollout();
-  expect(view.rolloutError).toBe("rolloutApprovalRejected");
+  expect(view.rolloutError).toBe("rolloutForbidden");
   await view.submitRollout();
   expect(view.rolloutError).toBe("rolloutNoEligibleNodes");
   await view.submitRollout();
@@ -243,7 +242,7 @@ it("drops a rejection whose Problem arrives after the workspace changes", async 
   });
   workspace = { id: "workspace-b", generation: 2 };
   window.dispatchEvent(new Event("workspace"));
-  body({ type: "https://ocservia.dev/problems/approval-required" });
+  body({ type: "https://ocservia.dev/problems/forbidden" });
   await submit;
   expect(view.rolloutError).toBe("");
 });
@@ -315,7 +314,7 @@ it("does not report a navigation failure as an unconfirmed create", async () => 
   expect(mocks.createAgentRollout).toHaveBeenCalledTimes(1);
 });
 
-// The first POST may have created the rollout and consumed the approval, so a
+// The first POST may have created the rollout, so a
 // definite rejection of an explicit retry does not settle the earlier start.
 it("keeps an unconfirmed start visible when an explicit retry is rejected", async () => {
   mocks.createAgentRollout.mockRejectedValueOnce(new TypeError("network"));

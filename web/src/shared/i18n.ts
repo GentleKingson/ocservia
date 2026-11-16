@@ -41,52 +41,25 @@ export const i18n = createI18n({
       removeFilter: "Remove filter {filter}",
       installNode: "Install node",
       installIntro:
-        "Prepare configuration, issue a short-lived token, then install and complete independent approval.",
-      installStep1: "1. Prepare configuration",
-      installStep2: "2. Prepare host and create bootstrap token",
-      installStep3: "3. Install and verify",
+        "Create a short-lived installation token and run the installer. The Controller supplies configuration and activates the node automatically.",
+      installStep1: "1. Choose node and release",
+      installStep2: "2. Create token and install",
       installField_name: "Node name",
       installField_environment: "Enrollment environment",
       installField_release: "Install Release tag",
-      installField_controllerEndpointId: "Controller EndpointID",
-      installField_relayUrl: "Dedicated Relay HTTPS URL",
-      installField_bootstrapTokenFile: "Bootstrap token file path",
-      installField_relayAccessTokenFile: "Relay access token file path",
-      installField_controllerCommandVerificationKeyFile:
-        "Controller command public key file path",
       installHint_name:
-        "Choose a name unique within this Workspace, including existing pending nodes. 1–128 letters, digits, dots, underscores or hyphens; start with a letter or digit. A duplicate can fail at enrollment even if token creation succeeds; changing install.env cannot change the token-bound name.",
+        "Choose a unique name in this Workspace. Use 1–128 letters, digits, dots, underscores or hyphens, starting with a letter or digit.",
       installHint_environment:
         "1–64 letters, digits, dots, underscores or hyphens; start with a letter or digit.",
       installHint_release:
         "Choose a published, matching Controller/Agent release: vX.Y.Z (or vX.Y.Z-rc.N). Never main or latest.",
-      installHint_controllerEndpointId:
-        "64 lowercase hexadecimal characters. This is the Controller identity, not the Agent EndpointID.",
-      installHint_relayUrl:
-        "One dedicated HTTPS Relay. No credentials, query, fragment, whitespace or shell expansion.",
-      installHint_bootstrapTokenFile:
-        "Absolute path on the Agent host to the short-lived token file.",
-      installHint_relayAccessTokenFile:
-        "Absolute path on the Agent host to the Relay access token file.",
-      installHint_controllerCommandVerificationKeyFile:
-        "Absolute path to the trusted Ed25519 public key PEM, never the Controller private key.",
-      installPaths:
-        "Use three distinct absolute paths with letters, digits, dots, underscores or hyphens; each segment must start with a letter, digit, underscore or hyphen. Provision non-empty regular files, not symlinks, through a protected channel. Tokens must be owner-only (0600) and readable by the installer launcher.",
-      installPrepare: "Prepare install.env",
-      installTemplate: "install.env (no secrets)",
-      installCopy: "Copy install.env",
-      installCopied: "Configuration copied",
-      installCopyFailed:
-        "Clipboard unavailable. Select and copy the configuration manually.",
-      installSaveConfig:
-        "Save as install.env (0600) in a private working directory on the Agent host. The installer reads it without executing it. Existing shell variables override this file; check for stale values. Name and Workspace are token bindings, recorded as comments only.",
+      installPrepare: "Continue",
       installTokenNotice:
-        "SecurityAdmin or PlatformAdmin authorization is required. Create only when the host is ready to enroll: validity is at most 900 seconds, starting at issuance. The token is shown once here; transfer it through a protected channel into the Bootstrap token file (0600), never a command, URL, inline script or log. Continuing, closing, changing Workspace or leaving this page clears it. Reopening does not recover it. Before issuing another token, confirm the previous attempt was rejected or expired.",
+        "Create the token when the host is ready. It expires within 15 minutes and is shown once. Paste it only into the installer’s hidden prompt; never place it in a command, URL or log. Closing this dialog, changing Workspace or leaving the page clears it. If issuance is uncertain, check audit records or wait for expiry before creating another token.",
       installIssue: "Create bootstrap token",
       installIssuing: "Creating token…",
       installToken: "Bootstrap token (shown once)",
       installExpires: "Expires at {time}",
-      installContinue: "Token saved — installation instructions",
       installWorkspaceFailed:
         "Cannot load an authorized Workspace. Close and check your session.",
       installForbidden:
@@ -97,18 +70,11 @@ export const i18n = createI18n({
         "The request outcome is unknown (network failure, server failure or unreadable response). It may have issued a token. No retry was sent. Check Controller audit records or wait for expiry before explicitly starting again; do not reset an Agent identity.",
       installExpired:
         "This token has expired and was cleared. Check any installation already attempted before explicitly starting again.",
-      installFiles:
-        "Prepare the Relay access token and trusted Controller command verification public key at the configured paths before issuing a Bootstrap token. After issuance, save the Bootstrap token at its configured path through a protected channel. Never copy an administrator session or Controller private key onto the node. Use a non-root launcher with sudo privileges on a supported Linux/systemd host.",
       installPreparation:
-        "For a slow first installation, prepare before starting the 900-second timer: on a fresh, unenrolled host with no existing enrollment-token file, temporarily set BOOTSTRAP_TOKEN_SOURCE= in install.env and remove any shell override for that variable. Run the pinned command above to download the package, run host checks and prepare keys. Wait for ENROLLMENT_READY; Agent/privd do not start. Then restore the configured Bootstrap token file path, click Create bootstrap token, save the token securely and rerun the same installer version with the same identity. Never delete an existing identity or token file to force this preparation path. If an earlier enrollment outcome is unknown, follow recovery instead.",
-      installRun: "Run in the directory containing install.env",
-      installLocal:
-        "ENROLLED_LOCAL means the installer persisted the local Node ID. The Controller node is PENDING_APPROVAL (pending); Agent/privd have not been enabled or started. Record the printed node ID. Local installation is not approval or online telemetry.",
-      installApproval:
-        "Use the existing node.approve workflow: the requester submits labels, policy and capabilities; a second authorized identity independently approves the exact request_hash; the requester activates the node using matching content and X-Approval-ID. Only after confirming active trust, manually start both services:",
-      installApprovalGuide: "Independent approval and activation instructions",
+        "Run the pinned installer as root on a supported Linux/systemd host, then paste the token at its hidden prompt. It securely retrieves configuration, verifies the package, enrolls and activates the node, registers the root-only privd key, and starts both services.",
+      installRun: "Run on the Agent host",
       installVerify:
-        "In this Workspace, open the node in Controller and check trust_status=active, connection_state=online and freshness=fresh with a recent heartbeat. SERVICES_ACTIVE proves only local systemd state; installer Controller observations remain NOT_OBSERVED.",
+        "Open the node in this Workspace and verify active trust, online connection and fresh telemetry.",
       installRecovery:
         "If installation or activation has an unknown outcome, reconcile it first. Preserve the existing Agent identity, keys, Relay configuration and original token binding. Follow the enrollment recovery instructions; never delete identity material to register again.",
       nodesDescription: "Manage the ocserv nodes connected to this workspace.",
@@ -227,7 +193,7 @@ export const i18n = createI18n({
         "Template draft · Current values have not been read. These defaults are not the node’s current configuration.",
       configSourceRevision: "Configuration revision bound to this request",
       configRiskFields:
-        "Review the full candidate before Apply, especially TCP/UDP ports, authentication, network/DNS, routes and certificate/key references. Apply requires its own approval.",
+        "Review the full candidate before Apply, especially TCP/UDP ports, authentication, network/DNS, routes and certificate/key references. Admin authorization is checked when applying.",
       configCandidateSource:
         "Redacted full candidate · Current field values are unknown. This is not a field-by-field comparison with the active configuration.",
       resourceUnmanaged: "Observed only · not managed",
@@ -313,46 +279,6 @@ export const i18n = createI18n({
       reason: "Reason",
       approvalId: "Approval ID",
       nextPage: "Next page",
-      pendingApprovals: "Pending approvals",
-      approvalQueueScope:
-        "Requests you can independently approve in this workspace. Refresh to see changes.",
-      approvalQueueUnavailable:
-        "Pending approvals could not be loaded. Refresh to retry.",
-      noPendingApprovals: "No pending requests you can approve",
-      approvals: "Approvals",
-      inspectApproval: "Inspect approval",
-      approvalDetails: "Approval details",
-      approvalAction: "Action",
-      approvalResource: "Resource",
-      approvalRequester: "Requester",
-      approvalApprover: "Approver",
-      approvalHash: "Request hash",
-      approvalContent: "Bound request content",
-      approvalDecisionReason: "Decision reason",
-      approvalReviewed: "I have reviewed this request and its bound content",
-      approve: "Approve",
-      approvalWorkspaceMismatch:
-        "This approval belongs to a different workspace.",
-      approvalUnavailable: "Approval details are unavailable.",
-      approvalForbidden:
-        "Approval denied. The requester cannot approve their own request; the approver must have authority for every bound resource.",
-      approvalDecisionUnconfirmed:
-        "Approval was not confirmed. Refresh its status before making another decision.",
-      approvalStatus_pending: "Pending",
-      approvalStatus_approved: "Approved",
-      approvalStatus_rejected: "Rejected",
-      approvalStatus_expired: "Expired",
-      approvalStatus_consumed: "Used",
-      approvalStatusHelp_pending:
-        "Waiting for an independent approver. Nothing runs until it is approved.",
-      approvalStatusHelp_approved:
-        "Approved, not run. The requester still starts the action with this approval ID; check the resulting operation for its outcome.",
-      approvalStatusHelp_rejected:
-        "Rejected. The action cannot run with this request.",
-      approvalStatusHelp_expired:
-        "Expired. It can no longer be approved or used; ask for a new request.",
-      approvalStatusHelp_consumed:
-        "Used by the requested action. Its outcome is on the resulting operation, not on this approval.",
       upgradeAgent: "Upgrade Agent",
       upgradeAgentTitle: "Upgrade the node agent to the recommended release",
       targetVersion: "Target version",
@@ -447,8 +373,6 @@ export const i18n = createI18n({
         "The user is disabled once usage in this direction reaches the size. 0 disables at once; choose No quota for no limit.",
       expiresAtHelp:
         "The user is disabled at this UTC time. Leave empty for no expiry.",
-      approvalIdHelp:
-        "This action runs only with an approved request. Enter its approval ID.",
       closeDialog: "Close dialog",
       convergence_converged: "Converged",
       convergence_pending: "Pending",
@@ -482,6 +406,8 @@ export const i18n = createI18n({
       certificateRecordsFailed: "Certificate records unavailable",
       certificateRequestFailed: "Certificate request failed",
       certificateIssueFailed: "Certificate issue failed",
+      p12GrantUnavailable:
+        "The export was accepted, but its one-time download credentials are unavailable. Check the operation before explicitly creating another export.",
       p12CreationFailed: "P12 creation failed",
       p12DownloadFailed: "P12 download failed",
       certificateRevokeFailed: "Certificate revoke failed",
@@ -497,8 +423,8 @@ export const i18n = createI18n({
       rolloutStartUnconfirmed:
         "Rollout start was not confirmed. Check Agent rollouts in Operations before starting another.",
       rolloutStartRejected: "Rollout start was rejected.",
-      rolloutApprovalRejected:
-        "The approval is expired, already used, or does not match this rollout.",
+      rolloutForbidden:
+        "Your current session is not authorized to start this rollout.",
       rolloutNoEligibleNodes:
         "None of the selected nodes can be upgraded to this version.",
       rolloutRequestInvalid: "The rollout request is invalid.",

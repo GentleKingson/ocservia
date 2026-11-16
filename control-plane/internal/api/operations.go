@@ -3,12 +3,12 @@ package api
 import (
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
@@ -99,16 +99,16 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 		ttl = *body.TTLSeconds
 	}
 	reason := strings.TrimSpace(body.Reason)
-	approval, approvalErr := uuid.Parse(strings.TrimSpace(body.ApprovalID))
-	if ttl < 60 || ttl > 3600 || reason == "" || len(reason) > 512 || approvalErr != nil || approval.Version() != 7 {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "target_version, approval_id, and reason are required and ttl_seconds must be between 60 and 3600")
+	approval, _ := uuid.Parse(body.ApprovalID)
+	if ttl < 60 || ttl > 3600 || reason == "" || len(reason) > 512 {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "target_version and reason are required and ttl_seconds must be between 60 and 3600")
 		return
 	}
 	target, err := s.operations.PrepareAgentUpgrade(r.Context(), workspace(r), nodeID, body.TargetVersion)
 	if err != nil {
 		switch {
 		case errors.Is(err, operations.ErrInvalidRequest):
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "target_version, approval_id, and reason are required and ttl_seconds must be between 60 and 3600")
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "target_version and reason are required and ttl_seconds must be between 60 and 3600")
 		case errors.Is(err, operations.ErrUpgradeArchitectureUnknown):
 			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "the node has not reported its package architecture yet")
 		case errors.Is(err, operations.ErrUpgradeReleaseNotTrusted):
@@ -310,6 +310,8 @@ func (s *Server) queueMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeOperationError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, rbac.ErrForbidden):
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, operations.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the operation request is invalid")
 	case errors.Is(err, operations.ErrIdempotencyConflict):
@@ -324,8 +326,6 @@ func (s *Server) writeOperationError(w http.ResponseWriter, r *http.Request, err
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/command-backlog-exceeded", "Command backlog is full", "the node or workspace remote command backlog has reached its bound")
 	case errors.Is(err, operations.ErrUpgradeActive):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/upgrade-already-active", "Upgrade is already active", "another agent upgrade is already active for this node")
-	case errors.Is(err, approvals.ErrNotReady):
-		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "a matching unexpired approval from a different principal is required")
 	case errors.Is(err, operations.ErrNodeUnavailable), errors.Is(err, database.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested node or operation does not exist")
 	default:

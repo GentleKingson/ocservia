@@ -42,7 +42,7 @@ from pathlib import Path
 import sys
 p, root = Path(sys.argv[1]), Path(sys.argv[2])
 s = p.read_text()
-for helper in ('install-ui', 'controller-runtime'):
+for helper in ('install-ui', 'controller-runtime', 'node-bootstrap'):
     marker = f'source "${{SCRIPT_LIB}}/{helper}.sh" # release-embed'
     s = s.replace(marker, (root / f'deploy/lib/{helper}.sh').read_text())
 p.write_text(s)

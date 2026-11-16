@@ -9,8 +9,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/google/uuid"
@@ -39,11 +39,11 @@ func NewBackend(backend database.Backend) *Service { return &Service{backend: ba
 
 var roleActions = map[string][]string{
 	"Viewer":        {"node.read", "operation.read"},
-	"Operator":      {"node.read", "operation.read", "operation.create", "session.disconnect", "session.terminate", "ip_ban.remove", "service.reload", "agent.upgrade", "approval.request"},
-	"UserManager":   {"node.read", "operation.read", "user.manage", "user.batch.disable", "group.manage", "approval.request"},
-	"ConfigManager": {"node.read", "operation.read", "config.plan", "config.review", "config.apply", "certificate.read", "certificate.issue", "secret.use", "approval.request"},
+	"Operator":      {"node.read", "operation.read", "operation.create", "session.disconnect", "session.terminate", "ip_ban.remove", "service.reload", "agent.upgrade"},
+	"UserManager":   {"node.read", "operation.read", "user.manage", "user.batch.disable", "group.manage"},
+	"ConfigManager": {"node.read", "operation.read", "config.plan", "config.review", "config.apply", "certificate.read", "certificate.issue", "secret.use"},
 	"Auditor":       {"node.read", "operation.read", "audit.read", "audit.verify"},
-	"SecurityAdmin": {"node.read", "operation.read", "config.review", "certificate.read", "certificate.revoke", "certificate.private_key.export", "secret.read", "secret.use", "secret.manage", "enrollment_token.create", "node_bootstrap_token.create", "node.approve", "node.revoke", "privd.attestation.manage", "approval.request", "approval.approve", "role_binding.manage", "security_alert.read"},
+	"SecurityAdmin": {"node.read", "operation.read", "config.review", "certificate.read", "certificate.revoke", "certificate.private_key.export", "secret.read", "secret.use", "secret.manage", "enrollment_token.create", "node_bootstrap_token.create", "node.approve", "node.revoke", "privd.attestation.manage", "role_binding.manage", "security_alert.read"},
 	"PlatformAdmin": {"*"},
 }
 
@@ -54,7 +54,11 @@ func (s *Service) Authorize(ctx context.Context, identityID uuid.UUID, action st
 	if breakGlass {
 		return nil
 	}
-	store, err := rbacstore.From(s.backend)
+	return authorizeStore(ctx, s.backend, identityID, action, resource)
+}
+
+func authorizeStore(ctx context.Context, source database.Store, identityID uuid.UUID, action string, resource Resource) error {
+	store, err := rbacstore.From(source)
 	if err != nil {
 		return err
 	}
@@ -161,6 +165,7 @@ func (s *Service) CreateBinding(ctx context.Context, request BindingRequest) (uu
 		!slices.Contains([]string{"workspace", "node", "resource", "secret_ref", "certificate", "config_plan", "batch_operation", "role_binding"}, request.ResourceType) || (request.ResourceType == "workspace") != (request.ResourceID == uuid.Nil) {
 		return uuid.Nil, ErrInvalidBinding
 	}
+	request.ApprovalID = uuid.Nil
 	id := uuid.Must(uuid.NewV7())
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := rbacstore.From(tx)
@@ -171,6 +176,9 @@ func (s *Service) CreateBinding(ctx context.Context, request BindingRequest) (uu
 		if err := store.LockManagement(ctx); err != nil {
 			return err
 		}
+		if err := AuthorizeMutationTx(ctx, tx, request.ActorID, request.SessionID, "role_binding.manage", Resource{WorkspaceID: request.WorkspaceID, Type: "workspace"}); err != nil {
+			return err
+		}
 		allowed, err := canGrantRole(ctx, tx, request.ActorID, request.WorkspaceID, request.Role)
 		if err != nil {
 			return err
@@ -178,12 +186,7 @@ func (s *Service) CreateBinding(ctx context.Context, request BindingRequest) (uu
 		if !allowed {
 			return ErrGrantForbidden
 		}
-		if slices.Contains([]string{"SecurityAdmin", "PlatformAdmin"}, request.Role) {
-			hash, _ := BindingApprovalContent(request.IdentityID, request.WorkspaceID, request.Role, request.ResourceType, request.ResourceID)
-			if err := approvals.ConsumeBoundTx(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorID, "role_binding.elevate", "role_binding", request.IdentityID, hash); err != nil {
-				return err
-			}
-		}
+
 		now := time.Now().UTC()
 		if err := store.Insert(ctx, rbacstore.Binding{ID: id, IdentityID: request.IdentityID, WorkspaceID: request.WorkspaceID, Role: request.Role, ResourceType: request.ResourceType, ResourceID: request.ResourceID, ActorID: request.ActorID, At: now, ApprovalID: request.ApprovalID}); err != nil {
 			return err
@@ -255,4 +258,29 @@ func canGrantRole(ctx context.Context, tx database.Tx, actorID, workspaceID uuid
 		}
 	}
 	return true, nil
+}
+
+// AuthorizeMutationTx rechecks the initiating session and resource authority in
+// the business transaction. Administrative actions do not need a second identity.
+func AuthorizeMutationTx(ctx context.Context, tx database.Tx, identityID, sessionID uuid.UUID, action string, resource Resource) error {
+	if identityID == uuid.Nil || sessionID == uuid.Nil || resource.WorkspaceID == uuid.Nil || action == "" {
+		return ErrForbidden
+	}
+	store, err := authstore.From(tx)
+	if err != nil {
+		return err
+	}
+	if err := store.LockActiveSession(ctx, identityID, sessionID, false); err != nil {
+		return ErrForbidden
+	}
+	// MayManage reads the persisted break-glass flag only after the session lock;
+	// caller-supplied principal flags cannot bypass this transaction boundary.
+	administrator, err := store.MayManage(ctx, identityID, resource.WorkspaceID, sessionID)
+	if err != nil {
+		return err
+	}
+	if administrator {
+		return nil
+	}
+	return authorizeStore(ctx, tx, identityID, action, resource)
 }

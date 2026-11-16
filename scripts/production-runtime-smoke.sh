@@ -71,7 +71,8 @@ general_secrets=(tls.crt tls.key postgres-owner-password postgres-app-password p
 chmod 0444 "${general_secrets[@]/#/${work}\/secrets/}"
 chmod 0400 "${work}/secrets/controller-command-signing-key.pem" "${work}/secrets/audit-event-key"
 chmod 0444 "${work}/relay-secrets/tls.crt" "${work}/relay-secrets/tls.key"
-chmod 0400 "${work}/secrets/relay-access-token" "${work}/secrets/controller-iroh.key" \
+chmod 0440 "${work}/secrets/relay-access-token"
+chmod 0400 "${work}/secrets/controller-iroh.key" \
   "${work}/relay-secrets/relay-access-token"
 sudo chown 65534:65532 "${work}/secrets/controller-command-signing-key.pem" "${work}/secrets/audit-event-key"
 sudo chown 65532:65532 "${work}/secrets/relay-access-token" "${work}/secrets/controller-iroh.key" \

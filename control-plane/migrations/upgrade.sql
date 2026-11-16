@@ -26,3 +26,12 @@ DELETE FROM public.schema_revisions WHERE epoch=1;
 ALTER TABLE public.local_auth_attempts DROP CONSTRAINT local_auth_attempts_username_check, ADD CONSTRAINT local_auth_attempts_username_check CHECK (((octet_length(username) >= 1) AND (octet_length(username) <= 128) AND (((username COLLATE "C") ~ '^[a-z0-9][a-z0-9._-]*$'::text) OR ((username COLLATE "C") ~ '^password-change:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text))));
 -- ocservia:end-step
 -- ocservia:end-revision
+-- ocservia:revision=2
+-- ocservia:checkpoint={"checksum":"699c3f9a894eca9a2ec2ba0070ed705e21b88b6a9e7621de5f282b04a343af23","steps":1}
+-- ocservia:step=001:single_admin_authorization
+-- ocservia:metadata={"catalog_sha256":"2701cf9af3ad577f17af4a919ddc49c1b74b03561ade5bc255f9487b1b53be68"}
+ALTER TABLE public.agent_rollouts ALTER COLUMN approval_id DROP NOT NULL;
+ALTER TABLE public.config_apply_operations ALTER COLUMN approval_id DROP NOT NULL;
+ALTER TABLE public.node_privd_attestation_keys ALTER COLUMN registration_credential_id DROP NOT NULL;
+-- ocservia:end-step
+-- ocservia:end-revision

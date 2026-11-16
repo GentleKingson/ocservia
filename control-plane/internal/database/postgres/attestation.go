@@ -73,7 +73,7 @@ func (s privdAttestationStore) ActiveKeys(ctx context.Context, node uuid.UUID, n
 
 func (s privdAttestationStore) InsertKey(ctx context.Context, k attestationstore.Key) error {
 	_, err := s.tx.Exec(ctx, `INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,predecessor_key_id,registration_credential_id) VALUES($1,$2,'ed25519',$3,'active',$4,$4,$4,$5,$6)`,
-		k.NodeID, k.KeyID, k.PublicKey, k.CreatedAt, k.PredecessorKeyID, k.RegistrationCredentialID)
+		k.NodeID, k.KeyID, k.PublicKey, k.CreatedAt, k.PredecessorKeyID, rbacID(k.RegistrationCredentialID))
 	return err
 }
 
@@ -103,4 +103,11 @@ func (s privdAttestationStore) RevokeKey(ctx context.Context, node uuid.UUID, ke
 		return false, err
 	}
 	return affected == 1, nil
+}
+
+func (s privdAttestationStore) FirstKey(ctx context.Context, node uuid.UUID) (string, attestationstore.VerificationKey, error) {
+	var id string
+	var k attestationstore.VerificationKey
+	err := s.tx.QueryRow(ctx, `SELECT key_id,public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=$1 ORDER BY created_at,key_id LIMIT 1`, node).Scan(&id, &k.PublicKey, &k.State, &k.ActivatedAt, &k.ValidUntil)
+	return id, k, err
 }

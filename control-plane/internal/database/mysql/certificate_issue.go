@@ -20,7 +20,7 @@ func (s certificateStore) ApprovedReceipt(ctx context.Context, id, approval uuid
 	if err != nil {
 		return v, err
 	}
-	err = s.QueryRow(ctx, `SELECT node_id,csr_der,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,csr_requested_subject_sha256,issue_request_hash,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy),EXISTS(SELECT 1 FROM node_privd_attestation_keys k WHERE k.node_id=certificates.node_id AND BINARY k.key_id=BINARY certificates.csr_privd_attestation_key_id AND k.state='active' AND (k.valid_until IS NULL OR k.valid_until>?)) FROM certificates WHERE id=? AND state='signing' AND issue_approval_id=?`, now, UUIDBytes(id), UUIDBytes(approval)).Scan(&v.NodeID, &v.CSR, &v.ReceiptKey, &v.ReceiptDigest, &v.CSRDigest, &v.SubjectDigest, &v.RequestHash, &v.Current, &v.KeyActive)
+	err = s.QueryRow(ctx, `SELECT node_id,csr_der,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,csr_requested_subject_sha256,issue_request_hash,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy),EXISTS(SELECT 1 FROM node_privd_attestation_keys k WHERE k.node_id=certificates.node_id AND BINARY k.key_id=BINARY certificates.csr_privd_attestation_key_id AND k.state='active' AND (k.valid_until IS NULL OR k.valid_until>?)) FROM certificates WHERE id=? AND state='signing' AND issue_approval_id <=> ?`, now, UUIDBytes(id), rbacID(approval)).Scan(&v.NodeID, &v.CSR, &v.ReceiptKey, &v.ReceiptDigest, &v.CSRDigest, &v.SubjectDigest, &v.RequestHash, &v.Current, &v.KeyActive)
 	return
 }
 
@@ -39,7 +39,7 @@ func (s certificateStore) StartIssue(ctx context.Context, v certificatestore.Sig
 	if err != nil {
 		return err
 	}
-	_, err = s.Exec(ctx, `UPDATE certificates SET state='signing',version=version+1,issue_approval_id=?,issue_request_hash=?,issue_actor_identity_id=?,issue_certificate_version=?,updated_at=? WHERE id=?`, UUIDBytes(v.ApprovalID), v.RequestHash, UUIDBytes(v.ActorID), v.Version, at, UUIDBytes(v.ID))
+	_, err = s.Exec(ctx, `UPDATE certificates SET state='signing',version=version+1,issue_approval_id=?,issue_request_hash=?,issue_actor_identity_id=?,issue_certificate_version=?,updated_at=? WHERE id=?`, rbacID(v.ApprovalID), v.RequestHash, UUIDBytes(v.ActorID), v.Version, at, UUIDBytes(v.ID))
 	return err
 }
 
@@ -57,7 +57,7 @@ func (s certificateStore) SignerUnavailable(ctx context.Context, id, approval uu
 	if err != nil {
 		return err
 	}
-	_, err = s.Exec(ctx, `UPDATE certificates SET state='signer_unavailable',version=version+1,updated_at=? WHERE id=? AND state='signing' AND issue_approval_id=? AND issue_request_hash=?`, stamp, UUIDBytes(id), UUIDBytes(approval), hash)
+	_, err = s.Exec(ctx, `UPDATE certificates SET state='signer_unavailable',version=version+1,updated_at=? WHERE id=? AND state='signing' AND issue_approval_id <=> ? AND issue_request_hash=?`, stamp, UUIDBytes(id), rbacID(approval), hash)
 	return err
 }
 
@@ -74,7 +74,7 @@ func (s certificateStore) CompleteIssue(ctx context.Context, v certificatestore.
 	if err != nil {
 		return false, err
 	}
-	n, err := s.Exec(ctx, `UPDATE certificates SET state='issued',version=version+1,certificate_chain_pem=?,serial_number=?,not_before=?,not_after=?,updated_at=? WHERE id=? AND state IN ('signing','signer_unavailable') AND issue_approval_id=? AND issue_request_hash=?`, v.Chain, v.Serial, before, after, at, UUIDBytes(v.ID), UUIDBytes(v.ApprovalID), v.RequestHash)
+	n, err := s.Exec(ctx, `UPDATE certificates SET state='issued',version=version+1,certificate_chain_pem=?,serial_number=?,not_before=?,not_after=?,updated_at=? WHERE id=? AND state IN ('signing','signer_unavailable') AND issue_approval_id <=> ? AND issue_request_hash=?`, v.Chain, v.Serial, before, after, at, UUIDBytes(v.ID), rbacID(v.ApprovalID), v.RequestHash)
 	return n == 1, err
 }
 

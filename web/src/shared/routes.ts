@@ -35,11 +35,6 @@ export const routeRecords: RouteRecordRaw[] = [
     component: () => import("../views/OperationsView.vue"),
   },
   {
-    path: "/approvals/:approvalId?",
-    name: "approvals",
-    component: () => import("../views/ApprovalsView.vue"),
-  },
-  {
     path: "/rollouts/:rolloutId",
     name: "rollout-detail",
     component: () => import("../views/RolloutDetailView.vue"),

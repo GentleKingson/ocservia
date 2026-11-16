@@ -41,6 +41,7 @@ backend-policy-upgrades internal/api TestAgentUpgradeRouteResolvesTrustedRelease
 backend-policy-upgrades internal/api TestAgentRolloutFleetLifecycleIntegration
 # Lifecycle acceptance in the full database entry points.
 backend-enrollment internal/enrollment TestEnrollmentBackendIntegration
+backend-enrollment internal/enrollment TestInstallationBackendIntegration
 backend-enrollment-restart internal/enrollment TestNodeLifecycleRestartBackendIntegration
 backend-enrollment internal/enrollment TestEnrollmentSharedStorageBackendIntegration
 backend-enrollment internal/enrollment TestTrustLeaseBackendIntegration

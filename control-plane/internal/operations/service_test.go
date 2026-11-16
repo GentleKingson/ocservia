@@ -136,14 +136,14 @@ func TestControlledOperationsRequireTypedTargetsAndReason(t *testing.T) {
 	}
 }
 
-func TestServiceReloadRequiresIndependentApprovalMetadata(t *testing.T) {
+func TestServiceReloadRequiresActorSession(t *testing.T) {
 	request := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: ServiceReload, ActorID: "operator", Action: "service.reload", Reason: "change", TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
 	if err := validateCreate(request); err == nil {
-		t.Fatal("high-risk reload accepted without approval metadata")
+		t.Fatal("high-risk reload accepted without actor session")
 	}
-	request.ActorIdentityID, request.ActorSessionID, request.ApprovalID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	request.ActorIdentityID, request.ActorSessionID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if err := validateCreate(request); err != nil {
-		t.Fatalf("approved reload rejected: %v", err)
+		t.Fatalf("authorized reload rejected: %v", err)
 	}
 }
 
@@ -176,15 +176,15 @@ func agentUpgradeRequest() CreateRequest {
 	return CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "roll out 1.2.3", TargetVersion: "1.2.3", PackageSHA256: make([]byte, 32), Architecture: "arm64", ActorIdentityID: uuid.Must(uuid.NewV7()), ActorSessionID: uuid.Must(uuid.NewV7()), ApprovalID: uuid.Must(uuid.NewV7()), TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
 }
 
-func TestAgentUpgradeRequiresApprovalAndValidReleaseIdentity(t *testing.T) {
+func TestAgentUpgradeRequiresActorAndValidReleaseIdentity(t *testing.T) {
 	base := agentUpgradeRequest()
 	if err := validateCreate(base); err != nil {
 		t.Fatalf("approved upgrade rejected: %v", err)
 	}
 	unapproved := base
 	unapproved.ApprovalID = uuid.Nil
-	if err := validateCreate(unapproved); err == nil {
-		t.Fatal("upgrade accepted without approval metadata")
+	if err := validateCreate(unapproved); err != nil {
+		t.Fatalf("single administrator upgrade requires no approval: %v", err)
 	}
 	unidentified := base
 	unidentified.ActorIdentityID = uuid.Nil

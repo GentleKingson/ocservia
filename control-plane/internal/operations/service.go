@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"net"
 	"strconv"
 	"strings"
@@ -111,8 +112,8 @@ type CreateRequest struct {
 	FromVersion         string
 	upgradeCapability   string
 	// RolloutID binds a generated node upgrade to its durable fleet rollout.
-	// The rollout approval was consumed once at rollout creation; dispatch
-	// validates against the consumed binding instead of consuming again.
+	// Dispatch validates the immutable stored rollout intent; completion does
+	// not depend on the lifetime of the administrator's browser session.
 	RolloutID           uuid.UUID
 	SessionID           string
 	BootID              string
@@ -196,6 +197,8 @@ func (s *Service) EnableReleaseCatalog(catalog *releasecatalog.Catalog) {
 }
 
 func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation, bool, error) {
+	legacyApprovalID := request.ApprovalID
+	request.ApprovalID = uuid.Nil
 	if err := validateCreate(request); err != nil {
 		return Operation{}, false, err
 	}
@@ -284,11 +287,38 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		if observation.Architecture != request.Architecture || !bytes.Equal(digest[:], request.PackageSHA256) {
 			return Operation{}, false, ErrStaleRevision
 		}
+		rollout, err := intentStore.Rollout(ctx, request.RolloutID, false)
+		if err != nil {
+			return Operation{}, false, err
+		}
+		if rollout.WorkspaceID != workspaceID || rollout.CreatedBy != request.ActorIdentityID || rollout.ActorSession != request.ActorSessionID || rollout.TargetVersion != request.TargetVersion || !bytes.Equal(rollout.RequestHash, request.ApprovalRequestHash) {
+			return Operation{}, false, ErrRolloutState
+		}
+
 		rolloutObservation = &observation
+	}
+	if request.RolloutID == uuid.Nil {
+		switch request.Kind {
+		case ConfigApply, CertificateP12, CertificateRevoke, ServiceReload, AgentUpgrade:
+			if err := rbac.AuthorizeMutationTx(ctx, commonTx, request.ActorIdentityID, request.ActorSessionID, request.Action, rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: request.NodeID}); err != nil {
+				return Operation{}, false, err
+			}
+		}
 	}
 	if existing, same, err := findIdempotent(ctx, commonTx, workspaceID, request.IdempotencyKey, hash[:]); err != nil {
 		return Operation{}, false, err
 	} else if existing.ID != "" {
+		if !same && legacyApprovalID != uuid.Nil {
+			// A pre-upgrade request can recover its original receipt. Never use its
+			// historical approval reference for a new command or audit record.
+			historical := request
+			historical.ApprovalID = legacyApprovalID
+			historicalHash := requestHash(historical)
+			_, same, err = findIdempotent(ctx, commonTx, workspaceID, request.IdempotencyKey, historicalHash[:])
+			if err != nil {
+				return Operation{}, false, err
+			}
+		}
 		if !same {
 			return Operation{}, false, ErrIdempotencyConflict
 		}
@@ -374,15 +404,9 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		if applyActive {
 			return Operation{}, false, ErrConfigApplyActive
 		}
-		if err := approvals.ConsumeBoundTx(ctx, commonTx, request.ApprovalID, workspaceID, request.ActorIdentityID, "config.apply", "config_plan", request.ApplyMetadata.PlanID, approvalHash); err != nil {
-			return Operation{}, false, err
-		}
 		request.ApprovalRequestHash = append([]byte(nil), approvalHash...)
 	}
 	if request.Kind == CertificateP12 || request.Kind == CertificateRevoke {
-		if err := approvals.ConsumeBoundTx(ctx, commonTx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "certificate", request.CertificateID, request.ApprovalRequestHash); err != nil {
-			return Operation{}, false, err
-		}
 	}
 	if capability := requestCapability(request); capability != "" {
 		approved, err := intentStore.HasCapability(ctx, request.NodeID, capability)
@@ -423,9 +447,6 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	}
 	if request.Kind == ServiceReload {
 		approvalHash, _ := approvals.GenericBinding(request.Action, "node", request.NodeID)
-		if err := approvals.ConsumeBoundTx(ctx, commonTx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
-			return Operation{}, false, err
-		}
 		request.ApprovalRequestHash = approvalHash
 	}
 	if request.Kind == AgentUpgrade {
@@ -443,18 +464,8 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 			}
 		}
 		request.FromVersion = observedVersion
-		if request.RolloutID != uuid.Nil {
-			// The rollout approval bound the immutable rollout request and was
-			// consumed when the rollout was created; every generated node
-			// upgrade validates against that consumed binding.
-			if err := approvals.ValidateConsumedBoundTx(ctx, commonTx, request.ApprovalID, workspaceID, request.ActorIdentityID, "agent.rollout", "batch_operation", request.RolloutID, request.ApprovalRequestHash); err != nil {
-				return Operation{}, false, err
-			}
-		} else {
+		if request.RolloutID == uuid.Nil {
 			approvalHash, _ := approvals.AgentUpgradeBinding(request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture)
-			if err := approvals.ConsumeBoundTx(ctx, commonTx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
-				return Operation{}, false, err
-			}
 			request.ApprovalRequestHash = approvalHash
 		}
 		// The release identity is approved; only one scheduled upgrade may
@@ -692,6 +703,11 @@ func (s *Service) Expire(ctx context.Context) error {
 }
 
 func validateCreate(r CreateRequest) error {
+	// High-risk authority is determined by the command kind, not caller text.
+	expectedAction := map[Kind]string{ConfigApply: "config.apply", CertificateP12: "certificate.private_key.export", CertificateRevoke: "certificate.revoke", ServiceReload: "service.reload", AgentUpgrade: "agent.upgrade"}[r.Kind]
+	if expectedAction != "" && r.Action != expectedAction {
+		return ErrInvalidRequest
+	}
 	if r.NodeID == uuid.Nil || r.NodeID.Version() != 7 || r.ExpectedVersion < 1 || r.RequestID == "" || tracecontext.TraceID(r.Traceparent) == "" || r.TTL < time.Second || r.TTL > 24*time.Hour {
 		return ErrInvalidRequest
 	}
@@ -741,7 +757,7 @@ func validateCreate(r CreateRequest) error {
 	}
 	if r.Kind == ConfigApply {
 		digest := sha256.Sum256(r.Candidate)
-		if !bytes.Equal(digest[:], r.CandidateHash) || r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil || r.ApprovalID == uuid.Nil {
+		if !bytes.Equal(digest[:], r.CandidateHash) || r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil {
 			return ErrInvalidRequest
 		}
 	}
@@ -758,7 +774,7 @@ func validateCreate(r CreateRequest) error {
 	if r.Kind == CertificateP12 && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || r.CertificateVersion == 0 || r.ArtifactID == uuid.Nil || r.ArtifactID.Version() != 7 || len(r.CertificateChain) < 64 || len(r.CertificateChain) > 256*1024 || !validSealedP12(r.SealedPassword) || r.ArtifactMetadata == nil || len(r.ArtifactMetadata.TokenSHA256) != sha256.Size || len(r.ArtifactMetadata.RequestHash) != sha256.Size || !r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC()) || r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC().Add(30*time.Minute))) {
 		return ErrInvalidRequest
 	}
-	if (r.Kind == CertificateP12 || r.Kind == CertificateRevoke) && (r.ApprovalID == uuid.Nil || r.ActorIdentityID == uuid.Nil || len(r.ApprovalRequestHash) != sha256.Size) {
+	if (r.Kind == CertificateP12 || r.Kind == CertificateRevoke) && (r.ActorIdentityID == uuid.Nil || len(r.ApprovalRequestHash) != sha256.Size) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == CertificateRevoke && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || r.CertificateVersion == 0 || strings.TrimSpace(r.RevocationReason) == "" || len(r.RevocationReason) > 128) {
@@ -798,12 +814,12 @@ func validateCreate(r CreateRequest) error {
 	if r.Kind == ConfigPlan && r.ActorID == "" {
 		return ErrInvalidRequest
 	}
-	if r.Kind == ServiceReload && (r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil || r.ApprovalID == uuid.Nil) {
+	if r.Kind == ServiceReload && (r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil) {
 		return ErrInvalidRequest
 	}
 	// Upgrades replace root-owned agent binaries, so they demand the same
-	// independent approval boundary as other high-impact node operations.
-	if r.Kind == AgentUpgrade && (r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil || r.ApprovalID == uuid.Nil) {
+	// authenticated administrator boundary as other high-impact node operations.
+	if r.Kind == AgentUpgrade && (r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil) {
 		return ErrInvalidRequest
 	}
 	return nil
@@ -979,7 +995,7 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 	if r.ApprovalID != uuid.Nil {
 		envelope.ApprovalId = r.ApprovalID[:]
 	}
-	if len(r.ApprovalRequestHash) != 0 {
+	if r.ApprovalID != uuid.Nil && len(r.ApprovalRequestHash) != 0 {
 		envelope.ApprovalRequestSha256 = append([]byte(nil), r.ApprovalRequestHash...)
 	}
 	payloadType := "synthetic_noop"

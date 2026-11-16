@@ -22,9 +22,21 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 	plans := &observedConfigPlans{ConfigPlans: f.s.configPlanLookup.(*configplan.Service)}
 	userOperations := useroperations.NewBackend(f.b, nil)
 	f.s = f.newServer(Modules{ConfigPlans: plans, UserOperations: userOperations})
-	f.exec(`DELETE FROM role_bindings WHERE identity_id=$1`, `DELETE FROM role_bindings WHERE identity_id=?`, f.approver.principal.IdentityID)
-	f.bind(f.approver, plan.NodeID, "UserManager")
-	manager := f.approver
+	// A separate scoped operator tests RBAC denials; it has no approval authority.
+	name, password := "scoped-"+uuid.NewString(), "a scoped route test credential"
+	if _, err := f.s.auth.CreateLocalCredential(t.Context(), name, password); err != nil {
+		t.Fatal(err)
+	}
+	cookie, _, err := f.s.auth.AuthenticateLocal(t.Context(), name, password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor, err := f.s.auth.Authenticate(t.Context(), cookie)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := applyHTTPActor{cookie: cookie, principal: actor}
+	f.bind(manager, plan.NodeID, "UserManager")
 	other, sibling, foreign := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	stamp := value.Timestamp{Valid: true}
 	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Business routes',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Business routes',?,?,?)`, other, other.String(), stamp, stamp)
@@ -204,7 +216,7 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 		before := counts(t)
 		w := f.call("POST", "/api/v1/user-batches", batchBody(plan.NodeID, foreign), uuid.NewString(), manager.cookie, nil)
 		assertBaselineProblem(t, w, "/api/v1/user-batches", 400, "invalid-request", "Request is invalid", "every batch item must reference an existing user in the selected workspace")
-		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", strings.ReplaceAll(batchBody(plan.NodeID), `"enable"`, `"disable"`), uuid.NewString(), manager.cookie, nil), 403, "approval-required")
+		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", strings.ReplaceAll(batchBody(plan.NodeID), `"enable"`, `"disable"`), uuid.NewString(), f.reader.cookie, nil), 403, "forbidden")
 		unchanged(t, before)
 		w = f.call("POST", "/api/v1/user-batches", batchBody(plan.NodeID, sibling), uuid.NewString(), manager.cookie, nil)
 		assertStatus(t, w, 202)

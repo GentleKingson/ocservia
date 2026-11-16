@@ -282,7 +282,7 @@ onBeforeUnmount(() => {
             <dt class="text-muted-foreground text-xs">{{ $t("reason") }}</dt>
             <dd class="m-0 break-words">{{ rollout.reason }}</dd>
           </div>
-          <div class="grid min-w-0 gap-1">
+          <div v-if="rollout.approvalId" class="grid min-w-0 gap-1">
             <dt class="text-muted-foreground text-xs">
               {{ $t("approvalId") }}
             </dt>

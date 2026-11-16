@@ -2,11 +2,11 @@
 -- ocservia:format=1
 -- ocservia:engine=postgresql
 -- ocservia:epoch=2
--- ocservia:revision=1
--- ocservia:history-sha256=8e0b43c44948ca4ca559907a6431194858e148d20edc7a796b613354714b8722
+-- ocservia:revision=2
+-- ocservia:history-sha256=f28f8c011013e180bb456f29362f250f83596e15acd692d062883815704f5adc
 
 -- ocservia:step=001:baseline
--- ocservia:metadata={"catalog_sha256":"24b043c5ad24ba23900a65a537b4c6f2c1c769a0a07b8899c2caeb81af43cc69"}
+-- ocservia:metadata={"catalog_sha256":"2701cf9af3ad577f17af4a919ddc49c1b74b03561ade5bc255f9487b1b53be68"}
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
 SET LOCAL idle_in_transaction_session_timeout = 0;
@@ -256,7 +256,7 @@ CREATE TABLE public.agent_rollouts (
     batch_size integer CONSTRAINT "agent_rollouts_batch_size_not_null" NOT NULL,
     stop_on_failure boolean DEFAULT true CONSTRAINT "agent_rollouts_stop_on_failure_not_null" NOT NULL,
     reason text CONSTRAINT "agent_rollouts_reason_not_null" NOT NULL,
-    approval_id uuid CONSTRAINT "agent_rollouts_approval_id_not_null" NOT NULL,
+    approval_id uuid,
     request_hash bytea CONSTRAINT "agent_rollouts_request_hash_not_null" NOT NULL,
     created_by uuid CONSTRAINT "agent_rollouts_created_by_not_null" NOT NULL,
     actor_session_id uuid CONSTRAINT "agent_rollouts_actor_session_id_not_null" NOT NULL,
@@ -619,7 +619,7 @@ CREATE TABLE public.config_apply_operations (
     workspace_id uuid CONSTRAINT "config_apply_operations_workspace_id_not_null" NOT NULL,
     node_id uuid CONSTRAINT "config_apply_operations_node_id_not_null" NOT NULL,
     plan_id uuid CONSTRAINT "config_apply_operations_plan_id_not_null" NOT NULL,
-    approval_id uuid CONSTRAINT "config_apply_operations_approval_id_not_null" NOT NULL,
+    approval_id uuid,
     expected_revision bigint CONSTRAINT "config_apply_operations_expected_revision_not_null" NOT NULL,
     desired_revision bigint CONSTRAINT "config_apply_operations_desired_revision_not_null" NOT NULL,
     candidate_hash bytea CONSTRAINT "config_apply_operations_candidate_hash_not_null" NOT NULL,
@@ -971,7 +971,7 @@ CREATE TABLE public.node_privd_attestation_keys (
     revoked_at timestamp with time zone,
     predecessor_key_id text,
     successor_key_id text,
-    registration_credential_id uuid CONSTRAINT "node_privd_attestation_keys_registration_credential_id_not_null" NOT NULL,
+    registration_credential_id uuid,
     CONSTRAINT node_privd_attestation_keys_algorithm_check CHECK ((algorithm = 'ed25519'::text)),
     CONSTRAINT node_privd_attestation_keys_check CHECK (((valid_until IS NULL) OR (valid_until >= activated_at))),
     CONSTRAINT node_privd_attestation_keys_check1 CHECK (((state = 'revoked'::text) = (revoked_at IS NOT NULL))),

@@ -81,6 +81,11 @@ services:
       OCSERV_AUDIT_EVENT_KEY_ID: ${OCSERV_AUDIT_EVENT_KEY_ID:?set the audit event HMAC key ID}
       OCSERV_AUDIT_EVENT_KEY_FILE: /run/secrets/audit_event_key
     secrets:
+      - source: relay_access_token
+        target: relay_access_token
+        uid: "65532"
+        gid: "65532"
+        mode: 0440
       - database_owner_url
       - session_key
       - audit_checkpoint_key
@@ -121,6 +126,8 @@ services:
       OCSERV_TRUST_SOCKET: /run/ocserv-trust/control-plane.sock
       OCSERV_TRANSPORT_UID: "65532"
       OCSERV_TRANSPORT_GID: "65532"
+      OCSERV_RELAY_URL_A: ${OCSERV_RELAY_URL_A:?set the dedicated HTTPS relay URL}
+      OCSERV_RELAY_ACCESS_TOKEN_FILE: /run/secrets/relay_access_token
       OCSERV_CONTROLLER_ENDPOINT_ID: ${OCSERV_CONTROLLER_ENDPOINT_ID:?set OCSERV_CONTROLLER_ENDPOINT_ID}
       OCSERV_CERTIFICATE_SIGNER_URL: ${OCSERV_CERTIFICATE_SIGNER_URL:?set OCSERV_CERTIFICATE_SIGNER_URL}
       OCSERV_CERTIFICATE_SIGNER_TOKEN_FILE: /run/secrets/certificate_signer_token

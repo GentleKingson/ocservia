@@ -54,9 +54,9 @@ func TestLocalLifecycleConcurrencyIntegration(t *testing.T) {
 	bootstrap := func() (uuid.UUID, error) {
 		return s.BootstrapLocalAdmin(ctx, name, password, wid, name+"-approver", secondPassword)
 	}
-	exec(`ALTER TABLE audit_events ADD CONSTRAINT test_bootstrap_approver_audit_failure CHECK(action<>'local_user.bootstrap-approver') NOT VALID`)
+	exec(`ALTER TABLE audit_events ADD CONSTRAINT test_bootstrap_approver_audit_failure CHECK(action<>'local_user.bootstrap') NOT VALID`)
 	if _, err := bootstrap(); err == nil {
-		t.Fatal("approver audit failure committed")
+		t.Fatal("administrator audit failure committed")
 	}
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM identities WHERE subject IN ($1,$2))+(SELECT count(*) FROM local_auth_bootstrap)`, name, name+"-approver").Scan(&count); err != nil || count != 0 {

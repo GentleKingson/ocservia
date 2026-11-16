@@ -367,7 +367,6 @@ describe("node workflow context isolation", () => {
     view.configReason = "plan";
     await view.submitConfigPlan();
     await changeContext(view, "node");
-    view.configApplyApprovalId = "approval";
     view.configApplyReason = "apply";
     await view.submitConfigApply();
     expect(view.configDialog).toBe(false);
@@ -494,7 +493,6 @@ describe("node workflow context isolation", () => {
     await view.submitConfigPlan();
     const accepted = deferred<Operation>();
     mocks.applyConfigPlan.mockReturnValueOnce(accepted.promise);
-    view.configApplyApprovalId = "approval";
     view.configApplyReason = "apply";
     const pending = view.submitConfigApply();
     await changeContext(view, "node");
@@ -534,7 +532,6 @@ describe("node workflow context isolation", () => {
             ? mocks.createCertificateP12
             : mocks.revokeCertificate;
       api.mockReturnValueOnce(accepted.promise);
-      view.certificateApprovalId = "approval";
       view.certificateReason = "request";
       const pending = view[method]();
       await changeContext(view, "workspace");
@@ -571,7 +568,6 @@ describe("node workflow context isolation", () => {
       const view = await mount();
       mocks.listNodeCertificates.mockResolvedValue([certificate]);
       await view.openCertificate();
-      view.certificateApprovalId = "approval";
       view.certificateReason = "export";
       await view.createP12();
       const blob = deferred<Blob>();
@@ -604,7 +600,6 @@ describe("node workflow context isolation", () => {
     let view = await mount();
     mocks.listNodeCertificates.mockResolvedValue([certificate]);
     await view.openCertificate();
-    view.certificateApprovalId = "approval";
     view.certificateReason = "export";
     const saved = vi.spyOn(sessionStorage, "setItem");
     const accepted = deferred<unknown>();
@@ -714,14 +709,12 @@ describe("node workflow context isolation", () => {
       const accepted = deferred<unknown>();
       api.mockReturnValueOnce(accepted.promise);
       view.certificateReason = "first";
-      view.certificateApprovalId = "approval";
       const first = view[method]();
       unmount?.();
       view = await mount();
       const reopening = view.openCertificate();
       await nextTick();
       view.certificateReason = "second";
-      view.certificateApprovalId = "approval";
       await view[method]();
       const calls = api.mock.calls.length;
       accepted.resolve(
@@ -752,7 +745,6 @@ describe("node workflow context isolation", () => {
     mocks.listNodeCertificates.mockResolvedValue([certificate]);
     await view.openCertificate();
     view.certificateReason = "export";
-    view.certificateApprovalId = "approval";
     await view.createP12();
     const context: NodeWorkflowContext = {
       nodeId: "node-a",
@@ -792,14 +784,12 @@ describe("node workflow context isolation", () => {
         await view.openConfigPlan();
         view.configReason = "plan";
         await view.submitConfigPlan();
-        view.configApplyApprovalId = "approval";
         view.configApplyReason = "apply";
         await view.submitConfigApply();
       } else {
         mocks.listNodeCertificates.mockResolvedValue([certificate]);
         await view.openCertificate();
         view.certificateReason = "export";
-        view.certificateApprovalId = "approval";
         await view.createP12();
         view.certificateDialog = false;
       }

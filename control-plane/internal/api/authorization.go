@@ -85,7 +85,7 @@ func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal,
 	if action == "" {
 		return nil, rbac.ErrForbidden
 	}
-	if (r.Method == http.MethodPost && (r.URL.Path == "/api/v1/user-batches" || r.URL.Path == "/api/v1/approval-requests" || r.URL.Path == "/api/v1/agent-rollouts")) || (r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/api/v1/user-batches/") || r.URL.Path == "/api/v1/agent-rollouts" || r.URL.Path == "/api/v1/approval-requests")) {
+	if (r.Method == http.MethodPost && (r.URL.Path == "/api/v1/user-batches" || r.URL.Path == "/api/v1/agent-rollouts")) || (r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/api/v1/user-batches/") || r.URL.Path == "/api/v1/agent-rollouts")) {
 		workspaceID, err := s.selectWorkspace(r, principal, action)
 		if err != nil {
 			return nil, err
@@ -117,56 +117,6 @@ func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal,
 			return nil, rolloutErr
 		}
 		resource, err = s.rbac.Workspace(r.Context(), rolloutWorkspace)
-	} else if approvalText := r.PathValue("approval_id"); approvalText != "" {
-		approvalID, parseErr := uuid.Parse(strings.TrimSuffix(approvalText, ":approve"))
-		if parseErr != nil || approvalID.Version() != 7 || s.approvals == nil {
-			return nil, database.ErrNotFound
-		}
-		approval, getErr := s.approvals.Get(r.Context(), approvalID)
-		if getErr != nil {
-			return nil, getErr
-		}
-		scopes, scopeErr := s.approvals.AuthorityResources(r.Context(), approvalID)
-		if scopeErr != nil {
-			return nil, scopeErr
-		}
-		if len(scopes) > 0 {
-			for _, scope := range scopes {
-				if scope.WorkspaceID != approval.WorkspaceID {
-					return nil, rbac.ErrForbidden
-				}
-				resource = rbac.Resource{WorkspaceID: scope.WorkspaceID, Type: scope.Type, ID: scope.ID}
-				if err := s.authorizeVisible(r.Context(), principal, action, resource); err != nil {
-					return nil, err
-				}
-			}
-			ctx := context.WithValue(r.Context(), principalKey{}, principal)
-			return context.WithValue(ctx, workspaceKey{}, approval.WorkspaceID), nil
-		}
-		if approval.ResourceType == "config_plan" {
-			if s.configPlanLookup == nil {
-				return nil, database.ErrNotFound
-			}
-			workspaceID, nodeID, resourceErr := s.configPlanLookup.Resource(r.Context(), approval.ResourceID)
-			if resourceErr != nil {
-				return nil, resourceErr
-			}
-			if workspaceID != approval.WorkspaceID {
-				return nil, rbac.ErrForbidden
-			}
-			resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
-		} else if approval.ResourceType == "certificate" {
-			if s.certificates == nil {
-				return nil, database.ErrNotFound
-			}
-			workspaceID, nodeID, resourceErr := s.certificates.Resource(r.Context(), approval.ResourceID)
-			if resourceErr != nil || workspaceID != approval.WorkspaceID {
-				return nil, rbac.ErrForbidden
-			}
-			resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
-		} else {
-			resource = rbac.Resource{WorkspaceID: approval.WorkspaceID, Type: approval.ResourceType, ID: approval.ResourceID}
-		}
 	} else if planText := r.PathValue("plan_id"); planText != "" {
 		planID, parseErr := uuid.Parse(planText)
 		if parseErr != nil || planID.Version() != 7 || s.configPlanLookup == nil {
@@ -355,15 +305,6 @@ func routeAction(r *http.Request) string {
 		return "node.revoke"
 	case strings.HasSuffix(path, "/privd-attestation-credentials"), strings.HasSuffix(path, "/privd-attestation-keys:revoke"):
 		return "privd.attestation.manage"
-	case strings.HasSuffix(path, ":approve") && strings.Contains(path, "/approval-requests/"):
-		return "approval.approve"
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/approval-requests/"):
-		return "approval.approve"
-	case path == "/api/v1/approval-requests":
-		if r.Method == http.MethodGet {
-			return "approval.approve"
-		}
-		return "approval.request"
 	case strings.HasPrefix(path, "/api/v1/audit"):
 		if strings.HasSuffix(path, ":verify") {
 			return "audit.verify"

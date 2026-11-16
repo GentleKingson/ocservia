@@ -104,7 +104,7 @@ func hash(envelope *agentv1.CommandEnvelope, version agentv1.SemanticPayloadHash
 		payload := envelope.GetCompleteConfigApply()
 		digest, err := configprofile.Hash(payload.GetCandidate())
 		expires := payload.GetPlanExpiresAt()
-		if version != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 || err != nil || !bytes.Equal(digest[:], payload.GetCandidateHash()) || !bytes.Equal(payload.GetCandidate().GetNodeId(), envelope.GetNodeId()) || len(payload.GetMaterializedHash()) != 32 || len(payload.GetExpectedCurrentHash()) != 32 || payload.GetDesiredRevision() <= payload.GetCandidate().GetExpectedRevision() || len(payload.GetPlanId()) != 16 || expires == nil || !expires.IsValid() || len(envelope.GetApprovalId()) != 16 || len(envelope.GetApprovalRequestSha256()) != 32 {
+		if version != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 || err != nil || !bytes.Equal(digest[:], payload.GetCandidateHash()) || !bytes.Equal(payload.GetCandidate().GetNodeId(), envelope.GetNodeId()) || len(payload.GetMaterializedHash()) != 32 || len(payload.GetExpectedCurrentHash()) != 32 || payload.GetDesiredRevision() <= payload.GetCandidate().GetExpectedRevision() || len(payload.GetPlanId()) != 16 || expires == nil || !expires.IsValid() || !((len(envelope.GetApprovalId()) == 0 && len(envelope.GetApprovalRequestSha256()) == 0) || (len(envelope.GetApprovalId()) == 16 && len(envelope.GetApprovalRequestSha256()) == 32)) {
 			return [sha256.Size]byte{}, errors.New("complete config apply identity is malformed")
 		}
 		payloadKind = 130

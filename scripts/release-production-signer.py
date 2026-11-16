@@ -97,8 +97,7 @@ def import_binding():
                        '--security-opt=no-new-privileges:true', '--network', 'ocservia-production_database',
                        '-v', f'{dsn}:/run/export-dsn:ro', '--entrypoint', '/usr/local/bin/ocserv-sealing-export',
                        os.environ['OCSERV_CONTROL_IMAGE'], '--database-url-file', '/run/export-dsn', '--bundled-postgres',
-                       '--workspace', os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], '--node', node, '--endpoint', endpoint,
-                       '--approval', (WORK / 'node-approval').read_text().strip())
+                       '--workspace', os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], '--node', node, '--endpoint', endpoint)
     finally:
         run('sudo', 'rm', '--', dsn)
     public = run('sudo', 'python3', ROOT / 'scripts/export-node-sealing-keys.py', '--node', node,

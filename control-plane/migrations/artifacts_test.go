@@ -76,6 +76,11 @@ func postgresDatabaseDigest(t *testing.T, pool *pgxpool.Pool) string {
 
 func TestPostgreSQLArtifactFreshAndUpgrade(t *testing.T) {
 	ctx := context.Background()
+	original, err := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := original.schema.Baseline.Number
 	upgraded := snapshotDatabase(t)
 	if err := Migrate(ctx, upgraded); err != nil {
 		t.Fatal(err)
@@ -110,7 +115,7 @@ func TestPostgreSQLArtifactFreshAndUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(freshRows) != 1 || freshRows[0].revision != 2 || len(upgradeRows) != 2 || upgradeRows[1].revision != 2 {
+	if len(freshRows) != 1 || freshRows[0].revision != current+1 || len(upgradeRows) != 2 || upgradeRows[0].revision != current || upgradeRows[1].revision != current+1 {
 		t.Fatal("incorrect checkpoint/execution receipts", freshRows, upgradeRows)
 	}
 }
@@ -123,7 +128,7 @@ func TestPostgreSQLArtifactUnsupportedNoMutation(t *testing.T) {
 		"UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex')",
 		"UPDATE schema_revisions SET state='running',verified_at=NULL",
 		"UPDATE schema_revisions SET step=0",
-		"INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) SELECT epoch,2,checksum,state,step,verified_at FROM schema_revisions",
+		"INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) SELECT epoch,revision+1,checksum,state,step,verified_at FROM schema_revisions",
 	} {
 		t.Run(tamper, func(t *testing.T) {
 			pool := snapshotDatabase(t)
@@ -215,7 +220,7 @@ func TestPostgreSQLArtifactCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 1 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != checkpointRef {
+	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 2 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != checkpointRef {
 		t.Fatal("major cutover must use the released immutable checkpoint")
 	}
 	for _, metadata := range []string{`{"catalog_sha256":"` + strings.Repeat("a", 64) + `","unknown":1}`, `{"catalog_sha256":"` + strings.Repeat("a", 64) + `","catalog_sha256":"` + strings.Repeat("a", 64) + `"}`, `{"catalog_sha256":"` + strings.Repeat("A", 64) + `"}`} {

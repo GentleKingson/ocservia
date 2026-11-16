@@ -2,11 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   AgentRolloutFromJSON,
-  ApprovalFromJSON,
   ArtifactGrantFromJSON,
   CertificateFromJSON,
   ConfigPlanFromJSON,
-  ConfigPlanApprovalSummaryFromJSON,
   NodeObservedStateFromJSON,
   NodeSessionFromJSON,
   OperationFromJSON,
@@ -70,14 +68,6 @@ describe("telemetry timestamps", () => {
     expect(resource.observedAt).toBe("infinity");
     expect(UserGroupResourceStateToJSON(resource)).toEqual(wire);
   });
-  it("retains approval expiry and creation clocks", () => {
-    const approval = ApprovalFromJSON({
-      expires_at: "infinity",
-      created_at: "-infinity",
-    });
-    expect(approval.expiresAt).toBe("infinity");
-    expect(approval.createdAt).toBe("-infinity");
-  });
   it("retains rollout clocks and complete stored exclusions", () => {
     const excluded = [null, ["nested"], { node_id: "node", extra: true }];
     const rollout = AgentRolloutFromJSON({
@@ -99,9 +89,6 @@ describe("telemetry timestamps", () => {
     expect(plan.warnings).toEqual(warnings);
     expect(plan.createdAt).toBe("-infinity");
     expect(plan.expiresAt).toBe("infinity");
-    expect(
-      ConfigPlanApprovalSummaryFromJSON({ expires_at: "infinity" }).expiresAt,
-    ).toBe("infinity");
   });
   it("retains certificate timestamps and the complete DNS JSON array", () => {
     const dnsNames = ["example.test", null, ["nested"], { extra: true }];

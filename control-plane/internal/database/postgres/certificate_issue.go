@@ -15,7 +15,7 @@ func (s certificateStore) LockIssue(ctx context.Context, id uuid.UUID) (v certif
 }
 
 func (s certificateStore) ApprovedReceipt(ctx context.Context, id, approval uuid.UUID) (v certificatestore.IssueReceipt, err error) {
-	err = s.QueryRow(ctx, `SELECT node_id,csr_der,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,csr_requested_subject_sha256,issue_request_hash,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy),EXISTS(SELECT 1 FROM node_privd_attestation_keys k WHERE k.node_id=certificates.node_id AND k.key_id=certificates.csr_privd_attestation_key_id AND k.state='active' AND (k.valid_until IS NULL OR k.valid_until>now())) FROM certificates WHERE id=$1 AND state='signing' AND issue_approval_id=$2`, id, approval).Scan(&v.NodeID, &v.CSR, &v.ReceiptKey, &v.ReceiptDigest, &v.CSRDigest, &v.SubjectDigest, &v.RequestHash, &v.Current, &v.KeyActive)
+	err = s.QueryRow(ctx, `SELECT node_id,csr_der,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,csr_requested_subject_sha256,issue_request_hash,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy),EXISTS(SELECT 1 FROM node_privd_attestation_keys k WHERE k.node_id=certificates.node_id AND k.key_id=certificates.csr_privd_attestation_key_id AND k.state='active' AND (k.valid_until IS NULL OR k.valid_until>now())) FROM certificates WHERE id=$1 AND state='signing' AND issue_approval_id IS NOT DISTINCT FROM $2`, id, rbacID(approval)).Scan(&v.NodeID, &v.CSR, &v.ReceiptKey, &v.ReceiptDigest, &v.CSRDigest, &v.SubjectDigest, &v.RequestHash, &v.Current, &v.KeyActive)
 	return
 }
 
@@ -30,7 +30,7 @@ func (s certificateStore) KeyActive(ctx context.Context, node uuid.UUID, key str
 }
 
 func (s certificateStore) StartIssue(ctx context.Context, v certificatestore.Signing) error {
-	_, err := s.Exec(ctx, `UPDATE certificates SET state='signing',version=version+1,issue_approval_id=$2,issue_request_hash=$3,issue_actor_identity_id=$4,issue_certificate_version=$5,updated_at=$6 WHERE id=$1`, v.ID, v.ApprovalID, v.RequestHash, v.ActorID, v.Version, v.At)
+	_, err := s.Exec(ctx, `UPDATE certificates SET state='signing',version=version+1,issue_approval_id=$2,issue_request_hash=$3,issue_actor_identity_id=$4,issue_certificate_version=$5,updated_at=$6 WHERE id=$1`, v.ID, rbacID(v.ApprovalID), v.RequestHash, v.ActorID, v.Version, v.At)
 	return err
 }
 
@@ -40,12 +40,12 @@ func (s certificateStore) ResumeIssue(ctx context.Context, id uuid.UUID, at time
 }
 
 func (s certificateStore) SignerUnavailable(ctx context.Context, id, approval uuid.UUID, hash []byte, at time.Time) error {
-	_, err := s.Exec(ctx, `UPDATE certificates SET state='signer_unavailable',version=version+1,updated_at=$2 WHERE id=$1 AND state='signing' AND issue_approval_id=$3 AND issue_request_hash=$4`, id, at, approval, hash)
+	_, err := s.Exec(ctx, `UPDATE certificates SET state='signer_unavailable',version=version+1,updated_at=$2 WHERE id=$1 AND state='signing' AND issue_approval_id IS NOT DISTINCT FROM $3 AND issue_request_hash=$4`, id, at, rbacID(approval), hash)
 	return err
 }
 
 func (s certificateStore) CompleteIssue(ctx context.Context, v certificatestore.Issued) (bool, error) {
-	n, err := s.Exec(ctx, `UPDATE certificates SET state='issued',version=version+1,certificate_chain_pem=$2,serial_number=$3,not_before=$4,not_after=$5,updated_at=$6 WHERE id=$1 AND state IN ('signing','signer_unavailable') AND issue_approval_id=$7 AND issue_request_hash=$8`, v.ID, v.Chain, v.Serial, v.NotBefore, v.NotAfter, v.At, v.ApprovalID, v.RequestHash)
+	n, err := s.Exec(ctx, `UPDATE certificates SET state='issued',version=version+1,certificate_chain_pem=$2,serial_number=$3,not_before=$4,not_after=$5,updated_at=$6 WHERE id=$1 AND state IN ('signing','signer_unavailable') AND issue_approval_id IS NOT DISTINCT FROM $7 AND issue_request_hash=$8`, v.ID, v.Chain, v.Serial, v.NotBefore, v.NotAfter, v.At, rbacID(v.ApprovalID), v.RequestHash)
 	return n == 1, err
 }
 

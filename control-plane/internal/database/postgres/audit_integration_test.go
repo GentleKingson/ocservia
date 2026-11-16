@@ -39,7 +39,11 @@ func TestAuditRBACControllerIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, uuid.New(), approver, workspace, now.Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	audittest.Controller(t, postgres.WrapPool(pool), workspace, actor, target, func(id, resource uuid.UUID, hash []byte, expiry time.Time) error {
+	session := uuid.New()
+	if _, err = pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,$3,$4)`, session, actor, now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	audittest.Controller(t, postgres.WrapPool(pool), workspace, actor, target, session, func(id, resource uuid.UUID, hash []byte, expiry time.Time) error {
 		_, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'role_binding.elevate','role_binding',$4,'test','approved',$5,'test',$6,$7,$8,$9,$10)`, id, workspace, actor, resource, approver, expiry, expiry.Add(-time.Minute), expiry.Add(-time.Hour), hash, `{}`)
 		if err != nil {
 			return err

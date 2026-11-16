@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -15,23 +14,14 @@ var (
 	ErrLocalInitialized      = errors.New("Local authentication is already initialized")
 	ErrLocalInvalid          = errors.New("invalid Local user request")
 	ErrLocalDuplicate        = errors.New("Local username already exists")
-	ErrLocalProtected        = errors.New("retain an active Local PlatformAdmin and a distinct Local approver in the management workspace")
+	ErrLocalProtected        = errors.New("retain an active Local PlatformAdmin in the management workspace")
 	ErrLocalWorkspaceMissing = errors.New("management workspace does not exist; provision it through the protected administrative database connection before initialization")
 )
 
-// BootstrapLocalAdmin is an explicit one-shot, never part of normal startup.
-func (s *Service) BootstrapLocalAdmin(ctx context.Context, username, password string, workspaceID uuid.UUID, approverUsername, approverPassword string) (uuid.UUID, error) {
-	return s.initializeLocal(ctx, username, password, workspaceID, approverUsername, approverPassword, false)
-}
-
-// CompleteLocalBootstrap only completes an eligible legacy Local bootstrap
-// marker missing an independent approver. It never replaces a credential or
-// grants a caller-selected role or workspace.
-func (s *Service) CompleteLocalBootstrap(ctx context.Context, username, password string, workspaceID uuid.UUID, approverUsername, approverPassword string) (uuid.UUID, error) {
-	return s.initializeLocal(ctx, username, password, workspaceID, approverUsername, approverPassword, true)
-}
-
-func (s *Service) initializeLocal(ctx context.Context, username, password string, workspaceID uuid.UUID, approverUsername, approverPassword string, complete bool) (uuid.UUID, error) {
+// BootstrapLocalAdmin is an explicit, atomic one-shot; normal startup never
+// reads or resets administrator credentials. The trailing legacy parameters are
+// ignored so older trusted callers cannot provision a second bootstrap identity.
+func (s *Service) BootstrapLocalAdmin(ctx context.Context, username, password string, workspaceID uuid.UUID, _, _ string) (uuid.UUID, error) {
 	if !s.localEnabled {
 		return uuid.Nil, ErrLocalDisabled
 	}
@@ -39,48 +29,12 @@ func (s *Service) initializeLocal(ctx context.Context, username, password string
 	if err != nil || workspaceID == uuid.Nil {
 		return uuid.Nil, ErrLocalInvalid
 	}
-	approverUsername, err = normalizeLocalUsername(approverUsername)
-	if err != nil || approverUsername == username || password == approverPassword {
-		return uuid.Nil, ErrLocalInvalid
-	}
-	approverHash, err := hashPassword(approverPassword)
+	hash, err := hashPassword(password)
 	if err != nil {
 		return uuid.Nil, err
 	}
-	var hash string
-	var credential localCredential
-	if complete {
-		lease, err := s.reserveLocalAttempt(ctx, username)
-		if err != nil {
-			return uuid.Nil, err
-		}
-		failed := false
-		defer func() { _ = s.finishLocalAttempt(username, lease, failed) }()
-		credential, err = s.localCredential(ctx, username)
-		if err != nil {
-			return uuid.Nil, ErrUnauthenticated
-		}
-		valid, err := verifyPassword(credential.passwordHash, password)
-		if err != nil {
-			return uuid.Nil, err
-		}
-		if !valid {
-			failed = true
-			return uuid.Nil, ErrUnauthenticated
-		}
-		if credential.disabled {
-			return uuid.Nil, ErrUnauthenticated
-		}
-		credential.attemptLease = lease
-	} else {
-		hash, err = hashPassword(password)
-		if err != nil {
-			return uuid.Nil, err
-		}
-	}
-	var id uuid.UUID
+	id := uuid.Must(uuid.NewV7())
 	err = s.withAuthentication(ctx, func(tx database.Tx, store authstore.Store) error {
-		// Serialize even when the singleton row does not yet exist.
 		if err := store.LockManagement(ctx); err != nil {
 			return err
 		}
@@ -90,65 +44,35 @@ func (s *Service) initializeLocal(ctx context.Context, username, password string
 			}
 			return err
 		}
-		if complete {
-			bootstrap, err := store.Bootstrap(ctx)
-			if err != nil {
-				return err
-			}
-			id = bootstrap.IdentityID
-			if !bootstrap.Pending || bootstrap.WorkspaceID != workspaceID || id != credential.identityID {
-				return ErrLocalInitialized
-			}
-			if err := store.ValidatePendingCredential(ctx, id, workspaceID, credential.passwordHash); err != nil {
-				return ErrLocalInitialized
-			}
-			cleared, err := store.ClearAttempt(ctx, username, credential.attemptLease)
-			if err != nil {
-				return err
-			}
-			if !cleared {
-				return ErrUnauthenticated
-			}
-		} else {
-			initialized, err := store.Initialized(ctx)
-			if err != nil {
-				return err
-			}
-			if initialized {
-				return ErrLocalInitialized
-			}
-			id = uuid.Must(uuid.NewV7())
-			if err := store.InsertCredential(ctx, id, username, hash, s.now()); err != nil {
-				return err
-			}
-			now := s.now()
-			if err := store.BindRole(ctx, uuid.Must(uuid.NewV7()), id, workspaceID, "PlatformAdmin", now); err != nil {
-				return err
-			}
-			if err := store.InsertBootstrap(ctx, id, workspaceID, now); err != nil {
-				return err
-			}
-			if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "controller", ActorID: "local-bootstrap", Action: "local_user.bootstrap", ResourceType: "local_user", ResourceID: id, RequestID: uuid.NewString(), Result: "succeeded", Reason: "initial Local administrator", At: now}); err != nil {
-				return err
-			}
-		}
-		approverID := uuid.Must(uuid.NewV7())
-		if err := store.InsertCredential(ctx, approverID, approverUsername, approverHash, s.now()); err != nil {
+		initialized, err := store.Initialized(ctx)
+		if err != nil {
 			return err
+		}
+		if initialized {
+			return ErrLocalInitialized
 		}
 		now := s.now()
-		if err := store.BindRole(ctx, uuid.Must(uuid.NewV7()), approverID, workspaceID, "SecurityAdmin", now); err != nil {
+		if err := store.InsertCredential(ctx, id, username, hash, now); err != nil {
 			return err
 		}
-		if err := store.CompleteBootstrap(ctx, approverID, now); err != nil {
+		if err := store.BindRole(ctx, uuid.Must(uuid.NewV7()), id, workspaceID, "PlatformAdmin", now); err != nil {
 			return err
 		}
-		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "controller", ActorID: "local-bootstrap", Action: "local_user.bootstrap-approver", ResourceType: "local_user", ResourceID: approverID, RequestID: uuid.NewString(), Result: "succeeded", Reason: "independent Local SecurityAdmin initialization", At: now})
+		if err := store.InsertBootstrap(ctx, id, workspaceID, now); err != nil {
+			return err
+		}
+		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "controller", ActorID: "local-bootstrap", Action: "local_user.bootstrap", ResourceType: "local_user", ResourceID: id, RequestID: uuid.NewString(), Result: "succeeded", Reason: "initial Local administrator", At: now})
 	})
 	if err != nil {
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+// CompleteLocalBootstrap is retired: existing administrators already have all
+// management authority and must never receive another identity implicitly.
+func (s *Service) CompleteLocalBootstrap(context.Context, string, string, uuid.UUID, string, string) (uuid.UUID, error) {
+	return uuid.Nil, ErrLocalInitialized
 }
 
 // LocalManagementWorkspace fixes the authority scope; caller headers cannot
@@ -181,6 +105,7 @@ func (s *Service) MutateLocalUser(ctx context.Context, request LocalUserMutation
 	if request.ActorID == uuid.Nil || request.SessionID == uuid.Nil || request.RequestID == "" {
 		return uuid.Nil, ErrLocalInvalid
 	}
+	request.ApprovalID = uuid.Nil
 	var hash string
 	var err error
 	switch request.Action {
@@ -251,12 +176,6 @@ func (s *Service) MutateLocalUser(ctx context.Context, request LocalUserMutation
 				}
 				err = store.Disable(ctx, id, now)
 			} else {
-				// Password reset can take over existing elevated bindings. Require
-				// the normal independent, one-use approval even for PlatformAdmin.
-				approvalHash, _ := approvals.GenericBinding("local_user.reset-password", "local_user", id)
-				if err := approvals.ConsumeBoundTx(ctx, tx, request.ApprovalID, workspaceID, request.ActorID, "local_user.reset-password", "local_user", id, approvalHash); err != nil {
-					return err
-				}
 				err = store.SetPassword(ctx, id, hash, now)
 			}
 			if err != nil {

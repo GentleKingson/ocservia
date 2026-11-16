@@ -17,7 +17,6 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -26,6 +25,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
@@ -210,45 +210,25 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}
 	at, _ := value.FromTime(time.Now().UTC())
 	expires, _ := at.Add(time.Hour)
-	requester, approver, session, approverSession := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	for _, id := range []uuid.UUID{requester, approver} {
-		exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'enrollment',$2,$3,$4)`, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,'enrollment',?,?,?)`, id, id.String(), at, at)
-		exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES(?,?,?,'PlatformAdmin','workspace',?)`, uuid.New(), id, workspace, at)
-	}
-	for _, pair := range [][2]uuid.UUID{{session, requester}, {approverSession, approver}} {
-		exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES(?,?,?,?)`, pair[0], pair[1], expires, at)
-	}
-	approvalsService := approvals.NewBackend(b)
-	approveRequest := func(action string, hash, summary []byte) uuid.UUID {
-		t.Helper()
-		v, err := approvalsService.Create(ctx, approvals.Request{WorkspaceID: workspace, RequesterID: requester, ResourceID: node, Action: action, ResourceType: "node", Reason: "enrollment", TTL: time.Hour, SessionID: session, RequestID: uuid.NewString(), RequestHash: hash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: workspace, Type: "node", ID: node}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := approvalsService.Approve(ctx, approvals.Decision{ApprovalID: v.ID, ApproverID: approver, SessionID: approverSession, Reason: "reviewed", RequestID: uuid.NewString(), ExpectedRequestHash: v.RequestHash}); err != nil {
-			t.Fatal(err)
-		}
-		return v.ID
-	}
-	_, hash, summary, err := s.ApprovalBinding(ctx, node, nil, "standard", capabilities)
-	if err != nil {
-		t.Fatal(err)
-	}
-	approval := Approval{NodeID: node, Policy: "standard", Capabilities: capabilities, ActorID: requester.String(), IdentityID: requester, SessionID: session, ApprovalID: approveRequest("node.approve", hash, summary), Reason: "approve", RequestID: uuid.NewString()}
+	requester, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'enrollment',$2,$3,$4)`, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,'enrollment',?,?,?)`, requester, requester.String(), at, at)
+	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES(?,?,?,'PlatformAdmin','workspace',?)`, uuid.Must(uuid.NewV7()), requester, workspace, at)
+	exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES(?,?,?,?)`, session, requester, expires, at)
+	approval := Approval{NodeID: node, Policy: "standard", Capabilities: capabilities, ActorID: requester.String(), IdentityID: requester, SessionID: session, Reason: "activate", RequestID: uuid.NewString()}
 	if _, err := ExportSealingBinding(ctx, b, workspace, node, approval.ApprovalID, hex.EncodeToString(endpoint)); err == nil {
 		t.Fatal("pending enrollment exported")
 	}
-	changed := approval
-	changed.Policy = "changed"
-	if _, err := s.Approve(ctx, changed); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatal("approval content substitution", err)
+	unauthorized := approval
+	unauthorized.IdentityID = uuid.Must(uuid.NewV7())
+	if _, err := s.Approve(ctx, unauthorized); !errors.Is(err, rbac.ErrForbidden) {
+		t.Fatal("activation accepted unrelated identity", err)
 	}
 	trust, err := s.Approve(ctx, approval)
 	if err != nil || trust.Revision == 0 {
 		t.Fatal(trust, err)
 	}
-	if replay, err := s.Approve(ctx, approval); err != nil || replay.Revision != trust.Revision {
-		t.Fatal("approval replay", replay, err)
+	if _, err := s.Approve(ctx, approval); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatal("activation mutated already active binding", err)
 	}
 	exported, err := ExportSealingBinding(ctx, b, workspace, node, approval.ApprovalID, hex.EncodeToString(endpoint))
 	if err != nil {
@@ -269,7 +249,6 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}{
 		{uuid.New(), node, approval.ApprovalID, hex.EncodeToString(endpoint)},
 		{workspace, uuid.New(), approval.ApprovalID, hex.EncodeToString(endpoint)},
-		{workspace, node, uuid.New(), hex.EncodeToString(endpoint)},
 		{workspace, node, approval.ApprovalID, strings.Repeat("a", 64)},
 	} {
 		if _, err := ExportSealingBinding(ctx, b, invalid.workspace, invalid.node, invalid.approval, invalid.endpoint); err == nil {
@@ -346,8 +325,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	fence = response.ConnectionFence
 	connection, _ = fixed16(fence.ConnectionId)
 	defer successor.CloseSession(context.Background(), [16]byte(node), connection, int64(fence.OwnerEpoch))
-	revokeHash, revokeSummary := approvals.GenericBinding("node.revoke", "node", node)
-	revocation := Revocation{NodeID: node, ActorID: requester.String(), IdentityID: requester, SessionID: session, ApprovalID: approveRequest("node.revoke", revokeHash, revokeSummary), Reason: "revoke", RequestID: uuid.NewString()}
+	revocation := Revocation{NodeID: node, ActorID: requester.String(), IdentityID: requester, SessionID: session, Reason: "revoke", RequestID: uuid.NewString()}
 	locked, lockedStore, err := s.begin(ctx, database.RepeatableRead)
 	if err != nil {
 		t.Fatal(err)
@@ -374,9 +352,9 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		t.Fatal("revoke replay", replay, err)
 	}
 	unrelated := revocation
-	unrelated.ApprovalID = uuid.New()
-	if _, err := s.Revoke(ctx, unrelated); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatal("unrelated approval authorized revoked-node replay", err)
+	unrelated.IdentityID = uuid.Must(uuid.NewV7())
+	if _, err := s.Revoke(ctx, unrelated); !errors.Is(err, rbac.ErrForbidden) {
+		t.Fatal("unrelated identity authorized revoked-node replay", err)
 	}
 	for _, alpn := range []string{"ocserv-platform/enroll/1", "ocserv-platform/agent/1"} {
 		if permitted, err := s.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: alpn}); err != nil || permitted {

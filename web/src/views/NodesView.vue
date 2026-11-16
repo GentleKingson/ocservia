@@ -111,7 +111,6 @@ const selected = ref<string[]>([]);
 const rolloutDialog = ref(false);
 const rolloutBatchSize = ref(5);
 const rolloutReason = ref("");
-const rolloutApprovalId = ref("");
 const rolloutStarting = ref(false);
 const rolloutError = ref("");
 // Bumped when the page or workspace changes; an accepted create keeps running
@@ -175,10 +174,7 @@ useEventListener(defaultWindow, workspaceChangedEvent, () => {
 // Only the stable Problem type selects a local message; server text is never
 // shown. Unknown or unreadable bodies fall back to a generic rejection.
 const rolloutRejections = new Map([
-  [
-    "https://ocservia.dev/problems/approval-required",
-    "rolloutApprovalRejected",
-  ],
+  ["https://ocservia.dev/problems/forbidden", "rolloutForbidden"],
   ["https://ocservia.dev/problems/no-eligible-nodes", "rolloutNoEligibleNodes"],
   ["https://ocservia.dev/problems/invalid-request", "rolloutRequestInvalid"],
 ]);
@@ -225,7 +221,6 @@ async function submitRollout(): Promise<void> {
       [...selectedNodes.value].map((node) => node.id),
       rolloutBatchSize.value,
       rolloutReason.value.trim(),
-      rolloutApprovalId.value.trim(),
     );
     // Closing the dialog abandons only the navigation, never the request.
     if (!owned()) return;
@@ -234,13 +229,12 @@ async function submitRollout(): Promise<void> {
     rolloutDialog.value = false;
     selected.value = [];
     rolloutReason.value = "";
-    rolloutApprovalId.value = "";
     createdId = rollout.id;
   } catch (cause) {
     if (!owned()) return;
     // A lost POST response may still have created the rollout; never resend.
     // Until a create is confirmed, a definite rejection of an explicit retry
-    // (e.g. the approval it consumed) does not settle that earlier start.
+    // (e.g. a stale node revision) does not settle that earlier start.
     rolloutUnconfirmed ||= !(cause instanceof ResponseError);
     if (!rolloutUnconfirmed && cause instanceof ResponseError) rejected = cause;
     else rolloutError.value = t("rolloutStartUnconfirmed");
@@ -625,21 +619,12 @@ async function submitRollout(): Promise<void> {
           required
         />
       </FormField>
-      <FormField id="rollout-approval" :label="$t('approvalId')">
-        <Input
-          id="rollout-approval"
-          v-model="rolloutApprovalId"
-          autocomplete="off"
-          required
-        />
-      </FormField>
       <template #footer>
         <Button
           type="submit"
           :disabled="
             rolloutStarting ||
             !rolloutReason.trim() ||
-            !rolloutApprovalId.trim() ||
             rolloutBatchSize < 1 ||
             rolloutBatchSize > 20
           "

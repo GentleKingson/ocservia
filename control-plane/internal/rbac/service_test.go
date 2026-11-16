@@ -14,7 +14,7 @@ func TestBaselineRoleMatrixKeepsAdministrativeFunctionsSeparate(t *testing.T) {
 	if slices.Contains(roleActions["Viewer"], "session.disconnect") || slices.Contains(roleActions["Operator"], "role_binding.manage") || slices.Contains(roleActions["Auditor"], "node.revoke") {
 		t.Fatal("BFLA role separation regressed")
 	}
-	if !slices.Contains(roleActions["SecurityAdmin"], "approval.approve") || !slices.Contains(roleActions["PlatformAdmin"], "*") {
+	if !slices.Contains(roleActions["SecurityAdmin"], "node.approve") || !slices.Contains(roleActions["PlatformAdmin"], "*") {
 		t.Fatal("administrative role policy is incomplete")
 	}
 	if !slices.Contains(roleActions["SecurityAdmin"], "node_bootstrap_token.create") || slices.Contains(roleActions["Operator"], "node_bootstrap_token.create") || slices.Contains(roleActions["Viewer"], "node_bootstrap_token.create") {

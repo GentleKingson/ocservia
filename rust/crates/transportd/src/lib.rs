@@ -2896,6 +2896,7 @@ fn validate_enrollment(request: &EnrollRequest, remote: EndpointId) -> Result<()
     let token = request
         .token
         .strip_prefix("obt1_")
+        .or_else(|| request.token.strip_prefix("obt2_"))
         .unwrap_or(&request.token);
     if token.len() != 43 || request.nonce.len() < 16 || request.nonce.len() > 64 {
         return Err(protocol_error("enrollment credential or nonce is invalid"));
@@ -4209,7 +4210,13 @@ mod tests {
         ocservia_agent_identity::authorize_enrollment(&mut bootstrap, &key)
             .expect("sign bootstrap request");
         assert!(validate_enrollment(&bootstrap, key.public()).is_ok());
-        bootstrap.token.push('a');
+        bootstrap.token = format!("obt2_{}", request.token);
+        ocservia_agent_identity::authorize_enrollment(&mut bootstrap, &key)
+            .expect("sign derived installation enrollment request");
+        assert!(validate_enrollment(&bootstrap, key.public()).is_ok());
+        bootstrap.token = format!("oit1_{}", request.token);
+        assert!(validate_enrollment(&bootstrap, key.public()).is_err());
+        bootstrap.token = format!("obt2_{}a", request.token);
         assert!(validate_enrollment(&bootstrap, key.public()).is_err());
         assert!(validate_enrollment(&request, SecretKey::generate().public()).is_err());
         let mut unicode = request;

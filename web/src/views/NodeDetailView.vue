@@ -69,7 +69,6 @@ const pendingAction = ref<{
   label: string;
 }>();
 const reason = ref("");
-const approvalId = ref("");
 const desiredDialog = ref<{
   kind: "create" | "disable" | "enable" | "rotate" | "group";
   name: string;
@@ -106,7 +105,6 @@ const {
   configCertificateSecretRefId,
   configPrivateKeySecretRefId,
   configReason,
-  configApplyApprovalId,
   configApplyReason,
   openConfigPlan,
   submitConfigPlan,
@@ -126,7 +124,6 @@ const {
   certificateCommonName,
   certificateDnsNames,
   certificateReason,
-  certificateApprovalId,
   certificateError,
   certificateLoading,
   openCertificate,
@@ -240,7 +237,6 @@ function openAction(
   label: string,
 ): void {
   reason.value = "";
-  approvalId.value = "";
   pendingAction.value = { kind, target, label };
 }
 
@@ -256,12 +252,8 @@ async function submitAction(): Promise<void> {
   else if (action.kind === "unban")
     await fleet.removeIpBan(action.target, explanation);
   else if (action.kind === "upgradeAgent")
-    await fleet.upgradeAgent(
-      action.target,
-      explanation,
-      approvalId.value.trim(),
-    );
-  else await fleet.reloadService(explanation, approvalId.value.trim());
+    await fleet.upgradeAgent(action.target, explanation);
+  else await fleet.reloadService(explanation);
 }
 
 function openDesired(
@@ -710,26 +702,6 @@ function openPolicy(username: string): void {
           >
         </div>
         <FormField
-          v-if="
-            certificate.state === 'csr_ready' ||
-            certificate.state === 'signer_unavailable' ||
-            certificate.state === 'issued' ||
-            certificate.state === 'expiring'
-          "
-          id="certificate-approval"
-          :label="$t('approvalId')"
-          :help="$t('approvalIdHelp')"
-          v-slot="{ describedBy }"
-        >
-          <Input
-            id="certificate-approval"
-            v-model="certificateApprovalId"
-            :aria-describedby="describedBy"
-            autocomplete="off"
-            required
-          />
-        </FormField>
-        <FormField
           v-if="certificateGrant?.password"
           id="certificate-password"
           :label="$t('p12Password')"
@@ -787,7 +759,6 @@ function openPolicy(username: string): void {
           :disabled="
             certificateLoading ||
             !actionAvailable('certificate.issue') ||
-            !certificateApprovalId.trim() ||
             !certificateReason.trim()
           "
           @click="submitCertificateIssue"
@@ -861,36 +832,13 @@ function openPolicy(username: string): void {
           required
         />
       </FormField>
-      <FormField
-        v-if="
-          pendingAction.kind === 'reload' ||
-          pendingAction.kind === 'upgradeAgent'
-        "
-        id="approval-id"
-        :label="$t('approvalId')"
-        :help="$t('approvalIdHelp')"
-        v-slot="{ describedBy }"
-      >
-        <Input
-          id="approval-id"
-          v-model="approvalId"
-          :aria-describedby="describedBy"
-          autocomplete="off"
-          required
-        />
-      </FormField>
       <template #footer>
         <Button
           type="submit"
           :variant="
             pendingAction.kind === 'terminate' ? 'destructive' : 'default'
           "
-          :disabled="
-            !reason.trim() ||
-            ((pendingAction.kind === 'reload' ||
-              pendingAction.kind === 'upgradeAgent') &&
-              !approvalId.trim())
-          "
+          :disabled="!reason.trim()"
         >
           {{ $t("confirm") }}
         </Button>
@@ -1192,19 +1140,6 @@ function openPolicy(username: string): void {
           {{ $t("apply") }}: {{ actionExplanation("config.apply") }}
         </p>
         <template v-if="configPlan.validation === 'valid'">
-          <FormField
-            id="config-apply-approval"
-            :label="$t('approvalId')"
-            :help="$t('approvalIdHelp')"
-            v-slot="{ describedBy }"
-          >
-            <Input
-              id="config-apply-approval"
-              v-model="configApplyApprovalId"
-              :aria-describedby="describedBy"
-              required
-            />
-          </FormField>
           <FormField id="config-apply-reason" :label="$t('reason')">
             <Textarea
               id="config-apply-reason"
@@ -1219,7 +1154,6 @@ function openPolicy(username: string): void {
               configLoading ||
               !canSubmitConfigPlan ||
               !actionAvailable('config.apply') ||
-              !configApplyApprovalId.trim() ||
               !configApplyReason.trim()
             "
             @click="submitConfigApply"

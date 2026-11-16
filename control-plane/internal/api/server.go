@@ -13,7 +13,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/configplanhttp"
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/nodehttp"
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/useroperationshttp"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
@@ -70,7 +69,6 @@ type Server struct {
 	privdRegisterBudget *authAdmission
 	authLogs            authLogState
 	rbac                *rbac.Service
-	approvals           *approvals.Service
 	audit               *audit.Manager
 	userstate           *userstate.Service
 	userOpsHTTP         *useroperationshttp.Handler
@@ -119,7 +117,6 @@ type Modules struct {
 type Authorization struct {
 	Authentication *auth.Service
 	RBAC           *rbac.Service
-	Approvals      *approvals.Service
 	Audit          *audit.Manager
 }
 
@@ -141,7 +138,7 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 		modules.UserOperations = nil
 	}
 	s := &Server{backend: backend, build: build, logger: logger, bodyLimit: config.BodyLimit, requestTimeout: config.RequestTimeout, devAuth: config.DevAuth, devAuthToken: config.DevAuthToken,
-		auth: authorization.Authentication, rbac: authorization.RBAC, approvals: authorization.Approvals, audit: authorization.Audit, certificates: modules.Certificates, configPlanLookup: modules.ConfigPlans}
+		auth: authorization.Authentication, rbac: authorization.RBAC, audit: authorization.Audit, certificates: modules.Certificates, configPlanLookup: modules.ConfigPlans}
 	s.EnableBrowserOrigin(config.BrowserOrigin)
 	s.ConfigureAuthProxies(config.AuthTrustedProxies)
 	s.breakGlassBudget = newAuthAdmission(5, 0, 4)

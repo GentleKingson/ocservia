@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"io"
 	"slices"
 	"sort"
@@ -20,7 +21,6 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates/artifactstore"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
@@ -78,7 +78,6 @@ type RevokeSignerRequest struct {
 type Service struct {
 	backend     database.Backend
 	operations  *operations.Service
-	approvals   *approvals.Service
 	signer      Signer
 	sealer      SecretSealer
 	artifacts   ArtifactFetcher
@@ -154,7 +153,7 @@ type ArtifactDownload struct {
 // NewBackend uses common certificate transactions. CSR/P12/revocation also
 // require an operations service configured for the same backend.
 func NewBackend(backend database.Backend, operationService *operations.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
-	return &Service{backend: backend, operations: operationService, approvals: approvals.NewBackend(backend), signer: signer, sealer: sealer, artifacts: artifacts, grantSigner: grantSigner, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{backend: backend, operations: operationService, signer: signer, sealer: sealer, artifacts: artifacts, grantSigner: grantSigner, now: func() time.Time { return time.Now().UTC() }}
 }
 
 // NewArtifactDownloads constructs downloads, durable consumption recovery and
@@ -294,13 +293,14 @@ func certificateActionBinding(action string, certificateID, nodeID uuid.UUID, ve
 }
 
 func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate, error) {
-	if request.CertificateID == uuid.Nil || request.ApprovalID == uuid.Nil || request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil || strings.TrimSpace(request.Reason) == "" || request.RequestID == "" {
+	request.ApprovalID = uuid.Nil
+	if request.CertificateID == uuid.Nil || request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil || strings.TrimSpace(request.Reason) == "" || request.RequestID == "" {
 		return Certificate{}, ErrInvalid
 	}
 	if s.signer == nil {
 		return Certificate{}, ErrSignerUnavailable
 	}
-	workspaceID, nodeID, csrDER, requestHash, err := s.prepareIssue(ctx, request)
+	workspaceID, nodeID, csrDER, requestHash, err := s.prepareIssue(ctx, &request)
 	if err != nil {
 		return Certificate{}, err
 	}
@@ -357,7 +357,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 		if !changed {
 			return ErrNotReady
 		}
-		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, ApprovalID: &request.ApprovalID, RequestID: request.RequestID, Result: "succeeded", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"node_id":%q,"serial_number":%q,"not_after":%q}`, nodeID, leaf.SerialNumber.String(), leaf.NotAfter.UTC().Format(time.RFC3339))), At: now})
+		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, RequestID: request.RequestID, Result: "succeeded", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"node_id":%q,"serial_number":%q,"not_after":%q}`, nodeID, leaf.SerialNumber.String(), leaf.NotAfter.UTC().Format(time.RFC3339))), At: now})
 	})
 	if err != nil {
 		return Certificate{}, err
@@ -365,7 +365,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 	return s.Get(ctx, request.CertificateID)
 }
 
-func (s *Service) prepareIssue(ctx context.Context, request IssueRequest) (workspaceID, nodeID uuid.UUID, csrDER, requestHash []byte, err error) {
+func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (workspaceID, nodeID uuid.UUID, csrDER, requestHash []byte, err error) {
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.FromTransaction(tx)
 		if err != nil {
@@ -379,6 +379,9 @@ func (s *Service) prepareIssue(ctx context.Context, request IssueRequest) (works
 			return err
 		}
 		workspaceID, nodeID, csrDER = stored.WorkspaceID, stored.NodeID, stored.CSR
+		if err := rbac.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, "certificate.issue", rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}); err != nil {
+			return err
+		}
 		var dnsNames []string
 		if err := json.Unmarshal(stored.DNSNames.Bytes(), &dnsNames); err != nil {
 			return ErrNotReady
@@ -399,20 +402,21 @@ func (s *Service) prepareIssue(ctx context.Context, request IssueRequest) (works
 		switch stored.State {
 		case "csr_ready":
 			requestHash = certificateIssueBinding(request.CertificateID, stored.Version, csrDER, stored.ReceiptDigest)
-			if err := approvals.ConsumeBoundTx(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, "certificate.issue", "certificate", request.CertificateID, requestHash); err != nil {
-				return err
-			}
 			now := s.now()
 			if err := store.StartIssue(ctx, certificatestore.Signing{ID: request.CertificateID, ApprovalID: request.ApprovalID, ActorID: request.ActorIdentityID, RequestHash: requestHash, Version: stored.Version, At: now}); err != nil {
 				return err
 			}
-			return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, NodeID: &nodeID, ApprovalID: &request.ApprovalID, RequestID: request.RequestID, Result: "intent", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"csr_sha256":%q,"state":"signing"}`, hex.EncodeToString(sha256Bytes(csrDER)))), At: now})
+			return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, NodeID: &nodeID, RequestID: request.RequestID, Result: "intent", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"csr_sha256":%q,"state":"signing"}`, hex.EncodeToString(sha256Bytes(csrDER)))), At: now})
 		case "signing", "signer_unavailable":
+			// Preserve a historical in-flight fence without requiring another approval.
+			if stored.ApprovalID != nil {
+				request.ApprovalID = *stored.ApprovalID
+			}
 			if stored.IssueVersion == nil || *stored.IssueVersion < 1 {
 				return ErrNotReady
 			}
 			requestHash = certificateIssueBinding(request.CertificateID, *stored.IssueVersion, csrDER, stored.ReceiptDigest)
-			if stored.ApprovalID == nil || stored.ActorID == nil || *stored.ApprovalID != request.ApprovalID || *stored.ActorID != request.ActorIdentityID || !bytes.Equal(stored.RequestHash, requestHash) {
+			if stored.ActorID == nil || *stored.ActorID != request.ActorIdentityID || !bytes.Equal(stored.RequestHash, requestHash) {
 				return ErrNotReady
 			}
 			if stored.State == "signer_unavailable" {
@@ -440,7 +444,7 @@ func certificateIssueBinding(certificateID uuid.UUID, version int64, csrDER, rec
 }
 
 func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations.Operation, bool, error) {
-	if request.CertificateID == uuid.Nil || request.ApprovalID == uuid.Nil || request.CertificateVersion < 1 || request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil || request.ExpectedVersion < 1 || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || request.RequestID == "" {
+	if request.CertificateID == uuid.Nil || request.CertificateVersion < 1 || request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil || request.ExpectedVersion < 1 || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || request.RequestID == "" {
 		return operations.Operation{}, false, ErrInvalid
 	}
 	if s.signer == nil {
@@ -536,21 +540,9 @@ func (s *Service) operationExists(ctx context.Context, workspace uuid.UUID, key 
 }
 
 func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGrant, bool, error) {
-	if request.ArtifactRequestID == uuid.Nil && request.ApprovalID != uuid.Nil {
-		approval, getErr := s.approvals.Get(ctx, request.ApprovalID)
-		if getErr != nil {
-			return ArtifactGrant{}, false, ErrNotReady
-		}
-		var content struct {
-			ArtifactRequestID  uuid.UUID `json:"artifact_request_id"`
-			CertificateVersion int64     `json:"certificate_version"`
-		}
-		if approval.Action != "certificate.private_key.export" || approval.ResourceID != request.CertificateID || json.Unmarshal(approval.CertificateSummary, &content) != nil || content.CertificateVersion != request.CertificateVersion {
-			return ArtifactGrant{}, false, ErrNotReady
-		}
-		request.ArtifactRequestID = content.ArtifactRequestID
-	}
-	if request.CertificateID == uuid.Nil || request.ApprovalID == uuid.Nil || request.ArtifactRequestID == uuid.Nil || request.CertificateVersion < 1 || request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil || request.ExpectedVersion < 1 || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || request.RequestID == "" {
+	request.ApprovalID = uuid.Nil
+
+	if request.CertificateID == uuid.Nil || request.ArtifactRequestID == uuid.Nil || request.CertificateVersion < 1 || request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil || request.ExpectedVersion < 1 || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || request.RequestID == "" {
 		return ArtifactGrant{}, false, ErrInvalid
 	}
 	if s.sealer == nil {
@@ -563,7 +555,10 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 			return err
 		}
 		eligible, err = store.P12Eligible(ctx, request.CertificateID)
-		return err
+		if err != nil {
+			return err
+		}
+		return rbac.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, "certificate.private_key.export", rbac.Resource{WorkspaceID: eligible.WorkspaceID, Type: "node", ID: eligible.NodeID})
 	})
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/api"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -61,7 +60,7 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 		DevAuth: operationAuthEnabled(cfg), DevAuthToken: cfg.DevAuthToken,
 		BrowserOrigin: cfg.BrowserOrigin(), AuthTrustedProxies: cfg.AuthTrustedProxyCIDRs, EventStreams: cfg.EventStreams,
 	}, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, services.modules,
-		api.Authorization{Authentication: authService, RBAC: rbac.NewBackend(backend), Approvals: approvals.NewBackend(backend), Audit: auditManager})
+		api.Authorization{Authentication: authService, RBAC: rbac.NewBackend(backend), Audit: auditManager})
 	if err != nil {
 		return nil, err
 	}
@@ -73,6 +72,11 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 	server.EnableUserState(services.userState)
 	server.EnablePrivdAttestation(privdattestation.NewBackend(backend))
 	server.EnableEnrollment(services.enrollment, services.transport)
+	if services.enrollment != nil && (cfg.InstallationRelayURL != "" || cfg.InstallationRelayToken != "") {
+		if err := services.enrollment.ConfigureInstallation(enrollment.InstallationTrust{Origin: cfg.BrowserOrigin(), RelayURL: cfg.InstallationRelayURL, RelayToken: cfg.InstallationRelayToken}); err != nil {
+			return nil, fmt.Errorf("configure secure node installation: %w", err)
+		}
+	}
 	server.EnableOwnerFencing(services.fences)
 	server.EnableTransportEvents(services.transportEvents)
 	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)

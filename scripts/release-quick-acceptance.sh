@@ -167,12 +167,11 @@ login() {
 }
 accounts() {
   login admin
-  login approver
-  [[ "$(stat -c '%u:%a' "${CREDENTIALS_DIR}" "${CREDENTIALS_DIR}"/{admin,approver}.txt | sort -u | paste -sd' ')" == "0:400 0:700" ]]
+  [[ "$(stat -c '%u:%a' "${CREDENTIALS_DIR}" "${CREDENTIALS_DIR}/admin.txt" | sort -u | paste -sd' ')" == "0:400 0:700" ]]
   [[ -e "${CREDENTIALS_DIR}/complete" && ! -e /etc/ocservia/secrets/local-bootstrap-admin-password ]]
 }
 accounts
-pass "initial-admin and initial-approver log in"
+pass "initial-admin logs in"
 
 stage=custody
 # The root CA private key exists only, encrypted, in the export directory.
@@ -235,14 +234,13 @@ lifecycle upgrade --release-file "${upgrade_manifest}"
 pass "upgrade after rollback keeps material, certificates and accounts"
 
 stage=output
-for account in admin approver; do
-  password="$(sed -n 's/^Password: //p' "${CREDENTIALS_DIR}/${account}.txt")"
-  [[ -n "${password}" ]]
-  absent "${password}" "${work}"/run-*.log
-  for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production); do
-    docker logs "${container}" >"${work}/container.log" 2>&1
-    absent "${password}" "${work}/container.log"
-  done
+password="$(sed -n 's/^Password: //p' "${CREDENTIALS_DIR}/admin.txt")"
+[[ -n "${password}" ]]
+absent "${password}" "${work}"/run-*.log
+for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production); do
+  docker logs "${container}" >"${work}/container.log" 2>&1
+  absent "${password}" "${work}/container.log"
 done
+
 pass "passwords appear in no installer output or container log"
 echo "Quick acceptance passed"
