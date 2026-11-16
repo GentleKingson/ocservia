@@ -99,8 +99,8 @@ targets = File.readlines('scripts/build-release-controller.sh').grep(/^\s*build_
   check(match, "unsupported Controller build_image call: #{line.strip}")
   match.captures
 end
-check(targets.length == 8 && targets.map(&:first).uniq.length == targets.length,
-      'Controller builder must declare all eight distinct image targets')
+check(targets.length == 7 && targets.map(&:first).uniq.length == targets.length,
+      'Controller builder must declare all seven distinct image targets')
 probes = Hash.new { |hash, path| hash[path] = [] }
 targets.each do |image, dockerfile|
   probes[dockerfile] << image

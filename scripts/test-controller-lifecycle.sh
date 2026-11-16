@@ -1174,7 +1174,7 @@ done
 for legacy_filter in '.images.mysql_backup = .images.signer' '.images.mysql_backup = .images.signer | .images.mariadb_backup = .images.signer'; do
   legacy_v2="$(mktemp "${fixture}/release/legacy-v2.XXXXXX.json")"
   jq "${legacy_filter}" "${integrated_release}" >"${legacy_v2}"
-  legacy_v2_state="$(mktemp -d "${fixture}/legacy-v2-upgrade.XXXXXX")"
+  legacy_v2_state="$(mktemp -d "${fixture}/legacy-v2-upgrade.XXXXXX")/state"
   seed_upgrade_state "${legacy_v2_state}" "${legacy_v2}"
   cp "${legacy_v2}" "${legacy_v2_state}/current-release.json"
   expect_upgrade_failure "${legacy_v2_state}" "${integrated_release}" 'release smoke failed' env MOCK_SMOKE_EXIT=1
