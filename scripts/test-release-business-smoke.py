@@ -36,6 +36,10 @@ def main():
                 patch.object(business, 'record') as record:
             business.local()
             calls = requests.call_args_list
+            assert not (work / 'private/reader-password').exists()
+            reader_create = next(call for call in calls if call.args[0] == 'local-users')
+            reader_login = next(call for call in calls if call.kwargs.get('role') == 'reader' and call.args[0] == 'auth/login')
+            assert reader_create.args[1]['password'] == reader_login.args[1]['password']
             assert calls[0].args[1]['username'] == 'business-test-requester'
             assert all('approval' not in call.args[0] for call in calls)
             assert any(call.args[0] == 'nodes' and call.kwargs.get('role') == 'reader'

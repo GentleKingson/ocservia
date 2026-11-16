@@ -111,7 +111,6 @@ def local():
     ids = sql("SELECT string_agg(id::text, ',' ORDER BY id) FROM identities WHERE issuer='local';").split(',')
     assert len(ids) == 1
     password = secrets.token_hex(32)
-    (WORK / 'private/reader-password').write_text(password)
     api('local-users', {'username': 'business-test-reader', 'password': password}, status=201)
     api('auth/login', {'username': 'business-test-reader', 'password': password}, role='reader', status=204)
     api('nodes', role='reader', status=403)

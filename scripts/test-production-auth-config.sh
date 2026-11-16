@@ -105,7 +105,12 @@ OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_GATEWAY_IMAGE=example.invalid/gateway:v1.2
   "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/rc-compose.json"
 jq -e '.services.gateway.image == "example.invalid/gateway:v1.2.0-rc.1" and
   .services["control-plane"].image == "example.invalid/control:v1.2.0-rc.1"' "${work}/rc-compose.json" >/dev/null
-OCSERV_RELAY_IMAGE=example.invalid/relay:v1.2.0-rc.1 OCSERV_RELAY_SECRET_DIR="${OCSERV_SECRET_DIR}" \
+# The standalone Relay has its own owner-only credential, unlike the
+# Controller/transportd credential shared through their private group.
+mkdir -m 700 "${work}/standalone-relay-secrets"
+cp "${OCSERV_SECRET_DIR}/tls.crt" "${OCSERV_SECRET_DIR}/tls.key" "${work}/standalone-relay-secrets/"
+"${owner[@]}" install -o 65532 -g 65532 -m 400 "${OCSERV_SECRET_DIR}/relay-access-token" "${work}/standalone-relay-secrets/relay-access-token"
+OCSERV_RELAY_IMAGE=example.invalid/relay:v1.2.0-rc.1 OCSERV_RELAY_SECRET_DIR="${work}/standalone-relay-secrets" \
   "${ROOT}/deploy/production/relay/compose.sh" config --quiet
 for invalid in v1.2.0-rc.0 v1.2.0-rc.01 v1.2.0-beta.1 v1.2.0-rc.1+build; do
   if OCSERV_CONTROL_IMAGE="example.invalid/control:${invalid}" \

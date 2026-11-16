@@ -4,8 +4,6 @@ import { readFile } from "node:fs/promises";
 const workspaceId = "019fde50-1111-7111-8111-111111111111";
 const nodeId = "019fde50-2222-7222-8222-222222222222";
 const certificateId = "019fde50-3333-7333-8333-333333333333";
-const approvalId = "019fde50-4444-7444-8444-444444444444";
-const exportApprovalId = "019fde50-7777-7777-8777-777777777777";
 const operationId = "019fde50-5555-7555-8555-555555555555";
 const artifactId = "019fde50-6666-7666-8666-666666666666";
 const node = {
@@ -129,8 +127,7 @@ test("issues a node-local CSR and downloads a one-time P12", async ({
     `**/api/v1/certificates/${certificateId}:issue`,
     async (route) => {
       expect(await route.request().postDataJSON()).toEqual({
-        approval_id: approvalId,
-        reason: "issue approved certificate",
+        reason: "issue certificate as Admin",
       });
       certificateState = "issued";
       await route.fulfill({
@@ -162,9 +159,12 @@ test("issues a node-local CSR and downloads a one-time P12", async ({
     `**/api/v1/certificates/${certificateId}:p12`,
     async (route) => {
       p12Requests += 1;
-      expect(await route.request().postDataJSON()).toMatchObject({
-        approval_id: exportApprovalId,
-      });
+      const body = route.request().postDataJSON();
+      expect(body).not.toHaveProperty("approval_id");
+      expect(body.artifact_request_id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(body.reason).toBe("create support export");
       await grantResponse;
       await route.fulfill({
         status: 202,
@@ -231,12 +231,11 @@ test("issues a node-local CSR and downloads a one-time P12", async ({
     key_bits: 3072,
   });
 
-  await page.getByLabel("Approval ID").fill(approvalId);
-  await page.getByLabel("Reason").fill("issue approved certificate");
+  await expect(page.getByLabel("Approval ID")).toHaveCount(0);
+  await page.getByLabel("Reason").fill("issue certificate as Admin");
   await page.getByRole("button", { name: "Issue certificate" }).click();
   await expect(page.getByText("issued", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("Approval ID")).toBeVisible();
-  await page.getByLabel("Approval ID").fill(exportApprovalId);
+  await expect(page.getByLabel("Approval ID")).toHaveCount(0);
   await page.getByLabel("Reason").fill("create support export");
   await page.getByRole("button", { name: "Create P12" }).click();
   await expect.poll(() => p12Requests).toBe(1);
