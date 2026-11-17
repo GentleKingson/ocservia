@@ -588,6 +588,7 @@ reset_state() {
     rm -rf -- "${sysroot}"
   fi
   mkdir -m 700 -- "${sysroot}"
+  mkdir -p -- "${sysroot}/var/lib"
   for log in "${curl_log}" "${sudo_log}" "${dpkg_log}" "${rpm_log}" \
     "${agent_log}" "${systemctl_log}" "${runuser_log}" "${root_sudo_log}" \
     "${openssl_log}"; do
