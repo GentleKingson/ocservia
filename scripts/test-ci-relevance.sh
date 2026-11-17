@@ -174,6 +174,7 @@ scripts/test-managed-node-install.sh run_installers run_ci_tools
 scripts/test-node-bootstrap.py run_installers run_ci_tools
 scripts/test-controller-install.sh run_installers run_ci_tools
 scripts/test-controller-bootstrap.sh run_installers run_ci_tools
+scripts/test-production-auth-config.sh run_installers run_ci_tools
 scripts/test-relay-launchers.py run_installers run_ci_tools
 scripts/test-release-agent-state-check.sh run_installers run_ci_tools
 .gitignore run_installers
