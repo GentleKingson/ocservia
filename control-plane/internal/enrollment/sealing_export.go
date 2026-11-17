@@ -13,7 +13,7 @@ import (
 
 // ExportSealingBinding is a local administrative operation. Its caller must
 // authenticate to the Controller database, never pass those credentials to Signer.
-func ExportSealingBinding(ctx context.Context, backend database.Backend, workspace, nodeID, approvalID uuid.UUID, endpoint string) ([]byte, error) {
+func ExportSealingBinding(ctx context.Context, backend database.Backend, workspace, nodeID uuid.UUID, endpoint string) ([]byte, error) {
 	var output []byte
 	err := database.Within(ctx, backend, database.RepeatableRead, func(tx database.Tx) error {
 		store, err := enrollmentstore.Enrollment(tx)

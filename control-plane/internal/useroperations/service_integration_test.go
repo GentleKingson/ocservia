@@ -2,7 +2,6 @@ package useroperations
 
 import (
 	"context"
-	"errors"
 	"os"
 	"testing"
 	"time"
@@ -15,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
+func TestQuotaExpirySchedulerAndUsageIntegration(t *testing.T) {
 	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
@@ -146,9 +145,6 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	if err := service.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE scheduler_leases SET lease_until=now()-interval '1 second' WHERE lease_name=$1`, leaseName); err != nil {
-		t.Fatal(err)
-	}
 	if err := service.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -177,9 +173,6 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 		t.Fatalf("manual disable after quota enforcement: %v", err)
 	}
 	now = time.Date(2026, 9, 1, 0, 0, 1, 0, time.UTC)
-	if _, err := pool.Exec(ctx, `UPDATE scheduler_leases SET lease_until=now()-interval '1 second' WHERE lease_name=$1`, leaseName); err != nil {
-		t.Fatal(err)
-	}
 	if err := service.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -191,86 +184,6 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	if enabled || desiredVersion != 3 {
 		t.Fatalf("monthly reset overrode manual disable enabled=%v version=%d", enabled, desiredVersion)
 	}
-
-	if _, err := pool.Exec(ctx, `UPDATE nodes SET status='offline' WHERE id=$1`, nodeID); err != nil {
-		t.Fatal(err)
-	}
-	batchID, requesterSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	batchItems := []BatchItemRequest{{NodeID: nodeID, Username: "bob", Action: "disable", ExpectedVersion: 1, Authorized: true}, {NodeID: nodeID, Username: "charlie", Action: "disable", ExpectedVersion: 1, Authorized: false}}
-	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',now())`, uuid.Must(uuid.NewV7()), requesterID, workspaceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, requesterSession, requesterID); err != nil {
-		t.Fatal(err)
-	}
-	batchRequest := BatchRequest{ID: batchID, WorkspaceID: workspaceID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ActorID: "operator", Reason: "ticket", RequestID: "request-batch", Traceparent: testTraceparent, IdempotencyKey: "batch-one", Items: batchItems}
-	batch, replayed, err := service.CreateBatch(ctx, batchRequest)
-	if err != nil || replayed || len(batch.Items) != 2 || batch.Items[1].State != "forbidden" {
-		t.Fatalf("create batch=%+v replayed=%v err=%v", batch, replayed, err)
-	}
-	substituted := batchRequest
-	substituted.Items = append([]BatchItemRequest(nil), batchRequest.Items...)
-	substituted.Items[0].ExpectedVersion = 2
-	if _, _, err := service.CreateBatch(ctx, substituted); !errors.Is(err, ErrIdempotencyConflict) {
-		t.Fatalf("content-substituted replay err=%v", err)
-	}
-	if _, replayed, err := service.CreateBatch(ctx, batchRequest); err != nil || !replayed {
-		t.Fatalf("batch replay=%v err=%v", replayed, err)
-	}
-	batchKey := operationIdempotencyKey("batch", batchID.String(), "0")
-	if _, _, err := service.users.Mutate(ctx, userstate.MutationRequest{NodeID: nodeID, Kind: userstate.UserDisable, Name: "bob", ExpectedVersion: 1, IdempotencyKey: batchKey, TTL: 24 * time.Hour, ActorID: "operator", ActorIdentityID: requesterID, ActorSessionID: requesterSession, Reason: "ticket", RequestID: "request-batch:0", Traceparent: testTraceparent}); err != nil {
-		t.Fatalf("inject batch post-mutation crash window: %v", err)
-	}
-	crashedOwner := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `UPDATE batch_operation_items SET state='submitting',lease_owner=$3,lease_until=now()-interval '1 second' WHERE batch_id=$1 AND item_index=$2`, batchID, 0, crashedOwner); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE scheduler_leases SET lease_until=now()-interval '1 second' WHERE lease_name=$1`, leaseName); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.RunOnce(ctx); err != nil {
-		t.Fatal(err)
-	}
-	batch, err = service.GetBatch(ctx, batch.ID)
-	if err != nil || batch.Items[0].ChildOperationID == nil || batch.Items[0].State != "offline_pending" || batch.Items[1].State != "forbidden" || batch.State != "partial_failed" {
-		t.Fatalf("batch result=%+v err=%v", batch, err)
-	}
-	var batchCommandCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM commands WHERE node_id=$1 AND resource_key='bob' AND idempotency_key=$2`, nodeID, batchKey).Scan(&batchCommandCount); err != nil || batchCommandCount != 1 {
-		t.Fatalf("batch crash recovery command count=%d err=%v", batchCommandCount, err)
-	}
-	metrics, err := service.Metrics(ctx, workspaceID)
-	if err != nil || metrics.ActiveBatchItemTotal != 1 || metrics.StaleBatchClaimTotal != 0 || metrics.UnknownBatchItemTotal != 0 {
-		t.Fatalf("user operation metrics=%+v err=%v", metrics, err)
-	}
-	var newestBatch uuid.UUID
-	for index := 0; index <= MaxBatchRefresh; index++ {
-		batchID := uuid.Must(uuid.NewV7())
-		state := "offline_pending"
-		if index == MaxBatchRefresh {
-			state = "succeeded"
-			newestBatch = batchID
-		}
-		createdAt := time.Date(2000, 1, 1, 0, index, 0, 0, time.UTC)
-		requestHash := make([]byte, 32)
-		requestHash[0] = byte(index)
-		if _, err := pool.Exec(ctx, `INSERT INTO batch_operations(id,workspace_id,state,actor_identity_id,actor_id,reason,request_id,traceparent,idempotency_key,request_hash,created_at,updated_at) VALUES($1,$2,'queued',$3,'operator','fairness','fairness',$4,$5,$6,$7,$7)`, batchID, workspaceID, requesterID, testTraceparent, "fairness-"+batchID.String(), requestHash, createdAt); err != nil {
-			t.Fatalf("insert refresh fairness batch %d: %v", index, err)
-		}
-		if _, err := pool.Exec(ctx, `INSERT INTO batch_operation_items(batch_id,item_index,node_id,username,action,expected_version,state,updated_at) VALUES($1,0,$2,'charlie','enable',1,$3,$4)`, batchID, nodeID, state, createdAt); err != nil {
-			t.Fatalf("insert refresh fairness item %d: %v", index, err)
-		}
-	}
-	if err := service.refreshBatches(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.refreshBatches(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var newestState string
-	if err := pool.QueryRow(ctx, `SELECT state FROM batch_operations WHERE id=$1`, newestBatch).Scan(&newestState); err != nil || newestState != "succeeded" {
-		t.Fatalf("fair refresh newest state=%q err=%v", newestState, err)
-	}
 }
 
 func cleanupIntegration(ctx context.Context, pool *pgxpool.Pool, workspaceID uuid.UUID) error {
@@ -281,9 +194,6 @@ func cleanupIntegration(ctx context.Context, pool *pgxpool.Pool, workspaceID uui
 		_, _ = pool.Exec(context.Background(), `ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only`)
 	}()
 	statements := []string{
-		`UPDATE scheduler_leases SET lease_until=now()-interval '1 second' WHERE lease_name='user-operations' AND $1::uuid IS NOT NULL`,
-		`DELETE FROM batch_operation_items WHERE batch_id IN(SELECT id FROM batch_operations WHERE workspace_id=$1)`,
-		`DELETE FROM batch_operations WHERE workspace_id=$1`,
 		`DELETE FROM user_policy_enforcements WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
 		`DELETE FROM user_policy_mutations WHERE workspace_id=$1`,
 		`DELETE FROM user_usage_cursors WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
@@ -297,11 +207,9 @@ func cleanupIntegration(ctx context.Context, pool *pgxpool.Pool, workspaceID uui
 		`DELETE FROM audit_events WHERE workspace_id=$1`,
 		`DELETE FROM commands WHERE workspace_id=$1`,
 		`DELETE FROM operations WHERE workspace_id=$1`,
-		`DELETE FROM approval_requests WHERE workspace_id=$1`,
 		`DELETE FROM desired_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
 		`DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
 		`DELETE FROM nodes WHERE workspace_id=$1`,
-		`DELETE FROM role_bindings WHERE workspace_id=$1`,
 		`DELETE FROM workspaces WHERE id=$1`,
 		`DELETE FROM auth_sessions WHERE identity_id IN (SELECT id FROM identities WHERE issuer='integration' AND subject LIKE $1::text || '%')`,
 		`DELETE FROM identities WHERE issuer='integration' AND subject LIKE $1::text || '%'`,

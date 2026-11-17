@@ -19,7 +19,6 @@ vi.mock("../src/api/operations", () => mocks);
 vi.mock("../src/api/workspace", async (original) => ({
   ...(await original<typeof import("../src/api/workspace")>()),
   ...mocks,
-  workspaceChangedEvent: "workspace",
 }));
 vi.mock("vue-router", () => ({
   useRoute: () => mocks.route,
@@ -79,10 +78,6 @@ function responseError(status: number): ResponseError {
 }
 
 let workspace = { id: "workspace-a", generation: 1 };
-function switchWorkspace(id: string): void {
-  workspace = { id, generation: workspace.generation + 1 };
-  window.dispatchEvent(new Event("workspace"));
-}
 
 let unmount: (() => void) | undefined;
 // Foreground reads requested by a route or workspace change run on a 0 ms timer.
@@ -163,13 +158,15 @@ describe("rollout detail", () => {
     expect(view.unavailable).toBe(false);
   });
 
-  it("drops a read from an earlier visit to the same workspace", async () => {
+  it("drops a read from an earlier route before returning to it", async () => {
     const first = deferred<AgentRollout>();
     mocks.getAgentRollout.mockReturnValueOnce(first.promise);
     mocks.getAgentRollout.mockReturnValue(new Promise(() => {}));
     const view = await mount<DetailView>(RolloutDetailView);
-    switchWorkspace("workspace-b");
-    switchWorkspace("workspace-a");
+    mocks.route.params.rolloutId = "rollout-b";
+    await nextTick();
+    mocks.route.params.rolloutId = "rollout-a";
+    await nextTick();
     first.resolve(rollout("rollout-a", "paused"));
     await flush();
     expect(view.rollout).toBeUndefined();
@@ -193,20 +190,6 @@ describe("rollout detail", () => {
       "rollout-b",
       expect.any(AbortSignal),
     );
-  });
-
-  it("hides the old rollout and resume action on a workspace change", async () => {
-    mocks.getAgentRollout.mockResolvedValueOnce(rollout("rollout-a", "paused"));
-    mocks.getAgentRollout.mockRejectedValue(responseError(404));
-    const view = await mount<DetailView>(RolloutDetailView);
-    expect(view.rollout?.state).toBe("paused");
-    switchWorkspace("workspace-b");
-    expect(view.rollout).toBeUndefined();
-    await flush();
-    expect(mocks.getAgentRollout).toHaveBeenCalledTimes(2);
-    expect(view.notFound).toBe(true);
-    await view.resume();
-    expect(mocks.resumeAgentRollout).not.toHaveBeenCalled();
   });
 
   it("rejects a rollout reported for another workspace", async () => {
@@ -314,22 +297,21 @@ describe("operations rollout list", () => {
     });
   });
 
-  it("clears rows on a workspace change and drops the older page", async () => {
+  it("clears stale list state on refresh and drops the older rollout page", async () => {
     const slow = deferred<{ rollouts: AgentRollout[] }>();
     mocks.listAgentRollouts.mockResolvedValueOnce({
       rollouts: [rollout("rollout-a", "running")],
     });
     mocks.listAgentRollouts.mockReturnValueOnce(slow.promise);
     mocks.listAgentRollouts.mockResolvedValue({
-      rollouts: [rollout("rollout-b", "running", "workspace-b")],
+      rollouts: [rollout("rollout-b", "running")],
     });
     const view = await mount<OperationsState>(OperationsView);
     expect(view.rollouts.map((item) => item.id)).toEqual(["rollout-a"]);
     view.refresh();
     await flush();
     expect(mocks.listAgentRollouts).toHaveBeenCalledTimes(2);
-    switchWorkspace("workspace-b");
-    expect(view.rollouts).toEqual([]);
+    view.refresh();
     await flush();
     slow.resolve({ rollouts: [rollout("rollout-a", "paused")] });
     await flush();
@@ -345,14 +327,14 @@ describe("operations rollout list", () => {
     expect(mocks.listOperations).toHaveBeenCalledTimes(2);
   });
 
-  it("ignores an operation detail failure from the previous workspace", async () => {
+  it("ignores an operation detail failure after unmount", async () => {
     const detail = deferred<unknown>();
     mocks.listAgentRollouts.mockResolvedValue({ rollouts: [] });
     mocks.getOperation.mockReturnValue(detail.promise);
     const view = await mount<OperationsState>(OperationsView);
     void view.inspectOperation("operation-a");
     await flush();
-    switchWorkspace("workspace-b");
+    unmount?.();
     detail.reject(new TypeError("network"));
     await flush();
     expect(view.detailError).toBe("");

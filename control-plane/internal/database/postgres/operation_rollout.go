@@ -10,11 +10,11 @@ import (
 	"github.com/google/uuid"
 )
 
-const rolloutColumns = `id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,created_at,updated_at`
+const rolloutColumns = `id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,created_at,updated_at`
 
 func scanRollout(row database.Row) (v operationstore.Rollout, err error) {
 	var exclusions value.JSONB
-	err = row.Scan(&v.ID, &v.WorkspaceID, &v.TargetVersion, &v.State, &v.BatchSize, &v.StopOnFailure, &v.Reason, &v.ApprovalID, &v.RequestHash, &v.CreatedBy, &v.ActorSession, &v.CurrentBatch, &v.PauseCode, &exclusions, &v.CreatedAt, &v.UpdatedAt)
+	err = row.Scan(&v.ID, &v.WorkspaceID, &v.TargetVersion, &v.State, &v.BatchSize, &v.StopOnFailure, &v.Reason, &v.RequestHash, &v.CreatedBy, &v.ActorSession, &v.CurrentBatch, &v.PauseCode, &exclusions, &v.CreatedAt, &v.UpdatedAt)
 	if err == nil {
 		err = json.Unmarshal(exclusions.Bytes(), &v.Excluded)
 	}
@@ -77,11 +77,6 @@ func (s operationStore) FindRollout(ctx context.Context, workspace uuid.UUID, ke
 	return
 }
 
-func (s operationStore) RolloutApproval(ctx context.Context, id, workspace, requester uuid.UUID, hash []byte, at value.Timestamp) (resource uuid.UUID, err error) {
-	err = s.QueryRow(ctx, `SELECT resource_id FROM approval_requests WHERE id=$1 AND workspace_id=$2 AND requester_id=$3 AND action='agent.rollout' AND resource_type='batch_operation' AND status='approved' AND expires_at>$5 AND request_hash=$4 FOR UPDATE`, id, workspace, requester, hash, at).Scan(&resource)
-	return
-}
-
 func (s operationStore) InsertRollout(ctx context.Context, v operationstore.PendingRollout) error {
 	exclusions, err := json.Marshal(v.Excluded)
 	if err != nil {
@@ -91,7 +86,7 @@ func (s operationStore) InsertRollout(ctx context.Context, v operationstore.Pend
 	if err != nil {
 		return err
 	}
-	_, err = s.Exec(ctx, `INSERT INTO agent_rollouts(id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,idempotency_key,created_at,updated_at) VALUES($1,$2,$3,'queued',$4,true,$5,$6,$7,$8,$9,0,'',$10,$11,$12,$12)`, v.ID, v.WorkspaceID, v.TargetVersion, v.BatchSize, v.Reason, rbacID(v.ApprovalID), v.RequestHash, v.CreatedBy, v.ActorSession, document, v.IdempotencyKey, v.CreatedAt)
+	_, err = s.Exec(ctx, `INSERT INTO agent_rollouts(id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,idempotency_key,created_at,updated_at) VALUES($1,$2,$3,'queued',$4,true,$5,$6,$7,$8,0,'',$9,$10,$11,$11)`, v.ID, v.WorkspaceID, v.TargetVersion, v.BatchSize, v.Reason, v.RequestHash, v.CreatedBy, v.ActorSession, document, v.IdempotencyKey, v.CreatedAt)
 	return err
 }
 

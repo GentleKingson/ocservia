@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
@@ -24,7 +23,6 @@ import (
 // check keeps a DNS-rebound browser page from reaching these routes.
 func (s *Server) allowDevelopmentRequest(w http.ResponseWriter, r *http.Request) bool {
 	if !s.hasOperationCredential(r) {
-		w.Header().Set("WWW-Authenticate", "OIDC")
 		writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "development routes require the development principal")
 		return false
 	}
@@ -126,12 +124,12 @@ func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}
-	after, ok := httpx.ParseOptionalUUIDv7(r.URL.Query().Get("cursor"))
+	after, ok := parseOptionalUUIDv7(r.URL.Query().Get("cursor"))
 	if !ok {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "cursor must be a UUIDv7 operation ID")
 		return
 	}
-	limit, ok := httpx.PageSize(r, 50)
+	limit, ok := pageSize(r, 50)
 	if !ok {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
 		return
@@ -170,7 +168,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}
-	after, ok := httpx.ParseOptionalUUIDv7(r.URL.Query().Get("after"))
+	after, ok := parseOptionalUUIDv7(r.URL.Query().Get("after"))
 	if !ok {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "after must be a UUIDv7 event ID")
 		return
@@ -183,7 +181,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-order", "Order is invalid", "order must be either asc or desc")
 		return
 	}
-	limit, ok := httpx.PageSize(r, 50)
+	limit, ok := pageSize(r, 50)
 	if !ok {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
 		return

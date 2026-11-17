@@ -19,7 +19,6 @@ import {
   getWorkspace,
   sameWorkspaceContext,
   workspaceContext,
-  workspaceChangedEvent,
   type WorkspaceContext,
 } from "../api/workspace";
 import {
@@ -100,7 +99,6 @@ export const useFleetStore = defineStore("fleet", () => {
   // every replayed page triggers another rebuild.
   let eventCursor: string | undefined;
   const streamConnected = ref(false);
-  let reading = false;
   let selectionTarget: string | undefined;
   let connectSequence = 0;
   const controllers = new Set<AbortController>();
@@ -546,13 +544,11 @@ export const useFleetStore = defineStore("fleet", () => {
   );
 
   function start(): void {
-    reading = true;
     foregroundRefresh.start();
   }
 
   // Leaving a view stops its reads, but does not cancel accepted mutations.
   function stop(): void {
-    reading = false;
     foregroundRefresh.stop();
     selectSequence += 1;
     selectionTarget = undefined;
@@ -565,7 +561,6 @@ export const useFleetStore = defineStore("fleet", () => {
   }
 
   async function connect(): Promise<void> {
-    reading = true;
     foregroundRefresh.start(false);
     if (!isPageActive()) return;
     const sequence = ++connectSequence;
@@ -643,30 +638,6 @@ export const useFleetStore = defineStore("fleet", () => {
     eventCursor = undefined;
     streamConnected.value = false;
     abortRequests();
-  }
-  function resetWorkspace(): void {
-    const wasReading = reading;
-    disconnect();
-    nodes.value = [];
-    snapshotAt.value = undefined;
-    selected.value = undefined;
-    sessions.value = [];
-    ipBans.value = [];
-    userGroupState.value = [];
-    latestOperation.value = undefined;
-    operationTracking.value = false;
-    operationError.value = "";
-    loading.value = false;
-    initialized.value = false;
-    selecting.value = false;
-    selectionError.value = "";
-    if (wasReading) start();
-  }
-  if (typeof window !== "undefined") {
-    window.addEventListener(workspaceChangedEvent, resetWorkspace);
-    onScopeDispose(() => {
-      window.removeEventListener(workspaceChangedEvent, resetWorkspace);
-    });
   }
   onScopeDispose(disconnect);
   return {

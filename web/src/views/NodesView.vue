@@ -1,18 +1,13 @@
 <script setup lang="ts">
 import { Ellipsis } from "@lucide/vue";
 import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
-import {
-  defaultWindow,
-  useEventListener,
-  useIntervalFn,
-  useNow,
-} from "@vueuse/core";
+import { useIntervalFn, useNow } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 
 import { createAgentRollout } from "../api/agents";
-import { workspaceChangedEvent, workspaceContext } from "../api/workspace";
+import { workspaceContext } from "../api/workspace";
 import DataState from "../components/common/DataState.vue";
 import FormField from "../components/common/FormField.vue";
 import OperationDialog from "../components/common/OperationDialog.vue";
@@ -159,16 +154,6 @@ function selectVisibleEligible(event: Event): void {
 const hiddenSelectedCount = computed(() => {
   const visible = new Set(visibleNodes.value.map((node) => node.id));
   return selectedNodes.value.filter((node) => !visible.has(node.id)).length;
-});
-
-// Selections never carry over into another workspace.
-useEventListener(defaultWindow, workspaceChangedEvent, () => {
-  rolloutSubmission += 1;
-  selected.value = [];
-  rolloutDialog.value = false;
-  rolloutStarting.value = false;
-  rolloutError.value = "";
-  rolloutUnconfirmed = false;
 });
 
 // Only the stable Problem type selects a local message; server text is never

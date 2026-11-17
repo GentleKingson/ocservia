@@ -12,19 +12,69 @@ import (
 	"testing"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
+	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
 
+func TestPlanRoutesBackendHTTPIntegration(t *testing.T) {
+	b, owner := authenticationBackendFixtureWithIsolation(t, true)
+	for _, scenario := range []struct {
+		name string
+		run  func(*testing.T, applyHTTPFixture)
+	}{
+		{"TestConfigPlanModuleBackendHTTPIntegration", testConfigPlanModuleBackendHTTPIntegration},
+		{"TestConfigRevisionBackendHTTPIntegration", testConfigRevisionBackendHTTPIntegration},
+		{"TestBusinessRouteActionsBackendHTTPIntegration", testBusinessRouteActionsBackendHTTPIntegration},
+	} {
+		if !t.Run(scenario.name, func(t *testing.T) {
+			scenario.run(t, newApplyHTTPFixtureWithBackend(t, b, owner))
+		}) {
+			return
+		}
+	}
+}
+
+func completeTemplateBody(revision int64, reason string, certRef, keyRef uuid.UUID) string {
+	directives := []configplan.Directive{
+		{Name: "auth", Value: "plain[passwd=/etc/ocserv/ocpasswd]"},
+		{Name: "cookie-timeout", Value: "300"},
+		{Name: "device", Value: "vpns"},
+		{Name: "dns", Value: "1.1.1.1"},
+		{Name: "ipv4-network", Value: "10.42.0.0/24"},
+		{Name: "max-clients", Value: "128"},
+		{Name: "max-same-clients", Value: "2"},
+		{Name: "server-cert", SecretRef: &configplan.SecretRef{ID: certRef}},
+		{Name: "server-key", SecretRef: &configplan.SecretRef{ID: keyRef}},
+		{Name: "socket-file", Value: "/run/ocserv.socket"},
+		{Name: "tcp-port", Value: "443"},
+		{Name: "udp-port", Value: "0"},
+	}
+	body, err := json.Marshal(map[string]any{
+		"expected_revision": revision,
+		"template":          configplan.Template{Name: "complete", Directives: directives},
+		"ttl_seconds":       900,
+		"reason":            reason,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return string(body)
+}
+
 func testConfigRevisionBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) {
 	plan := f.plan(false)
-	f.s = f.newServer(Modules{ConfigPlans: f.s.configPlanLookup.(*configplan.Service), Nodes: telemetry.NewBackend(f.b)})
-	f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Viewer','workspace',$4)`, uuid.Must(uuid.NewV7()), f.requester.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
+	var secretRef uuid.UUID
+	if err := f.row(`SELECT id FROM secret_provider_refs WHERE workspace_id=$1 ORDER BY created_at LIMIT 1`, f.workspace).Scan(&secretRef); err != nil {
+		t.Fatal(err)
+	}
+	f.s = f.newServer(Modules{ConfigPlans: f.s.configPlans, Nodes: telemetry.NewBackend(f.b), Certificates: f.s.certificates})
 	path := "/api/v1/nodes/" + plan.NodeID.String()
 	read := func(want int64) int64 {
 		t.Helper()
@@ -60,7 +110,7 @@ func testConfigRevisionBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) 
 	create := func(revision int64, status int) {
 		t.Helper()
 		before := f.counts(plan.NodeID)
-		body := fmt.Sprintf(`{"expected_revision":%d,"template":{"name":"revision","directives":[{"name":"tcp-port","value":"443"}]},"ttl_seconds":900,"reason":"revision regression"}`, revision)
+		body := completeTemplateBody(revision, "revision regression", secretRef, secretRef)
 		w := f.call("POST", path+"/config-plans", body, uuid.NewString(), f.requester.cookie, nil)
 		if status != 202 {
 			assertApplyHTTPProblem(t, w, status, "stale-revision")
@@ -78,7 +128,7 @@ func testConfigRevisionBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) 
 			t.Fatal(err)
 		}
 		var envelope agentv1.CommandEnvelope
-		if err := proto.Unmarshal(encoded, &envelope); err != nil || envelope.GetConfigPlan() == nil || envelope.GetConfigPlan().GetExpectedRevision() != uint64(revision) {
+		if err := proto.Unmarshal(encoded, &envelope); err != nil || envelope.GetCompleteConfigPlan() == nil || envelope.GetCompleteConfigPlan().GetCandidate().GetExpectedRevision() != uint64(revision) {
 			t.Fatalf("signed Plan revision: %v %v", &envelope, err)
 		}
 	}
@@ -100,16 +150,15 @@ func testConfigRevisionBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) 
 
 func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) {
 	plan := f.plan(true)
-	service := f.s.configPlanLookup.(*configplan.Service)
+	service := f.s.configPlans.(*configplan.Service)
 	path := "/api/v1/nodes/" + plan.NodeID.String() + "/config-plans"
-	plainBody := `{"expected_revision":0,"template":{"name":"module","directives":[{"name":"tcp-port","value":"443"}]},"ttl_seconds":900,"reason":"module request"}`
 	t.Run("construction-and-nil", func(t *testing.T) {
 		f := f
 		f.t = t
 		var disabled *configplan.Service
 		f.s = f.newServer(Modules{ConfigPlans: disabled})
-		if f.s.configPlanLookup != nil {
-			t.Fatal("typed nil retained in lookup")
+		if f.s.configPlans != nil {
+			t.Fatal("typed nil retained in Server")
 		}
 		for _, route := range []struct {
 			method, path string
@@ -127,31 +176,19 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 			}
 		}
 		f.s = f.newServer(Modules{ConfigPlans: service})
-		if f.s.configPlanLookup != service {
+		if f.s.configPlans != service {
 			t.Fatal("construction did not preserve the shared service")
 		}
 		w := f.call("GET", "/api/v1/config-plans/"+plan.ID.String(), "", "", f.requester.cookie, nil)
 		if w.Code != 200 {
 			t.Fatalf("first read: %d %s", w.Code, w.Body)
 		}
-		// Certificates is still absent; a request without SecretRef must submit.
-		w = f.call("POST", path, plainBody, uuid.NewString(), f.requester.cookie, nil)
-		if w.Code != 202 {
-			t.Fatalf("Create without Secrets: %d %s", w.Code, w.Body)
-		}
 	})
 	plans := &observedConfigPlans{ConfigPlans: service}
 	f.s = f.newServer(Modules{ConfigPlans: plans})
 	secretBody := func(ids ...uuid.UUID) string {
-		directives := []configplan.Directive{}
-		for i, id := range ids {
-			directives = append(directives, configplan.Directive{Name: []string{"server-key", "server-cert"}[i], SecretRef: &configplan.SecretRef{ID: id}})
-		}
-		body, err := json.Marshal(map[string]any{"expected_revision": 0, "template": configplan.Template{Name: "module", Directives: directives}, "ttl_seconds": 900, "reason": "module secret request"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(body)
+		certID, keyID := ids[0], ids[len(ids)-1]
+		return completeTemplateBody(0, "module secret request", certID, keyID)
 	}
 	t.Run("secret-service-unconfigured", func(t *testing.T) {
 		assertApplyHTTPProblem(t, f.call("POST", path, secretBody(uuid.Must(uuid.NewV7())), uuid.NewString(), f.requester.cookie, nil), 503, "service-unavailable")
@@ -159,32 +196,24 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 			t.Fatal("missing Secret service reached Create")
 		}
 	})
-	// Secret capability is bound only after Certificates and RBAC are fixed.
 	certs := certificates.NewBackend(f.b, f.s.operations, nil, nil, nil, f.signer)
 	f.s = f.newServer(Modules{ConfigPlans: plans, Certificates: certs})
 	foreign := uuid.Must(uuid.NewV7())
 	stamp := value.Timestamp{Valid: true}
 	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Secret module',$2,$3,$4)`, foreign, foreign.String(), stamp, stamp)
-	f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'config.tls',true)`, plan.NodeID)
+	f.bindWorkspaceAdmin(f.requester, foreign)
+	keyPath := plan.NodeID.String() + "/" + strings.Repeat("52", 32) + "/" + strings.Repeat("53", 32) + "/none"
 	refs := []uuid.UUID{}
-	for i, scope := range []uuid.UUID{f.workspace, f.workspace, foreign} {
-		keyPath := "vpn/key"
-		if i == 1 {
-			keyPath = "vpn/denied"
-		}
-		ref, err := certs.CreateSecretRef(t.Context(), certificates.SecretRefRequest{WorkspaceID: scope, ActorID: f.requester.principal.IdentityID, SessionID: f.requester.principal.SessionID, Provider: "fixture", KeyPath: keyPath, Version: "v1", Reason: "module fixture", RequestID: uuid.NewString()})
+	for _, scope := range []uuid.UUID{f.workspace, foreign} {
+		ref, err := certs.CreateSecretRef(t.Context(), certificates.SecretRefRequest{WorkspaceID: scope, ActorID: f.requester.principal.IdentityID, SessionID: f.requester.principal.SessionID, Provider: configprofile.Provider, KeyPath: keyPath, Version: "v1", Reason: "module fixture", RequestID: uuid.NewString()})
 		if err != nil {
 			t.Fatal(err)
 		}
 		refs = append(refs, ref.ID)
 	}
-	// The first and foreign references have explicit secret.use. The middle one does not.
-	for i, scope := range []uuid.UUID{f.workspace, foreign} {
-		f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'ConfigManager','secret_ref',$4,$5)`, uuid.Must(uuid.NewV7()), f.requester.principal.IdentityID, scope, refs[i*2], stamp)
-	}
 	t.Run("secret-denials-stop-before-create", func(t *testing.T) {
 		before := f.counts(plan.NodeID)
-		for _, ids := range [][]uuid.UUID{{uuid.Must(uuid.NewV7())}, {refs[1]}, {refs[2]}, {refs[0], refs[1]}, {refs[1], refs[0]}} {
+		for _, ids := range [][]uuid.UUID{{uuid.Must(uuid.NewV7())}, {refs[1]}, {refs[0], refs[1]}, {refs[1], refs[0]}} {
 			assertApplyHTTPProblem(t, f.call("POST", path, secretBody(ids...), uuid.NewString(), f.requester.cookie, nil), 403, "forbidden")
 		}
 		if plans.creates.Load() != 0 || f.counts(plan.NodeID) != before {
@@ -221,8 +250,9 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 		if err != nil || !ed25519.Verify(f.signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) {
 			t.Fatal("command signature", err)
 		}
-		candidate := envelope.GetConfigPlan()
-		if candidate == nil || !bytes.Equal(candidate.GetCandidate(), []byte("# generated by ocservia config-plan/v1\nserver-key = ${secret:fixture:vpn/key}\n")) || fmt.Sprintf("%x", candidate.GetCandidateHash()) != created.CandidateHash || actor != f.requester.principal.IdentityID.String() || envelope.GetActorId() != actor || session != f.requester.principal.SessionID || request != "baseline-request" || trace != "0123456789abcdef0123456789abcdef" || !strings.Contains(envelope.GetTraceparent(), trace) || reason != "module secret request" || storedKey != key {
+		candidate := envelope.GetCompleteConfigPlan()
+		hash, hashErr := configprofile.Hash(candidate.GetCandidate())
+		if candidate == nil || hashErr != nil || !bytes.Equal(hash[:], candidate.GetCandidateHash()) || fmt.Sprintf("%x", candidate.GetCandidateHash()) != created.CandidateHash || actor != f.requester.principal.IdentityID.String() || envelope.GetActorId() != actor || session != f.requester.principal.SessionID || request != "baseline-request" || trace != "0123456789abcdef0123456789abcdef" || !strings.Contains(envelope.GetTraceparent(), trace) || reason != "module secret request" || storedKey != key {
 			t.Fatalf("Secret command/audit identity changed: %v %s %s", &envelope, actor, session)
 		}
 		replay := f.call("POST", path, secretBody(refs[0]), " "+key+" ", f.requester.cookie, nil)
@@ -231,18 +261,21 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 		}
 	})
 	t.Run("development-mode-secret-check", func(t *testing.T) {
-		// Adapter-level check only: the real Local principal has no secret.use.
-		// The switch, not the Principal issuer, controls this historical exception.
 		r := baselineRequest("POST", path, nil)
 		ctx := context.WithValue(r.Context(), principalKey{}, f.reader.principal)
 		r = r.WithContext(context.WithValue(ctx, workspaceKey{}, f.workspace))
 		w := httptest.NewRecorder()
 		if f.s.allowConfigPlanSecret(w, r, refs[0]) || w.Code != 403 {
-			t.Fatal("Local principal gained secret.use")
+			t.Fatal("unauthorized local principal gained secret access")
 		}
-		dev := newTestServer(t, testHTTPConfig(true), f.b, Modules{ConfigPlans: plans, Certificates: certs}, Authorization{RBAC: f.s.rbac})
-		if !dev.allowConfigPlanSecret(httptest.NewRecorder(), r, refs[0]) {
-			t.Fatal("development mode was replaced by issuer check")
+		dev := newTestServer(t, testHTTPConfig(true), f.b, Modules{ConfigPlans: plans, Certificates: certs}, Authorization{})
+		devCtx := context.WithValue(r.Context(), principalKey{}, auth.Principal{Subject: "developer", Issuer: "development", BreakGlass: true})
+		devReq := r.WithContext(context.WithValue(devCtx, workspaceKey{}, f.workspace))
+		if !dev.allowConfigPlanSecret(httptest.NewRecorder(), devReq, refs[0]) {
+			t.Fatal("development mode did not permit workspace secret ref")
+		}
+		if dev.allowConfigPlanSecret(httptest.NewRecorder(), r, refs[0]) {
+			t.Fatal("development server flag bypassed principal issuer check")
 		}
 	})
 }

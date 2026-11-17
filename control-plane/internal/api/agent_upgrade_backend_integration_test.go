@@ -30,15 +30,10 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	f := newApplyHTTPFixtureWithBackend(t, b, owner)
 	node := uuid.MustParse("019fde50-2222-7222-8222-222222222222")
 	at, _ := value.FromTime(time.Now().UTC())
-	expires, _ := value.FromTime(time.Now().UTC().Add(time.Hour))
 	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'upgrade','active',1,$3,$4)`, node, f.workspace, at, at)
-	f.bind(f.requester, node, "PlatformAdmin")
-	f.bind(f.reader, node, "Viewer")
 	key := ed25519.NewKeyFromSeed(make([]byte, 32)).Public().(ed25519.PublicKey)
-	credential := uuid.Must(uuid.NewV7())
 	f.exec(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, node, []byte(key), at)
-	f.exec(`INSERT INTO privd_attestation_enrollment_credentials(id,node_id,secret_sha256,controller_nonce,credential_context_sha256,expires_at,consumed_at,created_by_identity_id,created_by_session_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, credential, node, []byte(key), []byte(key), []byte(key), expires, at, f.requester.principal.IdentityID, f.requester.principal.SessionID, at)
-	f.exec(`INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,registration_credential_id) VALUES($1,$2,'ed25519',$3,'active',$4,$5,$6,$7)`, node, privdattestation.PublicKeyID(key), []byte(key), at, at, at, credential)
+	f.exec(`INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at) VALUES($1,$2,'ed25519',$3,'active',$4,$5,$6)`, node, privdattestation.PublicKeyID(key), []byte(key), at, at, at)
 	for _, capability := range []string{"ocserv.agent.upgrade.v1", privdattestation.AttestationCapability} {
 		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,true)`, node, capability)
 	}
@@ -77,7 +72,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 
 	t.Run("input-and-authorization", func(t *testing.T) {
 		problem(f.call("POST", path, body("2.0.0"), "key", nil, nil), 401, "unauthenticated", "")
-		problem(f.call("POST", path, body("2.0.0"), "key", f.reader.cookie, nil), 403, "forbidden", "")
+		problem(f.call("POST", path, body("2.0.0"), "key", f.reader.cookie, nil), 404, "not-found", "")
 		problem(f.call("POST", path, body("2.0.0"), "", f.requester.cookie, nil), 400, "idempotency-key-required", "")
 		problem(f.call("POST", path, `{"target_version":"2.0.0","package_sha256":"untrusted"}`, "key", f.requester.cookie, nil), 400, "invalid-request", "request body is invalid")
 		problem(post("invalid", "invalid"), 400, "invalid-request", "target_version and reason are required and ttl_seconds must be between 60 and 3600")
@@ -228,9 +223,6 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 		replay = post("2.0.0", "accepted")
 		if replay.Code != 202 || replay.Header().Get("Idempotency-Replayed") != "true" || replay.Header().Get("Location") != w.Header().Get("Location") {
 			t.Fatalf("replay after version observation changed: %d %s", replay.Code, replay.Body)
-		}
-		if err := f.row(`SELECT count(*) FROM approval_requests WHERE workspace_id=$1`, f.workspace).Scan(&count); err != nil || count != 0 {
-			t.Fatalf("single Admin upgrade created an approval: %d %v", count, err)
 		}
 	})
 }

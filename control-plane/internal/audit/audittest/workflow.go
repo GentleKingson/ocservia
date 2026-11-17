@@ -6,20 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
-	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/google/uuid"
 )
 
-// Controller exercises public audit and RBAC services with the same runtime
-// backend and transaction, including rollback of failed mutations and legacy approval consumption.
-func Controller(t *testing.T, b database.Backend, workspace, actor, target, session uuid.UUID, approve func(uuid.UUID, uuid.UUID, []byte, time.Time) error) {
+// Controller exercises the public audit service with transactional rollback,
+// checkpoints, concurrent append chains, and repeatable-read verification.
+func Controller(t *testing.T, b database.Backend, workspace, actor uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
 	m := audit.NewBackendManager(b, bytes.Repeat([]byte{7}, 32))
@@ -63,126 +59,6 @@ func Controller(t *testing.T, b database.Backend, workspace, actor, target, sess
 		t.Fatalf("audit checkpoint: %+v %v", verified, err)
 	}
 
-	s := rbac.NewBackend(b)
-	request := rbac.BindingRequest{IdentityID: target, WorkspaceID: workspace, ActorID: actor, SessionID: session, Role: "Viewer", ResourceType: "workspace", RequestID: uuid.NewString(), Reason: "runtime workflow"}
-	if _, err = s.CreateBinding(ctx, request); err != nil {
-		t.Fatal(err)
-	}
-	resource := rbac.Resource{WorkspaceID: workspace, Type: "workspace"}
-	if err = s.Authorize(ctx, target, "node.read", resource, false); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.Authorize(ctx, target, "role_binding.manage", resource, false); !errors.Is(err, rbac.ErrForbidden) {
-		t.Fatal("permission escalation", err)
-	}
-	denied := request
-	denied.ActorID = target
-	denied.IdentityID = actor
-	denied.Role = "Operator"
-	if _, err = s.CreateBinding(ctx, denied); !errors.Is(err, rbac.ErrForbidden) {
-		t.Fatal("grant escalation", err)
-	}
-	if _, err = s.CreateBinding(ctx, request); !errors.Is(err, database.ErrUnique) {
-		t.Fatal("duplicate grant", err)
-	}
-	request.Role = "SecurityAdmin"
-	hash, _ := rbac.BindingApprovalContent(target, workspace, request.Role, request.ResourceType, uuid.Nil)
-	if _, err = s.CreateBinding(ctx, request); err != nil {
-		t.Fatal("direct elevated grant", err)
-	}
-	if err = s.Authorize(ctx, target, "role_binding.manage", resource, false); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.CreateBinding(ctx, request); !errors.Is(err, database.ErrUnique) {
-		t.Fatal("duplicate elevation", err)
-	}
-
-	blocker, err := b.Begin(ctx, database.ReadCommitted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Rollback(ctx)
-	store, err := rbacstore.From(blocker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = store.LockManagement(ctx); err != nil {
-		t.Fatal(err)
-	}
-	waitCtx, stop := context.WithTimeout(ctx, 100*time.Millisecond)
-	defer stop()
-	request.Role = "Auditor"
-	request.ApprovalID = uuid.Nil
-	if _, err = s.CreateBinding(waitCtx, request); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal("management lock cancellation", err)
-	}
-	if err = blocker.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.CreateBinding(ctx, request); err != nil {
-		t.Fatal("management lock release", err)
-	}
-	verified, err = m.Verify(ctx, workspace)
-	if err != nil || !verified.Valid || verified.Events != 4 {
-		t.Fatalf("transactional grant audit: %+v %v", verified, err)
-	}
-	// Approval expiration is judged by the wall clock read after the approval
-	// row lock is granted, so a wait that crosses expiration rejects the consumer
-	// even though its transaction started earlier.
-	old, err := b.Begin(ctx, database.ReadCommitted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer old.Rollback(ctx)
-	started, err := database.TransactionTime(ctx, old)
-	if err != nil {
-		t.Fatal(err)
-	}
-	startedAt, err := started.Time()
-	if err != nil {
-		t.Fatal(err)
-	}
-	expires := startedAt.Add(2 * time.Second)
-	approvalID := uuid.New()
-	if err = approve(approvalID, target, hash, expires); err != nil {
-		t.Fatal(err)
-	}
-	holder, err := b.Begin(ctx, database.ReadCommitted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer holder.Rollback(ctx)
-	consume := func(tx database.Tx) error {
-		return approvals.ConsumeBoundTx(ctx, tx, approvalID, workspace, actor, "role_binding.elevate", "role_binding", target, hash)
-	}
-	if err = consume(holder); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- consume(old) }()
-	select {
-	case err := <-done:
-		t.Fatal("approval lock did not block", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	time.Sleep(time.Until(expires.Add(150 * time.Millisecond)))
-	if err = holder.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err = <-done; !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatal("approval consumed after lock wait crossed expiration", err)
-	}
-	if err = old.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	approvalID = uuid.New()
-	if err = approve(approvalID, target, hash, expires); err != nil {
-		t.Fatal(err)
-	}
-	if err = database.Within(ctx, b, database.ReadCommitted, consume); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatal("already expired approval allowed", err)
-	}
-
 	results := make(chan error, 8)
 	for range cap(results) {
 		go func() { results <- appendEvent(ctx, nil) }()
@@ -196,7 +72,7 @@ func Controller(t *testing.T, b database.Backend, workspace, actor, target, sess
 		t.FailNow()
 	}
 	verified, err = m.Verify(ctx, workspace)
-	if err != nil || !verified.Valid || verified.Events != 12 {
+	if err != nil || !verified.Valid || verified.Events != 9 {
 		t.Fatalf("concurrent audit chain: %+v %v", verified, err)
 	}
 	// Commit an append and checkpoint between the verifier's two reads. Both
@@ -210,11 +86,11 @@ func Controller(t *testing.T, b database.Backend, workspace, actor, target, sess
 		}
 	}}, bytes.Repeat([]byte{7}, 32))
 	verified, err = snapshot.Verify(ctx, workspace)
-	if err != nil || !verified.Valid || !verified.Checkpoint || verified.Events != 12 {
+	if err != nil || !verified.Valid || !verified.Checkpoint || verified.Events != 9 {
 		t.Fatalf("inconsistent verification snapshot: %+v %v", verified, err)
 	}
 	verified, err = m.Verify(ctx, workspace)
-	if err != nil || !verified.Valid || !verified.Checkpoint || verified.Events != 13 {
+	if err != nil || !verified.Valid || !verified.Checkpoint || verified.Events != 10 {
 		t.Fatalf("committed audit tail: %+v %v", verified, err)
 	}
 }

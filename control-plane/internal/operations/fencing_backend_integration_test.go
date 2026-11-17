@@ -293,23 +293,6 @@ func TestFencingBackendIntegration(t *testing.T) {
 			t.Fatal("release readback", err)
 		}
 	})
-	t.Run("disconnect-rejects-observer", func(t *testing.T) {
-		node := f.node(t)
-		term, err := connectionowner.AcquireBackend(ctx, f.backend, node, identity, uuid.Must(uuid.NewV7()), time.Minute)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := term.ReleaseBackend(ctx, f.backend); err != nil {
-			t.Fatal(err)
-		}
-		connection := term.ConnectionID()
-		if release, err := connectionowner.GuardObservedTermBackend(ctx, f.backend, node, identity.InstanceID, identity.Incarnation, connection, term.Epoch()); !errors.Is(err, connectionowner.ErrNotOwner) {
-			if release != nil {
-				release()
-			}
-			t.Fatal("disconnected term still authorizes external mutations", err)
-		}
-	})
 }
 
 func lockOwner(t *testing.T, f *outboxFixture, node uuid.UUID) database.Tx {
@@ -319,7 +302,7 @@ func lockOwner(t *testing.T, f *outboxFixture, node uuid.UUID) database.Tx {
 		t.Fatal(err)
 	}
 	var epoch int64
-	if err := tx.QueryRow(context.Background(), `SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=$1 FOR UPDATE`, node).Scan(&epoch); err != nil {
+	if err := tx.QueryRow(context.Background(), `SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=$1 FOR UPDATE`, node[:]).Scan(&epoch); err != nil {
 		tx.Rollback(context.Background())
 		t.Fatal(err)
 	}

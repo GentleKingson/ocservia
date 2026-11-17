@@ -36,10 +36,7 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     UpdateNodeTrustResponse, ValidateEnrollmentRequest, WatchEventsRequest,
     transport_service_server::TransportService, trust_service_client::TrustServiceClient,
 };
-use ocservia_contracts::session::{
-    ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME, READ_ONLY_SESSION_CAPABILITIES,
-    is_read_only_session_capability,
-};
+use ocservia_contracts::session::{ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME};
 use prost::Message;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
@@ -422,15 +419,6 @@ impl IdentityPolicy {
         alpn == ENROLL_ALPN || (alpn == AGENT_ALPN && state.approved.contains_key(&endpoint))
     }
 
-    fn matches_node(&self, endpoint: EndpointId, node_id: &[u8]) -> bool {
-        self.state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .approved
-            .get(&endpoint)
-            .is_some_and(|approved_node| approved_node == node_id)
-    }
-
     fn revoked(&self, endpoint: EndpointId) -> bool {
         self.state
             .read()
@@ -691,16 +679,12 @@ struct SecurityHook {
 }
 
 impl SecurityHook {
-    fn new(policy: IdentityPolicy, trust: Option<&TrustAuthority>) -> Self {
-        let budgets = trust.map_or_else(
-            || Arc::new(TrustBudgetSet::new(&TrustBudgetConfig::default())),
-            |authority| Arc::clone(&authority.budgets),
-        );
+    fn new(policy: IdentityPolicy, trust: &TrustAuthority) -> Self {
         Self {
             policy,
             agent_attempts: Mutex::new(HashMap::new()),
             enrollment_attempts: Mutex::new(HashMap::new()),
-            budgets,
+            budgets: Arc::clone(&trust.budgets),
         }
     }
 }
@@ -831,8 +815,7 @@ struct Inner {
     connections: Mutex<HashMap<Vec<u8>, RegisteredConnection>>,
     registration_tokens: Mutex<HashMap<Vec<u8>, Weak<()>>>,
     fences: Mutex<HashMap<Vec<u8>, RegisteredFence>>,
-    keyring: Option<Arc<ControllerCommandKeyring>>,
-    require_fencing: bool,
+    keyring: Arc<ControllerCommandKeyring>,
     events: Mutex<EventState>,
     telemetry_budgets: Mutex<HashMap<Vec<u8>, TelemetryBudget>>,
     event_capacity: usize,
@@ -846,25 +829,17 @@ struct RegisteredConnection {
     connection: Connection,
     max_message_size: usize,
     negotiated_capabilities: HashSet<String>,
-    session_mode: TransportSessionMode,
     authorization_revision: u64,
     session_expires_at: Option<SystemTime>,
-    fence: Option<RegisteredFence>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TransportSessionMode {
-    ReadOnly,
-    AuthorizedV11,
+    fence: RegisteredFence,
 }
 
 struct NegotiatedSession {
     handshake: SessionHandshake,
     negotiated_capabilities: HashSet<String>,
-    session_mode: TransportSessionMode,
     authorization_revision: u64,
     session_expires_at: Option<SystemTime>,
-    fence: Option<RegisteredFence>,
+    fence: RegisteredFence,
 }
 
 struct EventState {
@@ -911,16 +886,7 @@ struct TelemetryBudget {
 }
 
 impl Shared {
-    #[cfg(test)]
-    fn new(event_capacity: usize) -> Self {
-        Self::new_with_fence_policy(event_capacity, None, false)
-    }
-
-    fn new_with_fence_policy(
-        event_capacity: usize,
-        keyring: Option<Arc<ControllerCommandKeyring>>,
-        require_fencing: bool,
-    ) -> Self {
+    fn new(event_capacity: usize, keyring: Arc<ControllerCommandKeyring>) -> Self {
         let capacity = event_capacity.clamp(1, MAX_CONNECTIONS);
         let (shutdown, _) = watch::channel(false);
         Self {
@@ -929,7 +895,6 @@ impl Shared {
                 registration_tokens: Mutex::new(HashMap::new()),
                 fences: Mutex::new(HashMap::new()),
                 keyring,
-                require_fencing,
                 events: Mutex::new(EventState {
                     retained: VecDeque::with_capacity(capacity),
                     subscribers: Vec::new(),
@@ -1065,7 +1030,7 @@ impl Shared {
                 &registered.metadata.endpoint_id,
                 TransportEventType::Disconnected,
                 reason.to_vec(),
-                registered.fence.as_ref(),
+                &registered.fence,
             ))
             .await;
         }
@@ -1107,23 +1072,16 @@ impl Shared {
             .get(node_id.as_slice())
             .cloned();
         let Some(registered) = registered else {
-            if binding.is_none() && !self.inner.require_fencing {
-                return Ok(None);
-            }
             return Err(Status::permission_denied(
                 "no owner fence is registered for this node",
             ));
         };
-        // A registered fence means the node is inside the fencing state
-        // machine: its operations are bound unconditionally, regardless of
-        // the global require-fencing policy, which only governs nodes that
-        // never registered a fence.
         let Some(binding) = binding else {
             return Err(Status::permission_denied(
                 "an owner fence binding is required for this operation",
             ));
         };
-        let keyring = self.keyring()?;
+        let keyring = self.keyring();
         let endpoint = endpoint_hint.copied().unwrap_or(registered.endpoint_id);
         let (now_seconds, now_nanos) = unix_now_parts();
         let claims = keyring
@@ -1176,27 +1134,18 @@ impl Shared {
         Ok(Some(registered))
     }
 
-    fn keyring(&self) -> Result<&Arc<ControllerCommandKeyring>, Status> {
-        self.inner.keyring.as_ref().ok_or_else(|| {
-            Status::permission_denied("controller fence verification keyring is unavailable")
-        })
+    fn keyring(&self) -> &Arc<ControllerCommandKeyring> {
+        &self.inner.keyring
     }
 
-    /// Closes any live mutation-capable session that is not grounded in the
-    /// newly recorded fence term after an Apply: a session of a different
-    /// fence, and equally a fence-less session opened before the node first
-    /// registered an owner fence. Only explicitly read-only legacy sessions
-    /// survive a first registration.
+    /// Closes any live session that is not grounded in the newly recorded
+    /// fence term after an Apply.
     async fn retire_superseded_owner(&self, node_id: &[u8], registered: &RegisteredFence) {
         let retired = {
             let connections = self.inner.connections.lock().await;
-            connections.get(node_id).is_some_and(|entry| {
-                entry.session_mode == TransportSessionMode::AuthorizedV11
-                    && entry
-                        .fence
-                        .as_ref()
-                        .is_none_or(|fence| fence.verified.fence_id != registered.verified.fence_id)
-            })
+            connections
+                .get(node_id)
+                .is_some_and(|entry| entry.fence.verified.fence_id != registered.verified.fence_id)
         };
         if retired {
             self.remove(node_id, b"owner fence superseded").await;
@@ -1226,32 +1175,16 @@ pub struct IrohTransportService {
 }
 
 impl IrohTransportService {
-    /// Creates the service and its bounded connection registry.
+    /// Creates the typed transport service with its endpoint policy and
+    /// Controller fence verification keyring.
     #[must_use]
-    pub fn new(event_capacity: usize) -> Self {
-        Self::new_with_policy(event_capacity, IdentityPolicy::default())
-    }
-
-    /// Creates the service with a shared mutable endpoint policy.
-    #[must_use]
-    pub fn new_with_policy(event_capacity: usize, policy: IdentityPolicy) -> Self {
-        Self::new_with_fence_policy(event_capacity, policy, None, false)
-    }
-
-    /// Creates the service with Controller fence verification keys. When
-    /// `keyring` is set, connection fences carried by session handshakes and
-    /// the `RegisterOwnerFence` RPC are signature-verified before they can
-    /// influence any dispatch decision. When `require_fencing` is set,
-    /// mutation-capable sessions without a verified fence are rejected.
-    #[must_use]
-    pub fn new_with_fence_policy(
+    pub fn new(
         event_capacity: usize,
         policy: IdentityPolicy,
-        keyring: Option<Arc<ControllerCommandKeyring>>,
-        require_fencing: bool,
+        keyring: Arc<ControllerCommandKeyring>,
     ) -> Self {
         Self {
-            shared: Shared::new_with_fence_policy(event_capacity, keyring, require_fencing),
+            shared: Shared::new(event_capacity, keyring),
             policy,
         }
     }
@@ -1262,9 +1195,9 @@ impl IrohTransportService {
     }
 
     /// Validates one command against the node's registered session before
-    /// any Agent stream is opened: session mode, negotiated capability,
-    /// authorization revision, Controller grant expiry, negotiated message
-    /// size, and the connection-owner fence term.
+    /// any Agent stream is opened: negotiated capability, authorization
+    /// revision, Controller grant expiry, negotiated message size, and the
+    /// connection-owner fence term.
     async fn validate_command_dispatch(
         &self,
         node_id: &[u8],
@@ -1275,7 +1208,6 @@ impl IrohTransportService {
             connection,
             max_message_size,
             negotiated_capabilities,
-            session_mode,
             authorization_revision,
             session_expires_at,
             session_fence,
@@ -1291,18 +1223,12 @@ impl IrohTransportService {
                     entry.connection.clone(),
                     entry.max_message_size,
                     entry.negotiated_capabilities.clone(),
-                    entry.session_mode,
                     entry.authorization_revision,
                     entry.session_expires_at,
                     entry.fence.clone(),
                 )
             })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
-        if session_mode == TransportSessionMode::ReadOnly {
-            return Err(Status::permission_denied(
-                "read-only session does not permit command dispatch",
-            ));
-        }
         if !negotiated_capabilities.contains(&command.required_capability) {
             return Err(Status::permission_denied(
                 "command capability was not negotiated for this session",
@@ -1323,7 +1249,7 @@ impl IrohTransportService {
                 "command exceeds the agent's negotiated message size",
             ));
         }
-        self.verify_command_fence(node_id, command, session_fence.as_ref())
+        self.verify_command_fence(node_id, command, &session_fence)
             .await?;
         Ok((connection, max_message_size))
     }
@@ -1339,40 +1265,9 @@ impl IrohTransportService {
         &self,
         node_id: &[u8],
         command: &CommandEnvelope,
-        session_fence: Option<&RegisteredFence>,
+        session_fence: &RegisteredFence,
     ) -> Result<(), Status> {
-        let Some(session_fence) = session_fence else {
-            if command.connection_fence.is_some() || command.fence_binding.is_some() {
-                return Err(Status::permission_denied(
-                    "command fence is not grounded in the session term",
-                ));
-            }
-            if self.shared.inner.require_fencing {
-                return Err(Status::permission_denied(
-                    "command dispatch requires a fenced session",
-                ));
-            }
-            // The session carries no fence, but the node may already have a
-            // registered owner fence from a current or superseded term: a
-            // fence-less session predating the first registration must not
-            // keep dispatching bare commands.
-            let node_key = fixed16(node_id)?;
-            let registered = self
-                .shared
-                .inner
-                .fences
-                .lock()
-                .await
-                .get(node_key.as_slice())
-                .cloned();
-            if registered.is_some() {
-                return Err(Status::permission_denied(
-                    "command dispatch requires the registered owner fence",
-                ));
-            }
-            return Ok(());
-        };
-        let keyring = self.shared.keyring()?;
+        let keyring = self.shared.keyring();
         let node_id = fixed16(node_id)?;
         let (now_seconds, now_nanos) = unix_now_parts();
         let (verified, claims) = verify_command_carriers(
@@ -1548,7 +1443,7 @@ impl TransportService for IrohTransportService {
         {
             return Err(Status::invalid_argument("artifact request is invalid"));
         }
-        let (connection, session_mode, endpoint_bytes, session_fence) = self
+        let (connection, endpoint_bytes, session_fence) = self
             .shared
             .inner
             .connections
@@ -1558,17 +1453,11 @@ impl TransportService for IrohTransportService {
             .map(|entry| {
                 (
                     entry.connection.clone(),
-                    entry.session_mode,
                     entry.metadata.endpoint_id.clone(),
                     entry.fence.clone(),
                 )
             })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
-        if session_mode == TransportSessionMode::ReadOnly {
-            return Err(Status::permission_denied(
-                "read-only session does not permit artifact fetch",
-            ));
-        }
         // Acceptance boundary contract: no response headers and no artifact
         // frames may leave this handler before verify_operation_binding has
         // accepted the fence binding. The controller holds its ownership
@@ -1580,7 +1469,7 @@ impl TransportService for IrohTransportService {
             .verify_operation_binding(
                 &node_id,
                 Some(&fixed32(&endpoint_bytes)?),
-                session_fence.as_ref(),
+                Some(&session_fence),
                 request.fence_binding.as_ref(),
                 FenceOperationKind::Artifact,
                 &artifact_id,
@@ -1635,7 +1524,7 @@ impl TransportService for IrohTransportService {
         let expected_artifact_id = grant.artifact_id.clone();
         let expected_grant_id = grant.grant_id.clone();
         let confirm_only = request.confirm_only;
-        let (connection, session_mode, endpoint_bytes, session_fence) = self
+        let (connection, endpoint_bytes, session_fence) = self
             .shared
             .inner
             .connections
@@ -1645,23 +1534,17 @@ impl TransportService for IrohTransportService {
             .map(|entry| {
                 (
                     entry.connection.clone(),
-                    entry.session_mode,
                     entry.metadata.endpoint_id.clone(),
                     entry.fence.clone(),
                 )
             })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
-        if session_mode == TransportSessionMode::ReadOnly {
-            return Err(Status::permission_denied(
-                "read-only session does not permit artifact consumption",
-            ));
-        }
         let dispatch_fence = self
             .shared
             .verify_operation_binding(
                 &node_id,
                 Some(&fixed32(&endpoint_bytes)?),
-                session_fence.as_ref(),
+                Some(&session_fence),
                 request.fence_binding.as_ref(),
                 FenceOperationKind::Artifact,
                 &expected_grant_id,
@@ -1882,7 +1765,7 @@ impl TransportService for IrohTransportService {
             .ok_or_else(|| Status::invalid_argument("owner fence is required"))?;
         let node_id = validate_uuid(&fence.node_id, "node_id")?;
         let endpoint_id = fixed32(&fence.endpoint_id)?;
-        let keyring = self.shared.keyring()?;
+        let keyring = self.shared.keyring();
         let (now_seconds, now_nanos) = unix_now_parts();
         let verified = keyring
             .verify_connection_fence_v2_at(
@@ -1982,7 +1865,7 @@ struct SessionHandler {
     shared: Shared,
     policy: IdentityPolicy,
     kind: ProtocolKind,
-    trust: Option<TrustAuthority>,
+    trust: TrustAuthority,
     /// One absolute budget for the whole pre-registration handshake.
     handshake_timeout: Duration,
 }
@@ -2004,14 +1887,10 @@ impl SessionHandler {
         send: &mut iroh::endpoint::SendStream,
         recv: &mut iroh::endpoint::RecvStream,
     ) -> Result<Option<NegotiatedSession>, AcceptError> {
-        if matches!(self.kind, ProtocolKind::Enroll) && self.trust.is_some() {
+        if matches!(self.kind, ProtocolKind::Enroll) {
             let request = read_enrollment(recv).await?;
             validate_enrollment(&request, connection.remote_id())?;
-            let trust = self
-                .trust
-                .as_ref()
-                .ok_or_else(|| protocol_error("trust authority unavailable"))?;
-            let response = trust.enroll(request).await?;
+            let response = self.trust.enroll(request).await?;
             write_message(send, &response).await?;
             wait_for_delivery(send).await?;
             let reason = if response.result == i32::from(HandshakeResult::Accepted) {
@@ -2024,43 +1903,17 @@ impl SessionHandler {
         }
         let handshake = read_handshake(recv).await?;
         validate_handshake(&handshake, connection.remote_id())?;
-        if self.trust.is_none() {
-            validate_protocol_version(&handshake)?;
-        }
-        let response = match self.kind {
-            ProtocolKind::Enroll => local_handshake_response(
-                HandshakeResult::PendingApproval,
-                handshake.max_message_size,
-            ),
-            ProtocolKind::Agent if self.trust.is_some() => {
-                self.trust
-                    .as_ref()
-                    .ok_or_else(|| protocol_error("trust authority unavailable"))?
-                    .authorize(connection.remote_id(), handshake.clone())
-                    .await?
-            }
-            ProtocolKind::Agent
-                if self
-                    .policy
-                    .matches_node(connection.remote_id(), &handshake.node_id) =>
-            {
-                static_read_only_handshake_response(&handshake)
-            }
-            ProtocolKind::Agent => {
-                return Err(protocol_error("endpoint is not bound to the claimed node"));
-            }
-        };
+        validate_protocol_version(&handshake)?;
+        let response = self
+            .trust
+            .authorize(connection.remote_id(), handshake.clone())
+            .await?;
         write_message(send, &response).await?;
         let result =
             HandshakeResult::try_from(response.result).unwrap_or(HandshakeResult::Unspecified);
-        if matches!(self.kind, ProtocolKind::Enroll) || result != HandshakeResult::Accepted {
+        if result != HandshakeResult::Accepted {
             wait_for_delivery(send).await?;
-            let reason = if matches!(self.kind, ProtocolKind::Enroll) {
-                b"enrollment pending".as_slice()
-            } else {
-                b"session rejected".as_slice()
-            };
-            connection.close(VarInt::from_u32(0x101), reason);
+            connection.close(VarInt::from_u32(0x101), b"session rejected");
             return Ok(None);
         }
         if response.max_message_size == 0
@@ -2069,17 +1922,8 @@ impl SessionHandler {
         {
             return Err(protocol_error("negotiated message size is invalid"));
         }
-        let negotiated_capabilities = validate_negotiated_session(
-            &handshake,
-            connection.remote_id(),
-            &response,
-            self.trust.is_some(),
-        )?;
-        let session_mode = if response.protocol_minor == 0 {
-            TransportSessionMode::ReadOnly
-        } else {
-            TransportSessionMode::AuthorizedV11
-        };
+        let negotiated_capabilities =
+            validate_negotiated_session(&handshake, connection.remote_id(), &response)?;
         let (authorization_revision, session_expires_at) = response
             .session_grant
             .as_ref()
@@ -2095,20 +1939,11 @@ impl SessionHandler {
             .transpose()?
             .unwrap_or((0, None));
         let fence = self.verify_session_fence(connection, &handshake, &response)?;
-        if session_mode == TransportSessionMode::AuthorizedV11
-            && self.shared.inner.require_fencing
-            && fence.is_none()
-        {
-            return Err(protocol_error(
-                "mutation session requires a verified owner fence",
-            ));
-        }
         let mut handshake = handshake;
         handshake.max_message_size = response.max_message_size;
         Ok(Some(NegotiatedSession {
             handshake,
             negotiated_capabilities,
-            session_mode,
             authorization_revision,
             session_expires_at,
             fence,
@@ -2116,7 +1951,7 @@ impl SessionHandler {
     }
 
     /// Verifies the Controller-signed connection-owner fence carried by one
-    /// accepted session handshake. Fails closed when the fence is present but
+    /// accepted session handshake. Fails closed when the fence is missing or
     /// cannot be verified, when its lease deadline has passed (it authorizes
     /// current mutations, unlike its later audit expiry), or when it is not
     /// pinned to the claiming node and the connection's endpoint.
@@ -2125,14 +1960,12 @@ impl SessionHandler {
         connection: &Connection,
         handshake: &SessionHandshake,
         response: &SessionHandshakeResponse,
-    ) -> Result<Option<RegisteredFence>, AcceptError> {
-        let Some(fence) = response.connection_fence.as_ref() else {
-            return Ok(None);
-        };
-        let keyring = self
-            .shared
-            .keyring()
-            .map_err(|_| protocol_error("controller fence verification keyring is unavailable"))?;
+    ) -> Result<RegisteredFence, AcceptError> {
+        let fence = response
+            .connection_fence
+            .as_ref()
+            .ok_or_else(|| protocol_error("session requires a verified owner fence"))?;
+        let keyring = self.shared.keyring();
         let node_id: [u8; 16] = handshake
             .node_id
             .clone()
@@ -2146,11 +1979,11 @@ impl SessionHandler {
         if lease_expired_at(verified.lease_until_seconds, verified.lease_until_nanos) {
             return Err(protocol_error("connection owner lease has expired"));
         }
-        Ok(Some(RegisteredFence {
+        Ok(RegisteredFence {
             verified,
             fence: fence.clone(),
             endpoint_id,
-        }))
+        })
     }
 }
 
@@ -2195,19 +2028,17 @@ impl ProtocolHandler for SessionHandler {
         let metadata = metadata(&session, &connection).await;
         let node_id = metadata.node_id.clone();
         let registration_token = self.shared.registration_token(&node_id).await;
-        if let Some(trust) = &self.trust {
-            match trust.recheck_agent(connection.remote_id()).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    connection.close(VarInt::from_u32(0x101), b"session trust changed");
-                    return Err(protocol_error(
-                        "endpoint trust changed during session registration",
-                    ));
-                }
-                Err(rejection) => {
-                    connection.close(VarInt::from_u32(0x102), b"trust authority unavailable");
-                    return Err(trust_rejection_error(rejection));
-                }
+        match self.trust.recheck_agent(connection.remote_id()).await {
+            Ok(true) => {}
+            Ok(false) => {
+                connection.close(VarInt::from_u32(0x101), b"session trust changed");
+                return Err(protocol_error(
+                    "endpoint trust changed during session registration",
+                ));
+            }
+            Err(rejection) => {
+                connection.close(VarInt::from_u32(0x102), b"trust authority unavailable");
+                return Err(trust_rejection_error(rejection));
             }
         }
         let mut registry = self.shared.inner.connections.lock().await;
@@ -2223,9 +2054,9 @@ impl ProtocolHandler for SessionHandler {
             connection.close(VarInt::from_u32(0x101), b"session revoked");
             return Err(protocol_error("endpoint was revoked during handshake"));
         }
-        if let Some(fence) = &session.fence {
+        {
             let mut fences = self.shared.inner.fences.lock().await;
-            match fence_registration_decision(fences.get(&node_id), fence) {
+            match fence_registration_decision(fences.get(&node_id), &session.fence) {
                 FenceRegistration::Stale => {
                     drop(fences);
                     drop(registry);
@@ -2243,7 +2074,7 @@ impl ProtocolHandler for SessionHandler {
                     ));
                 }
                 FenceRegistration::Apply | FenceRegistration::Refresh => {
-                    fences.insert(node_id.clone(), fence.clone());
+                    fences.insert(node_id.clone(), session.fence.clone());
                 }
             }
         }
@@ -2254,7 +2085,6 @@ impl ProtocolHandler for SessionHandler {
                 connection: connection.clone(),
                 max_message_size,
                 negotiated_capabilities: session.negotiated_capabilities,
-                session_mode: session.session_mode,
                 authorization_revision: session.authorization_revision,
                 session_expires_at: session.session_expires_at,
                 fence: session.fence.clone(),
@@ -2270,7 +2100,7 @@ impl ProtocolHandler for SessionHandler {
                     &previous.metadata.endpoint_id,
                     TransportEventType::Disconnected,
                     b"connection superseded".to_vec(),
-                    previous.fence.as_ref(),
+                    &previous.fence,
                 ))
                 .await;
         }
@@ -2280,7 +2110,7 @@ impl ProtocolHandler for SessionHandler {
                 &metadata.endpoint_id,
                 TransportEventType::Connected,
                 metadata.path_detail.as_bytes().to_vec(),
-                session.fence.as_ref(),
+                &session.fence,
             ))
             .await;
         drop(registry);
@@ -2328,7 +2158,7 @@ async fn finish_session(
                 connection.remote_id().as_bytes(),
                 TransportEventType::Disconnected,
                 b"connection closed".to_vec(),
-                fence.as_ref(),
+                &fence,
             ))
             .await;
     }
@@ -2356,9 +2186,7 @@ fn monitor_owner_lease(
             if entry.connection.stable_id() != connection.stable_id() {
                 break;
             }
-            let Some(session_fence) = &entry.fence else {
-                continue;
-            };
+            let session_fence = &entry.fence;
             // Renewal replaces the registered fence, not the handshake's
             // snapshot. Read it under the same lock used by registration.
             let fences = shared.inner.fences.lock().await;
@@ -2775,53 +2603,13 @@ async fn wait_for_delivery(send: &iroh::endpoint::SendStream) -> Result<(), Acce
     Ok(())
 }
 
-fn local_handshake_response(
-    result: HandshakeResult,
-    max_message_size: u32,
-) -> SessionHandshakeResponse {
-    SessionHandshakeResponse {
-        result: result.into(),
-        protocol_major: PROTOCOL_MAJOR,
-        protocol_minor: PROTOCOL_MINOR,
-        max_message_size,
-        controller_version: env!("CARGO_PKG_VERSION").to_owned(),
-        negotiated_capabilities: Vec::new(),
-        session_grant: None,
-        connection_fence: None,
-    }
-}
-
-fn static_read_only_handshake_response(handshake: &SessionHandshake) -> SessionHandshakeResponse {
-    let advertised = handshake
-        .capabilities
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    let negotiated_capabilities = READ_ONLY_SESSION_CAPABILITIES
-        .iter()
-        .filter(|capability| advertised.contains(**capability))
-        .map(|capability| (*capability).to_owned())
-        .collect();
-    SessionHandshakeResponse {
-        result: HandshakeResult::Accepted.into(),
-        protocol_major: PROTOCOL_MAJOR,
-        protocol_minor: 0,
-        max_message_size: handshake.max_message_size,
-        controller_version: env!("CARGO_PKG_VERSION").to_owned(),
-        negotiated_capabilities,
-        session_grant: None,
-        connection_fence: None,
-    }
-}
-
 fn validate_negotiated_session(
     handshake: &SessionHandshake,
     endpoint: EndpointId,
     response: &SessionHandshakeResponse,
-    controller_authoritative: bool,
 ) -> Result<HashSet<String>, AcceptError> {
     if response.protocol_major != PROTOCOL_MAJOR
-        || response.protocol_minor > PROTOCOL_MINOR
+        || response.protocol_minor != PROTOCOL_MINOR
         || response.protocol_minor > handshake.protocol_minor
     {
         return Err(protocol_error("negotiated protocol version is invalid"));
@@ -2837,26 +2625,6 @@ fn validate_negotiated_session(
             return Err(protocol_error("negotiated capability set is invalid"));
         }
         previous = Some(capability);
-    }
-    if response.protocol_minor == 0 {
-        if response
-            .negotiated_capabilities
-            .iter()
-            .any(|capability| !is_read_only_session_capability(capability))
-        {
-            return Err(protocol_error(
-                "legacy sessions may negotiate read-only capabilities only",
-            ));
-        }
-        if response.session_grant.is_some() {
-            return Err(protocol_error("legacy session grant is invalid"));
-        }
-        return Ok(response.negotiated_capabilities.iter().cloned().collect());
-    }
-    if !controller_authoritative {
-        return Err(protocol_error(
-            "mutation-capable sessions require Controller authority",
-        ));
     }
     let grant = response
         .session_grant
@@ -2895,8 +2663,7 @@ fn validate_enrollment(request: &EnrollRequest, remote: EndpointId) -> Result<()
     }
     let token = request
         .token
-        .strip_prefix("obt1_")
-        .or_else(|| request.token.strip_prefix("obt2_"))
+        .strip_prefix("obt2_")
         .unwrap_or(&request.token);
     if token.len() != 43 || request.nonce.len() < 16 || request.nonce.len() > 64 {
         return Err(protocol_error("enrollment credential or nonce is invalid"));
@@ -2959,7 +2726,7 @@ fn validate_handshake(handshake: &SessionHandshake, remote: EndpointId) -> Resul
 }
 
 fn validate_protocol_version(handshake: &SessionHandshake) -> Result<(), AcceptError> {
-    if handshake.protocol_major != PROTOCOL_MAJOR || handshake.protocol_minor > PROTOCOL_MINOR {
+    if handshake.protocol_major != PROTOCOL_MAJOR || handshake.protocol_minor != PROTOCOL_MINOR {
         return Err(protocol_error("protocol version incompatible"));
     }
     Ok(())
@@ -3011,10 +2778,7 @@ async fn metadata(session: &NegotiatedSession, connection: &Connection) -> NodeC
         },
         authorization_revision: session.authorization_revision,
         session_expires_at: session.session_expires_at.map(Into::into),
-        owner_epoch: session
-            .fence
-            .as_ref()
-            .map_or(0, |fence| fence.verified.owner_epoch),
+        owner_epoch: session.fence.verified.owner_epoch,
     }
 }
 
@@ -3389,13 +3153,11 @@ fn event_with_term(
     endpoint_id: &[u8],
     kind: TransportEventType,
     payload: Vec<u8>,
-    fence: Option<&RegisteredFence>,
+    fence: &RegisteredFence,
 ) -> TransportEvent {
     let mut transport_event = event(node_id, endpoint_id, kind, payload);
-    if let Some(fence) = fence {
-        transport_event.connection_id = fence.verified.connection_id.to_vec();
-        transport_event.owner_epoch = fence.verified.owner_epoch;
-    }
+    transport_event.connection_id = fence.verified.connection_id.to_vec();
+    transport_event.owner_epoch = fence.verified.owner_epoch;
     transport_event
 }
 
@@ -3452,55 +3214,6 @@ fn now_timestamp() -> prost_types::Timestamp {
     SystemTime::now().into()
 }
 
-/// Builds the single controller endpoint and registers exactly the two platform ALPNs.
-///
-/// # Errors
-///
-/// Returns an error when the initial fail-closed trust snapshot is unavailable
-/// or Iroh endpoint initialization fails.
-pub async fn build_router(
-    secret_key: SecretKey,
-    relay_mode: RelayMode,
-    policy: IdentityPolicy,
-    service: &IrohTransportService,
-) -> Result<Router, iroh::endpoint::BindError> {
-    build_router_with_direct(
-        secret_key,
-        relay_mode,
-        policy,
-        None,
-        service,
-        true,
-        Vec::new(),
-    )
-    .await
-}
-
-/// Builds the controller endpoint with additional relay TLS roots for
-/// deployments whose relays chain to a private certificate authority.
-///
-/// # Errors
-///
-/// Returns an Iroh bind error when endpoint or transport initialization fails.
-pub async fn build_router_with_tls_roots(
-    secret_key: SecretKey,
-    relay_mode: RelayMode,
-    policy: IdentityPolicy,
-    relay_tls_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
-    service: &IrohTransportService,
-) -> Result<Router, iroh::endpoint::BindError> {
-    build_router_with_direct(
-        secret_key,
-        relay_mode,
-        policy,
-        None,
-        service,
-        true,
-        relay_tls_roots,
-    )
-    .await
-}
-
 /// Builds the controller endpoint with a live Go trust authority.
 ///
 /// # Errors
@@ -3536,7 +3249,7 @@ pub async fn build_router_with_trust_tls_roots(
         secret_key,
         relay_mode,
         policy,
-        Some(trust),
+        trust,
         service,
         true,
         relay_tls_roots,
@@ -3549,12 +3262,11 @@ async fn build_router_with_direct(
     secret_key: SecretKey,
     relay_mode: RelayMode,
     policy: IdentityPolicy,
-    trust: Option<TrustAuthority>,
+    trust: TrustAuthority,
     service: &IrohTransportService,
     direct_enabled: bool,
     relay_tls_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
 ) -> Result<Router, iroh::endpoint::BindError> {
-    let keep_relays_connected = keep_dedicated_relays_connected(&relay_mode);
     let transport = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_STREAMS))
         .max_concurrent_uni_streams(VarInt::from_u32(2))
@@ -3575,9 +3287,9 @@ async fn build_router_with_direct(
                 .disable_fallback()
                 .build(),
         )
-        .keep_relays_connected(keep_relays_connected)
+        .keep_relays_connected(false)
         .transport_config(transport)
-        .hooks(SecurityHook::new(policy.clone(), trust.as_ref()));
+        .hooks(SecurityHook::new(policy.clone(), &trust));
     if !relay_tls_roots.is_empty() {
         endpoint_builder = endpoint_builder
             .ca_tls_config(iroh::tls::CaTlsConfig::default().with_extra_roots(relay_tls_roots));
@@ -3610,10 +3322,6 @@ async fn build_router_with_direct(
         .spawn())
 }
 
-fn keep_dedicated_relays_connected(relay_mode: &RelayMode) -> bool {
-    matches!(relay_mode, RelayMode::Custom(relays) if relays.len() >= 2)
-}
-
 /// Shuts down active connections before closing the Iroh router.
 ///
 /// # Errors
@@ -3631,14 +3339,26 @@ pub async fn shutdown(
 mod tests {
     use std::net::SocketAddr;
 
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer as _, SigningKey};
     use iroh::{RelayMap, Watcher as _, tls::CaTlsConfig};
+    use ocservia_command_authorization::{
+        ConnectionFenceClaimsV2, FenceBindingClaimsV2, SessionGrantClaimsV1,
+        canonical_connection_fence_v2, canonical_fence_binding_v2, canonical_session_grant_v1,
+        connection_fence_claims_v2, verification_key_id,
+    };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         ArtifactGrantV1, ArtifactGrantVersion, CommandAuthorizationProof,
-        CommandAuthorizationVersion, CommandDeliveryMode, GroupObservation, PrivdReceiptVersion,
-        PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose,
-        SealedSecretVersion, SealingKeyDescriptorV1, SemanticPayloadHashVersion, ServiceReload,
+        CommandAuthorizationVersion, CommandDeliveryMode, FenceSignatureVersion, GroupObservation,
+        PrivdReceiptVersion, PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind,
+        SealedSecretPurpose, SealedSecretVersion, SealingKeyDescriptorV1,
+        SemanticPayloadHashVersion, ServiceReload, SessionGrantV1, SessionGrantVersion,
         UserObservation,
+    };
+    use ocservia_contracts::generated::ocserv::platform::transport::v1::{
+        AuthorizeSessionRequest, CheckEndpointRequest, CheckEndpointResponse, ListNodeTrustRequest,
+        ListNodeTrustResponse, NodeTrustBinding, ValidateEnrollmentRequest,
+        ValidateEnrollmentResponse,
+        trust_service_server::{TrustService, TrustServiceServer},
     };
     use ocservia_privd_attestation::{key_id, sign_receipt, verify_receipt};
     use sha2::{Digest as _, Sha256};
@@ -3647,10 +3367,218 @@ mod tests {
         sync::oneshot,
         task::JoinHandle,
     };
+    use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
 
     const RELAYED_AUTHORIZATION_SIGNATURE: &[u8] = &[0xa5; 64];
+
+    fn test_service(event_capacity: usize) -> IrohTransportService {
+        test_service_with_policy(event_capacity, IdentityPolicy::default())
+    }
+
+    fn test_service_with_policy(
+        event_capacity: usize,
+        policy: IdentityPolicy,
+    ) -> IrohTransportService {
+        let (_signing_key, keyring) = controller_keyring();
+        IrohTransportService::new(event_capacity, policy, keyring)
+    }
+
+    struct TestTrustService {
+        signing_key: SigningKey,
+        bindings: Vec<(EndpointId, Vec<u8>, NodeTrustState, u64)>,
+        override_fence: Option<ConnectionFenceV2>,
+        next_epoch: AtomicU64,
+    }
+
+    #[tonic::async_trait]
+    impl TrustService for TestTrustService {
+        async fn validate_enrollment(
+            &self,
+            _request: Request<ValidateEnrollmentRequest>,
+        ) -> Result<Response<ValidateEnrollmentResponse>, Status> {
+            Ok(Response::new(ValidateEnrollmentResponse {
+                permitted: true,
+            }))
+        }
+
+        async fn check_endpoint(
+            &self,
+            request: Request<CheckEndpointRequest>,
+        ) -> Result<Response<CheckEndpointResponse>, Status> {
+            let endpoint = request.into_inner().endpoint_id;
+            let permitted = self.bindings.iter().any(|(bound, _, state, _)| {
+                bound.as_bytes() == endpoint.as_slice() && *state == NodeTrustState::Active
+            });
+            Ok(Response::new(CheckEndpointResponse { permitted }))
+        }
+
+        async fn authorize_session(
+            &self,
+            request: Request<AuthorizeSessionRequest>,
+        ) -> Result<Response<SessionHandshakeResponse>, Status> {
+            let request = request.into_inner();
+            let handshake = request
+                .handshake
+                .ok_or_else(|| Status::invalid_argument("handshake missing"))?;
+            let node_id: [u8; 16] = handshake
+                .node_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| Status::invalid_argument("node_id invalid"))?;
+            let endpoint_id: [u8; 32] = request
+                .remote_endpoint_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| Status::invalid_argument("endpoint_id invalid"))?;
+            let mut capabilities = handshake.capabilities;
+            capabilities.sort();
+            capabilities.dedup();
+            let now = unix_seconds();
+            let key_id = verification_key_id(&self.signing_key.verifying_key());
+            let grant_claims = SessionGrantClaimsV1 {
+                version: u32::try_from(i32::from(SessionGrantVersion::V1))
+                    .map_err(|_| Status::internal("grant version"))?,
+                key_id: key_id.clone(),
+                protocol_major: PROTOCOL_MAJOR,
+                protocol_minor: PROTOCOL_MINOR,
+                node_id,
+                endpoint_id,
+                authorization_revision: 1,
+                negotiated_capabilities: capabilities.clone(),
+                issued_at_seconds: now - 1,
+                issued_at_nanos: 0,
+                expires_at_seconds: now + 300,
+                expires_at_nanos: 0,
+            };
+            let canonical_grant = canonical_session_grant_v1(&grant_claims)
+                .map_err(|_| Status::internal("canonical grant"))?;
+            let session_grant = SessionGrantV1 {
+                version: SessionGrantVersion::V1.into(),
+                key_id,
+                protocol_major: PROTOCOL_MAJOR,
+                protocol_minor: PROTOCOL_MINOR,
+                node_id: node_id.to_vec(),
+                endpoint_id: endpoint_id.to_vec(),
+                authorization_revision: 1,
+                negotiated_capabilities: capabilities.clone(),
+                issued_at: Some(prost_types::Timestamp {
+                    seconds: grant_claims.issued_at_seconds,
+                    nanos: 0,
+                }),
+                expires_at: Some(prost_types::Timestamp {
+                    seconds: grant_claims.expires_at_seconds,
+                    nanos: 0,
+                }),
+                signature: self.signing_key.sign(&canonical_grant).to_bytes().to_vec(),
+            };
+            let fence = if let Some(fence) = &self.override_fence {
+                fence.clone()
+            } else {
+                let mut term = FenceTerm::new(
+                    node_id,
+                    endpoint_id,
+                    self.next_epoch.fetch_add(1, Ordering::Relaxed),
+                );
+                term.capabilities.clone_from(&capabilities);
+                signed_controller_fence(&self.signing_key, &term, 300)
+            };
+            Ok(Response::new(SessionHandshakeResponse {
+                result: HandshakeResult::Accepted.into(),
+                protocol_major: PROTOCOL_MAJOR,
+                protocol_minor: PROTOCOL_MINOR,
+                max_message_size: handshake.max_message_size,
+                controller_version: "test".to_owned(),
+                negotiated_capabilities: capabilities,
+                session_grant: Some(session_grant),
+                connection_fence: Some(fence),
+            }))
+        }
+
+        async fn enroll(
+            &self,
+            _request: Request<EnrollRequest>,
+        ) -> Result<Response<EnrollResponse>, Status> {
+            Ok(Response::new(EnrollResponse::default()))
+        }
+
+        async fn list_node_trust(
+            &self,
+            _request: Request<ListNodeTrustRequest>,
+        ) -> Result<Response<ListNodeTrustResponse>, Status> {
+            let bindings = self
+                .bindings
+                .iter()
+                .map(|(endpoint, node_id, state, revision)| NodeTrustBinding {
+                    node_id: node_id.clone(),
+                    endpoint_id: endpoint.as_bytes().to_vec(),
+                    state: (*state).into(),
+                    revision: *revision,
+                })
+                .collect();
+            Ok(Response::new(ListNodeTrustResponse { bindings }))
+        }
+    }
+
+    async fn test_trust_with_options(
+        signing_key: SigningKey,
+        bindings: Vec<(EndpointId, Vec<u8>, NodeTrustState, u64)>,
+        override_fence: Option<ConnectionFenceV2>,
+    ) -> TrustAuthority {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test trust service");
+        let addr = listener.local_addr().expect("test trust addr");
+        let trust_service = Arc::new(TestTrustService {
+            signing_key,
+            bindings,
+            override_fence,
+            next_epoch: AtomicU64::new(1),
+        });
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(TrustServiceServer::from_arc(trust_service))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .expect("test trust endpoint")
+            .connect()
+            .await
+            .expect("connect test trust service");
+        TrustAuthority::new(channel)
+    }
+
+    async fn test_trust_for_key(
+        key: &SecretKey,
+        handshake: &SessionHandshake,
+        override_fence: Option<ConnectionFenceV2>,
+    ) -> TrustAuthority {
+        let (signing_key, _) = controller_keyring();
+        test_trust_with_options(
+            signing_key,
+            vec![(
+                key.public(),
+                handshake.node_id.clone(),
+                NodeTrustState::Active,
+                1,
+            )],
+            override_fence,
+        )
+        .await
+    }
+
+    async fn test_router(
+        secret_key: SecretKey,
+        relay_mode: RelayMode,
+        policy: IdentityPolicy,
+        trust: TrustAuthority,
+        service: &IrohTransportService,
+    ) -> Router {
+        build_router_with_trust(secret_key, relay_mode, policy, trust, service)
+            .await
+            .expect("build test router")
+    }
 
     async fn private_tls_relay() -> (
         RelayMap,
@@ -3743,7 +3671,10 @@ mod tests {
             controller_version: String::new(),
             node_id: Uuid::now_v7().as_bytes().to_vec(),
             endpoint_id: key.public().as_bytes().to_vec(),
-            capabilities: vec!["ocserv.status.read".to_owned()],
+            capabilities: vec![
+                "ocserv.fencing.v2".to_owned(),
+                "ocserv.status.read".to_owned(),
+            ],
             ocserv_version: "1.3".to_owned(),
             os_release: "test".to_owned(),
             boot_id: "boot".to_owned(),
@@ -3773,7 +3704,7 @@ mod tests {
             sequence: 1,
             issued_at: Some(now_timestamp()),
             expires_at: Some((SystemTime::now() + Duration::from_secs(30)).into()),
-            expected_revision: 0,
+            expected_revision: 1,
             traceparent: traceparent.to_owned(),
             actor_id: "test".to_owned(),
             required_capability: "ocserv.status.read".to_owned(),
@@ -4054,14 +3985,11 @@ mod tests {
     fn policy_rejects_unknown_agent_and_revoked_enrollment() {
         let approved = SecretKey::generate().public();
         let revoked = SecretKey::generate().public();
-        let approved_node = Uuid::now_v7().as_bytes().to_vec();
         let policy = IdentityPolicy::new(
-            HashMap::from([(approved, approved_node.clone())]),
+            HashMap::from([(approved, Uuid::now_v7().as_bytes().to_vec())]),
             HashSet::from([revoked]),
         );
         assert!(policy.permits(approved, AGENT_ALPN));
-        assert!(policy.matches_node(approved, &approved_node));
-        assert!(!policy.matches_node(approved, Uuid::now_v7().as_bytes()));
         assert!(!policy.permits(revoked, ENROLL_ALPN));
         assert!(!policy.permits(SecretKey::generate().public(), AGENT_ALPN));
         let dynamic = SecretKey::generate().public();
@@ -4070,7 +3998,7 @@ mod tests {
             policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Active, 1),
             PolicyUpdateDisposition::Applied
         );
-        assert!(policy.matches_node(dynamic, &dynamic_node));
+        assert!(policy.permits(dynamic, AGENT_ALPN));
         assert_eq!(
             policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Revoked, 2),
             PolicyUpdateDisposition::Applied
@@ -4102,24 +4030,46 @@ mod tests {
 
     #[tokio::test]
     async fn trust_update_reports_stale_and_rejects_tombstone_reactivation() {
-        let service = IrohTransportService::new(8);
+        let (signing_key, keyring) = controller_keyring();
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let endpoint = SecretKey::generate().public();
         let node_id = Uuid::now_v7().as_bytes().to_vec();
-        let update = |state: NodeTrustState, revision: u64| UpdateNodeTrustRequest {
-            node_id: node_id.clone(),
-            endpoint_id: endpoint.as_bytes().to_vec(),
-            state: state.into(),
-            reason: "trust transition fixture".into(),
-            revision,
-            fence_binding: None,
-            operation_id: ocservia_command_authorization::state_update_operation_id(
+        let term = FenceTerm::new(
+            node_id.as_slice().try_into().expect("node id"),
+            *endpoint.as_bytes(),
+            1,
+        );
+        let fence = signed_controller_fence(&signing_key, &term, 300);
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+        let update = |state: NodeTrustState, revision: u64| {
+            let operation_id = ocservia_command_authorization::state_update_operation_id(
                 node_id.as_slice().try_into().expect("node id"),
                 endpoint.as_bytes(),
                 state as u32,
                 revision,
                 "trust transition fixture",
-            )
-            .to_vec(),
+            );
+            let binding = signed_fence_binding(
+                &signing_key,
+                &fence,
+                FenceOperationKind::StateUpdate,
+                operation_id,
+                "ocserv.fencing.v2",
+            );
+            UpdateNodeTrustRequest {
+                node_id: node_id.clone(),
+                endpoint_id: endpoint.as_bytes().to_vec(),
+                state: state.into(),
+                reason: "trust transition fixture".into(),
+                revision,
+                fence_binding: Some(binding),
+                operation_id: operation_id.to_vec(),
+            }
         };
         let active = service
             .update_node_trust(Request::new(update(NodeTrustState::Active, 2)))
@@ -4166,7 +4116,8 @@ mod tests {
 
     #[tokio::test]
     async fn close_attempt_invalidates_only_target_registration() {
-        let shared = Shared::new(8);
+        let (_signing_key, keyring) = controller_keyring();
+        let shared = Shared::new(8, keyring);
         let target = Uuid::now_v7().as_bytes().to_vec();
         let unrelated = Uuid::now_v7().as_bytes().to_vec();
         let target_token = shared.registration_token(&target).await;
@@ -4193,7 +4144,10 @@ mod tests {
             ocserv_version: "test".to_owned(),
             boot_id: "boot".to_owned(),
             agent_instance_id: Uuid::now_v7().as_bytes().to_vec(),
-            capabilities: vec!["ocserv.status.read".to_owned()],
+            capabilities: vec![
+                "ocserv.fencing.v2".to_owned(),
+                "ocserv.status.read".to_owned(),
+            ],
             environment: "test".to_owned(),
             nonce: vec![0; 16],
             time: Some(now_timestamp()),
@@ -4208,8 +4162,8 @@ mod tests {
         let mut bootstrap = request.clone();
         bootstrap.token = format!("obt1_{}", request.token);
         ocservia_agent_identity::authorize_enrollment(&mut bootstrap, &key)
-            .expect("sign bootstrap request");
-        assert!(validate_enrollment(&bootstrap, key.public()).is_ok());
+            .expect("sign legacy root bootstrap request");
+        assert!(validate_enrollment(&bootstrap, key.public()).is_err());
         bootstrap.token = format!("obt2_{}", request.token);
         ocservia_agent_identity::authorize_enrollment(&mut bootstrap, &key)
             .expect("sign derived installation enrollment request");
@@ -4460,15 +4414,16 @@ mod tests {
         let node_id = handshake.node_id.clone();
 
         for _ in 0..2 {
-            let service = IrohTransportService::new(8);
-            let router = build_router(
+            let service = test_service(8);
+            let trust = test_trust_for_key(&agent_key, &handshake, None).await;
+            let router = test_router(
                 controller_key.clone(),
                 RelayMode::Disabled,
                 identity_policy(&agent_key, &handshake),
+                trust,
                 &service,
             )
-            .await
-            .expect("build direct router");
+            .await;
             assert_eq!(router.endpoint().id(), controller_id);
             let client = Endpoint::builder(presets::N0)
                 .secret_key(agent_key.clone())
@@ -4544,6 +4499,9 @@ mod tests {
         };
         assert!(validate_handshake(&handshake, remote_key.public()).is_ok());
         assert!(validate_protocol_version(&handshake).is_ok());
+        handshake.protocol_minor = 0;
+        assert!(validate_protocol_version(&handshake).is_err());
+        handshake.protocol_minor = PROTOCOL_MINOR;
         handshake.protocol_major = 2;
         assert!(validate_handshake(&handshake, remote_key.public()).is_ok());
         assert!(validate_protocol_version(&handshake).is_err());
@@ -4552,38 +4510,29 @@ mod tests {
     }
 
     #[test]
-    fn static_handshake_is_protocol_v1_0_with_explicit_read_only_capabilities() {
+    fn negotiated_session_rejects_protocol_v1_0_and_grantless_v1_1() {
         let key = SecretKey::generate();
-        let mut request = handshake(&key);
-        request.capabilities = vec![
-            "synthetic.noop".to_owned(),
-            "future.feature.read".to_owned(),
-            "ocserv.status.read".to_owned(),
-            "ocserv.sessions.read".to_owned(),
-        ];
-        let response = static_read_only_handshake_response(&request);
-        assert_eq!(response.protocol_major, 1);
-        assert_eq!(response.protocol_minor, 0);
-        assert!(response.session_grant.is_none());
-        assert_eq!(
-            response.negotiated_capabilities,
-            vec!["ocserv.sessions.read", "ocserv.status.read"]
-        );
-        assert!(validate_negotiated_session(&request, key.public(), &response, false).is_ok());
+        let request = handshake(&key);
+        let legacy = SessionHandshakeResponse {
+            result: HandshakeResult::Accepted.into(),
+            protocol_major: 1,
+            protocol_minor: 0,
+            max_message_size: request.max_message_size,
+            controller_version: "test".to_owned(),
+            negotiated_capabilities: vec!["ocserv.status.read".to_owned()],
+            session_grant: None,
+            connection_fence: None,
+        };
+        assert!(validate_negotiated_session(&request, key.public(), &legacy).is_err());
 
-        let mut grantless_v1_1 = response.clone();
+        let mut grantless_v1_1 = legacy;
         grantless_v1_1.protocol_minor = 1;
-        assert!(
-            validate_negotiated_session(&request, key.public(), &grantless_v1_1, false).is_err()
-        );
-        let mut unknown_read = response;
-        unknown_read.negotiated_capabilities = vec!["future.feature.read".to_owned()];
-        assert!(validate_negotiated_session(&request, key.public(), &unknown_read, false).is_err());
+        assert!(validate_negotiated_session(&request, key.public(), &grantless_v1_1).is_err());
     }
 
     #[test]
     fn queues_are_bounded() {
-        let service = IrohTransportService::new(usize::MAX);
+        let service = test_service(usize::MAX);
         assert_eq!(service.shared.inner.event_capacity, MAX_CONNECTIONS);
         assert_eq!(
             service
@@ -4605,7 +4554,7 @@ mod tests {
 
     #[test]
     fn enrollment_capacity_cannot_exhaust_agent_capacity() {
-        let service = IrohTransportService::new(8);
+        let service = test_service(8);
         let enrollment_permits = service
             .shared
             .inner
@@ -4658,7 +4607,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_terminates_event_streams() {
-        let service = IrohTransportService::new(8);
+        let service = test_service(8);
         let mut stream = service
             .watch_events(Request::new(WatchEventsRequest {
                 after_event_id: Vec::new(),
@@ -4677,15 +4626,17 @@ mod tests {
 
     #[tokio::test]
     async fn router_rejects_wrong_alpn_and_unknown_agent() {
-        let service = IrohTransportService::new(8);
-        let router = build_router(
+        let service = test_service(8);
+        let (signing_key, _) = controller_keyring();
+        let trust = test_trust_with_options(signing_key, Vec::new(), None).await;
+        let router = test_router(
             SecretKey::generate(),
             RelayMode::Disabled,
             IdentityPolicy::default(),
+            trust,
             &service,
         )
-        .await
-        .expect("build router");
+        .await;
         let client = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .bind()
@@ -4716,10 +4667,16 @@ mod tests {
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
         let policy = identity_policy(&agent_key, &handshake);
-        let service = IrohTransportService::new_with_policy(8, policy.clone());
-        let router = build_router(SecretKey::generate(), RelayMode::Disabled, policy, &service)
-            .await
-            .expect("build router");
+        let service = test_service_with_policy(8, policy.clone());
+        let trust = test_trust_for_key(&agent_key, &handshake, None).await;
+        let router = test_router(
+            SecretKey::generate(),
+            RelayMode::Disabled,
+            policy,
+            trust,
+            &service,
+        )
+        .await;
         let client = Endpoint::builder(presets::Minimal)
             .secret_key(agent_key.clone())
             .relay_mode(RelayMode::Disabled)
@@ -4752,7 +4709,7 @@ mod tests {
         .expect("connection registered");
         let metadata = service
             .get_node_connection(Request::new(GetNodeConnectionRequest {
-                node_id: handshake.node_id,
+                node_id: handshake.node_id.clone(),
             }))
             .await
             .expect("query connection")
@@ -4760,6 +4717,22 @@ mod tests {
         assert_eq!(metadata.endpoint_id, agent_key.public().as_bytes());
         assert_eq!(metadata.path, i32::from(ConnectionPath::Direct));
 
+        let (signing_key, _) = controller_keyring();
+        let fence = response.connection_fence.expect("session connection fence");
+        let operation_id = ocservia_command_authorization::state_update_operation_id(
+            metadata.node_id.as_slice().try_into().expect("node id"),
+            agent_key.public().as_bytes(),
+            NodeTrustState::Active as u32,
+            2,
+            "capability authority changed",
+        );
+        let binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::StateUpdate,
+            operation_id,
+            "ocserv.fencing.v2",
+        );
         service
             .update_node_trust(Request::new(UpdateNodeTrustRequest {
                 node_id: metadata.node_id.clone(),
@@ -4767,15 +4740,8 @@ mod tests {
                 state: NodeTrustState::Active.into(),
                 reason: "capability authority changed".to_owned(),
                 revision: 2,
-                fence_binding: None,
-                operation_id: ocservia_command_authorization::state_update_operation_id(
-                    metadata.node_id.as_slice().try_into().expect("node id"),
-                    agent_key.public().as_bytes(),
-                    NodeTrustState::Active as u32,
-                    2,
-                    "capability authority changed",
-                )
-                .to_vec(),
+                fence_binding: Some(binding),
+                operation_id: operation_id.to_vec(),
             }))
             .await
             .expect("advance connected node authority");
@@ -4791,15 +4757,16 @@ mod tests {
     async fn telemetry_uni_stream_is_identity_checked_and_published() {
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
-        let service = IrohTransportService::new(8);
-        let router = build_router(
+        let service = test_service(8);
+        let trust = test_trust_for_key(&agent_key, &handshake, None).await;
+        let router = test_router(
             SecretKey::generate(),
             RelayMode::Disabled,
             identity_policy(&agent_key, &handshake),
+            trust,
             &service,
         )
-        .await
-        .expect("build router");
+        .await;
         let client = Endpoint::builder(presets::Minimal)
             .secret_key(agent_key)
             .relay_mode(RelayMode::Disabled)
@@ -4878,7 +4845,8 @@ mod tests {
     async fn stalled_handshake_response_releases_the_connection_slot() {
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
-        let service = IrohTransportService::new(8);
+        let service = test_service(8);
+        let trust = test_trust_for_key(&agent_key, &handshake, None).await;
         let router = Router::builder(
             Endpoint::builder(presets::Minimal)
                 .secret_key(SecretKey::generate())
@@ -4893,7 +4861,7 @@ mod tests {
                 shared: service.shared.clone(),
                 policy: identity_policy(&agent_key, &handshake),
                 kind: ProtocolKind::Agent,
-                trust: None,
+                trust,
                 handshake_timeout: Duration::from_millis(500),
             },
         )
@@ -4958,7 +4926,7 @@ mod tests {
 
     #[tokio::test]
     async fn telemetry_flood_does_not_evict_consumers_or_starve_control_events() {
-        let service = IrohTransportService::new(8);
+        let service = test_service(8);
         let mut events = service
             .watch_events(Request::new(WatchEventsRequest {
                 after_event_id: Vec::new(),
@@ -4995,7 +4963,7 @@ mod tests {
 
     #[tokio::test]
     async fn forged_security_priority_cannot_keep_evicting_a_slow_consumer() {
-        let service = IrohTransportService::new(8);
+        let service = test_service(8);
         let _events = service
             .watch_events(Request::new(WatchEventsRequest {
                 after_event_id: Vec::new(),
@@ -5045,7 +5013,7 @@ mod tests {
 
     #[tokio::test]
     async fn retained_telemetry_bytes_are_bounded_and_keep_control_events() {
-        let service = IrohTransportService::new(4096);
+        let service = test_service(4096);
         service
             .shared
             .publish(event(
@@ -5084,7 +5052,7 @@ mod tests {
 
     #[tokio::test]
     async fn telemetry_budget_allows_an_offline_burst_and_limits_one_node() {
-        let service = IrohTransportService::new(8);
+        let service = test_service(8);
         let (node_a, node_b) = (Uuid::now_v7(), Uuid::now_v7());
         for frame in 0..32 {
             assert!(
@@ -5118,15 +5086,16 @@ mod tests {
     async fn replacement_connection_publishes_disconnect_before_connect() {
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
-        let service = IrohTransportService::new(8);
-        let router = build_router(
+        let service = test_service(8);
+        let trust = test_trust_for_key(&agent_key, &handshake, None).await;
+        let router = test_router(
             SecretKey::generate(),
             RelayMode::Disabled,
             identity_policy(&agent_key, &handshake),
+            trust,
             &service,
         )
-        .await
-        .expect("build router");
+        .await;
         let client = Endpoint::builder(presets::Minimal)
             .secret_key(agent_key)
             .relay_mode(RelayMode::Disabled)
@@ -5191,16 +5160,17 @@ mod tests {
     async fn command_responses_are_published_with_negotiated_limits() {
         let agent_key = SecretKey::generate();
         let mut handshake = handshake(&agent_key);
-        handshake.max_message_size = 512;
-        let service = IrohTransportService::new(16);
-        let router = build_router(
+        handshake.max_message_size = 2048;
+        let service = test_service(16);
+        let trust = test_trust_for_key(&agent_key, &handshake, None).await;
+        let router = test_router(
             SecretKey::generate(),
             RelayMode::Disabled,
             identity_policy(&agent_key, &handshake),
+            trust,
             &service,
         )
-        .await
-        .expect("build router");
+        .await;
         let client = Endpoint::builder(presets::Minimal)
             .secret_key(agent_key.clone())
             .relay_mode(RelayMode::Disabled)
@@ -5222,15 +5192,23 @@ mod tests {
             .expect("query negotiated session")
             .into_inner();
         assert_eq!(metadata.negotiated_capabilities, handshake.capabilities);
-        service
-            .shared
-            .inner
-            .connections
-            .lock()
-            .await
-            .get_mut(&handshake.node_id)
-            .expect("registered session")
-            .session_mode = TransportSessionMode::AuthorizedV11;
+        let (signing_key, _) = controller_keyring();
+        let session_fence = response.connection_fence.expect("session connection fence");
+        let fenced_envelope = |traceparent: &str, reason: String| {
+            let bare = command_envelope(&handshake.node_id, traceparent, reason);
+            let op_id = binding_operation_id(&bare);
+            let binding = signed_fence_binding(
+                &signing_key,
+                &session_fence,
+                FenceOperationKind::Command,
+                op_id,
+                "ocserv.status.read",
+            );
+            let mut decoded = CommandEnvelope::decode(bare.as_slice()).expect("decode command");
+            decoded.connection_fence = Some(session_fence.clone());
+            decoded.fence_binding = Some(binding);
+            decoded.encode_to_vec()
+        };
 
         let mut unapproved = CommandEnvelope::decode(
             command_envelope(&handshake.node_id, &new_traceparent(), String::new()).as_slice(),
@@ -5297,7 +5275,7 @@ mod tests {
 
         let traceparent = new_traceparent();
         let baseline_last_seen = last_seen(&service, &handshake.node_id).await;
-        let oversized = command_envelope(&handshake.node_id, &traceparent, "x".repeat(512));
+        let oversized = command_envelope(&handshake.node_id, &traceparent, "x".repeat(2048));
         let error = service
             .send_command(Request::new(SendCommandRequest {
                 node_id: handshake.node_id.clone(),
@@ -5320,7 +5298,7 @@ mod tests {
             .await
             .expect("watch events")
             .into_inner();
-        let command = command_envelope(&handshake.node_id, &traceparent, String::new());
+        let command = fenced_envelope(&traceparent, String::new());
         let sent_command =
             CommandEnvelope::decode(command.as_slice()).expect("decode sent command");
         service
@@ -5362,11 +5340,8 @@ mod tests {
 
         let missing_receipt_traceparent = new_traceparent();
         let agent = tokio::spawn(respond_to_command(connection.clone(), false, false));
-        let missing_receipt_command_bytes = command_envelope(
-            &handshake.node_id,
-            &missing_receipt_traceparent,
-            String::new(),
-        );
+        let missing_receipt_command_bytes =
+            fenced_envelope(&missing_receipt_traceparent, String::new());
         let missing_receipt_command =
             CommandEnvelope::decode(missing_receipt_command_bytes.as_slice())
                 .expect("decode missing-receipt command");
@@ -5394,8 +5369,7 @@ mod tests {
 
         let foreign_traceparent = new_traceparent();
         let agent = tokio::spawn(respond_to_command(connection.clone(), true, true));
-        let foreign_command_bytes =
-            command_envelope(&handshake.node_id, &foreign_traceparent, String::new());
+        let foreign_command_bytes = fenced_envelope(&foreign_traceparent, String::new());
         let foreign_command = CommandEnvelope::decode(foreign_command_bytes.as_slice())
             .expect("decode foreign-result command");
         service
@@ -5417,8 +5391,7 @@ mod tests {
 
         let eof_traceparent = new_traceparent();
         let agent = tokio::spawn(end_command_without_response(connection.clone()));
-        let eof_command_bytes =
-            command_envelope(&handshake.node_id, &eof_traceparent, String::new());
+        let eof_command_bytes = fenced_envelope(&eof_traceparent, String::new());
         let eof_command =
             CommandEnvelope::decode(eof_command_bytes.as_slice()).expect("decode sent EOF command");
         service
@@ -5449,8 +5422,7 @@ mod tests {
         // is never published and leaves the command outcome unknown.
         let heartbeat_traceparent = new_traceparent();
         let agent = tokio::spawn(respond_with_heartbeat_first(connection.clone()));
-        let heartbeat_command_bytes =
-            command_envelope(&handshake.node_id, &heartbeat_traceparent, String::new());
+        let heartbeat_command_bytes = fenced_envelope(&heartbeat_traceparent, String::new());
         let heartbeat_command = CommandEnvelope::decode(heartbeat_command_bytes.as_slice())
             .expect("decode heartbeat command");
         service
@@ -5497,12 +5469,13 @@ mod tests {
         let (relay_map, relay_roots, relay) = private_tls_relay().await;
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
-        let service = IrohTransportService::new(8);
+        let service = test_service(8);
+        let trust = test_trust_for_key(&agent_key, &handshake, None).await;
         let router = build_router_with_direct(
             SecretKey::generate(),
             RelayMode::Custom(relay_map.clone()),
             identity_policy(&agent_key, &handshake),
-            None,
+            trust,
             &service,
             false,
             relay_roots.clone(),
@@ -5575,23 +5548,6 @@ mod tests {
         relay.shutdown().await.expect("stop private relay");
     }
 
-    #[test]
-    fn only_multi_member_custom_relays_enable_persistent_connections() {
-        let one = RelayMap::try_from_iter(["https://relay-one.invalid"]).expect("single relay map");
-        let two =
-            RelayMap::try_from_iter(["https://relay-one.invalid", "https://relay-two.invalid"])
-                .expect("two relay map");
-
-        assert!(!keep_dedicated_relays_connected(&RelayMode::Disabled));
-        assert!(!keep_dedicated_relays_connected(&RelayMode::Default));
-        assert!(!keep_dedicated_relays_connected(&RelayMode::Staging));
-        assert!(!keep_dedicated_relays_connected(&RelayMode::Custom(
-            RelayMap::empty()
-        )));
-        assert!(!keep_dedicated_relays_connected(&RelayMode::Custom(one)));
-        assert!(keep_dedicated_relays_connected(&RelayMode::Custom(two)));
-    }
-
     #[tokio::test]
     async fn malformed_relay_batches_preserve_receive_progress() {
         iroh::test_utils::assert_relay_receive_progress().await;
@@ -5611,12 +5567,13 @@ mod tests {
         let map = RelayMap::from_iter([iroh_relay::RelayConfig::from(url.clone())]);
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
-        let service = IrohTransportService::new(16);
+        let service = test_service(16);
+        let trust = test_trust_for_key(&agent_key, &handshake, None).await;
         let router = build_router_with_direct(
             SecretKey::generate(),
             RelayMode::Custom(map.clone()),
             identity_policy(&agent_key, &handshake),
-            None,
+            trust,
             &service,
             false,
             roots.clone(),
@@ -5673,559 +5630,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relay_connections_are_not_persistent_by_default() {
-        let (relay_map, _relay_url, relay_one) = iroh::test_utils::run_relay_server_with(false)
-            .await
-            .expect("start first relay");
-        let (second_map, _second_url, relay_two) = iroh::test_utils::run_relay_server_with(false)
-            .await
-            .expect("start second relay");
-        relay_map.extend(&second_map);
-
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(relay_map))
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .bind()
-            .await
-            .expect("build default relay endpoint");
-        tokio::time::timeout(Duration::from_secs(10), endpoint.online())
-            .await
-            .expect("default endpoint selected a home relay");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-
-        let relay_one_connected = relay_one.metrics().server.accepts.get() > 0;
-        let relay_two_connected = relay_two.metrics().server.accepts.get() > 0;
-        assert_ne!(
-            relay_one_connected, relay_two_connected,
-            "default endpoint must connect only its selected home relay"
-        );
-
-        endpoint.close().await;
-        relay_one.shutdown().await.expect("stop first relay");
-        relay_two.shutdown().await.expect("stop second relay");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn persistent_relay_map_add_remove_reconciles_connections() {
-        let (relay_map, relay_url, relay_one) = iroh::test_utils::run_relay_server_with(false)
-            .await
-            .expect("start first relay");
-        let (second_map, second_url, relay_two) = iroh::test_utils::run_relay_server_with(false)
-            .await
-            .expect("start second relay");
-        let first_config = relay_map
-            .get(&relay_url)
-            .expect("first relay configuration");
-        let second_config = second_map
-            .get(&second_url)
-            .expect("second relay configuration");
-
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(relay_map))
-            .keep_relays_connected(true)
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .bind()
-            .await
-            .expect("build persistent relay endpoint");
-        tokio::time::timeout(Duration::from_secs(10), endpoint.online())
-            .await
-            .expect("persistent endpoint selected its initial home relay");
-
-        assert!(
-            endpoint
-                .insert_relay(second_url.clone(), second_config.clone())
-                .await
-                .is_none()
-        );
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while relay_two.metrics().server.accepts.get() < 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("inserted relay was not preconnected");
-
-        let replacement_home_config = Arc::new(
-            first_config
-                .as_ref()
-                .clone()
-                .with_auth_token("rotated-test-token"),
-        );
-        assert!(
-            endpoint
-                .insert_relay(relay_url.clone(), replacement_home_config)
-                .await
-                .is_some()
-        );
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while relay_one.metrics().server.disconnects.get() < 1
-                || relay_one.metrics().server.accepts.get() < 2
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("same-URL relay configuration was not restarted");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        tokio::time::timeout(Duration::from_secs(2), endpoint.online())
-            .await
-            .expect("replacement home relay status was overwritten by the retired actor");
-
-        assert!(endpoint.remove_relay(&second_url).await.is_some());
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while relay_two.metrics().server.disconnects.get() < 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("removed non-home relay was not disconnected");
-
-        assert!(
-            endpoint
-                .insert_relay(second_url, second_config)
-                .await
-                .is_none()
-        );
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while relay_two.metrics().server.accepts.get() < 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("reinserted relay was not preconnected");
-
-        assert!(endpoint.remove_relay(&relay_url).await.is_some());
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while relay_one.metrics().server.disconnects.get() < 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("removed home relay was not disconnected");
-        let accepts_after_removal = relay_one.metrics().server.accepts.get();
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        assert_eq!(
-            relay_one.metrics().server.accepts.get(),
-            accepts_after_removal,
-            "removed home relay actor was resurrected"
-        );
-        assert!(
-            endpoint.addr().relay_urls().all(|url| url != &relay_url),
-            "removed home relay was republished by a stale network report"
-        );
-
-        endpoint.close().await;
-        relay_one.shutdown().await.expect("stop first relay");
-        relay_two.shutdown().await.expect("stop second relay");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn dedicated_relay_failure_accepts_an_immediate_survivor_connection() {
-        const TEST_ALPN: &[u8] = b"ocservia/relay-failover-test/1";
-        const RELAY_TOKEN: &str = "dedicated-relay-test-token";
-
-        async fn relay_auth_error(endpoint: &Endpoint) -> String {
-            let mut statuses = endpoint.home_relay_status().stream();
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while let Some(statuses) = statuses.next().await {
-                    if let Some(error) = statuses.iter().find_map(|status| status.last_error()) {
-                        return format!("{error:#}");
-                    }
-                }
-                panic!("home relay status stream ended before reporting auth denial");
-            })
-            .await
-            .expect("relay auth denial was not reported")
-        }
-
-        #[derive(Debug)]
-        struct TokenAccess;
-
-        impl iroh_relay::server::AccessControl for TokenAccess {
-            async fn on_connect(
-                &self,
-                request: &iroh_relay::server::ClientRequest,
-            ) -> iroh_relay::server::Access {
-                if request.auth_token().as_deref() == Some(RELAY_TOKEN) {
-                    iroh_relay::server::Access::Allow
-                } else {
-                    iroh_relay::server::Access::Deny { reason: None }
-                }
-            }
-        }
-
-        let access = Arc::new(TokenAccess);
-        let (relay_map, relay_url, relay_one) =
-            iroh::test_utils::run_relay_server_with_access(false, access.clone())
-                .await
-                .expect("start first dedicated relay");
-        let (second_map, second_url, relay_two) =
-            iroh::test_utils::run_relay_server_with_access(false, access)
-                .await
-                .expect("start second dedicated relay");
-        relay_map.extend(&second_map);
-        assert_eq!(relay_map.len(), 2);
-        let unauthenticated_relay_map = RelayMap::from_iter([relay_map
-            .get(&relay_url)
-            .expect("unauthenticated relay configuration")]);
-        let relay_map = relay_map.with_auth_token(RELAY_TOKEN);
-        let server = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(relay_map.clone()))
-            .keep_relays_connected(true)
-            .relay_inactive_cleanup_time(Duration::from_millis(100))
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .alpns(vec![TEST_ALPN.to_vec()])
-            .bind()
-            .await
-            .expect("build relay-only server");
-
-        tokio::time::timeout(Duration::from_secs(10), server.online())
-            .await
-            .expect("controller selected a home relay");
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if relay_one.metrics().server.accepts.get() >= 1
-                    && relay_two.metrics().server.accepts.get() >= 1
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("controller registered with both dedicated relays before traffic");
-
-        let relay_one_accepts = relay_one.metrics().server.accepts.get();
-        let relay_one_disconnects = relay_one.metrics().server.disconnects.get();
-        let relay_two_accepts = relay_two.metrics().server.accepts.get();
-        let relay_two_disconnects = relay_two.metrics().server.disconnects.get();
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(
-            relay_one.metrics().server.accepts.get(),
-            relay_one_accepts,
-            "first persistent relay reconnected after the idle deadline"
-        );
-        assert_eq!(
-            relay_one.metrics().server.disconnects.get(),
-            relay_one_disconnects,
-            "first persistent relay disconnected after the idle deadline"
-        );
-        assert_eq!(
-            relay_two.metrics().server.accepts.get(),
-            relay_two_accepts,
-            "second persistent relay reconnected after the idle deadline"
-        );
-        assert_eq!(
-            relay_two.metrics().server.disconnects.get(),
-            relay_two_disconnects,
-            "second persistent relay disconnected after the idle deadline"
-        );
-
-        let unauthenticated = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(unauthenticated_relay_map.clone()))
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .bind()
-            .await
-            .expect("build unauthenticated relay endpoint");
-        assert!(
-            relay_auth_error(&unauthenticated)
-                .await
-                .contains("not authorized"),
-            "dedicated relays did not reject a client without the configured token"
-        );
-        unauthenticated.close().await;
-
-        let wrong_token = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(
-                unauthenticated_relay_map.with_auth_token("wrong-token"),
-            ))
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .bind()
-            .await
-            .expect("build wrong-token relay endpoint");
-        assert!(
-            relay_auth_error(&wrong_token)
-                .await
-                .contains("not authorized"),
-            "dedicated relays did not reject a client with the wrong token"
-        );
-        wrong_token.close().await;
-
-        let server_id = server.id();
-        let advertised_before_fault = server.addr();
-        let advertised_relays = advertised_before_fault.relay_urls().collect::<Vec<_>>();
-        assert_eq!(
-            advertised_relays.len(),
-            1,
-            "persistent standby relays must not be published as additional homes"
-        );
-        let active_url = advertised_relays[0].clone();
-        let active_relay_map = RelayMap::from_iter([relay_map
-            .get(&active_url)
-            .expect("active relay configuration")]);
-        let peer_key = SecretKey::generate();
-        let active_peer = Endpoint::builder(presets::Minimal)
-            .secret_key(peer_key.clone())
-            .relay_mode(RelayMode::Custom(active_relay_map))
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .bind()
-            .await
-            .expect("build active relay-only peer");
-        let echo = tokio::spawn({
-            let server = server.clone();
-            async move {
-                let mut live_connections = Vec::new();
-                for _ in 0..2 {
-                    let connection = tokio::time::timeout(Duration::from_secs(20), server.accept())
-                        .await
-                        .expect("incoming connection timeout")
-                        .expect("incoming relay connection")
-                        .await
-                        .expect("complete relay handshake");
-                    let (mut send, mut recv) = connection.accept_bi().await.expect("accept stream");
-                    let bytes = recv.read_to_end(1024).await.expect("read relay payload");
-                    send.write_all(&bytes).await.expect("echo relay payload");
-                    send.finish().expect("finish echo");
-                    live_connections.push(connection);
-                }
-                live_connections
-            }
-        });
-        let active_target = iroh::EndpointAddr::new(server_id).with_relay_url(active_url.clone());
-        let active_connection = tokio::time::timeout(
-            Duration::from_secs(10),
-            active_peer.connect(active_target, TEST_ALPN),
-        )
-        .await
-        .expect("active peer connection timeout")
-        .expect("connect active peer through home relay");
-        let (mut send, mut recv) = active_connection
-            .open_bi()
-            .await
-            .expect("open active peer stream");
-        send.write_all(b"before-fault")
-            .await
-            .expect("write active peer payload");
-        send.finish().expect("finish active peer payload");
-        assert_eq!(
-            recv.read_to_end(1024).await.expect("read active peer echo"),
-            b"before-fault"
-        );
-
-        let (failed_relay, surviving_relay, surviving_url) = if active_url == relay_url {
-            (relay_one, relay_two, second_url)
-        } else {
-            (relay_two, relay_one, relay_url)
-        };
-        failed_relay
-            .shutdown()
-            .await
-            .expect("stop selected dedicated relay");
-
-        // Do not wait for a home-relay status or address update. The survivor
-        // must already have the live server registered before the fault.
-        let surviving_relay_map = RelayMap::from_iter([relay_map
-            .get(&surviving_url)
-            .expect("surviving relay configuration")]);
-        let surviving_target =
-            iroh::EndpointAddr::new(server_id).with_relay_url(surviving_url.clone());
-        let (replacement, replacement_connection) =
-            tokio::time::timeout(Duration::from_secs(10), async {
-                let replacement = Endpoint::builder(presets::Minimal)
-                    .secret_key(peer_key)
-                    .relay_mode(RelayMode::Custom(surviving_relay_map))
-                    .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-                    .clear_address_lookup()
-                    .clear_ip_transports()
-                    .bind()
-                    .await
-                    .expect("build same-key survivor-only peer");
-                let connection = replacement
-                    .connect(surviving_target, TEST_ALPN)
-                    .await
-                    .expect("connect same-key peer through surviving relay");
-                let (mut send, mut recv) =
-                    connection.open_bi().await.expect("open survivor stream");
-                send.write_all(b"after-fault")
-                    .await
-                    .expect("write survivor payload");
-                send.finish().expect("finish survivor payload");
-                assert_eq!(
-                    recv.read_to_end(1024).await.expect("read survivor echo"),
-                    b"after-fault"
-                );
-                (replacement, connection)
-            })
-            .await
-            .expect("survivor-only ALPN and echo exceeded ten seconds");
-
-        assert!(
-            server.addr().relay_urls().count() <= 1,
-            "persistent endpoint published more than one home relay after failover"
-        );
-
-        let live_server_connections = tokio::time::timeout(Duration::from_secs(5), echo)
-            .await
-            .expect("echo task completed")
-            .expect("echo task");
-        assert_eq!(live_server_connections.len(), 2);
-        replacement_connection.close(0_u32.into(), b"survivor complete");
-        replacement.close().await;
-        active_connection.close(0_u32.into(), b"home failed");
-        active_peer.close().await;
-        server.close().await;
-        drop(live_server_connections);
-        surviving_relay
-            .shutdown()
-            .await
-            .expect("stop surviving relay");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn persistent_replacement_reconnects_after_post_fault_refusal() {
-        const TEST_ALPN: &[u8] = b"ocservia/relay-restart-test/1";
-
-        let (relay_a_map, relay_a_url, relay_a) = iroh::test_utils::run_relay_server_with(false)
-            .await
-            .expect("start active relay");
-        let (_relay_b_map, _relay_b_url, relay_b) = iroh::test_utils::run_relay_server_with(false)
-            .await
-            .expect("start replacement relay");
-        let relay_b_addr = relay_b.https_addr().expect("relay B HTTPS address");
-        let proxy = RestartableTcpProxy::start("127.0.0.1:0".parse().unwrap(), relay_b_addr).await;
-        let proxy_url: iroh::RelayUrl = format!("https://{}", proxy.addr)
-            .parse()
-            .expect("proxy relay URL");
-        let proxy_addr = proxy.stop().await;
-        let relay_b_config = Arc::new(iroh_relay::RelayConfig::new(proxy_url.clone(), None));
-        let relay_map = RelayMap::from_iter([
-            relay_a_map
-                .get(&relay_a_url)
-                .expect("active relay configuration"),
-            relay_b_config.clone(),
-        ]);
-
-        let server = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(relay_map))
-            .keep_relays_connected(true)
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .alpns(vec![TEST_ALPN.to_vec()])
-            .bind()
-            .await
-            .expect("build dual-relay persistent server");
-        tokio::time::timeout(Duration::from_secs(10), server.online())
-            .await
-            .expect("persistent server active relay online");
-
-        let echo = tokio::spawn({
-            let server = server.clone();
-            async move {
-                let mut connections = Vec::new();
-                for _ in 0..2 {
-                    let connection = server
-                        .accept()
-                        .await
-                        .expect("incoming relay connection")
-                        .await
-                        .expect("complete relay handshake");
-                    let (mut send, mut recv) = connection.accept_bi().await.expect("accept stream");
-                    let bytes = recv.read_to_end(1024).await.expect("read relay payload");
-                    send.write_all(&bytes).await.expect("echo relay payload");
-                    send.finish().expect("finish echo");
-                    connections.push(connection);
-                }
-                connections
-            }
-        });
-
-        let peer_key = SecretKey::generate();
-        let first_peer = Endpoint::builder(presets::Minimal)
-            .secret_key(peer_key.clone())
-            .relay_mode(RelayMode::Custom(relay_a_map))
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .bind()
-            .await
-            .expect("build first relay peer");
-        let target = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_a_url);
-        let first = first_peer
-            .connect(target, TEST_ALPN)
-            .await
-            .expect("connect before relay restart");
-        let (mut send, mut recv) = first.open_bi().await.expect("open first stream");
-        send.write_all(b"before-restart")
-            .await
-            .expect("write first payload");
-        send.finish().expect("finish first payload");
-        assert_eq!(recv.read_to_end(1024).await.unwrap(), b"before-restart");
-
-        relay_a.shutdown().await.expect("stop active relay");
-        first.close(0_u32.into(), b"relay restarting");
-        first_peer.close().await;
-        let refused = TcpStream::connect(proxy_addr)
-            .await
-            .expect_err("stopped relay URL unexpectedly accepted a connection");
-        assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let replacement_proxy = RestartableTcpProxy::start(proxy_addr, relay_b_addr).await;
-        let replacement_map = RelayMap::from_iter([relay_b_config]);
-        let replacement = Endpoint::builder(presets::Minimal)
-            .secret_key(peer_key)
-            .relay_mode(RelayMode::Custom(replacement_map))
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .bind()
-            .await
-            .expect("build replacement relay peer");
-        let target = iroh::EndpointAddr::new(server.id()).with_relay_url(proxy_url);
-        let second = tokio::time::timeout(
-            Duration::from_secs(10),
-            replacement.connect(target, TEST_ALPN),
-        )
-        .await
-        .expect("relay restart recovery exceeded ten seconds")
-        .expect("connect after relay restart");
-        let (mut send, mut recv) = second.open_bi().await.expect("open second stream");
-        send.write_all(b"after-restart")
-            .await
-            .expect("write second payload");
-        send.finish().expect("finish second payload");
-        assert_eq!(recv.read_to_end(1024).await.unwrap(), b"after-restart");
-
-        let connections = tokio::time::timeout(Duration::from_secs(5), echo)
-            .await
-            .expect("echo completion timeout")
-            .expect("echo task");
-        second.close(0_u32.into(), b"test complete");
-        replacement.close().await;
-        server.close().await;
-        drop(connections);
-        replacement_proxy.stop().await;
-        relay_b.shutdown().await.expect("stop replacement relay");
-    }
-
-    #[tokio::test]
     async fn unsigned_artifact_requests_fail_before_connection_lookup() {
-        let service = IrohTransportService::new(8);
+        let service = test_service(8);
         let node_id = Uuid::now_v7();
         let artifact_id = Uuid::now_v7();
         let Err(fetch) = service
@@ -6266,12 +5672,7 @@ mod tests {
     async fn artifact_fetch_acceptance_waits_for_binding_verification() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (_term, fence, _router, _client, _connection) =
             fenced_agent_session(&service, &signing_key, node_id, 57).await;
         service
@@ -6315,12 +5716,7 @@ mod tests {
     async fn artifact_fence_carriers_cross_the_agent_boundary() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            true,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (term, _handshake_fence, _router, _client, connection) =
             fenced_agent_session(&service, &signing_key, node_id, 58).await;
         // Keep the immutable session term but age its handshake carrier past
@@ -6330,7 +5726,6 @@ mod tests {
         let expired_verified = service
             .shared
             .keyring()
-            .expect("test keyring")
             .verify_connection_fence_v2(
                 &expired_session_fence,
                 &term.node_id,
@@ -6342,11 +5737,11 @@ mod tests {
         connections
             .get_mut(node_id.as_slice())
             .expect("registered session")
-            .fence = Some(RegisteredFence {
+            .fence = RegisteredFence {
             verified: expired_verified,
             fence: expired_session_fence.clone(),
             endpoint_id: term.endpoint_id,
-        });
+        };
         drop(connections);
         let fence = signed_controller_fence(&signing_key, &term, 60);
         service
@@ -6512,11 +5907,13 @@ mod tests {
         let (relay_map, relay_roots, relay) = private_tls_relay().await;
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
-        let service = IrohTransportService::new(16);
-        let router = build_router_with_tls_roots(
+        let service = test_service(16);
+        let trust = test_trust_for_key(&agent_key, &handshake, None).await;
+        let router = build_router_with_trust_tls_roots(
             SecretKey::generate(),
             RelayMode::Custom(relay_map.clone()),
             identity_policy(&agent_key, &handshake),
+            trust,
             relay_roots.clone(),
             &service,
         )
@@ -6573,15 +5970,6 @@ mod tests {
     // ---------------------------------------------------------------------------
     // Connection-owner fence enforcement
     // ---------------------------------------------------------------------------
-
-    use ed25519_dalek::Signer as _;
-    use ocservia_command_authorization::ConnectionFenceClaimsV2;
-    use ocservia_command_authorization::FenceBindingClaimsV2;
-    use ocservia_command_authorization::canonical_connection_fence_v2;
-    use ocservia_command_authorization::canonical_fence_binding_v2;
-    use ocservia_command_authorization::connection_fence_claims_v2;
-    use ocservia_command_authorization::verification_key_id;
-    use ocservia_contracts::generated::ocserv::platform::agent::v1::FenceSignatureVersion;
 
     struct FenceTerm {
         node_id: [u8; 16],
@@ -6780,16 +6168,33 @@ mod tests {
         let agent_key = SecretKey::generate();
         let mut handshake = handshake(&agent_key);
         handshake.node_id = node_id.to_vec();
-        let term = FenceTerm::new(node_id, *agent_key.public().as_bytes(), owner_epoch);
+        handshake.capabilities = vec![
+            "ocserv.fencing.v2".to_owned(),
+            "ocserv.service.reload".to_owned(),
+            "ocserv.status.read".to_owned(),
+        ];
+        let mut term = FenceTerm::new(node_id, *agent_key.public().as_bytes(), owner_epoch);
+        term.capabilities.clone_from(&handshake.capabilities);
         let fence = signed_controller_fence(signing_key, &term, 120);
-        let router = build_router(
+        let trust = test_trust_with_options(
+            signing_key.clone(),
+            vec![(
+                agent_key.public(),
+                handshake.node_id.clone(),
+                NodeTrustState::Active,
+                1,
+            )],
+            Some(fence.clone()),
+        )
+        .await;
+        let router = test_router(
             SecretKey::generate(),
             RelayMode::Disabled,
             identity_policy(&agent_key, &handshake),
+            trust,
             service,
         )
-        .await
-        .expect("build router");
+        .await;
         let client = Endpoint::builder(presets::Minimal)
             .secret_key(agent_key.clone())
             .relay_mode(RelayMode::Disabled)
@@ -6803,24 +6208,6 @@ mod tests {
         let response = send_handshake(&connection, &handshake).await;
         assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
         wait_until_registered(service, &handshake.node_id).await;
-        let registered_fence = RegisteredFence {
-            verified: service
-                .shared
-                .keyring()
-                .expect("test keyring")
-                .verify_connection_fence_v2(&fence, &term.node_id, &term.endpoint_id, unix_now())
-                .expect("verify test fence"),
-            fence: fence.clone(),
-            endpoint_id: term.endpoint_id,
-        };
-        {
-            let mut connections = service.shared.inner.connections.lock().await;
-            let registered = connections
-                .get_mut(&handshake.node_id)
-                .expect("registered session");
-            registered.session_mode = TransportSessionMode::AuthorizedV11;
-            registered.fence = Some(registered_fence);
-        }
         (term, fence, router, client, connection)
     }
 
@@ -6849,12 +6236,7 @@ mod tests {
     async fn fenced_command_dispatch_requires_the_registered_owner_term() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (mut term, fence, _router, _client, _connection) =
             fenced_agent_session(&service, &signing_key, node_id, 41).await;
         let first = service
@@ -6864,7 +6246,10 @@ mod tests {
             .await
             .expect("register owner fence")
             .into_inner();
-        assert_eq!(first.disposition, i32::from(OwnerFenceDisposition::Applied));
+        assert_eq!(
+            first.disposition,
+            i32::from(OwnerFenceDisposition::Refreshed)
+        );
         assert_eq!(first.retained_epoch, 41);
 
         // A fenced session without its fence carriers is rejected.
@@ -6978,12 +6363,7 @@ mod tests {
     async fn higher_epoch_registration_retires_the_superseded_session() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (mut term, fence, _router, _client, _connection) =
             fenced_agent_session(&service, &signing_key, node_id, 7).await;
         service
@@ -7081,12 +6461,7 @@ mod tests {
     async fn owner_lease_expiry_closes_the_existing_agent_session() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (term, _, _router, _client, connection) =
             fenced_agent_session(&service, &signing_key, node_id, 7).await;
         service
@@ -7105,12 +6480,7 @@ mod tests {
     async fn owner_lease_refresh_keeps_the_existing_agent_session() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (term, _, _router, _client, connection) =
             fenced_agent_session(&service, &signing_key, node_id, 7).await;
         let short = signed_controller_fence(&signing_key, &term, 2);
@@ -7119,11 +6489,10 @@ mod tests {
             connections
                 .get_mut(node_id.as_slice())
                 .expect("live session")
-                .fence = Some(RegisteredFence {
+                .fence = RegisteredFence {
                 verified: service
                     .shared
                     .keyring()
-                    .expect("keyring")
                     .verify_connection_fence_v2(
                         &short,
                         &term.node_id,
@@ -7133,7 +6502,7 @@ mod tests {
                     .expect("short session fence"),
                 fence: short.clone(),
                 endpoint_id: term.endpoint_id,
-            });
+            };
         }
         for fence in [short, signed_controller_fence(&signing_key, &term, 120)] {
             service
@@ -7157,12 +6526,7 @@ mod tests {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
         let endpoint_id = [9_u8; 32];
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let expired = signed_controller_fence_at(
             &signing_key,
             &FenceTerm::new(node_id, endpoint_id, 3),
@@ -7201,12 +6565,7 @@ mod tests {
     async fn administrative_operations_require_the_registered_owner_binding() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (term, fence, _router, _client, _connection) =
             fenced_agent_session(&service, &signing_key, node_id, 12).await;
         service
@@ -7289,12 +6648,7 @@ mod tests {
     async fn revoked_update_retry_after_lost_ack_requires_the_same_live_fence() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (term, fence, router, client, connection) =
             fenced_agent_session(&service, &signing_key, node_id, 12).await;
         service
@@ -7406,12 +6760,7 @@ mod tests {
     async fn lost_close_ack_leaves_absence_without_a_historical_receipt() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (_term, fence, router, client, connection) =
             fenced_agent_session(&service, &signing_key, node_id, 12).await;
         service
@@ -7487,15 +6836,22 @@ mod tests {
             assert_eq!(restored.retained_state(endpoint), state);
             // Recreate both transport service and router with restored trust;
             // the old service's in-memory operation history is unavailable.
-            let service = IrohTransportService::new_with_policy(8, restored.clone());
-            let router = build_router(
+            let service = test_service_with_policy(8, restored.clone());
+            let (signing_key, _) = controller_keyring();
+            let trust = test_trust_with_options(
+                signing_key,
+                vec![(endpoint, node.clone(), state, 3)],
+                None,
+            )
+            .await;
+            let router = test_router(
                 controller_key.clone(),
                 RelayMode::Disabled,
                 restored,
+                trust,
                 &service,
             )
-            .await
-            .expect("restart transport router");
+            .await;
             let client = Endpoint::builder(presets::Minimal)
                 .secret_key(agent_key.clone())
                 .relay_mode(RelayMode::Disabled)
@@ -7542,12 +6898,7 @@ mod tests {
     async fn foreign_fence_terms_cannot_drive_state_updates() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (term, fence, _router, _client, _connection) =
             fenced_agent_session(&service, &signing_key, node_id, 12).await;
         service
@@ -7594,12 +6945,7 @@ mod tests {
     async fn require_fencing_rejects_fenceless_mutation_flows() {
         let (_signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            true,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let error = service
             .send_command(Request::new(SendCommandRequest {
                 node_id: node_id.to_vec(),
@@ -7640,15 +6986,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registered_fence_rejects_bindingless_operations_without_a_global_flag() {
+    async fn registered_fence_rejects_bindingless_operations() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (term, fence, _router, _client, _connection) =
             fenced_agent_session(&service, &signing_key, node_id, 15).await;
         service
@@ -7734,247 +7075,11 @@ mod tests {
         service.begin_shutdown().await;
     }
 
-    /// Registers a real agent session promoted to mutation mode without any
-    /// fence, the state an N-1 connection is in before the first owner fence
-    /// is registered. The returned handles must stay alive.
-    #[allow(clippy::type_complexity)]
-    async fn fenceless_mutation_session(
-        service: &IrohTransportService,
-        node_id: [u8; 16],
-    ) -> ([u8; 32], iroh::protocol::Router, Endpoint, Connection) {
-        fenceless_mutation_session_with_key(service, node_id, SecretKey::generate()).await
-    }
-
-    #[allow(clippy::type_complexity)]
-    async fn fenceless_mutation_session_with_key(
-        service: &IrohTransportService,
-        node_id: [u8; 16],
-        agent_key: SecretKey,
-    ) -> ([u8; 32], iroh::protocol::Router, Endpoint, Connection) {
-        let mut handshake = handshake(&agent_key);
-        handshake.node_id = node_id.to_vec();
-        let endpoint_id = *agent_key.public().as_bytes();
-        let router = build_router(
-            SecretKey::generate(),
-            RelayMode::Disabled,
-            identity_policy(&agent_key, &handshake),
-            service,
-        )
-        .await
-        .expect("build router");
-        let client = Endpoint::builder(presets::Minimal)
-            .secret_key(agent_key)
-            .relay_mode(RelayMode::Disabled)
-            .bind()
-            .await
-            .expect("build client");
-        let connection = client
-            .connect(router.endpoint().addr(), AGENT_ALPN)
-            .await
-            .expect("connect agent");
-        let response = send_handshake(&connection, &handshake).await;
-        assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
-        wait_until_registered(service, &handshake.node_id).await;
-        {
-            let mut connections = service.shared.inner.connections.lock().await;
-            let registered = connections
-                .get_mut(&handshake.node_id)
-                .expect("registered session");
-            registered.session_mode = TransportSessionMode::AuthorizedV11;
-            registered.fence = None;
-        }
-        (endpoint_id, router, client, connection)
-    }
-
-    #[tokio::test]
-    async fn first_fence_registration_retires_a_fenceless_mutation_session() {
-        let (signing_key, keyring) = controller_keyring();
-        let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
-        let (endpoint_id, _router, _client, connection) =
-            fenceless_mutation_session(&service, node_id).await;
-        assert!(
-            service
-                .shared
-                .inner
-                .connections
-                .lock()
-                .await
-                .get(&node_id.to_vec())
-                .is_some_and(|entry| entry.fence.is_none())
-        );
-
-        // The first fence registration must close the fence-less mutation
-        // session instead of leaving it beside the fenced term.
-        let fence =
-            signed_controller_fence(&signing_key, &FenceTerm::new(node_id, endpoint_id, 3), 30);
-        let response = service
-            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
-                fence: Some(fence),
-            }))
-            .await
-            .expect("register first owner fence")
-            .into_inner();
-        assert_eq!(
-            response.disposition,
-            i32::from(OwnerFenceDisposition::Applied)
-        );
-        assert!(
-            service
-                .shared
-                .inner
-                .connections
-                .lock()
-                .await
-                .get(&node_id.to_vec())
-                .is_none(),
-            "the fence-less mutation session must be retired"
-        );
-        tokio::time::timeout(Duration::from_secs(2), connection.closed())
-            .await
-            .expect("retired connection was closed");
-
-        service.begin_shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn registered_fence_rejects_bare_commands_on_fenceless_sessions() {
-        let (signing_key, keyring) = controller_keyring();
-        let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
-        // Register the fence before the session exists, then open a
-        // fence-less mutation session: its bare commands must be rejected
-        // because the node is inside the fencing state machine.
-        let endpoint_id = [4_u8; 32];
-        let fence =
-            signed_controller_fence(&signing_key, &FenceTerm::new(node_id, endpoint_id, 2), 30);
-        service
-            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
-                fence: Some(fence),
-            }))
-            .await
-            .expect("register owner fence");
-        let (_endpoint, _router, _client, _connection) =
-            fenceless_mutation_session(&service, node_id).await;
-
-        let error = service
-            .send_command(Request::new(SendCommandRequest {
-                node_id: node_id.to_vec(),
-                command_envelope: command_envelope(&node_id, &new_traceparent(), String::new()),
-            }))
-            .await
-            .expect_err("bare command rejected because a fence is registered");
-        assert_eq!(error.code(), tonic::Code::PermissionDenied);
-
-        service.begin_shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn retained_fence_cannot_be_borrowed_by_a_fenceless_artifact_session() {
-        let (signing_key, keyring) = controller_keyring();
-        let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
-
-        // This ordering is reachable during a rolling upgrade: transportd
-        // retains an owner fence, then an N-1 Agent opens an authorized
-        // session without carrying that fence. The endpoint is deliberately
-        // identical so signature pinning alone cannot reject the borrow.
-        let agent_key = SecretKey::generate();
-        let endpoint_id = *agent_key.public().as_bytes();
-        let term = FenceTerm::new(node_id, endpoint_id, 3);
-        let fence = signed_controller_fence(&signing_key, &term, 30);
-        service
-            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
-                fence: Some(fence.clone()),
-            }))
-            .await
-            .expect("retain owner fence before the N-1 session");
-        let (_endpoint, _router, _client, _connection) =
-            fenceless_mutation_session_with_key(&service, node_id, agent_key).await;
-
-        let artifact_id = *Uuid::now_v7().as_bytes();
-        let grant = shape_valid_grant(node_id, artifact_id);
-        let fetch_binding = signed_fence_binding(
-            &signing_key,
-            &fence,
-            FenceOperationKind::Artifact,
-            artifact_id,
-            "ocserv.fencing.v2",
-        );
-        let Err(fetch) = service
-            .fetch_artifact(Request::new(FetchArtifactRequest {
-                node_id: node_id.to_vec(),
-                artifact_id: artifact_id.to_vec(),
-                purpose: "certificate_p12".to_owned(),
-                max_bytes: 32,
-                grant: Some(grant.clone()),
-                fence_binding: Some(fetch_binding),
-            }))
-            .await
-        else {
-            panic!("fenceless N-1 session borrowed a retained fence for artifact fetch");
-        };
-        assert_eq!(fetch.code(), tonic::Code::PermissionDenied);
-        assert_eq!(
-            fetch.message(),
-            "artifact operation requires a fenced active agent session"
-        );
-
-        let grant_id: [u8; 16] = grant.grant_id.as_slice().try_into().expect("grant id");
-        let consume_binding = signed_fence_binding(
-            &signing_key,
-            &fence,
-            FenceOperationKind::Artifact,
-            grant_id,
-            "ocserv.fencing.v2",
-        );
-        for confirm_only in [false, true] {
-            let consume = service
-                .consume_artifact(Request::new(ConsumeArtifactRequest {
-                    node_id: node_id.to_vec(),
-                    grant: Some(grant.clone()),
-                    sha256: vec![0x11; 32],
-                    size: 32,
-                    confirm_only,
-                    fence_binding: Some(consume_binding.clone()),
-                }))
-                .await
-                .expect_err("fenceless N-1 session borrowed a retained fence for artifact consume");
-            assert_eq!(consume.code(), tonic::Code::PermissionDenied);
-            assert_eq!(
-                consume.message(),
-                "artifact operation requires a fenced active agent session"
-            );
-        }
-
-        service.begin_shutdown().await;
-    }
-
     #[tokio::test]
     async fn state_update_binding_binds_the_exact_update_carrier() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (term, fence, _router, _client, _connection) =
             fenced_agent_session(&service, &signing_key, node_id, 21).await;
         service
@@ -8052,12 +7157,7 @@ mod tests {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
         let endpoint_id = [6_u8; 32];
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
 
         // A lease valid for another fraction of a second inside the current
         // second must be accepted; whole-second truncation would reject it.
@@ -8098,12 +7198,7 @@ mod tests {
     async fn transport_events_carry_the_owner_term() {
         let (signing_key, keyring) = controller_keyring();
         let node_id = *Uuid::now_v7().as_bytes();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (term, fence, _router, _client, _connection) =
             fenced_agent_session(&service, &signing_key, node_id, 33).await;
         service
@@ -8223,12 +7318,7 @@ mod tests {
     #[tokio::test]
     async fn artifact_cancel_before_first_chunk_stops_the_stalled_stream() {
         let (_, keyring) = controller_keyring();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (fetched, mut send, _recv, _artifact, (router, client, connection)) =
             stalled_artifact_fetch(&service, Duration::from_mins(1)).await;
         drop(fetched);
@@ -8244,12 +7334,7 @@ mod tests {
     #[tokio::test]
     async fn artifact_cancel_after_first_chunk_stops_the_stalled_stream() {
         let (_, keyring) = controller_keyring();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (mut fetched, mut send, _recv, artifact_id, (router, client, connection)) =
             stalled_artifact_fetch(&service, Duration::from_mins(1)).await;
         let chunk = ArtifactChunk {
@@ -8283,12 +7368,7 @@ mod tests {
     #[tokio::test]
     async fn artifact_grant_expiry_stops_the_stalled_stream() {
         let (_, keyring) = controller_keyring();
-        let service = IrohTransportService::new_with_fence_policy(
-            8,
-            IdentityPolicy::default(),
-            Some(keyring),
-            false,
-        );
+        let service = IrohTransportService::new(8, IdentityPolicy::default(), keyring);
         let (mut fetched, mut send, _recv, _artifact, (router, client, connection)) =
             stalled_artifact_fetch(&service, Duration::from_secs(1)).await;
         // The consumer stays connected but sees the bounded failure.

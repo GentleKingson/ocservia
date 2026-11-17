@@ -70,9 +70,6 @@ async function main() {
       .fill(await read(path.join(work, "private/requester-password")));
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("heading", { name: "Nodes", exact: true }).waitFor();
-    // A single authorized Workspace is displayed as text, not a selector.
-    const selector = page.locator("#workspace-select");
-    if (await selector.count()) await selector.selectOption(workspace);
     await page
       .getByRole("button", { name: "Install node", exact: true })
       .click();

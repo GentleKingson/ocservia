@@ -80,7 +80,7 @@ classify_path() {
       tools_suite release ;;
     rust/*|scripts/rust-check.sh) run_rust=true ;;
     # Run only by Release Check; no installer contract executes it, while
-    # test-release-workflows.rb (release suite) asserts that Release Check calls it.
+    # test-release-workflows.py (release suite) asserts that Release Check calls it.
     scripts/release-quick-acceptance.sh) tools_suite release ;;
     # Offline Cross-VM contracts only; the credentialed three-VM run stays manual.
     .github/workflows/real-e2e.yml|deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*)
@@ -104,7 +104,7 @@ classify_path() {
     deploy/compose/*|deploy/database-e2e/*|scripts/*database*|scripts/*postgres*|\
     scripts/*-backup-restore-smoke.sh)
       run_go=true; run_database=true ;;
-    # test-release-workflows.rb (release suite) reads the Release notes config.
+    # test-release-workflows.py (release suite) reads the Release notes config.
     .github/release.yml) tools_suite release ;;
     .github/release-notes/*.md) run_docs=true; tools_suite release ;;
     # Shared Claude Code settings never reach CI or images; docs-check enforces its audited keys.
@@ -137,8 +137,8 @@ classify_path() {
   esac
   case "${path}" in
     scripts/generate-controller-release-manifest.mjs|scripts/redact-release-upgrade-log.mjs|\
-    scripts/release-business-browser.mjs|scripts/release-upgrade-oidc-fixture.mjs|\
-    scripts/test-release-upgrade.mjs|.github/actions/build-cache-credentials/index.js)
+    scripts/release-business-browser.mjs|scripts/test-release-upgrade.mjs|\
+    .github/actions/build-cache-credentials/index.js)
       run_web=true ;;
   esac
   case "${path}" in
@@ -178,7 +178,7 @@ classify_path() {
   case "${path}" in
     web/src/api/*|web/src/shared/*|web/src/App.vue|web/src/main.ts|web/src/main.css|web/index.html|\
     web/src/components/ui/*|web/src/components/layout/*|web/src/components/overview/*|web/src/features/operations/*|\
-    web/src/views/LoginView.vue|web/src/views/ApprovalsView.vue|web/src/views/AuditView.vue|web/src/views/SettingsView.vue|web/src/views/OverviewView.vue|web/src/views/OperationsView.vue|web/src/views/RolloutDetailView.vue|\
+    web/src/views/LoginView.vue|web/src/views/AuditView.vue|web/src/views/SettingsView.vue|web/src/views/OverviewView.vue|web/src/views/OperationsView.vue|web/src/views/RolloutDetailView.vue|\
     web/src/views/NodesView.vue|web/src/views/NodeDetailView.vue|web/src/components/common/*|\
     web/src/components/nodes/*|web/src/features/configuration/*|web/src/features/certificates/*|\
     web/src/features/node-workflow.ts|web/src/features/user-password.ts|web/src/adapters/user-policy.ts|\

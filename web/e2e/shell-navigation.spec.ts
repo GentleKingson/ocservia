@@ -124,24 +124,21 @@ test("navigation sheet opens and closes from the keyboard", async ({
   await expectNoPageOverflow(page);
 });
 
-test("long Workspace choices keep the section and readiness reachable", async ({
+test("long Workspace name keeps the section and readiness reachable", async ({
   page,
 }, info) => {
-  const betaId = "019fc0a4-6d92-765c-a8a1-4af556614cc2";
   const longName = "ProductionWorkspaceWithoutWhitespace".repeat(4);
   await page.route("**/api/v1/workspaces", (route) =>
     route.fulfill({
       json: {
-        items: [
-          { id: alphaId, name: longName, slug: "alpha", version: 1 },
-          { id: betaId, name: `${longName}-beta`, slug: "beta", version: 1 },
-        ],
+        items: [{ id: alphaId, name: longName, slug: "alpha", version: 1 }],
       },
     }),
   );
   await page.goto("/settings");
-  const select = page.getByLabel("Workspace", { exact: true });
-  await expect(select).toHaveValue(alphaId);
+  const workspaceBadge = page.getByTestId("workspace");
+  await expect(workspaceBadge).toContainText(longName);
+  await expect(page.locator("#workspace-select")).toHaveCount(0);
   for (const width of [1280, 1440, 1920, 320, 390, 768]) {
     await page.setViewportSize({ width, height: 1000 });
     await expectNoPageOverflow(page);
@@ -149,9 +146,8 @@ test("long Workspace choices keep the section and readiness reachable", async ({
       page.locator("header").first().getByText("Settings", { exact: true }),
     ).toBeVisible();
     await expect(page.getByTestId("readiness")).toHaveText("Ready");
-    const bounds = await select.boundingBox();
-    if (!bounds) throw new Error("Workspace select has no layout bounds");
-    expect(bounds.width).toBeGreaterThanOrEqual(160);
+    const bounds = await workspaceBadge.boundingBox();
+    if (!bounds) throw new Error("Workspace header has no layout bounds");
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
     if (
       process.env.OCSERVIA_UI_EVIDENCE_DIR &&
@@ -162,17 +158,9 @@ test("long Workspace choices keep the section and readiness reachable", async ({
         fullPage: true,
       });
   }
-  await select.selectOption(betaId);
-  await expect(select).toHaveValue(betaId);
-  await select.focus();
-  await page.keyboard.press("ArrowUp");
-  await page.keyboard.press("Enter");
-  await expect(select).toHaveValue(alphaId);
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.evaluate(() => {
     document.documentElement.style.zoom = "2";
   });
   await expectNoPageOverflow(page);
-  await select.focus();
-  await expect(select).toBeFocused();
 });

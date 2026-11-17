@@ -75,9 +75,6 @@ func TestOperationsRequireAuthenticatedPrincipal(t *testing.T) {
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("%s status = %d", path, response.Code)
 		}
-		if response.Header().Get("WWW-Authenticate") != "OIDC" {
-			t.Fatalf("%s missing OIDC challenge", path)
-		}
 	}
 }
 
@@ -149,9 +146,7 @@ func TestUserStateRevisionSlotErrorsUseConflictProblems(t *testing.T) {
 func TestEnrollmentWritesRequireAuthenticatedPrincipal(t *testing.T) {
 	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
 	for _, path := range []string{
-		"/api/v1/enrollment-tokens",
 		"/api/v1/node-bootstrap-tokens",
-		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/approval",
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/revocation",
 	} {
 		response := httptest.NewRecorder()
@@ -162,16 +157,9 @@ func TestEnrollmentWritesRequireAuthenticatedPrincipal(t *testing.T) {
 	}
 }
 
-func TestNodeBootstrapTokenRouteUsesSeparatePermission(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", nil)
-	if action := routeAction(request); action != "node_bootstrap_token.create" {
-		t.Fatalf("route action = %q", action)
-	}
-}
-
 func TestEnrollmentErrorsDistinguishInvalidRequestsFromBackendFailures(t *testing.T) {
 	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", nil)
 
 	response := httptest.NewRecorder()
 	server.writeEnrollmentError(response, request, enrollment.ErrInvalidRequest)
@@ -186,22 +174,24 @@ func TestEnrollmentErrorsDistinguishInvalidRequestsFromBackendFailures(t *testin
 	}
 }
 
-func TestCreateEnrollmentTokenRejectsUnboundEndpoint(t *testing.T) {
+func TestCreateBootstrapTokenRejectsInvalidExpectedEndpoint(t *testing.T) {
 	server := &Server{
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		devAuth:    true,
 		enrollment: &enrollment.Service{},
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", strings.NewReader(`{
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(`{
 		"workspace_id":"019fc0a4-6d92-765c-a8a1-4af556614cc3",
+		"expected_endpoint_id":"not-hex",
 		"environment":"production",
 		"reason":"provision a bound production node"
 	}`))
 	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(context.WithValue(request.Context(), principalKey{}, auth.Principal{Subject: "developer", Issuer: "development", BreakGlass: true}))
 	response := httptest.NewRecorder()
-	server.createEnrollmentToken(response, request)
+	server.createNodeBootstrapToken(response, request)
 	if response.Code != http.StatusBadRequest {
-		t.Fatalf("unbound token status = %d, body = %s", response.Code, response.Body.String())
+		t.Fatalf("invalid expected_endpoint_id status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 
@@ -340,7 +330,7 @@ func TestRoutingErrorsUseProblemDetails(t *testing.T) {
 		status int
 	}{
 		{method: http.MethodPost, path: "/api/v1/livez", status: http.StatusMethodNotAllowed},
-		{method: http.MethodPost, path: "/api/v1/auth/methods", status: http.StatusMethodNotAllowed},
+		{method: http.MethodGet, path: "/api/v1/auth/login", status: http.StatusMethodNotAllowed},
 		{method: http.MethodGet, path: "/missing", status: http.StatusNotFound},
 	}
 	for _, test := range tests {
@@ -424,7 +414,7 @@ func TestControlledOperationRoutesRequireAuthentication(t *testing.T) {
 	}
 }
 
-func TestUserPolicyAndBatchRoutesRequireAuthentication(t *testing.T) {
+func TestUserPolicyRoutesRequireAuthentication(t *testing.T) {
 	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
 	tests := []struct {
 		method string
@@ -432,8 +422,6 @@ func TestUserPolicyAndBatchRoutesRequireAuthentication(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/users/alice/policy"},
 		{http.MethodPut, "/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/users/alice/policy"},
-		{http.MethodPost, "/api/v1/user-batches"},
-		{http.MethodGet, "/api/v1/user-batches/019fc0a4-6d92-765c-a8a1-4af556614cc3"},
 	}
 	for _, test := range tests {
 		response := httptest.NewRecorder()
@@ -480,7 +468,7 @@ func TestBrowserMutationRequiresExactOrigin(t *testing.T) {
 				trustedOrigin = "https://admin.example.com"
 			}
 			server.EnableBrowserOrigin(trustedOrigin)
-			request := httptest.NewRequest(test.method, "/api/v1/enrollment-tokens", nil)
+			request := httptest.NewRequest(test.method, "/api/v1/node-bootstrap-tokens", nil)
 			if test.origin != "" {
 				request.Header.Set("Origin", test.origin)
 			}
@@ -500,9 +488,9 @@ func TestBrowserMutationRequiresExactOrigin(t *testing.T) {
 
 func TestBrowserMutationFailsClosedWithoutConfiguredOrigin(t *testing.T) {
 	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", nil)
 	request.Header.Set("Origin", "https://admin.example.com")
-	if err := server.validateBrowserMutation(request, auth.Principal{Issuer: "https://id.example.test"}); !errors.Is(err, errCrossOrigin) {
+	if err := server.validateBrowserMutation(request, auth.Principal{Issuer: "local"}); !errors.Is(err, errCrossOrigin) {
 		t.Fatalf("cookie mutation without a configured origin = %v", err)
 	}
 }
@@ -524,7 +512,7 @@ func TestEnableBrowserOriginRejectsMalformedOrigins(t *testing.T) {
 func TestRequireOperationAuthPassesDevelopmentBearerWithoutOrigin(t *testing.T) {
 	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters")
 	server.EnableBrowserOrigin("https://admin.example.com")
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", strings.NewReader("{}"))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader("{}"))
 	request.Header.Set("Authorization", "Bearer local-development-token-32-characters")
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -554,12 +542,12 @@ func TestJSONMediaTypeGate(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", strings.NewReader(test.body))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(test.body))
 			if test.contentType != "" {
 				request.Header.Set("Content-Type", test.contentType)
 			}
 			response := httptest.NewRecorder()
-			server.createEnrollmentToken(response, request)
+			server.createNodeBootstrapToken(response, request)
 			if response.Code != test.status {
 				t.Fatalf("status = %d, want %d, body = %s", response.Code, test.status, response.Body.String())
 			}

@@ -115,6 +115,8 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 			values["OCSERV_PUBLIC_ORIGIN"] = "https://controller.example.test"
 			values["OCSERV_COMMAND_SIGNING_KEY_FILE"] = commandSigningKeyFile
 			values["OCSERV_CONTROLLER_ENDPOINT_ID"] = strings.Repeat("ab", 32)
+			values["OCSERV_TRANSPORT_SOCKET"] = filepath.Join(dir, "transport.sock")
+			values["OCSERV_TRUST_SOCKET"] = filepath.Join(dir, "trust.sock")
 			values["OCSERV_TRANSPORT_UID"] = strconv.Itoa(os.Geteuid() + 1)
 			values["OCSERV_TRANSPORT_GID"] = strconv.Itoa(os.Getegid())
 		}
@@ -233,18 +235,14 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		}
 	}
 	password := "uncommon setup password for controller administrator"
-	adminFile, approverFile := filepath.Join(dir, "admin-password"), filepath.Join(dir, "approver-password")
-	for path, secret := range map[string]string{adminFile: password, approverFile: "separate long setup password for controller approver"} {
-		if err := os.WriteFile(path, []byte(secret), 0600); err != nil {
-			t.Fatal(err)
-		}
+	adminFile := filepath.Join(dir, "admin-password")
+	if err := os.WriteFile(adminFile, []byte(password), 0600); err != nil {
+		t.Fatal(err)
 	}
 	bootstrap := map[string]string{
-		"OCSERV_LOCAL_BOOTSTRAP_USERNAME":               "process-admin",
-		"OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE":          adminFile,
-		"OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID":           workspace.String(),
-		"OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME":      "process-approver",
-		"OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE": approverFile,
+		"OCSERV_LOCAL_BOOTSTRAP_USERNAME":      "process-admin",
+		"OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE": adminFile,
+		"OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID":  workspace.String(),
 	}
 	if err := run(runtimeOptions, bootstrap, "--bootstrap-local-admin"); err != nil {
 		t.Fatal("runtime CLI bootstrap", err)
@@ -272,9 +270,6 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	defer log.Close()
 	processArgs := []string(nil)
 	extra := map[string]string{"OCSERV_HTTP_ADDRESS": address}
-	if production || smoke {
-		processArgs = append(processArgs, "--role=api")
-	}
 	if !production {
 		extra["OCSERV_PUBLIC_ORIGIN"] = "http://" + address
 		if !smoke {

@@ -58,7 +58,6 @@ export default defineConfig(
       "scripts/generate-controller-release-manifest.mjs",
       "scripts/redact-release-upgrade-log.mjs",
       "scripts/release-business-browser.mjs",
-      "scripts/release-upgrade-oidc-fixture.mjs",
       "scripts/test-release-upgrade.mjs",
     ],
     ...tseslint.configs.disableTypeChecked,

@@ -1,4 +1,4 @@
-// Package authstore owns the storage contract shared by authentication flows.
+// Package authstore owns the storage contract shared by authentication and single-admin workspace authorization.
 package authstore
 
 import (
@@ -25,14 +25,18 @@ type Credential struct {
 	Hash     string
 	Disabled bool
 }
+
 type Session struct {
 	Issuer, Subject string
 	BreakGlass      bool
 	ExpiresAt       value.Timestamp
 }
-type Bootstrap struct {
-	IdentityID, WorkspaceID uuid.UUID
-	Pending                 bool
+
+type Workspace struct {
+	ID      uuid.UUID `json:"id"`
+	Name    string    `json:"name"`
+	Slug    string    `json:"slug"`
+	Version int64     `json:"version"`
 }
 
 type Store interface {
@@ -54,18 +58,16 @@ type Store interface {
 	BreakGlassIdentity(context.Context, uuid.UUID, time.Time) (uuid.UUID, error)
 	RecordBreakGlass(context.Context, []byte, uuid.UUID, uuid.UUID, uuid.UUID, time.Time) error
 	Workspaces(context.Context) ([]uuid.UUID, error)
+	AuthorizedWorkspaces(context.Context, uuid.UUID, bool) ([]Workspace, error)
 	LockManagement(context.Context) error
 	WorkspaceExists(context.Context, uuid.UUID) error
-	Bootstrap(context.Context) (Bootstrap, error)
-	ValidatePendingCredential(context.Context, uuid.UUID, uuid.UUID, string) error
+	NodeWorkspace(context.Context, uuid.UUID) (uuid.UUID, error)
+	OperationWorkspace(context.Context, uuid.UUID) (uuid.UUID, error)
 	Initialized(context.Context) (bool, error)
-	BindRole(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time) error
+	BindWorkspaceAdmin(context.Context, uuid.UUID, uuid.UUID, time.Time) error
+	IsWorkspaceAdmin(context.Context, uuid.UUID, uuid.UUID) (bool, error)
+	IsWorkspaceAdminOrBreakGlass(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error)
 	InsertBootstrap(context.Context, uuid.UUID, uuid.UUID, time.Time) error
-	CompleteBootstrap(context.Context, uuid.UUID, time.Time) error
-	MayManage(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error)
-	LockLocalIdentity(context.Context, uuid.UUID) error
-	Protected(context.Context, uuid.UUID, uuid.UUID) (bool, error)
-	Disable(context.Context, uuid.UUID, time.Time) error
 	DeleteIdentityAttempts(context.Context, uuid.UUID) error
 }
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"google.golang.org/protobuf/proto"
 )
 
 type recordingOperationCreator struct {
@@ -31,8 +32,14 @@ func (r *recordingOperationCreator) assertLast(t *testing.T, ctx context.Context
 	if len(r.requests) != count {
 		t.Fatalf("Create calls = %d, want %d", len(r.requests), count)
 	}
-	if r.contexts[count-1] != ctx || !reflect.DeepEqual(r.requests[count-1], want) {
-		t.Fatalf("Create context preserved = %v, request = %+v, want %+v", r.contexts[count-1] == ctx, r.requests[count-1], want)
+	got := r.requests[count-1]
+	if !proto.Equal(got.CompleteCandidate, want.CompleteCandidate) || !proto.Equal(got.PlanExpiresAt, want.PlanExpiresAt) {
+		t.Fatalf("Create proto fields mismatch: got (%v, %v), want (%v, %v)", got.CompleteCandidate, got.PlanExpiresAt, want.CompleteCandidate, want.PlanExpiresAt)
+	}
+	got.CompleteCandidate, want.CompleteCandidate = nil, nil
+	got.PlanExpiresAt, want.PlanExpiresAt = nil, nil
+	if r.contexts[count-1] != ctx || !reflect.DeepEqual(got, want) {
+		t.Fatalf("Create context preserved = %v, request = %+v, want %+v", r.contexts[count-1] == ctx, got, want)
 	}
 }
 

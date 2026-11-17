@@ -3,204 +3,277 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
-require_test_commands ruby tar gzip xz
+require_test_commands python3 tar gzip xz
 
 # These disposable command fixtures test routing and failures, not native Go.
-ruby - "${ROOT}" <<'RUBY'
-require 'tmpdir'
-require 'fileutils'
-require 'open3'
-require 'digest'
-root = ARGV.fetch(0)
-version = File.read("#{root}/toolchains.lock")[/^go=(.+)$/, 1]
-checksums = File.read("#{root}/scripts/checksums.txt")
-bash = ENV.fetch('PATH').split(':').map { |dir| "#{dir}/bash" }.find { |path| File.executable?(path) }
+python3 - "${ROOT}" <<'PY'
+import glob
+import hashlib
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
-def script(path, body)
-  FileUtils.mkdir_p(File.dirname(path))
-  File.write(path, "#!/usr/bin/env bash\nset -eu\n#{body}\n")
-  File.chmod(0755, path)
-end
+root = Path(sys.argv[1])
+version = None
+for line in (root / "toolchains.lock").read_text().splitlines():
+    if line.startswith("go="):
+        version = line.split("=", 1)[1]
+    elif line.startswith("node="):
+        node_version = line.split("=", 1)[1]
+    elif line.startswith("npm="):
+        npm_version = line.split("=", 1)[1]
+    elif line.startswith("rust="):
+        rust_version = line.split("=", 1)[1]
+    elif line.startswith("nfpm="):
+        nfpm_version = line.split("=", 1)[1]
+assert version is not None
+checksums = (root / "scripts" / "checksums.txt").read_text().splitlines()
+bash = shutil.which("bash")
+assert bash is not None
 
-def run(env, bash, path, *args, error: nil)
-  output, status = Open3.capture2e(env, bash, path, *args)
-  if error
-    raise "expected #{error.inspect}: #{status}\n#{output}" if status.success? || !output.include?(error)
-    raise "unbound variable diagnostic: #{output}" if output.include?('unbound variable')
-  else
-    raise "unexpected failure: #{status}\n#{output}" unless status.success?
-  end
-  output
-end
 
-Dir.mktmpdir('bootstrap-platforms-') do |tmp|
-  %w[Linux-aarch64 Linux-x86_64 Darwin-arm64].each do |platform|
-    target = {'Linux-aarch64' => 'linux-arm64', 'Linux-x86_64' => 'linux-amd64', 'Darwin-arm64' => 'darwin-arm64'}.fetch(platform)
-    os, arch = target.split('-')
-    artifact = "go#{version}.#{target}.tar.gz"
-    raise "missing locked checksum for #{artifact}" unless checksums.match?(/^[a-f0-9]{64}  #{Regexp.escape(artifact)}$/)
-    work = "#{tmp}/#{platform}"
-    FileUtils.mkdir_p("#{work}/scripts")
-    %w[bootstrap.sh env.sh].each { |name| FileUtils.cp("#{root}/scripts/#{name}", "#{work}/scripts/") }
-    FileUtils.cp("#{root}/toolchains.lock", work)
-    payload = "#{work}/payload"
-    script("#{payload}/go/bin/go", <<~SH)
-      echo executed >>"${FIXTURE_EXECUTIONS}"
-      [[ "$*" == 'env GOVERSION GOHOSTOS GOHOSTARCH' ]]
-      printf 'go#{version}\\n#{os}\\n#{arch}\\n'
-    SH
-    archive = "#{work}/fixture.tar.gz"
-    _, status = Open3.capture2e('tar', '-czf', archive, '-C', payload, 'go')
-    raise 'fixture archive failed' unless status.success?
-    digest = Digest::SHA256.file(archive).hexdigest
-    manifest = "#{work}/scripts/checksums.txt"
-    File.write(manifest, "#{digest}  #{artifact}\n")
-    bin = "#{work}/bin"
-    script("#{bin}/uname", "case \"$1\" in -s) echo #{platform.split('-').first} ;; -m) echo #{platform.split('-').last} ;; esac")
-    script("#{bin}/jq", 'exit 0')
-    script("#{bin}/curl", <<~SH)
-      printf '%s\\n' "$*" >>"${FIXTURE_DOWNLOADS}"
-      while (($#)); do
-        if [[ "$1" == --output ]]; then cp "${FIXTURE_ARCHIVE}" "$2"; exit; fi
-        shift
-      done
-      exit 1
-    SH
-    env = {'PATH' => "#{bin}:#{ENV.fetch('PATH')}", 'FIXTURE_ARCHIVE' => archive,
-           'FIXTURE_DOWNLOADS' => "#{work}/downloads", 'FIXTURE_EXECUTIONS' => "#{work}/executions",
-           'GOOS' => 'windows', 'GOARCH' => '386', 'GOTOOLCHAIN' => 'auto'}
-    bootstrap = "#{work}/scripts/bootstrap.sh"
-    run(env, bash, bootstrap, 'go-test')
-    raise 'wrong URL or artifact' unless File.read("#{work}/downloads").include?("https://go.dev/dl/#{artifact}")
-    raise 'go-test installed extra tools' unless Dir.children("#{work}/.tools").sort == %w[bin go]
-    installed = "#{work}/.tools/go/bin/go"
-    before = File.stat(installed)
-    FileUtils.mkdir_p("#{work}/.tools/node")
-    File.write("#{work}/.tools/node/keep", 'untouched')
-    run(env, bash, bootstrap, 'go-test')
-    raise 'valid Go reinstalled' unless File.stat(installed).ino == before.ino && File.stat(installed).mtime == before.mtime
-    raise 'unnecessary download' unless File.readlines("#{work}/downloads").length == 1
-    raise 'other tool changed' unless File.read("#{work}/.tools/node/keep") == 'untouched'
+def script(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/usr/bin/env bash\nset -eu\n{body}\n")
+    path.chmod(0o755)
 
-    next unless platform == 'Linux-aarch64'
-    # Same version but wrong host architecture must not satisfy reuse. GOARCH
-    # above deliberately differs from GOHOSTARCH, as in cross-compilation.
-    File.write(installed, File.read(installed).sub('arm64', 'amd64'))
-    run(env, bash, bootstrap, 'go-test')
-    raise 'wrong host reused' unless File.read(installed).include?('arm64')
-    File.chmod(0644, installed)
-    run(env, bash, bootstrap, 'go-test')
-    raise 'non-executable Go reused' unless File.executable?(installed)
 
-    # Keep a usable old version while every replacement failure is exercised.
-    old = File.read(installed).sub("go#{version}", 'go0.0.0')
-    File.write(installed, old)
-    cache = "#{work}/.cache/downloads/#{artifact}"
-    File.write(manifest, '')
-    run(env, bash, bootstrap, 'go-test', error: "missing or invalid SHA-256 checksum for #{artifact}")
-    File.write(manifest, "#{'0' * 64}  #{artifact}\n")
-    run(env, bash, bootstrap, 'go-test', error: 'checksum mismatch')
-    File.write(manifest, "#{digest}  #{artifact}\n")
-    File.write(cache, 'corrupt cached archive')
-    run(env, bash, bootstrap, 'go-test', error: 'checksum mismatch')
-    raise 'cached failure downloaded a replacement' unless File.readlines("#{work}/downloads").length == 1
-    File.delete(cache)
-    File.write(manifest, "#{'0' * 64}  #{artifact}\n")
-    run(env, bash, bootstrap, 'go-test', error: 'checksum mismatch')
-    raise 'unverified download promoted to cache' if File.exist?(cache)
-    raise 'failed verification overwrote old Go' unless File.read(installed) == old
+def run(env: dict[str, str], bash_bin: str, path: Path, *args: str, error: str | None = None) -> str:
+    proc = subprocess.run(
+        [bash_bin, str(path), *args],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output = proc.stdout
+    if error is not None:
+        if proc.returncode == 0 or error not in output:
+            raise AssertionError(f"expected {error!r}: {proc.returncode}\n{output}")
+        if "unbound variable" in output:
+            raise AssertionError(f"unbound variable diagnostic: {output}")
+    elif proc.returncode != 0:
+        raise AssertionError(f"unexpected failure: {proc.returncode}\n{output}")
+    return output
 
-    # A checksum-valid but wrong/unexecutable payload is never promoted either.
-    %w[wrong-host non-executable].each do |failure|
-      File.write("#{payload}/go/bin/go", File.read(installed).sub('go0.0.0', "go#{version}").sub('arm64', 'amd64'))
-      File.chmod(failure == 'non-executable' ? 0644 : 0755, "#{payload}/go/bin/go")
-      _, status = Open3.capture2e('tar', '-czf', archive, '-C', payload, 'go')
-      raise 'fixture archive failed' unless status.success?
-      FileUtils.rm_f(cache)
-      File.write(manifest, "#{Digest::SHA256.file(archive).hexdigest}  #{artifact}\n")
-      run(env, bash, bootstrap, 'go-test', error: 'invalid Go toolchain')
-      raise 'invalid toolchain replaced old Go' unless File.read(installed) == old
-      raise 'staging directory leaked' unless Dir.glob("#{work}/.tools/.go-install-*").empty?
-    end
 
-    FileUtils.rm_rf("#{work}/.tools")
-    FileUtils.rm_rf("#{work}/.cache")
-    %w[all ci-quality contracts secret-scan go-quality go-rust-integration native rust-validation web security].each do |profile|
-      run(env, bash, bootstrap, profile, error: "#{platform}/#{profile}; artifact mappings")
-      raise 'unsupported profile partially installed' if File.exist?("#{work}/.tools") || File.exist?("#{work}/.cache")
-    end
-    # Already-supported rustup/nfpm paths remain usable without adding new maps.
-    script("#{work}/.tools/cargo/bin/rustc", "echo 'rustc #{File.read("#{root}/toolchains.lock")[/^rust=(.+)$/, 1]} (fixture)'")
-    %w[cargo rustup rustfmt].each { |name| script("#{work}/.tools/cargo/bin/#{name}", 'exit 0') }
-    script("#{work}/.tools/bin/nfpm", "echo 'GitVersion: #{File.read("#{root}/toolchains.lock")[/^nfpm=(.+)$/, 1]}'")
-    run(env, bash, bootstrap, 'rust-basic')
-    run(env, bash, bootstrap, 'native-packages')
-    # ARM64 Business needs only pinned Node/npm, not the unsupported quality
-    # profiles. Exercise its real download/checksum/extraction path with stubs.
-    node_version = File.read("#{root}/toolchains.lock")[/^node=(.+)$/, 1]
-    npm_version = File.read("#{root}/toolchains.lock")[/^npm=(.+)$/, 1]
-    node_artifact = "node-v#{node_version}-linux-arm64.tar.xz"
-    raise 'missing locked ARM64 Node checksum' unless checksums.match?(/^[a-f0-9]{64}  #{Regexp.escape(node_artifact)}$/)
-    node_payload = "#{work}/node-payload"
-    script("#{node_payload}/node-fixture/bin/node", "echo v#{node_version}")
-    script("#{node_payload}/node-fixture/bin/npm", "echo #{npm_version}")
-    node_archive = "#{work}/node-fixture.tar.xz"
-    _, status = Open3.capture2e('tar', '-cJf', node_archive, '-C', node_payload, 'node-fixture')
-    raise 'Node fixture archive failed' unless status.success?
-    File.write(manifest, "#{Digest::SHA256.file(node_archive).hexdigest}  #{node_artifact}\n")
-    node_env = env.merge('FIXTURE_ARCHIVE' => node_archive)
-    run(node_env, bash, bootstrap, 'npm-security')
-    raise 'wrong ARM64 Node artifact URL' unless File.read("#{work}/downloads").include?("https://nodejs.org/dist/v#{node_version}/#{node_artifact}")
-    File.write("#{work}/.tools/node/bin/node", 'invalid installed node')
-    File.write(manifest, "#{'0' * 64}  #{node_artifact}\n")
-    run(node_env, bash, bootstrap, 'npm-security', error: 'checksum mismatch')
-    script("#{bin}/uname", 'echo unsupported')
-    run(env, bash, bootstrap, 'go-test', error: 'unsupported-unsupported/go-test; no artifact mappings')
-  end
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
-  # Minimal PATHs prove each real entrypoint fails before tests or containers.
-  work = "#{tmp}/missing-tools"
-  FileUtils.mkdir_p("#{work}/scripts")
-  %w[env.sh go-test-environment.sh go-check.sh required-go-tests.sh test-required-go-tests.sh test-bootstrap-profiles.sh database-integration.sh database-postgres-smoke.sh].each do |name|
-    FileUtils.cp("#{root}/scripts/#{name}", "#{work}/scripts/")
-  end
-  bin = "#{work}/bin"
-  FileUtils.mkdir_p(bin)
-  %w[bash dirname mktemp rm].each do |name|
-    path = ENV.fetch('PATH').split(':').map { |dir| "#{dir}/#{name}" }.find { |p| File.executable?(p) }
-    FileUtils.ln_s(path, "#{bin}/#{name}")
-  end
-  script("#{bin}/go", <<~SH)
-    case "$*" in
-      'env CGO_ENABLED') echo "${FIXTURE_CGO:-1}" ;;
-      'env CC') echo "${FIXTURE_CC:-cc}" ;;
-      *) echo 'expensive Go invocation reached' >>"${FIXTURE_LAUNCHED}"; exit 99 ;;
-    esac
-  SH
-  %w[gofmt jq setsid tee ruby python3 openssl curl sha256sum patch timeout].each { |name| script("#{bin}/#{name}", 'exit 0') }
-  script("#{bin}/docker", '[[ "${FIXTURE_DOCKER:-0}" == 0 ]]')
-  script("#{bin}/cc", 'exit 1')
-  env = {'PATH' => bin, 'FIXTURE_LAUNCHED' => "#{work}/launched", 'DATABASE_TEST_SCOPE' => 'regression'}
-  [ ['go-check.sh', 'standard', 'go'], ['go-check.sh', 'standard', 'gofmt'],
-    ['required-go-tests.sh', 'unit', 'setsid'], ['test-required-go-tests.sh', nil, 'ruby'],
-    ['test-bootstrap-profiles.sh', nil, 'ruby'], ['database-integration.sh', nil, 'ruby'],
-    ['database-integration.sh', nil, 'python3'], ['database-postgres-smoke.sh', nil, 'python3'],
-    ['database-postgres-smoke.sh', nil, 'docker'] ].each do |name, argument, missing|
-    File.rename("#{bin}/#{missing}", "#{bin}/hidden-#{missing}")
-    run(env, bash, "#{work}/scripts/#{name}", *[argument].compact, error: "required test command is missing: #{missing}")
-    File.rename("#{bin}/hidden-#{missing}", "#{bin}/#{missing}")
-  end
-  run(env.merge('FIXTURE_CGO' => '0'), bash, "#{work}/scripts/go-check.sh", 'race', error: '-race requires CGO_ENABLED=1')
-  run(env.merge('FIXTURE_CC' => 'missing-cc'), bash, "#{work}/scripts/go-check.sh", 'race', error: 'required test command is missing: missing-cc')
-  run(env, bash, "#{work}/scripts/go-check.sh", 'race', error: 'C compiler that can compile and link')
-  run(env.merge('FIXTURE_DOCKER' => '1'), bash, "#{work}/scripts/database-postgres-smoke.sh", error: 'access to a running Docker daemon')
-  # Full PostgreSQL needs sha256sum, not the unused shasum fallback. This PATH
-  # has no shasum; stop at the injected Docker error after command preflight.
-  %w[18 all].each do |major|
-    run(env.merge('DATABASE_TEST_SCOPE' => 'full', 'PG_MAJOR' => major, 'FIXTURE_DOCKER' => '1'),
-        bash, "#{work}/scripts/database-integration.sh", error: 'access to a running Docker daemon')
-  end
-  raise 'preflight started Go tests' if File.exist?("#{work}/launched")
-end
-puts 'Simulated bootstrap platforms, reuse, verification failures and entrypoint preflights passed (not native execution)'
-RUBY
+
+def has_checksum(artifact: str) -> bool:
+    return any(
+        len(line) > 66 and line[64:66] == "  " and line[66:] == artifact and all(c in "0123456789abcdef" for c in line[:64])
+        for line in checksums
+    )
+
+
+with tempfile.TemporaryDirectory(prefix="bootstrap-platforms-") as tmp_dir:
+    tmp = Path(tmp_dir)
+    platforms = {
+        "Linux-aarch64": "linux-arm64",
+        "Linux-x86_64": "linux-amd64",
+        "Darwin-arm64": "darwin-arm64",
+    }
+    for platform, target in platforms.items():
+        os_name, arch = target.split("-")
+        artifact = f"go{version}.{target}.tar.gz"
+        if not has_checksum(artifact):
+            raise AssertionError(f"missing locked checksum for {artifact}")
+        work = tmp / platform
+        (work / "scripts").mkdir(parents=True, exist_ok=True)
+        for name in ("bootstrap.sh", "env.sh"):
+            shutil.copy2(root / "scripts" / name, work / "scripts" / name)
+        shutil.copy2(root / "toolchains.lock", work / "toolchains.lock")
+        payload = work / "payload"
+        script(
+            payload / "go" / "bin" / "go",
+            f'echo executed >>"${{FIXTURE_EXECUTIONS}}"\n'
+            f'[[ "$*" == \'env GOVERSION GOHOSTOS GOHOSTARCH\' ]]\n'
+            f"printf 'go{version}\\n{os_name}\\n{arch}\\n'",
+        )
+        archive = work / "fixture.tar.gz"
+        subprocess.run(["tar", "-czf", str(archive), "-C", str(payload), "go"], check=True)
+        digest = sha256_file(archive)
+        manifest = work / "scripts" / "checksums.txt"
+        manifest.write_text(f"{digest}  {artifact}\n")
+        bin_dir = work / "bin"
+        sys_name, mach_name = platform.split("-")
+        script(bin_dir / "uname", f'case "$1" in -s) echo {sys_name} ;; -m) echo {mach_name} ;; esac')
+        script(bin_dir / "jq", "exit 0")
+        script(
+            bin_dir / "curl",
+            'printf \'%s\\n\' "$*" >>"${FIXTURE_DOWNLOADS}"\n'
+            'while (($#)); do\n'
+            '  if [[ "$1" == --output ]]; then cp "${FIXTURE_ARCHIVE}" "$2"; exit; fi\n'
+            '  shift\n'
+            'done\n'
+            'exit 1',
+        )
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "FIXTURE_ARCHIVE": str(archive),
+            "FIXTURE_DOWNLOADS": str(work / "downloads"),
+            "FIXTURE_EXECUTIONS": str(work / "executions"),
+            "GOOS": "windows",
+            "GOARCH": "386",
+            "GOTOOLCHAIN": "auto",
+        }
+        bootstrap = work / "scripts" / "bootstrap.sh"
+        run(env, bash, bootstrap, "go-test")
+        if f"https://go.dev/dl/{artifact}" not in (work / "downloads").read_text():
+            raise AssertionError("wrong URL or artifact")
+        if sorted(p.name for p in (work / ".tools").iterdir()) != ["bin", "go"]:
+            raise AssertionError("go-test installed extra tools")
+        installed = work / ".tools" / "go" / "bin" / "go"
+        before = installed.stat()
+        (work / ".tools" / "node").mkdir(parents=True, exist_ok=True)
+        (work / ".tools" / "node" / "keep").write_text("untouched")
+        run(env, bash, bootstrap, "go-test")
+        after = installed.stat()
+        if after.st_ino != before.st_ino or after.st_mtime_ns != before.st_mtime_ns:
+            raise AssertionError("valid Go reinstalled")
+        if len((work / "downloads").read_text().splitlines()) != 1:
+            raise AssertionError("unnecessary download")
+        if (work / ".tools" / "node" / "keep").read_text() != "untouched":
+            raise AssertionError("other tool changed")
+
+        if platform != "Linux-aarch64":
+            continue
+        installed.write_text(installed.read_text().replace("arm64", "amd64", 1))
+        run(env, bash, bootstrap, "go-test")
+        if "arm64" not in installed.read_text():
+            raise AssertionError("wrong host reused")
+        installed.chmod(0o644)
+        run(env, bash, bootstrap, "go-test")
+        if not os.access(installed, os.X_OK):
+            raise AssertionError("non-executable Go reused")
+
+        old = installed.read_text().replace(f"go{version}", "go0.0.0", 1)
+        installed.write_text(old)
+        cache = work / ".cache" / "downloads" / artifact
+        manifest.write_text("")
+        run(env, bash, bootstrap, "go-test", error=f"missing or invalid SHA-256 checksum for {artifact}")
+        manifest.write_text(f"{'0' * 64}  {artifact}\n")
+        run(env, bash, bootstrap, "go-test", error="checksum mismatch")
+        manifest.write_text(f"{digest}  {artifact}\n")
+        cache.write_text("corrupt cached archive")
+        run(env, bash, bootstrap, "go-test", error="checksum mismatch")
+        if len((work / "downloads").read_text().splitlines()) != 1:
+            raise AssertionError("cached failure downloaded a replacement")
+        cache.unlink()
+        manifest.write_text(f"{'0' * 64}  {artifact}\n")
+        run(env, bash, bootstrap, "go-test", error="checksum mismatch")
+        if cache.exists():
+            raise AssertionError("unverified download promoted to cache")
+        if installed.read_text() != old:
+            raise AssertionError("failed verification overwrote old Go")
+
+        for failure in ("wrong-host", "non-executable"):
+            go_bin = payload / "go" / "bin" / "go"
+            go_bin.write_text(installed.read_text().replace("go0.0.0", f"go{version}", 1).replace("arm64", "amd64", 1))
+            go_bin.chmod(0o644 if failure == "non-executable" else 0o755)
+            subprocess.run(["tar", "-czf", str(archive), "-C", str(payload), "go"], check=True)
+            cache.unlink(missing_ok=True)
+            manifest.write_text(f"{sha256_file(archive)}  {artifact}\n")
+            run(env, bash, bootstrap, "go-test", error="invalid Go toolchain")
+            if installed.read_text() != old:
+                raise AssertionError("invalid toolchain replaced old Go")
+            if glob.glob(str(work / ".tools" / ".go-install-*")):
+                raise AssertionError("staging directory leaked")
+
+        shutil.rmtree(work / ".tools", ignore_errors=True)
+        shutil.rmtree(work / ".cache", ignore_errors=True)
+        for profile in ("all", "ci-quality", "contracts", "secret-scan", "go-quality", "go-rust-integration", "native", "rust-validation", "web", "security"):
+            run(env, bash, bootstrap, profile, error=f"{platform}/{profile}; artifact mappings")
+            if (work / ".tools").exists() or (work / ".cache").exists():
+                raise AssertionError("unsupported profile partially installed")
+
+        script(work / ".tools" / "cargo" / "bin" / "rustc", f"echo 'rustc {rust_version} (fixture)'")
+        for name in ("cargo", "rustup", "rustfmt"):
+            script(work / ".tools" / "cargo" / "bin" / name, "exit 0")
+        script(work / ".tools" / "bin" / "nfpm", f"echo 'GitVersion: {nfpm_version}'")
+        run(env, bash, bootstrap, "rust-basic")
+        run(env, bash, bootstrap, "native-packages")
+
+        node_artifact = f"node-v{node_version}-linux-arm64.tar.xz"
+        if not has_checksum(node_artifact):
+            raise AssertionError("missing locked ARM64 Node checksum")
+        node_payload = work / "node-payload"
+        script(node_payload / "node-fixture" / "bin" / "node", f"echo v{node_version}")
+        script(node_payload / "node-fixture" / "bin" / "npm", f"echo {npm_version}")
+        node_archive = work / "node-fixture.tar.xz"
+        subprocess.run(["tar", "-cJf", str(node_archive), "-C", str(node_payload), "node-fixture"], check=True)
+        manifest.write_text(f"{sha256_file(node_archive)}  {node_artifact}\n")
+        node_env = {**env, "FIXTURE_ARCHIVE": str(node_archive)}
+        run(node_env, bash, bootstrap, "npm-security")
+        if f"https://nodejs.org/dist/v{node_version}/{node_artifact}" not in (work / "downloads").read_text():
+            raise AssertionError("wrong ARM64 Node artifact URL")
+        (work / ".tools" / "node" / "bin" / "node").write_text("invalid installed node")
+        manifest.write_text(f"{'0' * 64}  {node_artifact}\n")
+        run(node_env, bash, bootstrap, "npm-security", error="checksum mismatch")
+        script(bin_dir / "uname", "echo unsupported")
+        run(env, bash, bootstrap, "go-test", error="unsupported-unsupported/go-test; no artifact mappings")
+
+    work = tmp / "missing-tools"
+    (work / "scripts").mkdir(parents=True, exist_ok=True)
+    for name in (
+        "env.sh", "go-test-environment.sh", "go-check.sh", "required-go-tests.sh",
+        "test-required-go-tests.sh", "test-bootstrap-profiles.sh",
+        "database-integration.sh", "database-postgres-smoke.sh",
+    ):
+        shutil.copy2(root / "scripts" / name, work / "scripts" / name)
+    bin_dir = work / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("bash", "dirname", "mktemp", "rm"):
+        found = shutil.which(name)
+        assert found is not None
+        (bin_dir / name).symlink_to(found)
+    script(
+        bin_dir / "go",
+        'case "$*" in\n'
+        '  \'env CGO_ENABLED\') echo "${FIXTURE_CGO:-1}" ;;\n'
+        '  \'env CC\') echo "${FIXTURE_CC:-cc}" ;;\n'
+        '  *) echo \'expensive Go invocation reached\' >>"${FIXTURE_LAUNCHED}"; exit 99 ;;\n'
+        'esac',
+    )
+    for name in ("gofmt", "jq", "setsid", "tee", "python3", "openssl", "curl", "sha256sum", "patch", "timeout"):
+        script(bin_dir / name, "exit 0")
+    script(bin_dir / "docker", '[[ "${FIXTURE_DOCKER:-0}" == 0 ]]')
+    script(bin_dir / "cc", "exit 1")
+    env = {"PATH": str(bin_dir), "FIXTURE_LAUNCHED": str(work / "launched"), "DATABASE_TEST_SCOPE": "regression"}
+    preflight_cases = [
+        ("go-check.sh", "standard", "go"),
+        ("go-check.sh", "standard", "gofmt"),
+        ("required-go-tests.sh", "unit", "setsid"),
+        ("test-required-go-tests.sh", None, "python3"),
+        ("test-bootstrap-profiles.sh", None, "python3"),
+        ("database-integration.sh", None, "python3"),
+        ("database-postgres-smoke.sh", None, "python3"),
+        ("database-postgres-smoke.sh", None, "docker"),
+    ]
+    for name, argument, missing in preflight_cases:
+        (bin_dir / missing).rename(bin_dir / f"hidden-{missing}")
+        args = (argument,) if argument is not None else ()
+        run(env, bash, work / "scripts" / name, *args, error=f"required test command is missing: {missing}")
+        (bin_dir / f"hidden-{missing}").rename(bin_dir / missing)
+    run({**env, "FIXTURE_CGO": "0"}, bash, work / "scripts" / "go-check.sh", "race", error="-race requires CGO_ENABLED=1")
+    run({**env, "FIXTURE_CC": "missing-cc"}, bash, work / "scripts" / "go-check.sh", "race", error="required test command is missing: missing-cc")
+    run(env, bash, work / "scripts" / "go-check.sh", "race", error="C compiler that can compile and link")
+    run({**env, "FIXTURE_DOCKER": "1"}, bash, work / "scripts" / "database-postgres-smoke.sh", error="access to a running Docker daemon")
+    for major in ("18", "all"):
+        run(
+            {**env, "DATABASE_TEST_SCOPE": "full", "PG_MAJOR": major, "FIXTURE_DOCKER": "1"},
+            bash,
+            work / "scripts" / "database-integration.sh",
+            error="access to a running Docker daemon",
+        )
+    if (work / "launched").exists():
+        raise AssertionError("preflight started Go tests")
+print("Simulated bootstrap platforms, reuse, verification failures and entrypoint preflights passed (not native execution)")
+PY

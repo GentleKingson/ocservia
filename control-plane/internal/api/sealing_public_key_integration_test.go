@@ -30,9 +30,6 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 	f := newApplyHTTPFixture(t)
 	plan := f.plan(true)
 	node := plan.NodeID
-	f.bind(f.requester, node, "UserManager")
-	f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, f.reader.principal.IdentityID, f.workspace)
-	f.bind(f.reader, node, "Viewer")
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +60,7 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 	if json.Unmarshal(w.Body.Bytes(), &got) != nil || !bytes.Equal(got.PublicKeyDER, der) || got.KeyID != binding.KeyID {
 		t.Fatal("incorrect verified public key")
 	}
-	assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.reader.cookie, nil), 403, "forbidden")
+	assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.reader.cookie, nil), 404, "not-found")
 	assertApplyHTTPProblem(t, f.call("GET", path, "", "", nil, nil), 401, "unauthenticated")
 
 	for _, change := range []func(*enrollment.UserPasswordSealingKey){

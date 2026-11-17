@@ -163,7 +163,7 @@ func TestPostgreSQLArtifactRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	history, err := schemaartifact.HistoryChecksum(a, 2)
+	history, err := schemaartifact.HistoryChecksum(a, int64(len(a.Revisions)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestPostgreSQLArtifactCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 2 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != checkpointRef {
+	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 3 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != checkpointRef {
 		t.Fatal("major cutover must use the released immutable checkpoint")
 	}
 	for _, metadata := range []string{`{"catalog_sha256":"` + strings.Repeat("a", 64) + `","unknown":1}`, `{"catalog_sha256":"` + strings.Repeat("a", 64) + `","catalog_sha256":"` + strings.Repeat("a", 64) + `"}`, `{"catalog_sha256":"` + strings.Repeat("A", 64) + `"}`} {

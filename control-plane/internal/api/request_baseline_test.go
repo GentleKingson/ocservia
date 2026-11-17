@@ -24,7 +24,7 @@ func TestHTTPPathBaseline(t *testing.T) {
 		{"GET", "/missing", "", "not-found", 404},
 		{"OPTIONS", "/missing", "", "not-found", 404},
 		{"POST", "/livez", "GET", "method-not-allowed", 405},
-		{"GET", "/api/v1/local-users/a:unknown", "", "not-found", 404},
+		{"GET", "/livez/", "", "not-found", 404},
 		{"POST", "/api/v1/nodes/invalid/sessions/42:unknown", "", "not-found", 404},
 		{"POST", "/api/v1/nodes/invalid/sessions/42:terminate", "", "unauthenticated", 401},
 		{"POST", "/api/v1/nodes/invalid/users/alice:enable", "", "unauthenticated", 401},
@@ -32,7 +32,6 @@ func TestHTTPPathBaseline(t *testing.T) {
 		{"POST", "/api/v1/certificates/invalid:revoke", "", "unauthenticated", 401},
 		{"POST", "/api/v1/certificates/invalid:p12", "", "unauthenticated", 401},
 		{"POST", "/api/v1/certificates/invalid:unknown", "GET", "method-not-allowed", 405},
-		{"GET", "/livez/", "", "not-found", 404},
 		{"GET", "/api/v1/nodes//invalid", "", "not-found", 404},
 		{"GET", "/api/v1/%6eodes/invalid", "", "unauthenticated", 401},
 		{"GET", "/api/v1/nodes/a%2Fb", "", "not-found", 404},
@@ -103,7 +102,7 @@ func TestHTTPStrictJSONBaseline(t *testing.T) {
 			if tc.name == "read-error" {
 				body = baselineReadError{}
 			}
-			r := baselineRequest("POST", "/api/v1/enrollment-tokens", body)
+			r := baselineRequest("POST", "/api/v1/node-bootstrap-tokens", body)
 			r.Header.Set("Content-Type", tc.media)
 			w := httptest.NewRecorder()
 			s.http.Handler.ServeHTTP(w, r)
@@ -192,7 +191,7 @@ func TestHTTPDisabledServicesBaseline(t *testing.T) {
 		{"GET", "/api/v1/nodes/invalid/ip-bans", "telemetry-unavailable", "Telemetry unavailable", "the telemetry read model is unavailable", 503},
 		{"GET", "/api/v1/nodes/invalid/telemetry", "telemetry-unavailable", "Telemetry unavailable", "the telemetry read model is unavailable", 503},
 		{"POST", "/api/v1/nodes/invalid/config-plans", "service-unavailable", "Service unavailable", "configuration plan service is unavailable", 503},
-		{"POST", "/api/v1/enrollment-tokens", "not-found", "Resource not found", "enrollment is not enabled", 404},
+		{"POST", "/api/v1/node-bootstrap-tokens", "not-found", "Resource not found", "enrollment is not enabled", 404},
 		{"GET", "/api/v1/operations", "not-found", "Resource not found", "the requested resource does not exist", 404},
 		{"GET", "/api/v1/operations/summary", "not-found", "Resource not found", "the requested resource does not exist", 404},
 	} {

@@ -24,46 +24,37 @@ func (s authenticationStore) LockManagement(ctx context.Context) error {
 func (s authenticationStore) WorkspaceExists(ctx context.Context, id uuid.UUID) error {
 	return s.tx.QueryRow(ctx, `SELECT id FROM workspaces WHERE id=$1 FOR KEY SHARE`, id).Scan(&id)
 }
-func (s authenticationStore) Bootstrap(ctx context.Context) (authstore.Bootstrap, error) {
-	var b authstore.Bootstrap
-	err := s.tx.QueryRow(ctx, `SELECT identity_id,workspace_id,completion_pending FROM local_auth_bootstrap WHERE singleton FOR UPDATE`).Scan(&b.IdentityID, &b.WorkspaceID, &b.Pending)
-	return b, err
+func (s authenticationStore) NodeWorkspace(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	var workspace uuid.UUID
+	err := s.tx.QueryRow(ctx, `SELECT workspace_id FROM nodes WHERE id=$1`, id).Scan(&workspace)
+	return workspace, err
 }
-func (s authenticationStore) ValidatePendingCredential(ctx context.Context, id, workspace uuid.UUID, hash string) error {
-	return s.tx.QueryRow(ctx, `SELECT i.id FROM identities i JOIN local_credentials c ON c.identity_id=i.id WHERE i.id=$1 AND i.issuer='local' AND i.subject=c.username AND i.disabled_at IS NULL AND c.password_hash=$2 AND EXISTS(SELECT 1 FROM role_bindings WHERE identity_id=i.id AND workspace_id=$3 AND resource_type='workspace' AND role_name='PlatformAdmin') AND NOT EXISTS(SELECT 1 FROM role_bindings WHERE workspace_id=$3 AND identity_id<>i.id AND role_name IN ('SecurityAdmin','PlatformAdmin')) FOR UPDATE OF i,c`, id, hash, workspace).Scan(&id)
+func (s authenticationStore) OperationWorkspace(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	var workspace uuid.UUID
+	err := s.tx.QueryRow(ctx, `SELECT workspace_id FROM operations WHERE id=$1`, id).Scan(&workspace)
+	return workspace, err
 }
 func (s authenticationStore) Initialized(ctx context.Context) (bool, error) {
 	var yes bool
-	err := s.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM local_auth_bootstrap) OR EXISTS(SELECT 1 FROM identities i JOIN role_bindings b ON b.identity_id=i.id WHERE i.issuer='local' AND b.role_name IN ('SecurityAdmin','PlatformAdmin'))`).Scan(&yes)
+	err := s.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM local_auth_bootstrap) OR EXISTS(SELECT 1 FROM identities i JOIN workspace_admins a ON a.identity_id=i.id WHERE i.issuer='local')`).Scan(&yes)
 	return yes, err
 }
-func (s authenticationStore) BindRole(ctx context.Context, id, identity, workspace uuid.UUID, role string, now time.Time) error {
-	_, err := s.tx.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,$4,'workspace',$5)`, id, identity, workspace, role, now)
+func (s authenticationStore) BindWorkspaceAdmin(ctx context.Context, workspace, identity uuid.UUID, now time.Time) error {
+	_, err := s.tx.Exec(ctx, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, workspace, identity, now)
 	return err
+}
+func (s authenticationStore) IsWorkspaceAdmin(ctx context.Context, workspace, identity uuid.UUID) (bool, error) {
+	var yes bool
+	err := s.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspace_admins WHERE workspace_id=$1 AND identity_id=$2)`, workspace, identity).Scan(&yes)
+	return yes, err
+}
+func (s authenticationStore) IsWorkspaceAdminOrBreakGlass(ctx context.Context, workspace, identity, session uuid.UUID) (bool, error) {
+	var yes bool
+	err := s.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspace_admins WHERE workspace_id=$1 AND identity_id=$2) OR EXISTS(SELECT 1 FROM auth_sessions WHERE id=$3 AND break_glass)`, workspace, identity, session).Scan(&yes)
+	return yes, err
 }
 func (s authenticationStore) InsertBootstrap(ctx context.Context, id, workspace uuid.UUID, now time.Time) error {
-	_, err := s.tx.Exec(ctx, `INSERT INTO local_auth_bootstrap(singleton,identity_id,workspace_id,created_at,completed_at) VALUES(true,$1,$2,$3,$3)`, id, workspace, now)
-	return err
-}
-func (s authenticationStore) CompleteBootstrap(ctx context.Context, approver uuid.UUID, now time.Time) error {
-	_, err := s.tx.Exec(ctx, `UPDATE local_auth_bootstrap SET completion_pending=false,completed_at=$1,approver_identity_id=$2 WHERE singleton`, now, approver)
-	return err
-}
-func (s authenticationStore) MayManage(ctx context.Context, actor, workspace, session uuid.UUID) (bool, error) {
-	var yes bool
-	err := s.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2 AND role_name='PlatformAdmin' AND resource_type='workspace') OR EXISTS(SELECT 1 FROM auth_sessions WHERE id=$3 AND break_glass)`, actor, workspace, session).Scan(&yes)
-	return yes, err
-}
-func (s authenticationStore) LockLocalIdentity(ctx context.Context, id uuid.UUID) error {
-	return s.tx.QueryRow(ctx, `SELECT i.id FROM identities i JOIN local_credentials c ON c.identity_id=i.id WHERE i.id=$1 AND i.issuer='local' AND i.subject=c.username FOR UPDATE OF i,c`, id).Scan(&id)
-}
-func (s authenticationStore) Protected(ctx context.Context, workspace, id uuid.UUID) (bool, error) {
-	var yes bool
-	err := s.tx.QueryRow(ctx, `WITH effective AS (SELECT DISTINCT i.id,b.role_name FROM identities i JOIN local_credentials c ON c.identity_id=i.id JOIN role_bindings b ON b.identity_id=i.id WHERE i.disabled_at IS NULL AND i.issuer='local' AND i.subject=c.username AND b.workspace_id=$1 AND b.resource_type='workspace' AND b.role_name='PlatformAdmin') SELECT EXISTS(SELECT 1 FROM effective WHERE id=$2) AND (NOT EXISTS(SELECT 1 FROM effective WHERE id<>$2 AND role_name='PlatformAdmin'))`, workspace, id).Scan(&yes)
-	return yes, err
-}
-func (s authenticationStore) Disable(ctx context.Context, id uuid.UUID, now time.Time) error {
-	_, err := s.tx.Exec(ctx, `UPDATE identities SET disabled_at=COALESCE(disabled_at,$2),updated_at=$2 WHERE id=$1`, id, now)
+	_, err := s.tx.Exec(ctx, `INSERT INTO local_auth_bootstrap(singleton,identity_id,workspace_id,created_at) VALUES(true,$1,$2,$3)`, id, workspace, now)
 	return err
 }
 func (s authenticationStore) DeleteIdentityAttempts(ctx context.Context, id uuid.UUID) error {
@@ -88,6 +79,28 @@ func (s authenticationStore) RecordBreakGlass(ctx context.Context, fingerprint [
 }
 func (s authenticationStore) Workspaces(ctx context.Context) ([]uuid.UUID, error) {
 	return database.CollectColumn[uuid.UUID](s.tx.Query(ctx, `SELECT id FROM workspaces ORDER BY id`))
+}
+func (s authenticationStore) AuthorizedWorkspaces(ctx context.Context, identity uuid.UUID, breakGlass bool) ([]authstore.Workspace, error) {
+	var rows database.Rows
+	var err error
+	if breakGlass {
+		rows, err = s.tx.Query(ctx, `SELECT id,name,slug,version FROM workspaces ORDER BY name,id`)
+	} else {
+		rows, err = s.tx.Query(ctx, `SELECT w.id,w.name,w.slug,w.version FROM workspaces w JOIN workspace_admins a ON a.workspace_id=w.id WHERE a.identity_id=$1 ORDER BY w.name,w.id`, identity)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []authstore.Workspace
+	for rows.Next() {
+		var w authstore.Workspace
+		if err := rows.Scan(&w.ID, &w.Name, &w.Slug, &w.Version); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
 }
 func (s authenticationStore) ActiveLocalUsername(ctx context.Context, id uuid.UUID) (string, error) {
 	var username string

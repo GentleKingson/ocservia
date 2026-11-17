@@ -49,9 +49,6 @@ func TestEnrollmentSharedStorageBackendIntegration(t *testing.T) {
 			if err := enroll.InsertSealingKey(ctx, node, enrollmentstore.SealingKey{Purpose: 1, Version: 1, ID: "fixture", Digest: bytes.Repeat([]byte{1}, 32)}, at); err != nil {
 				return err
 			}
-			if err := enroll.TouchNode(ctx, node, at); err != nil {
-				return err
-			}
 			if _, err := enroll.Activate(ctx, node, labels, "fixture", at); err != nil {
 				return err
 			}

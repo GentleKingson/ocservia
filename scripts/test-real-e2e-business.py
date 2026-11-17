@@ -71,38 +71,15 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
         assert not (work / 'business.json').exists()
     (work / 'state/node-id').write_text(node + '\n')
     (work / 'state/agent-endpoint-id').write_text('a' * 64 + '\n')
-    (work / 'private').mkdir()
-    (work / 'private/privd-credential').write_text('private-test-credential')
     (result_dir / 'ready.json').write_text(json.dumps({'node_id': node, 'agent_endpoint_id': 'a' * 64}))
-    (result_dir / 'proof.json').write_text(json.dumps({'signature': 'public-test-proof'}))
-    confirmation = work / 'outbox/business-authority-registered/ready.json'
-    def register_api(path, proof, **kwargs):
-        assert path == f'nodes/{node}/privd-attestation-keys:register'
-        assert proof == {'signature': 'public-test-proof', 'credential': 'private-test-credential'}
-        assert kwargs == {'role': 'anonymous', 'status': 201}
-        raise RuntimeError('registration rejected')
-    harness.business.api = register_api
-    try:
-        harness.register_authority(result_dir)
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError('accepted failed root registration')
-    assert not confirmation.exists()
-    harness.business.api = lambda *args, **kwargs: None
-    harness.register_authority(result_dir)
-    assert json.loads(confirmation.read_text()) == {'node_id': node, 'agent_endpoint_id': 'a' * 64}
-    assert 'private-test-credential' not in confirmation.read_text()
-    # An installation that already registered privd must never require another
-    # administrator credential or send a second registration request.
-    os.environ['NODE_INSTALL_E2E'] = 'true'
-    (work / 'private/privd-credential').unlink()
     (result_dir / 'proof.json').write_text(json.dumps({'key_id': 'installed-root-key'}))
+    confirmation = work / 'outbox/business-authority-registered/ready.json'
     def no_registration(*args, **kwargs):
-        raise AssertionError('automatic installation attempted manual registration')
+        raise AssertionError('installation attempted legacy manual registration')
     harness.business.api = no_registration
     harness.business.sql = lambda query: '1' if "key_id='installed-root-key'" in query else '0'
     harness.register_authority(result_dir)
+    assert json.loads(confirmation.read_text()) == {'node_id': node, 'agent_endpoint_id': 'a' * 64}
     confirmation.unlink()
     harness.business.sql = lambda query: '0'
     try:
@@ -112,7 +89,6 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
     else:
         raise AssertionError('accepted an unregistered installation key')
     assert not confirmation.exists()
-    os.environ['NODE_INSTALL_E2E'] = 'false'
     harness.business.sql = sql
     for state in ('queued', 'unknown', 'succeeded', 'failed'):
         plan = {'operation_id': operation, 'state': state, 'validation': 'pending',

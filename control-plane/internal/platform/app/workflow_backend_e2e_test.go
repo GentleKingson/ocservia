@@ -47,10 +47,6 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	}
 	f := newControllerE2E(t)
 	publishedVersion := os.Getenv("PUBLISHED_AGENT_VERSION")
-	capabilities, err := e2eTrustCapabilities(publishedVersion)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if publishedVersion != "" {
 		for _, binary := range []string{"ocservia-agent", "ocservia-privd", "ocservia-upgrader"} {
 			if got := strings.TrimSpace(string(f.run(0, 0, nil, "/usr/local/bin/"+binary, "--version"))); got != binary+" "+publishedVersion {
@@ -103,26 +99,18 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	f.startOcserv()
 	address := e2eAddress(t)
 	f.base = "http://" + address
+	f.origin = "https://controller.e2e.test"
 	controllerEnvironment := f.environment(runtimeOptions, map[string]string{
-		"OCSERV_HTTP_ADDRESS": address, "OCSERV_PUBLIC_ORIGIN": f.base,
+		"OCSERV_HTTP_ADDRESS": address, "OCSERV_PUBLIC_ORIGIN": f.origin,
 		"OCSERV_CONTROLLER_ENDPOINT_ID": endpointID, "OCSERV_COMMAND_SIGNING_KEY_FILE": f.root + "/controller/signing.pem",
 		"OCSERV_TRANSPORT_SOCKET": f.root + "/transport/control.sock", "OCSERV_TRUST_SOCKET": f.root + "/controller/trust.sock",
 		"OCSERV_TRANSPORT_UID": "65532", "OCSERV_TRANSPORT_GID": "65532",
+		"OCSERV_RELAY_URL_A": f.relays[0], "OCSERV_RELAY_ACCESS_TOKEN_FILE": f.root + "/controller/relay-token",
 		"OCSERV_CERTIFICATE_SIGNER_URL": signer.URL, "OCSERV_CERTIFICATE_SIGNER_TOKEN": "isolated-test-signer",
 		"SSL_CERT_FILE": f.root + "/signer-ca.pem",
 		"OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true",
 	})
-	roles := []string{"all"}
-	switch os.Getenv("OCSERVIA_DATABASE_TEST_CONTROLLER_ROLE_MODE") {
-	case "", "all":
-	case "split":
-		roles = []string{"api", "worker", "scheduler"}
-	default:
-		t.Fatal("invalid Controller E2E role mode")
-	}
-	for _, role := range roles {
-		f.start("controller-"+role, 65534, 65532, controllerEnvironment, f.root+"/ocserv-control", "--role="+role)
-	}
+	f.start("controller-all", 65534, 65532, controllerEnvironment, f.root+"/ocserv-control", "--role=all")
 	f.wait("scheduler maintenance commit", func() bool {
 		var completed int
 		return owner.Store.QueryRow(f.ctx, `SELECT count(*) FROM test_scheduler_maintenance_history`).Scan(&completed) == nil && completed > 0
@@ -145,25 +133,16 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	f.admin = f.login("e2e-admin", adminPassword)
 
 	identityDirectory, journalPath, privdSocket := f.root+"/agent/identity", f.root+"/agent/journal.db", f.root+"/privd/privd.sock"
-	if os.Getenv("OCSERV_REBIND_E2E") != "" {
-		identityDirectory, journalPath, privdSocket = "/var/lib/ocservia-agent/identity", "/var/lib/ocservia-agent/agent.db", "/run/ocserv-platform/privd.sock"
-		for path, uid := range map[string]int{"/var/lib/ocservia-agent": 65533, "/var/lib/ocservia-privd": 0, "/var/lib/ocservia-upgrade": 0, "/etc/ocservia-agent": 0, "/run/ocserv-platform": 0} {
-			if err := os.MkdirAll(path, 0750); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chown(path, uid, 65533); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
 	identityArgs := []string{"--identity-dir", identityDirectory, "--controller", endpointID}
 	prepared := f.run(65533, 65533, nil, "/usr/local/bin/ocservia-agent", append(append([]string{}, identityArgs...), "--prepare-enrollment")...)
 	agentEndpoint := strings.TrimSpace(string(prepared))
 	if decoded, err := hex.DecodeString(agentEndpoint); err != nil || len(decoded) != 32 {
 		t.Fatal("Agent did not produce its authenticated persistent endpoint identity")
 	}
-	token := f.api(f.admin, "POST", "/api/v1/enrollment-tokens", map[string]any{"workspace_id": f.workspace, "environment": "development", "expected_node_name": "real-e2e-node", "expected_endpoint_id": agentEndpoint, "ttl_seconds": 600, "reason": "real three-backend process acceptance"}, nil, http.StatusCreated)
-	f.file("agent/enrollment-token", []byte(e2eString(t, token, "token")), 65533, 65533, 0600)
+	instTokenResp := f.api(f.admin, "POST", "/api/v1/node-bootstrap-tokens", map[string]any{"installation": true, "workspace_id": f.workspace, "environment": "development", "expected_node_name": "real-e2e-node", "expected_endpoint_id": agentEndpoint, "ttl_seconds": 600, "reason": "real process acceptance"}, nil, http.StatusCreated)
+	instToken := e2eString(t, instTokenResp, "token")
+	installCfg := f.api(nil, "POST", "/api/v1/node-bootstrap/config", map[string]any{"token": instToken}, nil, http.StatusOK)
+	f.file("agent/enrollment-token", []byte(e2eString(t, installCfg, "enrollment_token")), 65533, 65533, 0600)
 	agentArgs := append(append([]string{}, identityArgs...), f.relayArgs("agent")...)
 	agentArgs = append(agentArgs, sealArgs...)
 	enrollArgs := append(append([]string{}, agentArgs...), "--enrollment-token-file", f.root+"/agent/enrollment-token", "--enrollment-environment", "development")
@@ -181,19 +160,37 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		t.Fatal("Agent enrollment did not return a UUIDv7 node")
 	}
 	nodePath := "/api/v1/nodes/" + nodeID
-	trust := map[string]any{"labels": map[string]string{"fixture": "real-process"}, "policy": "default", "capabilities": capabilities}
-	trust["reason"] = "activate authenticated real Agent"
-	f.api(f.admin, "POST", nodePath+"/approval", trust, nil, http.StatusOK, http.StatusServiceUnavailable)
-	credential := f.api(f.admin, "POST", nodePath+"/privd-attestation-credentials", map[string]any{"ttl_seconds": 300, "reason": "provision real root key"}, nil, http.StatusCreated)
+	challenge := f.api(nil, "POST", "/api/v1/node-bootstrap/attestation", map[string]any{"token": instToken, "node_id": nodeID, "endpoint_id": agentEndpoint}, nil, http.StatusOK)
 	attestationKey := f.root + "/privd/state/attestation.key"
-	registration := f.run(0, 65533, nil, "/usr/local/bin/ocservia-privd", "attestation-registration", attestationKey, nodeID, e2eString(t, credential, "controller_nonce_hex"), e2eString(t, credential, "credential_context_sha256_hex"))
-	var body map[string]any
-	if err := json.Unmarshal(registration, &body); err != nil {
+	registration := f.run(0, 65533, nil, "/usr/local/bin/ocservia-privd", "attestation-registration", attestationKey, nodeID, e2eString(t, challenge, "controller_nonce_hex"), e2eString(t, challenge, "credential_context_sha256_hex"))
+	var regBody map[string]any
+	if err := json.Unmarshal(registration, &regBody); err != nil {
 		t.Fatal("decode root registration", err)
 	}
-	body["credential"] = e2eString(t, credential, "credential")
-	f.api(nil, "POST", nodePath+"/privd-attestation-keys:register", body, nil, http.StatusCreated)
-	f.api(nil, "POST", nodePath+"/privd-attestation-keys:register", body, nil, http.StatusUnauthorized)
+	sealDigestHex := func(purpose string) string {
+		publicDER, _ := x509.MarshalPKIXPublicKey(&f.sealKeys[purpose].PublicKey)
+		sum := sha256.Sum256(publicDER)
+		return hex.EncodeToString(sum[:])
+	}
+	registerReq := func(reg map[string]any) map[string]any {
+		return map[string]any{
+			"token":                                instToken,
+			"node_id":                              nodeID,
+			"endpoint_id":                          agentEndpoint,
+			"user_password_seal_key_id":            "e2e-user_password",
+			"user_password_seal_public_key_sha256": sealDigestHex("user_password"),
+			"p12_password_seal_key_id":             "e2e-certificate_p12_password",
+			"p12_password_seal_public_key_sha256":  sealDigestHex("certificate_p12_password"),
+			"registration":                         reg,
+		}
+	}
+	badReg := make(map[string]any, len(regBody))
+	for k, v := range regBody {
+		badReg[k] = v
+	}
+	badReg["controller_nonce"] = strings.Repeat("A", 43)
+	f.api(nil, "POST", "/api/v1/node-bootstrap/register", registerReq(badReg), nil, http.StatusUnauthorized)
+	f.api(nil, "POST", "/api/v1/node-bootstrap/register", registerReq(regBody), nil, http.StatusCreated)
 	privdArgs := []string{"--socket", privdSocket, "--agent-uid", "65533", "--node-id", nodeID, "--endpoint-id", agentEndpoint, "--controller-command-key-file", f.root + "/privd/verification.pem", "--attestation-key-file", attestationKey, "--user-password-seal-key-file", f.root + "/privd/user.key", "--p12-password-seal-key-file", f.root + "/privd/p12.key"}
 	privdArgs = append(privdArgs, sealArgs...)
 	f.start("privd", 0, 65533, nil, "/usr/local/bin/ocservia-privd", privdArgs...)
@@ -204,12 +201,11 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		node := f.api(f.admin, "GET", nodePath, nil, nil, http.StatusOK)
 		return node["trust_status"] == "active" && node["connection_state"] == "online" && node["observed_at"] != nil
 	})
-	f.requireFencedSession(len(capabilities))
+	f.requireFencedSession()
 	if version := os.Getenv("PUBLISHED_AGENT_VERSION"); version != "" {
 		if node := f.api(f.admin, "GET", nodePath, nil, nil, http.StatusOK); node["agent_version"] != version {
 			t.Fatal("Controller did not observe the published Agent version")
 		}
-		f.configRejectionWorkflow(nodePath)
 		generation, agentName, privdName := 0, "agent", "privd"
 		f.recoverNode = func() {
 			observedBefore := f.api(f.admin, "GET", nodePath, nil, nil, http.StatusOK)["observed_at"]
@@ -235,11 +231,6 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		}
 	}
 	f.certificateWorkflow(nodePath)
-	if disposition := os.Getenv("OCSERV_REBIND_E2E"); disposition != "" {
-		f.createRebindSourceUser(nodePath)
-		f.rebindWorkflow(nodeID, agentEndpoint, endpointID, sealArgs, privdArgs, capabilities, disposition, runtimeOptions)
-		return
-	}
 	f.userWorkflow(nodePath)
 	for _, path := range []string{nodePath + "/sessions", nodePath + "/ip-bans", "/api/v1/operations", "/api/v1/operations/summary", "/api/v1/operations/queue-metrics", "/api/v1/events", "/api/v1/audit/events"} {
 		f.api(f.admin, "GET", path, nil, nil, http.StatusOK)
@@ -284,15 +275,15 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 }
 
 type controllerE2E struct {
-	t                                *testing.T
-	ctx                              context.Context
-	root, artifacts, workspace, base string
-	client                           *http.Client
-	admin                            *http.Cookie
-	relays                           []string
-	sealKeys                         map[string]*rsa.PrivateKey
-	processes                        []*e2eProcess
-	recoverNode                      func()
+	t                                        *testing.T
+	ctx                                      context.Context
+	root, artifacts, workspace, base, origin string
+	client                                   *http.Client
+	admin                                    *http.Cookie
+	relays                                   []string
+	sealKeys                                 map[string]*rsa.PrivateKey
+	processes                                []*e2eProcess
+	recoverNode                              func()
 }
 
 type e2eProcess struct {
@@ -454,30 +445,7 @@ func (f *controllerE2E) stop(name string) {
 	f.t.Fatalf("recovery process not found: %s", name)
 }
 
-// e2eTrustCapabilities returns the node trust-policy capability set approved
-// by the E2E. The empty published version is the locally built candidate.
-// Published versions form a finite admission list, and each profile must stay
-// inside the capabilities that version's binaries actually declare: 0.6.x
-// nodes add the config.network directives, and the 1.0.0 line additionally
-// grants the complete-config plan/apply capabilities frozen for 1.x.
-func e2eTrustCapabilities(publishedVersion string) ([]string, error) {
-	capabilities := []string{"ocserv.config_fingerprint.read", "ocserv.ip_bans.read", "ocserv.sessions.read", "ocserv.status.read", "ocserv.version.read",
-		"ocserv.fencing.v2", "command.semantic-hash.v1", "command.strict-wire.v1", "privd_result_attestation_v1",
-		"ocserv.certificate.issue", "ocserv.certificate.revoke", "ocserv.users.write", "ocserv.groups.write",
-		"ocserv.config.plan", "ocserv.config.apply", "ocserv.service.reload"}
-	switch publishedVersion {
-	case "":
-		return capabilities, nil
-	case "0.6.0", "0.6.1":
-		return append(capabilities, "config.network"), nil
-	case "1.0.0":
-		return append(capabilities, "config.network", "ocserv.config.complete.plan", "ocserv.config.complete.apply"), nil
-	default:
-		return nil, fmt.Errorf("unregistered published node version: %s", publishedVersion)
-	}
-}
-
-func (f *controllerE2E) requireFencedSession(expectedCapabilities int) {
+func (f *controllerE2E) requireFencedSession() {
 	f.t.Helper()
 	log, err := os.Open(filepath.Join(f.artifacts, "agent.log"))
 	if err != nil {
@@ -496,11 +464,8 @@ func (f *controllerE2E) requireFencedSession(expectedCapabilities int) {
 			f.t.Fatal("decode Agent session evidence", err)
 		}
 		if record.Fields["message"] == "agent session accepted" && record.Fields["session_mode"] == "fenced_v1_1" {
-			// The granted set is negotiated intact only when the Agent, which
-			// rejects grants beyond its declared capabilities, accepts exactly
-			// the approved profile size.
-			if count, ok := record.Fields["negotiated_capabilities"].(float64); !ok || int(count) != expectedCapabilities {
-				f.t.Fatalf("fenced session negotiated %v capabilities, expected %d", record.Fields["negotiated_capabilities"], expectedCapabilities)
+			if count, ok := record.Fields["negotiated_capabilities"].(float64); !ok || int(count) < 1 {
+				f.t.Fatalf("fenced session negotiated %v capabilities", record.Fields["negotiated_capabilities"])
 			}
 			return
 		}
@@ -534,7 +499,7 @@ func (f *controllerE2E) request(cookie *http.Cookie, method, path string, body a
 		f.t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", f.base)
+	req.Header.Set("Origin", f.origin)
 	req.Header.Set("X-Workspace-ID", f.workspace)
 	if cookie != nil {
 		req.AddCookie(cookie)
@@ -616,7 +581,7 @@ func (f *controllerE2E) startRelays() {
 	}
 	f.file("relay.pem", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0, 0, 0644)
 	f.file("relay.key", pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}), 0, 0, 0600)
-	for name, ids := range map[string][2]int{"agent": {65533, 65533}, "transport": {65532, 65532}} {
+	for name, ids := range map[string][2]int{"agent": {65533, 65533}, "transport": {65532, 65532}, "controller": {65534, 65532}} {
 		f.file(name+"/relay-token", []byte("real-process-private-relay-token-v1"), ids[0], ids[1], 0600)
 	}
 	for i := 0; i < 1; i++ {

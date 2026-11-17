@@ -1169,23 +1169,7 @@ for filter in '.signer_state_version = 2' '.extra = true' '.images.extra = .imag
   grep -Fq 'release manifest is invalid' "${rejection_state}/output.log"
   test ! -e "${rejection_state}/compose.log"
 done
-# Old v2 inventories remain valid saved evidence, including pending-upgrade
-# recovery. They are rejected above as new targets and never enable retired backends.
-for legacy_filter in '.images.mysql_backup = .images.signer' '.images.mysql_backup = .images.signer | .images.mariadb_backup = .images.signer'; do
-  legacy_v2="$(mktemp "${fixture}/release/legacy-v2.XXXXXX.json")"
-  jq "${legacy_filter}" "${integrated_release}" >"${legacy_v2}"
-  legacy_v2_state="$(mktemp -d "${fixture}/legacy-v2-upgrade.XXXXXX")/state"
-  seed_upgrade_state "${legacy_v2_state}" "${legacy_v2}"
-  cp "${legacy_v2}" "${legacy_v2_state}/current-release.json"
-  expect_upgrade_failure "${legacy_v2_state}" "${integrated_release}" 'release smoke failed' env MOCK_SMOKE_EXIT=1
-  cmp -s "${legacy_v2}" "${legacy_v2_state}/current-release.json"
-  assert_pending_previous_release "${legacy_v2}" "${legacy_v2_state}/pending-release.json"
-  run_controller_upgrade "${legacy_v2_state}" "${integrated_release}" env
-  cmp -s "${integrated_release}" "${legacy_v2_state}/current-release.json"
-  cmp -s "${legacy_v2}" "${legacy_v2_state}/previous-release.json"
-done
-
-# Existing MySQL deployment profiles fail closed on every lifecycle action
+# Invalid deployment profiles fail closed on every lifecycle action
 # before any Compose invocation, pending-state write, or data/state purge.
 retired_mysql_state="${fixture}/retired-mysql-profile"
 seed_upgrade_state "${retired_mysql_state}" "${integrated_release}"
@@ -1205,8 +1189,8 @@ for action in install upgrade rollback start uninstall uninstall-purge; do
     uninstall) run_controller_uninstall "${retired_mysql_state}" >"${output_log}" 2>&1 || status=$? ;;
     uninstall-purge) run_controller_uninstall "${retired_mysql_state}" --purge-data >"${output_log}" 2>&1 || status=$? ;;
   esac
-  (( status != 0 )) || { echo "retired MySQL deployment profile accepted on ${action}" >&2; exit 1; }
-  grep -Fq 'existing MySQL deployment is retired' "${output_log}"
+  (( status != 0 )) || { echo "invalid deployment profile accepted on ${action}" >&2; exit 1; }
+  grep -Fq 'invalid deployment profile' "${output_log}"
   test ! -e "${retired_mysql_state}/compose.log"
   test ! -e "${retired_mysql_state}/pending-release.json"
   cmp -s "${release_file}" "${retired_mysql_state}/current-release.json"

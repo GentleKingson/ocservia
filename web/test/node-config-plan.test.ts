@@ -25,7 +25,6 @@ vi.mock("../src/api/workspace", async (original) => ({
 }));
 
 import NodeDetailView from "../src/views/NodeDetailView.vue";
-import { workspaceChangedEvent } from "../src/api/workspace";
 
 // Exercise the actual SFC setup without adding a DOM or another test framework.
 const renderer = createRenderer<object, object>({
@@ -153,7 +152,7 @@ describe("node configuration revision", () => {
     expect(mocks.createConfigPlan).not.toHaveBeenCalled();
   });
 
-  it("invalidates the captured revision on Workspace changes, including A to B to A", async () => {
+  it("invalidates the captured revision when the workspace context changes", async () => {
     const view = await mount();
     view.openConfigPlan();
     view.configReason = "review configuration";
@@ -161,8 +160,6 @@ describe("node configuration revision", () => {
       id: "workspace-a",
       generation: 3,
     });
-    window.dispatchEvent(new Event(workspaceChangedEvent));
-    await nextTick();
     await nextTick();
     await view.submitConfigPlan();
     expect(mocks.createConfigPlan).not.toHaveBeenCalled();

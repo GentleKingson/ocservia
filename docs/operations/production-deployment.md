@@ -33,16 +33,13 @@ install, upgrade, rollback, and uninstall lifecycles.
 | Databases | PostgreSQL 18.x bundled or external | [Database support](#database-support) |
 | Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, `1.5.0`, and `1.6.0` | See the note below |
 | Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated Relay](#dedicated-relay) |
-| Authentication | Local only, OIDC only, or Local + OIDC | [Production authentication](authentication.md) |
+| Authentication | Local single administrator (`OCSERV_LOCAL_AUTH_ENABLED=true`) | [Production authentication](authentication.md) |
 | Web console browsers | Chrome 111+, Safari 16.4+, Firefox 128+, Chromium 111+ derivatives; CI runs Chromium plus Playwright Firefox and WebKit on the cross-engine specs | [Web validation](../development/release-checks.md#web-validation) |
 
 On managed nodes, the ocserv adapter and Controller configuration planner admit
-`1.2.x`, `1.3.x`, `1.4.x`, and exactly `1.5.0` and `1.6.0`. Full release
+`1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` (while `1.6.0` parser fixtures remain covered by unit tests). Full release
 acceptance (native adapter integration plus real-VPN business validation)
-remains pinned to `1.5.0`. The `1.6.0` admission has separate
-[compatibility coverage](../development/release-checks.md#ocserv-160-compatibility),
-while the older lines have parser regression fixtures without separate per-line
-release certification. Future versions, including `1.5.1`, `1.6.1`, and
+remains pinned to `1.5.0`. Future versions, including `1.5.1`, `1.6.1`, and
 `1.7.0`, require explicit compatibility review before admission. New database
 patch releases or OS distributions are adopted only after artifact and
 migration verification.
@@ -60,11 +57,9 @@ Controller hosts:
 Every supported production deployment runs a single Controller instance, one
 PostgreSQL 18.x relational database, and one dedicated Relay (either on separate
 hosts in Standalone mode or co-located in Integrated mode, with bundled or
-external PostgreSQL), managing one or more node Agents. Controller high
-availability, multi-relay failover, database replication clusters, automatic
-PostgreSQL failover, and point-in-time recovery (PITR) are outside the
-supported scope. Controller rebind moves nodes between two independent
-single-Controller deployments without providing active-passive HA. See
+external PostgreSQL), managing one or more node Agents. Controller high availability, multi-relay failover, database replication clusters,
+automatic PostgreSQL failover, and point-in-time recovery (PITR) are outside the
+supported scope. See
 [resilience and capacity](../development/release-checks.md#resilience-and-capacity).
 
 Operational readiness distinguishes three pairs of states that are easy to
@@ -118,12 +113,11 @@ that settle in an `Unknown` state must be handled through
 
 Removing software-version admission does not relax runtime security or state
 invariants. Command signatures, trusted keys, Controller-authorized upgrade
-digests and target architectures, negotiated command capabilities, RBAC and
-authenticated Admin authorization, idempotency, replay protection, owner
-fences, Signer identity and monotonic revisions, and atomic database
-transactions all remain mandatory. Removing legacy deployment auto-conversion
-likewise means removing the automatic network, configuration, and data
-mutations that accompanied it.
+digests and target architectures, negotiated command capabilities, authenticated
+single-admin authorization, idempotency, replay protection, owner fences, Signer
+identity and monotonic revisions, and atomic database transactions all remain
+mandatory. Removing legacy deployment auto-conversion likewise means removing
+the automatic network, configuration, and data mutations that accompanied it.
 
 Database schema-source admission is still enforced: the owner migration runner
 rejects unknown schema epochs, revisions, or checksums, schema drift, and
@@ -262,14 +256,13 @@ application URL and CA certificate.
 | Published ports | TCP 443 | TCP 443 (Edge) and UDP 7842 (Relay) |
 | `uninstall --purge-data` | Supported | Refused |
 
-Both Standalone and Integrated deployments support only one dedicated Relay and
-require `OCSERV_RELAY_URL_B` to be empty. In a manual installation, the
-PostgreSQL 18 deployment (`bundled` or `external`) and the login mode (Local
-only, OIDC only, or Local + OIDC) can be chosen independently of the deployment
-mode. Quick mode fixes bundled PostgreSQL and Local-only login. At first
-install, the chosen deployment mode, database backend and deployment, and TLS
-mode are recorded in `deployment-profile.json` and cannot be changed on an
-existing installation.
+Both Standalone and Integrated deployments support only one dedicated Relay. In
+a manual installation, the PostgreSQL 18 deployment (`bundled` or `external`) can
+be chosen independently of Standalone or Integrated mode, using Local
+single-admin authentication (`OCSERV_LOCAL_AUTH_ENABLED=true`). Quick mode fixes
+bundled PostgreSQL and Local-only login. At first install, the chosen deployment
+mode, database backend and deployment, and TLS mode are recorded in
+`deployment-profile.json` and cannot be changed on an existing installation.
 
 The default `standalone` mode connects to a Relay and a Signer hosted elsewhere.
 The `integrated` mode runs the SNI-routing Edge, the Relay, and the production
@@ -289,7 +282,7 @@ interchangeable.
 | Configuration | You write `./install.env` | Ignores `./install.env`; writes `/etc/ocservia/install.env` |
 | Secrets and keys | You provision every protected file | Generated, including Signer material |
 | Choices | Any supported combination above | Integrated, bundled PostgreSQL, ACME, Local authentication |
-| First administrators | One-shot Local bootstrap, or OIDC | `initial-admin` |
+| First administrator | One-shot Local admin bootstrap | `initial-admin` |
 
 ## Prepare the configuration
 
@@ -309,9 +302,7 @@ A manual installation needs:
 - A DNS name and HTTPS certificate for the Controller. Integrated mode needs a
   second, distinct DNS name for its co-located Relay. With Integrated ACME
   enabled, it can obtain both certificate pairs automatically.
-- An authentication mode: Local only, OIDC only, or Local + OIDC (an OIDC
-  identity provider and client credentials are required only when SSO is
-  enabled).
+- Local authentication configuration (`OCSERV_LOCAL_AUTH_ENABLED=true` plus secret keys).
 - In Standalone mode, an external certificate Signer endpoint and one dedicated
   HTTPS Relay. In Integrated mode, both run on the Controller host.
 - Protected host directories for secrets and database backups.
@@ -360,9 +351,9 @@ variable list. At a minimum, configure:
 | Setting group | Examples |
 | --- | --- |
 | Public address | `OCSERV_PUBLIC_HOST`, `OCSERV_CONTROLLER_PUBLIC_URL`, `OCSERV_HTTPS_ADDRESS` |
-| Login | `OCSERV_LOCAL_AUTH_ENABLED`, `OCSERV_PUBLIC_ORIGIN`, `OCSERV_SESSION_TTL`; add OIDC settings when SSO is enabled |
+| Login | `OCSERV_LOCAL_AUTH_ENABLED`, `OCSERV_PUBLIC_ORIGIN`, `OCSERV_SESSION_TTL` |
 | External services | `OCSERV_CERTIFICATE_SIGNER_URL` |
-| Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID` and required `OCSERV_RELAY_URL_A`; leave `OCSERV_RELAY_URL_B` unset or empty (only one dedicated Relay is supported, and a non-empty B value is rejected) |
+| Controller identity and Relay | `OCSERV_CONTROLLER_ENDPOINT_ID` and required `OCSERV_RELAY_URL_A` (single dedicated Relay) |
 | Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, and optional Controller state root |
 | Database | Bundled or external PostgreSQL 18.x |
 
@@ -378,14 +369,11 @@ with the Relay and Signer settings in
 [Integrated configuration](#integrated-configuration). Leave out the external
 Signer and Relay URL variables; the installer derives them itself.
 
-For the login settings, start from the complete
-[authentication mode example](authentication.md#choose-a-mode) that matches the
-mode you chose. [Production authentication](authentication.md) covers Local
-only, OIDC only, and Local + OIDC configuration, login behavior, and one-shot
-first-admin creation. Every mode requires a protected session-key file. OIDC
-remains optional when Local login is enabled, and `compose.sh` selects the OIDC
-overlay only when configured. Manual installations may use any of the three
-login modes. Quick mode configures Local only.
+For the login settings, start from the
+[authentication mode example](authentication.md#choose-a-mode). [Production authentication](authentication.md)
+covers Local single-admin configuration, login behavior, and one-shot
+first-admin creation. Every installation requires a protected session-key file.
+Both Manual and Quick installations use Local single-admin authentication.
 
 Keep `install.env` restricted to the operator account and out of version
 control. The installer parses it as a strict key-value allowlist. It is data,
@@ -418,7 +406,7 @@ before running the installer:
   `database-app-url`, and `postgres.pgpass`; plus `postgres-password`,
   `postgres-app-password`, and `postgres-backup-password` for bundled
   PostgreSQL, or `database-ca.pem` when using external PostgreSQL).
-- Session key and audit keys, plus the OIDC client secret when SSO is enabled.
+- Session key and audit keys.
 - Controller command-signing private key.
 - Certificate Signer bearer token.
 - Relay access token.
@@ -427,7 +415,7 @@ before running the installer:
 | Path or file class | Host owner | Mode / additional checks |
 | --- | --- | --- |
 | `OCSERV_SECRET_DIR` | Launcher | `0700`; private parent prevents host traversal |
-| General secrets, including session, OIDC and enabled OTEL files | Launcher | `0444`; only explicitly mounted services receive them |
+| General secrets, including session and enabled OTEL files | Launcher | `0444`; only explicitly mounted services receive them |
 | `controller-command-signing-key.pem`, `audit-event-key` | `65534:65532` | `0400`; audit loader also rejects hard links and unsafe container ancestry |
 | `controller-iroh.key` | `65532:65532` | `0400` |
 | `relay-access-token` (Controller host) | `65532:65532` | `0440`, one-link; Controller and transport receive read-only mounts |
@@ -445,8 +433,7 @@ to its stable, non-secret identifier stored with events. The gateway files
 Integrated Relay and Signer files have additional requirements in
 [Integrated configuration](#integrated-configuration). Quick mode generates the
 Controller files above with these owners and modes (except the TLS pair
-obtained by ACME) along with the Signer files, and leaves OIDC and OTEL
-unconfigured.
+obtained by ACME) along with the Signer files, and leaves OTEL unconfigured.
 
 When the Relay uses a private CA, provision the public PEM bundle at
 `${OCSERV_SECRET_DIR}/relay-ca.pem` as a nonempty, one-link `root:root` regular
@@ -702,8 +689,8 @@ settings alongside the normal database, authentication and Controller Secrets.
 In a manual installation you write `install.env` and prepare every file below
 yourself. Quick mode generates this configuration and the protected
 Controller and Signer material for a new host (see [Quick mode](#quick-mode)
-and [Quick install materials](#quick-install-materials)). Manual installs may use any
-supported database and login mode, and either TLS mode.
+and [Quick install materials](#quick-install-materials)). Manual installs may use either
+supported PostgreSQL deployment and either TLS mode with Local single-admin authentication.
 
 ```dotenv
 OCSERV_DEPLOYMENT_MODE=integrated
@@ -721,10 +708,9 @@ permissions or adding a privileged helper. Non-root Integrated launch is
 rejected before host bootstrap; standalone launcher behavior is unchanged.
 
 Set `OCSERV_PUBLIC_HOST` to a distinct lowercase Controller DNS name. Omit
-`OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` and `OCSERV_CERTIFICATE_SIGNER_URL`:
-the launcher derives one Relay URL and `https://signer:9443/sign`. Conflicting
-values are rejected, and `OCSERV_RELAY_URL_B` must be empty because only one
-Relay is supported. Controller's trusted proxy must remain the
+`OCSERV_RELAY_URL_A` and `OCSERV_CERTIFICATE_SIGNER_URL`:
+the launcher derives the single Relay URL and `https://signer:9443/sign`. Conflicting
+values are rejected because only one dedicated Relay is supported. Controller's trusted proxy must remain the
 Gateway's application `/32`, not Edge or an entire subnet.
 
 By default (`OCSERV_TLS_MODE=manual`) certificates are provisioned externally;
@@ -773,8 +759,8 @@ Rollback changes images, never the ledger, CA, node identity or uncertain
 operation state.
 
 Container images and internal service ports come only from the selected
-manifest and versioned templates, with no mutable operator overrides. Local or
-OIDC authentication provisioning works the same as in Standalone mode. There is
+manifest and versioned templates, with no mutable operator overrides. Local
+single-admin authentication provisioning works the same as in Standalone mode. There is
 no automatic cross-mode migration, automatic CRL distribution, HA or forced
 disconnection of existing VPN sessions.
 
@@ -893,7 +879,7 @@ bash "$bootstrap_file" --quick \
 Quick mode requires a Release that ships `deploy/production/quick-install.sh`,
 that is, a stable or RC release after v1.2.0. Releases up to v1.2.0 reject
 `--quick` before modifying the host. If you need a Standalone topology, an
-external PostgreSQL database, OIDC authentication, or manual TLS certificates,
+external PostgreSQL database, or manual TLS certificates,
 use the manual workflow above.
 
 At the bootstrap launcher layer, the script validates only argument syntax: two distinct
@@ -937,9 +923,8 @@ After the preflight succeeds, the versioned installer invokes the release's
 5. Provisions the management workspace.
 6. Creates the Local administrator `initial-admin`.
 
-The generated passwords are written only to root-owned files under
-`/root/ocservia-initial-credentials`. Distribute the two accounts to different
-operators and change both passwords after first login.
+The generated password is written only to a root-owned file under
+`/root/ocservia-initial-credentials/admin.txt`. Change the initial administrator password after first login.
 
 Quick mode installs new hosts only. Re-running the same Quick command resumes
 an interrupted Quick installation. Running it against an existing deployment,
@@ -1019,14 +1004,12 @@ curl --fail --silent --show-error \
 
 How you sign in for the first time depends on the installation:
 
-- On a manual deployment with Local login enabled, run the
+- On a manual deployment, run the
   [one-shot Local admin bootstrap](authentication.md#bootstrap-the-first-local-admin)
   before you test login. A fresh manual install has no default administrator
   password, and normal restarts never reset credentials.
-- An OIDC-only deployment authenticates through its configured identity provider
-  and RBAC mappings.
-- Quick mode writes the generated passwords for its two initial Local
-  administrators to root-readable files under `/root/ocservia-initial-credentials`.
+- Quick mode writes the generated password for its initial Local administrator
+  `initial-admin` to `/root/ocservia-initial-credentials/admin.txt`.
 
 Then verify `/api/v1/readyz`, the expected version and source metadata at
 `/api/v1/version`, an authenticated read, a node connection through the
@@ -1185,11 +1168,11 @@ backup with the old binary instead of attempting a schema downgrade.
 
 #### Privileged command rollout
 
-Privileged node commands require root-authenticated privd key enrollment, key
-rotation state, receipt evidence, and certificate receipt bindings. Deploy
-Controller support first. The order for the node side, including key
-registration and capability approval, is in
-[Register the privd attestation key](agent-lifecycle.md#register-the-privd-attestation-key).
+Privileged node commands require root-authenticated privd key registration
+(performed automatically during node bootstrap installation), receipt evidence,
+and certificate receipt bindings. Deploy Controller support first. See
+[One-token installation](agent-lifecycle.md#one-token-installation) and
+[Privd receipt v1](../reference/stable-contracts.md#privd-receipt-v1).
 
 #### After the upgrade
 
@@ -1403,37 +1386,31 @@ Before you begin a Standalone Relay, have:
    deploy/production/relay/compose.sh up -d
    ```
 
-3. Configure the Controller relay URLs before starting or restarting the
+3. Configure the Controller relay URL before starting or restarting the
    Controller:
 
    ```bash
    export OCSERV_RELAY_URL_A=https://relay.example.com
-   export OCSERV_RELAY_URL_B=
    ```
 
-   You can also define these variables in the Controller's protected
+   You can also define this variable in the Controller's protected
    `install.env` without editing release files. `OCSERV_RELAY_URL_A` is
-   required. `OCSERV_RELAY_URL_B` must be absent or empty; `install.sh`,
-   `compose.sh`, and the transportd wrapper all reject a nonempty B before any
-   side effects occur. Exporting an explicitly empty `OCSERV_RELAY_URL_B` in the
-   shell overrides any B entry present in `install.env`. Exactly one dedicated
-   Relay is supported, without Relay failover, so B does not provide optional
-   redundancy. Integrated mode derives its Relay URL from its public host and
-   rejects a conflicting A or any nonempty B; use
+   required because only one dedicated Relay is supported, without a secondary
+   standby Relay. Integrated mode derives its Relay URL from its public host and
+   rejects a conflicting `OCSERV_RELAY_URL_A`; use
    [Integrated configuration](#integrated-configuration) instead of overriding
    Standalone Relay settings.
 
 4. Before enabling services on each managed node, configure the Agent with the
-   production relay drop-in and launcher, the matching URLs, and the same token
-   file; see [Agent lifecycle](agent-lifecycle.md) for the verified package path
-   and file contract.
+   production relay drop-in and launcher, the matching Relay URL, and the same
+   token file; see [Agent lifecycle](agent-lifecycle.md) for the verified package
+   path and file contract.
 
    ```dotenv
    RELAY_URL_A=https://relay.example.com
-   RELAY_URL_B=
    ```
 
-   Place these values in the managed node's `install.env` during initial
+   Place this value in the managed node's `install.env` during initial
    installation, or in `/etc/ocservia-agent/relays.env` when making an explicit
    operator topology change. Never edit the released Compose file or place raw
    token contents in either environment file.
@@ -1453,26 +1430,13 @@ verifying reconnection, fresh heartbeats, and command results. Preserve pending
 command state and reconcile any Unknown outcomes before performing an explicit
 safe retry.
 
-#### Migrate an existing A/B deployment
-
-During a planned maintenance window, clear the B entry in both the Controller
-and Agent configurations before running the new installers or starting the new
-launchers, while keeping A and all identity, enrollment, token, and journal
-material intact. Services do not hot-reload the Relay list, so restart the
-affected services and verify A-only traffic before retiring B. Rerunning the
-installer on an already-enrolled node validates the existing configuration and
-refuses any persisted non-empty B entry without rewriting topology or replacing
-tokens. If you later need to roll back, check the previous release's actual
-requirements first; see [Agent rollback](agent-lifecycle.md#rollback) and
-[Controller rollback](#rollback).
-
 #### Relay trust and capacity
 
 Sharing the Relay access token only authenticates access to the relay
 transport; it does not act as an Agent identity or a Controller capacity guard.
 Keep all five trust classes and the reserved known-Agent capacity enabled in
 transportd. Direct and Relay paths enforce the same snapshot, revocation,
-authorization, registration-recheck, and enrollment-token rules, and IP or NAT
+authorization, registration-recheck, and bootstrap-token rules, and IP or NAT
 identity must never be used to refill an EndpointID budget.
 
 ### Application networking
@@ -1490,9 +1454,7 @@ The control plane runs with `--role=all`. Public TLS terminates at the gateway
 (behind Edge in Integrated mode), and node certificates come from an HTTPS
 certificate signer (the external endpoint in Standalone mode, or the bundled
 Signer in Integrated mode). Set `OCSERV_PUBLIC_ORIGIN` to the public HTTPS
-origin; when OIDC is enabled, configure its redirect URI as
-`https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback` with an origin matching
-`OCSERV_PUBLIC_ORIGIN`.
+origin matching `OCSERV_PUBLIC_HOST`.
 
 ### Integrated host network
 
@@ -1688,11 +1650,9 @@ manifest:
   their ownership and mode contracts (see [Production secrets](#production-secrets)),
   and all required PKI, Controller EndpointID, and relay settings must be
   present.
-- Authentication variables must match the selected
-  [mode](authentication.md#choose-a-mode): Local-only requires no OIDC settings
-  or client secret. OIDC-only and dual-auth require a complete OIDC
-  configuration and protected client secret (a partial OIDC configuration is
-  rejected even when Local is enabled).
+- Authentication variables must satisfy Local single-admin requirements
+  (`OCSERV_LOCAL_AUTH_ENABLED=true`, session key, and audit key; see
+  [Production authentication](authentication.md#configuration-and-secrets)).
 
 Always manage the stack through `controller.sh` instead of invoking Docker
 Compose directly.
@@ -1726,8 +1686,7 @@ overwriting confirmed or pending state files.
 
 ### Relay is unavailable
 
-Only one dedicated Relay is supported and any non-empty `RELAY_URL_B` is
-rejected, so there is no standby failover or second Relay to fall back to. All
+Only one dedicated Relay is supported, so there is no standby failover or second Relay to fall back to. All
 Relay-dependent communication pauses until the Relay recovers. Restore the
 Relay at the same address with its matching certificate and credentials
 (rebuilding the Relay host with those same materials is how you recover the
@@ -1744,7 +1703,7 @@ service is restored.
 
 ### Other failures
 
-- Identity provider outage: see
+- Authentication failure or lockout: see
   [Authentication outage](incident-recovery.md#authentication-outage).
 - Database recovery: check `OCSERV_DATABASE_BACKEND` and
   `OCSERV_DATABASE_DEPLOYMENT` in the effective deployment configuration, then

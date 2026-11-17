@@ -19,7 +19,6 @@ vi.mock("@vueuse/core", async (original) => ({
 vi.mock("../src/api/agents", () => mocks);
 vi.mock("../src/api/workspace", () => ({
   workspaceContext: mocks.workspaceContext,
-  workspaceChangedEvent: "workspace",
 }));
 vi.mock("../src/shared/fleet", () => ({
   useFleetStore: () => ({
@@ -60,7 +59,6 @@ interface View {
   selected: string[];
   rolloutDialog: boolean;
   rolloutReason: string;
-  rolloutApprovalId: string;
   rolloutStarting: boolean;
   rolloutError: string;
   openRolloutDialog(): void;
@@ -126,20 +124,6 @@ it("keeps a late create from navigating after the page unmounts", async () => {
   resolve("rollout-a");
   await submit;
   expect(mocks.createAgentRollout).toHaveBeenCalledTimes(1);
-  expect(mocks.push).not.toHaveBeenCalled();
-});
-
-it("keeps a late create from clearing the next workspace's form", async () => {
-  const resolve = created();
-  const view = await mount();
-  const submit = view.submitRollout();
-  workspace = { id: "workspace-b", generation: 2 };
-  window.dispatchEvent(new Event("workspace"));
-  expect(view.rolloutStarting).toBe(false);
-  view.rolloutReason = "second";
-  resolve("rollout-a");
-  await submit;
-  expect(view.rolloutReason).toBe("second");
   expect(mocks.push).not.toHaveBeenCalled();
 });
 
@@ -361,15 +345,6 @@ it("settles an unconfirmed start once a later create is confirmed", async () => 
     name: "rollout-detail",
     params: { rolloutId: "rollout-b" },
   });
-  view.openRolloutDialog();
-  expect(view.rolloutError).toBe("");
-});
-
-it("drops an unconfirmed start when the workspace changes", async () => {
-  mocks.createAgentRollout.mockRejectedValue(new TypeError("network"));
-  const view = await mount();
-  await view.submitRollout();
-  window.dispatchEvent(new Event("workspace"));
   view.openRolloutDialog();
   expect(view.rolloutError).toBe("");
 });

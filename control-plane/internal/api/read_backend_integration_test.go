@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,10 +10,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
@@ -43,9 +39,8 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	at, _ := value.FromTime(time.Now().UTC())
-	bindingID := uuid.Must(uuid.NewV7())
-	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, bindingID, identity, workspace, at)
-	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(backend)})
+	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, workspace, identity, at)
+	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service})
 	server.EnableTransportEvents(transportevents.NewBackend(backend, nil))
 	server.devAuthToken = "read-backend-development-token-32-characters"
 	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
@@ -54,6 +49,15 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 		t.Fatalf("reader login: %d %s", login.Code, login.Body)
 	}
 	cookie := login.Result().Cookies()[0]
+	nonAdminName, nonAdminPass := "read-nonadmin-"+uuid.NewString(), "a long Controller reader test password"
+	if _, err := service.CreateLocalCredential(ctx, nonAdminName, nonAdminPass); err != nil {
+		t.Fatal(err)
+	}
+	nonAdminLogin := authHTTPRequest(server, "POST", "login", `{"username":"`+nonAdminName+`","password":"`+nonAdminPass+`"}`, authTestOrigin)
+	if nonAdminLogin.Code != http.StatusNoContent || len(nonAdminLogin.Result().Cookies()) != 1 {
+		t.Fatalf("non-admin reader login: %d %s", nonAdminLogin.Code, nonAdminLogin.Body)
+	}
+	nonAdminCookie := nonAdminLogin.Result().Cookies()[0]
 	get := func(path string, scope uuid.UUID, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(http.MethodGet, path, nil)
@@ -111,7 +115,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 		if err := json.Unmarshal(item["occurred_at"], &stamp); err != nil || stamp != stamps[2-i] {
 			t.Fatalf("audit time: %s %v", item["occurred_at"], err)
 		}
-		for _, field := range []string{"resource_id", "node_id", "trace_id", "command_id", "approval_id", "reason", "error_type"} {
+		for _, field := range []string{"resource_id", "node_id", "trace_id", "command_id", "reason", "error_type"} {
 			if string(item[field]) != "null" {
 				t.Fatalf("nullable %s changed: %s", field, item[field])
 			}
@@ -124,24 +128,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 
 	node := uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'read node','active',now(),now())`, node, workspace)
-	store, err := rbacstore.From(backend)
-	if err != nil {
-		t.Fatal(err)
-	}
-	readUpgradeNode := func(id uuid.UUID) (scope uuid.UUID, architecture, version string, err error) {
-		err = store.UpgradeNode(ctx, id).Scan(&scope, &architecture, &version)
-		return
-	}
-	if scope, architecture, version, err := readUpgradeNode(node); err != nil || scope != workspace || architecture != "" || version != "" {
-		t.Fatalf("unobserved upgrade target: %s %q %q %v", scope, architecture, version, err)
-	}
-	if _, _, _, err := readUpgradeNode(uuid.Must(uuid.NewV7())); !errors.Is(err, database.ErrNotFound) {
-		t.Fatalf("missing upgrade target: %v", err)
-	}
 	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$2,'read-api',$3,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$2)`, node, stamps[0], uuid.Must(uuid.NewV7()))
-	if scope, architecture, version, err := readUpgradeNode(node); err != nil || scope != workspace || architecture != "amd64" || version != "1.0.0" {
-		t.Fatalf("observed upgrade target: %s %q %q %v", scope, architecture, version, err)
-	}
 	if err := telemetry.NewBackend(backend).Maintain(ctx); err != nil {
 		t.Fatal("offline maintenance", err)
 	}
@@ -171,12 +158,11 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	}
 	get("/readyz", uuid.Nil, nil, http.StatusOK)
 	get("/readyz", uuid.Nil, nil, http.StatusOK)
-	exec(`DELETE FROM role_bindings WHERE id=$1`, bindingID)
-	w = get("/api/v1/workspaces", uuid.Nil, cookie, http.StatusOK)
+	w = get("/api/v1/workspaces", uuid.Nil, nonAdminCookie, http.StatusOK)
 	if err := json.Unmarshal(w.Body.Bytes(), &workspaces); err != nil || len(workspaces.Items) != 0 {
 		t.Fatalf("empty authorized workspaces: %s %v", w.Body, err)
 	}
-	get("/api/v1/audit/events", workspace, cookie, http.StatusForbidden)
+	get("/api/v1/audit/events", workspace, nonAdminCookie, http.StatusForbidden)
 	server.devAuth = true
 	w = get("/api/v1/workspaces", uuid.Nil, nil, http.StatusOK)
 	if err := json.Unmarshal(w.Body.Bytes(), &workspaces); err != nil {

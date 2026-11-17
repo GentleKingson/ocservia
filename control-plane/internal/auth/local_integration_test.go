@@ -54,14 +54,6 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 		t.Fatal("duplicate username replaced a credential")
 	}
 
-	// Same subject and profile claims are not an account-linking mechanism.
-	if _, err := pool.Exec(ctx, `UPDATE identities SET email='same@example.test',display_name='Same Name' WHERE id=$1`, id); err != nil {
-		t.Fatal(err)
-	}
-	oidcCookie, oidcPrincipal, err := s.createSession(ctx, "https://idp.example.com", username, "same@example.test", "Same Name", false, nil)
-	if err != nil || oidcPrincipal.IdentityID == id {
-		t.Fatalf("OIDC identity isolation: %+v, %v", oidcPrincipal, err)
-	}
 	for _, attempt := range []struct{ username, password string }{
 		{username, "wrong"}, {"missing-" + username, password}, {username, strings.Repeat("p", maxPasswordBytes+1)},
 	} {
@@ -98,10 +90,6 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE auth_sessions SET expires_at=$2 WHERE id=$1`, principal.SessionID, principal.ExpiresAt); err != nil {
 		t.Fatal(err)
 	}
-	var profiles int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM identities WHERE subject=$1 AND email='same@example.test' AND display_name='Same Name'`, username).Scan(&profiles); err != nil || profiles != 2 {
-		t.Fatalf("profiles changed/merged: %d, %v", profiles, err)
-	}
 	if err := s.Logout(ctx, principal); err != nil {
 		t.Fatal(err)
 	}
@@ -121,17 +109,8 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 	if _, err := s.Authenticate(ctx, cookie); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("disabled identity session accepted: %v", err)
 	}
-	if _, _, err := s.createSession(ctx, LocalIssuer, username, "", "", false, &credential); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, err := s.createSession(ctx, LocalIssuer, username, &credential); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("disable after verification accepted: %v", err)
-	}
-	if got, err := s.Authenticate(ctx, oidcCookie); err != nil || got.IdentityID != oidcPrincipal.IdentityID {
-		t.Fatalf("local disable affected OIDC: %+v, %v", got, err)
-	}
-	if err := s.Logout(ctx, oidcPrincipal); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Authenticate(ctx, oidcCookie); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("OIDC logout failed: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE identities SET disabled_at=NULL WHERE id=$1`, id); err != nil {
 		t.Fatal(err)
@@ -139,12 +118,12 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE local_credentials SET password_hash=$2 WHERE identity_id=$1`, id, dummyPasswordHash); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.createSession(ctx, LocalIssuer, username, "", "", false, &credential); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, err := s.createSession(ctx, LocalIssuer, username, &credential); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("changed credential accepted: %v", err)
 	}
-	var sessions, bindings int
-	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM auth_sessions WHERE identity_id=$1),(SELECT count(*) FROM role_bindings WHERE identity_id=$1)`, id).Scan(&sessions, &bindings); err != nil || sessions != 2 || bindings != 0 {
-		t.Fatalf("failed logins created sessions or provisioning granted roles: %d/%d, %v", sessions, bindings, err)
+	var sessions, admins int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM auth_sessions WHERE identity_id=$1),(SELECT count(*) FROM workspace_admins WHERE identity_id=$1)`, id).Scan(&sessions, &admins); err != nil || sessions != 2 || admins != 0 {
+		t.Fatalf("failed logins created sessions or provisioning granted workspace_admins: %d/%d, %v", sessions, admins, err)
 	}
 	for _, legacy := range []string{"x", "password", "12345678901234567890"} {
 		if _, err := pool.Exec(ctx, `UPDATE local_credentials SET password_hash=$2 WHERE identity_id=$1`, id, legacyPasswordHash(legacy)); err != nil {

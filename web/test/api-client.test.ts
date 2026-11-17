@@ -121,21 +121,18 @@ describe("API transport and session contracts", () => {
     expect(storage.get("ocservia.login.return-to")).toBe(
       "/nodes?sort=name#detail",
     );
-    storage.set("ocservia.login.oidc-attempt", "started");
     expect(api.consumeLoginReturnPath()).toBe("/nodes?sort=name#detail");
     expect(storage.has("ocservia.login.return-to")).toBe(false);
-    expect(storage.has("ocservia.login.oidc-attempt")).toBe(false);
   });
 
-  it("preserves a valid earlier return path and stops an attempted OIDC loop", async () => {
+  it("preserves a valid earlier return path across repeated 401 redirects", async () => {
     storage.set("ocservia.login.return-to", "/operations?state=failed");
-    storage.set("ocservia.login.oidc-attempt", "started");
     fetchMock.mockResolvedValue(json({}, 401));
     const api = await loadApi();
     await expect(api.getVersion()).rejects.toMatchObject({
       response: { status: 401 },
     });
-    expect(assign).toHaveBeenCalledExactlyOnceWith("/login?auth=failed");
+    expect(assign).toHaveBeenCalledExactlyOnceWith("/login");
     expect(api.consumeLoginReturnPath()).toBe("/operations?state=failed");
   });
 
@@ -216,15 +213,18 @@ describe("Workspace authority and events", () => {
     },
   );
 
-  it("rejects an earlier context after selecting A → B → A", async () => {
+  it("advances generation when a refreshed workspace changes identity", async () => {
     const api = await loadApi();
-    await api.selectWorkspace(alpha.id);
+    await api.getWorkspace();
     const firstA = api.workspaceContext();
-    await api.selectWorkspace(beta.id);
+    expect(firstA).toEqual({ id: alpha.id, generation: 1 });
+    fetchMock.mockResolvedValueOnce(json({ items: [beta] }));
+    await api.getWorkspace(true);
     expect(api.sameWorkspaceContext(firstA, api.workspaceContext())).toBe(
       false,
     );
-    await api.selectWorkspace(alpha.id);
+    fetchMock.mockResolvedValueOnce(json({ items: [alpha] }));
+    await api.getWorkspace(true);
     const returnedA = api.workspaceContext();
     expect(returnedA.id).toBe(firstA.id);
     expect(returnedA.generation).toBeGreaterThan(firstA.generation);
@@ -234,45 +234,35 @@ describe("Workspace authority and events", () => {
     );
   });
 
-  it("coalesces discovery, remembers selection and advances generation only on changes", async () => {
-    storage.set("ocservia.workspace-id", beta.id);
+  it("coalesces bootstrap discovery and stabilizes generation when unchanged", async () => {
     const api = await loadApi();
     expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
-    const changed = vi.fn<(event: Event) => void>();
-    browser.addEventListener(api.workspaceChangedEvent, changed);
     await Promise.all([
       api.getWorkspace(),
-      api.listAuthorizedWorkspaces(),
       api.getWorkspace(),
+      api.getWorkspaceId(),
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(api.workspaceContext()).toEqual({ id: beta.id, generation: 1 });
-    await api.selectWorkspace(beta.id);
-    expect(changed).not.toHaveBeenCalled();
-    await expect(api.selectWorkspace("unauthorized")).rejects.toThrow(
-      "Workspace is not authorized",
-    );
-    await api.selectWorkspace(alpha.id);
-    expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 2 });
-    expect(storage.get("ocservia.workspace-id")).toBe(alpha.id);
-    expect(changed).toHaveBeenCalledTimes(1);
-    expect(changed.mock.calls[0]?.[0]).toMatchObject({ detail: alpha.id });
+    expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
+    await api.getWorkspace(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
   });
 
   it("keeps session probes independent of cached Workspace authority and coalesces only in flight", async () => {
     const api = await loadApi();
-    await api.selectWorkspace(beta.id);
+    await api.getWorkspace();
     await Promise.all([api.probeAuthentication(), api.probeAuthentication()]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(api.workspaceContext()).toEqual({ id: beta.id, generation: 2 });
+    expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
     await api.probeAuthentication();
     expect(fetchMock).toHaveBeenCalledTimes(3);
     fetchMock.mockResolvedValueOnce(json({}, 503));
-    await expect(api.listAuthorizedWorkspaces(true)).rejects.toMatchObject({
+    await expect(api.getWorkspace(true)).rejects.toMatchObject({
       response: { status: 503 },
     });
-    expect(api.workspaceContext()).toEqual({ id: beta.id, generation: 2 });
-    await api.listAuthorizedWorkspaces(true);
+    expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
+    await api.getWorkspace(true);
     expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
@@ -280,21 +270,20 @@ describe("Workspace authority and events", () => {
     vi.stubEnv("VITE_DEV_AUTH_TOKEN", "fictional-dev-token");
     const api = await loadApi();
     const signal = new AbortController().signal;
-    await api.selectWorkspace(beta.id);
     await api.listNodes("cursor/a", signal);
     expect(request().path).toBe(
       "/api/v1/nodes?cursor=cursor%2Fa&page_size=200",
     );
-    expect(request().headers.get("X-Workspace-ID")).toBe(beta.id);
+    expect(request().headers.get("X-Workspace-ID")).toBe(alpha.id);
     expect(request().headers.get("Authorization")).toBe(
       "Bearer fictional-dev-token",
     );
     expect(request().signal).toBe(signal);
     await api.listOperations(undefined, signal);
     expect(request().path).toBe("/api/v1/operations?page_size=200");
-    expect(request().headers.get("X-Workspace-ID")).toBe(beta.id);
+    expect(request().headers.get("X-Workspace-ID")).toBe(alpha.id);
     await api.listEvents("event/a", signal, "desc");
-    expect(request().headers.get("X-Workspace-ID")).toBe(beta.id);
+    expect(request().headers.get("X-Workspace-ID")).toBe(alpha.id);
     expect(request().signal).toBe(signal);
     const eventUrl = new URL(request().path, "https://console.invalid");
     expect(Object.fromEntries(eventUrl.searchParams)).toEqual({
@@ -303,9 +292,8 @@ describe("Workspace authority and events", () => {
       order: "desc",
     });
     expect(await api.eventStreamPath("event/a")).toBe(
-      "/api/v1/events/stream?after=event%2Fa&workspace_id=workspace-b",
+      "/api/v1/events/stream?after=event%2Fa&workspace_id=workspace-a",
     );
-    await api.selectWorkspace(alpha.id);
     expect(await api.eventStreamPath()).toBe(
       "/api/v1/events/stream?workspace_id=workspace-a",
     );
@@ -374,20 +362,10 @@ describe.each(["getter", "getItem", "setItem", "removeItem"] as const)(
       expect(() => api.consumeLoginReturnPath()).not.toThrow();
     });
 
-    it("selects only authorized Workspaces and keeps events in step", async () => {
+    it("bootstraps the management Workspace without storage", async () => {
       const api = await loadApi();
-      const changed = vi.fn<(event: Event) => void>();
-      browser.addEventListener(api.workspaceChangedEvent, changed);
       expect((await api.getWorkspace()).id).toBe(alpha.id);
       expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
-      await api.selectWorkspace(beta.id);
-      expect(api.workspaceContext()).toEqual({ id: beta.id, generation: 2 });
-      await api.selectWorkspace(alpha.id);
-      expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 3 });
-      expect(changed).toHaveBeenCalledTimes(2);
-      await expect(api.selectWorkspace("unauthorized")).rejects.toThrow(
-        "Workspace is not authorized",
-      );
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
@@ -401,8 +379,7 @@ describe.each(["getter", "getItem", "setItem", "removeItem"] as const)(
       await expect(api.getWorkspace()).rejects.toThrow(
         "No authorized workspace is available",
       );
-      await expect(api.listAuthorizedWorkspaces(true)).resolves.toHaveLength(2);
-      expect((await api.getWorkspace()).id).toBe(alpha.id);
+      expect((await api.getWorkspace(true)).id).toBe(alpha.id);
     });
   },
 );
@@ -532,9 +509,8 @@ describe("domain request contracts", () => {
       target_version: "1.2.3",
       reason: "requested",
     });
-    await api.selectWorkspace(beta.id);
     await api.createAgentRollout("1.2.3", [node.id], 1, "requested", signal);
-    expect(request().headers.get("X-Workspace-ID")).toBe(beta.id);
+    expect(request().headers.get("X-Workspace-ID")).toBe(alpha.id);
     expect(request().body).toEqual({
       target_version: "1.2.3",
       node_ids: [node.id],

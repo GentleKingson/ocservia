@@ -221,28 +221,28 @@ verify_enrollment() {
   }
   observed="$(compose exec -T postgres psql -At -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     -c "SELECT n.id || ':' || n.status || ':' || encode(k.endpoint_id,'hex') FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id='${node_id}'")"
-  [[ "${observed}" == "${node_id}:pending:${endpoint}" ]] || {
-    echo "Controller did not persist the expected pending EndpointID binding" >&2
+  [[ "${observed}" == "${node_id}:active:${endpoint}" ]] || {
+    echo "Controller did not persist the expected active EndpointID binding" >&2
     return 1
   }
+  local digest
+  digest="$(<"${STATE}/bootstrap-token-sha256")"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
   if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
-    local digest
-    digest="$(<"${STATE}/bootstrap-token-sha256")"
-    [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
     token_observed="$(compose exec -T postgres psql -At -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
       -c "SELECT t.consumed_node_id || ':' || encode(t.bound_endpoint_id,'hex') FROM node_bootstrap_tokens t JOIN nodes n ON n.id=t.consumed_node_id WHERE t.id='${token_id}' AND encode(t.token_hash,'hex')='${digest}' AND t.consumed_at IS NOT NULL AND t.consumed_at BETWEEN t.created_at AND t.expires_at AND t.workspace_id='${WORKSPACE_ID}' AND n.workspace_id=t.workspace_id AND n.name=t.expected_node_name AND t.expected_node_name='github-hosted-node' AND t.expected_environment='development' AND t.expected_endpoint_id IS NULL AND t.expires_at-t.created_at=interval '900 seconds'")"
   else
     token_observed="$(compose exec -T postgres psql -At -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
-    -c "SELECT consumed_node_id || ':' || encode(expected_endpoint_id,'hex') FROM enrollment_tokens WHERE id='${token_id}' AND consumed_at IS NOT NULL AND workspace_id='${WORKSPACE_ID}' AND expected_environment='development'")"
+      -c "SELECT t.consumed_node_id || ':' || encode(t.bound_endpoint_id,'hex') FROM node_bootstrap_tokens t JOIN nodes n ON n.id=t.consumed_node_id WHERE t.id='${token_id}' AND encode(t.token_hash,'hex')='${digest}' AND t.consumed_at IS NOT NULL AND t.consumed_at BETWEEN t.created_at AND t.expires_at AND t.workspace_id='${WORKSPACE_ID}' AND n.workspace_id=t.workspace_id AND n.name=t.expected_node_name AND t.expected_node_name='github-hosted-node' AND t.expected_environment='development' AND t.expected_endpoint_id=decode('${endpoint}','hex') AND t.expires_at-t.created_at=interval '600 seconds'")"
   fi
   [[ "$token_observed" == "$node_id:$endpoint" ]]
   printf '%s\n' "${node_id}" >"${STATE}/node-id"
   mkdir -p "$ARTIFACT_DIR"
   jq -n --arg node "$node_id" --arg endpoint "$endpoint" \
     --arg controller "$OCSERV_CONTROLLER_ENDPOINT_ID" --arg token "$token_id" \
-    '{node_id:$node,agent_endpoint_id:$endpoint,controller_endpoint_id:$controller,token_id:$token,status:"pending",token_consumed:true}' \
+    '{node_id:$node,agent_endpoint_id:$endpoint,controller_endpoint_id:$controller,token_id:$token,status:"active",token_consumed:true}' \
     >"$ARTIFACT_DIR/binding.json"
-  printf 'cross_vm_runner=PASS\nreal_transportd=PASS\nreal_iroh_enrollment=PASS\nnode_state=pending\n' \
+  printf 'cross_vm_runner=PASS\nreal_transportd=PASS\nreal_iroh_enrollment=PASS\nnode_state=active\n' \
     >"${ARTIFACT_DIR}/result.txt"
 }
 
@@ -254,7 +254,7 @@ collect_diagnostics() {
     >"${ARTIFACT_DIR}/controller-services.log" 2>&1 || true
   docker system df >"${ARTIFACT_DIR}/docker-storage.txt" 2>&1 || true
   for secret in "${OUTBOX}/enrollment-token/enrollment-token" \
-    "${WORK}/private/privd-credential" "${WORK}/private/smoke-vpn-password"; do
+    "${WORK}/private/smoke-vpn-password"; do
     [[ -s "${secret}" ]] || continue
     while IFS= read -r hit; do
       rm -f -- "${hit}"

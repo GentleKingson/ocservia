@@ -11,9 +11,9 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -244,7 +244,7 @@ func TestAgentUpgradeIdempotencyBindsExactReleaseIdentityIntegration(t *testing.
 	if _, err := pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at=now() WHERE id=$1`, base.ActorSessionID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := service.Create(ctx, base); !errors.Is(err, rbac.ErrForbidden) {
+	if _, _, err := service.Create(ctx, base); !errors.Is(err, auth.ErrForbidden) {
 		t.Fatalf("revoked session replay: %v", err)
 	}
 
@@ -786,13 +786,12 @@ func controlledTestRequest(nodeID uuid.UUID, key string, kind Kind, action, boot
 func authorizeOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, request *CreateRequest) {
 	t.Helper()
 	request.ActorIdentityID, request.ActorSessionID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	request.ApprovalID = uuid.Nil
 	_, err := pool.Exec(context.Background(), `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now())`, request.ActorIdentityID, "admin-"+request.ActorIdentityID.String())
 	if err == nil {
 		_, err = pool.Exec(context.Background(), `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, request.ActorSessionID, request.ActorIdentityID)
 	}
 	if err == nil {
-		_, err = pool.Exec(context.Background(), `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',now())`, uuid.Must(uuid.NewV7()), request.ActorIdentityID, workspaceID)
+		_, err = pool.Exec(context.Background(), `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,now())`, workspaceID, request.ActorIdentityID)
 	}
 	if err != nil {
 		t.Fatal(err)

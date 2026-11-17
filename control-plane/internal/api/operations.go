@@ -3,12 +3,12 @@ package api
 import (
 	"errors"
 	"fmt"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
@@ -56,7 +56,6 @@ func (s *Server) reloadService(w http.ResponseWriter, r *http.Request) {
 
 type agentUpgradeRequest struct {
 	TargetVersion   string `json:"target_version"`
-	ApprovalID      string `json:"approval_id"`
 	Reason          string `json:"reason"`
 	ExpectedVersion *int64 `json:"expected_version,omitempty"`
 	TTLSeconds      *int64 `json:"ttl_seconds,omitempty"`
@@ -99,7 +98,6 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 		ttl = *body.TTLSeconds
 	}
 	reason := strings.TrimSpace(body.Reason)
-	approval, _ := uuid.Parse(body.ApprovalID)
 	if ttl < 60 || ttl > 3600 || reason == "" || len(reason) > 512 {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "target_version and reason are required and ttl_seconds must be between 60 and 3600")
 		return
@@ -121,7 +119,7 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 	operation, replayed, err := s.operations.Create(r.Context(), operations.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
 		Kind: operations.AgentUpgrade, TargetVersion: target.Version, PackageSHA256: target.PackageSHA256[:], Architecture: target.Architecture,
-		ApprovalID: approval, Action: "agent.upgrade", Reason: reason,
+		Action: "agent.upgrade", Reason: reason,
 		TTL: time.Duration(ttl) * time.Second, RequestID: requestID(r), Traceparent: requestTraceparent(r),
 		ActorID: actorID(r), ActorIdentityID: principal(r).IdentityID, ActorSessionID: principal(r).SessionID,
 	})
@@ -177,7 +175,7 @@ func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request,
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
 		Kind: kind, SessionID: sessionID, BootID: body.BootID, IP: ip,
 		TTL: time.Duration(ttl) * time.Second, RequestID: requestID(r), Traceparent: requestTraceparent(r),
-		ActorID: actorID(r), ActorIdentityID: principal(r).IdentityID, ActorSessionID: principal(r).SessionID, ApprovalID: approvalID(r), Action: action, Reason: strings.TrimSpace(body.Reason),
+		ActorID: actorID(r), ActorIdentityID: principal(r).IdentityID, ActorSessionID: principal(r).SessionID, Action: action, Reason: strings.TrimSpace(body.Reason),
 	})
 	if err != nil {
 		s.writeOperationError(w, r, err)
@@ -197,14 +195,6 @@ func actorID(r *http.Request) string {
 		return actor.IdentityID.String()
 	}
 	return "developer"
-}
-
-func approvalID(r *http.Request) uuid.UUID {
-	value, err := uuid.Parse(strings.TrimSpace(r.Header.Get("X-Approval-ID")))
-	if err != nil || value.Version() != 7 {
-		return uuid.Nil
-	}
-	return value
 }
 
 func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) {
@@ -310,7 +300,7 @@ func (s *Server) queueMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeOperationError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, rbac.ErrForbidden):
+	case errors.Is(err, auth.ErrForbidden):
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, operations.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the operation request is invalid")

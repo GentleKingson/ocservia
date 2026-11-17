@@ -61,7 +61,7 @@ pub struct PrivdRequest {
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44"
+        tags = "10, 11, 12, 13, 14, 15, 16, 19, 43, 44"
     )]
     pub operation: Option<privd_request::Operation>,
 }
@@ -85,11 +85,7 @@ pub mod privd_request {
     use prost::Oneof;
 
     use super::{
-        ArtifactConsumeRequest, ArtifactReadRequest, CertificateCsrRequest, CertificateP12Request,
-        CertificateRevokeRequest, ConfigApplyRequest, ConfigPlanRequest,
-        DesiredEffectObserveRequest, GroupApplyRequest, IpBanRemoveRequest, ReadRequest,
-        ServiceReloadRequest, SessionMutationRequest, UpgradeResultListRequest, UserDisableRequest,
-        UserEnableRequest, UserSecretRequest,
+        ArtifactConsumeRequest, ArtifactReadRequest, ReadRequest, UpgradeResultListRequest,
     };
 
     /// Fixed operation allowlist.
@@ -116,75 +112,18 @@ pub mod privd_request {
         /// List groups derived from authoritative ocpasswd records.
         #[prost(message, tag = "16")]
         GroupList(ReadRequest),
-        /// Check bounded non-secret evidence for one desired-state replacement.
-        #[prost(message, tag = "17")]
-        DesiredEffectObserve(DesiredEffectObserveRequest),
-        /// Validate one candidate in a fixed staging directory without changing current config.
-        #[prost(message, tag = "18")]
-        ConfigPlan(ConfigPlanRequest),
         /// Read one bounded chunk under a Controller-signed artifact lease.
         #[prost(message, tag = "19")]
         ArtifactRead(ArtifactReadRequest),
+        /// Durably consume and delete an artifact after successful delivery.
+        #[prost(message, tag = "43")]
+        ArtifactConsume(ArtifactConsumeRequest),
         /// Read the bounded most-recent durable agent upgrade outcomes by
         /// operation ID. Fixed read-only evidence; no operation ID set can be
         /// selected or influenced by the caller.
         #[prost(message, tag = "44")]
         UpgradeResultList(UpgradeResultListRequest),
-        /// Disconnect one numeric session without invalidating its cookie.
-        #[prost(message, tag = "30")]
-        SessionDisconnect(SessionMutationRequest),
-        /// Terminate one numeric session and invalidate its cookie.
-        #[prost(message, tag = "31")]
-        SessionTerminate(SessionMutationRequest),
-        /// Remove one canonical address from the ban list.
-        #[prost(message, tag = "32")]
-        IpBanRemove(IpBanRemoveRequest),
-        /// Reload only the fixed `ocserv.service` unit.
-        #[prost(message, tag = "33")]
-        ServiceReload(ServiceReloadRequest),
-        /// Create a user through the fixed ocpasswd resource.
-        #[prost(message, tag = "34")]
-        UserCreate(UserSecretRequest),
-        /// Disable a user through the fixed ocpasswd resource.
-        #[prost(message, tag = "35")]
-        UserDisable(UserDisableRequest),
-        /// Rotate a user's write-only password.
-        #[prost(message, tag = "36")]
-        UserPasswordRotate(UserSecretRequest),
-        /// Atomically replace one group membership record.
-        #[prost(message, tag = "37")]
-        GroupApply(GroupApplyRequest),
-        /// Enable a user without changing its password or groups.
-        #[prost(message, tag = "38")]
-        UserEnable(UserEnableRequest),
-        /// Atomically apply one approved immutable configuration candidate.
-        #[prost(message, tag = "39")]
-        ConfigApply(ConfigApplyRequest),
-        /// Generate one private key locally and return only its CSR and public-key digest.
-        #[prost(message, tag = "40")]
-        CertificateCsr(CertificateCsrRequest),
-        /// Remove one locally held certificate private key by certificate ID.
-        #[prost(message, tag = "41")]
-        CertificateRevoke(CertificateRevokeRequest),
-        /// Build an encrypted P12 in the fixed artifact spool.
-        #[prost(message, tag = "42")]
-        CertificateP12(CertificateP12Request),
-        /// Durably consume and delete an artifact after successful delivery.
-        #[prost(message, tag = "43")]
-        ArtifactConsume(ArtifactConsumeRequest),
     }
-}
-
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct CertificateCsrRequest {
-    #[prost(bytes = "vec", tag = "1")]
-    pub certificate_id: Vec<u8>,
-    #[prost(string, tag = "2")]
-    pub common_name: String,
-    #[prost(string, repeated, tag = "3")]
-    pub dns_names: Vec<String>,
-    #[prost(uint32, tag = "4")]
-    pub key_bits: u32,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -195,14 +134,6 @@ pub struct CertificateCsrResult {
     pub csr_der: Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
     pub public_key_sha256: Vec<u8>,
-}
-
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct CertificateRevokeRequest {
-    #[prost(bytes = "vec", tag = "1")]
-    pub certificate_id: Vec<u8>,
-    #[prost(uint64, tag = "2")]
-    pub certificate_version: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -254,25 +185,6 @@ pub struct UpgradeOperationResult {
 pub struct UpgradeResultList {
     #[prost(message, repeated, tag = "1")]
     pub results: Vec<UpgradeOperationResult>,
-}
-
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct CertificateP12Request {
-    #[prost(bytes = "vec", tag = "1")]
-    pub certificate_id: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
-    pub artifact_id: Vec<u8>,
-    #[prost(bytes = "vec", tag = "3")]
-    pub certificate_chain_pem: Vec<u8>,
-    #[prost(message, optional, tag = "4")]
-    pub sealed_password:
-        Option<ocservia_contracts::generated::ocserv::platform::agent::v1::SealedSecretV1>,
-    #[prost(uint64, tag = "5")]
-    pub certificate_version: u64,
-    #[prost(bytes = "vec", tag = "6")]
-    pub operation_id: Vec<u8>,
-    #[prost(int64, tag = "7")]
-    pub artifact_expires_at_unix_seconds: i64,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -334,15 +246,6 @@ pub struct CertificateArtifactResult {
     pub artifact_size: u64,
 }
 
-/// Side-effect-free candidate validation request. No path is accepted from the caller.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct ConfigPlanRequest {
-    #[prost(bytes = "vec", tag = "1")]
-    pub candidate: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
-    pub candidate_hash: Vec<u8>,
-}
-
 /// Secret-safe result of validating a staged candidate.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct ConfigPlanResult {
@@ -360,19 +263,6 @@ pub struct ConfigPlanResult {
     pub current_hash: Vec<u8>,
     #[prost(bytes = "vec", tag = "7")]
     pub materialized_hash: Vec<u8>,
-}
-
-/// Approved immutable configuration apply request. No caller-selected path is accepted.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct ConfigApplyRequest {
-    #[prost(bytes = "vec", tag = "1")]
-    pub candidate: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
-    pub candidate_hash: Vec<u8>,
-    #[prost(bytes = "vec", tag = "3")]
-    pub expected_current_hash: Vec<u8>,
-    #[prost(uint64, tag = "4")]
-    pub desired_revision: u64,
 }
 
 /// Secret-safe final transaction outcome.
@@ -394,79 +284,6 @@ pub struct ConfigApplyResult {
     pub failed_critical: bool,
     #[prost(string, tag = "8")]
     pub failure_code: String,
-}
-
-/// One stable numeric session scoped to the current boot.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct SessionMutationRequest {
-    #[prost(string, tag = "1")]
-    pub session_id: String,
-    #[prost(string, tag = "2")]
-    pub boot_id: String,
-}
-
-/// One canonical IP address to remove from the fixed Ocserv ban list.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct IpBanRemoveRequest {
-    #[prost(string, tag = "1")]
-    pub ip: String,
-}
-
-/// Empty marker for reloading the fixed Ocserv systemd unit.
-#[derive(Clone, Copy, PartialEq, Eq, Message)]
-pub struct ServiceReloadRequest {}
-
-/// User request carrying only ciphertext sealed for the node's root helper.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct UserSecretRequest {
-    #[prost(string, tag = "1")]
-    pub username: String,
-    #[prost(bytes = "vec", tag = "2")]
-    pub sealed_password: Vec<u8>,
-    #[prost(string, tag = "3")]
-    pub secret_key_id: String,
-    #[prost(uint64, tag = "4")]
-    pub desired_revision: u64,
-}
-
-/// User disable request with no password material.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct UserDisableRequest {
-    #[prost(string, tag = "1")]
-    pub username: String,
-    #[prost(uint64, tag = "2")]
-    pub desired_revision: u64,
-}
-
-/// User enable request with no password material.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct UserEnableRequest {
-    #[prost(string, tag = "1")]
-    pub username: String,
-    #[prost(uint64, tag = "2")]
-    pub desired_revision: u64,
-}
-
-/// Canonical group membership replacement.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct GroupApplyRequest {
-    #[prost(string, tag = "1")]
-    pub group_name: String,
-    #[prost(string, repeated, tag = "2")]
-    pub members: Vec<String>,
-    #[prost(uint64, tag = "3")]
-    pub desired_revision: u64,
-}
-
-/// Identifies one desired-state effect without carrying password material or hashes.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct DesiredEffectObserveRequest {
-    #[prost(string, tag = "1")]
-    pub mutation_kind: String,
-    #[prost(string, tag = "2")]
-    pub resource_key: String,
-    #[prost(uint64, tag = "3")]
-    pub desired_revision: u64,
 }
 
 /// Stable result of independently checking one desired-state effect.

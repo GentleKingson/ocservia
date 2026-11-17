@@ -5,7 +5,6 @@ import {
   type AgentRollout,
   type AgentRolloutNode,
 } from "@ocservia/api-client";
-import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute } from "vue-router";
@@ -14,7 +13,6 @@ import { getAgentRollout, resumeAgentRollout } from "../api/agents";
 import {
   getWorkspace,
   sameWorkspaceContext,
-  workspaceChangedEvent,
   workspaceContext,
   type WorkspaceContext,
 } from "../api/workspace";
@@ -209,7 +207,6 @@ async function resume(): Promise<void> {
 }
 
 watch(() => route.params.rolloutId, reload);
-useEventListener(window, workspaceChangedEvent, reload);
 onMounted(() => {
   foregroundRefresh.start();
 });
@@ -281,16 +278,6 @@ onBeforeUnmount(() => {
           <div class="grid min-w-0 gap-1">
             <dt class="text-muted-foreground text-xs">{{ $t("reason") }}</dt>
             <dd class="m-0 break-words">{{ rollout.reason }}</dd>
-          </div>
-          <div v-if="rollout.approvalId" class="grid min-w-0 gap-1">
-            <dt class="text-muted-foreground text-xs">
-              {{ $t("approvalId") }}
-            </dt>
-            <dd class="m-0">
-              <code :title="rollout.approvalId">{{
-                rollout.approvalId.slice(0, 8)
-              }}</code>
-            </dd>
           </div>
         </dl>
         <p

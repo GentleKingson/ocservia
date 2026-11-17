@@ -112,63 +112,6 @@ pub struct AppliedResourceRevision<'a> {
 }
 
 impl Journal {
-    /// Stores an already verified grant for independent local rebind confirmation.
-    /// This is observation evidence, never a substitute for signature verification.
-    ///
-    /// # Errors
-    /// Refuses empty/oversized grants or database failure.
-    pub fn record_verified_session_grant(&self, grant: &[u8]) -> Result<(), rusqlite::Error> {
-        if grant.is_empty() || grant.len() > 65536 {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        self.connection.execute(
-            "INSERT INTO agent_metadata(key,value) VALUES('verified_session_grant',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [grant],
-        )?;
-        Ok(())
-    }
-
-    /// Pins a fresh namespace to its Controller and `NodeID`, or verifies its pin.
-    /// Existing unbound command/recovery state cannot be adopted by rebind.
-    ///
-    /// # Errors
-    /// Refuses authority mismatch or unbound nonempty recovery state.
-    pub fn bind_authority(
-        &mut self,
-        node: &[u8; 16],
-        controller: &[u8; 32],
-    ) -> Result<(), rusqlite::Error> {
-        let binding = [node.as_slice(), controller.as_slice()].concat();
-        let transaction = self
-            .connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let stored: Option<Vec<u8>> = transaction
-            .query_row(
-                "SELECT value FROM agent_metadata WHERE key='controller_binding'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(stored) = stored {
-            if stored != binding {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-        } else {
-            let occupied: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM command_journal) OR EXISTS(SELECT 1 FROM agent_metadata) OR EXISTS(SELECT 1 FROM applied_resource_revisions) OR EXISTS(SELECT 1 FROM synthetic_effects)",
-                [], |row| row.get(0),
-            )?;
-            if occupied {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            transaction.execute(
-                "INSERT INTO agent_metadata(key,value) VALUES('controller_binding',?1)",
-                [binding],
-            )?;
-        }
-        transaction.commit()
-    }
-
     /// Opens an owner-controlled database and enforces the required `SQLite` pragmas.
     ///
     /// # Errors
@@ -262,7 +205,6 @@ impl Journal {
                 PRIMARY KEY(resource_type,resource_key)
              ) STRICT;",
         )?;
-        reject_retired_binding(&connection)?;
         migrate_command_journal(&connection)?;
         migrate_applied_resource_revisions(&connection)?;
         let integrity: String =
@@ -417,63 +359,6 @@ impl Journal {
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
-    /// Atomically records a successful external command and its applied resource revision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid identity, resource metadata, revision regression, or `SQLite` failure.
-    pub fn complete_external_with_revision(
-        &mut self,
-        idempotency_key: &[u8; 16],
-        command_id: &[u8; 16],
-        resource: AppliedResourceRevision<'_>,
-        result: &[u8],
-        now: i64,
-    ) -> Result<CommandRecord, rusqlite::Error> {
-        if !matches!(resource.resource_type, "user" | "group" | "config")
-            || resource.resource_key.is_empty()
-            || resource.resource_key.len() > 64
-            || resource.revision == 0
-            || resource.revision > i64::MAX as u64
-            || result.len() > 1024 * 1024
-        {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let record = query_command(&transaction, idempotency_key)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        if record.command_id != *command_id || record.state != CommandState::Running {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let revision =
-            i64::try_from(resource.revision).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        transaction.execute(
-            "INSERT INTO applied_resource_revisions(resource_type,resource_key,revision,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(resource_type,resource_key) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE excluded.revision >= applied_resource_revisions.revision",
-            rusqlite::params![resource.resource_type, resource.resource_key, revision, now],
-        )?;
-        let stored: i64 = transaction.query_row(
-            "SELECT revision FROM applied_resource_revisions WHERE resource_type=?1 AND resource_key=?2",
-            rusqlite::params![resource.resource_type, resource.resource_key],
-            |row| row.get(0),
-        )?;
-        if stored != revision {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let updated = transaction.execute(
-            "UPDATE command_journal SET state='succeeded',result=?3,error_code=NULL,updated_at=?4 WHERE idempotency_key=?1 AND command_id=?2 AND state='running'",
-            rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), result, now],
-        )?;
-        if updated != 1 {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let completed = query_command(&transaction, idempotency_key)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        transaction.commit()?;
-        Ok(completed)
-    }
-
     /// Atomically stores an applied revision, terminal result, and privd proof.
     ///
     /// # Errors
@@ -524,68 +409,6 @@ impl Journal {
         let updated = transaction.execute(
             "UPDATE command_journal SET state='succeeded',result=?3,error_code=NULL,privileged_result_proof=?4,updated_at=?5 WHERE idempotency_key=?1 AND command_id=?2 AND state='running'",
             rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), result, proof, now],
-        )?;
-        if updated != 1 {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let completed = query_command(&transaction, idempotency_key)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        transaction.commit()?;
-        Ok(completed)
-    }
-
-    /// Atomically recovers an observed desired-state effect and its applied revision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects terminal failures, identity mismatches, revision regressions, or `SQLite` failure.
-    pub fn reconcile_external_with_revision(
-        &mut self,
-        idempotency_key: &[u8; 16],
-        command_id: &[u8; 16],
-        resource: AppliedResourceRevision<'_>,
-        result: &[u8],
-        now: i64,
-    ) -> Result<CommandRecord, rusqlite::Error> {
-        if !matches!(resource.resource_type, "user" | "group" | "config")
-            || resource.resource_key.is_empty()
-            || resource.resource_key.len() > 64
-            || resource.revision == 0
-            || resource.revision > i64::MAX as u64
-            || result.len() > 1024 * 1024
-        {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let record = query_command(&transaction, idempotency_key)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        if record.command_id != *command_id
-            || !matches!(
-                record.state,
-                CommandState::Accepted | CommandState::Running | CommandState::Unknown
-            )
-        {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let revision =
-            i64::try_from(resource.revision).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        transaction.execute(
-            "INSERT INTO applied_resource_revisions(resource_type,resource_key,revision,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(resource_type,resource_key) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE excluded.revision >= applied_resource_revisions.revision",
-            rusqlite::params![resource.resource_type, resource.resource_key, revision, now],
-        )?;
-        let stored: i64 = transaction.query_row(
-            "SELECT revision FROM applied_resource_revisions WHERE resource_type=?1 AND resource_key=?2",
-            rusqlite::params![resource.resource_type, resource.resource_key],
-            |row| row.get(0),
-        )?;
-        if stored != revision {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let updated = transaction.execute(
-            "UPDATE command_journal SET state='succeeded',result=?3,error_code=NULL,updated_at=?4 WHERE idempotency_key=?1 AND command_id=?2 AND state IN ('accepted','running','unknown')",
-            rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), result, now],
         )?;
         if updated != 1 {
             return Err(rusqlite::Error::InvalidQuery);
@@ -1001,18 +824,6 @@ impl Journal {
 /// New databases already include every column via the `CREATE TABLE` statement.
 /// Pre-existing databases are upgraded with `ALTER TABLE … ADD COLUMN` guarded
 /// by a `PRAGMA table_info` presence check.
-fn reject_retired_binding(connection: &Connection) -> Result<(), rusqlite::Error> {
-    let retired: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_metadata WHERE key='retired_binding')",
-        [],
-        |row| row.get(0),
-    )?;
-    if retired {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    Ok(())
-}
-
 fn migrate_command_journal(connection: &Connection) -> Result<(), rusqlite::Error> {
     if !has_column(connection, "error_code")? {
         connection.execute(
@@ -1198,56 +1009,6 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
-    }
-
-    #[test]
-    fn retired_journal_cannot_be_reactivated() {
-        let path =
-            std::env::temp_dir().join(format!("retired-journal-{}.db", uuid::Uuid::now_v7()));
-        let journal = Journal::open(&path).unwrap();
-        journal
-            .connection
-            .execute(
-                "INSERT INTO agent_metadata(key,value) VALUES('retired_binding',?1)",
-                [vec![1_u8; 48]],
-            )
-            .unwrap();
-        drop(journal);
-        assert!(Journal::open(&path).is_err());
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn binding_namespace_refuses_old_identity_and_unbound_recovery_state() {
-        let path = temporary_path("binding");
-        let mut journal = Journal::open(&path).unwrap();
-        journal.bind_authority(&[1; 16], &[2; 32]).unwrap();
-        journal.raise_owner_fence_epoch_floor(42).unwrap();
-        drop(journal);
-        let mut reopened = Journal::open(&path).unwrap();
-        reopened.bind_authority(&[1; 16], &[2; 32]).unwrap();
-        assert!(reopened.bind_authority(&[3; 16], &[2; 32]).is_err());
-        assert!(reopened.bind_authority(&[1; 16], &[4; 32]).is_err());
-        assert_eq!(reopened.owner_fence_epoch_floor().unwrap(), 42);
-        drop(reopened);
-        cleanup(&path);
-
-        let old_path = temporary_path("unbound");
-        let mut old = Journal::open(&old_path).unwrap();
-        old.accept_command(&[1; 16], &[2; 16], &[3; 32], 2, 10)
-            .unwrap();
-        old.transition_command(
-            &[1; 16],
-            &[CommandState::Accepted],
-            CommandState::Unknown,
-            None,
-            None,
-            11,
-        )
-        .unwrap();
-        assert!(old.bind_authority(&[4; 16], &[5; 32]).is_err());
-        drop(old);
-        cleanup(&old_path);
     }
 
     #[test]
@@ -1517,7 +1278,7 @@ mod tests {
             )
             .expect("running");
         journal
-            .complete_external_with_revision(
+            .complete_external_with_revision_attested(
                 &key,
                 &command,
                 AppliedResourceRevision {
@@ -1526,6 +1287,7 @@ mod tests {
                     revision: 2,
                 },
                 b"applied",
+                b"proof",
                 12,
             )
             .expect("complete");
@@ -1592,7 +1354,7 @@ mod tests {
             )
             .expect("run config command");
         journal
-            .complete_external_with_revision(
+            .complete_external_with_revision_attested(
                 &key,
                 &command,
                 AppliedResourceRevision {
@@ -1601,6 +1363,7 @@ mod tests {
                     revision: 1,
                 },
                 b"applied",
+                b"proof",
                 13,
             )
             .expect("persist config fence");
@@ -1610,78 +1373,6 @@ mod tests {
                 .expect("config revision"),
             Some(1)
         );
-        drop(journal);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn reconciled_external_result_and_revision_recover_atomically_after_commit_failure() {
-        let path = temporary_path("reconciled-applied-revision");
-        let mut journal = Journal::open(&path).expect("open");
-        let key = *uuid::Uuid::now_v7().as_bytes();
-        let command = *uuid::Uuid::now_v7().as_bytes();
-        let payload = [8_u8; 32];
-        journal
-            .accept_command(&key, &command, &payload, 1, 10)
-            .expect("accept");
-        journal
-            .transition_command(
-                &key,
-                &[CommandState::Accepted],
-                CommandState::Unknown,
-                None,
-                Some("result_persistence_failed"),
-                11,
-            )
-            .expect("unknown");
-        journal
-            .connection
-            .execute_batch(
-                "CREATE TEMP TRIGGER fail_reconciled_terminal_result
-                 BEFORE UPDATE OF state ON command_journal
-                 WHEN NEW.state = 'succeeded'
-                 BEGIN SELECT RAISE(FAIL, 'injected reconciled write failure'); END;",
-            )
-            .expect("failure trigger");
-        assert!(
-            journal
-                .reconcile_external_with_revision(
-                    &key,
-                    &command,
-                    AppliedResourceRevision {
-                        resource_type: "user",
-                        resource_key: "alice",
-                        revision: 7,
-                    },
-                    b"observed",
-                    12,
-                )
-                .is_err()
-        );
-        assert_eq!(journal.applied_revision("user", "alice").unwrap(), None);
-        assert_eq!(
-            journal.command(&key).unwrap().unwrap().state,
-            CommandState::Unknown
-        );
-        journal
-            .connection
-            .execute_batch("DROP TRIGGER fail_reconciled_terminal_result")
-            .expect("drop trigger");
-        let recovered = journal
-            .reconcile_external_with_revision(
-                &key,
-                &command,
-                AppliedResourceRevision {
-                    resource_type: "user",
-                    resource_key: "alice",
-                    revision: 7,
-                },
-                b"observed",
-                13,
-            )
-            .expect("recover");
-        assert_eq!(recovered.state, CommandState::Succeeded);
-        assert_eq!(journal.applied_revision("user", "alice").unwrap(), Some(7));
         drop(journal);
         cleanup(&path);
     }
@@ -1819,6 +1510,19 @@ mod tests {
 
     #[test]
     fn read_only_database_cannot_accept_a_command() {
+        // Linux effective uid 0 bypasses DAC 0444 file mode bits and can still write to SQLite.
+        if std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .is_some_and(|status| {
+                status.lines().any(|line| {
+                    line.strip_prefix("Uid:")
+                        .and_then(|rest| rest.split_whitespace().nth(1))
+                        == Some("0")
+                })
+            })
+        {
+            return;
+        }
         let path = temporary_path("readonly");
         drop(Journal::open(&path).expect("create"));
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))

@@ -3,7 +3,6 @@ import { expect, test } from "@playwright/test";
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614dd1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614dd2";
 const planId = "019fc0a4-6d92-765c-a8a1-4af556614dd3";
-const approvalId = "019fc0a4-6d92-765c-a8a1-4af556614dd4";
 const operationId = "019fc0a4-6d92-765c-a8a1-4af556614dd5";
 const certificateSecretRefId = "019fc0a4-6d92-765c-a8a1-4af556614dd6";
 const privateKeySecretRefId = "019fc0a4-6d92-765c-a8a1-4af556614dd7";
@@ -218,7 +217,6 @@ test("submits a typed configuration plan and renders a safe diff", async ({
   ).toBeVisible();
   expect(planRequests).toBe(1);
 
-  await page.locator("#config-apply-approval").fill(approvalId);
   await page
     .locator("#config-apply-reason")
     .fill("apply independently approved plan");
@@ -226,7 +224,6 @@ test("submits a typed configuration plan and renders a safe diff", async ({
   await expect
     .poll(() => applied)
     .toEqual({
-      approval_id: approvalId,
       reason: "apply independently approved plan",
     });
 });

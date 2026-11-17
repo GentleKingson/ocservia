@@ -19,7 +19,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
+	telemetry "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -410,7 +410,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 					}
 					return store.ReleaseOperation(ctx, id)
 				}
-				store, err := telemetrywrite.From(tx)
+				store, err := telemetry.FromTransaction(tx)
 				if err != nil {
 					return err
 				}

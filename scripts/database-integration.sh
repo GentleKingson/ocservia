@@ -13,14 +13,10 @@ case "${scope}" in
 esac
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
-require_test_commands go jq setsid ruby python3 curl sha256sum
+require_test_commands go jq setsid python3 curl sha256sum
 require_test_docker
 require_go_race
 bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
-
-UPSTREAM_MANIFEST="${ROOT}/docs/upstream/v4.9-post1.manifest.json"
-EXPECTED_UPSTREAM_RECORD="$(jq -r '[(.repository | sub("^https://github.com/"; "")), .old.ref, .old.commit, .new.ref, .new.commit, .imported_at] | join("|")' "${UPSTREAM_MANIFEST}")"
-EXPECTED_UPSTREAM_ROLLBACK='publication: revert PR15 independently; implementation: stop I14 scheduler/API, reconcile commands, revert PR14, then apply migration 000013 down only when policy and batch data need not be retained'
 
 RUN_ID="${RUN_ID:-database-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
@@ -100,7 +96,7 @@ esac
 assert_current_checkpoint() {
   local container=$1 database=$2 expected_checksum
   expected_checksum="$(sha256sum "${ROOT}/control-plane/migrations/schema.sql" | cut -d' ' -f1)"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*)=1 AND bool_and(epoch=2 AND revision=2 AND checksum=decode('${expected_checksum}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions")" = t
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*)=1 AND bool_and(epoch=2 AND revision=3 AND checksum=decode('${expected_checksum}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions")" = t
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('schema_migrations','schema_snapshot_origin')")" = 0
 }
 
@@ -110,9 +106,7 @@ assert_local_bootstrap_schema() {
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT has_table_privilege('ocservia_app','local_auth_attempts','SELECT,INSERT,UPDATE,DELETE') AND NOT has_table_privilege('ocservia_app','local_auth_attempts','TRUNCATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='local_auth_bootstrap'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT has_table_privilege('ocservia_app','local_auth_bootstrap','SELECT') AND has_table_privilege('ocservia_app','local_auth_bootstrap','INSERT') AND NOT has_table_privilege('ocservia_app','local_auth_bootstrap','UPDATE,DELETE,TRUNCATE')")" = "t"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='local_auth_bootstrap' AND ((column_name='completion_pending' AND data_type='boolean' AND is_nullable='NO' AND column_default='false') OR (column_name='completed_at' AND data_type='timestamp with time zone' AND is_nullable='YES') OR (column_name='approver_identity_id' AND data_type='uuid' AND is_nullable='YES'))")" = "3"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid='local_auth_bootstrap'::regclass AND convalidated AND ((conname='local_initialization_state' AND contype='c') OR (conname='local_auth_bootstrap_approver_identity_id_fkey' AND contype='f' AND confrelid='identities'::regclass AND confdeltype='r'))")" = "2"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT bool_and(has_column_privilege('ocservia_app','local_auth_bootstrap',column_name,'UPDATE') = (column_name IN ('completion_pending','completed_at','approver_identity_id'))) FROM information_schema.columns WHERE table_schema='public' AND table_name='local_auth_bootstrap'")" = "t"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT has_table_privilege('ocservia_app','workspace_admins','SELECT') AND has_table_privilege('ocservia_app','workspace_admins','INSERT') AND NOT has_table_privilege('ocservia_app','workspace_admins','TRUNCATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolbypassrls AND NOT pg_has_role('ocservia_app','ocservia_owner','MEMBER') FROM pg_roles WHERE rolname='ocservia_app'")" = "t"
 }
 
@@ -189,8 +183,8 @@ assert_auth_fixture_cleanup() {
   local container=$1 database=$2
   test "$(docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${database}" -Atc "
     SELECT (SELECT count(*) FROM local_auth_bootstrap)
-      + (SELECT count(*) FROM pg_constraint WHERE conname IN ('test_bootstrap_approver_audit_failure','test_password_change_audit_failure','test_local_user_bootstrap_audit_failure','test_local_user_create_audit_failure','test_local_user_reset_audit_failure','test_auth_audit_failure') OR conname LIKE 'auth_log_%' OR conname LIKE 'auth_oidc_log_%')
-      + (SELECT count(*) FROM role_bindings b JOIN workspaces w ON w.id=b.workspace_id WHERE w.slug LIKE 'local-lifecycle-%' OR w.slug LIKE 'bootstrap-%' OR w.slug LIKE 'auth-safety-%')
+      + (SELECT count(*) FROM pg_constraint WHERE conname IN ('test_password_change_audit_failure','test_auth_audit_failure') OR conname LIKE 'auth_log_%')
+      + (SELECT count(*) FROM workspace_admins a JOIN workspaces w ON w.id=a.workspace_id WHERE w.slug LIKE 'local-lifecycle-%' OR w.slug LIKE 'bootstrap-%' OR w.slug LIKE 'auth-safety-%')
   ")" = 0
 }
 
@@ -232,13 +226,13 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
       "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-migrate-repeat.log" 2>&1
     assert_local_bootstrap_schema "${container}" ocservia
-    for group in regression-postgres regression-outbox regression-fencing regression-auth regression-auth-postgres regression-oidc regression-telemetry backend-policy-config backend-policy-certificates backend-policy-userstate backend-policy-useroperations; do
+    for group in regression-postgres regression-outbox regression-fencing regression-auth regression-auth-postgres regression-telemetry backend-policy-config backend-policy-certificates backend-policy-userstate backend-policy-useroperations; do
       OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
         checked_go_tests "${group}" --select -race -p 1 -parallel 1
     done
     # Deliberate corruption is last, after all current-schema business checks.
     docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-      "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex') WHERE epoch=2 AND revision=2" >/dev/null
+      "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex') WHERE epoch=2 AND revision=3" >/dev/null
     if OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
       "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-checksum-rejected.log" 2>&1; then
       echo 'migration accepted a checksum mismatch' >&2; exit 1
@@ -278,14 +272,14 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   curl --fail --silent "http://127.0.0.1:${api_port}/livez" >/dev/null
   curl --fail --silent "http://127.0.0.1:${api_port}/version" | grep -q '"role":"all"'
   assert_current_checkpoint "${container}" ocservia
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('workspaces','nodes','operations','audit_events','local_slice_jobs','transport_events','enrollment_tokens','node_endpoint_keys','node_capabilities','telemetry_ingest_batches','node_observed_snapshots','node_sessions','telemetry_security_events','telemetry_samples','telemetry_rollups_5m','telemetry_rollups_1h')")" = "16"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('workspaces','nodes','operations','audit_events','local_slice_jobs','transport_events','workspace_admins','node_endpoint_keys','node_capabilities','telemetry_ingest_batches','node_observed_snapshots','node_sessions','telemetry_security_events','telemetry_samples','telemetry_rollups_5m','telemetry_rollups_1h')")" = "16"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('commands','command_attempts','outbox_events','node_command_leases','operation_events')")" = "5"
   assert_local_bootstrap_schema "${container}" ocservia
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='node_bootstrap_tokens'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','node_bootstrap_tokens','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='scheduler_leadership'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='connection_owner_fencing'")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('privd_attestation_enrollment_credentials','node_privd_attestation_keys')")" = "2"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='node_privd_attestation_keys'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='agent_command_results' AND column_name IN ('receipt_verification_status','receipt_failure_reason','privd_attestation_key_id','effect_record_id','effect_sequence','receipt_sha256','privileged_result_proof')) OR (table_name='certificates' AND column_name IN ('csr_receipt_verified_at','csr_receipt_sha256','csr_privd_attestation_key_id','csr_effect_record_id','csr_der_sha256','csr_requested_subject_sha256','issue_certificate_version')))")" = "14"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('transport_event_cursor','transport_event_quarantine')")" = "2"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='transport_event_quarantine'")" = "7"
@@ -293,17 +287,16 @@ for major in "${POSTGRES_MAJORS[@]}"; do
 	test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audit_events' AND column_name IN ('auth_version','event_key_id','event_mac')")" = "3"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='node_sealing_keys'")" = "1"
 	test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='artifact_operations' AND column_name IN ('certificate_version','active_grant_id','active_grant_subject','active_grant_expires_at','consume_grant','consume_sha256','consume_size','consume_actor_id','consume_session_id','consume_request_id')")" = "10"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('approval_authority_resources','approval_batch_items')")" = "2"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='approval_requests' AND column_name='authority_snapshot_at') OR (table_name='role_bindings' AND column_name='approval_id') OR (table_name='artifact_operations' AND column_name='approval_id') OR (table_name='certificates' AND column_name='version'))")" = "4"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='certificates' AND column_name='version'")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('agent_rollouts','agent_rollout_nodes','agent_upgrade_operations','node_agent_upgrade_results')")" = "4"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='node_trust_convergence'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','node_trust_convergence','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='node_config_state' AND column_name='desired_revision'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('node_config_state','config_plans','config_apply_operations')")" = "3"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('certificates','artifact_operations','secret_provider_refs')")" = "3"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='security_alerts' AND column_name IN ('node_id','resource_type','resource_id')")" = "3"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%config_plan%' FROM pg_constraint WHERE conrelid='commands'::regclass AND conname='commands_payload_type_check'")" = "t"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%config_plan%' AND pg_get_constraintdef(oid) LIKE '%config_apply%' FROM pg_constraint WHERE conrelid='commands'::regclass AND conname='commands_payload_type_check'")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%certificate_csr%' AND pg_get_constraintdef(oid) LIKE '%certificate_p12%' AND pg_get_constraintdef(oid) LIKE '%certificate_revoke%' FROM pg_constraint WHERE conrelid='commands'::regclass AND conname='commands_payload_type_check'")" = "t"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%object%' FROM pg_constraint WHERE conrelid='approval_requests'::regclass AND conname='approval_requests_request_summary_check'")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','node_config_state','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','config_plans','SELECT,INSERT')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','config_apply_operations','SELECT,INSERT,UPDATE')")" = "t"
@@ -312,9 +305,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','secret_provider_refs','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='config_apply_operations' AND indexname='config_apply_operations_one_active_node_idx' AND indexdef LIKE '%UNIQUE%unknown%'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('desired_users','desired_groups','observed_users','observed_groups')")" = "4"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('desired_user_policies','user_policy_mutations','observed_user_usage','user_usage_cursors','scheduler_leases','user_policy_enforcements','batch_operations','batch_operation_items','upstream_sync_records')")" = "9"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT concat_ws('|',repository,old_ref,old_commit,new_ref,new_commit,to_char(synced_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM upstream_sync_records")" = "${EXPECTED_UPSTREAM_RECORD}"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT rollback_ref FROM upstream_sync_records")" = "${EXPECTED_UPSTREAM_ROLLBACK}"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('desired_user_policies','user_policy_mutations','observed_user_usage','user_usage_cursors','scheduler_leadership','user_policy_enforcements')")" = "6"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'operations' AND column_name = 'command_id' AND data_type = 'uuid'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'agent_command_results' AND column_name = 'semantic_payload_hash_version' AND data_type = 'smallint'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_command_results'::regclass AND conname = 'agent_command_results_semantic_payload_hash_version_supported'")" = "1"
@@ -368,15 +359,11 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates -p 1 ./internal/certificates -run Integration)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./internal/approvals ./internal/audit ./internal/privdattestation -run Integration -count=1)
-  # Local/RBAC fixtures retain the current production runtime privileges.
-  # Clone before any auth fixture writes. Lifecycle bootstrap requires no prior
-  # singleton/admin grants; its audit constraints must never affect other suites.
-  clone_database "${container}" ocservia_latest ocservia_lifecycle
+    go test -p 1 ./internal/audit ./internal/privdattestation -run Integration -count=1)
   clone_database "${container}" ocservia_latest ocservia_auth_backend
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_auth_backend}" \
     OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_auth_backend}" \
-    checked_go_tests backend-auth -p 1 -parallel 1 ./internal/api -run '^Test(AuthenticationBackend(HTTP|Safety|Legacy)|LocalResetApprovalPrecheckBackendHTTP)Integration$'
+    checked_go_tests backend-auth -p 1 -parallel 1 ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety)Integration$'
   assert_auth_fixture_cleanup "${container}" ocservia_auth_backend
   docker exec "${container}" dropdb -U ocservia_owner ocservia_auth_backend
   clone_database "${container}" ocservia_latest ocservia_policy_api
@@ -385,22 +372,18 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     checked_go_tests backend-policy-api --select -race -p 1 -parallel 1
   docker exec "${container}" dropdb -U ocservia_owner ocservia_policy_api
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
-    checked_go_tests database-auth -p 1 -parallel 1 ./internal/rbac ./internal/auth -run Integration
+    checked_go_tests database-auth -p 1 -parallel 1 ./internal/auth -run Integration
   assert_auth_fixture_cleanup "${container}" ocservia_latest
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     checked_go_tests database-api -p 1 -parallel 1 ./internal/api \
-      -run '^(TestLocalAccountHTTPSharedLimitsIntegration|TestAuthHTTPLoginLogoutIntegration|TestAuthLogSessionFailureIntegration|TestAuthenticationBackendHTTPIntegration)$'
+      -run '^(TestLocalAccountHTTPSharedLimitsIntegration|TestAuthHTTPLoginLogoutIntegration|TestAuthLogSessionFailureIntegration)$'
   assert_auth_fixture_cleanup "${container}" ocservia_latest
-  OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_lifecycle}" \
-    OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_lifecycle}" \
-    checked_go_tests database-lifecycle -p 1 -parallel 1 ./internal/api -run '^TestLocalUserLifecycleIntegration$'
-  assert_auth_fixture_cleanup "${container}" ocservia_lifecycle
-  docker exec "${container}" dropdb -U ocservia_owner ocservia_lifecycle
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-upgrades --select -p 1)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
-    go test -p 1 ./internal/api -run '^TestApprovalDetailRequiresEveryAuthorityScopeIntegration$|^TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations$' -count=1)
-  OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=scheduler \
+    go test -p 1 ./internal/api -run '^TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations$' -count=1)
+  OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
+    OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
     >"${TMP_ROOT}/pg${major}-audit-checkpoint.log" 2>&1 &
   checkpoint_pid=$!
   PIDS+=("${checkpoint_pid}")
@@ -449,7 +432,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # Isolate HTTP readiness from the scheduler's intentional fatal-error exit.
   # The all-role process and scheduler are exercised separately above.
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
-    OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=api \
+    OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
     >"${TMP_ROOT}/pg${major}-repeat.log" 2>&1 &
   pid=$!
   PIDS+=("${pid}")

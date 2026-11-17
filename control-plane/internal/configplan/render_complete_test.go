@@ -70,7 +70,6 @@ func TestCompleteRenderRejectsOldNodesAndIncompleteOrUnsafeCandidates(t *testing
 		}},
 		{"duplicate", func(i *RenderInput) { i.Template.Directives = append(i.Template.Directives, i.Template.Directives[0]) }},
 		{"arbitrary auth path", func(i *RenderInput) { i.Template.Directives[0].Value = "plain[passwd=/tmp/passwd]" }},
-		{"variable expansion", func(i *RenderInput) { i.NodeVariables = map[string]string{"PORT": "443"} }},
 		{"unresolved TLS", func(i *RenderInput) { i.Template.Directives[7].SecretRef.Provider = "node" }},
 		{"path in public binding", func(i *RenderInput) { i.Template.Directives[7].SecretRef.Key = "/etc/ocserv/key" }},
 		{"unsafe TLS version", func(i *RenderInput) { i.Template.Directives[7].SecretRef.Version = "../key" }},

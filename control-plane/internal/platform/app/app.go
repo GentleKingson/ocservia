@@ -18,7 +18,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	platformtelemetry "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
@@ -65,7 +64,7 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 	defer func() {
 		runErr = life.close(runErr)
 		stopPprof()
-		if cfg.RunsAPI() && errors.Is(runErr, context.Canceled) {
+		if errors.Is(runErr, context.Canceled) {
 			logger.Info("control plane stopped", "role", cfg.Role)
 		}
 	}()
@@ -111,17 +110,6 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 			return fmt.Errorf("configure API transport: %w", err)
 		}
 	}
-	// Roles without the lease issue bindings for the fence transportd
-	// registered, validated against the database ownership authority, so
-	// administrative operations stay owner-fenced without a second lease
-	// holder and a stale registered fence can never be re-signed.
-	if fenceExecutor == nil && controlTransport != nil {
-		observer, observerErr := ownersession.NewObserverBackend(backend, controlTransport, commandSigner)
-		if observerErr != nil {
-			return fmt.Errorf("configure owner fence observer: %w", observerErr)
-		}
-		fenceExecutor = observer
-	}
 	var certificateService *certificates.Service
 	var publicKeySigner *certificates.HTTPSigner
 	if cfg.CertificateSignerURL != "" {
@@ -135,47 +123,42 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 		certificateService = certificates.NewBackend(backend, operationService, nil, nil, nil, nil)
 	}
 	certificateService.EnableOwnerFencing(fenceExecutor)
-	if cfg.RunsScheduler() {
-		identity, identityErr := coordination.NewIdentity()
-		if identityErr != nil {
-			return fmt.Errorf("mint scheduler identity: %w", identityErr)
-		}
-		// The leadership lease spans the whole maintenance session and is
-		// renewed in the background; losing renewal cancels the session
-		// context, which aborts fenced transactions before they can commit.
-		leader := coordination.NewRunnerBackend(backend, identity, 15*time.Second, 5*time.Second, logger)
+	identity, identityErr := coordination.NewIdentity()
+	if identityErr != nil {
+		return fmt.Errorf("mint scheduler identity: %w", identityErr)
+	}
+	// The leadership lease spans the whole maintenance session and is
+	// renewed in the background; losing renewal cancels the session
+	// context, which aborts fenced transactions before they can commit.
+	leader := coordination.NewRunnerBackend(backend, identity, 15*time.Second, 5*time.Second, logger)
 
-		history, err := historyretention.New(backend, cfg.HistoryRetention)
-		if err != nil {
-			return err
-		}
-		work := maintenanceWork{
-			users:        userOperationsService.RunOnce,
-			rollouts:     operationService.AdvanceAgentRollouts,
-			telemetry:    telemetryService.Maintain,
-			certificates: certificateService.Maintain,
-			audit:        auditManager.CheckpointAll,
-			retention: func(ctx context.Context) error {
-				if err := history.RunOnce(ctx); err != nil {
-					return err
-				}
-				return auditManager.CompactDetails(ctx, cfg.HistoryRetention.AuditDays)
-			},
-		}
-		if cfg.TestSchedulerEvidence {
-			work.evidence = func(ctx context.Context, session *coordination.Session) error {
-				return coordination.RecordMaintenanceCompletion(ctx, backend, session)
+	history, err := historyretention.New(backend, cfg.HistoryRetention)
+	if err != nil {
+		return err
+	}
+	work := maintenanceWork{
+		users:        userOperationsService.RunOnce,
+		rollouts:     operationService.AdvanceAgentRollouts,
+		telemetry:    telemetryService.Maintain,
+		certificates: certificateService.Maintain,
+		audit:        auditManager.CheckpointAll,
+		retention: func(ctx context.Context) error {
+			if err := history.RunOnce(ctx); err != nil {
+				return err
 			}
+			return auditManager.CompactDetails(ctx, cfg.HistoryRetention.AuditDays)
+		},
+	}
+	if cfg.TestSchedulerEvidence {
+		work.evidence = func(ctx context.Context, session *coordination.Session) error {
+			return coordination.RecordMaintenanceCompletion(ctx, backend, session)
 		}
-		life.start("run telemetry maintenance", func(ctx context.Context) error {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			return runScheduler(ctx, leader, ticker.C, work, cfg.UserOperationConcurrency, logger)
-		})
 	}
-	if !cfg.RunsAPI() {
-		return life.wait()
-	}
+	life.start("run telemetry maintenance", func(ctx context.Context) error {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		return runScheduler(ctx, leader, ticker.C, work, cfg.UserOperationConcurrency, logger)
+	})
 
 	services := httpServices{
 		modules:    api.Modules{Nodes: telemetryService, ConfigPlans: configplan.NewBackend(backend, operationService), UserOperations: userOperationsService, Certificates: certificateService},

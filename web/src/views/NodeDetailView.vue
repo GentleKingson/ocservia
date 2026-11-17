@@ -12,7 +12,6 @@ import {
   ShieldOff,
 } from "@lucide/vue";
 import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
-import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
@@ -42,7 +41,6 @@ import UserPolicyDialog from "../components/nodes/UserPolicyDialog.vue";
 import { useFleetStore } from "../shared/fleet";
 import { operationTone } from "../features/operations/state-tone";
 import { operationStatusKey } from "../shared/operation-status";
-import { workspaceChangedEvent } from "../api/workspace";
 import { createNodeWorkflow } from "../features/node-workflow";
 
 const route = useRoute();
@@ -176,12 +174,6 @@ async function selectRouteNode(): Promise<void> {
     fleet.selectionError === "notFound" ? "not-found" : "unavailable";
 }
 
-function refreshForWorkspace(): void {
-  closeNodeDialogs();
-  void selectRouteNode();
-}
-
-useEventListener(window, workspaceChangedEvent, refreshForWorkspace);
 onMounted(() => {
   fleet.start();
   void selectRouteNode();

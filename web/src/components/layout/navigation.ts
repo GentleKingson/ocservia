@@ -1,22 +1,16 @@
 import {
   Boxes,
-  FlaskConical,
   LayoutDashboard,
   ListChecks,
   ScrollText,
   Settings,
 } from "@lucide/vue";
 
-import { developmentRuntime } from "../../shared/routes";
-
 export const navigationLinks = [
   { to: "/", label: "overview", icon: LayoutDashboard },
   { to: "/nodes", label: "nodes", icon: Boxes },
   { to: "/operations", label: "operations", icon: ListChecks },
   { to: "/audit", label: "audit", icon: ScrollText },
-  ...(developmentRuntime
-    ? [{ to: "/dev", label: "development", icon: FlaskConical }]
-    : []),
   { to: "/settings", label: "settings", icon: Settings },
 ];
 

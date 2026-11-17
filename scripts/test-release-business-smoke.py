@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Focused checks for Business Smoke and manual integration."""
+import base64
 import hashlib
 import importlib.util
 import json
 import os
-import subprocess
 from pathlib import Path
+import subprocess
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -26,8 +27,8 @@ def main():
             business = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(business)
 
-        # Bootstrap needs one administrator. A role-less test identity proves
-        # removing the second approver did not turn authentication into authority.
+        # Single-admin workspace isolation checks refuse wrong password,
+        # anonymous access, and foreign workspaces.
         (work / 'private/requester-password').write_text('isolated-test-admin-password')
         cookie = SimpleNamespace(name='__Host-ocservia_session', secure=True, path='/')
         with patch.object(business, 'api') as requests, \
@@ -37,13 +38,9 @@ def main():
             business.local()
             calls = requests.call_args_list
             assert not (work / 'private/reader-password').exists()
-            reader_create = next(call for call in calls if call.args[0] == 'local-users')
-            reader_login = next(call for call in calls if call.kwargs.get('role') == 'reader' and call.args[0] == 'auth/login')
-            assert reader_create.args[1]['password'] == reader_login.args[1]['password']
             assert calls[0].args[1]['username'] == 'business-test-requester'
-            assert all('approval' not in call.args[0] for call in calls)
-            assert any(call.args[0] == 'nodes' and call.kwargs.get('role') == 'reader'
-                       and call.kwargs.get('status') == 403 for call in calls)
+            assert all('local-users' not in call.args[0] and 'approval' not in call.args[0] for call in calls)
+            assert any(call.args[0] == 'nodes' and call.kwargs.get('status') == 403 for call in calls)
             record.assert_called_once_with('local_auth_and_workspace_isolation', identity_ids=['administrator-id'])
 
         # Exercise the driver's real profile branch with external commands
@@ -72,7 +69,7 @@ certutil() { :; }
             expected = (['api:certificate', 'checkpoint:real_certificate_lifecycle'] if profile == 'extended' else [])
             expected += ['api:browser_prepare', 'browser', 'api:browser_verify', 'checkpoint:real_browser_subset']
             if profile == 'smoke':
-                expected += ['api:smoke_user', 'checkpoint:approved_config_apply_and_vpn_user']
+                expected += ['api:smoke_user', 'checkpoint:config_apply_and_vpn_user']
             assert result.stdout.splitlines() == expected
             for failure in ('BROWSER_EXIT', 'VERIFY_EXIT'):
                 failed = subprocess.run(['bash', '-c', shell + browser_stage, 'browser-stage', str(root), str(work), profile],
@@ -81,14 +78,14 @@ certutil() { :; }
                 assert failed.returncode == 9
                 assert 'checkpoint:real_browser_subset' not in failed.stdout
 
-        # Only the 1.6.0 opt-in adds rollback to Smoke; existing release profiles
-        # keep their stages. Neither failed rollback nor a failed fresh VPN can pass.
+        # Extended runs rollback and supplemental checks while smoke focuses on
+        # initial config apply and VPN connectivity.
         vpn_stage = driver.split('next_stage business_vpn\n', 1)[1].split('if [[ "$BUSINESS_RUN_RESILIENCE"', 1)[0]
         vpn_shell = shell + '\npython3() { echo "api:$2"; [[ "$2" != "${FAIL_PHASE:-}" ]]; }\n'
         for profile, package in [('smoke', 'distribution'), ('smoke', 'backport-1.5.0'),
-                                 ('smoke', 'source-1.6.0'), ('extended', 'backport-1.5.0')]:
+                                 ('extended', 'backport-1.5.0')]:
             expected = ['api:vpn_after_config_apply', 'checkpoint:real_vpn_after_config_apply']
-            rollback = profile == 'extended' or package == 'source-1.6.0'
+            rollback = profile == 'extended'
             if rollback:
                 expected += ['api:configuration', 'checkpoint:config_plan_automatic_rollback',
                              'api:vpn_after_rollback', 'checkpoint:real_vpn_after_rollback']
@@ -373,7 +370,6 @@ certutil() { :; }
         ]
         rollout_state = {'agent-rollouts/rollout': {
                              'id': 'rollout', 'state': 'succeeded', 'target_version': '0.0.1', 'stop_on_failure': True,
-                             'approval_id': None,
                              'nodes': [{'node_id': 'node', 'batch': 0, 'state': 'succeeded', 'operation_id': 'upgrade'}]},
                          'nodes/node': {'connection_state': 'online', 'agent_version': '0.0.1'}}
 
@@ -390,7 +386,6 @@ certutil() { :; }
             ('csp', [rollout_entries[0], {**rollout_entries[1], 'flow_violations': 1}], {}),
             ('csp report-only', [rollout_entries[0], {**rollout_entries[1], 'control': ['script-src-elem/report', 'img-src/report']}], {}),
             ('paused', rollout_entries, {'agent-rollouts/rollout': {**rollout_state['agent-rollouts/rollout'], 'state': 'paused'}}),
-            ('unexpected approval dependency', rollout_entries, {'agent-rollouts/rollout': {**rollout_state['agent-rollouts/rollout'], 'approval_id': 'unexpected'}}),
         ]
         for label, entries, overrides in bad_rollouts:
             rollout_file.write_text(json.dumps(entries))
@@ -437,28 +432,32 @@ certutil() { :; }
             assert [call.args[0] for call in record.call_args_list] == [
                 'real_vpn_after_config_apply', 'real_vpn_after_rollback']
 
-        # The bootstrap source is protected and consumed by the installer; the
-        # private copy only feeds redaction. Binding evidence must be exact.
-        token = 'obt1_' + 'A' * 43
+        # The installation token is oit1_ while node_bootstrap_tokens stores the
+        # sha256 digest of the derived obt2_ child token and activates the node.
+        token = 'oit1_' + base64.urlsafe_b64encode(b'https://localhost').decode().rstrip('=') + '.' + base64.urlsafe_b64encode(b'A' * 32).decode().rstrip('=')
         with patch.dict(os.environ, env), \
                 patch.object(business, 'api', return_value={'id': 'token-id', 'token': token}) as requests, \
                 patch.object(business, 'sql', return_value='t'), patch.object(business, 'record') as record:
             business.bootstrap_token()
+            assert requests.call_args.args[1]['installation'] is True
             assert 'expected_endpoint_id' not in requests.call_args.args[1]
-            source = work / 'bootstrap/node-bootstrap-token'
+            source = work / 'bootstrap/join-token'
             assert source.read_text() == token and source.stat().st_mode & 0o777 == 0o600
             assert (work / 'private/bootstrap-token').read_text() == token
             record.assert_called_once_with('bootstrap_token_created_unbound', token_id='token-id')
-        binding = {'token_hash': hashlib.sha256(token.encode()).hexdigest(), 'bound_endpoint': 'e' * 64,
+        child_digest = hashlib.sha256(b'ocservia/install-enrollment/v1\x00' + token.encode()).digest()
+        child_token = 'obt2_' + base64.urlsafe_b64encode(child_digest).decode().rstrip('=')
+        binding = {'token_hash': hashlib.sha256(child_token.encode()).hexdigest(), 'bound_endpoint': 'e' * 64,
                    'unbound_at_creation': True, 'consumed_node_id': 'node', 'consumed': True}
         verify_env = {**env, 'OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID': 'e' * 64}
-        for label, row, status in [('accepted', binding, 'pending'),
-                                   ('other endpoint', {**binding, 'bound_endpoint': 'f' * 64}, 'pending'),
-                                   ('unconsumed', {**binding, 'consumed': False}, 'pending'),
-                                   ('created bound', {**binding, 'unbound_at_creation': False}, 'pending'),
-                                   ('active', binding, 'active')]:
+        for label, row, status, privd_count in [('accepted', binding, 'active', '1'),
+                                                ('other endpoint', {**binding, 'bound_endpoint': 'f' * 64}, 'active', '1'),
+                                                ('unconsumed', {**binding, 'consumed': False}, 'active', '1'),
+                                                ('created bound', {**binding, 'unbound_at_creation': False}, 'active', '1'),
+                                                ('pending', binding, 'pending', '1'),
+                                                ('no privd key', binding, 'active', '0')]:
             with patch.dict(os.environ, verify_env), \
-                    patch.object(business, 'sql', side_effect=[json.dumps(row), status, 'e' * 64]), \
+                    patch.object(business, 'sql', side_effect=[json.dumps(row), status, 'e' * 64, privd_count]), \
                     patch.object(business, 'record') as record:
                 try:
                     business.bootstrap_verify()
@@ -467,7 +466,7 @@ certutil() { :; }
                     record.assert_not_called()
                 else:
                     assert label == 'accepted', 'bootstrap evidence accepted: ' + label
-                    assert record.call_args.args[0] == 'bootstrap_token_consumed_and_bound_pending'
+                    assert record.call_args.args[0] == 'bootstrap_token_consumed_and_bound_active'
 
         # Revocation passes only on synchronously applied trust, a closed and not readmitted
         # session, and old authority that leaves privd untouched; a 503 or a
@@ -545,7 +544,7 @@ certutil() { :; }
 
         with patch.object(business, 'run', side_effect=[
                 'ocservia-agent.service loaded active running Ocservia Agent\n'
-                'ocservia-agent-retention.timer loaded inactive dead Retention timer\n', '[]']):
+                'ocservia-privd.service loaded inactive dead Ocservia privd\n', '[]']):
             native = business.uninstall_native()
             assert native['units'][0]['active'] == 'active'
             assert native['units'][1]['active'] == 'inactive'
@@ -585,7 +584,7 @@ python3() { echo "api:$2"; return "$API_EXIT"; }
                 active = not state['removed']
                 return {'processes': ['42'] if active or fault == 'process' else [],
                         'units': [{'unit': unit, 'active': 'active' if active or fault == 'timer' else 'inactive'}
-                                  for unit in ('ocservia-agent.service', 'ocservia-privd.service', 'ocservia-agent-retention.timer')]}
+                                  for unit in ('ocservia-agent.service', 'ocservia-privd.service')]}
 
             def terminal_run(*args):
                 if args[:3] == ('sudo', 'apt-get', 'remove'):

@@ -8,9 +8,7 @@ use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
 use iroh::endpoint::{QuicTransportConfig, RelayMode, VarInt, presets};
-use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, SecretKey, TransportAddr, Watcher,
-};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, SecretKey};
 use ocservia_agent::{
     CommandContext, CommandError, CommandExecutor, ExternalEffectObservation, ExternalPreparation,
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
@@ -54,7 +52,6 @@ const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
 const ENROLL_ALPN: &[u8] = b"ocserv-platform/enroll/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_FENCING_CAPABILITY: &str = "ocserv.fencing.v2";
-const RELAY_FAILOVER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const ARTIFACT_FRAME_MASK: u32 = 3 << 30;
 
 #[tokio::main]
@@ -63,10 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
     ocservia_agent::ensure_unprivileged(rustix::process::geteuid().as_raw())?;
-    if stage_rebind_if_requested()? {
-        return Ok(());
-    }
-    let mut config = parse_args()?;
+    let config = parse_args()?;
     if prepare_enrollment_if_requested(&config)? {
         return Ok(());
     }
@@ -77,18 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if run_one_shot_mode(&config).await? {
         return Ok(());
     }
-    let binding = ocservia_command_authorization::local_binding::LocalBinding::load_active()?;
-    let command_keys = if let Some(binding) = &binding {
-        apply_local_binding(&mut config, binding)?;
-        Some(ControllerCommandKeyring::new(vec![binding.command_key])?)
-    } else {
-        load_controller_command_keys(&config)?
-    };
+    let command_keys = load_controller_command_keys(&config)?;
     let relay_tls_roots = std::sync::Arc::new(load_relay_tls_roots(&config)?);
     let mut journal = Journal::open(&config.journal)?;
-    if let Some(binding) = &binding {
-        journal.bind_authority(binding.node_id.as_bytes(), &binding.controller)?;
-    }
     let mut command_executor = CommandExecutor::new(Journal::open(&config.journal)?);
     let privd = PrivdClient::new(config.privd_socket, Duration::from_secs(5))?;
     // The startup snapshot is a health gate: it fails fast when privd or the
@@ -114,15 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let node_id = config
         .node_id
         .ok_or_else(|| invalid("--node-id is required"))?;
-    let identity = if let Some(binding) = &binding {
-        ocservia_agent_identity::Identity::load_existing(
-            &config.identity_dir,
-            controller,
-            EndpointId::from_bytes(&binding.endpoint)?,
-        )?
-    } else {
-        ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?
-    };
+    let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
     let transport = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(u32::try_from(MAX_WRITE_QUEUE)?))
         .build();
@@ -211,25 +188,6 @@ fn prepare_enrollment_if_requested(config: &Config) -> Result<bool, io::Error> {
     Ok(true)
 }
 
-fn stage_rebind_if_requested() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let args: Vec<_> = env::args().skip(1).collect();
-    if args.first().map(String::as_str) != Some("--stage-rebind") {
-        return Ok(false);
-    }
-    if args.len() != 6 {
-        return Err(invalid("--stage-rebind requires source-dir target-dir Agent-EndpointID source-Controller target-Controller").into());
-    }
-    let identity = ocservia_agent_identity::Identity::stage_rebind(
-        Path::new(&args[1]),
-        Path::new(&args[2]),
-        args[3].parse()?,
-        args[4].parse()?,
-        args[5].parse()?,
-    )?;
-    println!("{}", identity.endpoint_id());
-    Ok(true)
-}
-
 async fn run_one_shot_mode(
     config: &Config,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
@@ -261,7 +219,6 @@ async fn enroll_agent(
         .ok_or_else(|| invalid("--enrollment-environment is required"))?;
     let token = read_enrollment_token(token_file)?;
     let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
-    let keep_relays_connected = keep_dedicated_relays_connected(&config.relay_mode);
     let endpoint = with_relay_tls_roots(
         Endpoint::builder(presets::N0),
         load_relay_tls_roots(config)?,
@@ -270,12 +227,11 @@ async fn enroll_agent(
     .relay_mode(config.relay_mode.clone())
     .clear_address_lookup()
     .dns_resolver(system_dns_resolver())
-    .keep_relays_connected(keep_relays_connected)
     .bind()
     .await?;
     let connection = endpoint
         .connect(
-            controller_dial_target(controller, &config.relay_mode, &endpoint),
+            controller_dial_target(controller, &config.relay_mode),
             ENROLL_ALPN,
         )
         .await?;
@@ -344,10 +300,6 @@ async fn exchange_message<M: Message, R: Message + Default>(
     Ok(response)
 }
 
-fn keep_dedicated_relays_connected(relay_mode: &RelayMode) -> bool {
-    matches!(relay_mode, RelayMode::Custom(relays) if relays.len() >= 2)
-}
-
 struct SessionContext<'a> {
     node_id: Uuid,
     endpoint_id: EndpointId,
@@ -393,6 +345,20 @@ impl ActiveSessionAuthority {
             } => Some((grant, connection_fence)),
         }
     }
+    fn name(&self) -> &'static str {
+        match self {
+            Self::SignedReadOnlyV11(_) => "signed_read_only_v1_1",
+            Self::FencedV11 { .. } => "fenced_v1_1",
+        }
+    }
+
+    fn capability_count(&self) -> usize {
+        self.grant().negotiated_capabilities.len()
+    }
+
+    fn expires_at_unix_seconds(&self) -> i64 {
+        self.grant().expires_at_unix_seconds
+    }
 }
 
 fn fenced_artifact_authority(
@@ -408,50 +374,15 @@ fn fenced_artifact_authority(
         .ok_or_else(|| invalid("signed read-only session received an artifact stream"))
 }
 
-enum AgentSessionMode {
-    ReadOnly {
-        negotiated_capabilities: HashSet<String>,
-    },
-    AuthorizedV11(ActiveSessionAuthority),
-}
-
-impl AgentSessionMode {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::ReadOnly { .. } => "read_only_v1_0",
-            Self::AuthorizedV11(ActiveSessionAuthority::SignedReadOnlyV11(_)) => {
-                "signed_read_only_v1_1"
-            }
-            Self::AuthorizedV11(ActiveSessionAuthority::FencedV11 { .. }) => "fenced_v1_1",
-        }
-    }
-
-    fn capability_count(&self) -> usize {
-        match self {
-            Self::ReadOnly {
-                negotiated_capabilities,
-            } => negotiated_capabilities.len(),
-            Self::AuthorizedV11(authority) => authority.grant().negotiated_capabilities.len(),
-        }
-    }
-
-    fn expires_at_unix_seconds(&self) -> Option<i64> {
-        match self {
-            Self::ReadOnly { .. } => None,
-            Self::AuthorizedV11(authority) => Some(authority.grant().expires_at_unix_seconds),
-        }
-    }
-}
-
 async fn wait_for_session_expiry(
-    session_mode: &AgentSessionMode,
+    authority: &ActiveSessionAuthority,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(expires_at) = session_mode.expires_at_unix_seconds() {
-        let lifetime = u64::try_from(expires_at.saturating_sub(unix_seconds()?))?;
-        tokio::time::sleep(Duration::from_secs(lifetime)).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
+    let lifetime = u64::try_from(
+        authority
+            .expires_at_unix_seconds()
+            .saturating_sub(unix_seconds()?),
+    )?;
+    tokio::time::sleep(Duration::from_secs(lifetime)).await;
     Ok(())
 }
 
@@ -472,8 +403,6 @@ fn supported_capabilities() -> Vec<String> {
             "ocserv.service.reload",
             "ocserv.users.write",
             "ocserv.groups.write",
-            "ocserv.config.plan",
-            "ocserv.config.apply",
             "ocserv.config.complete.plan",
             "ocserv.config.complete.apply",
             "config.auth",
@@ -559,47 +488,28 @@ async fn connect_once(
     if response.result != i32::from(HandshakeResult::Accepted) {
         return Err(invalid("controller refused agent handshake").into());
     }
-    let session_mode = negotiate_and_activate_session(&response, &supported_capabilities, session)?;
+    let session_authority =
+        negotiate_and_activate_session(&response, &supported_capabilities, session)?;
     tracing::info!(
         controller = %controller.id,
-        session_mode = session_mode.name(),
-        negotiated_capabilities = session_mode.capability_count(),
+        session_mode = session_authority.name(),
+        negotiated_capabilities = session_authority.capability_count(),
         "agent session accepted"
     );
     let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
-    // Dedicated-relay health is rechecked while the session is idle so a dead
-    // relay is failed over before the QUIC idle timeout notices the loss.
-    let mut relay_watchdog = tokio::time::interval(RELAY_FAILOVER_POLL_INTERVAL);
-    relay_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let session_expiry = wait_for_session_expiry(&session_mode);
+    let session_expiry = wait_for_session_expiry(&session_authority);
     tokio::pin!(session_expiry);
     let mut sequence = 0_u64;
     loop {
         tokio::select! {
             _ = connection.closed() => return Ok(()),
-            _ = relay_watchdog.tick() => {
-                let Some(failover) = relay_failover_plan(endpoint, &connection) else {
-                    continue;
-                };
-                tracing::warn!(
-                    failed_relay = %failover.failed_relay,
-                    healthy_relays = ?failover.healthy_relays,
-                    "controller session relay failed; redialing over the healthy standby"
-                );
-                connection.close(VarInt::from_u32(0x10b), b"relay failover redial");
-                return Err(failover.into());
-            },
             expiry = &mut session_expiry => {
                 expiry?;
                 return Err(invalid("Controller session grant expired").into());
             },
             stream = connection.accept_bi() => {
-                let (send,recv)=stream?;
-                let AgentSessionMode::AuthorizedV11(authority) = &session_mode else {
-                    connection.close(VarInt::from_u32(0x107), b"read-only session stream denied");
-                    return Err(invalid("read-only session received a command or artifact stream").into());
-                };
-                handle_command_stream(send,recv,session,authority).await?;
+                let (send, recv) = stream?;
+                handle_command_stream(send, recv, session, &session_authority).await?;
             },
             _ = heartbeat.tick() => {
                 let observations=session.privd.snapshot().await?;
@@ -627,8 +537,8 @@ fn negotiate_and_activate_session(
     response: &SessionHandshakeResponse,
     supported_capabilities: &[String],
     session: &mut SessionContext<'_>,
-) -> Result<AgentSessionMode, Box<dyn std::error::Error + Send + Sync>> {
-    let session_mode = negotiate_session_mode(
+) -> Result<ActiveSessionAuthority, Box<dyn std::error::Error + Send + Sync>> {
+    let authority = negotiate_session_mode(
         response,
         supported_capabilities,
         session.node_id,
@@ -637,24 +547,19 @@ fn negotiate_and_activate_session(
     )?;
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     activate_session_connection_fence(
-        &session_mode,
+        &authority,
         session.journal,
         session.fence_epoch_floor,
         i64::try_from(now.as_secs())?,
         now.subsec_nanos(),
     )?;
-    if let Some(grant) = &response.session_grant {
-        session
-            .journal
-            .record_verified_session_grant(&grant.encode_to_vec())?;
-    }
-    Ok(session_mode)
+    Ok(authority)
 }
 
 /// Builds the production Agent endpoint factory.
 ///
 /// The factory is indirect so tests can pin relay-only transports while
-/// production keeps the configured preset, dedicated relays, and relay CA
+/// production keeps the configured preset, dedicated relay, and relay CA
 /// roots.
 fn agent_endpoint_factory(
     secret_key: SecretKey,
@@ -668,13 +573,11 @@ fn agent_endpoint_factory(
         let transport = transport.clone();
         let relay_tls_roots = relay_tls_roots.clone();
         Box::pin(async move {
-            let keep_relays_connected = keep_dedicated_relays_connected(&relay_mode);
             with_relay_tls_roots(Endpoint::builder(presets::N0), relay_tls_roots)
                 .secret_key(secret_key)
                 .relay_mode(relay_mode)
                 .clear_address_lookup()
                 .dns_resolver(system_dns_resolver())
-                .keep_relays_connected(keep_relays_connected)
                 .transport_config(transport)
                 .bind()
                 .await
@@ -690,12 +593,8 @@ type EndpointFactory = Box<
 
 /// Supervises controller sessions for one Agent process.
 ///
-/// The Iroh Endpoint outlives every controller session: `keep_relays_connected`
-/// standbys are Endpoint state and must survive a session redial, so the
-/// Endpoint is rebuilt only when it is actually closed, never between
-/// sessions. A session whose dedicated relay failed while a standby stays
-/// connected is redialed immediately over the healthy relay instead of waiting
-/// for the QUIC idle timeout or a transport-level failure.
+/// The Iroh Endpoint outlives every controller session and is rebuilt only when
+/// it is actually closed, never between sessions.
 async fn supervise_controller_sessions(
     mut bind_endpoint: EndpointFactory,
     controller: EndpointId,
@@ -719,118 +618,30 @@ async fn supervise_controller_sessions(
             }
         }
         let endpoint = endpoint.as_ref().expect("agent endpoint is bound");
-        let target = controller_dial_target(controller, relay_mode, endpoint);
-        let mut relay_failover = false;
+        let target = controller_dial_target(controller, relay_mode);
         match connect_once(endpoint, target, session).await {
             Ok(()) => attempt = 0,
             Err(error) => {
-                if error.downcast_ref::<RelayFailoverError>().is_some() {
-                    relay_failover = true;
-                    tracing::warn!(
-                        error = %error,
-                        "controller session moved to a healthy dedicated relay"
-                    );
-                } else {
-                    tracing::warn!(error = %error, attempt, "controller connection ended");
-                    attempt = attempt.saturating_add(1);
-                }
+                tracing::warn!(error = %error, attempt, "controller connection ended");
+                attempt = attempt.saturating_add(1);
             }
         }
-        let delay = if relay_failover {
-            // The healthy standby is already connected: redial without the
-            // exponential backoff a genuine controller failure deserves.
-            backoff.delay(0, &mut rand::rng())
-        } else {
-            backoff.delay(attempt, &mut rand::rng())
-        };
+        let delay = backoff.delay(attempt, &mut rand::rng());
         tokio::time::sleep(delay).await;
     }
 }
 
-/// Session-end instruction telling the supervisor to redial immediately over
-/// a healthy dedicated standby relay.
-#[derive(Debug)]
-struct RelayFailoverError {
-    failed_relay: RelayUrl,
-    healthy_relays: Vec<RelayUrl>,
-}
-
-impl std::fmt::Display for RelayFailoverError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "controller session relay {} failed while a standby is connected",
-            self.failed_relay
-        )
-    }
-}
-
-impl std::error::Error for RelayFailoverError {}
-
-/// Detects an active session whose selected relay path no longer matches a
-/// healthy home relay.
+/// Builds the controller dial target from the configured dedicated relay.
 ///
-/// Only the home relay's state is publicly observable, but with dedicated
-/// standbys kept hot the relay actor moves the home relay to a connected
-/// standby as soon as the current one fails. A session still riding the
-/// failed relay at that point must be redialed over the new home relay
-/// instead of waiting for the QUIC idle timeout.
-fn relay_failover_plan(
-    endpoint: &Endpoint,
-    connection: &iroh::endpoint::Connection,
-) -> Option<RelayFailoverError> {
-    let home = endpoint.home_relay_status().get().into_iter().next()?;
-    if !home.is_connected() {
-        return None;
-    }
-    let failed_relay = connection
-        .paths()
-        .iter()
-        .find(iroh::endpoint::Path::is_selected)
-        .filter(iroh::endpoint::Path::is_relay)
-        .and_then(|path| match path.remote_addr() {
-            TransportAddr::Relay(url) => Some(url.clone()),
-            _ => None,
-        })?;
-    if home.url() == &failed_relay {
-        return None;
-    }
-    Some(RelayFailoverError {
-        failed_relay,
-        healthy_relays: vec![home.url().clone()],
-    })
-}
-
-/// Builds the controller dial target from the configured dedicated relays.
-///
-/// The `EndpointID` remains the authenticated controller identity. Dedicated
-/// relay URLs are safe addressing hints and keep redial independent of public
-/// address discovery during a relay or network-domain transition. While a
-/// dedicated home relay is connected it becomes the only hint, so a redial
-/// after a relay fault never spends its connect deadline on the failed relay.
-fn controller_dial_target(
-    controller: EndpointId,
-    relay_mode: &RelayMode,
-    endpoint: &Endpoint,
-) -> EndpointAddr {
+/// The `EndpointID` remains the authenticated controller identity. A dedicated
+/// relay URL is a safe addressing hint and keeps redial independent of public
+/// address discovery.
+fn controller_dial_target(controller: EndpointId, relay_mode: &RelayMode) -> EndpointAddr {
     let mut address = EndpointAddr::new(controller);
-    let RelayMode::Custom(relays) = relay_mode else {
-        return address;
-    };
-    let home = endpoint.home_relay_status().get().into_iter().next();
-    if keep_dedicated_relays_connected(relay_mode)
-        && home
-            .as_ref()
-            .is_some_and(iroh::endpoint::RelayStatus::is_connected)
-    {
-        return address.with_relay_url(
-            home.expect("home relay presence was just checked")
-                .url()
-                .clone(),
-        );
-    }
-    for relay in relays.urls::<Vec<_>>() {
-        address = address.with_relay_url(relay);
+    if let RelayMode::Custom(relays) = relay_mode {
+        for relay in relays.urls::<Vec<_>>() {
+            address = address.with_relay_url(relay);
+        }
     }
     address
 }
@@ -840,7 +651,7 @@ fn negotiate_session_mode(
     node_id: Uuid,
     endpoint_id: EndpointId,
     command_keys: &ControllerCommandKeyring,
-) -> Result<AgentSessionMode, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ActiveSessionAuthority, Box<dyn std::error::Error + Send + Sync>> {
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     negotiate_session_mode_at_instant(
         response,
@@ -861,7 +672,7 @@ fn negotiate_session_mode_at(
     endpoint_id: EndpointId,
     command_keys: &ControllerCommandKeyring,
     now_unix_seconds: i64,
-) -> Result<AgentSessionMode, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ActiveSessionAuthority, Box<dyn std::error::Error + Send + Sync>> {
     negotiate_session_mode_at_instant(
         response,
         supported_capabilities,
@@ -881,8 +692,8 @@ fn negotiate_session_mode_at_instant(
     command_keys: &ControllerCommandKeyring,
     now_unix_seconds: i64,
     now_unix_nanos: u32,
-) -> Result<AgentSessionMode, Box<dyn std::error::Error + Send + Sync>> {
-    if response.protocol_major != 1 || response.protocol_minor > 1 {
+) -> Result<ActiveSessionAuthority, Box<dyn std::error::Error + Send + Sync>> {
+    if response.protocol_major != 1 || response.protocol_minor != 1 {
         return Err(invalid("Controller session protocol is unsupported").into());
     }
     let supported = supported_capabilities.iter().collect::<HashSet<_>>();
@@ -894,20 +705,6 @@ fn negotiate_session_mode_at_instant(
             return Err(invalid("Controller negotiated capability set is invalid").into());
         }
         previous = Some(capability);
-    }
-    if response.protocol_minor == 0 {
-        if response.session_grant.is_some()
-            || response.connection_fence.is_some()
-            || response
-                .negotiated_capabilities
-                .iter()
-                .any(|capability| !is_read_only_session_capability(capability))
-        {
-            return Err(invalid("Controller read-only session is invalid").into());
-        }
-        return Ok(AgentSessionMode::ReadOnly {
-            negotiated_capabilities: response.negotiated_capabilities.iter().cloned().collect(),
-        });
     }
     let grant = response
         .session_grant
@@ -951,9 +748,7 @@ fn negotiate_session_mode_at_instant(
         {
             return Err(invalid("Controller mutation session omitted connection fencing").into());
         }
-        return Ok(AgentSessionMode::AuthorizedV11(
-            ActiveSessionAuthority::SignedReadOnlyV11(grant),
-        ));
+        return Ok(ActiveSessionAuthority::SignedReadOnlyV11(grant));
     }
     let fence = response
         .connection_fence
@@ -973,33 +768,27 @@ fn negotiate_session_mode_at_instant(
     {
         return Err(invalid("Controller connection fence authority mismatch").into());
     }
-    Ok(AgentSessionMode::AuthorizedV11(
-        ActiveSessionAuthority::FencedV11 {
-            grant,
-            connection_fence: verified,
-        },
-    ))
+    Ok(ActiveSessionAuthority::FencedV11 {
+        grant,
+        connection_fence: verified,
+    })
 }
 
 /// Verifies and durably records the owner term before a fenced session can
 /// become active. Every accepted handshake is a replacement connection, so
 /// its epoch must be strictly newer than the Agent's retained high-water mark.
 fn activate_session_connection_fence(
-    session_mode: &AgentSessionMode,
+    authority: &ActiveSessionAuthority,
     journal: &mut Journal,
     fence_epoch_floor: &mut u64,
     now_unix_seconds: i64,
     now_unix_nanos: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let verified = match session_mode {
-        AgentSessionMode::ReadOnly { .. }
-        | AgentSessionMode::AuthorizedV11(ActiveSessionAuthority::SignedReadOnlyV11(_)) => {
-            return Ok(());
-        }
-        AgentSessionMode::AuthorizedV11(ActiveSessionAuthority::FencedV11 {
-            connection_fence,
-            ..
-        }) => connection_fence,
+    let verified = match authority {
+        ActiveSessionAuthority::SignedReadOnlyV11(_) => return Ok(()),
+        ActiveSessionAuthority::FencedV11 {
+            connection_fence, ..
+        } => connection_fence,
     };
     if verified.lease_expired(now_unix_seconds, now_unix_nanos) {
         return Err(invalid("Controller connection fence lease has expired").into());
@@ -1322,8 +1111,6 @@ async fn handle_command_stream(
                 | command_envelope::Payload::UserEnable(_)
                 | command_envelope::Payload::UserPasswordRotate(_)
                 | command_envelope::Payload::GroupApply(_)
-                | command_envelope::Payload::ConfigPlan(_)
-                | command_envelope::Payload::ConfigApply(_)
                 | command_envelope::Payload::CompleteConfigPlan(_)
                 | command_envelope::Payload::CompleteConfigApply(_)
                 | command_envelope::Payload::CertificateCsr(_)
@@ -1927,9 +1714,6 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, String,
         command_envelope::Payload::GroupApply(value) => {
             Some(("group", value.group_name.clone(), value.desired_revision))
         }
-        command_envelope::Payload::ConfigApply(value) => {
-            Some(("config", "ocserv.conf".to_owned(), value.desired_revision))
-        }
         command_envelope::Payload::CompleteConfigApply(value) => {
             Some(("config", "ocserv.conf".to_owned(), value.desired_revision))
         }
@@ -1972,10 +1756,7 @@ async fn observe_external_effect(
     // validation can always be retried from the immutable candidate.
     if matches!(
         envelope.payload,
-        Some(
-            command_envelope::Payload::ConfigPlan(_)
-                | command_envelope::Payload::CompleteConfigPlan(_)
-        )
+        Some(command_envelope::Payload::CompleteConfigPlan(_))
     ) {
         return ExternalEffectObservation::Absent;
     }
@@ -2121,9 +1902,6 @@ fn desired_effect_identity(
         )),
         command_envelope::Payload::GroupApply(value) => {
             Some(("group_apply", &value.group_name, value.desired_revision))
-        }
-        command_envelope::Payload::ConfigApply(value) => {
-            Some(("config_apply", "ocserv.conf", value.desired_revision))
         }
         command_envelope::Payload::CompleteConfigApply(value) => {
             Some(("config_apply", "ocserv.conf", value.desired_revision))
@@ -2452,20 +2230,6 @@ struct Config {
     synthetic_barrier_file: Option<PathBuf>,
 }
 
-fn apply_local_binding(
-    config: &mut Config,
-    binding: &ocservia_command_authorization::local_binding::LocalBinding,
-) -> io::Result<()> {
-    config.controller = Some(
-        EndpointId::from_bytes(&binding.controller)
-            .map_err(|_| invalid("binding Controller EndpointID invalid"))?,
-    );
-    config.node_id = Some(binding.node_id);
-    config.identity_dir = binding.agent_directory().join("identity");
-    config.journal = binding.agent_directory().join("agent.db");
-    Ok(())
-}
-
 /// Loads the PEM relay certificate authority as additional relay TLS roots.
 /// Deployments whose relays chain to public roots leave this unset.
 fn load_relay_tls_roots(
@@ -2533,7 +2297,7 @@ fn parse_args() -> Result<Config, io::Error> {
         controller: None,
         node_id: None,
         probe_only: false,
-        relay_mode: RelayMode::Default,
+        relay_mode: RelayMode::Disabled,
         command_verification_key_files: Vec::new(),
         prepare_enrollment: false,
         enrollment_token_file: None,
@@ -2543,8 +2307,8 @@ fn parse_args() -> Result<Config, io::Error> {
         relay_ca_file: None,
         synthetic_barrier_file: None,
     };
-    let mut relay_mode = String::from("default");
-    let mut relay_urls = Vec::new();
+    let mut relay_mode = String::from("disabled");
+    let mut relay_url = None;
     let mut relay_token_file = None;
     let mut user_seal_key_id = None;
     let mut user_seal_key_sha256 = None;
@@ -2618,7 +2382,12 @@ fn parse_args() -> Result<Config, io::Error> {
                 )?);
             }
             "--relay-mode" => relay_mode = required(&mut args, "--relay-mode")?,
-            "--relay-url" => relay_urls.push(required(&mut args, "--relay-url")?),
+            "--relay-url" => {
+                if relay_url.is_some() {
+                    return Err(invalid("at most one --relay-url is allowed"));
+                }
+                relay_url = Some(required(&mut args, "--relay-url")?);
+            }
             "--relay-token-file" => {
                 relay_token_file = Some(PathBuf::from(required(&mut args, "--relay-token-file")?));
             }
@@ -2643,7 +2412,7 @@ fn parse_args() -> Result<Config, io::Error> {
     }
     validate_absolute_paths(&config, relay_token_file.as_deref())?;
     if config.prepare_enrollment
-        && (relay_mode != "default" || !relay_urls.is_empty() || relay_token_file.is_some())
+        && (relay_mode != "disabled" || relay_url.is_some() || relay_token_file.is_some())
     {
         return Err(invalid(
             "enrollment preparation does not accept relay configuration",
@@ -2657,7 +2426,11 @@ fn parse_args() -> Result<Config, io::Error> {
         p12_seal_key_id,
         p12_seal_key_sha256,
     )?;
-    config.relay_mode = build_relay_mode(&relay_mode, relay_urls, relay_token_file.as_deref())?;
+    config.relay_mode = build_relay_mode(
+        &relay_mode,
+        relay_url.as_deref(),
+        relay_token_file.as_deref(),
+    )?;
     Ok(config)
 }
 
@@ -2790,10 +2563,7 @@ fn read_enrollment_token(path: &Path) -> Result<String, io::Error> {
         .trim_end_matches(['\n', '\r']);
     // The root installation token is never accepted by the Agent. Only its
     // one-way derived obt2_ child may cross this boundary.
-    let encoded = token
-        .strip_prefix("obt1_")
-        .or_else(|| token.strip_prefix("obt2_"))
-        .unwrap_or(token);
+    let encoded = token.strip_prefix("obt2_").unwrap_or(token);
     if encoded.len() != 43
         || !encoded
             .bytes()
@@ -2806,46 +2576,36 @@ fn read_enrollment_token(path: &Path) -> Result<String, io::Error> {
 
 fn build_relay_mode(
     mode: &str,
-    raw_urls: Vec<String>,
+    raw_url: Option<&str>,
     token_file: Option<&Path>,
 ) -> Result<RelayMode, io::Error> {
     match mode {
-        "default" if raw_urls.is_empty() && token_file.is_none() => Ok(RelayMode::Default),
-        "disabled" if raw_urls.is_empty() && token_file.is_none() => Ok(RelayMode::Disabled),
-        "default" | "disabled" => Err(invalid(
-            "relay URLs and token are accepted only with custom relay mode",
+        "disabled" if raw_url.is_none() && token_file.is_none() => Ok(RelayMode::Disabled),
+        "disabled" => Err(invalid(
+            "relay URL and token are accepted only with custom relay mode",
         )),
         "custom" => {
-            if !(1..=8).contains(&raw_urls.len()) {
-                return Err(invalid("custom relay mode requires 1..8 relay URLs"));
-            }
+            let raw = raw_url.ok_or_else(|| invalid("custom relay mode requires --relay-url"))?;
             let token_file = token_file
                 .ok_or_else(|| invalid("custom relay mode requires --relay-token-file"))?;
-            let mut urls = Vec::with_capacity(raw_urls.len());
-            for raw in raw_urls {
-                let url: RelayUrl = raw.parse().map_err(|_| invalid("relay URL is invalid"))?;
-                if url.scheme() != "https"
-                    || !url.username().is_empty()
-                    || url.password().is_some()
-                    || url.query().is_some()
-                    || url.fragment().is_some()
-                    || url.host_str().is_none()
-                {
-                    return Err(invalid(
-                        "relay URL must be credential-free HTTPS without query or fragment",
-                    ));
-                }
-                if urls.contains(&url) {
-                    return Err(invalid("relay URLs must be unique"));
-                }
-                urls.push(url);
+            let url: RelayUrl = raw.parse().map_err(|_| invalid("relay URL is invalid"))?;
+            if url.scheme() != "https"
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || url.host_str().is_none()
+            {
+                return Err(invalid(
+                    "relay URL must be credential-free HTTPS without query or fragment",
+                ));
             }
             let token = read_relay_token(token_file)?;
             Ok(RelayMode::Custom(
-                RelayMap::from_iter(urls).with_auth_token(token),
+                RelayMap::from_iter([url]).with_auth_token(token),
             ))
         }
-        _ => Err(invalid("relay mode must be default, disabled, or custom")),
+        _ => Err(invalid("relay mode must be disabled or custom")),
     }
 }
 
@@ -2908,82 +2668,19 @@ fn invalid(detail: &str) -> io::Error {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer as _, SigningKey};
-    use futures_util::StreamExt as _;
     use ocservia_agent_protocol::{
-        ConfigFingerprint, DesiredEffectObservation, GroupList, IpBanList, OcservVersion,
-        PrivdRequest, ServiceStatus, SessionList, UserList, read_frame, write_frame,
+        DesiredEffectObservation, OcservVersion, PrivdRequest, read_frame, write_frame,
     };
     use ocservia_command_authorization::{
         ConnectionFenceClaimsV2, FENCE_SIGNATURE_VERSION_ED25519_V1, canonical_connection_fence_v2,
-        canonical_fence_binding_v2, canonical_v1, claims_from_envelope_v1,
-        semantic_payload_hash_v1, verification_key_id,
+        canonical_fence_binding_v2, verification_key_id,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        ArtifactGrantV1, CommandAuthorizationProof, CommandAuthorizationVersion, ConfigApply,
-        ConfigPlan, EnrollRequest, EnrollResponse, FenceSignatureVersion, SealedSecretV1,
-        SessionGrantV1, SessionGrantVersion, SyntheticNoop, UserPasswordRotate,
+        CompleteConfigApply, CompleteConfigPlan, EnrollRequest, FenceSignatureVersion,
+        SealedSecretV1, SessionGrantV1, SessionGrantVersion, UserPasswordRotate,
     };
-    use ocservia_contracts::generated::ocserv::platform::transport::v1::{
-        AuthorizeSessionRequest, CheckEndpointRequest, CheckEndpointResponse,
-        ConsumeArtifactRequest, FetchArtifactRequest, GetNodeConnectionRequest,
-        GetOwnerFenceRequest, ListNodeTrustRequest, ListNodeTrustResponse, NodeTrustBinding,
-        NodeTrustState, SendCommandRequest, TransportEventType, ValidateEnrollmentRequest,
-        ValidateEnrollmentResponse, WatchEventsRequest,
-        transport_service_server::TransportService,
-        trust_service_server::{TrustService, TrustServiceServer},
-    };
-    use ocservia_transportd::{IdentityPolicy, IrohTransportService, TrustAuthority};
     use prost_types::Timestamp;
-    use std::collections::HashMap;
-    use std::net::SocketAddr;
     use std::os::unix::fs::PermissionsExt as _;
-    use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::oneshot;
-    use tokio::task::JoinHandle;
-    use tokio_stream::wrappers::TcpListenerStream;
-
-    struct RestartableTcpProxy {
-        addr: SocketAddr,
-        stop: oneshot::Sender<()>,
-        task: JoinHandle<()>,
-    }
-
-    impl RestartableTcpProxy {
-        async fn start(addr: SocketAddr, target: SocketAddr) -> Self {
-            let listener = TcpListener::bind(addr).await.expect("bind relay proxy");
-            let addr = listener.local_addr().expect("relay proxy address");
-            let (stop, mut stop_rx) = oneshot::channel();
-            let task = tokio::spawn(async move {
-                let mut children = tokio::task::JoinSet::new();
-                loop {
-                    tokio::select! {
-                        _ = &mut stop_rx => break,
-                        accepted = listener.accept() => {
-                            let Ok((mut client, _)) = accepted else { break };
-                            children.spawn(async move {
-                                let Ok(mut upstream) = TcpStream::connect(target).await else {
-                                    return;
-                                };
-                                tokio::io::copy_bidirectional(&mut client, &mut upstream)
-                                    .await
-                                    .ok();
-                            });
-                        }
-                        Some(_) = children.join_next(), if !children.is_empty() => {}
-                    }
-                }
-                children.abort_all();
-                while children.join_next().await.is_some() {}
-            });
-            Self { addr, stop, task }
-        }
-
-        async fn stop(self) -> SocketAddr {
-            self.stop.send(()).ok();
-            self.task.await.expect("join relay proxy");
-            self.addr
-        }
-    }
 
     fn test_sealing_keys() -> Vec<SealingKeyDescriptorV1> {
         vec![
@@ -3045,7 +2742,7 @@ mod tests {
             controller: None,
             node_id: None,
             probe_only,
-            relay_mode: RelayMode::Default,
+            relay_mode: RelayMode::Disabled,
             command_verification_key_files: Vec::new(),
             prepare_enrollment: false,
             enrollment_token_file: None,
@@ -3060,286 +2757,6 @@ mod tests {
     fn test_command_keyring() -> ControllerCommandKeyring {
         ControllerCommandKeyring::new([SigningKey::from_bytes(&[7; 32]).verifying_key()])
             .expect("test command keyring")
-    }
-
-    #[derive(Debug)]
-    struct FencedSessionTrust {
-        signing: SigningKey,
-        node_id: Uuid,
-        endpoint_id: EndpointId,
-        next_epoch: std::sync::atomic::AtomicU64,
-    }
-
-    #[tonic::async_trait]
-    impl TrustService for FencedSessionTrust {
-        async fn list_node_trust(
-            &self,
-            _request: tonic::Request<ListNodeTrustRequest>,
-        ) -> Result<tonic::Response<ListNodeTrustResponse>, tonic::Status> {
-            Ok(tonic::Response::new(ListNodeTrustResponse {
-                bindings: vec![NodeTrustBinding {
-                    node_id: self.node_id.as_bytes().to_vec(),
-                    endpoint_id: self.endpoint_id.as_bytes().to_vec(),
-                    state: NodeTrustState::Active.into(),
-                    revision: 3,
-                }],
-            }))
-        }
-
-        async fn check_endpoint(
-            &self,
-            request: tonic::Request<CheckEndpointRequest>,
-        ) -> Result<tonic::Response<CheckEndpointResponse>, tonic::Status> {
-            Ok(tonic::Response::new(CheckEndpointResponse {
-                permitted: request.into_inner().endpoint_id == self.endpoint_id.as_bytes(),
-            }))
-        }
-
-        async fn validate_enrollment(
-            &self,
-            _request: tonic::Request<ValidateEnrollmentRequest>,
-        ) -> Result<tonic::Response<ValidateEnrollmentResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented(
-                "enrollment is outside this fixture",
-            ))
-        }
-
-        async fn enroll(
-            &self,
-            _request: tonic::Request<EnrollRequest>,
-        ) -> Result<tonic::Response<EnrollResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented(
-                "enrollment is outside this fixture",
-            ))
-        }
-
-        async fn authorize_session(
-            &self,
-            request: tonic::Request<AuthorizeSessionRequest>,
-        ) -> Result<tonic::Response<SessionHandshakeResponse>, tonic::Status> {
-            use std::sync::atomic::Ordering;
-
-            let request = request.into_inner();
-            if request.remote_endpoint_id != self.endpoint_id.as_bytes() {
-                return Err(tonic::Status::permission_denied("unexpected endpoint"));
-            }
-            let handshake = request
-                .handshake
-                .ok_or_else(|| tonic::Status::invalid_argument("missing handshake"))?;
-            if handshake.node_id != self.node_id.as_bytes() {
-                return Err(tonic::Status::permission_denied("unexpected node"));
-            }
-            let epoch = self.next_epoch.fetch_add(1, Ordering::SeqCst);
-            Ok(tonic::Response::new(live_signed_handshake_response(
-                &self.signing,
-                &self.node_id,
-                &self.endpoint_id,
-                epoch,
-                handshake.capabilities,
-            )))
-        }
-    }
-
-    fn live_signed_handshake_response(
-        signing: &SigningKey,
-        node_id: &Uuid,
-        endpoint_id: &EndpointId,
-        owner_epoch: u64,
-        mut capabilities: Vec<String>,
-    ) -> SessionHandshakeResponse {
-        capabilities.sort();
-        capabilities.dedup();
-        let now = unix_seconds().expect("current time");
-        let fence_id = Uuid::now_v7().into_bytes();
-        let connection_id = Uuid::now_v7().into_bytes();
-        let claims = ConnectionFenceClaimsV2 {
-            signature_version: FENCE_SIGNATURE_VERSION_ED25519_V1,
-            key_id: verification_key_id(&signing.verifying_key()),
-            fence_id,
-            node_id: *node_id.as_bytes(),
-            endpoint_id: *endpoint_id.as_bytes(),
-            owner_instance_id: [0x42; 16],
-            owner_incarnation: 1,
-            owner_epoch,
-            connection_id,
-            authorization_revision: 3,
-            capabilities: capabilities.clone(),
-            lease_until_seconds: now + 90,
-            lease_until_nanos: 0,
-            issued_at_seconds: now - 1,
-            issued_at_nanos: 0,
-            expires_at_seconds: now + 120,
-            expires_at_nanos: 0,
-        };
-        let canonical = canonical_connection_fence_v2(&claims).expect("canonical live fence");
-        let fence = ConnectionFenceV2 {
-            signature_version: FenceSignatureVersion::Ed25519V1.into(),
-            key_id: claims.key_id.clone(),
-            fence_id: claims.fence_id.to_vec(),
-            node_id: claims.node_id.to_vec(),
-            endpoint_id: claims.endpoint_id.to_vec(),
-            owner_instance_id: claims.owner_instance_id.to_vec(),
-            owner_incarnation: claims.owner_incarnation,
-            owner_epoch: claims.owner_epoch,
-            connection_id: claims.connection_id.to_vec(),
-            authorization_revision: claims.authorization_revision,
-            capabilities: claims.capabilities.clone(),
-            lease_until: Some(Timestamp {
-                seconds: claims.lease_until_seconds,
-                nanos: 0,
-            }),
-            issued_at: Some(Timestamp {
-                seconds: claims.issued_at_seconds,
-                nanos: 0,
-            }),
-            expires_at: Some(Timestamp {
-                seconds: claims.expires_at_seconds,
-                nanos: 0,
-            }),
-            signature: signing.sign(&canonical).to_bytes().to_vec(),
-        };
-        let mut response =
-            signed_handshake_response(signing, node_id, endpoint_id, 3, capabilities, Some(fence));
-        let grant = response.session_grant.as_mut().expect("session grant");
-        grant.issued_at = Some(Timestamp {
-            seconds: now - 1,
-            nanos: 0,
-        });
-        grant.expires_at = Some(Timestamp {
-            seconds: now + 120,
-            nanos: 0,
-        });
-        let grant_claims = ocservia_command_authorization::session_grant_claims_v1(grant)
-            .expect("live session grant claims");
-        grant.signature = signing
-            .sign(
-                &ocservia_command_authorization::canonical_session_grant_v1(&grant_claims)
-                    .expect("canonical live session grant"),
-            )
-            .to_bytes()
-            .to_vec();
-        response
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn live_signed_noop(
-        signing: &SigningKey,
-        node_id: &Uuid,
-        endpoint_id: &EndpointId,
-        fence: &ConnectionFenceV2,
-    ) -> CommandEnvelope {
-        let now = unix_seconds().expect("current time");
-        let command_id = Uuid::now_v7().into_bytes();
-        let mut envelope = CommandEnvelope {
-            protocol_version: "1.1".to_owned(),
-            message_id: Uuid::now_v7().as_bytes().to_vec(),
-            command_id: command_id.to_vec(),
-            idempotency_key: Uuid::now_v7().as_bytes().to_vec(),
-            node_id: node_id.as_bytes().to_vec(),
-            sequence: 1,
-            issued_at: Some(Timestamp {
-                seconds: now,
-                nanos: 0,
-            }),
-            expires_at: Some(Timestamp {
-                seconds: now + 60,
-                nanos: 0,
-            }),
-            expected_revision: fence.authorization_revision,
-            traceparent: format!(
-                "00-{}-0000000000000001-01",
-                hex::encode(Uuid::now_v7().as_bytes())
-            ),
-            actor_id: "relay-fencing-combination-test".to_owned(),
-            reason: "verify relay failover preserves fencing".to_owned(),
-            delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
-            semantic_payload_hash_version: SemanticPayloadHashVersion::V1.into(),
-            operation_id: Uuid::now_v7().as_bytes().to_vec(),
-            action: "operation.create".to_owned(),
-            required_capability: "synthetic.noop".to_owned(),
-            authorization: Some(CommandAuthorizationProof {
-                version: CommandAuthorizationVersion::V1.into(),
-                key_id: verification_key_id(&signing.verifying_key()),
-                signature: Vec::new(),
-            }),
-            payload: Some(command_envelope::Payload::SyntheticNoop(SyntheticNoop {})),
-            ..CommandEnvelope::default()
-        };
-        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope)
-            .expect("semantic no-op hash")
-            .to_vec();
-        let claims = claims_from_envelope_v1(&envelope).expect("no-op command claims");
-        envelope
-            .authorization
-            .as_mut()
-            .expect("command authorization")
-            .signature = signing
-            .sign(&canonical_v1(&claims).expect("canonical no-op command"))
-            .to_bytes()
-            .to_vec();
-
-        let fence_id: [u8; 16] = fence.fence_id.as_slice().try_into().expect("fence ID");
-        let owner_instance_id: [u8; 16] = fence
-            .owner_instance_id
-            .as_slice()
-            .try_into()
-            .expect("owner instance ID");
-        let connection_id: [u8; 16] = fence
-            .connection_id
-            .as_slice()
-            .try_into()
-            .expect("connection ID");
-        let binding_claims = FenceBindingClaimsV2 {
-            signature_version: FENCE_SIGNATURE_VERSION_ED25519_V1,
-            key_id: verification_key_id(&signing.verifying_key()),
-            operation_kind: FenceOperationKind::Command as u32,
-            operation_id: command_id,
-            fence_id,
-            node_id: *node_id.as_bytes(),
-            endpoint_id: *endpoint_id.as_bytes(),
-            owner_instance_id,
-            owner_incarnation: fence.owner_incarnation,
-            owner_epoch: fence.owner_epoch,
-            connection_id,
-            authorization_revision: fence.authorization_revision,
-            capability: "synthetic.noop".to_owned(),
-            issued_at_seconds: now,
-            issued_at_nanos: 0,
-            expires_at_seconds: now + 60,
-            expires_at_nanos: 0,
-        };
-        let binding_signature = signing
-            .sign(
-                &canonical_fence_binding_v2(&binding_claims)
-                    .expect("canonical live command binding"),
-            )
-            .to_bytes();
-        envelope.connection_fence = Some(fence.clone());
-        envelope.fence_binding = Some(FenceBindingV2 {
-            signature_version: FenceSignatureVersion::Ed25519V1.into(),
-            key_id: binding_claims.key_id,
-            operation_kind: FenceOperationKind::Command.into(),
-            operation_id: binding_claims.operation_id.to_vec(),
-            fence_id: binding_claims.fence_id.to_vec(),
-            node_id: binding_claims.node_id.to_vec(),
-            endpoint_id: binding_claims.endpoint_id.to_vec(),
-            owner_instance_id: binding_claims.owner_instance_id.to_vec(),
-            owner_incarnation: binding_claims.owner_incarnation,
-            owner_epoch: binding_claims.owner_epoch,
-            connection_id: binding_claims.connection_id.to_vec(),
-            authorization_revision: binding_claims.authorization_revision,
-            capability: binding_claims.capability,
-            issued_at: Some(Timestamp {
-                seconds: binding_claims.issued_at_seconds,
-                nanos: 0,
-            }),
-            expires_at: Some(Timestamp {
-                seconds: binding_claims.expires_at_seconds,
-                nanos: 0,
-            }),
-            signature: binding_signature.to_vec(),
-        });
-        envelope
     }
 
     #[tokio::test]
@@ -4240,10 +3657,10 @@ mod tests {
         .expect("signed session grant");
         assert!(matches!(
             &mode,
-            AgentSessionMode::AuthorizedV11(ActiveSessionAuthority::FencedV11 {
+            ActiveSessionAuthority::FencedV11 {
                 connection_fence,
                 ..
-            }) if connection_fence.owner_epoch == 8
+            } if connection_fence.owner_epoch == 8
         ));
         let directory = std::env::temp_dir()
             .canonicalize()
@@ -4567,7 +3984,7 @@ mod tests {
         .expect("signed read-only grant");
         assert!(matches!(
             &read_only_mode,
-            AgentSessionMode::AuthorizedV11(ActiveSessionAuthority::SignedReadOnlyV11(_))
+            ActiveSessionAuthority::SignedReadOnlyV11(_)
         ));
         activate_session_connection_fence(&read_only_mode, &mut journal, &mut floor, NOW, 100)
             .expect("authorized read-only compatibility session");
@@ -4605,38 +4022,29 @@ mod tests {
     }
 
     #[test]
-    fn agent_accepts_only_explicit_grantless_read_only_sessions() {
+    fn agent_rejects_protocol_1_0_grantless_sessions() {
         let node_id = Uuid::now_v7();
         let endpoint_id = iroh::SecretKey::generate().public();
-        let response = SessionHandshakeResponse {
-            result: HandshakeResult::Accepted.into(),
-            protocol_major: 1,
-            protocol_minor: 0,
-            max_message_size: 1024 * 1024,
-            controller_version: "test".to_owned(),
-            negotiated_capabilities: READ_ONLY_SESSION_CAPABILITIES
+        for negotiated_capabilities in [
+            READ_ONLY_SESSION_CAPABILITIES
                 .iter()
                 .map(|capability| (*capability).to_owned())
                 .collect(),
-            session_grant: None,
-            connection_fence: None,
-        };
-        let mode = negotiate_session_mode(
-            &response,
-            &supported_capabilities(),
-            node_id,
-            endpoint_id,
-            &test_command_keyring(),
-        )
-        .expect("grantless read-only mode accepted");
-        assert!(matches!(mode, AgentSessionMode::ReadOnly { .. }));
-
-        for capability in ["synthetic.noop", "future.feature.read"] {
-            let mut invalid = response.clone();
-            invalid.negotiated_capabilities = vec![capability.to_owned()];
+            vec!["synthetic.noop".to_owned()],
+        ] {
+            let response = SessionHandshakeResponse {
+                result: HandshakeResult::Accepted.into(),
+                protocol_major: 1,
+                protocol_minor: 0,
+                max_message_size: 1024 * 1024,
+                controller_version: "test".to_owned(),
+                negotiated_capabilities,
+                session_grant: None,
+                connection_fence: None,
+            };
             assert!(
                 negotiate_session_mode(
-                    &invalid,
+                    &response,
                     &supported_capabilities(),
                     node_id,
                     endpoint_id,
@@ -4729,58 +4137,8 @@ mod tests {
                 &keyring,
             )
             .expect("valid signed protocol 1.1 session"),
-            AgentSessionMode::AuthorizedV11(_)
+            ActiveSessionAuthority::SignedReadOnlyV11(_)
         ));
-    }
-
-    async fn answer_snapshot(mut stream: tokio::net::UnixStream) {
-        let request: PrivdRequest = read_frame(&mut stream).await.expect("snapshot request");
-        let result = match request.operation {
-            Some(privd_request::Operation::ServiceStatus(_)) => {
-                privd_response::Result::ServiceStatus(ServiceStatus::default())
-            }
-            Some(privd_request::Operation::OcservVersion(_)) => {
-                privd_response::Result::OcservVersion(OcservVersion::default())
-            }
-            Some(privd_request::Operation::SessionList(_)) => {
-                privd_response::Result::SessionList(SessionList::default())
-            }
-            Some(privd_request::Operation::IpBanList(_)) => {
-                privd_response::Result::IpBanList(IpBanList::default())
-            }
-            Some(privd_request::Operation::ConfigFingerprint(_)) => {
-                privd_response::Result::ConfigFingerprint(ConfigFingerprint::default())
-            }
-            Some(privd_request::Operation::UserList(_)) => {
-                privd_response::Result::UserList(UserList::default())
-            }
-            Some(privd_request::Operation::GroupList(_)) => {
-                privd_response::Result::GroupList(GroupList::default())
-            }
-            _ => panic!("unexpected snapshot operation"),
-        };
-        write_frame(
-            &mut stream,
-            &PrivdResponse {
-                request_id: request.request_id,
-                privileged_result_proof: None,
-                result: Some(result),
-            },
-        )
-        .await
-        .expect("snapshot response");
-    }
-
-    async fn serve_snapshot(listener: tokio::net::UnixListener) {
-        let mut handlers = tokio::task::JoinSet::new();
-        // One handshake Ocserv version read, then the seven snapshot reads.
-        for _ in 0..8 {
-            let (stream, _) = listener.accept().await.expect("accept snapshot request");
-            handlers.spawn(answer_snapshot(stream));
-        }
-        while let Some(result) = handlers.join_next().await {
-            result.expect("snapshot handler");
-        }
     }
 
     #[tokio::test]
@@ -4835,210 +4193,6 @@ mod tests {
             expected.retain(|capability| terminate || capability != "ocserv.session.terminate");
             assert_eq!(capabilities, expected);
         }
-    }
-
-    /// Serves snapshot requests for the whole test, so every redialed
-    /// controller session can keep taking privd heartbeats.
-    async fn serve_snapshots(listener: tokio::net::UnixListener) {
-        let mut handlers = tokio::task::JoinSet::new();
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            handlers.spawn(answer_snapshot(stream));
-        }
-        while handlers.join_next().await.is_some() {}
-    }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn real_agent_static_session_delivers_telemetry_and_denies_control_streams() {
-        let temp_root = if cfg!(target_os = "macos") {
-            "/private/tmp"
-        } else {
-            "/tmp"
-        };
-        let directory = PathBuf::from(temp_root).join(format!("ocsa-{}", Uuid::now_v7().simple()));
-        std::fs::create_dir(&directory).expect("create static session fixture");
-        let privd_socket = PathBuf::from(format!("/tmp/ocsm-{}.sock", Uuid::now_v7().simple()));
-        let privd_listener =
-            tokio::net::UnixListener::bind(&privd_socket).expect("bind privd snapshot fixture");
-        let privd_server = tokio::spawn(serve_snapshot(privd_listener));
-        let node_id = Uuid::now_v7();
-        let agent_key = iroh::SecretKey::generate();
-        let controller_key = iroh::SecretKey::generate();
-        let policy = IdentityPolicy::new(
-            HashMap::from([(agent_key.public(), node_id.as_bytes().to_vec())]),
-            HashSet::new(),
-        );
-        let service = IrohTransportService::new_with_policy(16, policy.clone());
-        let router = ocservia_transportd::build_router(
-            controller_key,
-            RelayMode::Disabled,
-            policy,
-            &service,
-        )
-        .await
-        .expect("build static transportd");
-        let controller = router.endpoint().addr();
-        let mut events = service
-            .watch_events(tonic::Request::new(WatchEventsRequest {
-                after_event_id: Vec::new(),
-            }))
-            .await
-            .expect("watch transport events")
-            .into_inner();
-        let journal_path = directory.join("agent.db");
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .secret_key(agent_key.clone())
-            .relay_mode(RelayMode::Disabled)
-            .bind()
-            .await
-            .expect("build real Agent endpoint");
-        let agent_endpoint = endpoint.clone();
-        let mut run = tokio::spawn({
-            let journal_path = journal_path.clone();
-            let agent_privd_socket = privd_socket.clone();
-            async move {
-                let privd = PrivdClient::new(agent_privd_socket, Duration::from_secs(2))
-                    .expect("privd client");
-                let mut journal = Journal::open(&journal_path).expect("Agent journal");
-                let mut command_executor =
-                    CommandExecutor::new(Journal::open(&journal_path).expect("executor journal"));
-                let command_keys = test_command_keyring();
-                let sealing_keys = test_sealing_keys();
-                let mut fence_epoch_floor = 0_u64;
-                let mut session = SessionContext {
-                    node_id,
-                    endpoint_id: agent_key.public(),
-                    privd: &privd,
-                    journal: &mut journal,
-                    command_executor: &mut command_executor,
-                    boot_id: "static-test-boot",
-                    os_release: "static-test-os",
-                    agent_instance_id: Uuid::now_v7(),
-                    command_keys: &command_keys,
-                    sealing_keys: &sealing_keys,
-                    fence_epoch_floor: &mut fence_epoch_floor,
-                    synthetic_barrier_file: None,
-                };
-                let result = connect_once(&endpoint, controller, &mut session).await;
-                endpoint.close().await;
-                result
-            }
-        });
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                tokio::select! {
-                    result = &mut run => panic!("Agent ended before telemetry: {result:?}"),
-                    event = events.next() => {
-                        let event = event.expect("event stream remains open").expect("valid event");
-                        if event.r#type == i32::from(TransportEventType::Telemetry) {
-                            let batch = TelemetryBatch::decode(event.payload.as_slice()).expect("telemetry batch");
-                            assert_eq!(batch.snapshot.expect("heartbeat snapshot").agent_version,
-                                ocservia_contracts::agent_upgrade::release_version());
-                            return;
-                        }
-                    }
-                }
-            }
-        })
-        .await
-        .expect("real Agent registered and delivered telemetry");
-        let metadata = service
-            .get_node_connection(tonic::Request::new(GetNodeConnectionRequest {
-                node_id: node_id.as_bytes().to_vec(),
-            }))
-            .await
-            .expect("query static Agent session")
-            .into_inner();
-        assert_eq!(metadata.authorization_revision, 0);
-        assert!(metadata.session_expires_at.is_none());
-        assert_eq!(
-            metadata.negotiated_capabilities,
-            READ_ONLY_SESSION_CAPABILITIES
-                .iter()
-                .map(|capability| (*capability).to_owned())
-                .collect::<Vec<_>>()
-        );
-
-        let command = CommandEnvelope {
-            node_id: node_id.as_bytes().to_vec(),
-            traceparent: "00-11111111111111111111111111111111-2222222222222222-01".to_owned(),
-            required_capability: "ocserv.status.read".to_owned(),
-            expires_at: Some((SystemTime::now() + Duration::from_secs(30)).into()),
-            ..CommandEnvelope::default()
-        };
-        let command_error = service
-            .send_command(tonic::Request::new(SendCommandRequest {
-                node_id: node_id.as_bytes().to_vec(),
-                command_envelope: command.encode_to_vec(),
-            }))
-            .await
-            .expect_err("read-only command dispatch denied");
-        assert_eq!(command_error.code(), tonic::Code::PermissionDenied);
-
-        let artifact_id = Uuid::now_v7();
-        let grant = ArtifactGrantV1 {
-            node_id: node_id.as_bytes().to_vec(),
-            artifact_id: artifact_id.as_bytes().to_vec(),
-            purpose: "certificate_p12".to_owned(),
-            max_bytes: 32,
-            grant_id: Uuid::now_v7().as_bytes().to_vec(),
-            ..ArtifactGrantV1::default()
-        };
-        let Err(fetch_error) = service
-            .fetch_artifact(tonic::Request::new(FetchArtifactRequest {
-                node_id: node_id.as_bytes().to_vec(),
-                artifact_id: artifact_id.as_bytes().to_vec(),
-                purpose: "certificate_p12".to_owned(),
-                max_bytes: 32,
-                grant: Some(grant.clone()),
-                fence_binding: None,
-            }))
-            .await
-        else {
-            panic!("read-only artifact fetch denied");
-        };
-        assert_eq!(fetch_error.code(), tonic::Code::PermissionDenied);
-        let consume_error = service
-            .consume_artifact(tonic::Request::new(ConsumeArtifactRequest {
-                node_id: node_id.as_bytes().to_vec(),
-                grant: Some(grant),
-                sha256: vec![0; 32],
-                size: 32,
-                confirm_only: false,
-                fence_binding: None,
-            }))
-            .await
-            .expect_err("read-only artifact consumption denied");
-        assert_eq!(consume_error.code(), tonic::Code::PermissionDenied);
-
-        assert!(
-            !run.is_finished(),
-            "Agent session remains active until the test closes its endpoint"
-        );
-        agent_endpoint.close().await;
-        let session_result = tokio::time::timeout(Duration::from_secs(5), run)
-            .await
-            .expect("Agent stops after endpoint shutdown")
-            .expect("Agent task");
-        if let Err(error) = session_result {
-            assert!(
-                matches!(
-                    error.downcast_ref::<iroh::endpoint::ConnectionError>(),
-                    Some(iroh::endpoint::ConnectionError::LocallyClosed)
-                ),
-                "Agent endpoint shutdown returned an unexpected error: {error}"
-            );
-        }
-        ocservia_transportd::shutdown(&service, router)
-            .await
-            .expect("shutdown static transportd");
-        privd_server.await.expect("privd server");
-        std::fs::remove_file(privd_socket).expect("remove privd snapshot socket");
-        std::fs::remove_dir_all(directory).expect("remove static session fixture");
     }
 
     #[test]
@@ -5166,11 +4320,7 @@ mod tests {
             valid_token
         );
 
-        for value in [
-            format!("obt1_{valid_token}"),
-            format!("obt2_{valid_token}"),
-            valid_token.clone(),
-        ] {
+        for value in [format!("obt2_{valid_token}"), valid_token.clone()] {
             std::fs::write(&token, format!("{value}\r\n")).expect("write supported token");
             assert_eq!(
                 read_enrollment_token(&token).expect("supported token"),
@@ -5178,15 +4328,16 @@ mod tests {
             );
         }
         for value in [
+            format!("obt1_{valid_token}"),
             format!("oit1_{valid_token}"),
             format!("obt3_{valid_token}"),
-            format!("obt1_{valid_token}extra"),
-            "obt1_short".to_owned(),
+            format!("obt2_{valid_token}extra"),
+            "obt2_short".to_owned(),
         ] {
             std::fs::write(&token, value).expect("write malformed token");
             assert!(read_enrollment_token(&token).is_err());
         }
-        std::fs::write(&token, format!("obt1_{valid_token}")).expect("restore valid token");
+        std::fs::write(&token, format!("obt2_{valid_token}")).expect("restore valid token");
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644))
             .expect("make token insecure");
         assert!(read_enrollment_token(&token).is_err());
@@ -5201,20 +4352,16 @@ mod tests {
         let token = directory.join("token");
         std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("token");
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("mode");
-        for count in [0, 1, 2, 8, 9] {
-            let urls = (0..count)
-                .map(|i| format!("https://relay-{i}.example.test"))
-                .collect();
-            let result = build_relay_mode("custom", urls, Some(&token));
-            if (1..=8).contains(&count) {
-                let RelayMode::Custom(map) = result.expect("valid count") else {
-                    panic!("custom mode required");
-                };
-                assert_eq!(map.len(), count);
-            } else {
-                assert!(result.is_err(), "count {count}");
-            }
-        }
+
+        assert!(build_relay_mode("custom", None, Some(&token)).is_err());
+        let RelayMode::Custom(map) =
+            build_relay_mode("custom", Some("https://relay-0.example.test"), Some(&token))
+                .expect("valid single custom relay")
+        else {
+            panic!("custom mode required");
+        };
+        assert_eq!(map.len(), 1);
+
         for invalid_url in [
             "",
             "not a URL",
@@ -5227,38 +4374,26 @@ mod tests {
             "https://$(touch /tmp/relay-injection)",
         ] {
             assert!(
-                build_relay_mode("custom", vec![invalid_url.into()], Some(&token)).is_err(),
+                build_relay_mode("custom", Some(invalid_url), Some(&token)).is_err(),
                 "accepted {invalid_url:?}"
             );
         }
-        assert!(
-            build_relay_mode(
-                "custom",
-                vec![
-                    "https://RELAY.example.test:443".into(),
-                    "https://relay.example.test/".into()
-                ],
-                Some(&token)
-            )
-            .is_err()
-        );
-        let urls = vec!["https://relay.example.test".to_owned()];
-        assert!(build_relay_mode("custom", urls.clone(), None).is_err());
-        assert!(
-            build_relay_mode("custom", urls.clone(), Some(&directory.join("missing"))).is_err()
-        );
-        for mode in ["default", "disabled"] {
-            assert!(build_relay_mode(mode, vec![], None).is_ok());
-            assert!(build_relay_mode(mode, urls.clone(), None).is_err());
-            assert!(build_relay_mode(mode, vec![], Some(&token)).is_err());
-        }
+        let url = "https://relay.example.test";
+        assert!(build_relay_mode("custom", Some(url), None).is_err());
+        assert!(build_relay_mode("custom", Some(url), Some(&directory.join("missing"))).is_err());
+
+        assert!(build_relay_mode("disabled", None, None).is_ok());
+        assert!(build_relay_mode("disabled", Some(url), None).is_err());
+        assert!(build_relay_mode("disabled", None, Some(&token)).is_err());
+        assert!(build_relay_mode("default", None, None).is_err());
+
         for invalid_token in ["short", "0123456789abcdef 123456789abcdef0"] {
             std::fs::write(&token, invalid_token).expect("invalid token");
-            assert!(build_relay_mode("custom", urls.clone(), Some(&token)).is_err());
+            assert!(build_relay_mode("custom", Some(url), Some(&token)).is_err());
         }
         std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("valid token");
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).expect("mode");
-        assert!(build_relay_mode("custom", urls, Some(&token)).is_err());
+        assert!(build_relay_mode("custom", Some(url), Some(&token)).is_err());
         std::fs::remove_dir_all(directory).expect("cleanup");
     }
 
@@ -5272,583 +4407,26 @@ mod tests {
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))
             .expect("protect token");
 
-        let mode = build_relay_mode(
-            "custom",
-            vec![
-                "https://relay-a.example.test".to_owned(),
-                "https://relay-b.example.test".to_owned(),
-            ],
-            Some(&token),
-        )
-        .expect("valid custom relay mode");
+        let mode = build_relay_mode("custom", Some("https://relay-a.example.test"), Some(&token))
+            .expect("valid custom relay mode");
         assert!(matches!(mode, RelayMode::Custom(_)));
-        assert!(build_relay_mode("default", Vec::new(), None).is_ok());
-        assert!(
-            build_relay_mode(
-                "custom",
-                vec!["https://relay-a.example.test".into()],
-                Some(&token)
-            )
-            .is_ok()
-        );
+        assert!(build_relay_mode("disabled", None, None).is_ok());
+        assert!(build_relay_mode("default", None, None).is_err());
+
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644))
             .expect("make token insecure");
         assert!(
-            build_relay_mode(
-                "custom",
-                vec![
-                    "https://relay-a.example.test".into(),
-                    "https://relay-b.example.test".into(),
-                ],
-                Some(&token),
-            )
-            .is_err()
+            build_relay_mode("custom", Some("https://relay-a.example.test"), Some(&token)).is_err()
         );
         assert!(
             build_relay_mode(
                 "custom",
-                vec![
-                    "https://user@relay-a.example.test".into(),
-                    "https://relay-b.example.test".into(),
-                ],
+                Some("https://user@relay-a.example.test"),
                 Some(&token),
             )
             .is_err()
         );
         std::fs::remove_dir_all(directory).expect("remove test directory");
-    }
-
-    #[test]
-    fn only_multi_member_custom_relays_enable_persistent_connections() {
-        let one = RelayMap::try_from_iter(["https://relay-one.invalid"]).expect("single relay map");
-        let two =
-            RelayMap::try_from_iter(["https://relay-one.invalid", "https://relay-two.invalid"])
-                .expect("two relay map");
-
-        assert!(!keep_dedicated_relays_connected(&RelayMode::Disabled));
-        assert!(!keep_dedicated_relays_connected(&RelayMode::Default));
-        assert!(!keep_dedicated_relays_connected(&RelayMode::Staging));
-        assert!(!keep_dedicated_relays_connected(&RelayMode::Custom(
-            RelayMap::empty()
-        )));
-        assert!(!keep_dedicated_relays_connected(&RelayMode::Custom(one)));
-        assert!(keep_dedicated_relays_connected(&RelayMode::Custom(two)));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::similar_names, clippy::too_many_lines)]
-    async fn agent_hot_standby_recovers_authenticated_alpn_after_relay_fault() {
-        use iroh::tls::CaTlsConfig;
-
-        let (relay_a_map, relay_a_url, relay_a) = iroh::test_utils::run_relay_server_with(false)
-            .await
-            .expect("start relay A");
-        let (_relay_b_map, _relay_b_url, relay_b) = iroh::test_utils::run_relay_server_with(false)
-            .await
-            .expect("start relay B");
-        let relay_b_addr = relay_b.https_addr().expect("relay B HTTPS address");
-        let relay_b_proxy =
-            RestartableTcpProxy::start("127.0.0.1:0".parse().unwrap(), relay_b_addr).await;
-        let relay_b_url: RelayUrl = format!("https://{}", relay_b_proxy.addr)
-            .parse()
-            .expect("proxy relay URL");
-        let relay_b_config =
-            std::sync::Arc::new(iroh_relay::RelayConfig::new(relay_b_url.clone(), None));
-        let relay_map = RelayMap::from_iter([
-            relay_a_map
-                .get(&relay_a_url)
-                .expect("relay A configuration"),
-            relay_b_config,
-        ]);
-        assert!(keep_dedicated_relays_connected(&RelayMode::Custom(
-            relay_map.clone()
-        )));
-
-        let controller = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(relay_map.clone()))
-            .keep_relays_connected(true)
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .alpns(vec![AGENT_ALPN.to_vec()])
-            .bind()
-            .await
-            .expect("build controller endpoint");
-        let agent = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(relay_map))
-            .keep_relays_connected(true)
-            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-            .clear_address_lookup()
-            .clear_ip_transports()
-            .bind()
-            .await
-            .expect("build Agent endpoint");
-
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while relay_a.metrics().server.accepts.get() < 2
-                || relay_b.metrics().server.accepts.get() < 2
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("Agent and Controller did not preconnect both relays");
-
-        let relay_b_proxy_addr = relay_b_proxy.stop().await;
-        let refused = TcpStream::connect(relay_b_proxy_addr)
-            .await
-            .expect_err("stopped Relay-B proxy accepted a connection");
-        assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
-
-        let echo = tokio::spawn({
-            let controller = controller.clone();
-            async move {
-                let mut connections = Vec::new();
-                for _ in 0..2 {
-                    let connection = controller
-                        .accept()
-                        .await
-                        .expect("incoming Agent connection")
-                        .await
-                        .expect("authenticated ALPN handshake");
-                    let (mut send, mut recv) = connection.accept_bi().await.expect("accept stream");
-                    let bytes = recv.read_to_end(1024).await.expect("read Agent payload");
-                    send.write_all(&bytes).await.expect("echo Agent payload");
-                    send.finish().expect("finish Agent echo");
-                    connections.push(connection);
-                }
-                connections
-            }
-        });
-
-        let relay_a_target = EndpointAddr::new(controller.id()).with_relay_url(relay_a_url);
-        let first = agent
-            .connect(relay_a_target, AGENT_ALPN)
-            .await
-            .expect("connect Agent through relay A");
-        let (mut send, mut recv) = first.open_bi().await.expect("open relay A stream");
-        send.write_all(b"before-fault")
-            .await
-            .expect("write relay A");
-        send.finish().expect("finish relay A");
-        assert_eq!(recv.read_to_end(1024).await.unwrap(), b"before-fault");
-
-        relay_a.shutdown().await.expect("stop relay A");
-        first.close(0_u32.into(), b"relay A failed");
-        let relay_b_proxy = RestartableTcpProxy::start(relay_b_proxy_addr, relay_b_addr).await;
-        let relay_b_target = EndpointAddr::new(controller.id()).with_relay_url(relay_b_url);
-        let second = tokio::time::timeout(
-            Duration::from_secs(15),
-            agent.connect(relay_b_target, AGENT_ALPN),
-        )
-        .await
-        .expect("Agent Relay-B transition exceeded fifteen seconds")
-        .expect("connect Agent through restored relay B");
-        let (mut send, mut recv) = second.open_bi().await.expect("open relay B stream");
-        send.write_all(b"after-fault").await.expect("write relay B");
-        send.finish().expect("finish relay B");
-        assert_eq!(recv.read_to_end(1024).await.unwrap(), b"after-fault");
-
-        let connections = tokio::time::timeout(Duration::from_secs(3), echo)
-            .await
-            .expect("Agent echo task timeout")
-            .expect("Agent echo task");
-        assert_eq!(connections.len(), 2);
-        second.close(0_u32.into(), b"test complete");
-        agent.close().await;
-        controller.close().await;
-        drop(connections);
-        relay_b_proxy.stop().await;
-        relay_b.shutdown().await.expect("stop relay B");
-    }
-
-    /// Starts a relay whose self-signed certificate is returned so controllers
-    /// can pin it as an extra relay TLS root.
-    async fn start_private_relay() -> (
-        iroh_relay::server::Server,
-        std::net::SocketAddr,
-        rustls_pki_types::CertificateDer<'static>,
-    ) {
-        let (certs, server_config) =
-            iroh_relay::server::testing::self_signed_tls_certs_and_config();
-        let localhost = (std::net::Ipv4Addr::LOCALHOST, 0);
-        let mut relay = iroh_relay::server::RelayConfig::new(localhost);
-        relay.tls = Some(iroh_relay::server::TlsConfig::new(
-            localhost,
-            iroh_relay::server::CertConfig::Manual { server_config },
-        ));
-        relay.key_cache_capacity = Some(1024);
-        relay.access = std::sync::Arc::new(iroh_relay::server::AllowAll);
-        let mut config = iroh_relay::server::ServerConfig::default();
-        config.relay = Some(relay);
-        let server = iroh_relay::server::Server::spawn(config)
-            .await
-            .expect("spawn private relay");
-        let address = server.https_addr().expect("private relay https address");
-        (
-            server,
-            address,
-            certs.into_iter().next().expect("private relay certificate"),
-        )
-    }
-
-    #[tokio::test]
-    #[allow(clippy::similar_names, clippy::too_many_lines)]
-    async fn fenced_agent_supervisor_redials_over_hot_standby_and_advances_epoch() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let temp_root = if cfg!(target_os = "macos") {
-            "/private/tmp"
-        } else {
-            "/tmp"
-        };
-        let directory = PathBuf::from(temp_root).join(format!("ocsa-{}", Uuid::now_v7().simple()));
-        std::fs::create_dir(&directory).expect("create relay failover fixture");
-        let privd_socket = PathBuf::from(format!("/tmp/ocsm-{}.sock", Uuid::now_v7().simple()));
-        let privd_listener =
-            tokio::net::UnixListener::bind(&privd_socket).expect("bind privd snapshot fixture");
-        let privd_server = tokio::spawn(serve_snapshots(privd_listener));
-        let privd =
-            PrivdClient::new(privd_socket.clone(), Duration::from_secs(2)).expect("privd client");
-        require_healthy_snapshot(privd.snapshot().await.expect("startup snapshot"))
-            .expect("healthy startup snapshot");
-
-        let (relay_a, relay_a_addr, relay_a_cert) = start_private_relay().await;
-        let relay_a_url: RelayUrl = format!("https://{relay_a_addr}")
-            .parse()
-            .expect("relay A URL");
-        let (relay_b, relay_b_addr, relay_b_cert) = start_private_relay().await;
-        // Relay B stays disabled behind a stopped proxy until the fault phase,
-        // so only relay A carries the initial controller session.
-        let disabled_proxy =
-            RestartableTcpProxy::start("127.0.0.1:0".parse().unwrap(), relay_b_addr).await;
-        let relay_b_proxy_addr = disabled_proxy.stop().await;
-        let refused = TcpStream::connect(relay_b_proxy_addr)
-            .await
-            .expect_err("disabled relay B accepted a connection");
-        assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
-        let relay_b_url: RelayUrl = format!("https://{relay_b_proxy_addr}")
-            .parse()
-            .expect("relay B URL");
-        let relay_map = RelayMap::from_iter([
-            iroh_relay::RelayConfig::new(relay_a_url.clone(), None),
-            iroh_relay::RelayConfig::new(relay_b_url.clone(), None),
-        ]);
-        assert!(keep_dedicated_relays_connected(&RelayMode::Custom(
-            relay_map.clone()
-        )));
-
-        let node_id = Uuid::now_v7();
-        let agent_key = iroh::SecretKey::generate();
-        let controller_key = iroh::SecretKey::generate();
-        let signing = SigningKey::from_bytes(&[7; 32]);
-        let trust = std::sync::Arc::new(FencedSessionTrust {
-            signing: signing.clone(),
-            node_id,
-            endpoint_id: agent_key.public(),
-            next_epoch: std::sync::atomic::AtomicU64::new(41),
-        });
-        let trust_listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind trust fixture");
-        let trust_addr = trust_listener.local_addr().expect("trust fixture address");
-        let (trust_stop, trust_stop_rx) = oneshot::channel::<()>();
-        let trust_server = tokio::spawn(
-            tonic::transport::Server::builder()
-                .add_service(TrustServiceServer::from_arc(trust.clone()))
-                .serve_with_incoming_shutdown(TcpListenerStream::new(trust_listener), async move {
-                    trust_stop_rx.await.ok();
-                }),
-        );
-        let trust_channel = tonic::transport::Endpoint::from_shared(format!("http://{trust_addr}"))
-            .expect("trust endpoint")
-            .connect()
-            .await
-            .expect("connect trust fixture");
-        let policy = IdentityPolicy::new(
-            HashMap::from([(agent_key.public(), node_id.as_bytes().to_vec())]),
-            HashSet::new(),
-        );
-        let service = IrohTransportService::new_with_fence_policy(
-            16,
-            policy.clone(),
-            Some(std::sync::Arc::new(test_command_keyring())),
-            true,
-        );
-        let router = ocservia_transportd::build_router_with_trust_tls_roots(
-            controller_key,
-            RelayMode::Custom(relay_map.clone()),
-            policy,
-            TrustAuthority::new(trust_channel),
-            vec![relay_a_cert.clone(), relay_b_cert.clone()],
-            &service,
-        )
-        .await
-        .expect("build relay failover transportd");
-        let controller_id = router.endpoint().id();
-
-        let telemetry_batches = std::sync::Arc::new(AtomicUsize::new(0));
-        let command_results = std::sync::Arc::new(AtomicUsize::new(0));
-        let events_watcher = tokio::spawn({
-            let service = service.clone();
-            let telemetry_batches = telemetry_batches.clone();
-            let command_results = command_results.clone();
-            async move {
-                let mut events = service
-                    .watch_events(tonic::Request::new(WatchEventsRequest {
-                        after_event_id: Vec::new(),
-                    }))
-                    .await
-                    .expect("watch transport events")
-                    .into_inner();
-                while let Some(event) = events.next().await {
-                    let event = event.expect("valid transport event");
-                    if event.r#type == i32::from(TransportEventType::Telemetry) {
-                        telemetry_batches.fetch_add(1, Ordering::SeqCst);
-                    } else if event.r#type == i32::from(TransportEventType::CommandResult) {
-                        command_results.fetch_add(1, Ordering::SeqCst);
-                    }
-                }
-            }
-        });
-
-        let journal_path = directory.join("agent.db");
-        let supervisor = tokio::spawn({
-            let journal_path = journal_path.clone();
-            let relay_map = relay_map.clone();
-            let relay_tls_roots = vec![relay_a_cert.clone(), relay_b_cert.clone()];
-            let agent_key = agent_key.clone();
-            async move {
-                let mut journal = Journal::open(&journal_path).expect("Agent journal");
-                let mut command_executor =
-                    CommandExecutor::new(Journal::open(&journal_path).expect("executor journal"));
-                let command_keys = test_command_keyring();
-                let sealing_keys = test_sealing_keys();
-                let mut fence_epoch_floor = 0_u64;
-                let mut session = SessionContext {
-                    node_id,
-                    endpoint_id: agent_key.public(),
-                    privd: &privd,
-                    journal: &mut journal,
-                    command_executor: &mut command_executor,
-                    boot_id: "relay-failover-test-boot",
-                    os_release: "relay-failover-test-os",
-                    agent_instance_id: Uuid::now_v7(),
-                    command_keys: &command_keys,
-                    sealing_keys: &sealing_keys,
-                    fence_epoch_floor: &mut fence_epoch_floor,
-                    synthetic_barrier_file: None,
-                };
-                let relay_mode = RelayMode::Custom(relay_map);
-                let dial_relay_mode = relay_mode.clone();
-                let transport = QuicTransportConfig::builder()
-                    .max_concurrent_bidi_streams(VarInt::from_u32(
-                        u32::try_from(MAX_WRITE_QUEUE).expect("write queue fits u32"),
-                    ))
-                    .build();
-                // Relay-only transports keep the localhost fixture honest:
-                // the session must ride the dedicated relays, never a
-                // same-host direct path.
-                let bind_endpoint: EndpointFactory = Box::new(move || {
-                    let agent_key = agent_key.clone();
-                    let relay_mode = relay_mode.clone();
-                    let transport = transport.clone();
-                    let relay_tls_roots = relay_tls_roots.clone();
-                    Box::pin(async move {
-                        Endpoint::builder(presets::Minimal)
-                            .secret_key(agent_key)
-                            .relay_mode(relay_mode)
-                            .keep_relays_connected(true)
-                            .ca_tls_config(
-                                iroh::tls::CaTlsConfig::default().with_extra_roots(relay_tls_roots),
-                            )
-                            .clear_address_lookup()
-                            .clear_ip_transports()
-                            .transport_config(transport)
-                            .bind()
-                            .await
-                    })
-                });
-                supervise_controller_sessions(
-                    bind_endpoint,
-                    controller_id,
-                    &dial_relay_mode,
-                    &mut session,
-                )
-                .await;
-            }
-        });
-
-        let node_connection = |relay_url: String| {
-            let service = service.clone();
-            async move {
-                loop {
-                    if let Ok(response) = service
-                        .get_node_connection(tonic::Request::new(GetNodeConnectionRequest {
-                            node_id: node_id.as_bytes().to_vec(),
-                        }))
-                        .await
-                    {
-                        let metadata = response.into_inner();
-                        if metadata.path_detail.contains(&relay_url) {
-                            return metadata;
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            }
-        };
-
-        let before = tokio::time::timeout(Duration::from_secs(30), {
-            let telemetry_batches = telemetry_batches.clone();
-            async move {
-                let metadata = node_connection(relay_a_url.to_string()).await;
-                // The relay-A session must be functional, not merely present.
-                while telemetry_batches.load(Ordering::SeqCst) == 0 {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-                metadata
-            }
-        })
-        .await
-        .expect("Agent session through relay A did not become healthy");
-        assert_eq!(before.endpoint_id, agent_key.public().as_bytes());
-        assert_eq!(before.owner_epoch, 41);
-        let first_fence = service
-            .get_owner_fence(tonic::Request::new(GetOwnerFenceRequest {
-                node_id: node_id.as_bytes().to_vec(),
-            }))
-            .await
-            .expect("query first owner fence")
-            .into_inner()
-            .fence
-            .expect("first owner fence");
-        let first_command = live_signed_noop(&signing, &node_id, &agent_key.public(), &first_fence);
-        assert!(
-            service
-                .send_command(tonic::Request::new(SendCommandRequest {
-                    node_id: node_id.as_bytes().to_vec(),
-                    command_envelope: first_command.encode_to_vec(),
-                }))
-                .await
-                .expect("dispatch under first owner epoch")
-                .into_inner()
-                .accepted
-        );
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while command_results.load(Ordering::SeqCst) < 1 {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("first owner epoch command did not complete");
-        let before_connected_at = before.connected_at.expect("relay A connected_at");
-        // Captured before the fault: session 1's next heartbeat is 30s away,
-        // so any additional batch inside the failover window can only come
-        // from the replacement session.
-        let batches_at_fault = telemetry_batches.load(Ordering::SeqCst);
-
-        relay_a.shutdown().await.expect("stop relay A");
-        let relay_b_proxy = RestartableTcpProxy::start(relay_b_proxy_addr, relay_b_addr).await;
-
-        let after = tokio::time::timeout(
-            Duration::from_secs(15),
-            node_connection(relay_b_url.to_string()),
-        )
-        .await
-        .expect("Agent did not fail over to relay B within fifteen seconds");
-        let after_connected_at = after.connected_at.expect("relay B connected_at");
-        assert!(
-            (after_connected_at.seconds, after_connected_at.nanos)
-                > (before_connected_at.seconds, before_connected_at.nanos),
-            "relay B must carry a replacement session, not a path migration"
-        );
-        assert_eq!(after.endpoint_id, agent_key.public().as_bytes());
-        assert_eq!(after.owner_epoch, 42);
-        assert_eq!(
-            after.agent_instance_id, before.agent_instance_id,
-            "the same Agent process must own the replacement session"
-        );
-        let stale_command = live_signed_noop(&signing, &node_id, &agent_key.public(), &first_fence);
-        let stale_error = service
-            .send_command(tonic::Request::new(SendCommandRequest {
-                node_id: node_id.as_bytes().to_vec(),
-                command_envelope: stale_command.encode_to_vec(),
-            }))
-            .await
-            .expect_err("superseded owner epoch must be rejected");
-        assert_eq!(stale_error.code(), tonic::Code::PermissionDenied);
-        let second_fence = service
-            .get_owner_fence(tonic::Request::new(GetOwnerFenceRequest {
-                node_id: node_id.as_bytes().to_vec(),
-            }))
-            .await
-            .expect("query replacement owner fence")
-            .into_inner()
-            .fence
-            .expect("replacement owner fence");
-        assert_eq!(second_fence.owner_epoch, 42);
-        let second_command =
-            live_signed_noop(&signing, &node_id, &agent_key.public(), &second_fence);
-        assert!(
-            service
-                .send_command(tonic::Request::new(SendCommandRequest {
-                    node_id: node_id.as_bytes().to_vec(),
-                    command_envelope: second_command.encode_to_vec(),
-                }))
-                .await
-                .expect("dispatch under replacement owner epoch")
-                .into_inner()
-                .accepted
-        );
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while command_results.load(Ordering::SeqCst) < 2 {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("replacement owner epoch command did not complete");
-
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while telemetry_batches.load(Ordering::SeqCst) <= batches_at_fault {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        })
-        .await
-        .expect("replacement session did not deliver telemetry");
-        assert!(
-            !supervisor.is_finished(),
-            "the session supervisor keeps running after the relay failover"
-        );
-
-        supervisor.abort();
-        assert!(
-            supervisor
-                .await
-                .expect_err("aborted Agent supervisor")
-                .is_cancelled()
-        );
-        events_watcher.abort();
-        privd_server.abort();
-        ocservia_transportd::shutdown(&service, router)
-            .await
-            .expect("shutdown relay failover transportd");
-        relay_b_proxy.stop().await;
-        relay_b.shutdown().await.expect("stop relay B");
-        trust_stop.send(()).ok();
-        trust_server
-            .await
-            .expect("trust fixture task")
-            .expect("trust fixture server");
-        let reopened = Journal::open(&journal_path).expect("reopen Agent journal");
-        assert_eq!(
-            reopened
-                .owner_fence_epoch_floor()
-                .expect("durable owner floor"),
-            42
-        );
-        std::fs::remove_file(&privd_socket).expect("remove privd snapshot socket");
-        std::fs::remove_dir_all(directory).expect("remove relay failover fixture");
     }
 
     #[test]
@@ -5966,11 +4544,9 @@ mod tests {
         let socket = std::env::temp_dir().join(format!("missing-{}.sock", Uuid::now_v7()));
         let client = PrivdClient::new(socket, Duration::from_millis(20)).expect("client");
         let envelope = CommandEnvelope {
-            payload: Some(command_envelope::Payload::ConfigPlan(ConfigPlan {
-                candidate: b"tcp-port = 443\n".to_vec(),
-                candidate_hash: vec![0x5a; 32],
-                expected_revision: 0,
-            })),
+            payload: Some(command_envelope::Payload::CompleteConfigPlan(
+                CompleteConfigPlan::default(),
+            )),
             ..CommandEnvelope::default()
         };
         assert_eq!(
@@ -5993,7 +4569,7 @@ mod tests {
                 let request: PrivdRequest = read_frame(&mut stream).await.expect("request");
                 assert!(request.operation.is_none());
                 let Some(CommandEnvelope {
-                    payload: Some(command_envelope::Payload::ConfigApply(observe)),
+                    payload: Some(command_envelope::Payload::CompleteConfigApply(observe)),
                     ..
                 }) = request.authorization_command
                 else {
@@ -6025,12 +4601,14 @@ mod tests {
                     seconds: i64::MAX,
                     nanos: 0,
                 }),
-                payload: Some(command_envelope::Payload::ConfigApply(ConfigApply {
-                    candidate: b"tcp-port = 443\n".to_vec(),
-                    candidate_hash: vec![0x5a; 32],
-                    expected_current_hash: vec![0x4b; 32],
-                    desired_revision: 2,
-                })),
+                payload: Some(command_envelope::Payload::CompleteConfigApply(
+                    CompleteConfigApply {
+                        candidate_hash: vec![0x5a; 32],
+                        expected_current_hash: vec![0x4b; 32],
+                        desired_revision: 2,
+                        ..CompleteConfigApply::default()
+                    },
+                )),
                 ..CommandEnvelope::default()
             };
             let result = observe_external_effect(&client, &envelope).await;

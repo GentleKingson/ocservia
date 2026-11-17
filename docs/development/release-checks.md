@@ -25,6 +25,15 @@ a result from one layer never stands in for another:
 
 ## Choose the validation scope
 
+Validation converges onto four explicit tiers:
+
+| Tier | Purpose | Primary entrypoints |
+| --- | --- | --- |
+| Unit | Fast in-memory domain, protocol, UI, and CI-guard contract checks | `scripts/go-check.sh standard`, `make rust-check`, `scripts/web-check.sh basic`, `scripts/ci-tools-check.sh` |
+| Key Integration | Live PostgreSQL 18 schema/snapshot/API checks, native ocserv adapter integration, and Controller/Agent lifecycle suites | `scripts/database-postgres-snapshot.sh check`, `scripts/database-postgres-smoke.sh`, `DATABASE_TEST_SCOPE=full PG_MAJOR=18 scripts/database-integration.sh`, `scripts/native-ocserv-integration.sh` |
+| Security Regressions | Single-admin workspace boundary, authentication/session, fencing/outbox regressions, secret scanning, and dependency/image vulnerability gates | `regression-*` groups in `scripts/required-go-tests.txt`, `scripts/security-check.sh`, `security.yml`, `release-products.yml` |
+| Release E2E Acceptance | Playwright browser suite, Integrated Business Smoke with single-instance recovery, Pebble ACME Quick Install, and cross-VM private business | `scripts/web-check.sh full` / `make e2e`, `release-check.yml`, `release-business-diagnostic.yml`, `real-e2e.yml` |
+
 When a change only touches documentation, run the focused checks:
 
 ```bash
@@ -121,70 +130,15 @@ Pick the entry point that matches the behavior under test:
 The database-backed Go groups over the Controller services and HTTP layer are
 `backend-policy-config`, `backend-policy-useroperations`, `backend-policy-api`,
 `regression-auth` and the startup group. They run over restricted runtime
-database connections and cover signed command intent, transactional session/RBAC checks and
-rollback, policy cleanup errors, leadership fencing, HTTP status ordering,
-Secret access denials and first-request server assembly. Owner credentials are
-for schema setup and fault injection only. Every required case must execute:
-skipped database tests do not satisfy acceptance, and HTTP intent tests do not
-verify Agent execution, package installation or release readiness.
+database connections and cover signed command intent, transactional session and
+workspace-admin checks and rollback, policy cleanup errors, leadership fencing,
+HTTP status ordering, Secret access denials and first-request server assembly.
+Owner credentials are for schema setup and fault injection only. Every required
+case must execute: skipped database tests do not satisfy acceptance, and HTTP
+intent tests do not verify Agent execution, package installation or release readiness.
 
-### Ocserv 1.6.0 compatibility
-
-The native ocserv fixture also covers upstream ocserv `1.6.0`. Run it as root in a
-disposable Linux environment with TUN and `NET_ADMIN`, native `ocserv`, `occtl`,
-`ocpasswd`, OpenConnect, OpenSSL, `ssl-cert`, and the locked Rust toolchain:
-
-```bash
-RUN_ID=native-ocserv160 ARTIFACT_DIR="$PWD/.cache/native-ocserv160" \
-  bash scripts/native-ocserv-integration.sh
-```
-
-For a container without Rust, build the adapter libtest ELF on the same
-architecture and set `OCSERVIA_NATIVE_OCSERV_TEST_BINARY` to its absolute mounted path.
-The script verifies that this binary contains the expected ignored test.
-
-On exactly `1.6.0`, the fixture also checks malformed per-user, per-group and
-default files and recovery after restoring valid configuration (each failure
-must reject the session without creating a tunnel), and waits for two TLS 1.3
-KeyUpdates with `rekey-method = ssl` while verifying the tunnel was assigned
-only once. All native runs exercise post-publication parser failure and exact
-configuration rollback with a fixture service controller that maps reload to
-SIGHUP; this checks adapter rollback, not systemd integration.
-
-The opt-in `ocserv160` diagnostic builds the checksum-pinned upstream source
-(see [`scripts/build-ocserv160-compat.sh`](../../scripts/build-ocserv160-compat.sh)
-and [`deploy/test-fixtures/ocserv160.Dockerfile`](../../deploy/test-fixtures/ocserv160.Dockerfile))
-and runs the native ocserv fixture, the adapter regression suite, Agent protocol tests and
-Controller ConfigPlan tests on native AMD64 and ARM64 runners in Debian 13
-containers ([`ocserv160-compat.yml`](../../.github/workflows/ocserv160-compat.yml)),
-checking host, image and ELF architectures. It does not use QEMU or change
-version admission. Dispatch it from a candidate branch:
-
-```bash
-gh workflow run release-upgrade.yml --ref <candidate-branch> -f purpose=ocserv160
-```
-
-After both native jobs pass, the diagnostic reuses Business Smoke on a disposable
-Ubuntu 24.04 ARM64 runner with source-built 1.6.0 binaries and the distribution's
-systemd unit. It requires browser ConfigPlan review and direct Admin apply, VPN user
-creation, a real OpenConnect tunnel, the injected reload-failure rollback with
-exact file-hash restoration and unchanged revision, durable receipts after
-Agent/privd restart, and a fresh working VPN after rollback; a missing rollback
-checkpoint fails it. The fixture disables PAM, RADIUS, GSSAPI and ocserv OIDC,
-so plain password authentication is the tested profile, and the other manual
-workflow inputs do not alter this run.
-
-The entry point is separate from release qualification: Release Check and the
-native package diagnostics still use the pinned 1.5.0 backport. Source binaries
-over a disposable distribution installation are not ocserv 1.6.0 package
-installation, upgrade or removal acceptance. User rotation, disable/enable,
-groups and session termination are covered by native ocserv tests, not by Controller
-business acceptance for 1.6.0. Controller OIDC, the P12 lifecycle, Agent
-rollout, the full recovery matrix, AMD64 systemd business, IPv6, custom
-authentication, ocserv's OIDC browser flow and other platforms are outside this
-scope. Upstream 1.6.0 requires GnuTLS 3.8.2 or newer for OIDC and changes the
-IPv6 server tunnel address from network + 1 to the network address. Operators
-with custom OIDC or IPv6 configurations must review those upstream changes.
+Native ocserv adapter integration runs via `scripts/native-ocserv-integration.sh`
+as root in a disposable Linux environment with TUN and `NET_ADMIN`.
 
 ### Command wire contracts
 
@@ -233,9 +187,9 @@ are still caught.
 
 `scripts/database-artifact-policy.sh all` verifies that `control-plane/migrations`
 contains only `schema.sql` and `upgrade.sql`, that no legacy migration manifests
-or retired `control-plane/internal/database/mysql` sources remain, and that the
-shared marker parser and PostgreSQL metadata checks pass. The prior release
-checkpoint stays pinned to v1.2.0 regardless of newer commits on main.
+remain, and that the shared marker parser and PostgreSQL 18 metadata checks
+pass. The prior release checkpoint stays pinned to v1.2.0 regardless of newer
+commits on main.
 
 In `scripts/required-go-tests.txt`, the `postgres-snapshot` inventory requires
 live PostgreSQL 18 execution where every listed test runs and passes with zero
@@ -435,7 +389,7 @@ image="ocservia-go-validation:$(basename "$task")"
 docker build --platform linux/arm64 -t "$image" -f - "$task" <<'DOCKERFILE'
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash ca-certificates curl tar gzip coreutils jq util-linux ruby gcc libc6-dev \
+    bash ca-certificates curl tar gzip coreutils jq util-linux gcc libc6-dev \
     docker.io openssl patch python3 git shellcheck \
     && rm -rf /var/lib/apt/lists/*
 ENV GOTOOLCHAIN=local
@@ -448,7 +402,6 @@ docker run --rm --init --name "$(basename "$task")-validation" \
     source scripts/env.sh
     go version
     go env GOVERSION GOHOSTOS GOHOSTARCH GOOS GOARCH CGO_ENABLED CC
-    ruby --version
     gcc --version
     bash scripts/test-required-go-tests.sh
     bash scripts/test-bootstrap-profiles.sh
@@ -603,11 +556,8 @@ always build all images.
 | `security.yml` | Weekly/manual scans; reusable, and called by Release Check (not by `release.yml`) |
 | `release-check.yml` | Manual main Full CI, Security, Release products build/image-security/smoke, Integrated Business Smoke with single-instance recovery, and Quick Install (Pebble ACME), each on native amd64 and arm64 |
 | `release.yml` | Tag build/image-security/smoke/publish; manual build-only dry-run |
-| `real-e2e.yml` | Manual three-hosted-VM enrollment and private business over an ephemeral Tailscale OIDC network and a temporary dedicated HTTPS Relay; the schedule is locked off, and unauthorized refs and missing infrastructure fail closed; outside Basic CI and Release Check |
-| `release-upgrade.yml` | Manual (workflow name Release Diagnostics): local Business smoke, Integration, native platform diagnostics, `ocserv160` compatibility, or published installation assets on a chosen architecture |
-| `release-products.yml`, `release-business-diagnostic.yml`, `release-native-platform.yml`, `ocserv160-compat.yml` | Reusable build/smoke, native Business probe, native platform diagnostics and ocserv 1.6.0 compatibility; called by the workflows above, not triggered directly |
-| `integrated-network.yml` | Manual or candidate-branch Integrated Network prototype; not part of Basic CI or Release Check |
-| `strip-claude-footer.yml` | PR-body housekeeping only; no validation |
+| `release-products.yml`, `release-business-diagnostic.yml` | Reusable native product build/smoke and Integrated Business Smoke workflows called by `release-check.yml` and `release.yml` |
+| `real-e2e.yml` | Manual three-hosted-VM enrollment and private business over an ephemeral Tailscale network and a temporary dedicated HTTPS Relay; the schedule is locked off, and unauthorized refs and missing infrastructure fail closed; outside Basic CI and Release Check |
 
 ### Security checks
 
@@ -708,13 +658,13 @@ user creation, direct reload and ConfigPlan apply, and an OpenConnect
 VPN session. It runs on one disposable native runner (`arch=amd64` or `arm64`;
 Release Check runs both) with one Controller and one dedicated Relay, and every
 production binary, service, Relay and VPN path runs without mocks.
-`production_signer=true` (the default in Release Check and `release-upgrade.yml`)
+`production_signer=true` (the default in `release-check.yml` / `release-business-diagnostic.yml`)
 enables production Signer sealing and internal TLS; `false` selects the
 standalone topology without them. Smoke also provisions a separate API-created
 VPN user and, with `production_signer=true`, verifies that the production Signer
 seals its password.
 
-The manual integration profile adds OIDC, PKI/P12 issuance and revocation
+The `extended` business profile adds PKI/P12 issuance and revocation
 (including browser flows), rollback and deeper fault recovery. Before the VPN and
 recovery stages it applies the node configuration once through the browser and
 checks the native file hash against the operation receipts. Both profiles require
@@ -725,20 +675,19 @@ Acceptance fails on any page violation or console CSP error outside the final
 positive control, if the collector misses that control, or if the control is
 reported without being enforced.
 
-To run the extended suite on a branch:
+To run the business harness locally on a disposable Ubuntu 24.04 systemd host or VM:
 
 ```bash
-gh workflow run release-upgrade.yml --ref <branch> \
-  -f version=0.0.0 -f purpose=integration \
-  -f production_signer=true -f run-resilience=true
+VERSION=0.0.0 BUSINESS_PROFILE=extended PRODUCTION_SIGNER_ACCEPTANCE=true \
+  BUSINESS_RUN_RESILIENCE=true bash scripts/release-business-probe.sh
 ```
 
-`arch` (default `amd64`) selects the `ubuntu-24.04` or `ubuntu-24.04-arm`
-runner. `purpose=smoke` narrows the run to Smoke regardless of Signer mode.
-`ocserv_package=distribution` (the default) keeps the runner's Ubuntu ocserv;
+In `release-check.yml`, `arch` (`amd64` and `arm64`) runs the native `smoke`
+profile with `production_signer=true` and `run-resilience=true`.
+`ocserv_package=distribution` keeps the runner's Ubuntu ocserv;
 `ocserv_package=backport-1.5.0` installs the pinned, SHA256-checked
 [ocserv-backport](https://github.com/GentleKingson/ocserv-backport/releases/tag/1.5.0-2)
-1.5.0 package and also requires the session terminate checkpoints below.
+1.5.0 package and also requires the session terminate checkpoints.
 Diagnostic runs never publish releases, push to GHCR or read production Secrets,
 and do not substitute for Release Check.
 
@@ -754,7 +703,7 @@ root-owned staging, and managed-node preparation through `SERVICES_ACTIVE` runs
 through the shipped installer.
 
 After the direct Admin positive ConfigPlan apply, both profiles bring up an
-OpenConnect tunnel and verify end-to-end ICMP. Manual integration then submits a
+OpenConnect tunnel and verify end-to-end ICMP. The extended profile then submits a
 reviewed revision built to fail during ocserv reload, confirms the node restores
 the previous files byte for byte, and establishes a fresh tunnel with working
 ICMP. This tests automatic rollback of a failed apply, not an operator-initiated
@@ -762,17 +711,17 @@ rollback of an active revision. Its final stage builds the next patch version of
 the Agent package, places it in the node's root-owned upgrade spool, recreates the
 Controller with a diagnostics-only Compose override that mounts a release catalog
 (absent from the shipped launcher), and drives a browser-initiated, direct Admin
-one-node canary rollout. The rollout must complete without an approval dependency, leave
+one-node canary rollout. The rollout completes without any approval queue, leaves
 the installed binaries and the live Agent reporting the target version, and
-record zero unexpected CSP violations. Stage durations go to `timings.json`; no
+records zero unexpected CSP violations. Stage durations go to `timings.json`; no
 duration target is a release gate.
 
 GitHub Actions job status is the pass/fail authority. `result.json` records the
-selected scope (`business-smoke` or `integration`, never full release
+selected scope (`smoke` or `extended`, never full release
 acceptance), the diagnostic schema version, overall outcome, stage timings and
 completed checkpoints, with `operator_mode=single_admin`. The Admin performs
-management operations directly. A role-less test user exercises RBAC denials;
-it is not a second authorizing identity. Exact request replay must recover the
+management operations directly; workspace-scoped denials are exercised by an
+unauthorized non-admin identity. Exact request replay must recover the
 same operation, changed intent with the same idempotency key must fail, and
 native receipts and effects must agree with the recorded operation.
 Checkpoints are written only after their assertions succeed, and unreached
@@ -784,32 +733,22 @@ and never scores them as PASS:
   Bootstrap launcher download/failure fixtures and Release build-only smoke cover it.
 - The private Relay CA is provisioned through the documented protected public CA
   files, and the shipped Compose overlay and native launcher enable the existing
-  strict-TLS flag unpatched. The managed-node installer drives enrollment, with
-  preparation, pending registration and SERVICES_ACTIVE as distinct checkpoints.
-  This legacy enrollment fixture uses direct Admin activation; the one-token
-  automatic activation path is covered by the Nodes installation wizard suite.
-  Smoke registers through a `POST /api/v1/node-bootstrap-tokens` token without an
-  EndpointID, handed to the first installer run as a protected
-  `BOOTSTRAP_TOKEN_SOURCE`, which reaches `ENROLLED_LOCAL`. The harness checks
-  that the Controller stored only the token digest, bound it to the Agent's
-  EndpointID on consumption and kept the node pending, and that installer reruns
-  while pending and after activation keep the node ID and identity files.
-  Extended keeps the legacy endpoint-bound registration (`ENROLLMENT_READY`, then
-  `POST /api/v1/enrollment-tokens`).
-- The initial Local bootstrap creates exactly one Admin. The browser uses that
-  identity without devAuth or injected sessions; the API creates a role-less
-  reader for denial checks. Direct database writes are limited to initial
-  workspace provisioning before Local bootstrap. The suite checks anonymous
-  access, RBAC and workspace denial, request binding and idempotency conflicts.
-  No second login or approval queue authorizes management operations.
-- Extended uses a dedicated HTTPS OIDC fixture for discovery, PKCE, callbacks and
-  rejection of invalid issuers, signatures, nonces, codes and state, then
-  OIDC-only sign-in, workspace authorization and restart/logout. The Signer
-  exercises real OpenSSL CSR verification, signing, public-key sealing and
-  revocation acknowledgements over authenticated TLS. The OIDC provider and
-  Signer CA are task-controlled fixtures, so they do not certify third-party
-  IdP, CA or HSM integrations or multi-operator key custody.
-- Extended certificate checks cover node restarts and single-use P12 downloads.
+  strict-TLS flag unpatched. Both Smoke and Extended profiles enroll via
+  `POST /api/v1/node-bootstrap-tokens` (`installation: true` `oit1_` -> `obt2_`),
+  passing `--non-interactive --join-token-file` to the managed-node installer.
+  The harness checks that the Controller persisted only the child token digest,
+  bound it to the Agent's EndpointID, activated the node immediately, registered
+  the root `privd` attestation key via `/api/v1/node-bootstrap/{attestation,register}`,
+  and that subsequent installer reruns preserve the node ID and identity files.
+- The initial Local bootstrap creates one single workspace Admin. The browser uses
+  that identity without devAuth or injected sessions, and direct database writes are
+  limited to initial workspace provisioning before Local bootstrap. The suite
+  checks anonymous access, non-admin `403`/`404` denials, request binding and
+  idempotency conflicts. No second login or approval queue authorizes management
+  operations.
+- Extended exercises real Signer OpenSSL CSR verification, signing, public-key
+  sealing and revocation acknowledgements over authenticated TLS, plus
+  certificate checks across node restarts and single-use P12 downloads.
   The exported P12 bundle authenticates against a second native `ocserv`; after
   the Controller revokes the certificate, the harness exports and verifies a
   fresh CRL, places it atomically and sends `SIGHUP`. Acceptance requires
@@ -818,7 +757,8 @@ and never scores them as PASS:
   explicit operator CRL refresh workflow, not scheduled distribution, OCSP or
   active session termination. `crl-acceptance.json` is kept with the API,
   root-receipt, browser and business logs, and a missing file or failed
-  assertion blocks acceptance.
+  assertion blocks acceptance. The task-controlled Signer CA fixture does not
+  certify third-party CA or HSM integrations.
 - A real browser drives the built gateway and Controller API without route mocks,
   transport simulators or TLS bypasses. Unexecuted phases stay NOT RUN, and only
   recorded runtime checkpoints count as evidence for a candidate commit.
@@ -892,17 +832,16 @@ validation does not certify native package distribution or high availability.
 
 ### Manual package removal terminal
 
-Release Diagnostics (`release-upgrade.yml`) accepts `terminal=uninstall` as an
-opt-in alternative to the default `terminal=revocation`. Use `purpose=smoke` to
-reuse Bootstrap Token enrollment, pending identity reruns, direct Admin activation,
-Online convergence, browser configuration apply and the real VPN before removing
-the package. It adds no Basic CI or Release Check E2E requirement and changes no
-production lifecycle behavior.
+The native business harness accepts `BUSINESS_TERMINAL=uninstall` as an
+opt-in alternative to the default `revocation` terminal. Under `smoke`,
+it reuses bootstrap installation enrollment, Online convergence, browser
+configuration apply and the real VPN before removing the package. It adds no
+Basic CI or Release Check E2E requirement and changes no production lifecycle behavior.
 
 ```sh
-gh workflow run release-upgrade.yml --ref <candidate-branch> \
-  -f purpose=smoke -f terminal=uninstall -f version=0.0.0 \
-  -f production_signer=true -f run-resilience=false
+VERSION=0.0.0 BUSINESS_PROFILE=smoke BUSINESS_TERMINAL=uninstall \
+  PRODUCTION_SIGNER_ACCEPTANCE=true BUSINESS_RUN_RESILIENCE=false \
+  bash scripts/release-business-probe.sh
 ```
 
 The terminal needs a disposable Ubuntu 24.04 systemd runner of the selected
@@ -1071,17 +1010,17 @@ requires typed `ServerDeniedAuth` for the wrong token before real enrollment.
 TLS and hostname verification stay enabled everywhere.
 
 The OAEP exchange, real Agent enrollment and Controller database assertions
-remain: UUIDv7 Pending Node, EndpointID, workspace/environment, and consumed
-token → node binding. Controller and Agent compare distinct boot IDs, source/run
+remain: active UUIDv7 node, EndpointID, workspace/environment, and consumed
+derived `obt2_` token -> node binding. Controller and Agent compare distinct boot IDs, source/run
 identity, common Relay metadata and a third distinct Relay boot ID. Those boot
 IDs and the authenticated Relay connection are the application Relay evidence.
 A compact post-traffic Tailscale peer observation records `CurAddr`, `Relay`,
 `PeerRelay` and `Active`; an absent path is unknown, not proof of direct traffic.
 Tailscale transport (direct, DERP or peer relay) is separate from application
 iroh Relay use, and `tailscale ping` is not enrollment evidence. The Controller
-registers the root attestation key before confirming native startup to the Node,
-because registration advances authorization and the first Agent session must
-negotiate that revision before business commands are queued.
+and node register the root attestation key during the installation handshake
+before confirming native startup, because registration advances authorization
+and the first Agent session must negotiate that revision before business commands are queued.
 
 Cleanup steps run with `always()`: Controller services/volumes/networks, Agent
 native units/package/process/build/private files, Relay container/image/TLS/token
@@ -1165,7 +1104,7 @@ Run these scripts only on explicitly authorized test hosts.
    elapses.
 5. Copy the node's `outbox/enrollment-result` directory back to the Controller,
    then run `scripts/real-e2e-controller.sh verify-enrollment RESULT_DIR` to
-   confirm the pending UUIDv7 node record and its EndpointID binding.
+   confirm the active UUIDv7 node record and its EndpointID binding.
 6. Run `scripts/real-e2e-controller.sh authority AGENT_ENDPOINT_DIR`; copy its
    `outbox/business-authority` to the node and run
    `scripts/real-e2e-node.sh activate AUTHORITY_DIR`.
@@ -1323,26 +1262,18 @@ docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
 `test-relay-launchers.py` swaps the fixed binary paths for argv recorders. The
 systemd unit check `test-relay-systemd.sh` needs root inside a separate
 disposable systemd container, where it checks the rendered unit argv, service UID
-and GID, signal delivery and exit codes when Relay B is unset, empty or
-populated. Never run either fixture on an installed host. In Basic CI, the
+and GID, signal delivery and exit codes for single-Relay configuration. Never run either fixture on an installed host. In Basic CI, the
 installer and launcher self-tests run only when [path routing](#path-routing)
 sets the installer flag; `test-relay-systemd.sh` is manual-only.
 
-To validate the Compose configuration, export a unique `RUN_ID`, `ARTIFACT_DIR`
+To validate the Compose configuration and authentication/database contracts, export a unique `RUN_ID`, `ARTIFACT_DIR`
 and a private, owner-controlled `RUNNER_TEMP`, then run:
 
 ```sh
-bash scripts/production-runtime-smoke.sh --compose-only
 bash scripts/test-database-deployment-config.sh
 bash scripts/test-production-auth-config.sh
 bash scripts/docs-check.sh
 ```
-
-The focused Compose mode checks the rendered Relay arguments and merged network
-boundaries without testing live reachability. The baseline Postgres and backup
-service definitions declare no `nofile` limits, so this mode does not satisfy the
-full production-runtime `nofile` assertion; the full and `--contract-only` production-runtime modes still
-enforce it and must be run separately when needed.
 
 ### Network probe
 
@@ -1456,7 +1387,7 @@ scenario, and each must finish and pass. Runs without resilience record
 candidate tree; the standalone [network probe](#network-probe) verifies transport
 reachability in isolation and does not exercise the business recovery chain. In
 every scenario the command pipeline still enforces owner/epoch/fence/lease
-validation, the transactional outbox, session and RBAC authorization, signatures, idempotent command IDs, the Agent SQLite journal and privd
+validation, the transactional outbox, session and workspace-admin authorization, signatures, idempotent command IDs, the Agent SQLite journal and privd
 receipts. A queued offline command proven never sent must never be treated as
 expected Unknown if it fails. Passing these checks does not imply exactly-once
 execution or production RTO/RPO guarantees.
@@ -1540,7 +1471,7 @@ Run verification checks inside an authorized, isolated environment with all depe
 | API adapters, session or Workspace | `test/api-client.test.ts`, generated-auth serialization checks; `node test/run-auth-browser.mjs` against the production build for login/Workspace/SSE races |
 | Configuration/certificate workflows | `test/configuration-feature.test.ts`, `test/certificates-feature.test.ts`, `test/node-config-plan.test.ts`, `test/node-workflows.test.ts`; browser specs `e2e/config-plan.spec.ts`, `e2e/certificate-lifecycle.spec.ts`, `e2e/node-forms.spec.ts` on desktop/mobile |
 | Operations/rollouts | `test/operation-state-tone.test.ts`, `test/rollout-views.test.ts`, `test/nodes-rollout-submit.test.ts`; browser specs `e2e/operations.spec.ts`, `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume; a real one-node rollout runs in [manual integration](#business-validation) |
-| Audit, overview | Corresponding view/unit tests and browser specs `e2e/approvals-audit.spec.ts` (audit and absence of approval navigation), `e2e/overview.spec.ts`; verify permission, stale/empty states and Workspace switching |
+| Audit, overview | Corresponding view/unit tests and browser specs `e2e/audit.spec.ts`, `e2e/overview.spec.ts`; verify authorization, stale/empty states and Workspace switching |
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
 | ESLint configuration | `npm run lint`, `npx vitest run test/eslint-vue.test.ts` (Vue rules reach SFCs) and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |
 
@@ -1632,7 +1563,7 @@ and `architecture` fields. Before protected staging, architecture verification,
 safe extraction and service lifecycle transitions, the upgrade path checks the
 downloaded archive's SHA-256 against the command and aborts on a mismatch. All
 standard command guarantees stay in force: runtime command authorization,
-transactional session/RBAC checks, owner/epoch/fence/lease checks,
+transactional session and workspace-admin checks, owner/epoch/fence/lease checks,
 idempotency, the Agent SQLite journal, privd receipts, Unknown outcome
 reconciliation, semantic payload hashes, command/fence/receipt signatures and
 durable immutable operation intent. The operator-provisioned release catalog
@@ -1815,55 +1746,36 @@ the exact commit for every RC and final tag.
 
 ### Published installation assets
 
-After the next RC's Release workflow has uploaded its assets, run the Release
-Diagnostics entry point on a disposable native runner:
-
-```bash
-gh workflow run release-upgrade.yml --ref <harness-ref> \
-  -f purpose=release-assets -f version=<X.Y.Z-rc.N> -f arch=amd64
-```
-
-`harness-ref` must contain the published-asset smoke. `version` is the already
-published version without `v`; `latest`, branch names and the local `0.0.0`
-fixture are rejected. Select `arch=arm64` for a separate native arm64 run. No
-Controller, Relay or three-VM deployment is created, and the diagnostic never
-builds or publishes assets.
-
-[`release-asset-smoke.sh`](../../scripts/release-asset-smoke.sh) downloads the
+After an RC's Release workflow has uploaded its assets, run
+[`release-asset-smoke.sh`](../../scripts/release-asset-smoke.sh) against the
+published tag (`VERSION=<X.Y.Z-rc.N>`) on a disposable native runner to download the
 exact Release's Agent archive, SHA-256 sidecar, DEB, RPM and managed-node
-bootstrap over HTTPS, verifies the archive checksum, and checks the bootstrap's
-embedded Release version. The Nodes wizard downloads that same Release asset. It runs the managed-node
-release contracts against the downloaded script (download-failure and
-staging-digest fault injection), then feeds the downloaded packages to the native
-installation Smoke, including real binary version and architecture checks and
-corrupted embedded-payload rejection. The recorded DEB/RPM download hashes are
-evidence, not publisher signatures. The run keeps the requested tag, harness SHA,
-architecture, exact URLs, downloaded hashes and installer and installation logs
-for seven days, and `release-assets-summary.txt` reports
-`RELEASE_ASSET_DOWNLOAD=PASS` only after every check succeeds. Preserve the
-Actions run URL and evidence for the exact RC before closing the release-asset
-validation gap.
+bootstrap over HTTPS, verify the archive checksum, and check the bootstrap's
+embedded Release version (`RELEASE_ASSET_DOWNLOAD=PASS`). It checks the
+downloaded script against release download/checksum contracts and feeds the
+downloaded packages to native installation Smoke, keeping the requested tag,
+architecture, exact URLs, downloaded hashes and logs without building or
+publishing assets (`latest`, branch names and `0.0.0` are rejected).
 
 This verifies published downloads and native package installation. Installer
 fault injection uses mocked host commands and is labeled separately; it does not
 repeat browser enrollment, automatic Controller activation or live Relay connectivity. The
 three-VM wizard run's `RELEASE_ASSET_DOWNLOAD=NOT_TESTED` stays accurate for its
-local same-SHA `v0.0.0` inputs, and only a successful published-RC run closes the
+local same-SHA `v0.0.0` inputs, and only a successful published-RC verification closes the
 gap.
 
 ### Existing checks
 
 | Behavior | Owner |
 | --- | --- |
-| Native bootstrap-token registration and online node, browser Admin login/Workspace/user creation/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke, amd64 and arm64 with the same checkpoint gate |
+| Native `oit1_` -> `obt2_` bootstrap installation and online node, browser Admin login/Workspace/user creation/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke (`release-business-diagnostic.yml`), amd64 and arm64 with the same checkpoint gate |
 | Controller/transport, Agent/privd, bundled PostgreSQL and sole Relay recovery (external PostgreSQL has no Business-level recovery) | Business Smoke with `run-resilience=true` |
-| Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Business Smoke and manual integration |
-| OIDC positive/negative paths; native session disconnect and IP-ban removal; CSR, issue, one-use P12, revoke and persistence (including browser checks); offline queue and exact root effects; one-node browser canary rollout to a locally built next Agent version | Manual integration |
+| Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Business Smoke and extended business harness |
+| Native session disconnect and IP-ban removal; CSR, issue, one-use P12, revoke and persistence (including browser checks); offline queue and exact root effects; one-node browser canary rollout to a locally built next Agent version | Extended business harness (`BUSINESS_PROFILE=extended`) |
 | DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on amd64/arm64 | Native package build/install smoke (Release Check and Release) |
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products (Release Check and Release) |
 | Source/dependency vulnerabilities and repository secrets, within the [tool scope](#security-checks) | Security |
 | Tagged-source build and GitHub/GHCR publication | Release |
-| Fixed-tag GitHub Release download, published checksum, native installation and rejection | Release Diagnostics with `purpose=release-assets` after publication |
 | Three-VM enrollment, private business and dedicated Relay recovery on separate hosted VMs | `real-e2e.yml` (see [Real three-VM acceptance](#real-three-vm-acceptance)) |
 
 Business and Quick Install workflows first require the runner, kernel, dpkg and
@@ -1878,100 +1790,12 @@ clusters.
 
 ## Diagnostics and build rehearsal
 
-### Native platform diagnostics
-
-The dispatch-only `release-upgrade.yml` purposes below are separate from
-Business, Basic CI, Release Check and release publication. They build the current
-source's real Agent package and adapter test ELF on matching GitHub-hosted
-runners, verify the fixed
-[ocserv-backport 1.5.0-2 release](https://github.com/GentleKingson/ocserv-backport/releases/tag/1.5.0-2)
-metadata, `SHA256SUMS`, package digest and dpkg fields, then run the native ocserv
-authentication, password rotation, disable/enable, group, occtl parsing,
-terminate, concurrency and file-permission fixture. Download, dependency or
-validation failures fail the job; no emulation or mock counts as native evidence.
-
-```bash
-gh workflow run release-upgrade.yml --ref <candidate-branch> -f purpose=native-ubuntu-arm64
-gh workflow run release-upgrade.yml --ref <candidate-branch> -f purpose=native-debian13
-```
-
-Runner labels and the pinned Debian base image are defined in
-[`release-native-platform.yml`](../../.github/workflows/release-native-platform.yml).
-Only the isolated Debian container receives TUN and `NET_ADMIN`; it has no host
-network, Docker socket or systemd, and its Agent DEB dependencies, layout and
-verified payload executables are checked without systemd-dependent scriptlets.
-This proves PACKAGE and limited NATIVE_RUNTIME, and an executed native ocserv fixture also
-proves adapter NATIVE_OPERATIONS. It proves neither Debian systemd service
-lifecycle nor CONTROLLER_E2E, which need a separately authorized native VM and
-complete Business acceptance; Ubuntu native ocserv checks does not prove Controller E2E either.
-
-Evidence artifacts keep the run ID and attempt, source SHA, kernel and Docker
-architecture, package metadata and digests, runtime log, native ocserv summary and cleanup
-result for seven days. The adapter libtest ELF may be passed through
-`OCSERVIA_NATIVE_OCSERV_TEST_BINARY` so Debian needs no second Rust toolchain; the native ocserv
-driver first checks that it contains exactly the requested ignored test, and the
-option is for matching native ELF binaries only. Platform diagnostics do not
-broaden the [support scope](../operations/production-deployment.md#support-scope)
-or replace a candidate's formal Release Check, and involve no Controller,
-database or production secrets. The Business integration and package removal
-dispatches are in [Business validation](#business-validation).
-
-### Integrated network check
-
-The Integrated edge and Relay network contract is checked by a bounded fixture.
-Network verification covers client-IP propagation and spoof rejection, invalid
-SNI and Host rejection, private-port isolation, changed-address container
-replacement, and authenticated Relay reconnection from same-host and external
-clients. Signer verification covers durable concurrent replay, lost responses,
-daemon restarts, key provenance checks, both sealing purposes and explicit CRL
-enforcement (see [Signer and certificate verification](#signer-and-certificate-verification)).
-Lifecycle verification covers both manifest versions, mode and database overlays,
-pending-state retry, same-mode rollback, and preflight refusal before side
-effects. [Business validation](#business-validation) covers real enrollment,
-direct Admin authorization, native privileged effects and browser workflows, and native
-product jobs cover both architectures. Missing proof blocks the corresponding
-claim, and historical results in Git history do not count as current acceptance.
-
-Run the fixture in an authorized isolated checkout with Docker and the build
-dependencies; development builds are allowed here. Publication qualification
-uses Release Check and freshly built local images on disposable native runners.
 The Edge and Gateway base images are digest-pinned in their Dockerfiles. The
 Relay image is built by [`scripts/build-relay.sh`](../../scripts/build-relay.sh),
 which reads the Relay source version from [`toolchains.lock`](../../toolchains.lock),
 verifies the archive checksum from `scripts/checksums.txt`, and builds against
 [`deploy/production/relay.Cargo.lock`](../../deploy/production/relay.Cargo.lock).
 No upstream Relay changes are made.
-
-```bash
-docker build -f deploy/production/edge.Dockerfile -t ocservia-integrated-test-edge .
-docker build -f deploy/production/relay.Dockerfile -t ocservia-integrated-test-relay .
-python3 scripts/test-integrated-network.py \
-  --edge-image ocservia-integrated-test-edge --relay-image ocservia-integrated-test-relay \
-  --artifacts /absolute/new/evidence-directory
-```
-
-The script needs Docker Compose, Python 3 and OpenSSL. It builds disposable test
-certificates, networks and containers, uses a synthetic HTTP/SSE backend and
-static page, and runs the real Caddy and Relay binaries, but not the real
-Controller Web/login/Agent workflow. Host bindings use loopback with ephemeral
-ports, not the server's public 443/7842, and the two client containers have
-distinct bridge addresses without being two external hosts. The reserved fixture
-subnets `198.18.91.0/24` and `198.18.92.0/24` must be free. Resources are removed
-on exit, and sanitized results and logs stay in the evidence directory. The
-[manual/branch Actions workflow](../../.github/workflows/integrated-network.yml)
-runs the same check on native AMD64 and ARM64 without publishing images; two
-architecture jobs are not a shared-public-endpoint test, and artifacts state
-their scope and keep NOT_RUN items.
-
-For an explicitly authorized disposable public endpoint, add
-`--serve-public-until /absolute/stop-file` to the fixture invocation. It binds
-TCP443 and UDP7842 for at most 15 minutes, then cleans up. The caller arranges and
-restores authorized host and cloud firewall rules, which the script does not
-change. Pass the endpoint IP and the public `ca_pem` from `public.json` to the
-workflow's `public_address` and `public_ca_pem` inputs, never upload private keys
-or Relay tokens, and compare the two observed public client IPs, since runner
-labels alone do not prove distinct sources. This uses explicit IP routing with
-test-domain SNI, not public DNS or public certificate issuance.
 
 The `relay-network-probe` target in `rust/test-runtime.Dockerfile` accepts
 `URL CA_FILE TOKEN_FILE`. It uses the locked Relay client to check a valid TCP
@@ -1997,7 +1821,7 @@ docker run --rm --network "$RELAY_EGRESS_NETWORK" \
 
 This diagnostic is not single-node recovery acceptance and does not establish a
 real Agent command result; that chain belongs to the Business Smoke and
-Integration environment (see [Resilience and capacity](#resilience-and-capacity)).
+extended harness (see [Resilience and capacity](#resilience-and-capacity)).
 
 ### Build rehearsal
 
@@ -2019,7 +1843,7 @@ In a rehearsal run, the native Agent and Controller build, image-security and
 smoke jobs must pass alongside asset preparation, and the Publish job must be
 skipped. For local validation of release changes, run
 `scripts/test-release-upgrade.sh` (which invokes
-`scripts/test-release-workflows.rb`), the package and installer test scripts,
+`scripts/test-release-workflows.py`), the package and installer test scripts,
 ShellCheck (`scripts/lint.sh`), any local workflow linter you have installed, and
 the documentation checks from
 [Choose the validation scope](#choose-the-validation-scope). The release

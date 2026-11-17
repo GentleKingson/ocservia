@@ -28,10 +28,7 @@ import (
 type Role string
 
 const (
-	RoleAPI       Role = "api"
-	RoleWorker    Role = "worker"
-	RoleScheduler Role = "scheduler"
-	RoleAll       Role = "all"
+	RoleAll Role = "all"
 )
 
 type Config struct {
@@ -59,10 +56,6 @@ type Config struct {
 	DevAuthToken             string
 	LocalAuth                bool
 	PublicOrigin             string
-	OIDCIssuer               string
-	OIDCClientID             string
-	OIDCClientSecret         string
-	OIDCRedirectURL          string
 	SessionKey               []byte
 	SessionTTL               time.Duration
 	AuditCheckpointKey       []byte
@@ -99,10 +92,6 @@ type Config struct {
 	AgentReleaseManifest     string
 	AgentUpgradeReconcile    time.Duration
 	EventStreams             eventstream.Config
-
-	CompleteLocalBootstrap         bool
-	LocalBootstrapApproverUsername string
-	LocalBootstrapApproverPassword string
 }
 
 type LookupEnv func(string) (string, bool)
@@ -165,12 +154,6 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	setString(lookup, "OCSERV_DEV_AUTH_TOKEN", &cfg.DevAuthToken)
 	setString(lookup, "OCSERV_PUBLIC_ORIGIN", &cfg.PublicOrigin)
-	setString(lookup, "OCSERV_OIDC_ISSUER", &cfg.OIDCIssuer)
-	setString(lookup, "OCSERV_OIDC_CLIENT_ID", &cfg.OIDCClientID)
-	if err := setStringOrFile(lookup, "OCSERV_OIDC_CLIENT_SECRET", &cfg.OIDCClientSecret); err != nil {
-		return Config{}, err
-	}
-	setString(lookup, "OCSERV_OIDC_REDIRECT_URL", &cfg.OIDCRedirectURL)
 	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_URL", &cfg.CertificateSignerURL)
 	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_CA_FILE", &cfg.CertificateSignerCAFile)
 	setString(lookup, "OCSERV_RECOMMENDED_AGENT_VERSION", &cfg.RecommendedAgentVersion)
@@ -350,8 +333,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	bootstrap := fs.Bool("bootstrap-local-admin", false, "create the initial Local administrator, then exit")
-	completeBootstrap := fs.Bool("complete-local-bootstrap", false, "add the missing independent approver to an eligible legacy Local initialization, then exit")
-	role := fs.String("role", string(cfg.Role), "process role: api, worker, scheduler, or all")
+	role := fs.String("role", string(cfg.Role), "process role: all")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
 	provisionWorkspace := fs.Bool("provision-management-workspace", false, "create the administration workspace on a database without workspaces, then exit")
 	if err := fs.Parse(args); err != nil {
@@ -361,17 +343,10 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		return Config{}, errors.New("unexpected command-line arguments")
 	}
 	cfg.BootstrapLocalAdmin = *bootstrap
-	cfg.CompleteLocalBootstrap = *completeBootstrap
-	if cfg.CompleteLocalBootstrap {
-		return Config{}, errors.New("--complete-local-bootstrap is retired; an existing administrator needs no second bootstrap identity")
-	}
-	if _, ok := lookup("OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD"); ok {
-		return Config{}, errors.New("plaintext approver password environment variable is forbidden; use OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE")
-	}
 	if _, ok := lookup("OCSERV_LOCAL_BOOTSTRAP_PASSWORD"); ok {
 		return Config{}, errors.New("plaintext bootstrap password environment variable is forbidden; use OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE")
 	}
-	if cfg.BootstrapLocalAdmin || cfg.CompleteLocalBootstrap {
+	if cfg.BootstrapLocalAdmin {
 		setString(lookup, "OCSERV_LOCAL_BOOTSTRAP_USERNAME", &cfg.LocalBootstrapUsername)
 		setString(lookup, "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID", &cfg.LocalBootstrapWorkspace)
 		path, _ := lookup("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE")
@@ -380,7 +355,6 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 			return Config{}, errors.New("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE must be a valid secret file")
 		}
 		cfg.LocalBootstrapPassword = password
-
 	}
 	cfg.Role = Role(*role)
 	cfg.MigrateOnly = *migrateOnly
@@ -397,16 +371,14 @@ func (c Config) Validate() error {
 	if c.DatabaseBackend != "" && c.DatabaseBackend != "postgres" {
 		return errors.New("OCSERV_DATABASE_BACKEND must be postgres; MySQL and cross-engine migration are unsupported")
 	}
-	if (c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) && (!c.LocalAuthEnabled() || c.MigrateOnly || (c.BootstrapLocalAdmin && c.CompleteLocalBootstrap) || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "") {
+	if c.BootstrapLocalAdmin && (!c.LocalAuthEnabled() || c.MigrateOnly || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")
 	}
-	if c.ProvisionWorkspace && (c.MigrateOnly || c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) {
+	if c.ProvisionWorkspace && (c.MigrateOnly || c.BootstrapLocalAdmin) {
 		return errors.New("workspace provisioning cannot be combined with other one-shot commands")
 	}
-	switch c.Role {
-	case RoleAPI, RoleWorker, RoleScheduler, RoleAll:
-	default:
-		return fmt.Errorf("invalid role %q", c.Role)
+	if c.Role != RoleAll {
+		return fmt.Errorf("invalid role %q (only single-process \"all\" is supported)", c.Role)
 	}
 	if c.Environment != "development" && c.Environment != "test" && c.Environment != "production" {
 		return fmt.Errorf("invalid environment %q", c.Environment)
@@ -451,27 +423,13 @@ func (c Config) Validate() error {
 	if c.Environment == "production" && !strings.HasPrefix(publicOrigin, "https://") {
 		return errors.New("OCSERV_PUBLIC_ORIGIN must be an HTTPS origin in production")
 	}
-	oidcConfigured := c.OIDCIssuer != "" || c.OIDCClientID != "" || c.OIDCClientSecret != "" || c.OIDCRedirectURL != ""
-	if oidcConfigured {
-		issuer, issuerErr := url.Parse(c.OIDCIssuer)
-		redirect, redirectErr := url.Parse(c.OIDCRedirectURL)
-		if issuerErr != nil || issuer.Scheme != "https" || issuer.Host == "" || issuer.User != nil || issuer.RawQuery != "" || issuer.Fragment != "" ||
-			redirectErr != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.User != nil || redirect.RawQuery != "" || redirect.Fragment != "" ||
-			c.OIDCClientID == "" || c.OIDCClientSecret == "" {
-			return errors.New("OIDC requires HTTPS issuer/redirect and complete client credentials")
-		}
-		redirectOrigin, ok := browserorigin.Normalize(redirect.Scheme + "://" + redirect.Host)
-		if !ok || (c.Environment == "production" && redirectOrigin != publicOrigin) {
-			return errors.New("OIDC redirect origin must match OCSERV_PUBLIC_ORIGIN in production")
-		}
-	}
-	if c.LocalAuthEnabled() || c.OIDCEnabled() || len(c.SessionKey) != 0 {
+	if c.LocalAuthEnabled() || len(c.SessionKey) != 0 {
 		if len(c.SessionKey) != 32 || c.SessionTTL < time.Minute || c.SessionTTL > 24*time.Hour {
 			return errors.New("browser sessions require a 32-byte session key and a session TTL from 1m to 24h")
 		}
 	}
-	if c.Environment == "production" && !c.LocalAuthEnabled() && !c.OIDCEnabled() {
-		return errors.New("Local or OIDC authentication is required in production")
+	if c.Environment == "production" && !c.LocalAuthEnabled() {
+		return errors.New("Local authentication is required in production")
 	}
 	if len(c.AuditCheckpointKey) != 0 && len(c.AuditCheckpointKey) != 32 {
 		return errors.New("audit checkpoint key must be 32 bytes")
@@ -492,7 +450,7 @@ func (c Config) Validate() error {
 	if c.CommandSigningKeyFile != "" && !filepath.IsAbs(c.CommandSigningKeyFile) {
 		return errors.New("command signing key file path must be absolute")
 	}
-	oneShotDatabaseCommand := c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin || c.CompleteLocalBootstrap
+	oneShotDatabaseCommand := c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin
 	if c.Environment == "production" && !oneShotDatabaseCommand && c.CommandSigningKeyFile == "" {
 		return errors.New("controller command signing key file is required in production")
 	}
@@ -594,12 +552,6 @@ func (c Config) Validate() error {
 func (c Config) LogLevel() slog.Level {
 	return map[string]slog.Level{"debug": slog.LevelDebug, "info": slog.LevelInfo, "warn": slog.LevelWarn, "error": slog.LevelError}[c.LogLevelName]
 }
-
-func (c Config) RunsAPI() bool { return c.Role == RoleAPI || c.Role == RoleAll }
-
-func (c Config) RunsWorker() bool { return c.Role == RoleWorker || c.Role == RoleAll }
-
-func (c Config) RunsScheduler() bool { return c.Role == RoleScheduler || c.Role == RoleAll }
 
 func setString(lookup LookupEnv, name string, target *string) {
 	if value, ok := lookup(name); ok {
@@ -860,12 +812,7 @@ func setHexOrFile(lookup LookupEnv, name string, target *[]byte) error {
 
 func (c Config) LocalAuthEnabled() bool { return c.LocalAuth }
 
-func (c Config) OIDCEnabled() bool {
-	return c.OIDCIssuer != "" && c.OIDCClientID != "" && c.OIDCClientSecret != "" && c.OIDCRedirectURL != ""
-}
-
-// BrowserOrigin is the explicit exact-origin boundary for cookie mutations,
-// independent of whether Local or OIDC authentication is enabled.
+// BrowserOrigin is the explicit exact-origin boundary for cookie mutations.
 func (c Config) BrowserOrigin() string {
 	if strings.ContainsAny(c.PublicOrigin, "?#") {
 		return ""
