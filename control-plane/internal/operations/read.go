@@ -1,4 +1,4 @@
-package transportevents
+package operations
 
 import (
 	"context"
@@ -12,35 +12,24 @@ import (
 
 type OperationSummary = operationstore.Summary
 
-func operationFromStore(v operationstore.Operation) Operation {
-	return Operation{ID: v.ID, State: v.State, NodeID: v.NodeID, CommandID: v.CommandID, Version: v.Version, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt}
-}
-
-func (s *Service) GetOperation(ctx context.Context, id uuid.UUID) (Operation, error) {
-	var v operationstore.Operation
+func (s *Service) Get(ctx context.Context, id uuid.UUID) (Operation, error) {
+	var result Operation
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := operationstore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		v, err = store.Get(ctx, id)
+		result, err = store.Get(ctx, id)
 		return err
 	})
-	if err != nil {
-		return Operation{}, fmt.Errorf("get operation: %w", err)
-	}
-	return operationFromStore(v), nil
+	return result, err
 }
 
-func (s *Service) ListOperations(ctx context.Context, after uuid.UUID, limit int) ([]Operation, bool, error) {
-	return s.ListOperationsInWorkspace(ctx, uuid.Nil, after, limit)
-}
-
-func (s *Service) ListOperationsInWorkspace(ctx context.Context, workspaceID, after uuid.UUID, limit int) ([]Operation, bool, error) {
+func (s *Service) ListInWorkspace(ctx context.Context, workspaceID, after uuid.UUID, limit int) ([]Operation, bool, error) {
 	if limit < 1 || limit > 200 {
 		return nil, false, errors.New("operation page size must be between 1 and 200")
 	}
-	var values []operationstore.Operation
+	var values []Operation
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := operationstore.FromTransaction(tx)
 		if err != nil {
@@ -56,16 +45,15 @@ func (s *Service) ListOperationsInWorkspace(ctx context.Context, workspaceID, af
 	if hasMore {
 		values = values[:limit]
 	}
-	result := make([]Operation, 0, len(values))
-	for _, v := range values {
-		result = append(result, operationFromStore(v))
+	if values == nil {
+		values = []Operation{}
 	}
-	return result, hasMore, nil
+	return values, hasMore, nil
 }
 
 // A nil workspace retains the development-auth aggregate view. Unknown
 // recovery is counted separately; terminal states do not count as active.
-func (s *Service) OperationSummaryInWorkspace(ctx context.Context, workspaceID uuid.UUID) (OperationSummary, error) {
+func (s *Service) SummaryInWorkspace(ctx context.Context, workspaceID uuid.UUID) (OperationSummary, error) {
 	var summary OperationSummary
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := operationstore.FromTransaction(tx)

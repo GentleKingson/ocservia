@@ -16,6 +16,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	"github.com/google/uuid"
@@ -149,7 +150,7 @@ func TestMatchingAttackerCSRWithoutPrivdReceiptCannotBecomeReady(t *testing.T) {
 }
 
 func TestOperationJSONOmitsAbsentIdentifiers(t *testing.T) {
-	payload, err := json.Marshal(Operation{ID: "019cf000-0000-7000-8000-000000000001", State: "draft"})
+	payload, err := json.Marshal(operations.Operation{ID: "019cf000-0000-7000-8000-000000000001", State: "draft"})
 	if err != nil {
 		t.Fatalf("marshal operation: %v", err)
 	}

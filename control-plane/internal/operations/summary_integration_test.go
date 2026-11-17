@@ -1,4 +1,4 @@
-package transportevents
+package operations
 
 import (
 	"context"
@@ -40,8 +40,8 @@ func TestOperationSummaryInWorkspaceCountsAllStatesIntegration(t *testing.T) {
 			t.Fatalf("insert %s operation: %v", state, err)
 		}
 	}
-	service := NewBackend(postgres.WrapPool(pool), nil)
-	baseline, err := service.OperationSummaryInWorkspace(ctx, uuid.Nil)
+	service := NewBackend(postgres.WrapPool(pool), 50, nil)
+	baseline, err := service.SummaryInWorkspace(ctx, uuid.Nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestOperationSummaryInWorkspaceCountsAllStatesIntegration(t *testing.T) {
 	insert(otherWorkspaceID, "queued")
 	insert(otherWorkspaceID, "unknown")
 
-	summary, err := service.OperationSummaryInWorkspace(ctx, workspaceID)
+	summary, err := service.SummaryInWorkspace(ctx, workspaceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestOperationSummaryInWorkspaceCountsAllStatesIntegration(t *testing.T) {
 		t.Fatalf("workspace summary = %+v, want active=6 unknown=2", summary)
 	}
 
-	otherSummary, err := service.OperationSummaryInWorkspace(ctx, otherWorkspaceID)
+	otherSummary, err := service.SummaryInWorkspace(ctx, otherWorkspaceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestOperationSummaryInWorkspaceCountsAllStatesIntegration(t *testing.T) {
 	// Development auth serves REST requests without a workspace context, so a
 	// nil workspace must aggregate every workspace like the listings do. The
 	// baseline delta tolerates rows left by other tests sharing the database.
-	allSummary, err := service.OperationSummaryInWorkspace(ctx, uuid.Nil)
+	allSummary, err := service.SummaryInWorkspace(ctx, uuid.Nil)
 	if err != nil {
 		t.Fatal(err)
 	}
