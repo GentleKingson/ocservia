@@ -27,9 +27,8 @@
 #   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=/protected/key.pem
 #   export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
 #   # (or keep the allowlisted node configuration in ./install.env, parsed by
-#   # the strict non-executing loader embedded below — the same contract as
-#   # deploy/lib/install-env.sh; explicit shell variables always win over the
-#   # file)
+#   # the strict non-executing loader in deploy/lib/install-env.sh; explicit
+#   # shell variables always win over the file)
 #   deploy/managed-node/install.sh --version vX.Y.Z   # -> ENROLLED_LOCAL
 #   # Without BOOTSTRAP_TOKEN_SOURCE, this stops at ENROLLMENT_READY instead;
 #   # create an endpoint-bound token for the printed EndpointID, install it as
@@ -63,6 +62,8 @@ set -euo pipefail
 umask 077
 readonly DEFAULT_VERSION=""
 SCRIPT_LIB="$(dirname "${BASH_SOURCE[0]}")/../lib"
+# shellcheck source=deploy/lib/install-env.sh
+source "${SCRIPT_LIB}/install-env.sh" # release-embed
 # shellcheck source=deploy/lib/install-ui.sh
 source "${SCRIPT_LIB}/install-ui.sh" # release-embed
 # shellcheck source=deploy/lib/node-bootstrap.sh
@@ -130,16 +131,9 @@ P12_SEAL_DESCRIPTOR=""
 # for the same reason as the Controller state root: an explicitly configured
 # root must stay identical on both sides of the boundary.
 ROOT_LIFECYCLE_ENV_NAMES=(
-  BOOTSTRAP_TOKEN_SOURCE
-  CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE
-  CONTROLLER_ENDPOINT_ID
-  ENROLLMENT_ENVIRONMENT
+  "${MANAGED_NODE_INSTALL_ENV_NAMES[@]}"
   OCSERV_MANAGED_NODE_OS_RELEASE
   OCSERV_MANAGED_NODE_SYSROOT
-  P12_PASSWORD_SEAL_KEY_ID
-  RELAY_ACCESS_TOKEN_SOURCE
-  RELAY_URL_A
-  USER_PASSWORD_SEAL_KEY_ID
 )
 
 fail() {
@@ -229,147 +223,10 @@ fi
 # install.env under its own privileges and forwarded the effective values
 # across the sudo boundary, so root must not treat a possibly-replaced
 # $PWD/install.env as new authoritative input. The fixture seams above stay
-# deliberately outside this allowlist: they are test seams, not operator
-# configuration, and must not gain an install.env entry.
-# Embedded install.env loader: the versioned installer contract copy of
-# deploy/lib/install-env.sh, kept functionally identical to it. This script
-# must stay a single self-contained file (it runs without a repository
-# checkout), so it cannot source the shared loader; any contract change is
-# made in the shared loader and both versioned installer copies. Contract:
-# - The caller names its own allowlist; any other key in the file fails
-#   closed, so a typo cannot silently drop a setting and internal test seams
-#   never gain a production configuration entry.
-# - Blank lines and lines whose first character is '#' are ignored; every
-#   other line must be strict KEY=VALUE with KEY matching ^[A-Z][A-Z0-9_]*$.
-# - Nothing in the file is ever executed, sourced, or expanded. Values
-#   containing '$' or '`' are rejected outright — no supported value
-#   (hostname, URL, path, fingerprint, environment tag) needs them, and the
-#   rejection guarantees command substitution can never reach a shell even
-#   if a future edit made this loader less careful.
-# - A value wrapped in one static outer layer of matching single or double
-#   quotes has exactly that layer removed: no expansion, no escape
-#   interpretation. Empty values are valid.
-# - Priority: explicit shell environment > install.env > installer
-#   defaults. Before the file is read, every allowlisted variable already
-#   set in the environment — including one explicitly set to an empty
-#   value — is recorded, and the loader only fills and exports variables
-#   that were not explicitly set.
-# - File safety: the file must be an existing regular file, must not be a
-#   symlink, and must not be group- or world-writable. Root ownership is
-#   deliberately not required: a launcher user must be able to maintain its
-#   own configuration in a normal working directory.
-# - Errors report the path, line, and reason only; file contents are never
-#   printed.
-# - A missing file is a silent no-op: without install.env the installer
-#   behaves exactly like an environment-only configuration.
-install_env_die() {
-  echo "install.env: $1" >&2
-  exit 1
-}
-
-# install_env_load <file> <allowlisted-key>...
-install_env_load() {
-  local file="$1"
-  shift
-  local -a allowlist=("$@")
-  local -a seen=()
-  local -a preset=()
-  local allowed key line value mode first last lineno=0 known
-
-  if [[ -L "${file}" ]]; then
-    install_env_die "refusing the configuration symlink ${file}; install.env must be a regular file"
-  fi
-  if [[ ! -e "${file}" ]]; then
-    return 0
-  fi
-  if [[ ! -f "${file}" ]]; then
-    install_env_die "${file} is not a regular file"
-  fi
-  if [[ ! -r "${file}" ]]; then
-    install_env_die "${file} is not readable by the invoking user"
-  fi
-  mode="$(stat -c '%a' -- "${file}")" ||
-    install_env_die "cannot inspect the permissions of ${file}"
-  if (( (8#${mode} & 8#022) != 0 )); then
-    install_env_die "refusing the group/world-writable configuration file ${file} (mode ${mode})"
-  fi
-
-  # A variable explicitly set in the shell — even to an empty value —
-  # always wins over the file; only unset variables are filled from it.
-  # (${!allowed+x} is the portable set-ness probe: it expands to "x" for a
-  # set-but-empty variable and to nothing for an unset one.)
-  for allowed in "${allowlist[@]}"; do
-    if [[ -n "${!allowed+x}" ]]; then
-      preset+=("${allowed}")
-    fi
-  done
-
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    lineno=$((lineno + 1))
-    if [[ -z "${line}" || "${line}" == \#* ]]; then
-      continue
-    fi
-    if [[ ! "${line}" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
-      install_env_die "${file}:${lineno}: expected KEY=VALUE, a # comment, or a blank line"
-    fi
-    key="${BASH_REMATCH[1]}"
-    value="${BASH_REMATCH[2]}"
-    case "${value}" in
-      *'$'* | *'`'*)
-        install_env_die "${file}:${lineno}: ${key} must be a literal value; shell expansion syntax is never evaluated"
-        ;;
-    esac
-    if [[ "${value}" =~ [[:cntrl:]] ]]; then
-      install_env_die "${file}:${lineno}: ${key} contains a control character"
-    fi
-    if (( ${#value} >= 2 )); then
-      first="${value:0:1}"
-      last="${value:${#value}-1:1}"
-      if [[ ( "${first}" == "'" && "${last}" == "'" ) || ( "${first}" == '"' && "${last}" == '"' ) ]]; then
-        value="${value:1:${#value}-2}"
-      fi
-    fi
-    known=false
-    for allowed in "${allowlist[@]}"; do
-      if [[ "${key}" == "${allowed}" ]]; then
-        known=true
-        break
-      fi
-    done
-    if [[ "${known}" != true ]]; then
-      install_env_die "${file}:${lineno}: unknown configuration variable ${key}"
-    fi
-    for allowed in ${seen[@]+"${seen[@]}"}; do
-      if [[ "${key}" == "${allowed}" ]]; then
-        install_env_die "${file}:${lineno}: duplicate configuration variable ${key}"
-      fi
-    done
-    seen+=("${key}")
-    for allowed in ${preset[@]+"${preset[@]}"}; do
-      if [[ "${key}" == "${allowed}" ]]; then
-        continue 2
-      fi
-    done
-    printf -v "${key}" '%s' "${value}"
-    # shellcheck disable=SC2163 # key is a validated allowlisted identifier
-    export "${key}"
-  done <"${file}"
-
-  if (( ${#seen[@]} > 0 )); then
-    echo "loaded configuration from ${file}"
-  fi
-}
-
+# deliberately outside MANAGED_NODE_INSTALL_ENV_NAMES: they are test seams,
+# not operator configuration, and must not gain an install.env entry.
 if [[ "${JOIN_MODE}" == false && -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
-  install_env_load "${CONFIG_FILE}" \
-    BOOTSTRAP_TOKEN_SOURCE \
-    CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
-    CONTROLLER_ENDPOINT_ID \
-    ENROLLMENT_ENVIRONMENT \
-    P12_PASSWORD_SEAL_KEY_ID \
-    RELAY_ACCESS_TOKEN_SOURCE \
-    RELAY_URL_A \
-    USER_PASSWORD_SEAL_KEY_ID
+  install_env_load "${CONFIG_FILE}" "${MANAGED_NODE_INSTALL_ENV_NAMES[@]}"
 fi
 
 # Configuration-derived defaults are applied only after the configuration
@@ -1180,9 +1037,7 @@ if [[ "${INTERACTIVE}" == true ]]; then
   echo "Release: ${RELEASE_TAG}; platform: ${PACKAGE_FAMILY}/${ARCH_WORD}; Relay: ${RELAY_URL_A}"
   echo "Configuration will be saved to ${CONFIG_FILE} (protected file paths only)."
   install_ui_confirm
-  install_ui_save "${CONFIG_FILE}" BOOTSTRAP_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
-    CONTROLLER_ENDPOINT_ID ENROLLMENT_ENVIRONMENT P12_PASSWORD_SEAL_KEY_ID RELAY_ACCESS_TOKEN_SOURCE \
-    RELAY_URL_A USER_PASSWORD_SEAL_KEY_ID
+  install_ui_save "${CONFIG_FILE}" "${MANAGED_NODE_INSTALL_ENV_NAMES[@]}"
 fi
 if [[ "${ROOT_LIFECYCLE}" == true && "${INTERACTIVE}" == true ]]; then
   ((EUID == 0)) || forward_root_lifecycle

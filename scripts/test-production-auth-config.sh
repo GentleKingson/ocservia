@@ -38,27 +38,20 @@ export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test
 export OCSERV_RELAY_URL_A=https://relay-a.example.test
 unset OCSERV_RELAY_URL_B OCSERV_OTEL_BACKEND_ENDPOINT
 
-# Exercise the published Local-only configuration through each real installer allowlist.
+# Exercise the published Local-only configuration through the shared Controller installer allowlist.
 awk -v dir="${work}" '
   /^```dotenv$/ { block++; active=1; next }
   /^```$/ { active=0 }
   active { print > (dir "/mode-" block ".env") }
 ' "${ROOT}/docs/operations/authentication.md"
 test -s "${work}/mode-1.env" && test ! -e "${work}/mode-2.env"
+# shellcheck source=deploy/lib/install-env.sh
 source "${ROOT}/deploy/lib/install-env.sh"
-for list in bootstrap root installer; do
-  case "${list}" in
-    bootstrap) section="$(sed -n '/^INSTALL_ENV_NAMES=(/,/^)/p' "${ROOT}/deploy/production/controller-bootstrap.sh")" ;;
-    root) section="$(sed -n '/^ROOT_LIFECYCLE_ENV_NAMES=(/,/^)/p' "${ROOT}/deploy/production/install.sh")" ;;
-    installer) section="$(sed -n '/^  install_env_load /,/^fi$/p' "${ROOT}/deploy/production/install.sh")" ;;
-  esac
-  mapfile -t names < <(printf '%s\n' "${section}" | grep -oE 'OCSERV_[A-Z0-9_]+')
-  (
-    unset OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL
-    install_env_load "${work}/mode-1.env" "${names[@]}"
-    "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/mode-1.json"
-  )
-done
+(
+  unset OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL
+  install_env_load "${work}/mode-1.env" "${CONTROLLER_INSTALL_ENV_NAMES[@]}"
+  "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/mode-1.json"
+)
 jq -e --arg dir "${OCSERV_SECRET_DIR}" '
   . as $config |
   all(.services.migrate, .services["control-plane"];
