@@ -67,8 +67,7 @@ func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) app
 	signer := commandauth.NewSignerFromSeed([32]byte{4})
 	ops := operations.NewBackend(b, 50, signer)
 	certs := certificates.NewBackend(b, ops, nil, nil, nil, signer)
-	s := newTestServer(t, testHTTPConfig(false), b, Modules{ConfigPlans: configplan.NewBackend(b, ops), Certificates: certs}, Authorization{Authentication: authn})
-	s.EnableOperations(ops)
+	s := newTestServer(t, testHTTPConfig(false), b, Modules{Operations: ops, ConfigPlans: configplan.NewBackend(b, ops), Certificates: certs}, Authorization{Authentication: authn})
 	f := applyHTTPFixture{t: t, b: b, owner: owner, s: s, signer: signer, workspace: uuid.Must(uuid.NewV7())}
 	stamp, err := value.FromTime(time.Now().UTC())
 	if err != nil {
@@ -100,8 +99,8 @@ func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) app
 // Construct another Server over the same persisted fixture and shared services.
 // Each scenario owns new modules, admission counters and hubs.
 func (f applyHTTPFixture) newServer(modules Modules) *Server {
+	modules.Operations = f.s.operations
 	s := newTestServer(f.t, testHTTPConfig(false), f.b, modules, Authorization{Authentication: f.s.auth, Audit: f.s.audit})
-	s.EnableOperations(f.s.operations)
 	return s
 }
 

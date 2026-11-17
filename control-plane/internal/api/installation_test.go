@@ -10,11 +10,14 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
+	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 )
 
 func TestInstallationAdmissionBeforeDecode(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
-	server.EnableEnrollment(enrollment.NewBackend(nil, "", "test", nil), nil)
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{Enrollment: enrollment.NewBackend(nil, "", "test", nil)}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	paths := []string{"/api/v1/node-bootstrap/config", "/api/v1/node-bootstrap/attestation", "/api/v1/node-bootstrap/register", "/api/v1/node-bootstrap/status"}
 	for i := 0; i < 31; i++ {
 		request := httptest.NewRequest(http.MethodPost, paths[i%len(paths)], strings.NewReader(`{"token":`))
@@ -35,8 +38,10 @@ func TestInstallationAdmissionBeforeDecode(t *testing.T) {
 }
 
 func TestInstallationConfigRejectsChildWithoutDisclosure(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
-	server.EnableEnrollment(enrollment.NewBackend(nil, "", "test", nil), nil)
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{Enrollment: enrollment.NewBackend(nil, "", "test", nil)}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	secret := "obt2_" + strings.Repeat("a", 43)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap/config", strings.NewReader(`{"token":"`+secret+`"}`))
 	request.Header.Set("Content-Type", "application/json")

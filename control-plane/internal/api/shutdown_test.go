@@ -16,7 +16,10 @@ import (
 )
 
 func TestShutdownWaitsForTimedOutHandler(t *testing.T) {
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Millisecond, false, "")
+	s, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Millisecond, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	defer close(release)
 	// Cleanup the deliberately stalled test handler without leaving a waiter.
@@ -52,7 +55,10 @@ func TestShutdownWaitsForTimedOutHandler(t *testing.T) {
 }
 
 func TestShutdownDoesNotReopenEventStreams(t *testing.T) {
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	s, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := s.Shutdown(ctx); err != nil {
@@ -68,7 +74,10 @@ func TestShutdownDoesNotReopenEventStreams(t *testing.T) {
 }
 
 func TestShutdownTimeoutClosesConnections(t *testing.T) {
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	s, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	started, finished := make(chan struct{}), make(chan struct{})
 	s.http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(started)

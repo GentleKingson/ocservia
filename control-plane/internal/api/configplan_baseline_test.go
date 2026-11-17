@@ -55,8 +55,7 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 	}
 	ops := apiOperationService(pool)
 	certs := certificates.NewBackend(postgres.WrapPool(pool), ops, nil, nil, nil, commandauth.NewSignerFromSeed([32]byte{4}))
-	s := newTestServer(t, testHTTPConfig(true), postgres.WrapPool(pool), Modules{ConfigPlans: configplan.NewBackend(postgres.WrapPool(pool), ops), Certificates: certs}, Authorization{})
-	s.EnableOperations(ops)
+	s := newTestServer(t, testHTTPConfig(true), postgres.WrapPool(pool), Modules{Operations: ops, ConfigPlans: configplan.NewBackend(postgres.WrapPool(pool), ops), Certificates: certs}, Authorization{})
 	path := "/api/v1/nodes/" + node.String() + "/config-plans"
 	body := fmt.Sprintf(`{"expected_revision":0,"template":{"name":"baseline","directives":[`+
 		`{"name":"auth","value":"plain[passwd=/etc/ocserv/ocpasswd]"},`+

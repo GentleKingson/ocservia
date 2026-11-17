@@ -88,12 +88,6 @@ func (a *authAdmission) acquire() bool {
 	}
 }
 
-// ConfigureAuthProxies must be called before serving. Only these peers may
-// supply the single client address overwritten by the production gateway.
-func (s *Server) ConfigureAuthProxies(prefixes []netip.Prefix) {
-	s.authProxies = append([]netip.Prefix(nil), prefixes...)
-}
-
 func (s *Server) authSource(r *http.Request) netip.Addr {
 	peer, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {

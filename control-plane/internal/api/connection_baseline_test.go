@@ -84,11 +84,10 @@ func TestHTTPTimeoutAndSSEBaseline(t *testing.T) {
 	config := testHTTPConfig(true)
 	config.BodyLimit, config.RequestTimeout = 1024, 20*time.Millisecond
 	config.EventStreams.PollInterval = 100 * time.Millisecond
-	s := newTestServer(t, config, b, Modules{}, Authorization{})
+	s := newTestServer(t, config, b, Modules{Operations: operations.NewBackend(b, 50, nil)}, Authorization{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(b.release) }) }
 	t.Cleanup(func() { release(); _ = s.Shutdown(context.Background()) })
-	s.EnableOperations(operations.NewBackend(b, 50, nil))
 	first, second := uuid.MustParse(baselineID), uuid.MustParse("019fc0a4-6d92-765c-a8a1-4af556614cc4")
 	emit := make(chan struct{})
 	b.events = &baselineEventStore{emit: emit, first: first, second: second}

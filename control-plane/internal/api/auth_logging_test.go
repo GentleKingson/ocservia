@@ -136,8 +136,9 @@ func TestAuthLogConcurrentAggregation(t *testing.T) {
 
 func TestAuthLogSourceAndAdmission(t *testing.T) {
 	for _, peer := range []string{"192.0.2.1:1234", "10.0.0.2:1234"} {
-		s := newAuthHTTPServer(t, nil, true)
-		s.ConfigureAuthProxies([]netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")})
+		config := testHTTPConfig(false)
+		config.AuthTrustedProxies = []netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")}
+		s := newAuthHTTPServer(t, nil, true, config)
 		b := captureAuthLogs(s)
 		for i := 0; i < 100; i++ {
 			r := httptest.NewRequest("POST", "/api/v1/auth/login", strings.NewReader(`{"username":"","password":""}`))

@@ -74,8 +74,7 @@ func TestOperationReadsUseOperationsWithoutTransportEvents(t *testing.T) {
 	}
 	store := &operationReadStore{operation: op, items: []operations.Operation{op, {ID: uuid.Must(uuid.NewV7()).String()}}}
 	backend := operationReadBackend{store: store}
-	s := newTestServer(t, testHTTPConfig(true), nil, Modules{}, Authorization{})
-	s.EnableOperations(operations.NewBackend(backend, 50, nil))
+	s := newTestServer(t, testHTTPConfig(true), nil, Modules{Operations: operations.NewBackend(backend, 50, nil)}, Authorization{})
 	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
 	get := func(path string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -130,10 +129,8 @@ func TestOperationReadsUseOperationsWithoutTransportEvents(t *testing.T) {
 
 func TestOperationReadErrorsDoNotFallBackToTransportEvents(t *testing.T) {
 	store := &operationReadStore{}
-	s := newTestServer(t, testHTTPConfig(true), nil, Modules{}, Authorization{})
-	s.EnableOperations(operations.NewBackend(operationReadBackend{store: store}, 50, nil))
-	// A fallback to this service would panic because it has no database.
-	s.EnableTransportEvents(transportevents.NewBackend(nil, nil))
+	// A fallback to transport events would panic because it has no database.
+	s := newTestServer(t, testHTTPConfig(true), nil, Modules{Operations: operations.NewBackend(operationReadBackend{store: store}, 50, nil), TransportEvents: transportevents.NewBackend(nil, nil)}, Authorization{})
 	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
 	for _, test := range []struct {
 		path, problem, title, detail string
@@ -157,7 +154,7 @@ func TestOperationReadErrorsDoNotFallBackToTransportEvents(t *testing.T) {
 			t.Fatalf("GET %s: %d reads, want %d", test.path, store.calls, test.calls)
 		}
 	}
-	s.EnableOperations(nil)
+	s = newTestServer(t, testHTTPConfig(true), nil, Modules{TransportEvents: transportevents.NewBackend(nil, nil)}, Authorization{})
 	for _, path := range []string{"/api/v1/operations/" + baselineID, "/api/v1/operations", "/api/v1/operations/summary"} {
 		r := baselineRequest(http.MethodGet, path, nil)
 		w := httptest.NewRecorder()

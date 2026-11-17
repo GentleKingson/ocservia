@@ -14,6 +14,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
+	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -88,8 +89,9 @@ func TestAuthAdmissionBoundedStateAndEmergency(t *testing.T) {
 }
 
 func TestAuthSourceTrustAndNormalization(t *testing.T) {
-	server := &Server{}
-	server.ConfigureAuthProxies([]netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")})
+	config := testHTTPConfig(false)
+	config.AuthTrustedProxies = []netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")}
+	server := newTestServer(t, config, nil, Modules{}, Authorization{})
 	for _, test := range []struct {
 		name, peer string
 		header     []string
@@ -116,13 +118,13 @@ func TestAuthSourceTrustAndNormalization(t *testing.T) {
 }
 
 func TestBreakGlassInvalidTokensLimitedBeforeService(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
-	var err error
-	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
+	service, err := auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	server.EnableBrowserOrigin("https://admin.example.com")
+	config := testHTTPConfig(false)
+	config.BrowserOrigin = "https://admin.example.com"
+	server := newTestServer(t, config, nil, Modules{}, Authorization{Authentication: service})
 	for i := 0; i < 6; i++ {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/break-glass", strings.NewReader(`{"token":"wrong"}`))
 		request.Header.Set("Origin", "https://admin.example.com")
@@ -140,13 +142,13 @@ func TestBreakGlassInvalidTokensLimitedBeforeService(t *testing.T) {
 }
 
 func TestBreakGlassEmptyTokenIsRejected(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
-	var err error
-	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
+	service, err := auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	server.EnableBrowserOrigin("https://admin.example.com")
+	config := testHTTPConfig(false)
+	config.BrowserOrigin = "https://admin.example.com"
+	server := newTestServer(t, config, nil, Modules{}, Authorization{Authentication: service})
 	for _, body := range []string{`{}`, `{"token":""}`, `{"token":"   "}`} {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/break-glass", strings.NewReader(body))
 		request.Header.Set("Origin", "https://admin.example.com")
@@ -160,7 +162,10 @@ func TestBreakGlassEmptyTokenIsRejected(t *testing.T) {
 }
 
 func TestInstallationRegistrationLimitedBeforeWork(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	path := "/api/v1/node-bootstrap/register"
 	send := func() *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"node_id":"018f0c2e-7b1a-7c3d-8e9f-0123456789ab","registration":{"version":1,"key_id":"k","public_key":"!","controller_nonce":"!","credential_context_sha256":"!","signature":"!"}}`))
@@ -175,7 +180,7 @@ func TestInstallationRegistrationLimitedBeforeWork(t *testing.T) {
 			t.Fatalf("disabled attempt=%d status=%d", i, response.Code)
 		}
 	}
-	server.EnableEnrollment(enrollment.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), "", "test", nil), nil)
+	server = newTestServer(t, testHTTPConfig(false), nil, Modules{Enrollment: enrollment.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), "", "test", nil)}, Authorization{})
 	for i := 0; i < 31; i++ {
 		response := send()
 		want := http.StatusBadRequest
