@@ -42,7 +42,7 @@ function rolloutDetail(wire: unknown): RolloutDetail {
       return {
         nodeId: "",
         reason: "",
-        raw: JSON.stringify(entry) ?? String(entry),
+        raw: JSON.stringify(entry),
       };
     }),
   };

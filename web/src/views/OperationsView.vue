@@ -5,7 +5,11 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { getOperation, listOperations } from "../api/operations";
-import { getWorkspace, workspaceContext, type WorkspaceContext } from "../api/workspace";
+import {
+  getWorkspace,
+  workspaceContext,
+  type WorkspaceContext,
+} from "../api/workspace";
 import { listAgentRollouts } from "../api/agents";
 import { operationStatusKey } from "../shared/operation-status";
 import { operationTone, rolloutTone } from "../features/operations/state-tone";

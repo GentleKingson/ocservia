@@ -8,7 +8,11 @@ import {
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { listAuditEvents, verifyAuditChain } from "../api/events";
-import { getWorkspace, workspaceContext, type WorkspaceContext } from "../api/workspace";
+import {
+  getWorkspace,
+  workspaceContext,
+  type WorkspaceContext,
+} from "../api/workspace";
 import { createReadRequest } from "../shared/read-request";
 import { formatTimestamp } from "../shared/timestamp";
 import DataState from "@/components/common/DataState.vue";
