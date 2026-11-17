@@ -495,6 +495,9 @@ export const useFleetStore = defineStore("fleet", () => {
     // Suspend snapshot reads only; accepted operations keep their own tracking.
     rebuildReads.cancel();
     selectReads.cancel();
+    // Cancellation fences old finalizers; the read owner settles its UI state.
+    loading.value = false;
+    selecting.value = false;
   }
 
   const foregroundRefresh = createForegroundRefresh(

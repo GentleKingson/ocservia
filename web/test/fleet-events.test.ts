@@ -165,8 +165,23 @@ describe("fleet event stream", () => {
     );
     await vi.advanceTimersByTimeAsync(15_000);
     expect(store.loading).toBe(true);
+    vi.mocked(getNode).mockImplementationOnce(
+      (_nodeId, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        }),
+    );
+    const pendingSelection = store.select("node");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.selecting).toBe(true);
     focused = false;
     window.dispatchEvent(new Event("blur"));
+    await pendingSelection;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.loading).toBe(false);
+    expect(store.selecting).toBe(false);
     store.$dispose();
     focused = true;
     window.dispatchEvent(new Event("focus"));
