@@ -8,6 +8,8 @@ readonly DEFAULT_VERSION=""
 SCRIPT_LIB="$(dirname "${BASH_SOURCE[0]}")/../lib"
 # shellcheck source=deploy/lib/controller-runtime.sh
 source "${SCRIPT_LIB}/controller-runtime.sh" # release-embed
+# shellcheck source=deploy/lib/install-env.sh
+source "${SCRIPT_LIB}/install-env.sh" # release-embed
 # shellcheck source=deploy/lib/install-ui.sh
 source "${SCRIPT_LIB}/install-ui.sh" # release-embed
 INTERACTIVE=false
@@ -25,152 +27,6 @@ ACME_EMAIL=""
 QUICK_ARGS=()
 SOURCE_ROOT=""
 TARGET=""
-
-# The install.env allowlist resolved by this bootstrap mirrors the
-# production installer's own allowlist (deploy/production/install.sh).
-# install.sh re-parses $PWD/install.env itself during the real run and
-# remains the authority; keep both lists in sync.
-INSTALL_ENV_NAMES=(
-  OCSERV_AUDIT_EVENT_KEY_ID
-  OCSERV_BACKUP_DIR
-  OCSERV_BACKUP_INTERVAL_SECONDS
-  OCSERV_BACKUP_RETENTION_COUNT
-  OCSERV_DATABASE_BACKEND
-  OCSERV_DATABASE_DEPLOYMENT
-  OCSERV_DATABASE_BACKUP_HOST
-  OCSERV_DATABASE_BACKUP_PORT
-  OCSERV_DATABASE_BACKUP_NAME
-  OCSERV_DATABASE_BACKUP_USER
-  OCSERV_DEPLOYMENT_MODE
-  OCSERV_RELAY_PUBLIC_HOST
-  OCSERV_RELAY_SECRET_DIR
-  OCSERV_TLS_MODE
-  OCSERV_ACME_EMAIL
-  OCSERV_ACME_DIRECTORY_URL
-  OCSERV_ACME_CA_FILE
-  OCSERV_SIGNER_SECRET_DIR
-  OCSERV_SIGNER_STATE_DIR
-  OCSERV_EDGE_GATEWAY_IP
-  OCSERV_EDGE_GATEWAY_SUBNET
-  OCSERV_EDGE_GATEWAY_IP_RANGE
-  OCSERV_CERTIFICATE_SIGNER_URL
-  OCSERV_CONTROLLER_ENDPOINT_ID
-  OCSERV_CONTROLLER_PUBLIC_URL
-  OCSERV_CONTROLLER_STATE_DIR
-  OCSERV_CONTROLLER_STATE_ROOT
-  OCSERV_HTTPS_ADDRESS
-  OCSERV_AUTH_TRUSTED_PROXY_CIDRS
-  OCSERV_APPLICATION_SUBNET
-  OCSERV_APPLICATION_IP_RANGE
-  OCSERV_GATEWAY_APPLICATION_IP
-  OCSERV_LOCAL_AUTH_ENABLED
-  OCSERV_PUBLIC_ORIGIN
-  OCSERV_SESSION_TTL
-  OCSERV_RECOMMENDED_AGENT_VERSION
-  OCSERV_OTEL_BACKEND_ENDPOINT
-  OCSERV_PUBLIC_HOST
-  OCSERV_RELAY_URL_A
-  OCSERV_SECRET_DIR
-)
-
-# Embedded install.env loader: the versioned installer contract copy of
-# deploy/lib/install-env.sh, kept functionally identical to it. This bootstrap
-# is a single self-contained Release asset, so it cannot source repository
-# siblings before it downloads the requested runtime; any loader contract change
-# is made in all embedded and shared copies.
-install_env_die() {
-  echo "install.env: $1" >&2
-  exit 1
-}
-
-# install_env_load <file> <allowlisted-key>...
-install_env_load() {
-  local file="$1"
-  shift
-  local -a allowlist=("$@")
-  local -a seen=()
-  local -a preset=()
-  local allowed key line value mode first last lineno=0 known
-
-  if [[ -L "${file}" ]]; then
-    install_env_die "refusing the configuration symlink ${file}; install.env must be a regular file"
-  fi
-  if [[ ! -e "${file}" ]]; then
-    return 0
-  fi
-  if [[ ! -f "${file}" ]]; then
-    install_env_die "${file} is not a regular file"
-  fi
-  if [[ ! -r "${file}" ]]; then
-    install_env_die "${file} is not readable by the invoking user"
-  fi
-  mode="$(stat -c '%a' -- "${file}")" ||
-    install_env_die "cannot inspect the permissions of ${file}"
-  if (( (8#${mode} & 8#022) != 0 )); then
-    install_env_die "refusing the group/world-writable configuration file ${file} (mode ${mode})"
-  fi
-
-  for allowed in "${allowlist[@]}"; do
-    if [[ -n "${!allowed+x}" ]]; then
-      preset+=("${allowed}")
-    fi
-  done
-
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    lineno=$((lineno + 1))
-    if [[ -z "${line}" || "${line}" == \#* ]]; then
-      continue
-    fi
-    if [[ ! "${line}" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
-      install_env_die "${file}:${lineno}: expected KEY=VALUE, a # comment, or a blank line"
-    fi
-    key="${BASH_REMATCH[1]}"
-    value="${BASH_REMATCH[2]}"
-    case "${value}" in
-      *'$'* | *'`'*)
-        install_env_die "${file}:${lineno}: ${key} must be a literal value; shell expansion syntax is never evaluated"
-        ;;
-    esac
-    if [[ "${value}" =~ [[:cntrl:]] ]]; then
-      install_env_die "${file}:${lineno}: ${key} contains a control character"
-    fi
-    if (( ${#value} >= 2 )); then
-      first="${value:0:1}"
-      last="${value:${#value}-1:1}"
-      if [[ ( "${first}" == "'" && "${last}" == "'" ) || ( "${first}" == '"' && "${last}" == '"' ) ]]; then
-        value="${value:1:${#value}-2}"
-      fi
-    fi
-    known=false
-    for allowed in "${allowlist[@]}"; do
-      if [[ "${key}" == "${allowed}" ]]; then
-        known=true
-        break
-      fi
-    done
-    if [[ "${known}" != true ]]; then
-      install_env_die "${file}:${lineno}: unknown configuration variable ${key}"
-    fi
-    for allowed in ${seen[@]+"${seen[@]}"}; do
-      if [[ "${key}" == "${allowed}" ]]; then
-        install_env_die "${file}:${lineno}: duplicate configuration variable ${key}"
-      fi
-    done
-    seen+=("${key}")
-    for allowed in ${preset[@]+"${preset[@]}"}; do
-      if [[ "${key}" == "${allowed}" ]]; then
-        continue 2
-      fi
-    done
-    printf -v "${key}" '%s' "${value}"
-    # shellcheck disable=SC2163 # key is a validated allowlisted identifier
-    export "${key}"
-  done <"${file}"
-
-  if (( ${#seen[@]} > 0 )); then
-    echo "loaded configuration from ${file}"
-  fi
-}
 
 fail() {
   echo "controller bootstrap: $1" >&2
@@ -286,7 +142,7 @@ validate_source_component() {
 load_config() {
   # Quick generates its own configuration and never reads ./install.env.
   [[ "${QUICK}" == false ]] || return 0
-  install_env_load "${CONFIG_FILE}" "${INSTALL_ENV_NAMES[@]}"
+  install_env_load "${CONFIG_FILE}" "${CONTROLLER_INSTALL_ENV_NAMES[@]}"
 }
 
 # Read-only Quick preflight. Both names must have the same IPv4 addresses;
@@ -572,7 +428,7 @@ if [[ "${INTERACTIVE}" == true ]]; then
   fi
   echo 'Existing deployments are never upgraded by this installer.'
   install_ui_confirm
-  [[ "${QUICK}" == true ]] || install_ui_save "${CONFIG_FILE}" "${INSTALL_ENV_NAMES[@]}"
+  [[ "${QUICK}" == true ]] || install_ui_save "${CONFIG_FILE}" "${CONTROLLER_INSTALL_ENV_NAMES[@]}"
 fi
 walk_source_root true
 prepare_runtime

@@ -188,9 +188,9 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
     delete baselineDocument.paths[path];
   }
 
+  assertExact("/auth/login.get", candidateDocument.paths["/auth/login"]?.get, undefined);
   const loginPath = baselineDocument.paths["/auth/login"];
-  if (loginPath?.get) {
-    assertExact("/auth/login.get", candidateDocument.paths["/auth/login"]?.get, undefined);
+  if (loginPath) {
     delete loginPath.get;
   }
 
