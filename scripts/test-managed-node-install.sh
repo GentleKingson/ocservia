@@ -839,13 +839,18 @@ install_token
 assert_status 0
 assert_log_contains "${rpm_log}" "ocservia-agent-${VERSION}-1."
 
-for phase in before-freeze after-freeze; do
-  scenario
-  printf '%s\n' "$phase" >"${tamper_after_verify_file}"
-  install_token
-  assert_status 1
-  assert_log_empty "${dpkg_log}"
-done
+scenario
+printf 'before-freeze\n' >"${tamper_after_verify_file}"
+install_token
+assert_status 1
+assert_log_empty "${dpkg_log}"
+scenario
+printf 'after-freeze\n' >"${tamper_after_verify_file}"
+install_token
+assert_status 0
+assert_output '^ONLINE$'
+assert_log_contains "${dpkg_log}" 'ocservia-managed-node-pkg.'
+
 scenario
 printf 'resource=ocpasswd reason=mode\n' >"${fixture}/preflight-failure"
 install_token

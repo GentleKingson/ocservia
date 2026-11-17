@@ -100,6 +100,7 @@ test("reads bounded workspace audit records and verifies the hash chain", async 
         json: {
           workspace_id: workspaceId,
           events: 2,
+          compacted_events: 0,
           valid: true,
           checkpoint_valid: true,
         },
@@ -110,6 +111,7 @@ test("reads bounded workspace audit records and verifies the hash chain", async 
       json: {
         workspace_id: workspaceId,
         events: 2,
+        compacted_events: 0,
         valid: false,
         checkpoint_valid: false,
       },
