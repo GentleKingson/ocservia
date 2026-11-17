@@ -93,7 +93,6 @@ services:
       args:
         VERSION: ${OCSERV_VERSION:-dev}
         COMMIT: ${OCSERV_COMMIT:-unknown}
-    command: ["--role=all"]
     environment:
       OCSERV_ENVIRONMENT: development
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080

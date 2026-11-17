@@ -141,7 +141,7 @@ const (
 )
 
 // Manager owns the per-node connection leases of one Controller process. It
-// runs inside the worker-role process that serves session authorization and
+// runs inside the Controller process that serves session authorization and
 // command dispatch; every ownership deadline it stores is the exact value
 // returned by the database authority, never a local reconstruction. The
 // local publication grace only makes event-gap cleanup retryable and never

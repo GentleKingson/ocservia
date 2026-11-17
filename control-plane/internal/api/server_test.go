@@ -339,7 +339,7 @@ func TestDevelopmentRuntimeKeepsProcessMetricsWhenDatabaseIsUnavailable(t *testi
 }
 
 func TestVersionUsesContractFieldNames(t *testing.T) {
-	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{Version: "test", Commit: "abc", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{Version: "test", Commit: "abc"}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestVersionUsesContractFieldNames(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body["version"] != "test" || body["Version"] != "" {
+	if body["version"] != "test" || body["Version"] != "" || body["commit"] != "abc" || body["role"] != "all" {
 		t.Fatalf("unexpected response: %v", body)
 	}
 }

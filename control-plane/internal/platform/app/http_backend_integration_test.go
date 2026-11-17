@@ -31,7 +31,7 @@ import (
 // Called inside an isolated PostgreSQL Controller startup database.
 func TestControllerHTTPAssemblyBackendIntegration(t *testing.T) {
 	runtime, owner := databasetest.OpenIsolated(t, t, "http_assembly")
-	cfg := config.Config{Environment: "test", Role: config.RoleAll, BodyLimit: 1 << 20, RequestTimeout: 10 * time.Second, ShutdownTimeout: 2 * time.Second}
+	cfg := config.Config{Environment: "test", BodyLimit: 1 << 20, RequestTimeout: 10 * time.Second, ShutdownTimeout: 2 * time.Second}
 	testHTTPServerAssembly(t, cfg, &connection.Connection{Store: postgres.WrapPool(owner)}, &connection.Connection{Store: postgres.WrapPool(runtime)})
 }
 

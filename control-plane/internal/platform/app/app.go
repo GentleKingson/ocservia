@@ -45,31 +45,31 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 	}()
 
-	conn, err := connection.Open(ctx, connection.Options{Backend: cfg.DatabaseBackend, Environment: cfg.Environment, URL: cfg.DatabaseURL, CAFile: cfg.DatabaseTLSCAFile, BundledPostgres: cfg.DatabaseBundledPostgres})
+	conn, err := connection.Open(ctx, connection.Options{Environment: cfg.Environment, URL: cfg.DatabaseURL, CAFile: cfg.DatabaseTLSCAFile, BundledPostgres: cfg.DatabaseBundledPostgres})
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 	backend := conn.Store
-	startup, err := initializeDatabase(ctx, conn, cfg, logger)
-	if err != nil || startup == nil {
+	auditManager, err := initializeDatabase(ctx, conn, cfg, logger)
+	if err != nil || auditManager == nil {
 		return err
 	}
-	return runRoles(ctx, cfg, build, backend, startup.audit, logger)
+	return runController(ctx, cfg, build, backend, auditManager, logger)
 }
 
-func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger *slog.Logger) (runErr error) {
+func runController(ctx context.Context, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger *slog.Logger) (runErr error) {
 	life := newLifecycle(ctx, cfg.ShutdownTimeout, logger)
 	stopPprof := startPprof(cfg.PprofAddress, logger)
 	defer func() {
 		runErr = life.close(runErr)
 		stopPprof()
 		if errors.Is(runErr, context.Canceled) {
-			logger.Info("control plane stopped", "role", cfg.Role)
+			logger.Info("control plane stopped")
 		}
 	}()
 	var err error
-	logger.Info("control plane starting", "role", cfg.Role)
+	logger.Info("control plane starting")
 	var commandSigner *commandauth.Signer
 	if cfg.CommandSigningKeyFile != "" {
 		commandSigner, err = commandauth.LoadSigner(cfg.CommandSigningKeyFile)

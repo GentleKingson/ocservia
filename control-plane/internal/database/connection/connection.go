@@ -1,5 +1,5 @@
-// Package connection owns Controller database selection and owner-only startup.
-// Business services receive only the selected Store, never driver handles.
+// Package connection owns Controller PostgreSQL connections and owner-only startup.
+// Business services receive only the Store, never driver handles.
 package connection
 
 import (
@@ -22,7 +22,7 @@ import (
 var ErrUnmanagedWorkspaces = errors.New("workspaces exist without the administration workspace; select the management workspace explicitly")
 
 type Options struct {
-	Backend, Environment, URL, CAFile string
+	Environment, URL, CAFile string
 	// BundledPostgres is the explicit deployment declaration that the URL
 	// targets the official bundled PostgreSQL service on its internal network.
 	BundledPostgres bool
@@ -99,19 +99,11 @@ func validatePlaintextPostgres(options Options) error {
 }
 
 func ValidateOptions(options Options) error {
-	switch options.Backend {
-	case "", "postgres":
-		_, err := postgresURL(options)
-		return err
-	default:
-		return errors.New("unsupported Controller database backend; only postgres is supported and cross-engine migration is unsupported")
-	}
+	_, err := postgresURL(options)
+	return err
 }
 
 func Open(ctx context.Context, options Options) (*Connection, error) {
-	if err := ValidateOptions(options); err != nil {
-		return nil, err
-	}
 	databaseURL, err := postgresURL(options)
 	if err != nil {
 		return nil, err
@@ -123,20 +115,8 @@ func Open(ctx context.Context, options Options) (*Connection, error) {
 	return &Connection{Store: postgres.WrapPool(pool), pg: pool}, nil
 }
 
-// ValidateDeployment runs connection-level deployment gates before migrations.
-// PostgreSQL connections are checked centrally by migrations.Open, for bundled,
-// external, owner, runtime and tool connections alike.
-func (c *Connection) ValidateDeployment(ctx context.Context) error {
-	if c.pg != nil {
-		return c.pg.Ping(ctx)
-	}
-	return nil
-}
-
 func (c *Connection) Close() {
-	if c.pg != nil {
-		c.pg.Close()
-	}
+	c.pg.Close()
 }
 
 func (c *Connection) Migrate(ctx context.Context) error {

@@ -182,6 +182,13 @@ database port. External PostgreSQL 18 requires `sslmode=verify-full` with
 | PostgreSQL 18 | bundled or external | Yes; bundled remains the default |
 | MySQL / MariaDB / PostgreSQL 17 | any | Retired and rejected |
 
+PostgreSQL is the only backend, so new configuration omits
+`OCSERV_DATABASE_BACKEND`. Existing `OCSERV_DATABASE_BACKEND=postgres` is
+validated at configuration and launcher entrypoints without becoming an
+internal backend selector. The sealing export CLI likewise accepts the legacy
+`--backend=postgres` argument; other values are rejected before opening files
+or connecting to the database.
+
 Support for MySQL 8.4 LTS, MariaDB, and PostgreSQL 17 has been removed.
 Existing MySQL configurations (`OCSERV_DATABASE_BACKEND=mysql`) and existing
 hosts whose saved `deployment-profile.json` records `"database_backend": "mysql"`
@@ -205,7 +212,6 @@ To use external PostgreSQL 18 instead of the bundled default, select it
 explicitly:
 
 ```dotenv
-OCSERV_DATABASE_BACKEND=postgres
 OCSERV_DATABASE_DEPLOYMENT=external
 OCSERV_DATABASE_BACKUP_HOST=postgres.example.com
 OCSERV_DATABASE_BACKUP_PORT=5432
@@ -655,7 +661,7 @@ enforces are in
    checked by privd at startup without exporting private keys. Set `umask 077`
    before redirecting its output.
 2. On the Controller host, run `/usr/local/bin/ocserv-sealing-export` with
-   `--database-url-file`, `--backend`, `--database-ca-file` for an external
+   `--database-url-file`, `--database-ca-file` for an external
    database or `--bundled-postgres` for bundled PostgreSQL, and the
    verified `--workspace`, `--node`, and `--endpoint` flags.
 3. Copy both the Controller export and the node export over an authenticated
@@ -1450,7 +1456,7 @@ test relay reachability, so validate TLS, token-authenticated relay traffic, and
 fresh Agent observations separately. Normal production direct
 connectivity remains unchanged.
 
-The control plane runs with `--role=all`. Public TLS terminates at the gateway
+The Controller starts HTTP, worker, and scheduler together without a role argument. Public TLS terminates at the gateway
 (behind Edge in Integrated mode), and node certificates come from an HTTPS
 certificate signer (the external endpoint in Standalone mode, or the bundled
 Signer in Integrated mode). Set `OCSERV_PUBLIC_ORIGIN` to the public HTTPS
@@ -1705,8 +1711,7 @@ service is restored.
 
 - Authentication failure or lockout: see
   [Authentication outage](incident-recovery.md#authentication-outage).
-- Database recovery: check `OCSERV_DATABASE_BACKEND` and
-  `OCSERV_DATABASE_DEPLOYMENT` in the effective deployment configuration, then
+- Database recovery: check `OCSERV_DATABASE_DEPLOYMENT` in the effective deployment configuration, then
   follow [Database recovery](incident-recovery.md#database-recovery). Neither
   rolling back the Controller application package nor verifying a backup
   checksum restores database state.

@@ -71,7 +71,7 @@ func testNodeAndEndpoint(t *testing.T) ([16]byte, [32]byte) {
 	return nodeID, endpointID
 }
 
-// TestManagerSessionOwnershipIntegration covers the worker-role owner
+// TestManagerSessionOwnershipIntegration covers the Controller owner
 // lifecycle: acquiring the lease, registering the fence, issuing bindings,
 // refusing a second owner while the lease is held, and failing closed after
 // a takeover takes a strictly higher epoch.
@@ -1004,7 +1004,7 @@ func testLogger() *slog.Logger {
 }
 
 // TestManagerExecuteFencedRunsTheActionUnderTheNodeLock covers the
-// worker-role executor: a live session's mutation runs with the fence and
+// Controller executor: a live session's mutation runs with the fence and
 // binding, an unknown node keeps the unfenced compatibility path, and an
 // ended session fails closed without running the mutation.
 func TestManagerExecuteFencedRunsTheActionUnderTheNodeLockIntegration(t *testing.T) {

@@ -553,7 +553,7 @@ verification.
 
 ## Database recovery
 
-Start by checking `OCSERV_DATABASE_BACKEND` and `OCSERV_DATABASE_DEPLOYMENT` in
+Start by checking `OCSERV_DATABASE_DEPLOYMENT` in
 the active configuration against the
 [production support matrix](production-deployment.md#database-support): for a
 transient PostgreSQL outage, restart the existing instance; after data loss,

@@ -25,17 +25,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type Role string
-
-const (
-	RoleAll Role = "all"
-)
-
 type Config struct {
 	InstallationRelayURL     string
 	InstallationRelayToken   string
 	HistoryRetention         historyretention.Policy
-	Role                     Role
 	MigrateOnly              bool
 	ProvisionWorkspace       bool
 	BootstrapLocalAdmin      bool
@@ -48,7 +41,6 @@ type Config struct {
 	HTTPAddress              string
 	AuthTrustedProxyCIDRs    []netip.Prefix
 	DatabaseURL              string
-	DatabaseBackend          string
 	DatabaseTLSCAFile        string
 	DatabaseBundledPostgres  bool
 	OTLPEndpoint             string
@@ -98,7 +90,7 @@ type LookupEnv func(string) (string, bool)
 
 func Load(args []string, lookup LookupEnv) (Config, error) {
 	cfg := Config{
-		Role: RoleAll, Environment: "development", HTTPAddress: "127.0.0.1:8080",
+		Environment: "development", HTTPAddress: "127.0.0.1:8080",
 		BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, ShutdownTimeout: 10 * time.Second,
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
 		TrustSocket:      "/run/ocserv-trust/control-plane.sock",
@@ -127,7 +119,6 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		if backend != "postgres" {
 			return Config{}, errors.New("OCSERV_DATABASE_BACKEND must be postgres; MySQL and cross-engine migration are unsupported")
 		}
-		cfg.DatabaseBackend = backend
 	}
 	setString(lookup, "OCSERV_DATABASE_TLS_CA_FILE", &cfg.DatabaseTLSCAFile)
 	setString(lookup, "OCSERV_RUNTIME_DATABASE_ROLE", &cfg.RuntimeDBRole)
@@ -333,7 +324,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	bootstrap := fs.Bool("bootstrap-local-admin", false, "create the initial Local administrator, then exit")
-	role := fs.String("role", string(cfg.Role), "process role: all")
+	role := fs.String("role", "all", "legacy compatibility flag; only all is supported")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
 	provisionWorkspace := fs.Bool("provision-management-workspace", false, "create the administration workspace on a database without workspaces, then exit")
 	if err := fs.Parse(args); err != nil {
@@ -356,7 +347,9 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		}
 		cfg.LocalBootstrapPassword = password
 	}
-	cfg.Role = Role(*role)
+	if *role != "all" {
+		return Config{}, fmt.Errorf("invalid role %q (only single-process \"all\" is supported)", *role)
+	}
 	cfg.MigrateOnly = *migrateOnly
 	cfg.ProvisionWorkspace = *provisionWorkspace
 	if err := cfg.Validate(); err != nil {
@@ -367,18 +360,11 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 }
 
 func (c Config) Validate() error {
-	// Empty retains the pre-backend-selector PostgreSQL configuration contract.
-	if c.DatabaseBackend != "" && c.DatabaseBackend != "postgres" {
-		return errors.New("OCSERV_DATABASE_BACKEND must be postgres; MySQL and cross-engine migration are unsupported")
-	}
 	if c.BootstrapLocalAdmin && (!c.LocalAuthEnabled() || c.MigrateOnly || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")
 	}
 	if c.ProvisionWorkspace && (c.MigrateOnly || c.BootstrapLocalAdmin) {
 		return errors.New("workspace provisioning cannot be combined with other one-shot commands")
-	}
-	if c.Role != RoleAll {
-		return fmt.Errorf("invalid role %q (only single-process \"all\" is supported)", c.Role)
 	}
 	if c.Environment != "development" && c.Environment != "test" && c.Environment != "production" {
 		return fmt.Errorf("invalid environment %q", c.Environment)
@@ -389,7 +375,7 @@ func (c Config) Validate() error {
 	if c.MigrateOnly && strings.TrimSpace(c.RuntimeDBRole) == "" {
 		return errors.New("OCSERV_RUNTIME_DATABASE_ROLE is required with --migrate-only")
 	}
-	if err := connection.ValidateOptions(connection.Options{Backend: c.DatabaseBackend, Environment: c.Environment, URL: c.DatabaseURL, CAFile: c.DatabaseTLSCAFile, BundledPostgres: c.DatabaseBundledPostgres}); err != nil {
+	if err := connection.ValidateOptions(connection.Options{Environment: c.Environment, URL: c.DatabaseURL, CAFile: c.DatabaseTLSCAFile, BundledPostgres: c.DatabaseBundledPostgres}); err != nil {
 		return err
 	}
 	// The development default is only implicit on a loopback listener, so a

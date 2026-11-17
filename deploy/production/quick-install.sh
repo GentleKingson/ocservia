@@ -116,7 +116,7 @@ if [[ ! -e "${CONFIG}" ]]; then
   staged="$(mktemp "${CONFIG_DIR}/.install.env.XXXXXX")"
   {
     printf '%s\n' "${HEADER}"
-    printf '%s\n' OCSERV_DEPLOYMENT_MODE=integrated OCSERV_DATABASE_BACKEND=postgres \
+    printf '%s\n' OCSERV_DEPLOYMENT_MODE=integrated \
       OCSERV_DATABASE_DEPLOYMENT=bundled OCSERV_TLS_MODE=acme "OCSERV_ACME_EMAIL=${acme_email}"
     [[ -z "${acme_directory}" ]] || printf 'OCSERV_ACME_DIRECTORY_URL=%s\n' "${acme_directory}"
     [[ -z "${acme_ca}" ]] || printf 'OCSERV_ACME_CA_FILE=%s\n' "${acme_ca}"

@@ -102,7 +102,6 @@ services:
   control-plane:
     <<: *service-defaults
     image: ${OCSERV_CONTROL_IMAGE:?set OCSERV_CONTROL_IMAGE to a digest-pinned image}
-    command: ["--role=all"]
     environment:
       OCSERV_ENVIRONMENT: production
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080

@@ -110,7 +110,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		"SSL_CERT_FILE": f.root + "/signer-ca.pem",
 		"OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true",
 	})
-	f.start("controller-all", 65534, 65532, controllerEnvironment, f.root+"/ocserv-control", "--role=all")
+	f.start("controller", 65534, 65532, controllerEnvironment, f.root+"/ocserv-control")
 	f.wait("scheduler maintenance commit", func() bool {
 		var completed int
 		return owner.Store.QueryRow(f.ctx, `SELECT count(*) FROM test_scheduler_maintenance_history`).Scan(&completed) == nil && completed > 0
@@ -271,7 +271,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	}
 	listener.Close()
 	t.Log("real CLI, single local Admin, one dedicated TLS Relay, enrollment, root attestation, fenced certificate lifecycle and one-use artifact passed")
-	t.Log("all Controller roles drained after SIGTERM with real Agent/transport still running; Trust socket and HTTP port released")
+	t.Log("Controller tasks drained after SIGTERM with real Agent/transport still running; Trust socket and HTTP port released")
 }
 
 type controllerE2E struct {
@@ -339,7 +339,7 @@ func (f *controllerE2E) file(name string, data []byte, uid, gid int, mode os.Fil
 }
 
 func (f *controllerE2E) environment(options connection.Options, extra map[string]string) []string {
-	values := map[string]string{"OCSERV_ENVIRONMENT": "test", "OCSERV_DATABASE_BACKEND": options.Backend, "OCSERV_DATABASE_URL": options.URL,
+	values := map[string]string{"OCSERV_ENVIRONMENT": "test", "OCSERV_DATABASE_URL": options.URL,
 		"OCSERV_AUDIT_EVENT_KEY_ID": "e2e-audit-v1", "OCSERV_TEST_AUDIT_EVENT_KEY_HEX": strings.Repeat("11", 32), "OCSERV_AUDIT_CHECKPOINT_KEY": strings.Repeat("22", 32), "OCSERV_SESSION_KEY": strings.Repeat("33", 32), "OCSERV_LOCAL_AUTH_ENABLED": "true", "OCSERV_RECOMMENDED_AGENT_VERSION": "1.2.3"}
 	for key, v := range extra {
 		values[key] = v

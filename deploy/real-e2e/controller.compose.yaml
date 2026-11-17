@@ -134,7 +134,6 @@ services:
     build:
       context: ../..
       dockerfile: control-plane/Dockerfile
-    command: ["--role=all"]
     environment:
       OCSERV_ENVIRONMENT: development
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080

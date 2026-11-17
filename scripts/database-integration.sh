@@ -214,7 +214,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   assert_local_bootstrap_schema "${container}" ocservia
   latest_owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia_latest?sslmode=disable"
   latest_runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia_latest?sslmode=disable"
-  # CLI bootstrap and role lifecycle fixtures must not alter the shared
+  # CLI bootstrap and Controller lifecycle fixtures must not alter the shared
   # database used by the authentication and migration acceptance below.
   clone_database "${container}" ocservia ocservia_startup
   OCSERV_TEST_DATABASE_URL="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia_startup?sslmode=disable" \
@@ -264,7 +264,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     go test -p 1 ./internal/api -run '^TestReadinessRequiresDatabaseConnectivityIntegration$' -count=1)
 
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
-    OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
+    OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" \
     >"${TMP_ROOT}/pg${major}-fresh.log" 2>&1 &
   pid=$!
   PIDS+=("${pid}")
@@ -383,7 +383,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
     go test -p 1 ./internal/api -run '^TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations$' -count=1)
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
-    OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
+    OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" \
     >"${TMP_ROOT}/pg${major}-audit-checkpoint.log" 2>&1 &
   checkpoint_pid=$!
   PIDS+=("${checkpoint_pid}")
@@ -429,10 +429,10 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-repeat-migrate.log" 2>&1
 
-  # Isolate HTTP readiness from the scheduler's intentional fatal-error exit.
-  # The all-role process and scheduler are exercised separately above.
+  # Restart the single Controller after the repeated migration, then verify
+  # HTTP readiness and database outage reporting with background work active.
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
-    OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
+    OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" \
     >"${TMP_ROOT}/pg${major}-repeat.log" 2>&1 &
   pid=$!
   PIDS+=("${pid}")
