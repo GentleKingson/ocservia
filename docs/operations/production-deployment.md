@@ -1617,7 +1617,7 @@ Production installation uses fixed GitHub Release assets directly; no static hos
 ```bash
 wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/controller-bootstrap.sh -O install.sh
 bash install.sh
-# On a managed node, download managed-node-bootstrap.sh instead.
+# Managed nodes use managed-node-bootstrap.sh with --join-token-file or --resume-install; see Agent lifecycle.
 ```
 
 `install-controller` and `install-node` remain optional thin bootstrap launcher wrappers, also published with an embedded fixed version. No arguments requests the versioned installer wizard; explicit legacy arguments retain CLI behavior. `--non-interactive` and `--config PATH` pass through to the versioned installer. Neither stage selects `latest` or `main`.
