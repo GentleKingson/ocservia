@@ -117,34 +117,6 @@ for script in database-integration.sh database-foundation-integration.sh; do
   grep -Fq 'DATABASE_TEST_SCOPE must be smoke, full or regression' "${tmp}/scope.log"
   done
 done
-# PostgreSQL full acceptance keeps each package's complete Integration suite;
-# the manifest is an additional guard, not the test selector.
-# Match literal shell source, without expanding its variables.
-# shellcheck disable=SC2016
-grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" "${group}" -p 1 "./internal/${package}" -run Integration)' \
-  "${ROOT}/scripts/database-integration.sh"
-# Match literal shell source, without expanding its variables.
-# shellcheck disable=SC2016
-grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-config -p 1 ./internal/configplan -run Integration)' \
-  "${ROOT}/scripts/database-integration.sh"
-# Match literal shell source, without expanding its variables.
-# shellcheck disable=SC2016
-grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates -p 1 ./internal/certificates -run Integration)' \
-  "${ROOT}/scripts/database-integration.sh"
-grep -Fq 'go test -p 1 ./internal/telemetry -run Integration -count=1)' \
-  "${ROOT}/scripts/database-integration.sh"
-grep -Fq 'checked_go_tests backend-policy-api --select -race -p 1 -parallel 1' \
-  "${ROOT}/scripts/database-integration.sh"
-# Match literal shell source, without expanding its variables.
-# shellcheck disable=SC2016
-grep -Fq 'clone_database "${container}" ocservia_latest ocservia_policy_api' \
-  "${ROOT}/scripts/database-integration.sh"
-grep -Fq 'dropdb -U ocservia_owner ocservia_policy_api' \
-  "${ROOT}/scripts/database-integration.sh"
-if grep -Eq 'PRE34_|\.down\.sql|schema-compatibility-check' \
-  "${ROOT}/scripts/database-integration.sh"; then
-  echo 'current PostgreSQL acceptance still runs a historical compatibility path' >&2; exit 1
-fi
 # This small fixture RUNS the slash-separated -run expression, including
 # literal regex metacharacters and a sibling that must never execute.
 mkdir "${tmp}/selection"
@@ -333,6 +305,50 @@ for bad in 'smoke unknown-shard' 'smoke services'; do
     bash "${tmp}/wrapper/scripts/database-foundation-integration.sh" >/dev/null 2>&1; then
     echo "invalid MySQL shard accepted: ${bad}" >&2; exit 1
   fi
+done
+# Run the production PostgreSQL business-suite function with recording command
+# boundaries. This proves complete Integration selectors and isolated API state
+# without pretending that the fixture executes SQL or business acceptance.
+export ROUTE_LOG="${tmp}/postgres-full.route"
+run_postgres_fixture() {
+  bash -euo pipefail -s -- "${tmp}/wrapper" "${ROOT}/scripts/database-postgres-tests.sh" <<'SH'
+  ROOT="$1"
+  TEST_CONTROL_PLANE="${ROOT}/control-plane"
+  container=ocservia-pg-smoke-fixture major=18 port=12345
+  runtime_url=postgres://app/ocservia owner_url=postgres://owner/ocservia
+  latest_runtime_url=postgres://app/ocservia_latest latest_owner_url=postgres://owner/ocservia_latest
+  clone_database() { printf 'clone %s\n' "$*" >>"${ROUTE_LOG}"; }
+  checked_go_tests() {
+    printf 'checked %s|%s|%s\n' "$*" "${OCSERV_TEST_DATABASE_URL}" "${OCSERV_TEST_OWNER_DATABASE_URL}" >>"${ROUTE_LOG}"
+    [[ "${POSTGRES_FAIL_GROUP:-}" != "$1" ]] || return 19
+  }
+  assert_auth_fixture_cleanup() { printf 'cleanup %s\n' "$*" >>"${ROUTE_LOG}"; }
+  docker() { printf 'docker %s\n' "$*" >>"${ROUTE_LOG}"; }
+  source "$2"
+  PATH="${ROOT}/bin:${PATH}"
+  run_postgres_business_tests "$container" "$major" "$port" "$runtime_url" "$owner_url" "$latest_runtime_url" "$latest_owner_url"
+SH
+}
+run_postgres_fixture
+for package in userstate useroperations configplan certificates; do
+  case "${package}" in
+    configplan) group=config ;;
+    *) group="${package}" ;;
+  esac
+  grep -Fxq "backend-policy-${group} -p 1 ./internal/${package} -run Integration" "${ROUTE_LOG}"
+done
+grep -Fxq 'test -p 1 ./internal/telemetry -run Integration -count=1' "${ROUTE_LOG}"
+grep -Fxq 'clone ocservia-pg-smoke-fixture ocservia_latest ocservia_policy_api' "${ROUTE_LOG}"
+grep -Fxq 'checked backend-policy-api --select -race -p 1 -parallel 1|postgres://app/ocservia_policy_api|postgres://owner/ocservia_policy_api' "${ROUTE_LOG}"
+grep -Fxq 'docker exec ocservia-pg-smoke-fixture dropdb -U ocservia_owner ocservia_policy_api' "${ROUTE_LOG}"
+for failed_group in backend-auth backend-policy-api database-auth database-api database-lifecycle; do
+  export ROUTE_LOG="${tmp}/postgres-failed.route"
+  : >"${ROUTE_LOG}"
+  status=0
+  POSTGRES_FAIL_GROUP="${failed_group}" run_postgres_fixture >"${tmp}/postgres-failed.log" 2>&1 || status=$?
+  [[ "${status}" == 19 ]] || { echo "PostgreSQL routing swallowed ${failed_group}: ${status}" >&2; exit 1; }
+  [[ "$(tail -n 1 "${ROUTE_LOG}")" == "checked ${failed_group} "* ]] || {
+    echo "PostgreSQL routing continued after ${failed_group}" >&2; exit 1; }
 done
 echo 'Full current database routing passed'
 # Exact, ordered smoke routes per backend: a missing, duplicated, replaced or

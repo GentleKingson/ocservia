@@ -54,6 +54,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Smoke published release assets
+        id: smoke-assets
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           RUN_ID: release-assets-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}

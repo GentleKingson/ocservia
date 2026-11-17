@@ -158,10 +158,94 @@ Dir.mktmpdir('bootstrap-platforms-') do |tmp|
     run(env, bash, bootstrap, 'go-test', error: 'unsupported-unsupported/go-test; no artifact mappings')
   end
 
+  # Execute complete bootstrap entrypoints against a pinned, disposable tool
+  # installation. Unexpected downloads fail instead of reaching the network.
+  work = "#{tmp}/profiles"
+  FileUtils.mkdir_p("#{work}/scripts")
+  %w[bootstrap.sh env.sh].each { |name| FileUtils.cp("#{root}/scripts/#{name}", "#{work}/scripts/") }
+  FileUtils.cp("#{root}/toolchains.lock", work)
+  versions = File.readlines("#{root}/toolchains.lock", chomp: true).grep(/^[a-z_]+=/).to_h { |line| line.split('=', 2) }
+  trace = "#{work}/trace"
+  bin = "#{work}/bin"
+  script("#{bin}/uname", 'case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac')
+  script("#{bin}/curl", 'echo unexpected-download >>"$FIXTURE_TRACE"; exit 81')
+  %w[jq shellcheck python3 java].each { |name| script("#{bin}/#{name}", 'exit 0') }
+  tools = {
+    'go/bin/go' => "printf 'go#{versions.fetch('go')}\\nlinux\\namd64\\n'",
+    'node/bin/node' => "echo v#{versions.fetch('node')}",
+    'node/bin/npm' => "if [[ \"$*\" == --version ]]; then echo #{versions.fetch('npm')}; else [[ \"$*\" == ci ]]; fi",
+    'cargo/bin/rustc' => "echo 'rustc #{versions.fetch('rust')} (fixture)'",
+    'cargo/bin/cargo' => "case \"$*\" in 'audit --version') echo #{versions.fetch('cargo_audit')} ;; 'deny --version') echo #{versions.fetch('cargo_deny')} ;; *) echo cargo ;; esac",
+    'cargo/bin/rustup' => 'exit 0',
+    'cargo/bin/rustfmt' => 'exit 0',
+    'cargo/bin/cargo-audit' => "echo #{versions.fetch('cargo_audit')}",
+    'cargo/bin/cargo-deny' => "echo #{versions.fetch('cargo_deny')}",
+    'bin/ruff' => "echo 'ruff #{versions.fetch('ruff')}'",
+    'bin/buf' => "echo #{versions.fetch('buf')}",
+    'bin/oasdiff' => "echo #{versions.fetch('oasdiff')}",
+    'bin/govulncheck' => "echo v#{versions.fetch('govulncheck')}",
+    'bin/nfpm' => "echo 'GitVersion: #{versions.fetch('nfpm')}'",
+    'bin/syft' => "echo #{versions.fetch('syft')}",
+    'bin/grype' => "echo #{versions.fetch('grype')}"
+  }
+  tools.each do |path, body|
+    script("#{work}/.tools/#{path}", <<~SH + body)
+      printf '%s|%s|%s\\n' "${0##*/}" "$PWD" "$*" >>"$FIXTURE_TRACE"
+      [[ "${FIXTURE_FAIL_TOOL:-}" != "${0##*/}" ]] || exit 19
+    SH
+  end
+  # Supply checksum-valid scanner archives for any download the real
+  # entrypoint requires; these command fixtures never contact the network.
+  %w[syft grype].each do |name|
+    artifact = "#{name}_#{versions.fetch(name)}_linux_amd64.tar.gz"
+    archive = "#{work}/#{artifact}"
+    _, status = Open3.capture2e('tar', '-czf', archive, '-C', "#{work}/.tools/bin", name)
+    raise 'scanner fixture archive failed' unless status.success?
+  end
+  script("#{bin}/curl", <<~SH)
+    printf 'curl|%s|%s\\n' "$PWD" "$*" >>"$FIXTURE_TRACE"
+    while (($#)); do
+      if [[ "$1" == --output ]]; then output="$2"; shift; fi
+      url="$1"; shift
+    done
+    case "${url##*/}" in
+      syft_*_linux_amd64.tar.gz|grype_*_linux_amd64.tar.gz) cp "#{work}/${url##*/}" "$output" ;;
+      *) exit 81 ;;
+    esac
+  SH
+  FileUtils.mkdir_p("#{work}/web")
+  jar = "openapi-generator-cli-#{versions.fetch('openapi_generator')}.jar"
+  File.write("#{work}/.tools/#{jar}", 'fixture jar')
+  File.write("#{work}/scripts/checksums.txt", "#{Digest::SHA256.hexdigest('fixture jar')}  #{jar}\n")
+  Dir.glob("#{work}/*_linux_amd64.tar.gz").each do |archive|
+    File.open("#{work}/scripts/checksums.txt", 'a') { |file| file.puts "#{Digest::SHA256.file(archive).hexdigest}  #{File.basename(archive)}" }
+  end
+  env = {'PATH' => "#{bin}:#{ENV.fetch('PATH')}", 'FIXTURE_TRACE' => trace}
+  {
+    'source-style' => %w[ruff],
+    'contracts' => %w[node npm buf oasdiff],
+    'go-security' => %w[go govulncheck],
+    'rust-security' => %w[rustc cargo cargo-audit cargo-deny],
+    'npm-security' => %w[node npm],
+    'package-tools' => %w[nfpm],
+    'image-security' => %w[syft grype]
+  }.each do |profile, expected|
+    File.write(trace, '')
+    run(env, bash, "#{work}/scripts/bootstrap.sh", profile)
+    calls = File.readlines(trace, chomp: true).map { |line| line.split('|') }
+    raise "#{profile} checked unrelated tools: #{calls}" unless (calls.map(&:first).uniq - (profile == 'image-security' ? ['curl'] : [])).sort == expected.sort
+    installs = calls.select { |name, _cwd, args| name == 'npm' && args != '--version' }
+    raise "#{profile} dependency installation drifted" unless installs == (profile == 'contracts' ? [['npm', "#{work}/web", 'ci']] : [])
+    # The real dispatch must propagate a required tool failure, even on a hit.
+    File.write(trace, '')
+    output, status = Open3.capture2e(env.merge('FIXTURE_FAIL_TOOL' => expected.last), bash, "#{work}/scripts/bootstrap.sh", profile)
+    raise "#{profile} ignored a tool failure: #{output}" if status.success?
+  end
+
   # Minimal PATHs prove each real entrypoint fails before tests or containers.
   work = "#{tmp}/missing-tools"
   FileUtils.mkdir_p("#{work}/scripts")
-  %w[env.sh go-test-environment.sh go-check.sh required-go-tests.sh test-required-go-tests.sh test-bootstrap-profiles.sh database-integration.sh database-foundation-integration.sh].each do |name|
+  %w[env.sh go-test-environment.sh go-check.sh required-go-tests.sh test-required-go-tests.sh test-bootstrap-profiles.sh database-integration.sh database-postgres-tests.sh database-foundation-integration.sh].each do |name|
     FileUtils.cp("#{root}/scripts/#{name}", "#{work}/scripts/")
   end
   bin = "#{work}/bin"

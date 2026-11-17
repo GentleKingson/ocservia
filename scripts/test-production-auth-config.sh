@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Static production auth regression: no containers, real accounts or secrets.
+# Production auth configuration regression: no containers, real accounts or secrets.
 set -euo pipefail
 if (( EUID != 0 )); then
   exec sudo -- bash "$0" "$@"
@@ -38,7 +38,8 @@ export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test
 export OCSERV_RELAY_URL_A=https://relay-a.example.test OCSERV_RELAY_URL_B=
 unset OCSERV_OTEL_BACKEND_ENDPOINT
 
-# Exercise the published mode examples through each real installer allowlist.
+# Render the documented mode examples. Installer handoff and sudo forwarding
+# are exercised by test-controller-bootstrap.sh and test-controller-install.sh.
 awk -v dir="${work}" '
   /^```dotenv$/ { block++; active=1; next }
   /^```$/ { active=0 }
@@ -50,20 +51,14 @@ for mode in 1 2 3; do
     printf 'test-only-not-a-production-secret\n' >"${OCSERV_SECRET_DIR}/oidc-client-secret"
     chmod 0444 "${OCSERV_SECRET_DIR}/oidc-client-secret"
   fi
-  for list in bootstrap root installer; do
-    case "${list}" in
-      bootstrap) section="$(sed -n '/^INSTALL_ENV_NAMES=(/,/^)/p' "${ROOT}/deploy/production/controller-bootstrap.sh")" ;;
-      root) section="$(sed -n '/^ROOT_LIFECYCLE_ENV_NAMES=(/,/^)/p' "${ROOT}/deploy/production/install.sh")" ;;
-      installer) section="$(sed -n '/^  install_env_load /,/^fi$/p' "${ROOT}/deploy/production/install.sh")" ;;
-    esac
-    mapfile -t names < <(printf '%s\n' "${section}" | grep -oE 'OCSERV_[A-Z0-9_]+')
-    (
+  (
       unset OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL
       unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL
-      install_env_load "${work}/mode-${mode}.env" "${names[@]}"
+      install_env_load "${work}/mode-${mode}.env" \
+        OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL \
+        OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL
       "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/mode-${mode}.json"
-    )
-  done
+  )
   jq -e --argjson mode "${mode}" --arg dir "${OCSERV_SECRET_DIR}" '
     . as $config |
     all(.services.migrate, .services["control-plane"];
@@ -316,4 +311,4 @@ if grep -Fq ' stop signer' "${CONFIG_TEST_LOG}"; then
 fi
 rm "${OCSERV_SECRET_DIR}/session-key"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
-echo "Production auth configuration: all three documented modes, installer allowlists, secret mounts and rejection checks passed"
+echo "Production auth configuration: all three documented modes, secret mounts and rejection checks passed"

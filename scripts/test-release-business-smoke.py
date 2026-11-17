@@ -48,13 +48,12 @@ def main():
 
         # Exercise the driver's real profile branch with external commands
         # stubbed: no native installation, browser, or business mutation here.
-        driver = (root / 'scripts/release-business-probe.sh').read_text()
-        browser_stage = driver.split('record native_node_services\n', 1)[1].split('next_stage vpn_client_setup', 1)[0]
         shell = r"""
 set -euo pipefail
 ROOT="$1"
 work="$2"
 BUSINESS_PROFILE="$3"
+source "$ROOT/scripts/release-business-stages.sh"
 next_stage() { :; }
 record() { echo "checkpoint:$1"; }
 python3() { echo "api:$2"; if [[ "$2" == browser_verify ]]; then return "${VERIFY_EXIT}"; fi; }
@@ -67,7 +66,7 @@ mkdir() { :; }
 certutil() { :; }
 """
         for profile in ('smoke', 'extended'):
-            result = subprocess.run(['bash', '-c', shell + browser_stage, 'browser-stage', str(root), str(work), profile],
+            result = subprocess.run(['bash', '-c', shell + '\nrun_business_browser "$work"\n', 'browser-stage', str(root), str(work), profile],
                                     env={**os.environ, 'BROWSER_EXIT': '0', 'VERIFY_EXIT': '0'}, capture_output=True, text=True, check=True)
             expected = (['api:certificate', 'checkpoint:real_certificate_lifecycle'] if profile == 'extended' else [])
             expected += ['api:browser_prepare', 'browser', 'api:browser_verify', 'checkpoint:real_browser_subset']
@@ -75,7 +74,7 @@ certutil() { :; }
                 expected += ['api:smoke_user', 'checkpoint:approved_config_apply_and_vpn_user']
             assert result.stdout.splitlines() == expected
             for failure in ('BROWSER_EXIT', 'VERIFY_EXIT'):
-                failed = subprocess.run(['bash', '-c', shell + browser_stage, 'browser-stage', str(root), str(work), profile],
+                failed = subprocess.run(['bash', '-c', shell + '\nrun_business_browser "$work"\n', 'browser-stage', str(root), str(work), profile],
                                         env={**os.environ, 'BROWSER_EXIT': '0', 'VERIFY_EXIT': '0', failure: '9'},
                                         capture_output=True, text=True)
                 assert failed.returncode == 9
@@ -83,7 +82,6 @@ certutil() { :; }
 
         # Only the 1.6.0 opt-in adds rollback to Smoke; existing release profiles
         # keep their stages. Neither failed rollback nor a failed fresh VPN can pass.
-        vpn_stage = driver.split('next_stage business_vpn\n', 1)[1].split('if [[ "$BUSINESS_RUN_RESILIENCE"', 1)[0]
         vpn_shell = shell + '\npython3() { echo "api:$2"; [[ "$2" != "${FAIL_PHASE:-}" ]]; }\n'
         for profile, package in [('smoke', 'distribution'), ('smoke', 'backport-1.5.0'),
                                  ('smoke', 'source-1.6.0'), ('extended', 'backport-1.5.0')]:
@@ -94,12 +92,12 @@ certutil() { :; }
                              'api:vpn_after_rollback', 'checkpoint:real_vpn_after_rollback']
             if profile == 'extended':
                 expected += ['api:business', 'checkpoint:real_vpn_business_and_recovery']
-            result = subprocess.run(['bash', '-c', vpn_shell + vpn_stage, 'vpn-stage', str(root), str(work), profile],
+            result = subprocess.run(['bash', '-c', vpn_shell + '\nrun_business_vpn\n', 'vpn-stage', str(root), str(work), profile],
                                     env={**os.environ, 'OCSERV_PACKAGE': package}, capture_output=True, text=True, check=True)
             assert result.stdout.splitlines() == expected
             if rollback:
                 for phase in ('configuration', 'vpn_after_rollback'):
-                    result = subprocess.run(['bash', '-c', vpn_shell + vpn_stage, 'vpn-stage', str(root), str(work), profile],
+                    result = subprocess.run(['bash', '-c', vpn_shell + '\nrun_business_vpn\n', 'vpn-stage', str(root), str(work), profile],
                                             env={**os.environ, 'OCSERV_PACKAGE': package, 'FAIL_PHASE': phase},
                                             capture_output=True, text=True)
                     assert result.returncode != 0
@@ -558,18 +556,18 @@ certutil() { :; }
         with patch.object(business, 'run', side_effect=['', '[]']):
             business.assert_uninstalled(business.uninstall_native(), [])
 
-        terminal_stage = driver.split('next_stage "node_${BUSINESS_TERMINAL}"', 1)[1]
         terminal_shell = r"""
 set -euo pipefail
 ROOT="$1"
 BUSINESS_TERMINAL="$2"
+source "$ROOT/scripts/release-business-stages.sh"
 next_stage() { :; }
 record() { echo "checkpoint:$1"; }
 python3() { echo "api:$2"; return "$API_EXIT"; }
 """
         for terminal in ('revocation', 'uninstall'):
             for code in (0, 9):
-                result = subprocess.run(['bash', '-c', terminal_shell + terminal_stage, 'terminal', str(root), terminal],
+                result = subprocess.run(['bash', '-c', terminal_shell + '\nrun_business_terminal\n', 'terminal', str(root), terminal],
                                         env={**os.environ, 'API_EXIT': str(code)}, capture_output=True, text=True)
                 assert result.returncode == code
                 checkpoint = 'real_node_uninstall_and_offline' if terminal == 'uninstall' else 'real_node_revocation_and_disconnect'

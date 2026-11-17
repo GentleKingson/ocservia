@@ -98,6 +98,9 @@ for entry in install.sh quick-install.sh; do
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"${TEST_ROOT}/handoff"
 printf '%s\n' "${OCSERV_PUBLIC_HOST:-}" "${OCSERV_DATABASE_BACKEND:-}" >"${TEST_ROOT}/environment"
+for name in OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL; do
+  printf '%s=%s\n' "${name}" "${!name-<unset>}"
+done >"${TEST_ROOT}/auth-environment"
 MOCK
   chmod 755 "${fixture}/payload/deploy/production/${entry}"
 done
@@ -110,6 +113,27 @@ pack
 run --non-interactive
 [[ -f "${fixture}/releases/v4.5.6/RELEASE" && ! -e "${fixture}/releases/v4.5.6/.git" ]]
 grep -Fq -- '--non-interactive --config' "${fixture}/handoff"
+# The released bootstrap must load each documented auth mode before handoff.
+awk -v dir="${fixture}" '
+  /^```dotenv$/ { block++; active=1; next }
+  /^```$/ { active=0 }
+  active { print > (dir "/auth-" block ".env") }
+' "${ROOT}/docs/operations/authentication.md"
+for mode in 1 2 3; do
+  (
+    unset OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL
+    unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL
+    run --non-interactive --config "${fixture}/auth-${mode}.env"
+  )
+  while IFS= read -r setting; do
+    grep -Fxq "${setting}" "${fixture}/auth-environment"
+  done <"${fixture}/auth-${mode}.env"
+  if (( mode == 1 )); then
+    for name in OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL; do
+      grep -Fxq "${name}=<unset>" "${fixture}/auth-environment"
+    done
+  fi
+done
 # Reuse the validated runtime offline; changed contents never get overwritten.
 : >"${fixture}/downloads"
 run --version v4.5.6

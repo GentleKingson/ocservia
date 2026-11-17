@@ -50,7 +50,7 @@ worker_flags.each do |id, flag|
 end
 %w[go rust].each do |id|
   steps = jobs.fetch(id).fetch("steps")
-  heavy = steps.select { |s| s.fetch("run", "").match?(/scripts\/(go-check|rust-check)\.sh|bootstrap.sh rust-basic/) }
+  heavy = steps.select { |s| %w[go-check rust-tools rust-check].include?(s["id"]) }
   reject("#{id} heavy steps must not run for tools/installers alone") unless
     !heavy.empty? && heavy.all? { |s| s["if"] == "needs.ci-relevance.outputs.run_#{id} == 'true'" }
 end
@@ -64,7 +64,7 @@ reject("heavy history must not be a Basic CI job") if jobs.key?("database-histor
 reject("Quick and Full must have separate concurrency groups") unless
   workflow.fetch("concurrency").fetch("group").include?("inputs.profile || 'quick'") &&
   workflow.fetch("concurrency").fetch("group").include?("github.ref")
-guard = jobs.fetch("go").fetch("steps").find { |s| s["name"] == "CI guard and workflow contracts" }
+guard = jobs.fetch("go").fetch("steps").find { |s| s["id"] == "ci-tools" }
 reject("CI self-tests must be path selected") unless guard.fetch("if") == "needs.ci-relevance.outputs.run_ci_tools == 'true'"
 jobs.each do |id, job|
   timeout = job.fetch("timeout-minutes")
@@ -133,7 +133,10 @@ end
 # replaced by recording stubs. The Release upgrade contract itself stays real.
 require "tmpdir"
 require "fileutils"
-standard = jobs.fetch("go").fetch("steps").find { |step| step["run"] == "scripts/go-check.sh standard" }
+workspace_json, workspace_status = Open3.capture2("bash", "-c", 'source "$1/scripts/env.sh"; go work edit -json "$1/go.work"', "go-work", root)
+reject("cannot read Go workspace") unless workspace_status.success?
+workspace_modules = JSON.parse(workspace_json).fetch("Use").map { |item| item.fetch("DiskPath").delete_prefix("./") }
+standard = jobs.fetch("go").fetch("steps").find { |step| step["id"] == "go-check" }
 reject("standard Go checks must follow run_go") unless standard && standard["if"] == "needs.ci-relevance.outputs.run_go == 'true'"
 reject("tool checks must receive the same Go selection") unless
   guard.fetch("env").slice("CI_SUITES", "CI_RUN_GO") == {"CI_SUITES" => "${{ needs.ci-relevance.outputs.ci_suites }}", "CI_RUN_GO" => "${{ needs.ci-relevance.outputs.run_go }}"}
@@ -143,7 +146,7 @@ reject("contract PR comparison must receive the actual head") unless
   guard.fetch("env").fetch("CONTRACT_HEAD_SHA") == "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" &&
   guard.fetch("env").fetch("CONTRACT_EVENT") == "${{ github.event_name }}"
 %w[source-style contracts].each do |suite|
-  step = jobs.fetch("go").fetch("steps").find { |item| item["run"] == "scripts/bootstrap.sh #{suite}" }
+  step = jobs.fetch("go").fetch("steps").find { |item| item["id"] == "#{suite}-tools" }
   reject("#{suite} dependencies must follow their exact suite") unless step &&
     step["if"] == "contains(needs.ci-relevance.outputs.ci_suites, '#{suite}')"
 end
@@ -184,11 +187,49 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
   raise "fixture baseline failed" unless system("git", "-C", work, "commit", "--allow-empty", "-qm", "base")
   work_base = Open3.capture2("git", "-C", work, "rev-parse", "HEAD").first.strip
   raise "fixture candidate failed" unless system("git", "-C", work, "commit", "--allow-empty", "-qm", "candidate")
-  %w[bin control-plane signer].each { |path| FileUtils.mkdir_p(File.join(work, path)) }
+  (["bin"] + workspace_modules).each { |path| FileUtils.mkdir_p(File.join(work, path)) }
   %w[go gofmt].each do |name|
     path = File.join(work, "bin", name)
     File.write(path, "#!/usr/bin/env bash\nprintf '%s|%s|%s\\n' \"${0##*/}\" \"${PWD}\" \"$*\" >> \"${CI_TRACE}\"\n")
+    if name == "go"
+      File.write(path, <<~SH)
+        #!/usr/bin/env bash
+        case "$*" in 'env CGO_ENABLED') echo 1; exit ;; 'env CC') echo cc; exit ;; esac
+        printf '%s|%s|%s\\n' "${0##*/}" "${PWD}" "$*" >> "${CI_TRACE}"
+      SH
+    end
     FileUtils.chmod(0755, path)
+  end
+  File.write(File.join(work, "scripts/bootstrap.sh"), <<~'SH')
+    #!/usr/bin/env bash
+    printf '%s\n' "$*" >>"${CI_TRACE}"
+    exit "${BOOTSTRAP_EXIT:-0}"
+  SH
+  %w[source-style contracts].each do |suite|
+    step = jobs.fetch("go").fetch("steps").find { |item| item["id"] == "#{suite}-tools" }
+    trace = File.join(tmp, "bootstrap-trace")
+    File.write(trace, "")
+    env = {"CI_TRACE" => trace}
+    output, status = Open3.capture2e(env, "bash", "-euo", "pipefail", "-c", step.fetch("run"), chdir: work)
+    reject("workflow selected wrong #{suite} tools: #{output}") unless status.success? && File.readlines(trace, chomp: true) == [suite]
+    _, status = Open3.capture2e(env.merge("BOOTSTRAP_EXIT" => "19"), "bash", "-euo", "pipefail", "-c", step.fetch("run"), chdir: work)
+    reject("workflow swallowed #{suite} bootstrap failure") unless status.exitstatus == 19
+  end
+  %w[standard race full].each do |mode|
+    trace = File.join(tmp, "go-trace")
+    File.write(trace, "")
+    env = {"CI_TRACE" => trace, "PATH" => File.join(work, "bin") + ":" + ENV.fetch("PATH")}
+    # Race preflight is real: fixture go reports its compiler requirements.
+    output, status = Open3.capture2e(env, "bash", File.join(work, "scripts/go-check.sh"), mode, chdir: work)
+    reject("#{mode} Go checks failed: #{output}") unless status.success?
+    calls = File.readlines(trace, chomp: true)
+    expected = []
+    if mode != "race"
+      expected << "gofmt|#{work}|-l #{workspace_modules.map { |mod| File.join(work, mod) }.join(' ')}"
+      workspace_modules.each { |mod| ["vet ./...", "test -count=1 ./..."].each { |args| expected << "go|#{work}/#{mod}|#{args}" } }
+    end
+    workspace_modules.each { |mod| expected << "go|#{work}/#{mod}|test -race -count=1 ./..." } if mode != "standard"
+    reject("#{mode} missed or duplicated a workspace validation: #{calls}") unless calls == expected
   end
   route = File.join(tmp, "route")
   FileUtils.mkdir_p(route)
@@ -237,7 +278,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
     run.call(env, "bash", "-eo", "pipefail", "-c", standard.fetch("run"), chdir: work) if routing.fetch("run_go") == "true"
     calls = File.readlines(trace, chomp: true)
     reject("#{name} skipped a Go workspace module") if routing.fetch("run_go") == "true" &&
-      !%w[control-plane signer].all? { |mod| calls.include?("go|#{File.join(work, mod)}|test -count=1 ./...") }
+      !workspace_modules.all? { |mod| ["vet ./...", "test -count=1 ./..."].all? { |args| calls.include?("go|#{File.join(work, mod)}|#{args}") } }
     reject("#{name} retained retired G6 contract checks") unless calls.grep(/^test-g6-/).empty?
     reject("#{name} lost shared tooling checks") unless
       %w[test-build-cache-credentials.sh test-buildx-cache-fallback.sh test-secret-scan-config.sh].all? { |test| calls.count(test) == 1 }
@@ -287,38 +328,34 @@ reject("security scans must cover secrets and all three dependency ecosystems") 
   checks.map { |check| check.fetch("profile") }.sort == %w[go-security npm-security rust-security secret-scan]
 reject("secret scans need complete history") unless
   scan.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == "${{ matrix.profile != 'secret-scan' && 1 || 0 }}" }
-bootstrap = File.read(File.join(root, "scripts/bootstrap.sh"))
-dispatch = 'case "${PROFILE}" in' + bootstrap.split('case "${PROFILE}" in').last
-stubs = bootstrap.scan(/^(install_\w+|verify_\w+)\(\)/).flatten.map do |name|
-  "#{name}() { echo #{name}; }"
-end.join("\n")
-{
-  "source-style" => %w[verify_host_command verify_host_command install_ruff],
-  "contracts" => %w[install_node install_npm install_contract_tools verify_java install_web_dependencies],
-  "go-security" => %w[install_go install_govulncheck],
-  "rust-security" => %w[install_rust install_cargo_audit install_cargo_deny],
-  "npm-security" => %w[install_node install_npm],
-  "package-tools" => %w[install_nfpm],
-  "image-security" => %w[install_syft install_grype verify_host_command]
-}.each do |profile, expected|
-  output, status = Open3.capture2e({"PROFILE" => profile}, "bash", "-eu", "-c", stubs + "\n" + dispatch)
-  reject("#{profile} installs unrelated tools/dependencies: #{output}") unless status.success? && output.split == expected
-end
 rust_scan = checks.find { |check| check["profile"] == "rust-security" }.fetch("command")
-reject("workspace and Relay advisory scans must remain fresh and fail closed") unless
-  rust_scan.lines.map(&:strip) == [
-    "cd rust",
-    "cargo audit",
-    "cargo audit --file ../deploy/production/relay.Cargo.lock",
-    "cargo deny --locked check advisories",
-  ]
+Dir.mktmpdir('security-dispatch-') do |dir|
+  FileUtils.mkdir_p("#{dir}/rust")
+  log = "#{dir}/calls"
+  File.write("#{dir}/cargo", <<~'SH')
+    #!/usr/bin/env bash
+    printf '%s|%s\n' "$PWD" "$*" >>"$SCAN_CALLS"
+    [[ "${FAIL_COMMAND:-}" != "$*" ]] || exit 19
+  SH
+  File.chmod(0755, "#{dir}/cargo")
+  env = {"PATH" => "#{dir}:#{ENV.fetch('PATH')}", "SCAN_CALLS" => log}
+  expected = ["audit", "audit --file ../deploy/production/relay.Cargo.lock", "deny --locked check advisories"]
+  [nil, *expected].each do |failure|
+    File.write(log, '')
+    output, status = Open3.capture2e(env.merge("FAIL_COMMAND" => failure), "bash", "-euo", "pipefail", "-c", rust_scan, chdir: dir)
+    count = failure ? expected.index(failure) + 1 : expected.length
+    reject("Rust advisory dispatch changed: #{output}") unless
+      File.readlines(log, chomp: true) == expected.first(count).map { |args| "#{dir}/rust|#{args}" }
+    reject("Rust advisory failure was swallowed") unless failure ? status.exitstatus == 19 : status.success?
+  end
+end
 # test-release-upgrade.sh executes Release Check with failed security results
 # and checks that dispatch dry runs cannot publish.
 products = YAML.safe_load(File.read(File.join(root, ".github/workflows/release-products.yml")), aliases: true)
 build_steps = products.fetch("jobs").fetch("build-agent-packages").fetch("steps")
-restore = build_steps.find { |step| step["name"] == "Restore native-package tool cache" }
-save = build_steps.find { |step| step["name"] == "Save native-package tool cache" }
-release_build = build_steps.find { |step| step.fetch("run", "").include?("bash scripts/build-release-agent.sh") }
+restore = build_steps.find { |step| step["id"] == "native-package-tools-cache" }
+save = build_steps.find { |step| step.fetch("uses", "").start_with?("actions/cache/save@") && step.dig("with", "key") == "${{ steps.native-package-tools-cache.outputs.cache-primary-key }}" }
+release_build = build_steps.find { |step| step["id"] == "build-packages" }
 reject("release tool cache restore must expose its primary key") unless
   restore && restore["id"] == "native-package-tools-cache"
 reject("release tool cache save must reuse restore path and primary key") unless
@@ -353,13 +390,5 @@ done
 
 if "${ROOT}/scripts/go-check.sh" unsupported >/dev/null 2>&1; then
   echo "go-check.sh accepted an unsupported execution mode" >&2
-  exit 1
-fi
-
-# Every go.work module must reach gofmt, vet and the unit/race tests in go-check.sh.
-workspace_modules="$(sed -n 's#^[[:space:]]*\./\([^[:space:]]*\)$#\1#p' "${ROOT}/go.work" | sort)"
-checked_modules="$(sed -n 's/^GO_MODULES=(\(.*\))$/\1/p' "${ROOT}/scripts/go-check.sh" | tr ' ' '\n' | sort)"
-if [[ -z "${workspace_modules}" || "${workspace_modules}" != "${checked_modules}" ]]; then
-  echo "go-check.sh GO_MODULES must match the go.work modules" >&2
   exit 1
 fi

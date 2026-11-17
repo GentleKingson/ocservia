@@ -93,6 +93,9 @@ cat >"${repo}/deploy/production/bootstrap-host.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 bootstrap_log="${INSTALL_TEST_BOOTSTRAP_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.bootstrap.log}"
+for name in OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL; do
+  printf '%s=%s\n' "${name}" "${!name-<unset>}" >>"${bootstrap_log}"
+done
 printf 'launcher:%s\n' "${SUDO_USER:-<unset>}" >>"${bootstrap_log}"
 printf '%s\n' "$*" >>"${bootstrap_log}"
 printf 'OCSERV_PUBLIC_HOST=%s\n' "${OCSERV_PUBLIC_HOST:-<unset>}" >>"${bootstrap_log}"
@@ -116,6 +119,9 @@ cat >"${repo}/deploy/production/controller.sh" <<'EOF'
 set -euo pipefail
 controller_log="${INSTALL_TEST_CONTROLLER_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.controller.log}"
 printf '%s\n' "$*" >>"${controller_log}"
+for name in OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL; do
+  printf '%s=%s\n' "${name}" "${!name-<unset>}" >>"${controller_log}"
+done
 printf 'relay-a:%s\nrelay-b:%s\n' "${OCSERV_RELAY_URL_A-<unset>}" "${OCSERV_RELAY_URL_B-<unset>}" >>"${controller_log}"
 exit "${MOCK_CONTROLLER_EXIT:-0}"
 EOF
@@ -717,6 +723,56 @@ assert_log_contains "${bootstrap_log}" "proxy-network:198.18.80.0/24,198.18.80.1
 assert_log_contains "${bootstrap_log}" "otel:otel.example.test:4317"
 assert_log_contains "${bootstrap_log}" "recommended:0.2.0"
 echo "install.env values load without dirtying the release checkout"
+
+# Run each documented auth mode through the real installer and, on the CI
+# launcher account, its real sudo env_reset transition. No source allowlist is read.
+awk -v dir="${fixture}" '
+  /^```dotenv$/ { block++; active=1; next }
+  /^```$/ { active=0 }
+  active { print > (dir "/auth-" block ".env") }
+' "${ROOT}/docs/operations/authentication.md"
+for mode in 1 2 3; do
+  for lifecycle in launcher root; do
+    if [[ "${lifecycle}" == root ]] && ! can_root; then
+      die "auth forwarding requires passwordless sudo"
+    fi
+    reset_logs
+    reset_checkout
+    install_docker_client_stub
+    cp "${fixture}/auth-${mode}.env" "${repo}/install.env"
+    RUN_STATUS=0
+    RUN_OUTPUT="$( (
+      unset OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL
+      unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL
+      if [[ "${lifecycle}" == root ]] && (( EUID != 0 )); then
+        cd "${repo}"
+        PATH="${root_lifecycle_bin}" OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
+          "${repo}/deploy/production/install.sh" --root-lifecycle
+      else
+        run_installer_from "${repo}"
+      fi
+    ) 2>&1)" || RUN_STATUS=$?
+    assert_status 0
+    expected="${fixture}/auth-${mode}.env"
+    actual_bootstrap="${bootstrap_log}"
+    actual_controller="${controller_log}"
+    if [[ "${lifecycle}" == root ]] && (( EUID != 0 )); then
+      actual_bootstrap="${root_bootstrap_log}"
+      actual_controller="${root_controller_log}"
+      as_root chown -R "$(id -u):$(id -g)" "${repo}"
+    fi
+    while IFS= read -r setting; do
+      grep -Fxq "${setting}" "${actual_bootstrap}" || die "bootstrap lost auth mode ${mode}: ${setting}"
+      grep -Fxq "${setting}" "${actual_controller}" || die "activation lost auth mode ${mode}: ${setting}"
+    done <"${expected}"
+    if (( mode == 1 )); then
+      for name in OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL; do
+        grep -Fxq "${name}=<unset>" "${actual_controller}" || die "local auth inherited OIDC configuration"
+      done
+    fi
+  done
+done
+echo "documented auth modes reach bootstrap and activation across the sudo boundary"
 
 # 8a. an explicit shell variable wins over install.env.
 reset_logs
