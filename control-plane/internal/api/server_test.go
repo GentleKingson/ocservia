@@ -16,6 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
+	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
@@ -41,7 +42,10 @@ func TestCommonStoreNotFoundProblems(t *testing.T) {
 }
 
 func TestLiveAndRequestID(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{Version: "test"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{Version: "test"}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodGet, "/livez", nil)
 	response := httptest.NewRecorder()
 	server.http.Handler.ServeHTTP(response, request)
@@ -57,7 +61,10 @@ func TestLiveAndRequestID(t *testing.T) {
 }
 
 func TestDevAuthMarker(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, true, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: true, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/livez", nil)
 	request.Host = "127.0.0.1:8080"
@@ -68,7 +75,10 @@ func TestDevAuthMarker(t *testing.T) {
 }
 
 func TestOperationsRequireAuthenticatedPrincipal(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, path := range []string{"/api/v1/operations", "/api/v1/operations/019fc0a4-6d92-765c-a8a1-4af556614cc3"} {
 		response := httptest.NewRecorder()
 		server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
@@ -144,7 +154,10 @@ func TestUserStateRevisionSlotErrorsUseConflictProblems(t *testing.T) {
 }
 
 func TestEnrollmentWritesRequireAuthenticatedPrincipal(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, path := range []string{
 		"/api/v1/node-bootstrap-tokens",
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/revocation",
@@ -158,7 +171,10 @@ func TestEnrollmentWritesRequireAuthenticatedPrincipal(t *testing.T) {
 }
 
 func TestEnrollmentErrorsDistinguishInvalidRequestsFromBackendFailures(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", nil)
 
 	response := httptest.NewRecorder()
@@ -197,7 +213,10 @@ func TestCreateBootstrapTokenRejectsInvalidExpectedEndpoint(t *testing.T) {
 
 func TestOperationsAcceptConfiguredDevelopmentBearer(t *testing.T) {
 	const token = "local-development-token-32-characters"
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, token)
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: token, EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name, host, bearer string
 		wantUnauthorized   bool
@@ -224,7 +243,10 @@ func TestOperationsAcceptConfiguredDevelopmentBearer(t *testing.T) {
 }
 
 func TestDevAuthRejectsReboundHost(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, true, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: true, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for host, wantUnauthorized := range map[string]bool{"attacker.example:8080": true, "127.0.0.1:8080": false} {
 		response := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodGet, "/api/v1/operations", nil)
@@ -237,8 +259,10 @@ func TestDevAuthRejectsReboundHost(t *testing.T) {
 }
 
 func TestCreateSimulationRejectsNullBody(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters")
-	server.EnableTransportEvents(transportevents.NewBackend(nil, nil))
+	server, err := NewServer(HTTPConfig{LocalSimulator: true, Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "local-development-token-32-characters", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{TransportEvents: transportevents.NewBackend(nil, nil)}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name, host, token string
 		want              int
@@ -266,7 +290,10 @@ func TestCreateSimulationRejectsNullBody(t *testing.T) {
 }
 
 func TestDevelopmentRuntimeIsHiddenWhenSimulatorIsDisabled(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/development/runtime", nil)
 	response := httptest.NewRecorder()
 
@@ -283,8 +310,10 @@ func TestDevelopmentRuntimeKeepsProcessMetricsWhenDatabaseIsUnavailable(t *testi
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	server := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters")
-	server.SetLocalSimulatorEnabled(true)
+	server, err := NewServer(HTTPConfig{LocalSimulator: true, Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "local-development-token-32-characters", EventStreams: eventstream.DefaultConfig()}, postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/development/runtime", nil)
 	request.Host = "127.0.0.1:8080"
 	request.Header.Set("Authorization", "Bearer local-development-token-32-characters")
@@ -310,7 +339,10 @@ func TestDevelopmentRuntimeKeepsProcessMetricsWhenDatabaseIsUnavailable(t *testi
 }
 
 func TestVersionUsesContractFieldNames(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{Version: "test", Commit: "abc", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{Version: "test", Commit: "abc", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	response := httptest.NewRecorder()
 	server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/version", nil))
 	var body map[string]string
@@ -323,7 +355,10 @@ func TestVersionUsesContractFieldNames(t *testing.T) {
 }
 
 func TestRoutingErrorsUseProblemDetails(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		method string
 		path   string
@@ -388,7 +423,10 @@ func TestExpectedRevisionRequiresMatchingHeaderOrBody(t *testing.T) {
 }
 
 func TestSyntheticCommandRequiresAuthentication(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
 	server.http.Handler.ServeHTTP(response, request)
@@ -398,7 +436,10 @@ func TestSyntheticCommandRequiresAuthentication(t *testing.T) {
 }
 
 func TestControlledOperationRoutesRequireAuthentication(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, path := range []string{
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/sessions/42:disconnect",
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/sessions/42:terminate",
@@ -415,7 +456,10 @@ func TestControlledOperationRoutesRequireAuthentication(t *testing.T) {
 }
 
 func TestUserPolicyRoutesRequireAuthentication(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		method string
 		path   string
@@ -462,12 +506,13 @@ func TestBrowserMutationRequiresExactOrigin(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 			trustedOrigin := test.trustedOrigin
 			if trustedOrigin == "" {
 				trustedOrigin = "https://admin.example.com"
 			}
-			server.EnableBrowserOrigin(trustedOrigin)
+			config := testHTTPConfig(false)
+			config.BrowserOrigin = trustedOrigin
+			server := newTestServer(t, config, nil, Modules{}, Authorization{})
 			request := httptest.NewRequest(test.method, "/api/v1/node-bootstrap-tokens", nil)
 			if test.origin != "" {
 				request.Header.Set("Origin", test.origin)
@@ -495,23 +540,27 @@ func TestBrowserMutationFailsClosedWithoutConfiguredOrigin(t *testing.T) {
 	}
 }
 
-func TestEnableBrowserOriginRejectsMalformedOrigins(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
-	for _, origin := range []string{"not a url", "https://admin.example.com/callback", "https://user:pass@admin.example.com", "https://admin.example.com?x=1"} {
-		server.EnableBrowserOrigin(origin)
-		if server.browserOrigin != "" {
-			t.Fatalf("EnableBrowserOrigin(%q) installed %q", origin, server.browserOrigin)
-		}
-	}
-	server.EnableBrowserOrigin("https://Admin.Example.Com")
-	if server.browserOrigin != "https://admin.example.com" {
-		t.Fatalf("normalized browser origin = %q", server.browserOrigin)
+func TestHTTPConstructionBrowserOrigin(t *testing.T) {
+	for _, origin := range []string{"", "not a url", "https://admin.example.com/callback", "https://user:pass@admin.example.com", "https://admin.example.com?x=1", "https://Admin.Example.Com"} {
+		t.Run(origin, func(t *testing.T) {
+			config := testHTTPConfig(false)
+			config.BrowserOrigin = origin
+			server := newTestServer(t, config, nil, Modules{}, Authorization{})
+			want := ""
+			if origin == "https://Admin.Example.Com" {
+				want = "https://admin.example.com"
+			}
+			if server.browserOrigin != want {
+				t.Fatalf("origin %q normalized to %q, want %q", origin, server.browserOrigin, want)
+			}
+		})
 	}
 }
 
 func TestRequireOperationAuthPassesDevelopmentBearerWithoutOrigin(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters")
-	server.EnableBrowserOrigin("https://admin.example.com")
+	config := testHTTPConfig(false)
+	config.BrowserOrigin, config.DevAuthToken = "https://admin.example.com", "local-development-token-32-characters"
+	server := newTestServer(t, config, nil, Modules{}, Authorization{})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader("{}"))
 	request.Header.Set("Authorization", "Bearer local-development-token-32-characters")
 	request.Header.Set("Content-Type", "application/json")
@@ -559,8 +608,9 @@ func TestJSONMediaTypeGate(t *testing.T) {
 }
 
 func TestBreakGlassRejectsCrossSiteRequests(t *testing.T) {
-	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), auth: &auth.Service{}}
-	server.EnableBrowserOrigin("https://admin.example.com")
+	config := testHTTPConfig(false)
+	config.BrowserOrigin = "https://admin.example.com"
+	server := newTestServer(t, config, nil, Modules{}, Authorization{Authentication: &auth.Service{}})
 	tests := []struct {
 		name      string
 		origin    string
@@ -590,7 +640,10 @@ func TestBreakGlassRejectsCrossSiteRequests(t *testing.T) {
 }
 
 func TestAPIResponsesAreNotCacheable(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
+	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		path, want string
 	}{

@@ -96,8 +96,9 @@ func TestHTTPStrictJSONBaseline(t *testing.T) {
 		{"read-error", "application/json", "", "request body must be valid UTF-8 JSON", 400},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := baselineServer(t, true)
-			s.EnableEnrollment(&enrollment.Service{}, nil)
+			config := testHTTPConfig(true)
+			config.BodyLimit = 1024
+			s := newTestServer(t, config, nil, Modules{Enrollment: &enrollment.Service{}}, Authorization{})
 			var body io.Reader = strings.NewReader(tc.body)
 			if tc.name == "read-error" {
 				body = baselineReadError{}

@@ -18,17 +18,27 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
+	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
 )
 
 func testHTTPConfig(devAuth bool) HTTPConfig {
 	return HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, DevAuth: devAuth, BrowserOrigin: authTestOrigin, EventStreams: eventstream.DefaultConfig()}
 }
+
+type constructionFence struct{ ownersession.FencedExecutor }
 
 type constructionReader struct {
 	NodeReader
@@ -51,15 +61,28 @@ func TestHTTPConstruction(t *testing.T) {
 	reader := &constructionReader{}
 	plans := configplan.NewBackend(nil, nil)
 	authz := &auth.Service{}
-	modules, authorization := Modules{Nodes: reader, ConfigPlans: plans}, Authorization{Authentication: authz}
+	modules := Modules{Nodes: reader, ConfigPlans: plans,
+		Operations: operations.NewBackend(nil, 5, nil), TransportEvents: transportevents.NewBackend(nil, nil),
+		Certificates: &certificates.Service{}, ReleaseCatalog: &releasecatalog.Catalog{},
+		UserState:  userstate.NewWithSignerBackend(nil, nil),
+		Enrollment: enrollment.NewBackend(nil, "", "test", nil), Transport: &transportclient.Client{}, OwnerFencing: &constructionFence{},
+	}
+	wantModules := modules
+	authorization := Authorization{Authentication: authz}
 	s := newTestServer(t, config, nil, modules, authorization)
 	other := newTestServer(t, config, nil, modules, authorization)
 	config.AuthTrustedProxies[0] = netip.MustParsePrefix("10.0.0.3/32")
 	config.EventStreams = eventstream.Config{}
 	config.BrowserOrigin, config.DevAuth = "https://changed.example", false
-	modules.Nodes, modules.ConfigPlans, authorization.Authentication = nil, nil, nil
+	modules, authorization = Modules{}, Authorization{}
 	if s.authProxies[0] != proxy || s.browserOrigin != "https://admin.example.test" || !s.devAuth || s.auth != authz || s.configPlans != plans || s.nodes != reader {
 		t.Fatal("constructor retained mutable input or lost shared service")
+	}
+	if s.operations != wantModules.Operations || s.transportEvents != wantModules.TransportEvents ||
+		s.certificates != wantModules.Certificates || s.releaseCatalog != wantModules.ReleaseCatalog ||
+		s.userstate != wantModules.UserState ||
+		s.enrollment != wantModules.Enrollment || s.transport != wantModules.Transport || s.fences != wantModules.OwnerFencing {
+		t.Fatal("constructor lost a configured capability")
 	}
 	w := httptest.NewRecorder()
 	s.http.Handler.ServeHTTP(w, baselineRequest("GET", "/api/v1/nodes", nil))
@@ -133,6 +156,51 @@ func TestHTTPConstructionTypedNil(t *testing.T) {
 	}
 }
 
+func TestHTTPConstructionSimulatorIsExplicit(t *testing.T) {
+	for _, events := range []bool{false, true} {
+		for _, simulator := range []bool{false, true} {
+			for _, authenticated := range []bool{false, true} {
+				config := testHTTPConfig(authenticated)
+				config.LocalSimulator = simulator
+				modules := Modules{}
+				if events {
+					modules.TransportEvents = transportevents.NewBackend(nil, nil)
+				}
+				s := newTestServer(t, config, nil, modules, Authorization{})
+				// Final configuration is copied; an event source must not enable simulation.
+				config.LocalSimulator = !simulator
+				w := httptest.NewRecorder()
+				r := baselineRequest("POST", "/api/v1/development/simulations", strings.NewReader("null"))
+				r.Header.Set("Content-Type", "application/json")
+				s.http.Handler.ServeHTTP(w, r)
+				want := http.StatusNotFound
+				if events && simulator {
+					want = http.StatusUnauthorized
+					if authenticated {
+						want = http.StatusBadRequest
+					}
+				}
+				if w.Code != want {
+					t.Fatalf("events=%t simulator=%t authenticated=%t: %d want %d: %s", events, simulator, authenticated, w.Code, want, w.Body)
+				}
+				// Event routes remain registered and enforce authentication independently.
+				w = httptest.NewRecorder()
+				s.http.Handler.ServeHTTP(w, baselineRequest("GET", "/api/v1/events?after=invalid", nil))
+				want = http.StatusUnauthorized
+				if authenticated {
+					want = http.StatusNotFound
+					if events {
+						want = http.StatusBadRequest
+					}
+				}
+				if w.Code != want {
+					t.Fatalf("event route events=%t simulator=%t authenticated=%t: %d want %d: %s", events, simulator, authenticated, w.Code, want, w.Body)
+				}
+			}
+		}
+	}
+}
+
 func TestHTTPConstructionRejectsInvalidSSE(t *testing.T) {
 	for _, invalid := range []eventstream.Config{{}, {GlobalStreams: 1}, func() eventstream.Config {
 		c := eventstream.DefaultConfig()
@@ -156,7 +224,7 @@ func TestHTTPAssemblyBoundary(t *testing.T) {
 			t.Errorf("Server stores assembly input: %s", field.Name)
 		}
 	}
-	for _, name := range []string{"EnableTelemetry", "EnableConfigPlans", "EnableUserOperations", "EnableAuthorization", "EnableCertificates", "ConfigureEventStreams"} {
+	for _, name := range []string{"EnableTelemetry", "EnableConfigPlans", "EnableUserOperations", "EnableAuthorization", "EnableCertificates", "ConfigureEventStreams", "EnableOperations", "EnableReleaseCatalog", "EnableUserState", "EnablePrivdAttestation", "EnableEnrollment", "EnableOwnerFencing", "EnableTransportEvents", "EnableBrowserOrigin", "ConfigureAuthProxies", "SetLocalSimulatorEnabled"} {
 		if _, ok := reflect.TypeOf(&Server{}).MethodByName(name); ok {
 			t.Errorf("mutable assembly remains: %s", name)
 		}
@@ -180,6 +248,9 @@ func TestHTTPAssemblyBoundary(t *testing.T) {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
+			}
+			if fn.Recv == nil && fn.Name.Name == "NewBackend" {
+				t.Error("compatibility constructor remains")
 			}
 			ast.Inspect(fn, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)

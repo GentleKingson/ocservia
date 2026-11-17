@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -97,7 +98,10 @@ POST /api/v1/secret-provider-refs/{secret_ref_action}`
 
 func baselineServer(t *testing.T, dev bool) *Server {
 	t.Helper()
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{Version: "baseline", Commit: "fixture", Role: "all"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, dev, "")
+	s, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: dev, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{Version: "baseline", Commit: "fixture", Role: "all"}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
 	return s
 }

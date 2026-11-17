@@ -418,8 +418,7 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 	}
 	config := testHTTPConfig(false)
 	config.BodyLimit = 1024
-	server := newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: authService})
-	server.EnableOperations(apiOperationService(pool))
+	server := newTestServer(t, config, postgres.WrapPool(pool), Modules{Operations: apiOperationService(pool)}, Authorization{Authentication: authService})
 
 	do := func(method, path, origin, fetchSite, contentType, cookie, idempotencyKey, body string) *httptest.ResponseRecorder {
 		t.Helper()

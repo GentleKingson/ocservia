@@ -44,7 +44,7 @@ func developmentHost(hostport string) bool {
 }
 
 func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
-	service := s.transportEventService()
+	service := s.transportEvents
 	if service == nil || !s.localSimulator {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
@@ -76,7 +76,7 @@ func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
-	service := s.transportEventService()
+	service := s.transportEvents
 	if service == nil {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
@@ -113,7 +113,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
-	service := s.transportEventService()
+	service := s.transportEvents
 	if service == nil {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return

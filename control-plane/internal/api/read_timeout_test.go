@@ -9,10 +9,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 )
 
 func TestRequestReadTimeout(t *testing.T) {
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.Default(), 1024, 50*time.Millisecond, false, "")
+	s, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: 50 * time.Millisecond, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.Default(), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Scale the production deadline down; keep it longer than the handler timeout.
 	s.http.ReadTimeout /= 150
 	readErrors := make(chan error, 2)
@@ -60,7 +65,10 @@ func TestRequestReadTimeout(t *testing.T) {
 }
 
 func TestReadTimeoutPreservesStreamingWrites(t *testing.T) {
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.Default(), 1024, 50*time.Millisecond, false, "")
+	s, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: 50 * time.Millisecond, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{}, slog.Default(), Modules{}, Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.http.ReadTimeout /= 150
 	s.http.Handler = s.timeout(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

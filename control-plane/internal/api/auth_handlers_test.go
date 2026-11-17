@@ -18,7 +18,7 @@ import (
 
 const authTestOrigin = "https://admin.example.test"
 
-func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool) *Server {
+func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, httpConfigs ...HTTPConfig) *Server {
 	t.Helper()
 	cfg := auth.Config{LocalEnabled: local, SessionKey: make([]byte, 32), SessionTTL: time.Hour}
 	if pool == nil {
@@ -29,6 +29,9 @@ func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool) *Server {
 		t.Fatal(err)
 	}
 	config := testHTTPConfig(false)
+	if len(httpConfigs) > 0 {
+		config = httpConfigs[0]
+	}
 	return newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: service})
 }
 

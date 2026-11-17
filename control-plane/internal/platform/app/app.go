@@ -160,18 +160,18 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 		return runScheduler(ctx, leader, ticker.C, work, cfg.UserOperationConcurrency, logger)
 	})
 
-	services := httpServices{
-		modules:    api.Modules{Nodes: telemetryService, ConfigPlans: configplan.NewBackend(backend, operationService), UserOperations: userOperationsService, Certificates: certificateService},
-		operations: operationService, releaseCatalog: releaseCatalog, userState: userStateService, transportEvents: eventService,
+	modules := api.Modules{
+		Nodes: telemetryService, ConfigPlans: configplan.NewBackend(backend, operationService), UserOperations: userOperationsService, Certificates: certificateService,
+		Operations: operationService, ReleaseCatalog: releaseCatalog, UserState: userStateService, TransportEvents: eventService,
 	}
 	if cfg.ControllerEndpointID != "" {
-		services.enrollment = enrollment.NewBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner)
+		modules.Enrollment = enrollment.NewBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner)
 		if publicKeySigner != nil {
-			services.enrollment.EnableUserPasswordPublicKeys(publicKeySigner)
+			modules.Enrollment.EnableUserPasswordPublicKeys(publicKeySigner)
 		}
-		services.transport, services.fences = controlTransport, fenceExecutor
+		modules.Transport, modules.OwnerFencing = controlTransport, fenceExecutor
 	}
-	server, err := newHTTPServer(life, cfg, build, backend, auditManager, logger, services)
+	server, err := newHTTPServer(life, cfg, build, backend, auditManager, logger, modules)
 	if err != nil {
 		return err
 	}

@@ -48,7 +48,6 @@ type Server struct {
 	devAuthToken        string
 	browserOrigin       string
 	transportEvents     *transportevents.Service
-	transportEventsMu   sync.RWMutex
 	localSimulator      bool
 	operations          *operations.Service
 	enrollment          *enrollment.Service
@@ -86,6 +85,7 @@ type HTTPConfig struct {
 	RequestTimeout     time.Duration
 	DevAuth            bool
 	DevAuthToken       string
+	LocalSimulator     bool
 	BrowserOrigin      string
 	AuthTrustedProxies []netip.Prefix
 	EventStreams       eventstream.Config
@@ -93,10 +93,17 @@ type HTTPConfig struct {
 
 // Modules is construction input only. Nil capabilities disable the optional feature, not its routes.
 type Modules struct {
-	Nodes          NodeReader
-	ConfigPlans    ConfigPlans
-	UserOperations UserOperations
-	Certificates   *certificates.Service
+	Nodes           NodeReader
+	ConfigPlans     ConfigPlans
+	UserOperations  UserOperations
+	Certificates    *certificates.Service
+	Operations      *operations.Service
+	ReleaseCatalog  *releasecatalog.Catalog
+	UserState       *userstate.Service
+	Enrollment      *enrollment.Service
+	Transport       *transportclient.Client
+	OwnerFencing    ownersession.FencedExecutor
+	TransportEvents *transportevents.Service
 }
 
 type Authorization struct {
@@ -125,9 +132,19 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 		auth: authorization.Authentication, audit: authorization.Audit,
 		nodes: modules.Nodes, configPlans: modules.ConfigPlans,
 		userOperations: modules.UserOperations, certificates: modules.Certificates,
+		operations: modules.Operations, releaseCatalog: modules.ReleaseCatalog, userstate: modules.UserState,
+		enrollment: modules.Enrollment, transport: modules.Transport, fences: modules.OwnerFencing,
+		transportEvents: modules.TransportEvents, localSimulator: config.LocalSimulator,
+		authProxies: append([]netip.Prefix(nil), config.AuthTrustedProxies...),
 	}
-	s.EnableBrowserOrigin(config.BrowserOrigin)
-	s.ConfigureAuthProxies(config.AuthTrustedProxies)
+	if config.BrowserOrigin != "" {
+		normalized, ok := browserorigin.Normalize(config.BrowserOrigin)
+		if ok {
+			s.browserOrigin = normalized
+		} else {
+			logger.Warn("ignoring unparseable browser origin", "origin_length", len(config.BrowserOrigin))
+		}
+	}
 	s.breakGlassBudget = newAuthAdmission(5, 0, 4)
 	s.localLoginBudget = newAuthAdmission(5, 120, 4)
 	s.privdRegisterBudget = newAuthAdmission(30, 120, 4)
@@ -140,55 +157,6 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	// Bound request reads without a global write deadline that would end SSE streams.
 	s.http = &http.Server{Addr: config.Address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	return s, nil
-}
-
-// NewBackend is a default-only compatibility constructor. Optional modules and
-// authentication are explicitly disabled, not waiting for later injection.
-func NewBackend(address string, backend database.Backend, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string) *Server {
-	s, err := NewServer(HTTPConfig{Address: address, BodyLimit: bodyLimit, RequestTimeout: requestTimeout, DevAuth: devAuth, DevAuthToken: devAuthToken, EventStreams: eventstream.DefaultConfig()}, backend, build, logger, Modules{}, Authorization{})
-	if err != nil {
-		panic(err)
-	}
-	return s
-}
-
-// EnableBrowserOrigin installs the exact public browser origin that may spend
-// a session cookie on state changing requests. An origin that does not
-// normalize is rejected so a misconfigured deployment fails closed instead of
-// trusting malformed input.
-func (s *Server) EnableBrowserOrigin(origin string) {
-	if origin == "" {
-		return
-	}
-	normalized, ok := browserorigin.Normalize(origin)
-	if !ok {
-		s.logger.Warn("ignoring unparseable browser origin", "origin_length", len(origin))
-		return
-	}
-	s.browserOrigin = normalized
-}
-
-func (s *Server) EnableOperations(service *operations.Service) {
-	s.operations = service
-}
-
-// EnableReleaseCatalog installs the operator-provisioned trusted agent
-// release catalog backing the single-node upgrade workflow.
-func (s *Server) EnableReleaseCatalog(catalog *releasecatalog.Catalog) {
-	s.releaseCatalog = catalog
-}
-
-func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = service }
-
-func (s *Server) EnableEnrollment(service *enrollment.Service, transport *transportclient.Client) {
-	s.enrollment = service
-	s.transport = transport
-}
-
-// EnableOwnerFencing runs administrative trust updates and connection closes
-// issued by API handlers inside the connection owner's fencing interval.
-func (s *Server) EnableOwnerFencing(fences ownersession.FencedExecutor) {
-	s.fences = fences
 }
 
 func (s *Server) ListenAndServe() error {
@@ -216,19 +184,4 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return errors.Join(err, ctx.Err())
 	}
-}
-
-func (s *Server) EnableTransportEvents(service *transportevents.Service) {
-	s.transportEventsMu.Lock()
-	defer s.transportEventsMu.Unlock()
-	s.transportEvents = service
-	s.localSimulator = true
-}
-
-func (s *Server) SetLocalSimulatorEnabled(enabled bool) { s.localSimulator = enabled }
-
-func (s *Server) transportEventService() *transportevents.Service {
-	s.transportEventsMu.RLock()
-	defer s.transportEventsMu.RUnlock()
-	return s.transportEvents
 }

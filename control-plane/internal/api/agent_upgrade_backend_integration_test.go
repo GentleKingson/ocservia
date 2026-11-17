@@ -45,7 +45,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.s.EnableReleaseCatalog(catalog)
+	f.s = f.newServer(Modules{ReleaseCatalog: catalog})
 	f.s.operations.EnableReleaseCatalog(catalog)
 	path := "/api/v1/nodes/" + node.String() + "/agent-upgrade"
 	body := func(target string) string {
@@ -110,12 +110,10 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 		for _, tc := range []struct {
 			name                                       string
 			domainCatalog, httpCatalog, httpOperations bool
-			catalogFirst                               bool
 		}{
 			{name: "missing-http-catalog", domainCatalog: true, httpOperations: true},
 			{name: "missing-operations", domainCatalog: true, httpCatalog: true},
-			{name: "operations-first", httpCatalog: true, httpOperations: true},
-			{name: "catalog-first", httpCatalog: true, httpOperations: true, catalogFirst: true},
+			{name: "http-catalog-without-domain-catalog", httpCatalog: true, httpOperations: true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				domain := operations.NewBackend(b, 50, f.signer)
@@ -124,8 +122,6 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 				}
 				original := f.s
 				defer func() { f.s = original }()
-				f.s = f.newServer(Modules{})
-				f.s.EnableOperations(nil)
 				var httpCatalog *releasecatalog.Catalog
 				if tc.httpCatalog {
 					httpCatalog = catalog
@@ -134,13 +130,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 				if tc.httpOperations {
 					httpOperations = domain
 				}
-				if tc.catalogFirst {
-					f.s.EnableReleaseCatalog(httpCatalog)
-					f.s.EnableOperations(httpOperations)
-				} else {
-					f.s.EnableOperations(httpOperations)
-					f.s.EnableReleaseCatalog(httpCatalog)
-				}
+				f.s = newTestServer(t, testHTTPConfig(false), f.b, Modules{ReleaseCatalog: httpCatalog, Operations: httpOperations}, Authorization{Authentication: original.auth, Audit: original.audit})
 				target, err := domain.PrepareAgentUpgrade(t.Context(), f.workspace, node, "2.0.0")
 				if tc.domainCatalog {
 					if err != nil || !bytes.Equal(target.PackageSHA256[:], bytes.Repeat([]byte{0x43}, 32)) {

@@ -40,9 +40,9 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	}
 	at, _ := value.FromTime(time.Now().UTC())
 	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, workspace, identity, at)
-	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service})
-	server.EnableTransportEvents(transportevents.NewBackend(backend, nil))
-	server.devAuthToken = "read-backend-development-token-32-characters"
+	config := testHTTPConfig(false)
+	config.LocalSimulator, config.DevAuthToken = true, "read-backend-development-token-32-characters"
+	server := newTestServer(t, config, backend, Modules{TransportEvents: transportevents.NewBackend(backend, nil)}, Authorization{Authentication: service})
 	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
 	login := authHTTPRequest(server, "POST", "login", `{"username":"`+username+`","password":"`+password+`"}`, authTestOrigin)
 	if login.Code != http.StatusNoContent || len(login.Result().Cookies()) != 1 {

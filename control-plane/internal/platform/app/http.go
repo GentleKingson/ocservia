@@ -14,29 +14,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
-	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
-	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
-	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
-	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
-	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 )
 
-// HTTP consumers reuse services already configured by runRoles. This input is
-// not retained by Server or passed to any handler.
-type httpServices struct {
-	modules         api.Modules
-	operations      *operations.Service
-	releaseCatalog  *releasecatalog.Catalog
-	userState       *userstate.Service
-	enrollment      *enrollment.Service
-	transport       *transportclient.Client
-	fences          ownersession.FencedExecutor
-	transportEvents *transportevents.Service
-}
-
-func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger *slog.Logger, services httpServices) (*api.Server, error) {
+func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger *slog.Logger, modules api.Modules) (*api.Server, error) {
 	var err error
 	if err := cfg.EventStreams.Validate(); err != nil {
 		return nil, fmt.Errorf("configure SSE admission: %w", err)
@@ -49,11 +30,16 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 			return nil, fmt.Errorf("configure authentication: %w", err)
 		}
 	}
+	if modules.Enrollment != nil && (cfg.InstallationRelayURL != "" || cfg.InstallationRelayToken != "") {
+		if err := modules.Enrollment.ConfigureInstallation(enrollment.InstallationTrust{Origin: cfg.BrowserOrigin(), RelayURL: cfg.InstallationRelayURL, RelayToken: cfg.InstallationRelayToken}); err != nil {
+			return nil, fmt.Errorf("configure secure node installation: %w", err)
+		}
+	}
 	server, err := api.NewServer(api.HTTPConfig{
 		Address: cfg.HTTPAddress, BodyLimit: cfg.BodyLimit, RequestTimeout: cfg.RequestTimeout,
 		DevAuth: operationAuthEnabled(cfg), DevAuthToken: cfg.DevAuthToken,
-		BrowserOrigin: cfg.BrowserOrigin(), AuthTrustedProxies: cfg.AuthTrustedProxyCIDRs, EventStreams: cfg.EventStreams,
-	}, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, services.modules,
+		LocalSimulator: cfg.LocalSimulator, BrowserOrigin: cfg.BrowserOrigin(), AuthTrustedProxies: cfg.AuthTrustedProxyCIDRs, EventStreams: cfg.EventStreams,
+	}, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, modules,
 		api.Authorization{Authentication: authService, Audit: auditManager})
 	if err != nil {
 		return nil, err
@@ -61,19 +47,6 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 	// No HTTP resources exist on earlier failures. From this point lifecycle
 	// owns Shutdown, including failures before the listener starts.
 	life.http = server
-	server.EnableOperations(services.operations)
-	server.EnableReleaseCatalog(services.releaseCatalog)
-	server.EnableUserState(services.userState)
-	server.EnableEnrollment(services.enrollment, services.transport)
-	if services.enrollment != nil && (cfg.InstallationRelayURL != "" || cfg.InstallationRelayToken != "") {
-		if err := services.enrollment.ConfigureInstallation(enrollment.InstallationTrust{Origin: cfg.BrowserOrigin(), RelayURL: cfg.InstallationRelayURL, RelayToken: cfg.InstallationRelayToken}); err != nil {
-			return nil, fmt.Errorf("configure secure node installation: %w", err)
-		}
-	}
-	server.EnableOwnerFencing(services.fences)
-	server.EnableTransportEvents(services.transportEvents)
-	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)
-
 	return server, nil
 }
 

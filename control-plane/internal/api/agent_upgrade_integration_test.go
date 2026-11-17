@@ -162,8 +162,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{backend: postgres.WrapPool(pool), auth: authn, operations: apiOperationService(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	server.EnableReleaseCatalog(catalog)
+	server := &Server{backend: postgres.WrapPool(pool), auth: authn, operations: apiOperationService(pool), releaseCatalog: catalog, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	server.operations.EnableReleaseCatalog(catalog)
 
 	operator := auth.Principal{IdentityID: operatorID, SessionID: operatorSession, Subject: operatorID.String(), Issuer: "integration"}

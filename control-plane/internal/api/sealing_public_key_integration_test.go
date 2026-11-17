@@ -49,8 +49,7 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 	set(binding)
 	service := enrollment.NewBackend(f.b, "", "test", f.signer)
 	service.EnableUserPasswordPublicKeys(source)
-	f.s.EnableEnrollment(service, nil)
-	f.s.EnableUserState(userstate.NewWithSignerBackend(f.b, f.signer))
+	f.s = f.newServer(Modules{Enrollment: service, UserState: userstate.NewWithSignerBackend(f.b, f.signer)})
 	path := "/api/v1/nodes/" + node.String() + "/user-password-sealing-key"
 	w := f.call("GET", path, "", "", f.requester.cookie, nil)
 	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" {

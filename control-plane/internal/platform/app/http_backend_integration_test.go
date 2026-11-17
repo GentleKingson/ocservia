@@ -68,9 +68,9 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	signer := commandauth.NewSignerFromSeed([32]byte{1})
 	ops := operations.NewBackend(runtime.Store, 3, signer)
 	users := userstate.NewWithSignerBackend(runtime.Store, signer)
-	services := httpServices{
-		modules:    api.Modules{Nodes: telemetry.NewWithRecommendedAgentVersionBackend(runtime.Store, cfg.RecommendedAgentVersion), ConfigPlans: configplan.NewBackend(runtime.Store, ops), UserOperations: useroperations.NewWithConcurrencyBackend(runtime.Store, users, 3)},
-		operations: ops, userState: users, transportEvents: transportevents.NewBackend(runtime.Store, signer),
+	modules := api.Modules{
+		Nodes: telemetry.NewWithRecommendedAgentVersionBackend(runtime.Store, cfg.RecommendedAgentVersion), ConfigPlans: configplan.NewBackend(runtime.Store, ops), UserOperations: useroperations.NewWithConcurrencyBackend(runtime.Store, users, 3),
+		Operations: ops, UserState: users, TransportEvents: transportevents.NewBackend(runtime.Store, signer),
 	}
 	life := newLifecycle(ctx, time.Second, quietLogger())
 	t.Cleanup(func() {
@@ -78,12 +78,12 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 			t.Error(err)
 		}
 	})
-	server, err := newHTTPServer(life, cfg, BuildInfo{Version: "test-http-assembly"}, runtime.Store, nil, quietLogger(), services)
+	server, err := newHTTPServer(life, cfg, BuildInfo{Version: "test-http-assembly"}, runtime.Store, nil, quietLogger(), modules)
 	if err != nil || life.http != server {
 		t.Fatal("production assembly ownership", err)
 	}
 	// Mutation of the assembly inputs cannot disable a returned Server.
-	services.modules = api.Modules{}
+	modules = api.Modules{}
 	cfg.EventStreams.IdentityStreams = 8
 	life.start("serve HTTP", func(context.Context) error { return server.ListenAndServe() })
 	client := &http.Client{Timeout: 10 * time.Second}
