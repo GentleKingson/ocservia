@@ -604,19 +604,6 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	return operation, false, nil
 }
 
-func (s *Service) Get(ctx context.Context, id uuid.UUID) (Operation, error) {
-	var result Operation
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		result, err = store.Get(ctx, id)
-		return err
-	})
-	return result, err
-}
-
 func (s *Service) ListEvents(ctx context.Context, operationID, after uuid.UUID, limit int) ([]Event, error) {
 	if limit < 1 || limit > 200 {
 		return nil, ErrInvalidRequest
