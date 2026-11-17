@@ -156,14 +156,26 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 		return Plan{}, false, err
 	}
 	op, replayed, err := s.operations.Create(ctx, operations.CreateRequest{
-		NodeID: request.NodeID, IdempotencyKey: request.IdempotencyKey, ExpectedVersion: node.Version,
-		Kind: operations.ConfigPlan, Candidate: rendered.Candidate, CandidateHash: rendered.Hash[:], PlanRevision: uint64(request.ExpectedRevision),
-		CompleteCandidate: rendered.CompleteCandidate,
-		TTL:               request.TTL, RequestID: request.RequestID, Traceparent: request.Traceparent,
-		ActorID: request.ActorID, ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID,
-		Action: "config.plan", Reason: request.Reason,
-		OcservVersion: node.OcservVersion, PlanCapabilities: rendered.RequiredCapabilities,
-		PlanMetadata: &operations.ConfigPlanMetadata{TemplateName: request.Template.Name, CandidateRedacted: rendered.Redacted, Warnings: rendered.Warnings, CreatedBy: request.ActorIdentityID},
+		NodeID:          request.NodeID,
+		IdempotencyKey:  request.IdempotencyKey,
+		ExpectedVersion: node.Version,
+		TTL:             request.TTL,
+		RequestID:       request.RequestID,
+		Traceparent:     request.Traceparent,
+		ActorID:         request.ActorID,
+		ActorIdentityID: request.ActorIdentityID,
+		ActorSessionID:  request.ActorSessionID,
+		Action:          "config.plan",
+		Reason:          request.Reason,
+		Payload: operations.ConfigPlanPayload{
+			Candidate:         rendered.Candidate,
+			CandidateHash:     rendered.Hash[:],
+			PlanRevision:      uint64(request.ExpectedRevision),
+			CompleteCandidate: rendered.CompleteCandidate,
+			OcservVersion:     node.OcservVersion,
+			PlanCapabilities:  rendered.RequiredCapabilities,
+			PlanMetadata:      &operations.ConfigPlanMetadata{TemplateName: request.Template.Name, CandidateRedacted: rendered.Redacted, Warnings: rendered.Warnings, CreatedBy: request.ActorIdentityID},
+		},
 	})
 	if err != nil {
 		return Plan{}, false, err
@@ -286,15 +298,28 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 		return operations.Operation{}, false, ErrInvalid
 	}
 	return s.operations.Create(ctx, operations.CreateRequest{
-		NodeID: plan.NodeID, IdempotencyKey: request.IdempotencyKey, ExpectedVersion: input.NodeVersion,
-		Kind: operations.ConfigApply, CompleteCandidate: complete.GetCandidate(),
-		Candidate: candidate, CandidateHash: complete.GetCandidateHash(),
-		ExpectedCurrentHash: previousHash, MaterializedHash: materialized,
-		PlanRevision: uint64(plan.ExpectedRevision), DesiredRevision: uint64(input.DesiredRevision) + 1,
-		PlanExpiresAt: timestamppb.New(expires), ApplyMetadata: &operations.ConfigApplyMetadata{PlanID: request.PlanID},
-		TTL: 15 * time.Minute, RequestID: request.RequestID, Traceparent: request.Traceparent,
-		ActorID: request.ActorID, ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID,
-		Action: "config.apply", Reason: request.Reason,
+		NodeID:          plan.NodeID,
+		IdempotencyKey:  request.IdempotencyKey,
+		ExpectedVersion: input.NodeVersion,
+		TTL:             15 * time.Minute,
+		RequestID:       request.RequestID,
+		Traceparent:     request.Traceparent,
+		ActorID:         request.ActorID,
+		ActorIdentityID: request.ActorIdentityID,
+		ActorSessionID:  request.ActorSessionID,
+		Action:          "config.apply",
+		Reason:          request.Reason,
+		Payload: operations.ConfigApplyPayload{
+			CompleteCandidate:   complete.GetCandidate(),
+			Candidate:           candidate,
+			CandidateHash:       complete.GetCandidateHash(),
+			ExpectedCurrentHash: previousHash,
+			MaterializedHash:    materialized,
+			PlanRevision:        uint64(plan.ExpectedRevision),
+			DesiredRevision:     uint64(input.DesiredRevision) + 1,
+			PlanExpiresAt:       timestamppb.New(expires),
+			ApplyMetadata:       &operations.ConfigApplyMetadata{PlanID: request.PlanID},
+		},
 	})
 }
 

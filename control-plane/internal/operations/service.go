@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +18,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
-	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
@@ -77,57 +74,22 @@ const (
 	AgentUpgrade      Kind = "agent_upgrade"
 )
 
+// CreateRequest carries shared admission and audit context. Payload owns the
+// target and effect fields; its concrete type determines the operation kind.
 type CreateRequest struct {
-	CompleteCandidate   *agentv1.CompleteConfigCandidate
-	MaterializedHash    []byte
-	PlanExpiresAt       *timestamppb.Timestamp
-	NodeID              uuid.UUID
-	IdempotencyKey      string
-	ExpectedVersion     int64
-	Kind                Kind
-	Message             string
-	Candidate           []byte
-	CandidateHash       []byte
-	ExpectedCurrentHash []byte
-	DesiredRevision     uint64
-	PlanRevision        uint64
-	PlanMetadata        *ConfigPlanMetadata
-	ApplyMetadata       *ConfigApplyMetadata
-	ArtifactMetadata    *ArtifactMetadata
-	OcservVersion       string
-	PlanCapabilities    []string
-	CertificateID       uuid.UUID
-	CommonName          string
-	DNSNames            []string
-	KeyBits             uint32
-	CertificateChain    []byte
-	SealedPassword      *agentv1.SealedSecretV1
-	CertificateVersion  uint64
-	ArtifactID          uuid.UUID
-	RevocationReason    string
-	TargetVersion       string
-	PackageSHA256       []byte
-	Architecture        string
-	FromVersion         string
-	upgradeCapability   string
-	// RolloutID binds a generated node upgrade to its durable fleet rollout.
-	// Dispatch validates the immutable stored rollout intent; completion does
-	// not depend on the lifetime of the administrator's browser session.
-	RolloutID          uuid.UUID
-	SessionID          string
-	BootID             string
-	IP                 string
-	ActorID            string
-	ActorIdentityID    uuid.UUID
-	ActorSessionID     uuid.UUID
-	RolloutRequestHash []byte
-	Action             string
-	Reason             string
-	SupersedePending   bool
-	HoldDispatch       bool
-	TTL                time.Duration
-	RequestID          string
-	Traceparent        string
+	NodeID           uuid.UUID
+	IdempotencyKey   string
+	ExpectedVersion  int64
+	Payload          Payload
+	ActorID          string
+	ActorIdentityID  uuid.UUID
+	ActorSessionID   uuid.UUID
+	Action           string
+	Reason           string
+	SupersedePending bool
+	TTL              time.Duration
+	RequestID        string
+	Traceparent      string
 }
 
 // ConfigPlanMetadata is written atomically with the remote validation intent.
@@ -220,6 +182,8 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	}
 
 	var rolloutObservation *rolloutNodeObservation
+	upgrade, _ := request.Payload.(AgentUpgradePayload)
+	var fromVersion string
 	node, err := intentStore.LockNode(ctx, request.NodeID)
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {
@@ -231,11 +195,11 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	if nodeStatus != "active" && nodeStatus != "offline" {
 		return Operation{}, false, ErrNodeUnavailable
 	}
-	if request.RolloutID != uuid.Nil {
+	if upgrade.RolloutID != uuid.Nil {
 		// Serialize generated operation intent, including idempotent replay,
 		// with rollout pause/resume. A cleared claim or non-running rollout
 		// must not create or recover an operation from an older memory claim.
-		claim, err := intentStore.LockRolloutClaim(ctx, request.RolloutID, workspaceID, request.NodeID)
+		claim, err := intentStore.LockRolloutClaim(ctx, upgrade.RolloutID, workspaceID, request.NodeID)
 		if errors.Is(err, database.ErrNotFound) {
 			return Operation{}, false, ErrRolloutState
 		}
@@ -267,7 +231,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("recheck active rollout upgrade: %w", err)
 		}
-		reason, digest, eligible := s.rolloutNodeEligibility(now, observation, request.TargetVersion)
+		reason, digest, eligible := s.rolloutNodeEligibility(now, observation, upgrade.TargetVersion)
 		if !eligible {
 			switch reason {
 			case "not_trusted", "offline":
@@ -280,22 +244,22 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 				return Operation{}, false, ErrStaleRevision
 			}
 		}
-		if observation.Architecture != request.Architecture || !bytes.Equal(digest[:], request.PackageSHA256) {
+		if observation.Architecture != upgrade.Architecture || !bytes.Equal(digest[:], upgrade.PackageSHA256) {
 			return Operation{}, false, ErrStaleRevision
 		}
-		rollout, err := intentStore.Rollout(ctx, request.RolloutID, false)
+		rollout, err := intentStore.Rollout(ctx, upgrade.RolloutID, false)
 		if err != nil {
 			return Operation{}, false, err
 		}
-		if rollout.WorkspaceID != workspaceID || rollout.CreatedBy != request.ActorIdentityID || rollout.ActorSession != request.ActorSessionID || rollout.TargetVersion != request.TargetVersion || !bytes.Equal(rollout.RequestHash, request.RolloutRequestHash) {
+		if rollout.WorkspaceID != workspaceID || rollout.CreatedBy != request.ActorIdentityID || rollout.ActorSession != request.ActorSessionID || rollout.TargetVersion != upgrade.TargetVersion || !bytes.Equal(rollout.RequestHash, upgrade.RolloutRequestHash) {
 			return Operation{}, false, ErrRolloutState
 		}
 
 		rolloutObservation = &observation
 	}
-	if request.RolloutID == uuid.Nil {
-		switch request.Kind {
-		case ConfigApply, CertificateP12, CertificateRevoke, ServiceReload, AgentUpgrade:
+	if upgrade.RolloutID == uuid.Nil {
+		switch request.Payload.(type) {
+		case ConfigApplyPayload, CertificateP12Payload, CertificateRevokePayload, ServiceReloadPayload, AgentUpgradePayload:
 			if err := auth.AuthorizeMutationTx(ctx, commonTx, request.ActorIdentityID, request.ActorSessionID, workspaceID); err != nil {
 				return Operation{}, false, err
 			}
@@ -315,7 +279,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	if nodeVersion != request.ExpectedVersion {
 		return Operation{}, false, ErrStaleRevision
 	}
-	if request.Kind != SyntheticNoop && request.Kind != SyntheticEcho {
+	if request.Payload.kind() != SyntheticNoop && request.Payload.kind() != SyntheticEcho {
 		attestationReady, err := intentStore.AttestationReady(ctx, request.NodeID)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("recheck privd result attestation: %w", err)
@@ -324,7 +288,8 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 			return Operation{}, false, ErrCapabilityMissing
 		}
 	}
-	if request.Kind == ConfigPlan {
+	switch payload := request.Payload.(type) {
+	case ConfigPlanPayload:
 		configStore, err := configurationstore.FromTransaction(commonTx)
 		if err != nil {
 			return Operation{}, false, err
@@ -333,13 +298,13 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("read configuration revision: %w", err)
 		}
-		if state.Revision < 0 || uint64(state.Revision) != request.PlanRevision {
+		if state.Revision < 0 || uint64(state.Revision) != payload.PlanRevision {
 			return Operation{}, false, ErrStaleRevision
 		}
-		if state.OcservVersion != request.OcservVersion {
+		if state.OcservVersion != payload.OcservVersion {
 			return Operation{}, false, ErrStaleRevision
 		}
-		for _, required := range request.PlanCapabilities {
+		for _, required := range payload.PlanCapabilities {
 			approved, err := intentStore.HasCapability(ctx, request.NodeID, required)
 			if err != nil {
 				return Operation{}, false, fmt.Errorf("recheck configuration capability: %w", err)
@@ -348,23 +313,22 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 				return Operation{}, false, ErrCapabilityMissing
 			}
 		}
-	}
-	if request.Kind == ConfigApply {
+	case ConfigApplyPayload:
 		configStore, err := configurationstore.FromTransaction(commonTx)
 		if err != nil {
 			return Operation{}, false, err
 		}
-		plan, err := configStore.Proof(ctx, request.ApplyMetadata.PlanID)
+		plan, err := configStore.Proof(ctx, payload.ApplyMetadata.PlanID)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("lock configuration plan: %w", err)
 		}
 		var validation agentv1.ConfigPlanResult
-		if plan.WorkspaceID != workspaceID || plan.NodeID != request.NodeID || plan.ExpectedRevision < 0 || uint64(plan.ExpectedRevision) != request.PlanRevision || !bytes.Equal(plan.CandidateHash, request.CandidateHash) || !plan.ExpiresAt.Valid || plan.ExpiresAt.Micros <= created.Micros || plan.State != "succeeded" || proto.Unmarshal(plan.Result, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), plan.CandidateHash) || !bytes.Equal(validation.GetCurrentHash(), request.ExpectedCurrentHash) {
+		if plan.WorkspaceID != workspaceID || plan.NodeID != request.NodeID || plan.ExpectedRevision < 0 || uint64(plan.ExpectedRevision) != payload.PlanRevision || !bytes.Equal(plan.CandidateHash, payload.CandidateHash) || !plan.ExpiresAt.Valid || plan.ExpiresAt.Micros <= created.Micros || plan.State != "succeeded" || proto.Unmarshal(plan.Result, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), plan.CandidateHash) || !bytes.Equal(validation.GetCurrentHash(), payload.ExpectedCurrentHash) {
 			return Operation{}, false, ErrStaleRevision
 		}
-		if request.CompleteCandidate != nil {
+		if payload.CompleteCandidate != nil {
 			expires, expiryErr := plan.ExpiresAt.Time()
-			if expiryErr != nil || !proto.Equal(timestamppb.New(expires), request.PlanExpiresAt) || !bytes.Equal(validation.GetMaterializedHash(), request.MaterializedHash) || len(validation.GetWarnings()) != 0 {
+			if expiryErr != nil || !proto.Equal(timestamppb.New(expires), payload.PlanExpiresAt) || !bytes.Equal(validation.GetMaterializedHash(), payload.MaterializedHash) || len(validation.GetWarnings()) != 0 {
 				return Operation{}, false, ErrStaleRevision
 			}
 		} else if len(validation.GetMaterializedHash()) != 0 {
@@ -374,7 +338,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("read configuration apply fence: %w", err)
 		}
-		if state.Locked || state.Revision != plan.ExpectedRevision || state.DesiredRevision < state.Revision || request.DesiredRevision != uint64(state.DesiredRevision)+1 {
+		if state.Locked || state.Revision != plan.ExpectedRevision || state.DesiredRevision < state.Revision || payload.DesiredRevision != uint64(state.DesiredRevision)+1 {
 			return Operation{}, false, ErrStaleRevision
 		}
 		applyActive, err := configStore.HasActiveApply(ctx, request.NodeID)
@@ -390,7 +354,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("check operation capability: %w", err)
 		}
-		if !approved && request.Kind == AgentUpgrade {
+		if !approved && request.Payload.kind() == AgentUpgrade {
 			capability = "ocserv.agent.upgrade.v1"
 			approved, err = intentStore.HasCapability(ctx, request.NodeID, capability)
 			if err != nil {
@@ -400,12 +364,13 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		if !approved {
 			return Operation{}, false, ErrCapabilityMissing
 		}
-		if request.Kind == AgentUpgrade {
-			request.upgradeCapability = capability
+		if payload, ok := request.Payload.(AgentUpgradePayload); ok {
+			payload.upgradeCapability = capability
+			request.Payload = payload
 		}
 	}
-	if request.Kind == SessionDisconnect || request.Kind == SessionTerminate {
-		present, err := intentStore.HasSession(ctx, request.NodeID, request.SessionID, request.BootID)
+	if sessionID, bootID, ok := sessionTarget(request.Payload); ok {
+		present, err := intentStore.HasSession(ctx, request.NodeID, sessionID, bootID)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("check observed session: %w", err)
 		}
@@ -413,8 +378,8 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 			return Operation{}, false, ErrTargetNotObserved
 		}
 	}
-	if request.Kind == IPBanRemove {
-		present, err := intentStore.HasIPBan(ctx, request.NodeID, request.IP)
+	if payload, ok := request.Payload.(IPBanRemovePayload); ok {
+		present, err := intentStore.HasIPBan(ctx, request.NodeID, payload.IP)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("check observed IP ban: %w", err)
 		}
@@ -422,7 +387,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 			return Operation{}, false, ErrTargetNotObserved
 		}
 	}
-	if request.Kind == AgentUpgrade {
+	if _, ok := request.Payload.(AgentUpgradePayload); ok {
 		var observedVersion string
 		if rolloutObservation != nil {
 			observedVersion = rolloutObservation.AgentVersion
@@ -436,7 +401,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 				observedVersion = observed.AgentVersion
 			}
 		}
-		request.FromVersion = observedVersion
+		fromVersion = observedVersion
 		upgradeActive, err := intentStore.HasActiveUpgrade(ctx, request.NodeID)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("check active agent upgrade: %w", err)
@@ -474,8 +439,9 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	}); err != nil {
 		return Operation{}, false, fmt.Errorf("insert operation intent: %w", err)
 	}
-	if request.Kind == ConfigPlan {
-		warnings, err := json.Marshal(request.PlanMetadata.Warnings)
+	switch payload := request.Payload.(type) {
+	case ConfigPlanPayload:
+		warnings, err := json.Marshal(payload.PlanMetadata.Warnings)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("marshal configuration plan warnings: %w", err)
 		}
@@ -487,28 +453,26 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		if err != nil {
 			return Operation{}, false, err
 		}
-		if err := configStore.InsertPlan(ctx, configurationstore.PendingPlan{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TemplateName: request.PlanMetadata.TemplateName, ExpectedRevision: request.PlanRevision, CandidateHash: request.CandidateHash, CandidateRedacted: request.PlanMetadata.CandidateRedacted, Warnings: logicalWarnings, ExpiresAt: expiry, CreatedBy: optionalUUID(request.PlanMetadata.CreatedBy), CreatedAt: created}); err != nil {
+		if err := configStore.InsertPlan(ctx, configurationstore.PendingPlan{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TemplateName: payload.PlanMetadata.TemplateName, ExpectedRevision: payload.PlanRevision, CandidateHash: payload.CandidateHash, CandidateRedacted: payload.PlanMetadata.CandidateRedacted, Warnings: logicalWarnings, ExpiresAt: expiry, CreatedBy: optionalUUID(payload.PlanMetadata.CreatedBy), CreatedAt: created}); err != nil {
 			return Operation{}, false, fmt.Errorf("insert configuration plan: %w", err)
 		}
-	}
-	if request.Kind == ConfigApply {
+	case ConfigApplyPayload:
 		configStore, err := configurationstore.FromTransaction(commonTx)
 		if err != nil {
 			return Operation{}, false, err
 		}
-		if err := configStore.InsertApply(ctx, configurationstore.PendingApply{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, PlanID: request.ApplyMetadata.PlanID, ExpectedRevision: request.PlanRevision, DesiredRevision: request.DesiredRevision, CandidateHash: request.CandidateHash, PreviousHash: request.ExpectedCurrentHash, CreatedAt: created}); err != nil {
+		if err := configStore.InsertApply(ctx, configurationstore.PendingApply{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, PlanID: payload.ApplyMetadata.PlanID, ExpectedRevision: payload.PlanRevision, DesiredRevision: payload.DesiredRevision, CandidateHash: payload.CandidateHash, PreviousHash: payload.ExpectedCurrentHash, CreatedAt: created}); err != nil {
 			return Operation{}, false, fmt.Errorf("insert configuration apply: %w", err)
 		}
-		advanced, err := configStore.AdvanceDesiredRevision(ctx, request.NodeID, request.DesiredRevision, created)
+		advanced, err := configStore.AdvanceDesiredRevision(ctx, request.NodeID, payload.DesiredRevision, created)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("advance configuration desired revision: %w", err)
 		}
 		if !advanced {
 			return Operation{}, false, ErrStaleRevision
 		}
-	}
-	if request.Kind == CertificateCSR {
-		dnsNames, err := json.Marshal(request.DNSNames)
+	case CertificateCSRPayload:
+		dnsNames, err := json.Marshal(payload.DNSNames)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("marshal certificate DNS names: %w", err)
 		}
@@ -520,30 +484,29 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		if err != nil {
 			return Operation{}, false, err
 		}
-		if err := store.InsertCSR(ctx, certificatestore.PendingCSR{ID: request.CertificateID, WorkspaceID: workspaceID, NodeID: request.NodeID, OperationID: operationID, CommonName: request.CommonName, DNSNames: names, KeyBits: request.KeyBits, CreatedAt: created}); err != nil {
+		if err := store.InsertCSR(ctx, certificatestore.PendingCSR{ID: payload.CertificateID, WorkspaceID: workspaceID, NodeID: request.NodeID, OperationID: operationID, CommonName: payload.CommonName, DNSNames: names, KeyBits: payload.KeyBits, CreatedAt: created}); err != nil {
 			return Operation{}, false, fmt.Errorf("insert certificate request: %w", err)
 		}
-	}
-	if request.Kind == CertificateP12 {
+	case CertificateP12Payload:
 		store, err := certificatestore.FromTransaction(commonTx)
 		if err != nil {
 			return Operation{}, false, err
 		}
-		artifactExpiry, err := value.FromTime(request.ArtifactMetadata.ExpiresAt)
+		artifactExpiry, err := value.FromTime(payload.ArtifactMetadata.ExpiresAt)
 		if err != nil {
 			return Operation{}, false, err
 		}
-		if err := store.InsertArtifact(ctx, certificatestore.PendingArtifact{ID: request.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: request.CertificateID, CertificateVersion: request.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: request.ArtifactMetadata.TokenSHA256, RequestHash: request.ArtifactMetadata.RequestHash, ExpiresAt: artifactExpiry, CreatedAt: created}); err != nil {
+		if err := store.InsertArtifact(ctx, certificatestore.PendingArtifact{ID: payload.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: payload.CertificateID, CertificateVersion: payload.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: payload.ArtifactMetadata.TokenSHA256, RequestHash: payload.ArtifactMetadata.RequestHash, ExpiresAt: artifactExpiry, CreatedAt: created}); err != nil {
 			return Operation{}, false, fmt.Errorf("insert certificate artifact operation: %w", err)
 		}
-	}
-	if request.Kind == AgentUpgrade {
-		if err := intentStore.InsertUpgrade(ctx, operationstore.PendingUpgrade{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TargetVersion: request.TargetVersion, PackageSHA256: request.PackageSHA256, Architecture: request.Architecture, FromVersion: request.FromVersion, CreatedAt: created}); err != nil {
+	case AgentUpgradePayload:
+		if err := intentStore.InsertUpgrade(ctx, operationstore.PendingUpgrade{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TargetVersion: payload.TargetVersion, PackageSHA256: payload.PackageSHA256, Architecture: payload.Architecture, FromVersion: fromVersion, CreatedAt: created}); err != nil {
 			return Operation{}, false, fmt.Errorf("insert agent upgrade operation: %w", err)
 		}
+
 	}
 	availableAt := created
-	if request.HoldDispatch {
+	if payload, ok := request.Payload.(CertificateRevokePayload); ok && payload.HoldDispatch {
 		availableAt = expiry
 	}
 	if err := intentStore.EnqueueCommand(ctx, operationstore.QueuedCommand{
@@ -556,18 +519,18 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	}
 	actorID, action, reason := normalizedAuditIntent(request)
 	var auditSummary json.RawMessage
-	if request.Kind == ConfigPlan {
-		auditSummary, _ = json.Marshal(map[string]any{"candidate_hash": fmt.Sprintf("%x", request.CandidateHash), "expected_revision": request.PlanRevision})
-	}
-	if request.Kind == ConfigApply {
-		auditSummary, _ = json.Marshal(map[string]any{"plan_id": request.ApplyMetadata.PlanID, "candidate_hash": fmt.Sprintf("%x", request.CandidateHash), "previous_hash": fmt.Sprintf("%x", request.ExpectedCurrentHash), "desired_revision": request.DesiredRevision})
-	}
-	if request.Kind == AgentUpgrade {
-		summary := map[string]any{"from_version": request.FromVersion, "target_version": request.TargetVersion, "architecture": request.Architecture, "package_sha256": fmt.Sprintf("%x", request.PackageSHA256)}
-		if request.RolloutID != uuid.Nil {
-			summary["rollout_id"] = request.RolloutID
+	switch payload := request.Payload.(type) {
+	case ConfigPlanPayload:
+		auditSummary, _ = json.Marshal(map[string]any{"candidate_hash": fmt.Sprintf("%x", payload.CandidateHash), "expected_revision": payload.PlanRevision})
+	case ConfigApplyPayload:
+		auditSummary, _ = json.Marshal(map[string]any{"plan_id": payload.ApplyMetadata.PlanID, "candidate_hash": fmt.Sprintf("%x", payload.CandidateHash), "previous_hash": fmt.Sprintf("%x", payload.ExpectedCurrentHash), "desired_revision": payload.DesiredRevision})
+	case AgentUpgradePayload:
+		summary := map[string]any{"from_version": fromVersion, "target_version": payload.TargetVersion, "architecture": payload.Architecture, "package_sha256": fmt.Sprintf("%x", payload.PackageSHA256)}
+		if upgrade.RolloutID != uuid.Nil {
+			summary["rollout_id"] = upgrade.RolloutID
 		}
 		auditSummary, _ = json.Marshal(summary)
+
 	}
 	if err := audit.AppendChainTx(ctx, commonTx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, SessionID: optionalUUID(request.ActorSessionID), Action: action, ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), Reason: reason, AfterSummary: auditSummary, At: now}); err != nil {
 		return Operation{}, false, fmt.Errorf("append operation audit intent: %w", err)
@@ -594,12 +557,12 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	}
 	nodeText, commandText := request.NodeID.String(), commandID.String()
 	operation := Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: created, UpdatedAt: created, ExpiresAt: &expiry}
-	if request.Kind == ConfigApply {
+	if _, ok := request.Payload.(ConfigApplyPayload); ok {
 		operation.ConfigApplyState = "queued"
 	}
-	if request.Kind == AgentUpgrade {
+	if payload, ok := request.Payload.(AgentUpgradePayload); ok {
 		operation.AgentUpgradeState = "queued"
-		operation.AgentUpgradeTarget = request.TargetVersion
+		operation.AgentUpgradeTarget = payload.TargetVersion
 	}
 	return operation, false, nil
 }
@@ -655,126 +618,6 @@ func (s *Service) Expire(ctx context.Context) error {
 	})
 }
 
-func validateCreate(r CreateRequest) error {
-	// High-risk authority is determined by the command kind, not caller text.
-	expectedAction := map[Kind]string{ConfigApply: "config.apply", CertificateP12: "certificate.private_key.export", CertificateRevoke: "certificate.revoke", ServiceReload: "service.reload", AgentUpgrade: "agent.upgrade"}[r.Kind]
-	if expectedAction != "" && r.Action != expectedAction {
-		return ErrInvalidRequest
-	}
-	if r.NodeID == uuid.Nil || r.NodeID.Version() != 7 || r.ExpectedVersion < 1 || r.RequestID == "" || tracecontext.TraceID(r.Traceparent) == "" || r.TTL < time.Second || r.TTL > 24*time.Hour {
-		return ErrInvalidRequest
-	}
-	if len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 || strings.TrimSpace(r.IdempotencyKey) != r.IdempotencyKey {
-		return ErrInvalidRequest
-	}
-	if len(r.RolloutRequestHash) != 0 && (r.Kind != AgentUpgrade || r.RolloutID == uuid.Nil) {
-		return ErrInvalidRequest
-	}
-	if r.RolloutID != uuid.Nil && (r.RolloutID.Version() != 7 || r.Kind != AgentUpgrade || len(r.RolloutRequestHash) != sha256.Size) {
-		return ErrInvalidRequest
-	}
-	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan && r.Kind != ConfigApply && r.Kind != CertificateCSR && r.Kind != CertificateP12 && r.Kind != CertificateRevoke && r.Kind != AgentUpgrade {
-		return ErrInvalidRequest
-	}
-	if r.Kind == SyntheticNoop && r.Message != "" || len(r.Message) > 4096 {
-		return ErrInvalidRequest
-	}
-	if r.Kind == ConfigPlan && (len(r.Candidate) == 0 || len(r.Candidate) > 256*1024 || len(r.CandidateHash) != sha256.Size || len(r.ExpectedCurrentHash) != 0 || r.DesiredRevision != 0 || r.ApplyMetadata != nil || r.PlanRevision > uint64(^uint64(0)>>1) || r.PlanMetadata == nil || strings.TrimSpace(r.PlanMetadata.TemplateName) == "" || len(r.PlanMetadata.TemplateName) > 128 || len(r.PlanMetadata.CandidateRedacted) == 0 || len(r.PlanMetadata.CandidateRedacted) > 256*1024 || len(r.PlanCapabilities) == 0) {
-		return ErrInvalidRequest
-	}
-	if r.Kind == ConfigPlan {
-		digest := sha256.Sum256(r.Candidate)
-		if !bytes.Equal(digest[:], r.CandidateHash) {
-			return ErrInvalidRequest
-		}
-	}
-	if r.CompleteCandidate != nil {
-		canonical, err := configprofile.Canonical(r.CompleteCandidate)
-		if err != nil || (r.Kind != ConfigPlan && r.Kind != ConfigApply) || !bytes.Equal(canonical, r.Candidate) || !bytes.Equal(r.CompleteCandidate.NodeId, r.NodeID[:]) || r.CompleteCandidate.ExpectedRevision != r.PlanRevision {
-			return ErrInvalidRequest
-		}
-		if r.Kind == ConfigApply && (len(r.MaterializedHash) != 32 || r.PlanExpiresAt == nil || !r.PlanExpiresAt.IsValid()) {
-			return ErrInvalidRequest
-		}
-		if r.Kind == ConfigPlan && (len(r.MaterializedHash) != 0 || r.PlanExpiresAt != nil) {
-			return ErrInvalidRequest
-		}
-	} else if len(r.MaterializedHash) != 0 || r.PlanExpiresAt != nil {
-		return ErrInvalidRequest
-	}
-	if r.Kind == ConfigApply && (len(r.Candidate) == 0 || len(r.Candidate) > 256*1024 || len(r.CandidateHash) != sha256.Size || len(r.ExpectedCurrentHash) != sha256.Size || r.PlanRevision > uint64(^uint64(0)>>1) || r.DesiredRevision <= r.PlanRevision || r.ApplyMetadata == nil || r.ApplyMetadata.PlanID == uuid.Nil) {
-		return ErrInvalidRequest
-	}
-	if r.Kind == ConfigApply {
-		digest := sha256.Sum256(r.Candidate)
-		if !bytes.Equal(digest[:], r.CandidateHash) || r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil {
-			return ErrInvalidRequest
-		}
-	}
-	if r.Kind == CertificateCSR {
-		if r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || !validDNSName(r.CommonName) || len(r.DNSNames) > 32 || (r.KeyBits != 2048 && r.KeyBits != 3072 && r.KeyBits != 4096) {
-			return ErrInvalidRequest
-		}
-		for _, name := range r.DNSNames {
-			if !validDNSName(name) {
-				return ErrInvalidRequest
-			}
-		}
-	}
-	if r.Kind == CertificateP12 && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || r.CertificateVersion == 0 || r.ArtifactID == uuid.Nil || r.ArtifactID.Version() != 7 || len(r.CertificateChain) < 64 || len(r.CertificateChain) > 256*1024 || !validSealedP12(r.SealedPassword) || r.ArtifactMetadata == nil || len(r.ArtifactMetadata.TokenSHA256) != sha256.Size || len(r.ArtifactMetadata.RequestHash) != sha256.Size || !r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC()) || r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC().Add(30*time.Minute))) {
-		return ErrInvalidRequest
-	}
-	if (r.Kind == CertificateP12 || r.Kind == CertificateRevoke) && r.ActorIdentityID == uuid.Nil {
-		return ErrInvalidRequest
-	}
-	if r.Kind == CertificateRevoke && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || r.CertificateVersion == 0 || strings.TrimSpace(r.RevocationReason) == "" || len(r.RevocationReason) > 128) {
-		return ErrInvalidRequest
-	}
-	if r.HoldDispatch && r.Kind != CertificateRevoke {
-		return ErrInvalidRequest
-	}
-	if r.Kind != ConfigPlan && r.Kind != ConfigApply && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || len(r.ExpectedCurrentHash) != 0 || r.DesiredRevision != 0 || r.PlanRevision != 0 || r.PlanMetadata != nil || r.ApplyMetadata != nil || r.OcservVersion != "" || len(r.PlanCapabilities) != 0) {
-		return ErrInvalidRequest
-	}
-	if r.Kind == AgentUpgrade && (!semanticpayload.ValidAgentUpgradeTargetVersion(r.TargetVersion) || len(r.PackageSHA256) != sha256.Size || !semanticpayload.ValidAgentUpgradeArchitecture(r.Architecture)) {
-		return ErrInvalidRequest
-	}
-	if r.Kind != AgentUpgrade && (r.TargetVersion != "" || len(r.PackageSHA256) != 0 || r.Architecture != "") {
-		return ErrInvalidRequest
-	}
-	if r.Kind == SessionDisconnect || r.Kind == SessionTerminate {
-		sessionID, err := strconv.ParseUint(r.SessionID, 10, 64)
-		if err != nil || sessionID == 0 || strconv.FormatUint(sessionID, 10) != r.SessionID {
-			return ErrInvalidRequest
-		}
-		bootID, err := uuid.Parse(r.BootID)
-		if err != nil || bootID == uuid.Nil {
-			return ErrInvalidRequest
-		}
-	}
-	if r.Kind == IPBanRemove {
-		parsed := net.ParseIP(r.IP)
-		if parsed == nil || parsed.String() != r.IP {
-			return ErrInvalidRequest
-		}
-	}
-	if (r.Kind == SessionDisconnect || r.Kind == SessionTerminate || r.Kind == IPBanRemove || r.Kind == ServiceReload || r.Kind == ConfigPlan || r.Kind == ConfigApply || r.Kind == CertificateCSR || r.Kind == CertificateP12 || r.Kind == CertificateRevoke || r.Kind == AgentUpgrade) && (r.Action == "" || r.Reason == "" || len(r.Reason) > 512) {
-		return ErrInvalidRequest
-	}
-	if r.Kind == ConfigPlan && r.ActorID == "" {
-		return ErrInvalidRequest
-	}
-	if r.Kind == ServiceReload && (r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil) {
-		return ErrInvalidRequest
-	}
-	// Upgrades replace root-owned agent binaries, so they demand the same
-	// authenticated administrator boundary as other high-impact node operations.
-	if r.Kind == AgentUpgrade && (r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil) {
-		return ErrInvalidRequest
-	}
-	return nil
-}
-
 func requestHash(r CreateRequest) [32]byte {
 	actorID, action, reason := normalizedAuditIntent(r)
 	// Request and trace IDs identify an attempt, not the mutation intent. Every
@@ -825,28 +668,47 @@ func requestHash(r CreateRequest) [32]byte {
 		TargetVersion        string                 `json:"target_version"`
 		PackageSHA256        string                 `json:"package_sha256"`
 		Architecture         string                 `json:"architecture"`
-	}{CompleteProfile: r.CompleteCandidate != nil, MaterializedHash: hex.EncodeToString(r.MaterializedHash), PlanExpiresAt: r.PlanExpiresAt, NodeID: r.NodeID, Kind: r.Kind, Message: r.Message, SessionID: r.SessionID, BootID: r.BootID, IP: r.IP,
-		ExpectedVersion: r.ExpectedVersion, SupersedePending: r.SupersedePending, HoldDispatch: r.HoldDispatch, TTLSeconds: int64(r.TTL / time.Second),
-		ActorID: actorID, Action: action, Reason: reason, ActorSessionID: r.ActorSessionID, ActorIdentityID: r.ActorIdentityID,
-		CandidateHash: fmt.Sprintf("%x", r.CandidateHash), ExpectedCurrentHash: fmt.Sprintf("%x", r.ExpectedCurrentHash),
-		DesiredRevision: r.DesiredRevision, PlanID: applyPlanID(r.ApplyMetadata), PlanRevision: r.PlanRevision,
-		PlanTemplate: planTemplate(r.PlanMetadata), OcservVersion: r.OcservVersion, PlanCapabilities: r.PlanCapabilities,
-		CertificateID: idempotencyCertificateID(r), CommonName: r.CommonName, DNSNames: r.DNSNames, KeyBits: r.KeyBits, ArtifactID: r.ArtifactID,
-		CertificateChainHash: hashBytes(r.CertificateChain), SealedPasswordHash: sealedPasswordHash(r.SealedPassword), SecretKeyID: sealedPasswordKeyID(r.SealedPassword), SecretVersion: sealedPasswordVersion(r.SealedPassword), SecretPurpose: sealedPasswordPurpose(r.SealedPassword), CertificateVersion: r.CertificateVersion,
-		ArtifactTokenHash: artifactTokenHash(r.ArtifactMetadata), ArtifactRequestHash: artifactRequestHash(r.ArtifactMetadata), ArtifactExpiresAt: artifactExpiry(r.ArtifactMetadata),
-		RevocationReason: r.RevocationReason, TargetVersion: r.TargetVersion, PackageSHA256: fmt.Sprintf("%x", r.PackageSHA256), Architecture: r.Architecture}
+	}{NodeID: r.NodeID, Kind: r.Payload.kind(), ExpectedVersion: r.ExpectedVersion,
+		SupersedePending: r.SupersedePending, TTLSeconds: int64(r.TTL / time.Second),
+		ActorID: actorID, Action: action, Reason: reason, ActorSessionID: r.ActorSessionID,
+		ActorIdentityID: r.ActorIdentityID}
+	// Keep the historical JSON shape, including zero fields, nil lists and the
+	// generated CSR ID exclusion. Changing this projection invalidates receipts.
+	switch p := r.Payload.(type) {
+	case SyntheticEchoPayload:
+		intent.Message = p.Message
+	case SessionDisconnectPayload:
+		intent.SessionID, intent.BootID = p.SessionID, p.BootID
+	case SessionTerminatePayload:
+		intent.SessionID, intent.BootID = p.SessionID, p.BootID
+	case IPBanRemovePayload:
+		intent.IP = p.IP
+	case ConfigPlanPayload:
+		intent.CompleteProfile = p.CompleteCandidate != nil
+		intent.CandidateHash, intent.PlanRevision = fmt.Sprintf("%x", p.CandidateHash), p.PlanRevision
+		intent.PlanTemplate, intent.OcservVersion, intent.PlanCapabilities = planTemplate(p.PlanMetadata), p.OcservVersion, p.PlanCapabilities
+	case ConfigApplyPayload:
+		intent.CompleteProfile, intent.MaterializedHash, intent.PlanExpiresAt = p.CompleteCandidate != nil, hex.EncodeToString(p.MaterializedHash), p.PlanExpiresAt
+		intent.CandidateHash, intent.ExpectedCurrentHash = fmt.Sprintf("%x", p.CandidateHash), fmt.Sprintf("%x", p.ExpectedCurrentHash)
+		intent.DesiredRevision, intent.PlanRevision, intent.PlanID = p.DesiredRevision, p.PlanRevision, applyPlanID(p.ApplyMetadata)
+	case CertificateCSRPayload:
+		intent.CommonName, intent.DNSNames, intent.KeyBits = p.CommonName, p.DNSNames, p.KeyBits
+	case CertificateP12Payload:
+		intent.CertificateID, intent.CertificateVersion, intent.ArtifactID = p.CertificateID, p.CertificateVersion, p.ArtifactID
+		intent.CertificateChainHash, intent.SealedPasswordHash = hashBytes(p.CertificateChain), sealedPasswordHash(p.SealedPassword)
+		intent.SecretKeyID, intent.SecretVersion, intent.SecretPurpose = sealedPasswordKeyID(p.SealedPassword), sealedPasswordVersion(p.SealedPassword), sealedPasswordPurpose(p.SealedPassword)
+		intent.ArtifactTokenHash, intent.ArtifactRequestHash, intent.ArtifactExpiresAt = artifactTokenHash(p.ArtifactMetadata), artifactRequestHash(p.ArtifactMetadata), artifactExpiry(p.ArtifactMetadata)
+	case CertificateRevokePayload:
+		intent.CertificateID, intent.CertificateVersion, intent.RevocationReason, intent.HoldDispatch = p.CertificateID, p.CertificateVersion, p.RevocationReason, p.HoldDispatch
+	case AgentUpgradePayload:
+		intent.TargetVersion, intent.PackageSHA256, intent.Architecture = p.TargetVersion, fmt.Sprintf("%x", p.PackageSHA256), p.Architecture
+	}
+
 	encoded, err := json.Marshal(intent)
 	if err != nil {
 		panic("marshal fixed idempotency intent: " + err.Error())
 	}
 	return sha256.Sum256(encoded)
-}
-
-func idempotencyCertificateID(request CreateRequest) uuid.UUID {
-	if request.Kind == CertificateCSR {
-		return uuid.Nil
-	}
-	return request.CertificateID
 }
 
 func hashBytes(value []byte) string {
@@ -942,55 +804,57 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 	actorID, action, reason := normalizedAuditIntent(r)
 	envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: authorizationRevision, Traceparent: r.Traceparent, ActorId: actorID, Reason: reason, OperationId: operationID[:], Action: action, DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
 	payloadType := "synthetic_noop"
-	switch r.Kind {
-	case SyntheticEcho:
+	switch p := r.Payload.(type) {
+	case SyntheticEchoPayload:
 		payloadType = "synthetic_echo"
-		envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: r.Message}}
-	case SyntheticNoop:
+		envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: p.Message}}
+	case SyntheticNoopPayload:
 		envelope.Payload = &agentv1.CommandEnvelope_SyntheticNoop{SyntheticNoop: &agentv1.SyntheticNoop{}}
-	case SessionDisconnect:
+	case SessionDisconnectPayload:
 		payloadType = "session_disconnect"
-		envelope.Payload = &agentv1.CommandEnvelope_SessionDisconnect{SessionDisconnect: &agentv1.SessionDisconnect{SessionId: r.SessionID, BootId: r.BootID}}
-	case SessionTerminate:
+		envelope.Payload = &agentv1.CommandEnvelope_SessionDisconnect{SessionDisconnect: &agentv1.SessionDisconnect{SessionId: p.SessionID, BootId: p.BootID}}
+	case SessionTerminatePayload:
 		payloadType = "session_terminate"
-		envelope.Payload = &agentv1.CommandEnvelope_SessionTerminate{SessionTerminate: &agentv1.SessionTerminate{SessionId: r.SessionID, BootId: r.BootID}}
-	case IPBanRemove:
+		envelope.Payload = &agentv1.CommandEnvelope_SessionTerminate{SessionTerminate: &agentv1.SessionTerminate{SessionId: p.SessionID, BootId: p.BootID}}
+	case IPBanRemovePayload:
 		payloadType = "ip_ban_remove"
-		envelope.Payload = &agentv1.CommandEnvelope_IpBanRemove{IpBanRemove: &agentv1.IpBanRemove{Ip: r.IP}}
-	case ServiceReload:
+		envelope.Payload = &agentv1.CommandEnvelope_IpBanRemove{IpBanRemove: &agentv1.IpBanRemove{Ip: p.IP}}
+	case ServiceReloadPayload:
 		payloadType = "service_reload"
 		envelope.Payload = &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}
-	case ConfigPlan:
+	case ConfigPlanPayload:
 		payloadType = "config_plan"
-		envelope.Payload = &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{Candidate: r.Candidate, CandidateHash: r.CandidateHash, ExpectedRevision: r.PlanRevision}}
-		if r.CompleteCandidate != nil {
-			envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigPlan{CompleteConfigPlan: &agentv1.CompleteConfigPlan{Candidate: r.CompleteCandidate, CandidateHash: r.CandidateHash}}
+		envelope.Payload = &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{Candidate: p.Candidate, CandidateHash: p.CandidateHash, ExpectedRevision: p.PlanRevision}}
+		if p.CompleteCandidate != nil {
+			envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigPlan{CompleteConfigPlan: &agentv1.CompleteConfigPlan{Candidate: p.CompleteCandidate, CandidateHash: p.CandidateHash}}
 		}
-	case ConfigApply:
+	case ConfigApplyPayload:
 		payloadType = "config_apply"
-		envelope.Payload = &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{Candidate: r.Candidate, CandidateHash: r.CandidateHash, ExpectedCurrentHash: r.ExpectedCurrentHash, DesiredRevision: r.DesiredRevision}}
-		if r.CompleteCandidate != nil {
-			envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{Candidate: r.CompleteCandidate, CandidateHash: r.CandidateHash, ExpectedCurrentHash: r.ExpectedCurrentHash, MaterializedHash: r.MaterializedHash, DesiredRevision: r.DesiredRevision, PlanId: r.ApplyMetadata.PlanID[:], PlanExpiresAt: r.PlanExpiresAt}}
+		envelope.Payload = &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{Candidate: p.Candidate, CandidateHash: p.CandidateHash, ExpectedCurrentHash: p.ExpectedCurrentHash, DesiredRevision: p.DesiredRevision}}
+		if p.CompleteCandidate != nil {
+			envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{Candidate: p.CompleteCandidate, CandidateHash: p.CandidateHash, ExpectedCurrentHash: p.ExpectedCurrentHash, MaterializedHash: p.MaterializedHash, DesiredRevision: p.DesiredRevision, PlanId: p.ApplyMetadata.PlanID[:], PlanExpiresAt: p.PlanExpiresAt}}
 		}
-	case CertificateCSR:
+	case CertificateCSRPayload:
 		payloadType = "certificate_csr"
-		envelope.Payload = &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: r.CertificateID[:], CommonName: r.CommonName, DnsNames: r.DNSNames, KeyBits: r.KeyBits}}
-	case CertificateP12:
+		envelope.Payload = &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: p.CertificateID[:], CommonName: p.CommonName, DnsNames: p.DNSNames, KeyBits: p.KeyBits}}
+	case CertificateP12Payload:
 		payloadType = "certificate_p12"
-		envelope.Payload = &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: r.CertificateID[:], CertificateChainPem: r.CertificateChain, SealedPasswordV1: r.SealedPassword, ArtifactId: r.ArtifactID[:], CertificateVersion: r.CertificateVersion, ArtifactExpiresAt: timestamppb.New(r.ArtifactMetadata.ExpiresAt)}}
-	case CertificateRevoke:
+		envelope.Payload = &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: p.CertificateID[:], CertificateChainPem: p.CertificateChain, SealedPasswordV1: p.SealedPassword, ArtifactId: p.ArtifactID[:], CertificateVersion: p.CertificateVersion, ArtifactExpiresAt: timestamppb.New(p.ArtifactMetadata.ExpiresAt)}}
+	case CertificateRevokePayload:
 		payloadType = "certificate_revoke"
-		envelope.Payload = &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: r.CertificateID[:], Reason: r.RevocationReason, CertificateVersion: r.CertificateVersion}}
-	case AgentUpgrade:
+		envelope.Payload = &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: p.CertificateID[:], Reason: p.RevocationReason, CertificateVersion: p.CertificateVersion}}
+	case AgentUpgradePayload:
 		payloadType = "agent_upgrade"
-		envelope.Payload = &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: &agentv1.AgentUpgrade{TargetVersion: r.TargetVersion, PackageSha256: r.PackageSHA256, Architecture: r.Architecture}}
+		envelope.Payload = &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: &agentv1.AgentUpgrade{TargetVersion: p.TargetVersion, PackageSha256: p.PackageSHA256, Architecture: p.Architecture}}
+	default:
+		return nil, "", ErrInvalidRequest
 	}
 	if err := semanticpayload.PopulateV2(envelope); err != nil {
 		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)
 	}
 	envelope.RequiredCapability = requestCapability(r)
 	if envelope.RequiredCapability == "" {
-		switch r.Kind {
+		switch r.Payload.kind() {
 		case SyntheticNoop:
 			envelope.RequiredCapability = "synthetic.noop"
 		case SyntheticEcho:
@@ -1005,46 +869,6 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 		return nil, "", fmt.Errorf("marshal typed command: %w", err)
 	}
 	return data, payloadType, nil
-}
-
-func requestCapability(request CreateRequest) string {
-	if request.Kind == AgentUpgrade && request.upgradeCapability != "" {
-		return request.upgradeCapability
-	}
-	if request.CompleteCandidate != nil {
-		if request.Kind == ConfigPlan {
-			return configprofile.PlanCapability
-		}
-		if request.Kind == ConfigApply {
-			return configprofile.ApplyCapability
-		}
-	}
-	return capabilityFor(request.Kind)
-}
-
-func capabilityFor(kind Kind) string {
-	switch kind {
-	case SessionDisconnect:
-		return "ocserv.session.disconnect"
-	case SessionTerminate:
-		return "ocserv.session.terminate"
-	case IPBanRemove:
-		return "ocserv.ip_ban.remove"
-	case ServiceReload:
-		return "ocserv.service.reload"
-	case ConfigPlan:
-		return "ocserv.config.plan"
-	case ConfigApply:
-		return "ocserv.config.apply"
-	case CertificateCSR, CertificateP12:
-		return "ocserv.certificate.issue"
-	case CertificateRevoke:
-		return "ocserv.certificate.revoke"
-	case AgentUpgrade:
-		return "ocserv.agent.upgrade.v2"
-	default:
-		return ""
-	}
 }
 
 func validDNSName(value string) bool {

@@ -56,7 +56,7 @@ func createScheduledUpgrade(t *testing.T, service *Service, pool *pgxpool.Pool, 
 	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true) ON CONFLICT(node_id,capability) DO UPDATE SET approved=true`, nodeID); err != nil {
 		t.Fatal(err)
 	}
-	request := CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Hour, RequestID: "request-" + key, Traceparent: testTraceparent}
+	request := CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TTL: time.Hour, RequestID: "request-" + key, Traceparent: testTraceparent, Payload: AgentUpgradePayload{TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64"}}
 	authorizeOperation(t, pool, workspaceID, &request)
 	operation, replayed, err := service.Create(ctx, request)
 	if err != nil || replayed || operation.State != "queued" {
@@ -319,7 +319,22 @@ func TestAgentUpgradeReconciliationLifecycleIntegration(t *testing.T) {
 func TestAgentUpgradeActiveConflictIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := upgradeReconciliationFixture(t)
 	createScheduledUpgrade(t, service, pool, workspaceID, nodeID, "upgrade-active-first")
-	request := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-active-second", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Hour, RequestID: "request-upgrade-active-second", Traceparent: testTraceparent}
+	request := CreateRequest{
+		NodeID:          nodeID,
+		IdempotencyKey:  "upgrade-active-second",
+		ExpectedVersion: 1,
+		ActorID:         "operator",
+		Action:          "agent.upgrade",
+		Reason:          "integration test",
+		TTL:             time.Hour,
+		RequestID:       "request-upgrade-active-second",
+		Traceparent:     testTraceparent,
+		Payload: AgentUpgradePayload{
+			TargetVersion: "2.0.0",
+			PackageSHA256: bytes.Repeat([]byte{0x43}, 32),
+			Architecture:  "amd64",
+		},
+	}
 	authorizeOperation(t, pool, workspaceID, &request)
 	if _, _, err := service.Create(context.Background(), request); !errors.Is(err, ErrUpgradeActive) {
 		t.Fatalf("second concurrent upgrade error = %v", err)

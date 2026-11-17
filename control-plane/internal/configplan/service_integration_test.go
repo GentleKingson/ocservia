@@ -133,12 +133,23 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatalf("replay plan=%+v replayed=%v err=%v", second, replayed, err)
 	}
 	wantCreate := operations.CreateRequest{
-		NodeID: nodeID, IdempotencyKey: request.IdempotencyKey, ExpectedVersion: 1,
-		Kind: operations.ConfigPlan, Candidate: rendered.Candidate, CompleteCandidate: rendered.CompleteCandidate, CandidateHash: rendered.Hash[:],
-		TTL: request.TTL, RequestID: request.RequestID, Traceparent: request.Traceparent,
-		ActorID: request.ActorID, Action: "config.plan", Reason: request.Reason,
-		OcservVersion: "1.2.4", PlanCapabilities: []string{configprofile.PlanCapability},
-		PlanMetadata: &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}},
+		NodeID:          nodeID,
+		IdempotencyKey:  request.IdempotencyKey,
+		ExpectedVersion: 1,
+		TTL:             request.TTL,
+		RequestID:       request.RequestID,
+		Traceparent:     request.Traceparent,
+		ActorID:         request.ActorID,
+		Action:          "config.plan",
+		Reason:          request.Reason,
+		Payload: operations.ConfigPlanPayload{
+			Candidate:         rendered.Candidate,
+			CompleteCandidate: rendered.CompleteCandidate,
+			CandidateHash:     rendered.Hash[:],
+			OcservVersion:     "1.2.4",
+			PlanCapabilities:  []string{configprofile.PlanCapability},
+			PlanMetadata:      &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}},
+		},
 	}
 	creator.assertLast(t, ctx, 3, wantCreate)
 	changed := request
@@ -267,13 +278,27 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(expiryErr)
 	}
 	creator.assertLast(t, ctx, 7, operations.CreateRequest{
-		NodeID: nodeID, IdempotencyKey: applyRequest.IdempotencyKey, ExpectedVersion: 1,
-		Kind: operations.ConfigApply, CompleteCandidate: rendered.CompleteCandidate, Candidate: rendered.Candidate, CandidateHash: rendered.Hash[:],
-		ExpectedCurrentHash: currentHash, MaterializedHash: materializedHash, DesiredRevision: 1, PlanExpiresAt: timestamppb.New(expires),
-		ApplyMetadata: &operations.ConfigApplyMetadata{PlanID: plan.ID},
-		TTL:           15 * time.Minute, RequestID: applyRequest.RequestID, Traceparent: applyRequest.Traceparent,
-		ActorID: applyRequest.ActorID, ActorIdentityID: requesterID, ActorSessionID: applyRequest.ActorSessionID,
-		Action: "config.apply", Reason: applyRequest.Reason,
+		NodeID:          nodeID,
+		IdempotencyKey:  applyRequest.IdempotencyKey,
+		ExpectedVersion: 1,
+		TTL:             15 * time.Minute,
+		RequestID:       applyRequest.RequestID,
+		Traceparent:     applyRequest.Traceparent,
+		ActorID:         applyRequest.ActorID,
+		ActorIdentityID: requesterID,
+		ActorSessionID:  applyRequest.ActorSessionID,
+		Action:          "config.apply",
+		Reason:          applyRequest.Reason,
+		Payload: operations.ConfigApplyPayload{
+			CompleteCandidate:   rendered.CompleteCandidate,
+			Candidate:           rendered.Candidate,
+			CandidateHash:       rendered.Hash[:],
+			ExpectedCurrentHash: currentHash,
+			MaterializedHash:    materializedHash,
+			DesiredRevision:     1,
+			PlanExpiresAt:       timestamppb.New(expires),
+			ApplyMetadata:       &operations.ConfigApplyMetadata{PlanID: plan.ID},
+		},
 	})
 	var applyEnvelopeBytes []byte
 	if err := pool.QueryRow(ctx, `SELECT c.envelope FROM commands c JOIN config_apply_operations x ON x.operation_id=c.operation_id WHERE x.operation_id=$1`, apply.ID).Scan(&applyEnvelopeBytes); err != nil {

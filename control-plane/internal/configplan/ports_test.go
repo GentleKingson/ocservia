@@ -33,11 +33,23 @@ func (r *recordingOperationCreator) assertLast(t *testing.T, ctx context.Context
 		t.Fatalf("Create calls = %d, want %d", len(r.requests), count)
 	}
 	got := r.requests[count-1]
-	if !proto.Equal(got.CompleteCandidate, want.CompleteCandidate) || !proto.Equal(got.PlanExpiresAt, want.PlanExpiresAt) {
-		t.Fatalf("Create proto fields mismatch: got (%v, %v), want (%v, %v)", got.CompleteCandidate, got.PlanExpiresAt, want.CompleteCandidate, want.PlanExpiresAt)
+	switch payload := got.Payload.(type) {
+	case operations.ConfigPlanPayload:
+		expected, ok := want.Payload.(operations.ConfigPlanPayload)
+		if !ok || !proto.Equal(payload.CompleteCandidate, expected.CompleteCandidate) {
+			t.Fatal("Create plan proto fields mismatch")
+		}
+		payload.CompleteCandidate, expected.CompleteCandidate = nil, nil
+		got.Payload, want.Payload = payload, expected
+	case operations.ConfigApplyPayload:
+		expected, ok := want.Payload.(operations.ConfigApplyPayload)
+		if !ok || !proto.Equal(payload.CompleteCandidate, expected.CompleteCandidate) || !proto.Equal(payload.PlanExpiresAt, expected.PlanExpiresAt) {
+			t.Fatal("Create apply proto fields mismatch")
+		}
+		payload.CompleteCandidate, expected.CompleteCandidate = nil, nil
+		payload.PlanExpiresAt, expected.PlanExpiresAt = nil, nil
+		got.Payload, want.Payload = payload, expected
 	}
-	got.CompleteCandidate, want.CompleteCandidate = nil, nil
-	got.PlanExpiresAt, want.PlanExpiresAt = nil, nil
 	if r.contexts[count-1] != ctx || !reflect.DeepEqual(got, want) {
 		t.Fatalf("Create context preserved = %v, request = %+v, want %+v", r.contexts[count-1] == ctx, got, want)
 	}
