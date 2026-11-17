@@ -8,15 +8,6 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s userOperationsStore) Metrics(ctx context.Context, workspace uuid.UUID) (v userstore.Metrics, err error) {
-	err = s.QueryRow(ctx, `SELECT
- (SELECT count(*) FROM desired_user_policies policy JOIN nodes node ON node.id=policy.node_id JOIN desired_users desired USING(node_id,username) LEFT JOIN observed_users observed USING(node_id,username) LEFT JOIN observed_user_usage usage ON usage.node_id=policy.node_id AND usage.username=policy.username AND usage.period=CASE WHEN policy.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND usage.period_start=CASE WHEN policy.quota_period='monthly' THEN date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' ELSE '1970-01-01T00:00:00Z'::timestamptz END WHERE node.workspace_id=$1 AND ((desired.enabled=true AND ((policy.expires_at IS NOT NULL AND policy.expires_at<=now()) OR (policy.quota_period<>'none' AND CASE policy.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=policy.quota_bytes::numeric))) OR (EXISTS(SELECT 1 FROM user_policy_enforcements enforcement WHERE enforcement.node_id=policy.node_id AND enforcement.username=policy.username AND enforcement.policy_version=policy.version AND enforcement.operation_id IS NOT NULL) AND (observed.username IS NULL OR observed.enabled<>desired.enabled OR observed.revision<>desired.revision)))),
- (SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state IN('queued','submitting','submitted','offline_pending','unknown')),
- (SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state='submitting' AND item.lease_until<=now()),
- (SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state='unknown')`, workspace).Scan(&v.PolicyPendingTotal, &v.ActiveBatchItemTotal, &v.StaleBatchClaimTotal, &v.UnknownBatchItemTotal)
-	return
-}
-
 func (s userOperationsStore) ActiveOperations(ctx context.Context) (count int, err error) {
 	err = s.QueryRow(ctx, `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running','unknown')`).Scan(&count)
 	return

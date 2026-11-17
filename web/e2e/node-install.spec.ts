@@ -1,7 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./csp";
 const alpha = "019fc0a4-6d92-765c-a8a1-4af556614fa1";
-const beta = "019fc0a4-6d92-765c-a8a1-4af556614fa2";
 const secret = "oit1_aHR0cHM6Ly9jb250cm9sbGVyLmV4YW1wbGU." + "b".repeat(43);
 
 async function setup(page: Page, empty: boolean) {
@@ -21,10 +20,7 @@ async function setup(page: Page, empty: boolean) {
   await page.route("**/api/v1/workspaces", (route) =>
     route.fulfill({
       json: {
-        items: [
-          { id: alpha, name: "Alpha", slug: "alpha", version: 1 },
-          { id: beta, name: "Beta", slug: "beta", version: 1 },
-        ],
+        items: [{ id: alpha, name: "Alpha", slug: "alpha", version: 1 }],
       },
     }),
   );
@@ -67,12 +63,12 @@ for (const empty of [true, false]) {
     await page.route("**/api/v1/node-bootstrap-tokens", async (route) => {
       posts += 1;
       expect(route.request().method()).toBe("POST");
-      expect(route.request().headers()["x-workspace-id"]).toBe(beta);
+      expect(route.request().headers()["x-workspace-id"]).toBe(alpha);
       expect(route.request().headers()["content-type"]).toBe(
         "application/json",
       );
       expect(route.request().postDataJSON()).toEqual({
-        workspace_id: beta,
+        workspace_id: alpha,
         installation: true,
         environment: "production",
         expected_node_name: "edge-1",
@@ -89,7 +85,6 @@ for (const empty of [true, false]) {
       });
     });
     await page.goto("/nodes");
-    await page.getByLabel("Workspace", { exact: true }).selectOption(beta);
     await prepare(page);
     expect(posts).toBe(0);
     await expect(page.getByLabel("Run on the Agent host")).toHaveValue(
@@ -132,7 +127,7 @@ for (const empty of [true, false]) {
   });
 }
 
-test("clears a displayed token when Workspace changes and when the page is left", async ({
+test("clears a displayed token when the dialog closes and when the page is left", async ({
   page,
 }) => {
   await setup(page, true);
@@ -154,13 +149,7 @@ test("clears a displayed token when Workspace changes and when the page is left"
   await expect(page.getByLabel("Bootstrap token (shown once)")).toHaveValue(
     secret,
   );
-  // A second UI context can switch Workspace while the modal owns focus.
-  await page
-    .getByLabel("Workspace", { exact: true })
-    .evaluate((element: HTMLSelectElement, id) => {
-      element.value = id;
-      element.dispatchEvent(new Event("change", { bubbles: true }));
-    }, beta);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await prepare(page);
   await expect(page.getByLabel("Bootstrap token (shown once)")).toHaveCount(0);

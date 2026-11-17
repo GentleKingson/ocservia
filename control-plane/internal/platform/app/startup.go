@@ -26,12 +26,8 @@ func validateBootstrapPasswords(cfg config.Config) error {
 	return nil
 }
 
-// A nil result means the requested one-shot command has finished.
-type startupState struct {
-	audit *audit.Manager
-}
-
-func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg config.Config, logger *slog.Logger) (*startupState, error) {
+// A nil manager means the requested one-shot command has finished.
+func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg config.Config, logger *slog.Logger) (*audit.Manager, error) {
 	backend := conn.Store
 	databaseTimeout := 30 * time.Second
 	if cfg.MigrateOnly {
@@ -39,9 +35,6 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 	}
 	databaseCtx, cancel := context.WithTimeout(ctx, databaseTimeout)
 	defer cancel()
-	if err := conn.ValidateDeployment(databaseCtx); err != nil {
-		return nil, fmt.Errorf("validate database deployment: %w", err)
-	}
 	if cfg.MigrateOnly {
 		auditManager, err := newAuditManager(backend, cfg)
 		if err != nil {
@@ -75,7 +68,7 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 		return nil, fmt.Errorf("verify audit event authentication: %w", err)
 	}
 
-	if cfg.BootstrapLocalAdmin || cfg.CompleteLocalBootstrap {
+	if cfg.BootstrapLocalAdmin {
 		service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
 		if err != nil {
 			return nil, errors.New("configure bootstrap authentication failed")
@@ -84,18 +77,14 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 		if err != nil || workspaceID.Version() != 7 {
 			return nil, errors.New("bootstrap workspace ID must be UUIDv7")
 		}
-		initialize := service.BootstrapLocalAdmin
-		if cfg.CompleteLocalBootstrap {
-			initialize = service.CompleteLocalBootstrap
-		}
-		id, err := initialize(ctx, cfg.LocalBootstrapUsername, cfg.LocalBootstrapPassword, workspaceID, cfg.LocalBootstrapApproverUsername, cfg.LocalBootstrapApproverPassword)
+		id, err := service.BootstrapLocalAdmin(ctx, cfg.LocalBootstrapUsername, cfg.LocalBootstrapPassword, workspaceID)
 		if err != nil {
 			if errors.Is(err, auth.ErrLocalWorkspaceMissing) || errors.Is(err, auth.ErrLocalInitialized) {
 				return nil, err
 			}
 			return nil, errors.New("Local administrator bootstrap rejected; check initialization state, workspace and credentials")
 		}
-		logger.Info("Local initialization complete", "administrator_identity_id", id, "workspace_id", workspaceID, "upgrade_completion", cfg.CompleteLocalBootstrap)
+		logger.Info("Local initialization complete", "administrator_identity_id", id, "workspace_id", workspaceID)
 		return nil, nil
 	}
 
@@ -103,7 +92,7 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 		return nil, fmt.Errorf("validate required runtime database capabilities: %w", err)
 	}
 
-	return &startupState{audit: auditManager}, nil
+	return auditManager, nil
 }
 
 func newAuditManager(backend database.Backend, cfg config.Config) (*audit.Manager, error) {

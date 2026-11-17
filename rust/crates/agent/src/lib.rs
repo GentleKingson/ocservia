@@ -25,6 +25,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 };
 use prost::Message;
 use rand::Rng;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use tokio::net::UnixStream;
 use uuid::Uuid;
@@ -389,53 +390,6 @@ impl CommandExecutor {
         })
     }
 
-    /// Persists the bounded result of an external privd call.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on missing identity, identity conflict, or journal failure.
-    pub fn complete_external(
-        &self,
-        command: &ExternalCommand,
-        result: Result<&[u8], &'static str>,
-        now: i64,
-    ) -> Result<CommandOutcome, CommandError> {
-        let (state, bytes, code) = match result {
-            Ok(bytes) if bytes.len() <= MAX_COMMAND_BYTES => {
-                (CommandState::Succeeded, Some(bytes), None)
-            }
-            Ok(_) => (CommandState::Failed, None, Some("result_too_large")),
-            Err(code) => (CommandState::Failed, None, Some(code)),
-        };
-        let before = self
-            .journal
-            .command(&command.key)
-            .map_err(pre_effect_failure)?
-            .ok_or(CommandError::Rejected("command_not_accepted"))?;
-        let record = self
-            .journal
-            .transition_command(
-                &command.key,
-                &[CommandState::Running],
-                state,
-                bytes,
-                code,
-                now,
-            )
-            .map_err(|source| CommandError::OutcomeUnknown {
-                code: "result_persistence_failed",
-                record: Box::new(before),
-                source: Box::new(source),
-            })?;
-        if record.command_id != command.command_id {
-            return Err(CommandError::IdentityConflict);
-        }
-        Ok(CommandOutcome {
-            record,
-            replayed: false,
-        })
-    }
-
     /// Persists a privd result and its opaque root-signed proof in one journal write.
     ///
     /// # Errors
@@ -479,49 +433,6 @@ impl CommandExecutor {
         if record.command_id != command.command_id {
             return Err(CommandError::IdentityConflict);
         }
-        Ok(CommandOutcome {
-            record,
-            replayed: false,
-        })
-    }
-
-    /// Atomically persists a successful desired-state result and applied revision.
-    ///
-    /// # Errors
-    ///
-    /// Reports an unknown outcome if the post-effect `SQLite` transaction cannot commit.
-    pub fn complete_external_applied(
-        &mut self,
-        command: &ExternalCommand,
-        resource_type: &str,
-        resource_key: &str,
-        revision: u64,
-        result: &[u8],
-        now: i64,
-    ) -> Result<CommandOutcome, CommandError> {
-        let before = self
-            .journal
-            .command(&command.key)
-            .map_err(pre_effect_failure)?
-            .ok_or(CommandError::Rejected("command_not_accepted"))?;
-        let record = self
-            .journal
-            .complete_external_with_revision(
-                &command.key,
-                &command.command_id,
-                AppliedResourceRevision {
-                    resource_type,
-                    resource_key,
-                    revision,
-                },
-                result,
-                now,
-            )
-            .map_err(|source| CommandError::OutcomeUnknown {
-                code: "result_persistence_failed",
-                record: Box::new(before),
-                source: Box::new(source),
-            })?;
         Ok(CommandOutcome {
             record,
             replayed: false,
@@ -977,9 +888,6 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u
         command_envelope::Payload::GroupApply(value) => {
             Some(("group", &value.group_name, value.desired_revision))
         }
-        command_envelope::Payload::ConfigApply(value) => {
-            Some(("config", "ocserv.conf", value.desired_revision))
-        }
         command_envelope::Payload::CompleteConfigApply(value) => {
             Some(("config", "ocserv.conf", value.desired_revision))
         }
@@ -990,7 +898,7 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u
 #[cfg(test)]
 fn observed_result(envelope: &CommandEnvelope) -> Vec<u8> {
     match envelope.payload.as_ref() {
-        Some(command_envelope::Payload::ConfigApply(payload)) => ConfigApplyResult {
+        Some(command_envelope::Payload::CompleteConfigApply(payload)) => ConfigApplyResult {
             candidate_hash: payload.candidate_hash.clone(),
             previous_hash: Vec::new(),
             observed_hash: payload.candidate_hash.clone(),
@@ -1041,12 +949,6 @@ fn legacy_synthetic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32],
         }
         Some(command_envelope::Payload::ServiceReload(payload)) => {
             ("ocserv.service.reload", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::ConfigPlan(payload)) => {
-            ("ocserv.config.plan", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::ConfigApply(payload)) => {
-            ("ocserv.config.apply", payload.encode_to_vec())
         }
         Some(command_envelope::Payload::CertificateCsr(payload)) => {
             ("ocserv.certificate.issue", payload.encode_to_vec())
@@ -1243,28 +1145,6 @@ fn validate_payload(
         }
         Some(command_envelope::Payload::ServiceReload(_)) => {
             ("ocserv.service.reload", Vec::new(), true)
-        }
-        Some(command_envelope::Payload::ConfigPlan(payload)) => {
-            if payload.candidate.is_empty()
-                || payload.candidate.len() > 256 * 1024
-                || payload.candidate_hash.len() != 32
-                || Sha256::digest(&payload.candidate).as_slice() != payload.candidate_hash
-            {
-                return Err(CommandError::Rejected("config_candidate_invalid"));
-            }
-            ("ocserv.config.plan", Vec::new(), true)
-        }
-        Some(command_envelope::Payload::ConfigApply(payload)) => {
-            if payload.candidate.is_empty()
-                || payload.candidate.len() > 256 * 1024
-                || payload.candidate_hash.len() != 32
-                || payload.expected_current_hash.len() != 32
-                || payload.desired_revision == 0
-                || Sha256::digest(&payload.candidate).as_slice() != payload.candidate_hash
-            {
-                return Err(CommandError::Rejected("config_apply_invalid"));
-            }
-            ("ocserv.config.apply", Vec::new(), true)
         }
         Some(command_envelope::Payload::CompleteConfigPlan(_)) => {
             semantic_payload_hash_v2(envelope)?;
@@ -1821,11 +1701,13 @@ mod tests {
     use ocservia_command_authorization::{
         ControllerCommandKeyring, canonical_v1, claims_from_envelope_v1, verification_key_id,
     };
+    use ocservia_contracts::config_profile;
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        AgentUpgrade, CommandAuthorizationProof, CommandAuthorizationVersion, ConfigApply,
-        ConfigApplyResult, ConfigPlan, GroupApply, IpBanRemove, ServiceReload, SessionDisconnect,
-        SessionTerminate, SyntheticEcho, SyntheticNoop, UserCreate, UserDisable, UserEnable,
-        UserPasswordRotate, command_envelope,
+        AgentUpgrade, CommandAuthorizationProof, CommandAuthorizationVersion, CompleteConfigApply,
+        CompleteConfigCandidate, CompleteConfigDirective, ConfigApplyResult, ConfigPlan,
+        GroupApply, IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SyntheticEcho,
+        SyntheticNoop, UserCreate, UserDisable, UserEnable, UserPasswordRotate, command_envelope,
+        complete_config_directive,
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
@@ -2136,8 +2018,8 @@ mod tests {
             Some(command_envelope::Payload::GroupApply(_)) => {
                 ("group.apply", "ocserv.groups.write")
             }
-            Some(command_envelope::Payload::ConfigApply(_)) => {
-                ("config.apply", "ocserv.config.apply")
+            Some(command_envelope::Payload::CompleteConfigApply(_)) => {
+                ("config.apply", config_profile::APPLY_CAPABILITY)
             }
             Some(command_envelope::Payload::AgentUpgrade(_)) => {
                 if envelope.required_capability == "ocserv.agent.upgrade.v1" {
@@ -2198,26 +2080,72 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn config_reconciliation_rebuilds_lost_journal_from_exact_durable_effect() {
+        use complete_config_directive::Value::{Literal, Tls};
+
         let path = temporary_journal("config-journal-rebuild");
         let node = *Uuid::now_v7().as_bytes();
-        let candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n";
-        let candidate_hash = Sha256::digest(candidate).to_vec();
+        let tls =
+            ocservia_contracts::generated::ocserv::platform::agent::v1::NodeLocalTlsReference {
+                secret_ref_id: vec![0x12; 16],
+                version: "v1".to_owned(),
+                certificate_sha256: vec![0x23; 32],
+                spki_sha256: vec![0x34; 32],
+                ca_sha256: Vec::new(),
+            };
+        let directive = |name: &str, value| CompleteConfigDirective {
+            name: name.to_owned(),
+            value: Some(value),
+        };
+        let candidate = CompleteConfigCandidate {
+            node_id: node.to_vec(),
+            expected_revision: 6,
+            directives: vec![
+                directive(
+                    "auth",
+                    Literal("plain[passwd=/etc/ocserv/ocpasswd]".to_owned()),
+                ),
+                directive("cookie-timeout", Literal("300".to_owned())),
+                directive("device", Literal("vpns".to_owned())),
+                directive("dns", Literal("1.1.1.1".to_owned())),
+                directive("ipv4-network", Literal("192.0.2.0/24".to_owned())),
+                directive("max-clients", Literal("64".to_owned())),
+                directive("max-same-clients", Literal("2".to_owned())),
+                directive("server-cert", Tls(tls.clone())),
+                directive("server-key", Tls(tls)),
+                directive("socket-file", Literal("/run/ocserv.socket".to_owned())),
+                directive("tcp-port", Literal("443".to_owned())),
+                directive("udp-port", Literal("0".to_owned())),
+            ],
+        };
+        let candidate_hash = Sha256::digest(
+            config_profile::canonical(&candidate).expect("canonical complete config"),
+        )
+        .to_vec();
         let mut envelope = command(node, *Uuid::now_v7().as_bytes(), "", 100);
-        envelope.payload = Some(command_envelope::Payload::ConfigApply(ConfigApply {
-            candidate: candidate.to_vec(),
-            candidate_hash: candidate_hash.clone(),
-            expected_current_hash: vec![0x44; 32],
-            desired_revision: 7,
-        }));
+        envelope.payload = Some(command_envelope::Payload::CompleteConfigApply(
+            CompleteConfigApply {
+                candidate: Some(candidate),
+                candidate_hash: candidate_hash.clone(),
+                materialized_hash: vec![0x55; 32],
+                expected_current_hash: vec![0x44; 32],
+                desired_revision: 7,
+                plan_id: Uuid::now_v7().as_bytes().to_vec(),
+                plan_expires_at: Some(Timestamp {
+                    seconds: 200,
+                    nanos: 0,
+                }),
+            },
+        ));
         envelope.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
-        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1.into();
-        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope)
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V2.into();
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v2(&envelope)
             .expect("config semantic hash")
             .to_vec();
         authorize_test_command(&mut envelope);
         let mut command_context = context(node, 100);
-        command_context.capabilities = capabilities(&["ocserv.config.apply"]);
+        command_context.capabilities = capabilities(&[config_profile::APPLY_CAPABILITY]);
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("empty journal"));
 
         let recovered = executor
@@ -2282,12 +2210,13 @@ mod tests {
         let (resource_type, resource_key, revision) =
             desired_resource(envelope).expect("desired resource");
         executor
-            .complete_external_applied(
+            .complete_external_applied_attested(
                 &command,
                 resource_type,
                 resource_key,
                 revision,
                 b"applied",
+                b"root-receipt",
                 now,
             )
             .expect("complete desired command");
@@ -2481,7 +2410,12 @@ mod tests {
             panic!("fresh revision must execute")
         };
         executor
-            .complete_external(&failed_command, Err("privd_rejected"), 102)
+            .complete_external_attested(
+                &failed_command,
+                Err("privd_rejected"),
+                b"root-receipt",
+                102,
+            )
             .expect("record deterministic failure");
         assert_eq!(
             executor
@@ -2621,7 +2555,7 @@ mod tests {
             panic!("first delivery must execute");
         };
         let completed = executor
-            .complete_external(&command, Ok(b"applied"), 101)
+            .complete_external_attested(&command, Ok(b"applied"), b"root-receipt", 101)
             .expect("complete");
         assert_eq!(completed.record.state, CommandState::Succeeded);
         let ExternalPreparation::Replay(replayed) = executor
@@ -2768,6 +2702,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn older_unknown_password_revision_is_reconciled_before_newer_success() {
         let path = temporary_journal("password-superseded");
         let node = *Uuid::now_v7().as_bytes();
@@ -2844,7 +2779,15 @@ mod tests {
             panic!("new execute preparation")
         };
         executor
-            .complete_external_applied(&new_command, "user", "alice", 3, b"applied", 102)
+            .complete_external_applied_attested(
+                &new_command,
+                "user",
+                "alice",
+                3,
+                b"applied",
+                b"root-receipt",
+                102,
+            )
             .expect("newer applied");
         command_context.now_unix_seconds = 103;
         let replayed = executor
@@ -2938,7 +2881,15 @@ mod tests {
             panic!("new execute preparation")
         };
         executor
-            .complete_external_applied(&new_command, "user", "alice", 3, b"applied", 103)
+            .complete_external_applied_attested(
+                &new_command,
+                "user",
+                "alice",
+                3,
+                b"applied",
+                b"root-receipt",
+                103,
+            )
             .expect("newer applied");
         command_context.now_unix_seconds = 104;
         assert!(matches!(

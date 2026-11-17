@@ -11,7 +11,6 @@ import {
   getWorkspace,
   sameWorkspaceContext,
   workspaceContext,
-  workspaceChangedEvent,
   type WorkspaceContext,
 } from "../api/workspace";
 import { listEvents, platformEventsEvent } from "../api/events";
@@ -215,15 +214,9 @@ export const useOverviewStore = defineStore("overview", () => {
     eventsAt.value = undefined;
   }
 
-  function resetWorkspace(): void {
-    clearState();
-    refresh();
-  }
-
   function start(): void {
     if (started) return;
     started = true;
-    window.addEventListener(workspaceChangedEvent, resetWorkspace);
     window.addEventListener(platformEventsEvent, schedulePlatformRefresh);
     clearState();
     foregroundRefresh.start();
@@ -233,7 +226,6 @@ export const useOverviewStore = defineStore("overview", () => {
     if (!started) return;
     started = false;
     foregroundRefresh.stop();
-    window.removeEventListener(workspaceChangedEvent, resetWorkspace);
     window.removeEventListener(platformEventsEvent, schedulePlatformRefresh);
     clearState();
   }

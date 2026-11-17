@@ -60,14 +60,8 @@ func TestUnavailableConnectionClassification(t *testing.T) {
 	}
 }
 
-func TestCapabilitiesAndIsolationFailClosed(t *testing.T) {
+func TestIsolationFailClosed(t *testing.T) {
 	b := WrapPool(nil)
-	if err := database.Require(b, database.Transactions, database.RowLocks); err != nil {
-		t.Fatal(err)
-	}
-	if !errors.Is(database.Require(b, "unknown"), database.ErrUnsupported) {
-		t.Fatal("unknown capability accepted")
-	}
 	if _, err := b.Begin(context.Background(), database.Isolation(255)); !errors.Is(err, database.ErrUnsupported) {
 		t.Fatal(err)
 	}

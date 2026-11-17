@@ -14,16 +14,6 @@
 
 import * as runtime from "../runtime";
 import {
-  type EnrollmentToken,
-  EnrollmentTokenFromJSON,
-  EnrollmentTokenToJSON,
-} from "../models/EnrollmentToken";
-import {
-  type EnrollmentTokenRequest,
-  EnrollmentTokenRequestFromJSON,
-  EnrollmentTokenRequestToJSON,
-} from "../models/EnrollmentTokenRequest";
-import {
   type GetNodeBootstrapStatus200Response,
   GetNodeBootstrapStatus200ResponseFromJSON,
   GetNodeBootstrapStatus200ResponseToJSON,
@@ -74,10 +64,6 @@ import {
   RegisterNodeBootstrapAttestation201ResponseToJSON,
 } from "../models/RegisterNodeBootstrapAttestation201Response";
 
-export interface CreateEnrollmentTokenRequest {
-  enrollmentTokenRequest: EnrollmentTokenRequest;
-}
-
 export interface CreateNodeBootstrapTokenRequest {
   nodeBootstrapTokenRequest: NodeBootstrapTokenRequest;
 }
@@ -102,77 +88,6 @@ export interface RegisterNodeBootstrapAttestationRequest {
  *
  */
 export class EnrollmentApi extends runtime.BaseAPI {
-  /**
-   * Creates request options for createEnrollmentToken without sending the request
-   */
-  async createEnrollmentTokenRequestOpts(
-    requestParameters: CreateEnrollmentTokenRequest,
-  ): Promise<runtime.RequestOpts> {
-    if (requestParameters["enrollmentTokenRequest"] == null) {
-      throw new runtime.RequiredError(
-        "enrollmentTokenRequest",
-        'Required parameter "enrollmentTokenRequest" was null or undefined when calling createEnrollmentToken().',
-      );
-    }
-
-    const queryParameters: any = {};
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    headerParameters["Content-Type"] = "application/json";
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/enrollment-tokens`;
-
-    return {
-      path: urlPath,
-      method: "POST",
-      headers: headerParameters,
-      query: queryParameters,
-      body: EnrollmentTokenRequestToJSON(
-        requestParameters["enrollmentTokenRequest"],
-      ),
-    };
-  }
-
-  /**
-   * Create a one-time enrollment token
-   */
-  async createEnrollmentTokenRaw(
-    requestParameters: CreateEnrollmentTokenRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<EnrollmentToken>> {
-    const requestOptions =
-      await this.createEnrollmentTokenRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      EnrollmentTokenFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Create a one-time enrollment token
-   */
-  async createEnrollmentToken(
-    requestParameters: CreateEnrollmentTokenRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<EnrollmentToken> {
-    const response = await this.createEnrollmentTokenRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
   /**
    * Creates request options for createNodeBootstrapToken without sending the request
    */

@@ -74,17 +74,6 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
     throw new Error("OpenAPI component schemas are missing");
   }
 
-  const enrollmentField = "expected_endpoint_id";
-  if (!candidateSchemas.EnrollmentTokenRequest?.required?.includes(enrollmentField)) {
-    throw new Error(`EnrollmentTokenRequest.${enrollmentField} must remain required`);
-  }
-  if (!schemas.EnrollmentTokenRequest?.properties?.[enrollmentField]) {
-    throw new Error(`EnrollmentTokenRequest.${enrollmentField} is missing from the comparison baseline`);
-  }
-  schemas.EnrollmentTokenRequest.required = [
-    ...new Set([...(schemas.EnrollmentTokenRequest.required ?? []), enrollmentField]),
-  ];
-
   const configSecretRef = structuredClone(schemas.ConfigSecretRef);
   configSecretRef.required = ["secret_ref_id"];
   configSecretRef.properties = {
@@ -137,51 +126,108 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
     const request = structuredClone(schemas[name]);
     request.required = ["expected_version", "certificate_version", "reason"];
     request.properties.certificate_version = { type: "integer", format: "int64", minimum: 1 };
-    request.properties.approval_id = { $ref: "#/components/schemas/UuidV7" };
+    delete request.properties.approval_id;
     if (name === "CertificateP12Request") {
       request.required.splice(2, 0, "artifact_request_id");
-      delete request.properties.approval_id;
       request.properties.artifact_request_id = { $ref: "#/components/schemas/UuidV7" };
     }
     assertExact(name, candidateSchemas[name], request);
     schemas[name] = request;
   }
 
-  // Retire only schemas owned by the removed independent-approval API.
+  // Retire only schemas owned by removed multi-user, OIDC, RBAC, enrollment-token,
+  // privd-attestation, batch-user, and independent-approval APIs.
   for (const name of [
     "ApprovalRequest", "ApprovalDecision", "ApprovalPage", "Approval",
     "ConfigPlanApprovalSummary", "CertificateApprovalSummary",
     "CertificateIssueApprovalSummary", "CertificateActionApprovalSummary",
+    "AuthMethods", "RoleBindingRequest", "RoleBinding",
+    "EnrollmentTokenRequest", "EnrollmentToken", "NodeApproval",
+    "PrivdAttestationCredentialRequest", "PrivdAttestationCredential",
+    "PrivdAttestationRegistration", "PrivdAttestationRevokeRequest",
+    "PrivdAttestationKeyState",
+    "UserBatchItemRequest", "UserBatchRequest", "UserBatchItem", "UserBatch",
+    "UserOperationMetrics",
   ]) {
     assertExact(name, candidateSchemas[name], undefined);
     delete schemas[name];
   }
+  assertExact("ApprovalId", candidateDocument.components?.parameters?.ApprovalId, undefined);
+  if (baselineDocument.components?.parameters) {
+    delete baselineDocument.components.parameters.ApprovalId;
+  }
+
+  if (baselineDocument.components?.securitySchemes?.sessionCookie) {
+    const sessionCookie = structuredClone(baselineDocument.components.securitySchemes.sessionCookie);
+    sessionCookie.description = "Shared Secure, HttpOnly, SameSite server-side session established by Local or break-glass authentication.";
+    assertExact("sessionCookie", candidateDocument.components?.securitySchemes?.sessionCookie, sessionCookie);
+    baselineDocument.components.securitySchemes.sessionCookie = sessionCookie;
+  }
+
   // No other route deletion is normalized.
   for (const path of [
     "/approval-requests",
     "/approval-requests/{approval_id}",
     "/approval-requests/{approval_id}:approve",
+    "/local-users",
+    "/local-users/{identity_id}:disable",
+    "/local-users/{identity_id}:reset-password",
+    "/role-bindings",
+    "/enrollment-tokens",
+    "/nodes/{node_id}/approval",
+    "/nodes/{node_id}/privd-attestation-credentials",
+    "/nodes/{node_id}/privd-attestation-keys:register",
+    "/nodes/{node_id}/privd-attestation-keys:revoke",
+    "/user-batches",
+    "/user-batches/{batch_id}",
+    "/user-operations/metrics",
+    "/auth/methods",
+    "/auth/callback",
   ]) {
     assertExact(path, candidateDocument.paths[path], undefined);
     delete baselineDocument.paths[path];
   }
-  const passwordResetPath = "/local-users/{identity_id}:reset-password";
-  const passwordReset = baselineDocument.paths[passwordResetPath].post;
-  const resetParameters = passwordReset.parameters.filter(
-    (parameter) => !(parameter.in === "header" && parameter.name === "X-Approval-ID"),
-  );
-  assertExact(
-    "resetLocalUserPassword.parameters",
-    candidateDocument.paths[passwordResetPath]?.post?.parameters,
-    resetParameters,
-  );
-  passwordReset.parameters = resetParameters;
+
+  assertExact("/auth/login.get", candidateDocument.paths["/auth/login"]?.get, undefined);
+  const loginPath = baselineDocument.paths["/auth/login"];
+  if (loginPath) {
+    delete loginPath.get;
+  }
+
+  for (const path of ["/nodes/{node_id}/revocation", "/nodes/{node_id}/service:reload"]) {
+    const operation = baselineDocument.paths[path]?.post;
+    if (!operation?.parameters) {
+      continue;
+    }
+    const nextParameters = operation.parameters.filter(
+      (parameter) => parameter?.$ref !== "#/components/parameters/ApprovalId",
+    );
+    assertExact(
+      `${path}.post.parameters`,
+      candidateDocument.paths[path]?.post?.parameters,
+      nextParameters,
+    );
+    operation.parameters = nextParameters;
+  }
+
+  const configPlanRequest = structuredClone(schemas.ConfigPlanRequest);
+  delete configPlanRequest.properties.node_variables;
+  assertExact("ConfigPlanRequest", candidateSchemas.ConfigPlanRequest, configPlanRequest);
+  schemas.ConfigPlanRequest = configPlanRequest;
+
+  const configPlan = structuredClone(schemas.ConfigPlan);
+  delete configPlan.properties.approval_id;
+  delete configPlan.properties.approval_status;
+  assertExact("ConfigPlan", candidateSchemas.ConfigPlan, configPlan);
+  schemas.ConfigPlan = configPlan;
+
   for (const name of [
     "AgentUpgradeRequest", "ConfigApplyRequest", "CertificateIssueRequest",
     "AgentRolloutCreateRequest", "AgentRollout",
   ]) {
     const schema = structuredClone(schemas[name]);
-    schema.required = schema.required.filter((field) => field !== "approval_id");
+    schema.required = (schema.required ?? []).filter((field) => field !== "approval_id");
+    delete schema.properties.approval_id;
     if (name === "AgentRolloutCreateRequest") {
       schema.description = "The immutable rollout request hash binds target version, sorted node set, batch size and stop-on-failure policy.";
     }
@@ -195,16 +241,26 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
   schemas.NodeBootstrapToken = bootstrapToken;
 };
 
-// Prove the allowlist rejects an unrelated breaking change inside a schema
-// that contains an intentional migration.
+// Prove the allowlist rejects an unrelated breaking change inside a migrated
+// schema, parameter list, or retired path/method.
 for (const [name, mutate] of [
-  ["CertificateRevokeRequest", (schema) => { schema.properties.reason.maxLength = 127; }],
-  ["CertificateP12Request", (schema) => { schema.properties.artifact_request_id = { type: "string" }; }],
-  ["AgentRollout", (schema) => { schema.required = schema.required.filter((field) => field !== "state"); }],
-  ["NodeBootstrapToken", (schema) => { schema.properties.token.pattern = ".*"; }],
+  ["CertificateRevokeRequest", (doc) => { doc.components.schemas.CertificateRevokeRequest.properties.reason.maxLength = 127; }],
+  ["CertificateP12Request", (doc) => { doc.components.schemas.CertificateP12Request.properties.artifact_request_id = { type: "string" }; }],
+  ["ConfigPlanRequest", (doc) => { doc.components.schemas.ConfigPlanRequest.properties.ttl_seconds.maximum = 7200; }],
+  ["ConfigPlan", (doc) => { delete doc.components.schemas.ConfigPlan.properties.materialized_hash; }],
+  ["AgentUpgradeRequest", (doc) => { doc.components.schemas.AgentUpgradeRequest.properties.reason.maxLength = 256; }],
+  ["ConfigApplyRequest", (doc) => { doc.components.schemas.ConfigApplyRequest.properties.reason.maxLength = 256; }],
+  ["CertificateIssueRequest", (doc) => { doc.components.schemas.CertificateIssueRequest.properties.reason.maxLength = 256; }],
+  ["AgentRolloutCreateRequest", (doc) => { doc.components.schemas.AgentRolloutCreateRequest.properties.batch_size.maximum = 10; }],
+  ["AgentRollout", (doc) => { doc.components.schemas.AgentRollout.required = doc.components.schemas.AgentRollout.required.filter((field) => field !== "state"); }],
+  ["NodeBootstrapToken", (doc) => { doc.components.schemas.NodeBootstrapToken.properties.token.pattern = ".*"; }],
+  ["sessionCookie", (doc) => { doc.components.securitySchemes.sessionCookie.name = "bad_cookie"; }],
+  ["/auth/login.get", (doc) => { doc.paths["/auth/login"].get = { responses: { "200": { description: "bad" } } }; }],
+  ["/nodes/{node_id}/revocation.post.parameters", (doc) => { doc.paths["/nodes/{node_id}/revocation"].post.parameters = []; }],
+  ["/role-bindings", (doc) => { doc.paths["/role-bindings"] = { post: { responses: { "201": { description: "bad" } } } }; }],
 ]) {
   const guardCandidate = structuredClone(candidate);
-  mutate(guardCandidate.components.schemas[name]);
+  mutate(guardCandidate);
   let guardRejected = false;
   try {
     normalizeSecurityMigrations(structuredClone(baseline), guardCandidate);

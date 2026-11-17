@@ -130,8 +130,8 @@ if [[ "${verify_only}" != true ]]; then
 fi
 validate_file "${manifest}" 600
 snapshot_entries="$(wc -l <"${manifest}")"
-if [[ "${snapshot_entries}" -ne 8 && "${snapshot_entries}" -ne 9 && "${snapshot_entries}" -ne 13 ]] || \
-  awk 'length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^(ocservia-agent\.previous|ocservia-privd\.previous|ocservia-agent\.service\.previous|ocservia-privd\.service\.previous|ocservia-agent-relays\.conf\.(previous|absent)|ocservia-agent-relays\.(previous|absent)|ocservia-upgrader\.(previous|absent)|ocservia-upgrader@\.service\.(previous|absent)|ocservia-agent-verify\.(previous|absent)|ocservia-agent-rebind\.(previous|absent)|ocservia-agent-retention(\.service|\.timer)?\.(previous|absent))$/ || NF != 2 || seen[$2]++ { bad=1 } END { exit bad ? 0 : 1 }' "${manifest}"; then
+if [[ "${snapshot_entries}" -ne 8 && "${snapshot_entries}" -ne 9 ]] || \
+  awk 'length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^(ocservia-agent\.previous|ocservia-privd\.previous|ocservia-agent\.service\.previous|ocservia-privd\.service\.previous|ocservia-agent-relays\.conf\.(previous|absent)|ocservia-agent-relays\.(previous|absent)|ocservia-upgrader\.(previous|absent)|ocservia-upgrader@\.service\.(previous|absent)|ocservia-agent-verify\.(previous|absent))$/ || NF != 2 || seen[$2]++ { bad=1 } END { exit bad ? 0 : 1 }' "${manifest}"; then
   rollback_error "rollback snapshot manifest is malformed"
 fi
 
@@ -193,33 +193,6 @@ fi
 
 libexec="${DESTDIR}${PREFIX}/libexec/ocservia"
 systemd="${DESTDIR}${PREFIX}/lib/systemd/system"
-lifecycle_restores=()
-retention_timer_backup=""
-if [[ "${snapshot_entries}" -eq 13 ]]; then
-  resolve_optional_backup ocservia-agent-rebind 755
-  rebind_backup="${resolved_backup}"
-  resolve_optional_backup ocservia-agent-retention 755
-  retention_backup="${resolved_backup}"
-  resolve_optional_backup ocservia-agent-retention.service 644
-  retention_unit_backup="${resolved_backup}"
-  resolve_optional_backup ocservia-agent-retention.timer 644
-  retention_timer_backup="${resolved_backup}"
-  if [[ -n "${retention_backup}" && -z "${rebind_backup}" ]]; then
-    rollback_error "rollback snapshot retention executable requires rebind helper"
-  fi
-  if [[ -n "${retention_unit_backup}" && -z "${retention_backup}" ]]; then
-    rollback_error "rollback snapshot retention service requires retention executable"
-  fi
-  if [[ -n "${retention_timer_backup}" && -z "${retention_unit_backup}" ]]; then
-    rollback_error "rollback snapshot retention timer requires retention service"
-  fi
-  lifecycle_restores=(
-    "${rebind_backup}" "${libexec}/ocservia-agent-rebind" 755
-    "${retention_backup}" "${libexec}/ocservia-agent-retention" 755
-    "${retention_unit_backup}" "${systemd}/ocservia-agent-retention.service" 644
-    "${retention_timer_backup}" "${systemd}/ocservia-agent-retention.timer" 644
-  )
-fi
 pending_record="${DESTDIR}${UPGRADE_STATE_DIR}/installing-package"
 if [[ -e "${pending_record}" || -L "${pending_record}" ]]; then
   if [[ ! -f "${pending_record}" || -L "${pending_record}" ]] ||
@@ -229,21 +202,6 @@ if [[ -e "${pending_record}" || -L "${pending_record}" ]]; then
   fi
 fi
 
-binding_node=""
-active_binding="${DESTDIR}/etc/ocservia-agent/active-binding"
-if [[ -e "${active_binding}" || -L "${active_binding}" ]]; then
-  validate_root_ancestry "$(dirname -- "${active_binding}")"
-  [[ -f "${active_binding}" && ! -L "${active_binding}" ]] || rollback_error "unsafe Controller binding"
-  read -r binding_uid binding_mode binding_links < <(stat -c '%u %a %h' -- "${active_binding}")
-  [[ "${binding_uid}" == 0 && "${binding_links}" == 1 && ( "${binding_mode}" == 640 || "${binding_mode}" == 440 ) ]] || rollback_error "unsafe Controller binding metadata"
-  binding_node="$(sed -n '2p' "${active_binding}")"
-  [[ "${binding_node}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || rollback_error "invalid Controller binding node"
-  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
-    [[ "$("${BACKUP_DIR}/${binary}.previous" --binding-version)" == 1 ]] ||
-      rollback_error "snapshot ${binary} cannot enforce the committed Controller binding"
-  done
-fi
-
 
 if [[ "${verify_only}" == true ]]; then
   echo "Matched rollback snapshot verified without modification"
@@ -251,8 +209,8 @@ if [[ "${verify_only}" == true ]]; then
 fi
 
 # Missing legacy records mean unknown prior state, never an .absent claim.
-if [[ "${snapshot_entries}" -lt 13 ]]; then
-  rollback_error "rollback snapshot does not record prior rebind and retention state; mutation requires a complete matched snapshot"
+if [[ "${snapshot_entries}" -lt 9 ]]; then
+  rollback_error "rollback snapshot does not record the required package state; mutation requires a complete matched snapshot"
 fi
 relay_directory="${systemd}/ocservia-agent.service.d"
 relay_directory_missing=false
@@ -263,20 +221,11 @@ validate_destination "${systemd}/ocservia-agent.service" 644
 validate_destination "${systemd}/ocservia-privd.service" 644
 validate_root_ancestry "${libexec}"
 validate_root_ancestry "${systemd}"
-for ((entry = 0; entry < ${#lifecycle_restores[@]}; entry += 3)); do
-  validate_destination "${lifecycle_restores[entry + 1]}" "${lifecycle_restores[entry + 2]}"
-done
-# A present runner artifact must be a safe restore destination; an absent one
-# matches the .absent snapshot branch.
-if [[ -n "${upgrader_backup}" ]]; then
-  validate_destination "${libexec}/ocservia-upgrader" 755
-fi
-if [[ -n "${upgrader_unit_backup}" ]]; then
-  validate_destination "${systemd}/ocservia-upgrader@.service" 644
-fi
-if [[ -n "${verifier_backup}" ]]; then
-  validate_destination "${libexec}/ocservia-agent-verify" 755
-fi
+# Every runner destination must remain a safe regular file (or absent) even
+# when an .absent snapshot intends to delete it.
+validate_destination "${libexec}/ocservia-upgrader" 755
+validate_destination "${systemd}/ocservia-upgrader@.service" 644
+validate_destination "${libexec}/ocservia-agent-verify" 755
 if [[ "${restore_relay}" == true ]]; then
   if [[ ! -e "${relay_directory}" && ! -L "${relay_directory}" ]]; then
     validate_root_ancestry "$(dirname -- "${relay_directory}")"
@@ -294,9 +243,6 @@ fi
 # release afterwards.
 mark_operations_rolled_back() {
   local operations="${DESTDIR}${UPGRADE_STATE_DIR}/operations" entry state staging
-  if [[ -n "${binding_node:-}" ]]; then
-    operations="${DESTDIR}${UPGRADE_STATE_DIR}/bindings/${binding_node}/operations"
-  fi
   [[ -d "${operations}" ]] || return 0
   for entry in "${operations}"/*; do
     [[ -d "${entry}" ]] || continue
@@ -319,14 +265,6 @@ mark_operations_rolled_back() {
 
 
 if [[ -z "${DESTDIR}" ]]; then
-  if [[ -f "${systemd}/ocservia-agent-retention.timer" ]]; then
-    if [[ -n "${retention_timer_backup}" ]]; then
-      systemctl stop ocservia-agent-retention.timer
-    else
-      systemctl disable --now ocservia-agent-retention.timer
-    fi
-  fi
-  [[ ! -f "${systemd}/ocservia-agent-retention.service" ]] || systemctl stop ocservia-agent-retention.service
   systemctl stop 'ocservia-upgrader@*.service' 2>/dev/null || true
   systemctl stop ocservia-agent.service ocservia-privd.service
 fi
@@ -349,7 +287,6 @@ optional_restores=(
   "${upgrader_backup}" "${libexec}/ocservia-upgrader" 755
   "${upgrader_unit_backup}" "${systemd}/ocservia-upgrader@.service" 644
   "${verifier_backup}" "${libexec}/ocservia-agent-verify" 755
-  "${lifecycle_restores[@]}"
 )
 for ((entry = 0; entry < ${#optional_restores[@]}; entry += 3)); do
   backup="${optional_restores[entry]}"
@@ -383,6 +320,5 @@ if [[ -z "${DESTDIR}" ]]; then
   systemctl start ocservia-privd.service
   systemctl start ocservia-agent.service
   flock -u 9
-  [[ -z "${retention_timer_backup}" ]] || systemctl start ocservia-agent-retention.timer
 fi
 echo "Agent, privd, and systemd units restored from one verified matched rollback snapshot"

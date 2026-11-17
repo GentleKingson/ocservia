@@ -22,25 +22,20 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Run through real HTTP authentication and the restricted runtime on every
-// backend. A single Admin authorizes the trusted target while the intent,
-// command and audit stay atomic without an approval record.
+// Run through real HTTP authentication and the restricted runtime on PostgreSQL.
+// A single Admin authorizes the trusted target while the intent, command and
+// audit stay atomic without an approval record.
 func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	b, owner := authenticationBackendFixtureWithIsolation(t, true)
 	f := newApplyHTTPFixtureWithBackend(t, b, owner)
 	node := uuid.MustParse("019fde50-2222-7222-8222-222222222222")
 	at, _ := value.FromTime(time.Now().UTC())
-	expires, _ := value.FromTime(time.Now().UTC().Add(time.Hour))
-	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'upgrade','active',1,$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,'upgrade','active',1,?,?)`, node, f.workspace, at, at)
-	f.bind(f.requester, node, "PlatformAdmin")
-	f.bind(f.reader, node, "Viewer")
+	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'upgrade','active',1,$3,$4)`, node, f.workspace, at, at)
 	key := ed25519.NewKeyFromSeed(make([]byte, 32)).Public().(ed25519.PublicKey)
-	credential := uuid.Must(uuid.NewV7())
-	f.exec(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES(?,?,'active',?)`, node, []byte(key), at)
-	f.exec(`INSERT INTO privd_attestation_enrollment_credentials(id,node_id,secret_sha256,controller_nonce,credential_context_sha256,expires_at,consumed_at,created_by_identity_id,created_by_session_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, `INSERT INTO privd_attestation_enrollment_credentials(id,node_id,secret_sha256,controller_nonce,credential_context_sha256,expires_at,consumed_at,created_by_identity_id,created_by_session_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, credential, node, []byte(key), []byte(key), []byte(key), expires, at, f.requester.principal.IdentityID, f.requester.principal.SessionID, at)
-	f.exec(`INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,registration_credential_id) VALUES($1,$2,'ed25519',$3,'active',$4,$5,$6,$7)`, `INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,registration_credential_id) VALUES(?,?,'ed25519',?,'active',?,?,?,?)`, node, privdattestation.PublicKeyID(key), []byte(key), at, at, at, credential)
+	f.exec(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, node, []byte(key), at)
+	f.exec(`INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at) VALUES($1,$2,'ed25519',$3,'active',$4,$5,$6)`, node, privdattestation.PublicKeyID(key), []byte(key), at, at, at)
 	for _, capability := range []string{"ocserv.agent.upgrade.v1", privdattestation.AttestationCapability} {
-		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,true)`, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES(?,?,true)`, node, capability)
+		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,true)`, node, capability)
 	}
 	manifest := filepath.Join(t.TempDir(), "releases.json")
 	if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"`+strings.Repeat("43", 32)+`"},{"version":"2.0.0","architecture":"arm64","package_sha256":"`+strings.Repeat("44", 32)+`"},{"version":"1.0.0","architecture":"amd64","package_sha256":"`+strings.Repeat("45", 32)+`"}]}`), 0600); err != nil {
@@ -50,7 +45,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.s.EnableReleaseCatalog(catalog)
+	f.s = f.newServer(Modules{ReleaseCatalog: catalog})
 	f.s.operations.EnableReleaseCatalog(catalog)
 	path := "/api/v1/nodes/" + node.String() + "/agent-upgrade"
 	body := func(target string) string {
@@ -72,12 +67,12 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 		}
 	}
 	setObservation := func(architecture, version string) {
-		f.exec(`UPDATE node_observed_snapshots SET architecture=$1,agent_version=$2 WHERE node_id=$3`, `UPDATE node_observed_snapshots SET architecture=?,agent_version=? WHERE node_id=?`, architecture, version, node)
+		f.exec(`UPDATE node_observed_snapshots SET architecture=$1,agent_version=$2 WHERE node_id=$3`, architecture, version, node)
 	}
 
 	t.Run("input-and-authorization", func(t *testing.T) {
 		problem(f.call("POST", path, body("2.0.0"), "key", nil, nil), 401, "unauthenticated", "")
-		problem(f.call("POST", path, body("2.0.0"), "key", f.reader.cookie, nil), 403, "forbidden", "")
+		problem(f.call("POST", path, body("2.0.0"), "key", f.reader.cookie, nil), 404, "not-found", "")
 		problem(f.call("POST", path, body("2.0.0"), "", f.requester.cookie, nil), 400, "idempotency-key-required", "")
 		problem(f.call("POST", path, `{"target_version":"2.0.0","package_sha256":"untrusted"}`, "key", f.requester.cookie, nil), 400, "invalid-request", "request body is invalid")
 		problem(post("invalid", "invalid"), 400, "invalid-request", "target_version and reason are required and ttl_seconds must be between 60 and 3600")
@@ -85,15 +80,15 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	t.Run("resource-boundaries", func(t *testing.T) {
 		otherWorkspace := authSafetyWorkspace(t, owner)
 		otherNode := uuid.Must(uuid.NewV7())
-		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'other','active',1,$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,'other','active',1,?,?)`, otherNode, otherWorkspace, at, at)
+		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'other','active',1,$3,$4)`, otherNode, otherWorkspace, at, at)
 		problem(f.call("POST", "/api/v1/nodes/"+otherNode.String()+"/agent-upgrade", body("2.0.0"), "foreign", f.requester.cookie, nil), 404, "not-found", "")
 	})
 	t.Run("target-error-order", func(t *testing.T) {
 		problem(post("3.0.0", "unobserved"), 409, "release-not-trusted", "the node has not reported its package architecture yet")
-		f.exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,'upgrade',$3,'1.2.0','1.3.0','debian','amd64','{}','{}','{}',$4)`, "INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,`system`,path,last_heartbeat_at) VALUES(?,?,'upgrade',?,'1.2.0','1.3.0','debian','amd64','{}','{}','{}',?)", node, at, uuid.Must(uuid.NewV7()), at)
+		f.exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,'upgrade',$3,'1.2.0','1.3.0','debian','amd64','{}','{}','{}',$4)`, node, at, uuid.Must(uuid.NewV7()), at)
 		// A trusted target reaches the capability fence regardless of the
 		// observed version; rejected probes must not create upgrade intents.
-		f.exec(`UPDATE node_capabilities SET approved=false WHERE node_id=$1`, `UPDATE node_capabilities SET approved=false WHERE node_id=?`, node)
+		f.exec(`UPDATE node_capabilities SET approved=false WHERE node_id=$1`, node)
 		for _, tc := range []struct {
 			name, arch, observed, target, operationProblem string
 		}{
@@ -109,18 +104,16 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 			})
 		}
 		setObservation("amd64", "1.2.0")
-		f.exec(`UPDATE node_capabilities SET approved=true WHERE node_id=$1`, `UPDATE node_capabilities SET approved=true WHERE node_id=?`, node)
+		f.exec(`UPDATE node_capabilities SET approved=true WHERE node_id=$1`, node)
 	})
 	t.Run("domain-catalog-ownership", func(t *testing.T) {
 		for _, tc := range []struct {
 			name                                       string
 			domainCatalog, httpCatalog, httpOperations bool
-			catalogFirst                               bool
 		}{
 			{name: "missing-http-catalog", domainCatalog: true, httpOperations: true},
 			{name: "missing-operations", domainCatalog: true, httpCatalog: true},
-			{name: "operations-first", httpCatalog: true, httpOperations: true},
-			{name: "catalog-first", httpCatalog: true, httpOperations: true, catalogFirst: true},
+			{name: "http-catalog-without-domain-catalog", httpCatalog: true, httpOperations: true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				domain := operations.NewBackend(b, 50, f.signer)
@@ -129,8 +122,6 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 				}
 				original := f.s
 				defer func() { f.s = original }()
-				f.s = f.newServer(Modules{})
-				f.s.EnableOperations(nil)
 				var httpCatalog *releasecatalog.Catalog
 				if tc.httpCatalog {
 					httpCatalog = catalog
@@ -139,13 +130,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 				if tc.httpOperations {
 					httpOperations = domain
 				}
-				if tc.catalogFirst {
-					f.s.EnableReleaseCatalog(httpCatalog)
-					f.s.EnableOperations(httpOperations)
-				} else {
-					f.s.EnableOperations(httpOperations)
-					f.s.EnableReleaseCatalog(httpCatalog)
-				}
+				f.s = newTestServer(t, testHTTPConfig(false), f.b, Modules{ReleaseCatalog: httpCatalog, Operations: httpOperations}, Authorization{Authentication: original.auth, Audit: original.audit})
 				target, err := domain.PrepareAgentUpgrade(t.Context(), f.workspace, node, "2.0.0")
 				if tc.domainCatalog {
 					if err != nil || !bytes.Equal(target.PackageSHA256[:], bytes.Repeat([]byte{0x43}, 32)) {
@@ -166,17 +151,17 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	unchanged := func() {
 		t.Helper()
 		var count int
-		if err := f.row(`SELECT count(*) FROM operations WHERE node_id=$1`, `SELECT count(*) FROM operations WHERE node_id=?`, node).Scan(&count); err != nil || count != 0 {
+		if err := f.row(`SELECT count(*) FROM operations WHERE node_id=$1`, node).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("unexpected intent: %d %v", count, err)
 		}
 	}
 	t.Run("transaction-rechecks", func(t *testing.T) {
-		f.exec(`UPDATE nodes SET version=2 WHERE id=$1`, `UPDATE nodes SET version=2 WHERE id=?`, node)
+		f.exec(`UPDATE nodes SET version=2 WHERE id=$1`, node)
 		problem(post("2.0.0", "stale"), 409, "stale-revision", "")
-		f.exec(`UPDATE nodes SET version=1 WHERE id=$1`, `UPDATE nodes SET version=1 WHERE id=?`, node)
-		f.exec(`UPDATE node_capabilities SET approved=false WHERE node_id=$1`, `UPDATE node_capabilities SET approved=false WHERE node_id=?`, node)
+		f.exec(`UPDATE nodes SET version=1 WHERE id=$1`, node)
+		f.exec(`UPDATE node_capabilities SET approved=false WHERE node_id=$1`, node)
 		problem(post("2.0.0", "missing-capability"), 409, "capability-unavailable", "")
-		f.exec(`UPDATE node_capabilities SET approved=true WHERE node_id=$1`, `UPDATE node_capabilities SET approved=true WHERE node_id=?`, node)
+		f.exec(`UPDATE node_capabilities SET approved=true WHERE node_id=$1`, node)
 		setObservation("riscv64", "1.2.0")
 		problem(post("2.0.0", "changed-architecture"), 409, "release-not-trusted", "")
 		setObservation("amd64", "1.2.0")
@@ -191,14 +176,14 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	t.Run("offline-intent-replay-and-active-conflict", func(t *testing.T) {
 		// Single-node operations historically queue for offline nodes. Do not
 		// replace this with rollout's stricter online admission policy.
-		f.exec(`UPDATE nodes SET status='offline' WHERE id=$1`, `UPDATE nodes SET status='offline' WHERE id=?`, node)
+		f.exec(`UPDATE nodes SET status='offline' WHERE id=$1`, node)
 		w := post("2.0.0", "accepted")
 		var operation operations.Operation
 		if w.Code != 202 || json.Unmarshal(w.Body.Bytes(), &operation) != nil || operation.AgentUpgradeState != "queued" || w.Header().Get("Location") != "/api/v1/operations/"+operation.ID || w.Header().Get("ETag") != `"revision-1"` {
 			t.Fatalf("accepted: %d %v %s", w.Code, w.Header(), w.Body)
 		}
 		var payload []byte
-		if err := f.row(`SELECT envelope FROM commands WHERE operation_id=$1`, `SELECT envelope FROM commands WHERE operation_id=?`, uuid.MustParse(operation.ID)).Scan(&payload); err != nil {
+		if err := f.row(`SELECT envelope FROM commands WHERE operation_id=$1`, uuid.MustParse(operation.ID)).Scan(&payload); err != nil {
 			t.Fatal(err)
 		}
 		var envelope agentv1.CommandEnvelope
@@ -212,25 +197,22 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 		if upgrade.GetTargetVersion() != "2.0.0" || upgrade.GetArchitecture() != "amd64" || !bytes.Equal(upgrade.GetPackageSha256(), bytes.Repeat([]byte{0x43}, 32)) {
 			t.Fatalf("command release identity: %v", upgrade)
 		}
-		f.exec(`UPDATE nodes SET version=2 WHERE id=$1`, `UPDATE nodes SET version=2 WHERE id=?`, node)
+		f.exec(`UPDATE nodes SET version=2 WHERE id=$1`, node)
 		replay := post("2.0.0", "accepted")
 		if replay.Code != 202 || replay.Header().Get("Idempotency-Replayed") != "true" || replay.Header().Get("Location") != w.Header().Get("Location") {
 			t.Fatalf("replay: %d %s", replay.Code, replay.Body)
 		}
-		f.exec(`UPDATE nodes SET version=1 WHERE id=$1`, `UPDATE nodes SET version=1 WHERE id=?`, node)
+		f.exec(`UPDATE nodes SET version=1 WHERE id=$1`, node)
 		problem(post("1.0.0", "accepted"), 409, "idempotency-conflict", "")
 		problem(post("2.0.0", "active"), 409, "upgrade-already-active", "")
 		var count int
-		if err := f.row(`SELECT count(*) FROM agent_upgrade_operations WHERE node_id=$1`, `SELECT count(*) FROM agent_upgrade_operations WHERE node_id=?`, node).Scan(&count); err != nil || count != 1 {
+		if err := f.row(`SELECT count(*) FROM agent_upgrade_operations WHERE node_id=$1`, node).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("duplicate upgrade intent: %d %v", count, err)
 		}
 		setObservation("amd64", "2.0.0")
 		replay = post("2.0.0", "accepted")
 		if replay.Code != 202 || replay.Header().Get("Idempotency-Replayed") != "true" || replay.Header().Get("Location") != w.Header().Get("Location") {
 			t.Fatalf("replay after version observation changed: %d %s", replay.Code, replay.Body)
-		}
-		if err := f.row(`SELECT count(*) FROM approval_requests WHERE workspace_id=$1`, `SELECT count(*) FROM approval_requests WHERE workspace_id=?`, f.workspace).Scan(&count); err != nil || count != 0 {
-			t.Fatalf("single Admin upgrade created an approval: %d %v", count, err)
 		}
 	})
 }

@@ -19,7 +19,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
+	telemetry "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -38,7 +38,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, table := range []string{"operations", "commands", "outbox_events", "audit_events", "operation_events"} {
-			if n := f.count(t, "SELECT count(*) FROM "+table, "SELECT count(*) FROM "+table); n != 0 {
+			if n := f.count(t, "SELECT count(*) FROM "+table); n != 0 {
 				t.Fatal("partial intent", table, n)
 			}
 		}
@@ -53,7 +53,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			t.Fatal("idempotent readback", again, replay, err)
 		}
 		for _, table := range []string{"operations", "commands", "outbox_events", "audit_events", "operation_events"} {
-			if n := f.count(t, "SELECT count(*) FROM "+table, "SELECT count(*) FROM "+table); n != 1 {
+			if n := f.count(t, "SELECT count(*) FROM "+table); n != 1 {
 				t.Fatal("duplicate intent", table, n)
 			}
 		}
@@ -67,7 +67,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		if jobs, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute); err == nil || len(jobs) != 0 {
 			t.Fatal(jobs, err)
 		}
-		if n := f.count(t, "SELECT count(*) FROM command_attempts", "SELECT count(*) FROM command_attempts"); n != 0 {
+		if n := f.count(t, "SELECT count(*) FROM command_attempts"); n != 0 {
 			t.Fatal("partial claim", n)
 		}
 		fault.commit = true
@@ -80,7 +80,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		if err := service.MarkSent(ctx, d); err != nil {
 			t.Fatal("bookkeeping replay", err)
 		}
-		if f.count(t, `SELECT count(*) FROM operation_events WHERE state='dispatched'`, `SELECT count(*) FROM operation_events WHERE state='dispatched'`) != 1 {
+		if f.count(t, `SELECT count(*) FROM operation_events WHERE state='dispatched'`) != 1 {
 			t.Fatal("duplicate dispatch projection")
 		}
 	})
@@ -105,10 +105,8 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				return err
 			}
 			command := uuid.Must(uuid.FromBytes(envelope.CommandId))
-			q, args := f.query(`SELECT count(*) FROM command_attempts WHERE command_id=$1 AND state='sending'`,
-				`SELECT count(*) FROM command_attempts WHERE command_id=? AND state='sending'`, []any{command})
 			var n int
-			err := f.backend.QueryRow(ctx, q, args...).Scan(&n)
+			err := f.backend.QueryRow(ctx, `SELECT count(*) FROM command_attempts WHERE command_id=$1 AND state='sending'`, command).Scan(&n)
 			if err == nil && n != 1 {
 				err = errors.New("transport ran before durable claim")
 			}
@@ -133,7 +131,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			t.Error("worker did not send")
 		}
 		deadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(deadline) && f.count(t, `SELECT count(*) FROM command_attempts WHERE state='sent'`, `SELECT count(*) FROM command_attempts WHERE state='sent'`) == 0 {
+		for time.Now().Before(deadline) && f.count(t, `SELECT count(*) FROM command_attempts WHERE state='sent'`) == 0 {
 			time.Sleep(20 * time.Millisecond)
 		}
 		cancel()
@@ -142,10 +140,10 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				t.Error(err)
 			}
 		}
-		if sends.Load() != 1 || f.count(t, "SELECT count(*) FROM command_attempts", "SELECT count(*) FROM command_attempts") != 1 {
+		if sends.Load() != 1 || f.count(t, "SELECT count(*) FROM command_attempts") != 1 {
 			t.Fatal("duplicate send/claim", sends.Load())
 		}
-		if f.count(t, `SELECT count(*) FROM command_attempts WHERE state='sent'`, `SELECT count(*) FROM command_attempts WHERE state='sent'`) != 1 {
+		if f.count(t, `SELECT count(*) FROM command_attempts WHERE state='sent'`) != 1 {
 			t.Fatal("success not recorded")
 		}
 	})
@@ -175,8 +173,8 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			dispatch := original
 			for attempt := 1; attempt <= 3; attempt++ {
 				past := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}
-				f.exec(t, `UPDATE node_command_leases SET leased_until=$1 WHERE lease_token=$2`, `UPDATE node_command_leases SET leased_until=? WHERE lease_token=?`, past, dispatch.LeaseToken)
-				f.exec(t, `UPDATE outbox_events SET locked_until=$1 WHERE id=$2`, `UPDATE outbox_events SET locked_until=? WHERE id=?`, past, dispatch.OutboxID)
+				f.exec(t, `UPDATE node_command_leases SET leased_until=$1 WHERE lease_token=$2`, past, dispatch.LeaseToken)
+				f.exec(t, `UPDATE outbox_events SET locked_until=$1 WHERE id=$2`, past, dispatch.OutboxID)
 				if err := service.Reap(ctx, 3); err != nil {
 					t.Fatal(err)
 				}
@@ -250,10 +248,10 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		if err != nil || op.State != "succeeded" {
 			t.Fatal(op, err)
 		}
-		if f.count(t, "SELECT count(*) FROM agent_command_results", "SELECT count(*) FROM agent_command_results") != 1 || f.count(t, "SELECT count(*) FROM node_command_leases", "SELECT count(*) FROM node_command_leases") != 0 {
+		if f.count(t, "SELECT count(*) FROM agent_command_results") != 1 || f.count(t, "SELECT count(*) FROM node_command_leases") != 0 {
 			t.Fatal("duplicate result or leaked claim")
 		}
-		if f.count(t, `SELECT count(*) FROM operation_events WHERE state='succeeded'`, `SELECT count(*) FROM operation_events WHERE state='succeeded'`) != 1 {
+		if f.count(t, `SELECT count(*) FROM operation_events WHERE state='succeeded'`) != 1 {
 			t.Fatal("duplicate projection")
 		}
 	})
@@ -273,13 +271,12 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				}
 				operation := uuid.MustParse(created.ID)
 				if state != "queued" {
-					f.exec(t, `UPDATE operations SET state=$1 WHERE id=$2`, `UPDATE operations SET state=? WHERE id=?`, state, operation)
-					f.exec(t, `UPDATE commands SET state=$1 WHERE operation_id=$2`, `UPDATE commands SET state=? WHERE operation_id=?`, state, operation)
+					f.exec(t, `UPDATE operations SET state=$1 WHERE id=$2`, state, operation)
+					f.exec(t, `UPDATE commands SET state=$1 WHERE operation_id=$2`, state, operation)
 				}
 				if published {
 					at := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}
-					f.exec(t, `UPDATE outbox_events SET published_at=$1 WHERE command_id IN (SELECT id FROM commands WHERE operation_id=$2)`,
-						`UPDATE outbox_events SET published_at=? WHERE command_id IN (SELECT id FROM commands WHERE operation_id=?)`, at, operation)
+					f.exec(t, `UPDATE outbox_events SET published_at=$1 WHERE command_id IN (SELECT id FROM commands WHERE operation_id=$2)`, at, operation)
 				}
 				return operation
 			}
@@ -292,14 +289,11 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox other workspace',$2,$3,$4)`,
-				`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Outbox other workspace',?,?,?)`, otherWorkspace, otherWorkspace.String(), at, at)
+			f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox other workspace',$2,$3,$4)`, otherWorkspace, otherWorkspace.String(), at, at)
 			node := uuid.Must(uuid.NewV7())
-			f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',$4,$5)`,
-				`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, node, otherWorkspace, node.String(), at, at)
+			f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',$4,$5)`, node, otherWorkspace, node.String(), at, at)
 			endpoint := sha256.Sum256(node[:])
-			f.exec(t, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`,
-				`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES(?,?,'active',?)`, node, endpoint[:], at)
+			f.exec(t, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, node, endpoint[:], at)
 			seed(f.node(t), "unknown", true)
 			seed(f.node(t), "unknown", true)
 			want := seed(node, "queued", false)
@@ -332,7 +326,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			leases := f.count(t, `SELECT count(*) FROM node_command_leases`, `SELECT count(*) FROM node_command_leases`)
+			leases := f.count(t, `SELECT count(*) FROM node_command_leases`)
 			if claimed.Load() != 2 || leases != 2 {
 				t.Fatal("concurrent recovery exceeded the global limit", claimed.Load(), leases)
 			}
@@ -372,8 +366,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			older := seed(node, "unknown", true)
 			newer := seed(node, "queued", false)
 			for index, operation := range []uuid.UUID{older, newer} {
-				f.exec(t, `UPDATE commands SET resource_type='user',resource_key='alice',expected_version=$1 WHERE operation_id=$2`,
-					`UPDATE commands SET resource_type='user',resource_key='alice',expected_version=? WHERE operation_id=?`, index+1, operation)
+				f.exec(t, `UPDATE commands SET resource_type='user',resource_key='alice',expected_version=$1 WHERE operation_id=$2`, index+1, operation)
 			}
 			if jobs, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 10, time.Minute); err != nil || len(jobs) != 0 {
 				t.Fatal("same-resource write passed an Unknown predecessor", jobs, err)
@@ -395,9 +388,9 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 			}
 			id := uuid.MustParse(created.ID)
 			if source == "certificate-release" {
-				f.exec(t, `UPDATE outbox_events SET available_at=$1`, `UPDATE outbox_events SET available_at=?`, value.Timestamp{Valid: true, Micros: value.PositiveInfinity})
+				f.exec(t, `UPDATE outbox_events SET available_at=$1`, value.Timestamp{Valid: true, Micros: value.PositiveInfinity})
 			} else {
-				f.exec(t, `UPDATE nodes SET status='offline' WHERE id=$1`, `UPDATE nodes SET status='offline' WHERE id=?`, node)
+				f.exec(t, `UPDATE nodes SET status='offline' WHERE id=$1`, node)
 			}
 			assertUnclaimed := func() {
 				t.Helper()
@@ -417,7 +410,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 					}
 					return store.ReleaseOperation(ctx, id)
 				}
-				store, err := telemetrywrite.From(tx)
+				store, err := telemetry.FromTransaction(tx)
 				if err != nil {
 					return err
 				}
@@ -490,8 +483,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Fence rows have independent locks; node UPDATE triggers also lock the
-	// shared exact-key guard on MySQL, preventing a two-row rendezvous.
+	// Fence rows have independent row locks for a deterministic two-row deadlock rendezvous.
 	ready, proceed := make(chan struct{}, 2), make(chan struct{})
 	done := make(chan error, 2)
 	var attempts atomic.Int32
@@ -501,8 +493,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 			done <- database.WithinRetry(ctx, f.backend, database.ReadCommitted, func(tx database.Tx) error {
 				local++
 				attempts.Add(1)
-				q, args := f.query(`UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1 WHERE node_id=$1`, `UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1 WHERE node_id=?`, []any{nodes[worker][:]})
-				if n, err := tx.Exec(ctx, q, args...); err != nil {
+				if n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1 WHERE node_id=$1`, nodes[worker][:]); err != nil {
 					return err
 				} else if n != 1 {
 					return errors.New("missing first deadlock row")
@@ -515,8 +506,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 						return ctx.Err()
 					}
 				}
-				q, args = f.query(`UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1 WHERE node_id=$1`, `UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1 WHERE node_id=?`, []any{nodes[1-worker][:]})
-				n, err := tx.Exec(ctx, q, args...)
+				n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1 WHERE node_id=$1`, nodes[1-worker][:])
 				if err == nil && n != 1 {
 					return errors.New("missing second deadlock row")
 				}
@@ -543,7 +533,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 		t.Fatal("did not exercise one real deadlock rollback", attempts.Load())
 	}
 	for _, node := range nodes {
-		if got := f.count(t, `SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=$1`, `SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=?`, node[:]); got != 3 {
+		if got := f.count(t, `SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=$1`, node[:]); got != 3 {
 			t.Fatal("partial transaction leaked", got)
 		}
 	}

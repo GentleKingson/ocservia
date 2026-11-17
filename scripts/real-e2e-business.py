@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Controller checks for the disposable cross-VM native business run."""
+import base64
 from datetime import datetime, timezone
+import hashlib
 import importlib.util
 import json
 import os
@@ -56,37 +58,29 @@ def plan_result(plan_id):
 
 def issue_token(endpoint):
     assert endpoint == hex64(STATE / 'agent-endpoint-id')
-    response = business.api('enrollment-tokens', {
+    response = business.api('node-bootstrap-tokens', {
+        'installation': True,
         'workspace_id': os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], 'environment': 'development',
         'expected_node_name': 'github-hosted-node', 'expected_endpoint_id': endpoint,
         'ttl_seconds': 600, 'reason': 'cross-VM native business enrollment'}, status=201)
-    assert re.fullmatch(r'[A-Za-z0-9_-]{43}', response['token'])
+    root = response['token']
+    assert re.fullmatch(r'oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}', root)
+    child = 'obt2_' + base64.urlsafe_b64encode(
+        hashlib.sha256(b'ocservia/install-enrollment/v1\x00' + root.encode()).digest()).decode().rstrip('=')
+    digest = hashlib.sha256(child.encode()).hexdigest()
     token = OUTBOX / 'enrollment-token' / 'enrollment-token'
     token.parent.mkdir(parents=True, exist_ok=True)
-    token.write_text(response['token'] + '\n')
+    token.write_text(root + '\n')
     token.chmod(0o600)
+    (STATE / 'bootstrap-token-sha256').write_text(digest + '\n')
     (STATE / 'token-id').write_text(response['id'] + '\n')
 
 
 def authority(peer_dir):
     node = node_id()
-    installed = os.environ.get('NODE_INSTALL_E2E') == 'true'
     observed = business.api('nodes/' + node)
-    credential = None
-    if installed:
-        assert observed['trust_status'] == 'active'
-        assert business.sql(f"SELECT count(*) FROM node_privd_attestation_keys WHERE node_id='{node}' AND state='active';") == '1'
-    else:
-        assert observed['trust_status'] == 'pending'
-        caps = json.loads(business.sql(
-            f"SELECT json_agg(capability ORDER BY capability) FROM node_capabilities WHERE node_id='{node}';"))
-        business.api(f'nodes/{node}/approval', {'labels': {}, 'policy': 'standard',
-                     'capabilities': caps, 'reason': 'cross-VM activation by Admin'})
-        credential = business.api(f'nodes/{node}/privd-attestation-credentials',
-                                 {'ttl_seconds': 600, 'reason': 'cross-VM native receipt'}, status=201)
-        credential_file = PRIVATE / 'privd-credential'
-        credential_file.write_text(credential['credential'])
-        credential_file.chmod(0o600)
+    assert observed['trust_status'] == 'active'
+    assert business.sql(f"SELECT count(*) FROM node_privd_attestation_keys WHERE node_id='{node}' AND state='active';") == '1'
     assert business.sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'active'
     key = f"{node}/{hex64(peer_dir / 'vpn-cert-sha256')}/{hex64(peer_dir / 'vpn-spki-sha256')}/none"
     reference = business.api('secret-provider-refs', {
@@ -94,12 +88,8 @@ def authority(peer_dir):
         'reason': 'cross-VM node-local TLS'}, status=201)
     target = OUTBOX / 'business-authority'
     target.mkdir(parents=True, exist_ok=True)
-    if credential is not None:
-        encrypt(credential_file, peer_dir / 'exchange.pub', target / 'credential.oaep')
     (target / 'authority.json').write_text(json.dumps({
         'node_id': node, 'agent_endpoint_id': hex64(STATE / 'agent-endpoint-id'),
-        'controller_nonce_hex': credential['controller_nonce_hex'] if credential else '',
-        'credential_context_sha256_hex': credential['credential_context_sha256_hex'] if credential else '',
         'secret_ref_id': reference['id'], 'secret_ref_key': key}) + '\n')
     (STATE / 'secret-ref-id').write_text(reference['id'] + '\n')
 
@@ -110,13 +100,9 @@ def register_authority(ready_dir):
     assert ready['node_id'] == node
     assert ready['agent_endpoint_id'] == hex64(STATE / 'agent-endpoint-id')
     proof = json.loads((ready_dir / 'proof.json').read_text())
-    if os.environ.get('NODE_INSTALL_E2E') == 'true':
-        key_id = proof['key_id']
-        assert re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', key_id)
-        assert business.sql(f"SELECT count(*) FROM node_privd_attestation_keys WHERE node_id='{node}' AND key_id='{key_id}' AND state='active';") == '1'
-    else:
-        proof['credential'] = (PRIVATE / 'privd-credential').read_text()
-        business.api(f'nodes/{node}/privd-attestation-keys:register', proof, role='anonymous', status=201)
+    key_id = proof['key_id']
+    assert re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', key_id)
+    assert business.sql(f"SELECT count(*) FROM node_privd_attestation_keys WHERE node_id='{node}' AND key_id='{key_id}' AND state='active';") == '1'
     target = OUTBOX / 'business-authority-registered'
     target.mkdir(parents=True, exist_ok=True)
     (target / 'ready.json').write_text(json.dumps({
@@ -281,7 +267,7 @@ def recovery(phase, peer_dir):
         request = json.loads((STATE / 'recovery-request.json').read_text())
         replay = business.api(prefix + '/service:reload', request['body'], headers=request['headers'], status=202)
         assert replay['id'] == operation['id'] and replay['command_id'] == operation['command_id']
-        assert business.sql(f"SELECT count(*) FROM audit_events WHERE command_id='{operation['command_id']}' AND approval_id IS NULL;") != '0'
+        assert business.sql(f"SELECT count(*) FROM audit_events WHERE command_id='{operation['command_id']}';") != '0'
         value = {**queued, 'owner': after, 'idempotent_replay': True}
     elif phase == 'verify':
         result = json.loads((peer_dir / 'result.json').read_text())

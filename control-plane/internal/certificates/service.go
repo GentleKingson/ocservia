@@ -13,7 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"io"
 	"slices"
 	"sort"
@@ -115,22 +115,22 @@ type Certificate struct {
 }
 
 type IssueRequest struct {
-	CertificateID, ApprovalID, ActorIdentityID, ActorSessionID uuid.UUID
-	Reason, RequestID                                          string
+	CertificateID, ActorIdentityID, ActorSessionID uuid.UUID
+	Reason, RequestID                              string
 }
 
 type RevokeRequest struct {
-	CertificateID, ApprovalID, ActorIdentityID, ActorSessionID uuid.UUID
-	CertificateVersion                                         int64
-	ExpectedVersion                                            int64
-	IdempotencyKey, Reason, RequestID, Traceparent             string
+	CertificateID, ActorIdentityID, ActorSessionID uuid.UUID
+	CertificateVersion                             int64
+	ExpectedVersion                                int64
+	IdempotencyKey, Reason, RequestID, Traceparent string
 }
 
 type P12Request struct {
-	CertificateID, ApprovalID, ArtifactRequestID, ActorIdentityID, ActorSessionID uuid.UUID
-	CertificateVersion                                                            int64
-	ExpectedVersion                                                               int64
-	IdempotencyKey, Reason, RequestID, Traceparent                                string
+	CertificateID, ArtifactRequestID, ActorIdentityID, ActorSessionID uuid.UUID
+	CertificateVersion                                                int64
+	ExpectedVersion                                                   int64
+	IdempotencyKey, Reason, RequestID, Traceparent                    string
 }
 
 type ArtifactGrant struct {
@@ -214,86 +214,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificat
 	return certificate, false, err
 }
 
-func (s *Service) ApprovalBinding(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, requestHash []byte, summary json.RawMessage, err error) {
-	var binding certificatestore.IssueState
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		binding, err = store.IssueBinding(ctx, id)
-		return err
-	})
-	if err != nil {
-		return
-	}
-	workspaceID, nodeID = binding.WorkspaceID, binding.NodeID
-	requestHash = certificateIssueBinding(id, binding.Version, binding.CSR, binding.ReceiptDigest)
-	summary, err = json.Marshal(map[string]any{"certificate_id": id, "node_id": nodeID, "common_name": binding.CommonName, "dns_names": json.RawMessage(binding.DNSNames.Bytes()), "csr_sha256": hex.EncodeToString(sha256Bytes(binding.CSR))})
-	return
-}
-
-func (s *Service) ActionApprovalBinding(ctx context.Context, action string, certificateID uuid.UUID, certificateVersion int64, purpose string, artifactRequestID uuid.UUID) (workspaceID, nodeID uuid.UUID, requestHash []byte, summary json.RawMessage, err error) {
-	var binding certificatestore.ActionBinding
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		binding, err = store.ActionBinding(ctx, certificateID)
-		return err
-	})
-	if err != nil {
-		return
-	}
-	workspaceID, nodeID = binding.WorkspaceID, binding.NodeID
-	if certificateVersion < 1 || binding.Version != certificateVersion {
-		err = ErrNotReady
-		return
-	}
-	if action == "certificate.revoke" {
-		binding.Chain = nil
-	}
-	requestHash, summary, err = certificateActionBinding(action, certificateID, nodeID, binding.Version, purpose, artifactRequestID, binding.Serial, binding.Chain)
-	return
-}
-
-func certificateActionBinding(action string, certificateID, nodeID uuid.UUID, version int64, purpose string, artifactRequestID uuid.UUID, serial string, chain []byte) ([]byte, json.RawMessage, error) {
-	if action != "certificate.revoke" && action != "certificate.private_key.export" {
-		return nil, nil, ErrInvalid
-	}
-	if action == "certificate.private_key.export" && (purpose != "certificate_p12" || artifactRequestID == uuid.Nil) {
-		return nil, nil, ErrInvalid
-	}
-	if action == "certificate.revoke" && (artifactRequestID != uuid.Nil || strings.TrimSpace(purpose) == "" || len(purpose) > 128) {
-		return nil, nil, ErrInvalid
-	}
-	chainHash := sha256.Sum256(chain)
-	type content struct {
-		Action             string     `json:"action"`
-		CertificateID      uuid.UUID  `json:"certificate_id"`
-		CertificateVersion int64      `json:"certificate_version"`
-		NodeID             uuid.UUID  `json:"node_id"`
-		Purpose            string     `json:"purpose,omitempty"`
-		ArtifactRequestID  *uuid.UUID `json:"artifact_request_id,omitempty"`
-		SerialNumber       string     `json:"serial_number,omitempty"`
-		CertificateSHA256  string     `json:"certificate_sha256,omitempty"`
-	}
-	var artifact *uuid.UUID
-	if artifactRequestID != uuid.Nil {
-		artifact = &artifactRequestID
-	}
-	value := content{Action: action, CertificateID: certificateID, CertificateVersion: version, NodeID: nodeID, Purpose: purpose, ArtifactRequestID: artifact, SerialNumber: serial}
-	if len(chain) > 0 {
-		value.CertificateSHA256 = hex.EncodeToString(chainHash[:])
-	}
-	summary, _ := json.Marshal(value)
-	digest := sha256.Sum256(append([]byte("ocservia/certificate-approval/v1\x00"), summary...))
-	return digest[:], summary, nil
-}
-
 func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate, error) {
-	request.ApprovalID = uuid.Nil
 	if request.CertificateID == uuid.Nil || request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil || strings.TrimSpace(request.Reason) == "" || request.RequestID == "" {
 		return Certificate{}, ErrInvalid
 	}
@@ -310,7 +231,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 		if err != nil {
 			return err
 		}
-		approved, err = store.ApprovedReceipt(ctx, request.CertificateID, request.ApprovalID)
+		approved, err = store.SigningReceipt(ctx, request.CertificateID)
 		return err
 	})
 	csrDigest := sha256.Sum256(csrDER)
@@ -324,7 +245,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 			if storeErr != nil {
 				return storeErr
 			}
-			return store.SignerUnavailable(context.WithoutCancel(ctx), request.CertificateID, request.ApprovalID, requestHash, s.now())
+			return store.SignerUnavailable(context.WithoutCancel(ctx), request.CertificateID, requestHash, s.now())
 		})
 		return Certificate{}, fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
 	}
@@ -350,7 +271,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 		if err != nil || !active {
 			return ErrNotReady
 		}
-		changed, err := store.CompleteIssue(ctx, certificatestore.Issued{ID: request.CertificateID, ApprovalID: request.ApprovalID, Chain: result.CertificateChainPEM, RequestHash: requestHash, Serial: leaf.SerialNumber.String(), NotBefore: leaf.NotBefore.UTC(), NotAfter: leaf.NotAfter.UTC(), At: now})
+		changed, err := store.CompleteIssue(ctx, certificatestore.Issued{ID: request.CertificateID, Chain: result.CertificateChainPEM, RequestHash: requestHash, Serial: leaf.SerialNumber.String(), NotBefore: leaf.NotBefore.UTC(), NotAfter: leaf.NotAfter.UTC(), At: now})
 		if err != nil {
 			return err
 		}
@@ -379,7 +300,7 @@ func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (work
 			return err
 		}
 		workspaceID, nodeID, csrDER = stored.WorkspaceID, stored.NodeID, stored.CSR
-		if err := rbac.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, "certificate.issue", rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}); err != nil {
+		if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, workspaceID); err != nil {
 			return err
 		}
 		var dnsNames []string
@@ -403,15 +324,11 @@ func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (work
 		case "csr_ready":
 			requestHash = certificateIssueBinding(request.CertificateID, stored.Version, csrDER, stored.ReceiptDigest)
 			now := s.now()
-			if err := store.StartIssue(ctx, certificatestore.Signing{ID: request.CertificateID, ApprovalID: request.ApprovalID, ActorID: request.ActorIdentityID, RequestHash: requestHash, Version: stored.Version, At: now}); err != nil {
+			if err := store.StartIssue(ctx, certificatestore.Signing{ID: request.CertificateID, ActorID: request.ActorIdentityID, RequestHash: requestHash, Version: stored.Version, At: now}); err != nil {
 				return err
 			}
 			return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, NodeID: &nodeID, RequestID: request.RequestID, Result: "intent", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"csr_sha256":%q,"state":"signing"}`, hex.EncodeToString(sha256Bytes(csrDER)))), At: now})
 		case "signing", "signer_unavailable":
-			// Preserve a historical in-flight fence without requiring another approval.
-			if stored.ApprovalID != nil {
-				request.ApprovalID = *stored.ApprovalID
-			}
 			if stored.IssueVersion == nil || *stored.IssueVersion < 1 {
 				return ErrNotReady
 			}
@@ -462,10 +379,6 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	if certificateVersion != request.CertificateVersion && !existingRequest {
 		return operations.Operation{}, false, ErrNotReady
 	}
-	requestHash, _, err := certificateActionBinding("certificate.revoke", request.CertificateID, nodeID, request.CertificateVersion, request.Reason, uuid.Nil, serialNumber, nil)
-	if err != nil {
-		return operations.Operation{}, false, err
-	}
 	if state == "revoked" {
 		exists, err := s.operationExists(ctx, workspaceID, request.IdempotencyKey)
 		if err != nil {
@@ -478,7 +391,7 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	if state != "issued" && state != "expiring" && state != "expired" && state != "revoking" && state != "revocation_unknown" && state != "revoked" || serialNumber == "" {
 		return operations.Operation{}, false, ErrNotReady
 	}
-	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operations.CertificateRevoke, CertificateID: request.CertificateID, CertificateVersion: uint64(request.CertificateVersion), RevocationReason: request.Reason, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: requestHash, Action: "certificate.revoke", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute, HoldDispatch: true})
+	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operations.CertificateRevoke, CertificateID: request.CertificateID, CertificateVersion: uint64(request.CertificateVersion), RevocationReason: request.Reason, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, Action: "certificate.revoke", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute, HoldDispatch: true})
 	if err != nil {
 		return operations.Operation{}, false, err
 	}
@@ -540,8 +453,6 @@ func (s *Service) operationExists(ctx context.Context, workspace uuid.UUID, key 
 }
 
 func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGrant, bool, error) {
-	request.ApprovalID = uuid.Nil
-
 	if request.CertificateID == uuid.Nil || request.ArtifactRequestID == uuid.Nil || request.CertificateVersion < 1 || request.ActorIdentityID == uuid.Nil || request.ActorSessionID == uuid.Nil || request.ExpectedVersion < 1 || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || request.RequestID == "" {
 		return ArtifactGrant{}, false, ErrInvalid
 	}
@@ -558,7 +469,7 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 		if err != nil {
 			return err
 		}
-		return rbac.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, "certificate.private_key.export", rbac.Resource{WorkspaceID: eligible.WorkspaceID, Type: "node", ID: eligible.NodeID})
+		return auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, eligible.WorkspaceID)
 	})
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {
@@ -566,11 +477,11 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 		}
 		return ArtifactGrant{}, false, err
 	}
-	workspaceID, nodeID, chain, serialNumber, certificateVersion := eligible.WorkspaceID, eligible.NodeID, eligible.Chain, eligible.Serial, eligible.Version
+	workspaceID, nodeID, chain, certificateVersion := eligible.WorkspaceID, eligible.NodeID, eligible.Chain, eligible.Version
 	if certificateVersion != request.CertificateVersion {
 		return ArtifactGrant{}, false, ErrNotReady
 	}
-	intent, _ := json.Marshal(map[string]any{"certificate_id": request.CertificateID, "certificate_version": request.CertificateVersion, "artifact_request_id": request.ArtifactRequestID, "approval_id": request.ApprovalID, "node_id": nodeID, "expected_version": request.ExpectedVersion, "actor_identity_id": request.ActorIdentityID, "actor_session_id": request.ActorSessionID, "reason": request.Reason})
+	intent, _ := json.Marshal(map[string]any{"certificate_id": request.CertificateID, "certificate_version": request.CertificateVersion, "artifact_request_id": request.ArtifactRequestID, "node_id": nodeID, "expected_version": request.ExpectedVersion, "actor_identity_id": request.ActorIdentityID, "actor_session_id": request.ActorSessionID, "reason": request.Reason})
 	intentHash := sha256.Sum256(intent)
 	existing, err := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey, intentHash[:])
 	if err == nil {
@@ -623,11 +534,7 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 		return ArtifactGrant{}, false, err
 	}
 	tokenHash := sha256.Sum256([]byte(token))
-	approvalHash, _, err := certificateActionBinding("certificate.private_key.export", request.CertificateID, nodeID, certificateVersion, "certificate_p12", artifactID, serialNumber, chain)
-	if err != nil {
-		return ArtifactGrant{}, false, err
-	}
-	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operations.CertificateP12, CertificateID: request.CertificateID, CertificateVersion: uint64(certificateVersion), CertificateChain: chain, SealedPassword: sealed, ArtifactID: artifactID, ArtifactMetadata: &operations.ArtifactMetadata{TokenSHA256: tokenHash[:], RequestHash: intentHash[:], ExpiresAt: expiresAt}, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: approvalHash, Action: "certificate.private_key.export", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute})
+	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operations.CertificateP12, CertificateID: request.CertificateID, CertificateVersion: uint64(certificateVersion), CertificateChain: chain, SealedPassword: sealed, ArtifactID: artifactID, ArtifactMetadata: &operations.ArtifactMetadata{TokenSHA256: tokenHash[:], RequestHash: intentHash[:], ExpiresAt: expiresAt}, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, Action: "certificate.private_key.export", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute})
 	if err != nil {
 		if errors.Is(err, operations.ErrIdempotencyConflict) {
 			found, lookupErr := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey, intentHash[:])

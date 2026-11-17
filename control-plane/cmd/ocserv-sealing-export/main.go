@@ -15,16 +15,18 @@ import (
 )
 
 func main() {
-	backend := flag.String("backend", "postgres", "database backend")
+	backend := flag.String("backend", "postgres", "legacy compatibility flag; only postgres is supported")
 	dsnFile := flag.String("database-url-file", "", "protected Controller database credential file")
 	ca := flag.String("database-ca-file", "", "database trust CA")
 	bundled := flag.Bool("bundled-postgres", false, "the URL targets the bundled PostgreSQL service")
 	workspace := flag.String("workspace", "", "expected workspace UUID")
 	node := flag.String("node", "", "expected node UUID")
-	flag.String("approval", "", "deprecated; enrollment exports no longer require approval")
 	endpoint := flag.String("endpoint", "", "expected endpoint hex identity")
 	flag.Parse()
 	fail := func() { fmt.Fprintln(os.Stderr, "sealing binding export rejected"); os.Exit(1) }
+	if *backend != "postgres" {
+		fail()
+	}
 	dsn, err := readCredentialFile(*dsnFile)
 	if err != nil {
 		fail()
@@ -37,12 +39,12 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	db, err := connection.Open(ctx, connection.Options{Backend: *backend, Environment: "production", URL: strings.TrimSpace(string(dsn)), CAFile: *ca, BundledPostgres: *bundled})
+	db, err := connection.Open(ctx, connection.Options{Environment: "production", URL: strings.TrimSpace(string(dsn)), CAFile: *ca, BundledPostgres: *bundled})
 	if err != nil {
 		fail()
 	}
 	defer db.Close()
-	data, err := enrollment.ExportSealingBinding(ctx, db.Store, w, n, uuid.Nil, *endpoint)
+	data, err := enrollment.ExportSealingBinding(ctx, db.Store, w, n, *endpoint)
 	if err != nil {
 		fail()
 	}

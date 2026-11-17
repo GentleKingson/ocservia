@@ -1,6 +1,6 @@
 # Agent lifecycle
 
-This is the operations manual for a managed node: install, enroll, activate, start, upgrade, rollback, rebind, retention and removal.
+This is the operations manual for a managed node: install, enroll, activate, start, upgrade, rollback and removal.
 
 A managed node is an existing ocserv server with the ocservia node daemons installed alongside it. The local ocserv instance still terminates VPN tunnels and forwards traffic. The ocservia services handle enrollment, health telemetry, and signed administrative commands from the Controller.
 
@@ -95,7 +95,7 @@ At a minimum, set the following parameters:
 | Setting | Purpose |
 | --- | --- |
 | `CONTROLLER_ENDPOINT_ID` | Binds the node to the expected Controller identity. |
-| `RELAY_URL_A`, `RELAY_URL_B` | Required literal HTTPS URL for Relay A (without credentials, query string, or fragment); omit `RELAY_URL_B` or leave it empty. Production supports only one dedicated Relay, and any non-empty B value (in `install.env` or an existing `relays.env`) is rejected. |
+| `RELAY_URL_A` | Required literal HTTPS URL for the dedicated Relay (without credentials, query string, or fragment). Production supports only one dedicated Relay. |
 | `RELAY_ACCESS_TOKEN_SOURCE` | Protected file path containing the relay access token. |
 | `CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE` | Protected file path containing the Controller command verification public key. |
 | `BOOTSTRAP_TOKEN_SOURCE` | Optional protected file path containing a bootstrap token for single-run enrollment. |
@@ -114,7 +114,7 @@ The bundle adds trusted root CAs; it is not a certificate pin. Rotating or remov
 
 ### Production Relay launcher
 
-To configure production relays during installation, set `INSTALL_PRODUCTION_RELAYS=true` and populate `/etc/ocservia-agent/relays.env` with the required HTTPS `RELAY_URL_A`. Omit `RELAY_URL_B` or leave it empty; the managed-node installer rejects a nonempty B before installation, and the production launcher rejects it before Agent execution. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`, or set `RELAY_ACCESS_TOKEN_SOURCE` so the installer can install it.
+To configure production relays during installation, set `INSTALL_PRODUCTION_RELAYS=true` and populate `/etc/ocservia-agent/relays.env` with the required HTTPS `RELAY_URL_A`. Production supports only one dedicated Relay. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`, or set `RELAY_ACCESS_TOKEN_SOURCE` so the installer can install it.
 
 The production drop-in executes the packaged fixed launcher `/usr/libexec/ocservia/ocservia-agent-relays`, which constructs a single Relay URL argument and replaces itself with the Agent, leaving base development units and direct binary invocations unchanged. Archive and native installations, upgrades, rollback snapshots, and uninstall all include this launcher. The lower-level package installer and upgrades preserve operator configuration and identity. Uninstall removes the launcher but retains configuration and state unless the existing purge option is used.
 
@@ -142,9 +142,9 @@ The script then:
 4. Generates the two password-sealing keys if they do not exist yet. Existing keys are preserved.
 5. Writes the relay configuration and initializes the persistent node identity.
 
-Enrollment and the running services both use the single configured Relay URL. A non-empty `RELAY_URL_B` is rejected before installation or startup.
+Enrollment and the running services both use the single configured `RELAY_URL_A` URL.
 
-The installer enables and starts the history-retention timer (`ocservia-agent-retention.timer`). It leaves the node unapproved and the `Agent` and `privd` services stopped. If a different version of `ocservia-agent` is already installed on the host, the installer exits without upgrading or downgrading the package. Never rerun an unpinned or `latest` installer script as a shortcut for upgrading.
+The installer leaves the `Agent` and `privd` services stopped in `--config` mode (or activates and verifies `ONLINE` in `--join-token` mode). If a different version of `ocservia-agent` is already installed on the host, the installer exits without upgrading or downgrading the package. Never rerun an unpinned or `latest` installer script as a shortcut for upgrading.
 
 ### Package verification and staging
 
@@ -152,11 +152,11 @@ Once its external endpoint is deployed and verified, the operator-hosted thin fi
 
 ```text
 bootstrap launcher -> exact vX.Y.Z versioned installer -> HTTPS native package
-        -> identity/sealing -> Bootstrap Enrollment -> ENROLLED_LOCAL
-        -> Admin activation -> service activation
+        -> identity/sealing -> bootstrap enrollment (oit1_ -> obt2_)
+        -> active node + privd attestation -> service activation
 ```
 
-The bootstrap launcher and the initial versioned installer and native package downloads rely on HTTPS. Before invoking the package manager, the installer copies the downloaded native package into root-owned staging and verifies that its bytes remain unchanged. That transport check applies only to initial installation; an AgentUpgrade instead verifies against the SHA256 carried in the already-authorized Controller command. The advanced manual `obt1_` token creates or recovers the same pending node and requires Admin activation. The `oit1_` installation token authorizes the complete automatic flow, with a derived Agent credential and separate root-key proof. The fixed Release installer and native package need no source checkout or Git. The bootstrap launcher plays no role in ongoing lifecycle operations.
+The bootstrap launcher and the initial versioned installer and native package downloads rely on HTTPS. Before invoking the package manager, the installer copies the downloaded native package into root-owned staging and verifies that its bytes remain unchanged. That transport check applies only to initial installation; an AgentUpgrade instead verifies against the SHA256 carried in the already-authorized Controller command. The `oit1_` installation token authorizes the complete automatic flow, issuing a derived `obt2_` Agent credential, immediately activating `nodes.status = 'active'`, and registering the root-owned `privd` attestation key via `/api/v1/node-bootstrap/{attestation,register}`. The fixed Release installer and native package need no source checkout or Git. The bootstrap launcher plays no role in ongoing lifecycle operations.
 
 The verifier copies only the archive into a unique `root:root` mode `0700` directory below `/var/lib/ocservia-upgrade/package-staging`, compares the copied archive SHA256 with the caller-supplied expected digest, rejects unsafe archive paths and member types, and extracts that root-owned copy. Install and upgrade scripts accept only the verified directory printed by the verifier; never extract or run installers from a download directory, and remove the verified staging directory after the lifecycle operation succeeds. `PACKAGE_ARCH` pins the package architecture (`amd64` or `arm64`), which the MANIFEST records as `arch=`. On a real host install (no `DESTDIR`), the verifier also checks host architecture equivalence (`x86_64` for `amd64`, `aarch64` for `arm64`) and rejects a foreign-architecture package before anything is staged.
 
@@ -193,7 +193,7 @@ Each release publishes the node archive and its plain `.sha256`, plus native DEB
 
 The `.deb` and `.rpm` packages embed only the archive, its plain checksum, and the verifier under `/usr/share/ocservia-agent`, and depend on `openssl`, `python3`, and `util-linux`. Their scriptlets contain no layout logic: `postinst` refuses a host-architecture mismatch, verifies the archive into trusted staging, and runs the verified `install-agent.sh` on a fresh host or `upgrade-agent.sh` on an existing installation.
 
-Installing or upgrading a package never enables or starts the Agent or privd units. Operators must first provision `/etc/ocservia-agent/agent.env` and the keys, then enable both units manually. The independent history-retention timer is the only exception: installation enables it and starts it unless an install is still unfinished. An upgrade or an identical-package retry runs `systemctl try-restart` on `ocservia-privd` and `ocservia-agent`, restarting units that are already running while leaving stopped units stopped.
+Installing or upgrading a package never enables or starts the Agent or privd units outside the one-token bootstrap flow. Operators using the configuration-driven installer must first provision `/etc/ocservia-agent/agent.env` and the keys, then enable both units manually. An upgrade or an identical-package retry runs `systemctl try-restart` on `ocservia-privd` and `ocservia-agent`, restarting units that are already running while leaving stopped units stopped.
 
 A production managed node requests the relay contract before invoking the package manager by creating `/etc/ocservia/agent-install-production-relays` as a regular file. `postinst` then passes `INSTALL_PRODUCTION_RELAYS=true` into the verified lifecycle on both fresh installs and upgrades, sourcing the production relay drop-in and `relays.env` exclusively from the verified embedded payload (never from a source checkout). This marker file is consumed only after the verified lifecycle succeeds, keeping a failed install or upgrade retryable. A real package removal (as opposed to an upgrade) deletes any unconsumed request so it cannot affect a later plain install. Once installed, the drop-in records the standing production intent, and subsequent upgrades reinstall it whenever the drop-in is already present, with or without the marker. Without the marker or an existing drop-in, a native install stays relay-free.
 
@@ -213,26 +213,28 @@ sudo install -o root -g root -m 0600 p12-password-seal-private.pem \
   /etc/ocservia-agent/p12-password-seal-private.pem
 ```
 
-[Provisioned trust](../reference/stable-contracts.md#provisioned-trust) defines startup verification and key separation. Finish [enrollment](#enroll-the-node) and [Admin activation](#approve-the-node) before enabling the services.
+[Provisioned trust](../reference/stable-contracts.md#provisioned-trust) defines startup verification and key separation. Finish [enrollment](#enroll-the-node) before enabling the services.
 
 ## Enroll the node
 
-The default Nodes wizard uses the [one-token workflow](#one-token-installation).
-Its token expires within 15 minutes, binds the chosen Workspace, environment
-and optional node name/EndpointID, and creates exactly one active node. The
-browser retains the token only in the open dialog's memory and clears it on
-expiry, close or Workspace change. A lost issuance response is ambiguous;
-consult audit records or wait for expiry before issuing another token.
+The default Nodes wizard and unattended `install.sh` workflow use the [one-token installation](#one-token-installation) flow.
+Its `oit1_` token expires within 15 minutes, binds the chosen Workspace, environment
+and optional node name/EndpointID, and creates and activates a single node alongside
+its root `privd` attestation key. The browser retains the token only in the open
+dialog's memory and clears it on expiry, close or Workspace change. A lost
+issuance response is ambiguous; consult audit records or wait for expiry before
+issuing another token.
 
 ### Use the Nodes page wizard
 
 Choose Install node, provide name/environment/release, create the token and run
-the displayed command. The installer asks only for the token and completes the
-workflow without a second human decision.
+the displayed command. The installer asks only for the token (or reads `--join-token-file`)
+and completes enrollment, activation, root attestation registration, and startup without
+a second human decision.
 
 ### Enroll with the API
 
-An authenticated Admin may issue the same installation token:
+An authenticated Admin issues the installation token:
 
 ```http
 POST /api/v1/node-bootstrap-tokens
@@ -250,154 +252,57 @@ Content-Type: application/json
 
 The response returns the `oit1_` root token once. `ttl_seconds` can shorten the
 15-minute maximum, and `expected_endpoint_id` can pre-bind a known EndpointID.
-Without `installation: true`, the legacy `obt1_` pending-enrollment token remains
-available for the explicit manual and Controller-rebind workflows.
+Never place the token in a URL, log, or shared shell history; stage it in a
+protected root-owned file (mode `0600`) when invoking `--join-token-file`.
 
-### Advanced endpoint-bound enrollment
-
-When no bootstrap token source is provided, you can use the two-step endpoint-bound enrollment flow.
-
-1. On the node, prepare its persistent identity and record the printed EndpointID:
-
-   ```bash
-   sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
-     --identity-dir /var/lib/ocservia-agent/identity \
-     --controller "$CONTROLLER_ENDPOINT_ID" \
-     --prepare-enrollment
-   ```
-
-   Identity preparation runs offline without contacting the Controller or opening a transport session, and reusing the same identity directory preserves the EndpointID across runs.
-
-2. Issue a short-lived endpoint-bound enrollment token, replacing the placeholders with the target workspace and the exact EndpointID from step 1:
-
-   ```http
-   POST /api/v1/enrollment-tokens
-   X-Workspace-ID: <workspace-uuidv7>
-   Content-Type: application/json
-
-   {
-     "workspace_id": "<workspace-uuidv7>",
-     "environment": "production",
-     "expected_node_name": "<node-name>",
-     "expected_endpoint_id": "<64-lowercase-hex-endpoint-id>",
-     "reason": "Enroll managed node"
-   }
-   ```
-
-   The plaintext token is returned once and expires within 15 minutes. Follow the same workspace rule as step 1 of the bootstrap flow, and never place the token in a URL, log, or shared shell history.
-
-3. Copy the token to a root-owned file readable by the Agent group:
-
-   ```bash
-   sudo install -o root -g ocserv-agent -m 0640 \
-     /protected/enrollment-token /etc/ocservia-agent/enrollment-token
-   ```
-
-4. Run enrollment against the same identity directory:
-
-   ```bash
-   sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
-     --identity-dir /var/lib/ocservia-agent/identity \
-     --controller "$CONTROLLER_ENDPOINT_ID" \
-     --enrollment-token-file /etc/ocservia-agent/enrollment-token \
-     --enrollment-environment production \
-     --user-password-seal-key-id "$USER_PASSWORD_SEAL_KEY_ID" \
-     --user-password-seal-public-key-sha256 "$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256" \
-     --p12-password-seal-key-id "$P12_PASSWORD_SEAL_KEY_ID" \
-     --p12-password-seal-public-key-sha256 "$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256" \
-     --relay-mode custom \
-     --relay-url "${RELAY_URL_A:?set the dedicated HTTPS relay URL}" \
-     --relay-token-file /etc/ocservia-agent/relay-access-token
-   ```
-
-   During enrollment, the Agent signs and persists both sealing public-key descriptors. The command prints the pending UUIDv7 node ID and exits without opening a mutation-capable Agent session. Record the node ID and remove `/etc/ocservia-agent/enrollment-token`. The key descriptors are enrollment inputs. In `agent.env`, record the returned `NODE_ID` alongside the `AGENT_ENDPOINT_ID` binding from step 1.
-
-   Before approval, complete the remaining host configuration: [manual trust provisioning](#manual-trust-provisioning) and, for production, the [Production Relay launcher](#production-relay-launcher).
+For unattended bootstrap via `install.sh --config`, omit `installation` or set
+`BOOTSTRAP_TOKEN_SOURCE` to a single-use `obt1_` bootstrap token file; the
+installer prepares the persistent EndpointID via `--prepare-enrollment`, completes
+bootstrap enrollment over the single configured `RELAY_URL_A`, writes `NODE_ID`
+and `AGENT_ENDPOINT_ID` to `/etc/ocservia-agent/agent.env`, and removes the
+temporary token copy once local state commits.
 
 ### Finish enrollment
 
-What happens after the installer depends on whether `BOOTSTRAP_TOKEN_SOURCE` was supplied:
+What happens after the configuration-driven installer (`--config`) depends on whether `BOOTSTRAP_TOKEN_SOURCE` was supplied:
 
 | Installer result | What to do next |
 | --- | --- |
-| `ENROLLED_LOCAL` | Local enrollment succeeded. The installer does not query Controller state, so check the node's approval and connection status in the Controller UI. |
-| `ENROLLMENT_READY` | No token was provided. Issue an endpoint-bound enrollment token (`expected_endpoint_id` set to the printed EndpointID, see [Advanced endpoint-bound enrollment](#advanced-endpoint-bound-enrollment)), write it to `/etc/ocservia-agent/enrollment-token` owned by `root:ocserv-agent` with mode `0640` (or point `BOOTSTRAP_TOKEN_SOURCE` at a protected bootstrap token file), and rerun the installer. |
+| `ONLINE` (`--join-token` / `--join-token-file`) | Installation token flow completed enrollment, node activation, root `privd` attestation registration via `/api/v1/node-bootstrap/{attestation,register}`, and service startup; Controller reports online and fresh telemetry. |
+| `ENROLLED_LOCAL` | Local configuration enrollment succeeded. Verify node trust and connection status in the Controller UI and ensure `privd` attestation is registered before enabling services. |
+| `ENROLLMENT_READY` | No token was provided. Issue a short-lived bootstrap token (`POST /api/v1/node-bootstrap-tokens` with `expected_endpoint_id` set to the printed EndpointID), supply it via `BOOTSTRAP_TOKEN_SOURCE`, and rerun the installer. |
 
 The installer deletes one-time token files and the `BOOTSTRAP_TOKEN_SOURCE` file only after enrollment succeeds. If enrollment fails or the result is ambiguous, stop and follow the next section.
 
 ### Recover an uncertain enrollment response
 
-If an enrollment response is lost or your SSH session drops mid-run, keep the original EndpointID, identity directory, and protected token material intact. Never generate a new identity or issue a new token just because the client did not receive a response. Recover according to the token type:
+If an enrollment response is lost or your SSH session drops mid-run, keep the original EndpointID, identity directory, and protected token material intact. Never generate a new identity or issue a new token just because the client did not receive a response:
 
-- With a bootstrap token (`BOOTSTRAP_TOKEN_SOURCE`), rerun the same installer with the original bootstrap binding so the Controller's same-endpoint recovery path can return the enrollment record it already committed. Retrying with the same bootstrap token and persistent EndpointID returns the same pending node for as long as the node remains pending. The Controller rejects the replay if the presenting EndpointID differs or if the node has already been approved, and it refuses any bootstrap enrollment for an EndpointID already present in its database.
-- Endpoint-bound enrollment tokens do not support that bootstrap replay contract, and they are single-use. Before deciding whether a new token is needed after an interrupted endpoint-bound run, an administrator must look up the node by its original EndpointID in the Controller inventory. A replacement token on its own does not prove the earlier attempt failed.
+- With a bootstrap or installation token (`--join-token-file` or `BOOTSTRAP_TOKEN_SOURCE`), rerun the same installer with the original identity directory and token binding so the Controller's same-endpoint recovery path can return the record it already committed. The Controller rejects a replay if the presenting EndpointID differs or refuses any bootstrap enrollment for an EndpointID already present from another attempt.
+- Always check node status by `EndpointID` in the Controller inventory before issuing any replacement token.
 
-Once local enrollment is confirmed, the installer deletes only its fixed internal copy of the enrollment token. The installer does not convert that copy to a root-only file: it stays `root:ocserv-agent` with mode `0640` so the Agent can read it. If power loss, `SIGKILL`, or another interruption stops the process between configuration commit and cleanup, rerunning the installer validates the existing identity and binding (failing closed on unsafe file metadata), completes any pending token cleanup, and prints the local summary. The external bootstrap token source file is deleted only by the enrollment invocation that actually consumed it, so a later rerun will not delete an arbitrary newly configured source path. Whenever enrollment fails or remains uncertain, the installer retains recovery material along with the long-term identity, Relay token, public trust files, and sealing private keys.
+Once local enrollment is confirmed, the installer deletes only its fixed internal copy of the token. If power loss, `SIGKILL`, or another interruption stops the process between configuration commit and cleanup, rerunning the installer validates the existing identity and binding (failing closed on unsafe file metadata), completes any pending token cleanup, and prints the local summary. Whenever enrollment fails or remains uncertain, the installer retains recovery material along with the long-term identity, Relay token, public trust files, and sealing private keys.
 
-## Approve the node
-
-Token installation automatically activates its node. For a legacy pending node,
-an Admin submits the activation directly with its own authenticated session:
-
-```http
-POST /api/v1/nodes/<node-uuidv7>/approval
-Content-Type: application/json
-
-{
-  "labels": {"environment": "production"},
-  "policy": "<node-policy>",
-  "capabilities": ["<required-advertised-capability>"],
-  "reason": "Activate managed node"
-}
-```
-
-No approval request or `X-Approval-ID` is required. Capabilities must match the
-node's advertised support. A `503 Trust update pending` means activation was
-committed but transport convergence is pending; preserve the node and inspect
-that convergence before retrying. Privileged commands still require root-key
-attestation even when node trust is active.
-
-### Register the privd attestation key
-
-The token installer registers this key automatically. For manual provisioning or recovery, privileged mutations need a registered privd result attestation key. Until the key is registered and `privd_result_attestation_v1` is approved, the node remains readable while privileged mutations fail closed. Receipt contents are defined in [Privd receipt v1](../reference/stable-contracts.md#privd-receipt-v1).
-
-The one-time Controller credential, delivered exclusively to root provisioning, is issued through `POST /api/v1/nodes/{node_id}/privd-attestation-credentials`. The operator runs the installed root-only helper
-
-```text
-ocservia-privd attestation-registration <key-path> <node-uuidv7> <controller-nonce-hex> <credential-context-sha256-hex>
-```
-
-and submits its public JSON output alongside the one-time credential to `POST /api/v1/nodes/{node_id}/privd-attestation-keys:register` (request and response schemas are in [`openapi.yaml`](../../openapi/openapi.yaml)). The packaged default key path is `PRIVD_ATTESTATION_KEY_FILE=/var/lib/ocservia-privd/attestation.key` in `/etc/ocservia-agent/privd.env`. The registration endpoint's request budget and the helper's guarantees are in [Privd receipt v1](../reference/stable-contracts.md#privd-receipt-v1).
-
-Roll out upgrades in strict order:
-
-1. Deploy the receipt-aware Controller and its database migration.
-2. Initialize and independently register the privd key, consuming the root-authenticated credential to approve `privd_result_attestation_v1`.
-3. Upgrade privd and the Agent.
-4. Confirm that the Agent advertises and negotiates that capability before dispatching privileged commands.
-
-### Rotate the privd attestation key
-
-Key rotation provisions a new key path and credential. The overlap limit and the effect of explicit revocation (`POST /api/v1/nodes/{node_id}/privd-attestation-keys:revoke`) are in [Privd receipt v1](../reference/stable-contracts.md#privd-receipt-v1). During an operator-approved rotation, update the root-managed `PRIVD_ATTESTATION_KEY_FILE` setting in `privd.env` to point to a fresh file name, register and verify the new key before retiring the old one, and never overwrite or copy a private key in place.
+Root `privd` result attestation keys are registered automatically by the one-token bootstrap flow through `POST /api/v1/node-bootstrap/attestation` and `POST /api/v1/node-bootstrap/register`. The packaged default key path is `PRIVD_ATTESTATION_KEY_FILE=/var/lib/ocservia-privd/attestation.key` in `/etc/ocservia-agent/privd.env`, and receipt contents are defined in [Privd receipt v1](../reference/stable-contracts.md#privd-receipt-v1).
 
 ## Start and verify the node
 
-The advanced configuration-driven installer and manual enrollment do not enable or start systemd units, and starting the local daemons does not approve the node. After approval and attestation registration, enable and start both services. The node then connects to the Controller and starts accepting signed commands:
+The configuration-driven installer (`--config`) leaves systemd units stopped so operators can verify trust files before starting the daemons (whereas `--join-token` / `--join-token-file` enables and starts them automatically):
 
 ```bash
 sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
 systemctl status ocservia-privd.service ocservia-agent.service
 ```
 
-Local `systemctl` status shows only that the units run on the host. Confirm the node on the Controller. In the selected Workspace, open the node, or query `GET /api/v1/nodes/{node_id}` from an authorized workspace session, and inspect `trust_status`, `connection_state` and `freshness`. The node is operational when they are `active`, `online` and `fresh` with a recent heartbeat. The `status` field returned by the approval and activation POST tracks a different state transition. Never copy that administrator session onto the managed node.
+Local `systemctl` status shows only that the units run on the host. Confirm the node on the Controller. In the selected Workspace, open the node, or query `GET /api/v1/nodes/{node_id}` from an authorized workspace Admin session, and inspect `trust_status`, `connection_state` and `freshness`. The node is operational when they are `active`, `online` and `fresh` with a recent heartbeat. Never copy that administrator session onto the managed node.
 
-Once the node is approved and its services are running, you can rerun the same release installer with the original `install.env` and source paths. The rerun is idempotent and works as a convergence check:
+Once the node is active and its services are running, you can rerun the same release installer with the original `install.env` and source paths. The rerun is idempotent and works as a convergence check:
 
 ```bash
 bash install.sh --non-interactive --config ./install.env
 ```
 
-On an active node, the script reports `SERVICES_ACTIVE`. It does not reinstall the package, overwrite the identity, keys, relay configuration, or `agent.env`, re-approve the node, or restart the services. It does rerun the host preflight, verify the enrolled identity and trust files (failing closed on any discrepancy), and remove any leftover enrollment token file. You still need to check approval, connection state, and telemetry freshness on the Controller. After the Agent has been upgraded or rolled back to a different version, do not run an older release's installer on the host. It stops on the version mismatch.
+On an active node, the script reports `SERVICES_ACTIVE`. It does not reinstall the package, overwrite the identity, keys, relay configuration, or `agent.env`, or restart the services. It does rerun the host preflight, verify the enrolled identity and trust files (failing closed on any discrepancy), and remove any leftover token file. You still need to check trust state, connection state, and telemetry freshness on the Controller. After the Agent has been upgraded or rolled back to a different version, do not run an older release's installer on the host. It stops on the version mismatch.
 
 ## Revoke a node
 
@@ -449,11 +354,11 @@ If an operator changes any startup-only setting during maintenance, `ocserv` mus
 
 ## Upgrade and rollback
 
-Upgrade an existing managed node by installing an explicitly selected Agent package, or through a Controller-driven upgrade. The v1.1.0 scripts remove source-version windows and target-version ordering checks, but cross-version operation is still not guaranteed to be safe. Previously installed older scripts retain their original checks, and the lifecycle does not convert historical deployments; see the [version policy](production-deployment.md#version-policy). The package scripts do not automatically enroll or rebind keys, reset node identity, or purge existing certificate artifacts, and the former upgrade-time enrollment environment variables and marker are no longer used. Removing historical layout checks does not make arbitrary cross-version operations safe or grant an installed binary capabilities it does not implement.
+Upgrade an existing managed node by installing an explicitly selected Agent package, or through a Controller-driven upgrade. The v1.1.0 scripts remove source-version windows and target-version ordering checks, but cross-version operation is still not guaranteed to be safe. Previously installed older scripts retain their original checks, and the lifecycle does not convert historical deployments; see the [version policy](production-deployment.md#version-policy). The package scripts do not automatically enroll keys, reset node identity, or purge existing certificate artifacts, and the former upgrade-time enrollment environment variables and marker are no longer used. Removing historical layout checks does not make arbitrary cross-version operations safe or grant an installed binary capabilities it does not implement.
 
 ### Upgrade
 
-Native package installation runs the same verified repository lifecycle as the archive installer. An upgrade installs the matching complete node package: the Agent, privd and upgrader binaries, the rollback, retention, rebind and verification tools, the production Relay launcher, and the systemd units and retention timer. It keeps the existing identity, configuration and durable state. It does not enroll, approve, or authorize the node, and it cannot recover state left behind by a failed upgrade (use [Rollback](#rollback) for recovery).
+Native package installation runs the same verified repository lifecycle as the archive installer. An upgrade installs the matching complete node package: the Agent, privd and upgrader binaries, the rollback and verification tools, the production Relay launcher, and the systemd units. It keeps the existing identity, configuration and durable state. It does not enroll or authorize the node, and it cannot recover state left behind by a failed upgrade (use [Rollback](#rollback) for recovery).
 
 Before you begin:
 
@@ -479,9 +384,9 @@ sudo rpm -Uvh "$RELEASE_DIR/$AGENT_PACKAGE"
 
 Before changing backups, binaries, systemd units, or services, `upgrade-agent.sh` runs a strict preflight against the existing trust configuration. It verifies that `agent.env` contains a single absolute `CONTROLLER_COMMAND_VERIFICATION_KEY_FILE` and that the referenced Ed25519 public key satisfies the combined Agent and privd requirements for file type, ownership, mode, link count, symlinks, size, and directory ancestry. The shared key must be independently provisioned as `root:ocserv-agent` mode `0440` or `0640` beneath root-controlled ancestry; an Agent-owned legacy key is rejected and never promoted into a root trust anchor. The preflight also requires two distinct enrolled sealing key IDs and public-key fingerprints, derives each fingerprint from its root-owned private key, and rejects missing, reused, mismatched, symlinked, or unsafe key files. A legacy two-line `agent.env` or an invalid key therefore halts the upgrade with provisioning instructions before installing an Agent that would fail to restart. These checks enforce current trust requirements regardless of the source software version.
 
-Once the preflight passes, the script saves one matched snapshot under the root-only `/var/lib/ocservia-upgrade/upgrade-backup` hierarchy covering the previous Agent and privd binaries, both base systemd units, the durable upgrader and verifier, the production relay drop-in and launcher, the rebind helper, the retention executable, and the retention service and timer. Keeping this directory outside privd's systemd-managed `StateDirectory` prevents service startup from rewriting rollback evidence ownership. A root-owned manifest binds the exact snapshot digests, and rollback rejects unsafe ancestry, symlinks, hard links, ownership, modes, or file replacement. Optional files carry explicit `.previous` or `.absent` records that tell rollback whether to restore or remove the installed file. Retention depends on its matching rebind helper, the retention service depends on the retention executable, and the timer depends on the service. A rebind helper without retention remains a valid layout. Upgrading to a different package overwrites the previous snapshot, leaving only the most recent pre-upgrade state available for restoration. Reinstalling an identical verified package keeps the existing snapshot intact and restarts the running services.
+Once the preflight passes, the script saves one matched snapshot under the root-only `/var/lib/ocservia-upgrade/upgrade-backup` hierarchy covering the previous Agent and privd binaries, both base systemd units, the production relay drop-in and launcher, the durable upgrader binary and unit, and the verifier. Keeping this directory outside privd's systemd-managed `StateDirectory` prevents service startup from rewriting rollback evidence ownership. A root-owned manifest binds the exact 9 snapshot digests, and rollback rejects unsafe ancestry, symlinks, hard links, ownership, modes, or file replacement. Optional files carry explicit `.previous` or `.absent` records that tell rollback whether to restore or remove the installed file. Upgrading to a different package overwrites the previous snapshot, leaving only the most recent pre-upgrade state available for restoration. Reinstalling an identical verified package keeps the existing snapshot intact and restarts the running services.
 
-Before modifying package-owned files, the upgrade script persists the complete snapshot, atomically publishes the verified standalone rollback driver, and records the verified target digest in `/var/lib/ocservia-upgrade/installing-package`. If an upgrade is interrupted, a subsequent direct or native-package retry refuses to overwrite the existing snapshot; run the verified rollback first to restore the host, then retry the package operation. A matching completed retry clears a stale `installing-package` record only after verifying the installation commit, every package-owned file, and the rollback snapshot, while rollback clears the record only after all restores and removals are synced across filesystems. Neither path alters Controller binding authority or reverses database migrations. When an identical retry completes, it also starts an enabled retention timer after releasing the lifecycle lock, recovering service activation if a prior run was interrupted after the installation commit (explicitly disabled or masked timers are left untouched).
+Before modifying package-owned files, the upgrade script persists the complete snapshot, atomically publishes the verified standalone rollback driver, and records the verified target digest in `/var/lib/ocservia-upgrade/installing-package`. If an upgrade is interrupted, a subsequent direct or native-package retry refuses to overwrite the existing snapshot; run the verified rollback first to restore the host, then retry the package operation. A matching completed retry clears a stale `installing-package` record only after verifying the installation commit, every package-owned file, and the rollback snapshot, while rollback clears the record only after all restores and removals are synced across filesystems. Neither path alters Controller binding authority or reverses database migrations.
 
 To verify an upgrade, check the local units:
 
@@ -501,8 +406,8 @@ Before you begin:
 
 - Place the node in a controlled recovery window.
 - Confirm that the root-only upgrade snapshot at `/var/lib/ocservia-upgrade/upgrade-backup` is present and unmodified.
-- Reconcile any Controller operation affected by the outage. Running rollback stops the Agent, `privd`, active upgrader units, and the retention job, and marks every non-terminal (`accepted` or `running`) local upgrade operation `rolled_back` so it cannot be re-applied afterwards.
-- Ensure the snapshot is complete with all 13 recorded entries. Older 8- and 9-record snapshots remain readable with `ocservia-agent-rollback --verify-only`, but they lack prior rebind and retention evidence, and 8-record snapshots also lack launcher evidence. A mutating rollback refuses incomplete snapshots before stopping services, because missing records do not prove that the prior files were absent on disk. Recovering from an incomplete snapshot requires either a complete trusted matched snapshot or an independently reviewed manual restoration of the missing artifacts; no force or skip flag is provided.
+- Reconcile any Controller operation affected by the outage. Running rollback stops the Agent, `privd`, and active upgrader units, and marks every non-terminal (`accepted` or `running`) local upgrade operation `rolled_back` so it cannot be re-applied afterwards.
+- Ensure the snapshot is complete with all 9 recorded entries (`ocservia-agent.previous`, `ocservia-privd.previous`, `ocservia-agent.service.previous`, `ocservia-privd.service.previous`, plus `.previous`/`.absent` entries for `ocservia-agent-relays.conf`, `ocservia-agent-relays`, `ocservia-upgrader`, `ocservia-upgrader@.service`, and `ocservia-agent-verify`). A mutating rollback refuses incomplete snapshots before stopping services, because missing records do not prove that the prior files were absent on disk. Recovering from an incomplete snapshot requires either a complete trusted matched snapshot or an independently reviewed manual restoration of the missing artifacts; no force or skip flag is provided.
 - To validate the snapshot before changing anything on disk, run `sudo /usr/libexec/ocservia/ocservia-agent-rollback --verify-only`.
 
 To roll back the complete matched snapshot, run:
@@ -511,7 +416,7 @@ To roll back the complete matched snapshot, run:
 sudo /usr/libexec/ocservia/ocservia-agent-rollback
 ```
 
-The rollback command validates the complete snapshot and target destinations before stopping services. It stops retention before replacing the retention executable and imported rebind helper, restores binaries and units together (including the production relay drop-in and launcher state), reloads systemd, and starts privd before the Agent unconditionally, even if those services were stopped before rollback began. A restored retention timer is restarted after the completed lifecycle releases its lock so persistent timer catch-up runs against the restored files. An explicitly absent timer is disabled and removed. The command clears any pending `installing-package` record. The standalone rollback driver itself remains on disk so it can finish executing and re-read the snapshot if invoked again. Restoring binaries without their matching units is unsupported because the CLI and local wire contract can change together; never restore one binary on its own.
+The rollback command validates the complete snapshot and target destinations before stopping services. It restores binaries and units together (including the production relay drop-in and launcher state), reloads systemd, and starts privd before the Agent unconditionally, even if those services were stopped before rollback began. The command clears any pending `installing-package` record. The standalone rollback driver itself remains on disk so it can finish executing and re-read the snapshot if invoked again. Restoring binaries without their matching units is unsupported because the CLI and local wire contract can change together; never restore one binary on its own.
 
 The verifier and rollback script do not infer a software version from a missing Relay launcher or reject a snapshot on that basis alone. Any launcher referenced by a service unit must still exist on disk, and all snapshot integrity, trust, and configuration checks continue to apply. Operator configuration, node identity, and persistent state are preserved without silent conversion or reset. Removing the version check does not guarantee that the restored binary will work with the current configuration or on-disk data, and older scripts already installed on the host keep their original behavior.
 
@@ -525,7 +430,7 @@ If rollback fails, stop immediately and preserve both the snapshot and host diag
 
 ### Controller-driven single-node upgrade
 
-The console exposes one reconciled upgrade endpoint per node: `POST /api/v1/nodes/{node_id}/agent-upgrade` (RBAC action `agent.upgrade`, Operator role), which accepts a target version and a reason alongside a required `Idempotency-Key` header. Callers never supply a URL, file path, or package digest; the Controller looks up the digest in the operator-provisioned release catalog pointed to by `OCSERV_AGENT_RELEASE_MANIFEST` (an absolute path with no default). When that environment variable is unset, the Controller starts without a catalog and returns `503` on the agent-upgrade and agent-rollout endpoints. Enabling Controller-driven AgentUpgrade and rollouts requires a deployment-specific override that mounts the catalog file read-only into the control-plane container, because the shipped production Compose neither sets nor mounts `OCSERV_AGENT_RELEASE_MANIFEST`. The catalog file has this form:
+The console exposes one reconciled upgrade endpoint per node: `POST /api/v1/nodes/{node_id}/agent-upgrade` (workspace Admin session), which accepts a target version and a reason alongside a required `Idempotency-Key` header. Callers never supply a URL, file path, or package digest; the Controller looks up the digest in the operator-provisioned release catalog pointed to by `OCSERV_AGENT_RELEASE_MANIFEST` (an absolute path with no default). When that environment variable is unset, the Controller starts without a catalog and returns `503` on the agent-upgrade and agent-rollout endpoints. Enabling Controller-driven AgentUpgrade and rollouts requires a deployment-specific override that mounts the catalog file read-only into the control-plane container, because the shipped production Compose neither sets nor mounts `OCSERV_AGENT_RELEASE_MANIFEST`. The catalog file has this form:
 
 ```json
 {
@@ -541,7 +446,7 @@ The console exposes one reconciled upgrade endpoint per node: `POST /api/v1/node
 
 This manifest is the only digest source for the workflow and must list between 1 and 512 unique `(version, architecture)` entries; once `OCSERV_AGENT_RELEASE_MANIFEST` is set, a missing, unreadable, malformed, or ambiguous file aborts Controller startup. The Controller does not synchronize with GitHub or container registries, so preparing an upgrade consists of placing the archive in each node's local spool (see [Durable self-upgrade runner](#durable-self-upgrade-runner)) and adding its exact digest to the manifest. Under the v1.1.0 policy reset, the Controller accepts any explicit trusted target regardless of whether it is lower, equal, or higher than the current version or whether the source version is unknown; version classifications shown in the UI are informational and do not govern execution. Each request must still supply the node's current revision (`If-Match`) and preserve the exact `node + version + digest + architecture` release identity.
 
-To dispatch the upgrade, the Controller requires an approved typed-command capability on the node (`ocserv.agent.upgrade.v2` or `ocserv.agent.upgrade.v1`, preferring v2 when both are approved) and binds that exact capability name into the signed command. Nodes advertising only v1 remain eligible despite lacking the former software downgrade fence; the Controller never fabricates capabilities or converts historical payloads. The already-installed runner executes the command, so previously installed code retains its own runtime behavior. Advertising a command capability does not guarantee cross-version safety or certify historical version combinations.
+To dispatch the upgrade, the Controller requires the node's typed-command capability (`ocserv.agent.upgrade.v2` or `ocserv.agent.upgrade.v1`, preferring v2 when both are active) and binds that exact capability name into the signed command. Nodes advertising only v1 remain eligible despite lacking the former software downgrade fence; the Controller never fabricates capabilities or converts historical payloads. The already-installed runner executes the command, so previously installed code retains its own runtime behavior. Advertising a command capability does not guarantee cross-version safety or certify historical version combinations.
 
 New upgrade operations start in the `queued` state and move to the non-terminal `accepted` state when the Agent acknowledges scheduling (acknowledgement alone never counts as completion). As the upgrader restarts the Agent and privd, the node temporarily disconnects as part of normal progress. The Controller determines terminal outcomes strictly from durable evidence: `succeeded` requires the node to reconnect and report the target Agent version alongside a successful local terminal result from the upgrader; an explicit local failure closes the operation as `failed`; and a matched rollback closes it as `rolled_back`. If an operation remains unresolved when the reconciliation window expires (`OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT`, defaulting to 30 minutes with an accepted startup range of 1 minute to 24 hours; not forwarded by the shipped production Compose unless overridden), the Controller closes it conservatively as `unknown` and marks its command expired to prevent blind retries. Only one upgrade may be active per node at a time, so concurrent requests fail with a conflict until the active operation reaches a terminal state. Every terminal transition appends an audit record capturing the operator, source and target versions, and outcome.
 
@@ -559,7 +464,7 @@ All native DEB and RPM packages (`amd64` and `arm64`) include the durable runner
 
 ### Fleet rolling upgrades
 
-`POST /api/v1/agent-rollouts` (RBAC action `agent.upgrade`, Operator role) upgrades a selected set of nodes to a single trusted target version in bounded batches. The creation request takes the target version, node IDs, an optional `batch_size` (defaulting to 5, bounded from 1 to 20), and a reason. Callers cannot set `stop_on_failure` in the request; the server fixes `StopOnFailure = true`, and the immutable rollout request hash covers the target version, sorted node set, batch size, and `stop_on_failure = true`. Every selected node's architecture must have a matching target entry in the operator-provisioned release catalog, and every selected node must advertise an approved `ocserv.agent.upgrade.v1` or `ocserv.agent.upgrade.v2` capability.
+`POST /api/v1/agent-rollouts` (workspace Admin session) upgrades a selected set of nodes to a single trusted target version in bounded batches. The creation request takes the target version, node IDs, an optional `batch_size` (defaulting to 5, bounded from 1 to 20), and a reason. Callers cannot set `stop_on_failure` in the request; the server fixes `StopOnFailure = true`, and the immutable rollout request hash covers the target version, sorted node set, batch size, and `stop_on_failure = true`. Every selected node's architecture must have a matching target entry in the operator-provisioned release catalog, and every selected node must advertise `ocserv.agent.upgrade.v1` or `ocserv.agent.upgrade.v2`.
 
 Fleet version badges in the console and the recommended version displayed in Settings come from the operator-pinned `OCSERV_RECOMMENDED_AGENT_VERSION` (SemVer), which classifies observed versions without scheduling any upgrades on its own. Configure it in the Controller section of `install.env` or export it in the invoking shell before running the production installer or bootstrap, so the root lifecycle forwards the resolved value to the migrate and control-plane containers. An explicitly empty export overrides `install.env` and clears the recommendation.
 
@@ -569,69 +474,11 @@ Batch 0 always runs as a mandatory single-node canary, and subsequent batches st
 
 Within each batch, every node follows the reconciled single-node upgrade lifecycle under its own stable operation ID, and nodes that reach `succeeded` are never redispatched. A batch advances only after all of its nodes reach a terminal outcome, pausing the rollout if any node finishes as `failed`, `unknown`, or `rolled_back`. If a node is ineligible when its batch dispatches (because it is offline, has a stale observation, withdrew its capability, has another upgrade active, or lacks a manifest entry), the Controller marks it `skipped` with a reason code and pauses the rollout. Resuming a paused rollout requeues the current batch's `failed`, `unknown`, `rolled_back`, and skipped-canary nodes for a fresh eligibility check, while skipped non-canary nodes remain `skipped` with their recorded reason. The rollout detail view tracks succeeded, failed, and skipped nodes per batch alongside the remaining count, so an overall rollout status of `succeeded` does not imply that every originally selected node was upgraded.
 
-Rollout state persists across Controller restarts and console sessions. Viewing a rollout requires `operation.read`, and listing a workspace's rollouts requires that permission at workspace scope (node-scoped bindings do not list them). Creating or resuming a rollout requires `agent.upgrade`, and each rollout is visible and resumable only within its own workspace.
-
-## Rebind to another Controller
-
-Run the packaged `ocservia-agent-rebind` CLI locally on the managed node as root when moving an Agent to another Controller during planned maintenance or recovery. An operator must still approve the node on the target Controller. What rebinding preserves and what it does not copy, and the authority, fence and quarantine rules, are in [Controller rebind](../reference/stable-contracts.md#controller-rebind).
-
-Before starting, install a matched release that includes the rebind CLI, Agent, privd, and upgrader together on a host with Python 3, OpenSSL, and util-linux. The node must use the packaged systemd launchers and their standard state paths; custom launchers or state arguments are refused because their recovery evidence cannot be inferred safely. The initial `agent.env` must retain its independently verified `AGENT_ENDPOINT_ID` enrollment binding. Once a node has been rebound, bootstrap installation reruns refuse it, so future upgrades must use the native package lifecycle.
-
-Independently provision the target Controller EndpointID and Ed25519 command verification public key on the host, storing the key and bootstrap token as protected root-owned regular files under trusted root-owned parent directories. The existing relay configuration must already reach the target Controller through a single dedicated Relay, with `RELAY_URL_B` omitted or left empty in `relays.env`. If `RELAY_URL_B` is non-empty, `prepare` (including `--dry-run`), `resume`, and any uncommitted operation will abort before enrollment, operation creation, or service shutdown. `status` inspection and post-publication recovery remain available.
-
-1. If the old Controller is still reachable, revoke its node record using the standard independently approved [node revocation flow](#revoke-a-node). When the old Controller is permanently unavailable, declare that state with `--source-disposition unreachable` in step 3; contacting the old Controller is not required, and the CLI records the disposition you declare without probing it.
-2. On the new Controller, create a short-lived bootstrap token via `POST /api/v1/node-bootstrap-tokens` with `expected_endpoint_id` set to the existing Agent EndpointID so the Controller checks that binding before consuming the token. Rebinding uses the existing possession proof and recoverable `obt1_` token protocol (no other token type is accepted) and always assigns a new NodeID. The target must be a different Controller with a different command key, and its `environment` must match the token's. Its database must have no record of this EndpointID in any state: a Controller that has previously held the endpoint (even in `revoked` state) refuses the enrollment.
-3. Prepare the rebind and enroll with the target Controller, supplying a reason and the source disposition:
-
-   ```sh
-   sudo /usr/libexec/ocservia/ocservia-agent-rebind prepare \
-     --controller <target-controller-endpoint-id> \
-     --command-key-file /etc/ocservia-agent/new-controller.pub.pem \
-     --token-file /etc/ocservia-agent/new-controller.token \
-     --environment production \
-     --source-disposition revoked \
-     --reason 'Replace the retired Controller'
-   ```
-
-   Pass `--dry-run` to validate host prerequisites without enrolling or publishing authority changes. During a normal run, `prepare` prints `PREPARED` along with a local operation UUID before contacting the Controller, followed by `ENROLLED_LOCAL` and the new pending NodeID.
-4. Complete the standard [approval and activation procedure](#approve-the-node) on the target Controller. The node must be active before `commit` can verify a session, and bootstrap token possession does not authorize approval (if the enrollment response in step 3 is still unknown locally, recover it before approving the node). Privileged mutations also require [registering the node's privd attestation key](#register-the-privd-attestation-key) and approving `privd_result_attestation_v1`. Until that attestation is approved, the node remains readable while privileged mutations fail closed.
-5. Commit the confirmed operation:
-
-   ```sh
-   sudo /usr/libexec/ocservia/ocservia-agent-rebind commit <operation-uuid>
-   ```
-
-Running `commit` stops the Agent, privd, and any active upgrade runners, publishes a single root-owned authority record at `/etc/ocservia-agent/active-binding`, and starts privd before the Agent. It then waits up to about a minute for a signed session grant from the new Controller and verifies it independently through privd before recording `VERIFIED` and marking the source binding sealed in the operation record while leaving the historical source files in place. The authority selector covers the Controller endpoint, command key, new NodeID, and all derived durable namespaces, so an old Controller that comes back online later cannot regain authority.
-
-### Resume and inspect
-
-```sh
-sudo /usr/libexec/ocservia/ocservia-agent-rebind status <operation-uuid>
-sudo /usr/libexec/ocservia/ocservia-agent-rebind resume <operation-uuid>
-```
-
-Use `resume` when preparation or enrollment is interrupted before authority publication. A response timeout leaves the original token and identity in place, so rerunning `resume` recovers that token's same pending node on the target Controller. Do not create a second token or node record to work around an unknown response. Only one unfinished operation is permitted at a time. Supplying an incorrect pin, key, or token leaves the source authority untouched, and incomplete filesystem staging is preserved for diagnosis and refused instead of being repaired by generating a new endpoint key. Any failure before the selector is committed leaves the source binding active and untouched.
-
-Once `commit` has published the authority record, rerun `commit` to retry service startup and session verification. If restarting services or verifying the session fails at that stage, the target binding remains committed with the source evidence intact. The node never reverts automatically to the old Controller. Resolve the target approval, network connectivity, or host health issue and rerun `commit`. If target commands may already have run, moving back to the original Controller requires a new explicit rebind operation, and a Controller that previously held the endpoint refuses it. A stale operation cannot override a newer binding, and package upgrades and rollbacks share the lifecycle lock and refuse binaries that cannot enforce an existing binding.
-
-Local operation records are stored under `/var/lib/ocservia-rebind/<operation-uuid>` and must be kept alongside the source databases for recovery. If `commit` finds unfinished commands in the Agent journal, a missing journal, prepared privileged effects, incomplete upgrades, or unreadable evidence when publishing the binding, it quarantines privileged mutations for the target Controller while still permitting read-only operation and new authority verification. The CLI provides no command to clear that quarantine; preserve and reconcile the underlying records, and never alter file timestamps or delete a state database to clear quarantine. Rebind performs no historical cleanup. See [Rebind and retention limits](incident-recovery.md#rebind-and-retention-limits).
-
-### Independent local retention
-
-Historical compaction runs independently of rebind, on its own schedule. Package installation enables a single host-wide `ocservia-agent-retention.timer` that runs hourly with a randomized delay (inspect failures with `journalctl -u ocservia-agent-retention.service`). To override the default windows, create a root-owned `/etc/ocservia-agent/retention.env` with mode `0600`:
-
-```ini
-OCSERV_AGENT_RETIRED_BINDING_RETENTION_DAYS=30
-OCSERV_REBIND_HISTORY_RETENTION_DAYS=365
-```
-
-Permitted values are listed in the retention table in [Independent retention](../reference/stable-contracts.md#independent-retention); zero, negative, unknown, or duplicate settings are rejected as errors. Every run validates `retention.env` before touching disk, and you can run `sudo /usr/libexec/ocservia/ocservia-agent-retention` directly to validate the file and execute one bounded cleanup pass.
-
-On the Controller, the scheduler compacts terminal command payloads and retired-node snapshots on its own. The cutoff variables, defaults and safety boundaries for both the Controller and the nodes are in [Independent retention](../reference/stable-contracts.md#independent-retention).
+Rollout state persists across Controller restarts and console sessions. Viewing, listing, creating, or resuming a rollout requires an authenticated Admin session for that rollout's workspace.
 
 ## Remove a node package
 
-Package removal (`dpkg -r`, `rpm -e`) runs the verified `uninstall-agent.sh`, which disables and stops the Agent, privd, and retention timer and removes the binaries and units (including the production Relay launcher) while preserving identity, state, and configuration. The Controller then shows the node offline. Neither `dpkg --purge` nor the package manager triggers the state purge; only `uninstall-agent.sh --purge-state` does so.
+Package removal (`dpkg -r`, `rpm -e`) runs the verified `uninstall-agent.sh`, which disables and stops the Agent and privd units and removes the binaries and units (including the production Relay launcher) while preserving identity, state, and configuration. The Controller then shows the node offline. Neither `dpkg --purge` nor the package manager triggers the state purge; only `uninstall-agent.sh --purge-state` does so.
 
 Passing `--purge-state` is irreversible and should only be done after revoking the node identity on the Controller (see [Revoke a node](#revoke-a-node)) and archiving required audit material. It deletes the Agent and privd state directories, `/var/lib/ocservia-upgrade` (including the rollback snapshot, preventing any subsequent rollback), and `/etc/ocservia-agent` (`agent.env`, keys, and relay token), and then removes the `ocserv-agent` user and group. Purging local state does not update the Controller, so revoke the node record there separately.
 
@@ -639,13 +486,13 @@ Passing `--purge-state` is irreversible and should only be done after revoking t
 
 ### Journal storage monitoring
 
-Monitor journal storage independently of Agent connectivity. The command journal has no automatic retention policy, and normal authorized commands accumulate durable state over time. From a reviewed checkout, run this read-only Linux probe as `ocserv-agent` (or another account permitted to stat the state directory):
+Monitor journal storage independently of Agent connectivity. The command journal compacts terminal command entries after retention bounds, and normal authorized commands accumulate durable state over time. From a reviewed checkout, run this read-only Linux probe as `ocserv-agent` (or another account permitted to stat the state directory):
 
 ```bash
 sudo -u ocserv-agent bash scripts/check-agent-storage.sh /var/lib/ocservia-agent/agent.db
 ```
 
-Pass the actual database path when `--journal` overrides the default. When an active Controller binding exists (for example after a rebind), the Agent writes its journal to `/var/lib/ocservia-agent/bindings/<node-id>/agent.db` instead of the default path, so monitor that file. The probe reports the logical sizes of the database, WAL, and SHM files, their combined allocated bytes, and available filesystem bytes and inodes without opening SQLite or checkpointing, truncating, or deleting any state. If the state files are missing or unreadable, the probe reports UNKNOWN (exit code 3).
+Pass the actual database path when `--journal` overrides the default. The probe reports the logical sizes of the database, WAL, and SHM files, their combined allocated bytes, and available filesystem bytes and inodes without opening SQLite or checkpointing, truncating, or deleting any state. If the state files are missing or unreadable, the probe reports UNKNOWN (exit code 3).
 
 Schedule this probe in the node's monitoring agent every 15 minutes with a 30-second execution timeout. Exit codes are 0 OK, 1 WARNING, 2 CRITICAL, and 3 UNKNOWN; configure alerts on exit codes 1, 2, or 3, on timeouts, or after two missed samples. The default warning and critical thresholds are 80% and 90% for both disk and inode usage, and can be tuned with `STORAGE_WARNING_PERCENT` and `STORAGE_CRITICAL_PERCENT`. These defaults are starting operational thresholds and do not guarantee capacity. The repository does not install a scheduler or notification destination automatically.
 
@@ -656,7 +503,7 @@ sudo -u ocserv-agent env STORAGE_WARNING_PERCENT=1 STORAGE_CRITICAL_PERCENT=99 \
   bash scripts/check-agent-storage.sh /var/lib/ocservia-agent/agent.db
 ```
 
-When a warning fires, inspect journal growth alongside unrelated files on the same filesystem and plan capacity expansion. On a critical alert, stop initiating new command dispatches or rollouts to the affected node and expand storage before resuming operations. Always keep the database and WAL files together during controlled recovery; never delete command identities, revision fences, pending or unknown records, or WAL files to reclaim space, and do not introduce age-based cleanup until idempotency, signed replay, and recovery retention boundaries are explicitly defined.
+When a warning fires, inspect journal growth alongside unrelated files on the same filesystem and plan capacity expansion. On a critical alert, stop initiating new command dispatches or rollouts to the affected node and expand storage before resuming operations. Always keep the database and WAL files together during controlled recovery; never delete command identities, revision fences, pending or unknown records, or WAL files to reclaim space, and do not introduce ad-hoc age-based cleanup until idempotency, signed replay, and recovery boundaries are explicitly preserved.
 
 ### UTC and network-monitor diagnostics
 
@@ -680,12 +527,12 @@ Retain the exact release version, host architecture, command output, and redacte
 
 Confirm that the expected EndpointID matches the one printed from the node's persistent identity directory and that the Controller EndpointID and Relay URL pins have not changed. The expected EndpointID, Controller EndpointID, and identity directory must stay aligned. Changing the Controller pin or replacing the identity directory represents a new trust decision.
 
-Enrollment and bootstrap tokens are single-use and short-lived. Issue a new token only after confirming that the previous token was rejected or expired. After a failed or unknown enrollment response, always query the Controller by that EndpointID before issuing a new token, and follow [Recover an uncertain enrollment response](#recover-an-uncertain-enrollment-response) first.
+Bootstrap and installation tokens are single-use and short-lived. Issue a new token only after confirming that the previous token was rejected or expired. After a failed or unknown enrollment response, always query the Controller by that EndpointID before issuing a new token, and follow [Recover an uncertain enrollment response](#recover-an-uncertain-enrollment-response) first.
 
 If the Controller enrollment routes return `404`, the Controller has no `OCSERV_CONTROLLER_ENDPOINT_ID` configured. See [Prepare the configuration](production-deployment.md#prepare-the-configuration).
 
-Enrollment only creates a pending node record. A different authorized principal must approve the node before it can open a normal mutation-capable session, even if the host already shows `ENROLLED_LOCAL` or active local services. See [Approve the node](#approve-the-node).
+Configuration-only enrollment without an `oit1_` installation token leaves services stopped until local trust files and `privd` attestation are verified before enabling the daemons.
 
 ### Agent will not start after an upgrade
 
-Inspect `journalctl -u ocservia-privd -u ocservia-agent` to see which check failed, then verify `/etc/ocservia-agent/agent.env`, the independently provisioned command verification key, both distinct sealing keys, `relays.env` (which requires a literal HTTPS `RELAY_URL_A` and rejects any non-empty `RELAY_URL_B`), and the relay access token and CA files it references. When an upgrade fails during preflight before modifying files on disk, fix the reported prerequisite and retry. If the new binaries were already installed and must be reverted, run [Rollback](#rollback) instead of copying binaries from an unverified directory.
+Inspect `journalctl -u ocservia-privd -u ocservia-agent` to see which check failed, then verify `/etc/ocservia-agent/agent.env`, the independently provisioned command verification key, both distinct sealing keys, `relays.env` (which requires a literal HTTPS `RELAY_URL_A`), and the relay access token and CA files it references. When an upgrade fails during preflight before modifying files on disk, fix the reported prerequisite and retry. If the new binaries were already installed and must be reverted, run [Rollback](#rollback) instead of copying binaries from an unverified directory.

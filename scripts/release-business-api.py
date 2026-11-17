@@ -14,7 +14,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import urllib.parse
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,10 +109,6 @@ def local():
     api('nodes')
     ids = sql("SELECT string_agg(id::text, ',' ORDER BY id) FROM identities WHERE issuer='local';").split(',')
     assert len(ids) == 1
-    password = secrets.token_hex(32)
-    api('local-users', {'username': 'business-test-reader', 'password': password}, status=201)
-    api('auth/login', {'username': 'business-test-reader', 'password': password}, role='reader', status=204)
-    api('nodes', role='reader', status=403)
     record('local_auth_and_workspace_isolation', identity_ids=ids)
 
 
@@ -140,104 +135,17 @@ def trust_controller():
         'mount', '--bind', '/tmp/ocservia-business-test-ca.crt', '/etc/ssl/certs/ca-certificates.crt')
 
 
-def oidc():
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *_args):
-            return None
-
-    issuer = os.environ['OCSERV_OIDC_ISSUER']
-
-    def login(role, fault=''):
-        jar = client(role)[1]
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=CONTEXT),
-                                            urllib.request.HTTPCookieProcessor(jar), NoRedirect())
-
-        def request(url, headers=None):
-            try:
-                return opener.open(urllib.request.Request(url, headers=headers or {}), timeout=15)
-            except urllib.error.HTTPError as error:
-                return error
-
-        (WORK / 'oidc-fault/mode').write_text(fault)
-        start = request(ORIGIN + '/api/v1/auth/login')
-        assert start.status == 302
-        location = start.headers['Location']
-        assert location.startswith(issuer + '/authorize?')
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
-        assert query['code_challenge_method'] == ['S256'] and query['state'][0] and query['nonce'][0]
-        secret = (WORK / 'private/oidc-client-secret').read_text().strip()
-        authorized = request(location, {'Authorization': 'Basic ' + base64.b64encode(('upgrade:' + secret).encode()).decode()})
-        assert authorized.status == 302
-        callback = authorized.headers['Location']
-        if fault in ('code', 'state'):
-            parts = urllib.parse.urlparse(callback)
-            values = urllib.parse.parse_qs(parts.query)
-            values[fault] = ['invalid-business-test-value']
-            callback = parts._replace(query=urllib.parse.urlencode(values, doseq=True)).geturl()
-        response = request(callback)
-        assert response.status == (401 if fault else 302)
-        assert request(issuer + '/.well-known/openid-configuration').status == 200
-        if fault:
-            assert not any(c.name == '__Host-ocservia_session' for c in jar)
-        else:
-            assert any(c.name == '__Host-ocservia_session' and c.secure for c in jar)
-            assert request(callback).status == 401  # one-use code/state
-        jar.save(ignore_discard=True)
-
-    local_enabled = os.environ['OCSERV_LOCAL_AUTH_ENABLED'] == 'true'
-    assert api('auth/methods', role='anonymous') == {'local': local_enabled, 'oidc': True}
-    if not local_enabled:
-        login('oidc-only')
-        api('nodes', role='oidc-only')
-        api('auth/login', {'username': 'business-test-requester', 'password': 'disabled'}, role='disabled-local', status=404)
-        record('external_oidc_only_and_local_disabled')
-        return
-    for fault in ('issuer', 'signature', 'nonce', 'code', 'state'):
-        login('oidc-' + fault, fault)
-        api('nodes', role='oidc-' + fault, status=401)
-        record('oidc_reject_' + fault)
-    login('oidc')
-    api('nodes', role='oidc', status=403)
-    identity = sql("SELECT id FROM identities WHERE issuer='" + issuer + "' AND subject='upgrade-operator';")
-    uuid.UUID(identity)
-    api('role-bindings', {'identity_id': identity, 'workspace_id': WORKSPACE, 'role': 'Viewer',
-                          'resource_type': 'workspace', 'reason': 'Business test: OIDC scope'}, status=201)
-    api('nodes', role='oidc')
-    api('nodes', role='oidc', headers={'X-Workspace-ID': '00000000-0000-7000-8000-000000000072'}, status=403)
-    run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'control-plane')
-    trust_controller()
-
-    def ready():
-        try:
-            return api('readyz', role='anonymous').get('status') == 'ok'
-        except (RuntimeError, urllib.error.URLError):
-            return False
-    wait_for('Controller after restart', ready)
-    api('nodes', role='oidc')
-    api('auth/logout', {}, role='oidc', status=204)
-    api('nodes', role='oidc', status=401)
-    record('external_https_oidc_pkce_callback_workspace_restart_logout', identity_id=identity)
-
-
-def token():
-    result = api('enrollment-tokens', {'workspace_id': WORKSPACE, 'environment': 'production',
-                                      'expected_node_name': 'business-test-agent',
-                                      'expected_endpoint_id': os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID'],
-                                      'reason': 'Business test: isolated native node'}, status=201)
-    (WORK / 'private' / 'enrollment-token').write_text(result['token'])
-
-
 def bootstrap_token():
-    # Standard registration: no EndpointID until the Agent's possession proof.
-    result = api('node-bootstrap-tokens', {'workspace_id': WORKSPACE, 'environment': 'production',
-                                          'expected_node_name': 'business-test-agent',
-                                          'reason': 'Business test: isolated native bootstrap'}, status=201)
-    assert result['token'].startswith('obt1_')
-    # The private copy is redaction input only; the installer consumes the source.
+    # Token-only installation issues an EndpointID-unbound oit1_ token.
+    result = api('node-bootstrap-tokens', {'installation': True, 'workspace_id': WORKSPACE, 'environment': 'production',
+                                           'expected_node_name': 'business-test-agent',
+                                           'reason': 'Business test: isolated native bootstrap'}, status=201)
+    assert result['token'].startswith('oit1_')
+    # The private copy is redaction input only; the probe removes the staged token file.
     (WORK / 'private' / 'bootstrap-token').write_text(result['token'])
     (WORK / 'bootstrap-token-id').write_text(result['id'])
-    source = WORK / 'bootstrap' / 'node-bootstrap-token'
-    source.parent.mkdir(mode=0o700)
+    source = WORK / 'bootstrap' / 'join-token'
+    source.parent.mkdir(mode=0o700, exist_ok=True)
     with os.fdopen(os.open(source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as output:
         output.write(result['token'])
     assert sql(f"SELECT expected_endpoint_id IS NULL AND consumed_at IS NULL FROM node_bootstrap_tokens WHERE id='{result['id']}';") == 't'
@@ -247,33 +155,20 @@ def bootstrap_token():
 def bootstrap_verify():
     node, endpoint = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'], os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID']
     token_id = (WORK / 'bootstrap-token-id').read_text()
-    digest = hashlib.sha256((WORK / 'private' / 'bootstrap-token').read_text().encode()).hexdigest()
+    root_token = (WORK / 'private' / 'bootstrap-token').read_text().strip()
+    child_digest = hashlib.sha256(b'ocservia/install-enrollment/v1\x00' + root_token.encode()).digest()
+    child_token = 'obt2_' + base64.urlsafe_b64encode(child_digest).decode().rstrip('=')
+    digest = hashlib.sha256(child_token.encode()).hexdigest()
     row = json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(token_hash,'hex') token_hash,"
                          "encode(bound_endpoint_id,'hex') bound_endpoint,expected_endpoint_id IS NULL unbound_at_creation,"
                          "consumed_node_id,consumed_at IS NOT NULL consumed "
                          f"FROM node_bootstrap_tokens WHERE id='{token_id}') s;"))
     assert row == {'token_hash': digest, 'bound_endpoint': endpoint, 'unbound_at_creation': True,
                    'consumed_node_id': node, 'consumed': True}, 'bootstrap token binding'
-    assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'pending'
-    assert sql(f"SELECT encode(endpoint_id,'hex') FROM node_endpoint_keys WHERE node_id='{node}';") == endpoint
-    record('bootstrap_token_consumed_and_bound_pending', token_id=token_id, node_id=node)
-
-
-def approve():
-    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'pending'
-    caps = json.loads(sql(f"SELECT json_agg(capability ORDER BY capability) FROM node_capabilities WHERE node_id='{node}';"))
-    binding = {'labels': {}, 'policy': 'standard', 'capabilities': caps}
-    api(f'nodes/{node}/approval', {**binding, 'reason': 'Business test: direct Admin activation'})
     assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'active'
-    credential = api(f'nodes/{node}/privd-attestation-credentials',
-                     {'ttl_seconds': 300, 'reason': 'Business test: receipt authority'}, status=201)
-    proof = json.loads(run('sudo', '/usr/libexec/ocservia/ocservia-privd', 'attestation-registration',
-                          '/var/lib/ocservia-privd/attestation.key', node,
-                          credential['controller_nonce_hex'], credential['credential_context_sha256_hex']))
-    proof['credential'] = credential['credential']
-    api(f'nodes/{node}/privd-attestation-keys:register', proof, role='anonymous', status=201)
-    record('pending_approve_active_and_receipt_authority', node_id=node)
+    assert sql(f"SELECT encode(endpoint_id,'hex') FROM node_endpoint_keys WHERE node_id='{node}';") == endpoint
+    assert sql(f"SELECT count(*) FROM node_privd_attestation_keys WHERE node_id='{node}' AND state='active';") == '1'
+    record('bootstrap_token_consumed_and_bound_active', token_id=token_id, node_id=node)
 
 
 def cross_check(operation):
@@ -466,10 +361,6 @@ def smoke_user():
 def configuration():
     node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     prefix = 'nodes/' + node
-    if os.environ.get('OCSERV_PACKAGE') == 'source-1.6.0':
-        assert ocserv_version() == (1, 6, 0)
-        assert api(prefix)['ocserv_version'] == '1.6.0'
-        record('ocserv160_controller_observed', ocserv_version='1.6.0')
     browser = json.loads((EVIDENCE / 'browser-checkpoints.json').read_text())
     entry = next(item for item in browser if item['name'] == 'browser_complete_config_apply')
     applied = api('operations/' + entry['operation']['id'])
@@ -771,7 +662,7 @@ def rollout_verify():
     created = next(entry for entry in entries if entry['name'] == 'browser_agent_rollout')['rollout']
     rollout = api('agent-rollouts/' + created['id'])
     assert rollout['state'] == 'succeeded' and rollout['target_version'] == target
-    assert rollout['stop_on_failure'] is True and not rollout.get('approval_id')
+    assert rollout['stop_on_failure'] is True
     assert [(item['node_id'], item['batch'], item['state']) for item in rollout['nodes']] == [(node, 0, 'succeeded')]
     wait_for('upgraded Agent online', lambda: (value if (value := api('nodes/' + node))['connection_state'] == 'online'
                                                 and value['agent_version'] == target else None))
@@ -847,7 +738,7 @@ def uninstall():
     assert 'ActiveState=active' in ocserv and 'MainPID=0\n' not in ocserv
     native_before = uninstall_native()
     assert native_before['processes']
-    for unit in ('ocservia-agent.service', 'ocservia-privd.service', 'ocservia-agent-retention.timer'):
+    for unit in ('ocservia-agent.service', 'ocservia-privd.service'):
         assert any(row['unit'] == unit and row['active'] == 'active' for row in native_before['units'])
     trust_query = ("SELECT status||'|'||authorization_revision FROM nodes WHERE id='" + node + "';")
     trust = sql(trust_query)
@@ -861,8 +752,7 @@ def uninstall():
              and run('sudo', 'find', path, '-maxdepth', '0', '-type', 'f').strip()]
     assert paths
     paths += ['/usr/libexec/ocservia', '/usr/lib/systemd/system/ocservia-agent.service',
-              '/usr/lib/systemd/system/ocservia-privd.service', '/usr/lib/systemd/system/ocservia-agent-retention.timer',
-              '/usr/lib/systemd/system/ocservia-agent-retention.service', '/usr/lib/systemd/system/ocservia-upgrader@.service']
+              '/usr/lib/systemd/system/ocservia-privd.service', '/usr/lib/systemd/system/ocservia-upgrader@.service']
     record('uninstall_before', node_id=node, endpoint_id=os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID'], identity=identity,
            owner=owner_before, trust=trust, endpoint_trust=endpoint_trust, ocserv=ocserv, native=native_before)
     # No purge, autoremove, revocation or preliminary systemctl stop.
@@ -912,7 +802,6 @@ def revocation():
     effects = node_side_effects()
     path, body = prefix + '/revocation', {'reason': 'Business test: terminal node revocation'}
     api(path, body, role='anonymous', status=401)
-    api(path, body, role='reader', status=403)
     api(path, body, headers={'Origin': 'https://attacker.invalid'}, status=403)
     assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'active'
     record('revocation_unauthorized_rejected')
@@ -1005,11 +894,6 @@ def single_relay_recovery(ping, native_session, operations):
     finally:
         run('docker', 'unpause', control)
     relay = os.environ['OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER']
-    denied = api(prefix + '/service:reload', {'reason': 'Business test: denied reader', 'ttl_seconds': 300},
-                 role='reader', headers={'Idempotency-Key': secrets.token_hex(16),
-                                         'If-Match': f'"revision-{api(prefix)["version"]}"'}, status=403)
-    assert denied['type'] == 'https://ocservia.dev/problems/forbidden'
-    record('reader_cannot_reload_service')
 
     def reload_count():
         return run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
@@ -1361,7 +1245,7 @@ def vpn_smoke(phase, relay_recovery=False):
 
 if __name__ == '__main__':
     phase = sys.argv[1]
-    if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'bootstrap_token', 'bootstrap_verify', 'approve', 'certificate', 'config_prepare', 'configuration',
+    if phase not in ('local', 'transport_ready', 'trust_controller', 'bootstrap_token', 'bootstrap_verify', 'certificate', 'config_prepare', 'configuration',
                      'browser_prepare', 'browser_verify', 'business', 'smoke_user', 'rollout_ready', 'rollout_verify',
                      'vpn_after_config_apply', 'vpn_after_rollback', 'resilience', 'revocation', 'uninstall'):
         raise SystemExit('unknown phase')

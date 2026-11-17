@@ -2,15 +2,9 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -18,22 +12,15 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
-	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/oauth2"
 )
 
 const authTestOrigin = "https://admin.example.test"
 
-func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, issuer string) *Server {
+func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, httpConfigs ...HTTPConfig) *Server {
 	t.Helper()
 	cfg := auth.Config{LocalEnabled: local, SessionKey: make([]byte, 32), SessionTTL: time.Hour}
-	if issuer != "" {
-		cfg.Issuer, cfg.ClientID, cfg.ClientSecret = issuer, "client", "secret"
-		cfg.RedirectURL = authTestOrigin + "/api/v1/auth/callback"
-	}
 	if pool == nil {
 		pool = &pgxpool.Pool{}
 	}
@@ -42,8 +29,10 @@ func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, issuer stri
 		t.Fatal(err)
 	}
 	config := testHTTPConfig(false)
-	s := newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(postgres.WrapPool(pool))})
-	return s
+	if len(httpConfigs) > 0 {
+		config = httpConfigs[0]
+	}
+	return newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: service})
 }
 
 func authHTTPRequest(s *Server, method, path, body, origin string) *httptest.ResponseRecorder {
@@ -56,42 +45,18 @@ func authHTTPRequest(s *Server, method, path, body, origin string) *httptest.Res
 	return w
 }
 
-func TestAuthHTTPMethodsAndDisabledRoutes(t *testing.T) {
-	for _, local := range []bool{false, true} {
-		for _, oidc := range []bool{false, true} {
-			t.Run(fmt.Sprintf("local=%t/oidc=%t", local, oidc), func(t *testing.T) {
-				issuer := ""
-				if oidc {
-					issuer = "https://idp.example.test"
-				}
-				s := newAuthHTTPServer(t, nil, local, issuer)
-				w := authHTTPRequest(s, "GET", "methods", "", "")
-				if w.Code != 200 || strings.TrimSpace(w.Body.String()) != fmt.Sprintf(`{"local":%t,"oidc":%t}`, local, oidc) {
-					t.Fatalf("methods: %d %s", w.Code, w.Body)
-				}
-				if !local {
-					for i := 0; i < 7; i++ {
-						if w := authHTTPRequest(s, "POST", "login", `{}`, ""); w.Code != 404 {
-							t.Fatalf("disabled local: %d", w.Code)
-						}
-					}
-				}
-				if !oidc {
-					for _, path := range []string{"login", "callback"} {
-						for i := 0; i < 32; i++ {
-							if w := authHTTPRequest(s, "GET", path, "", ""); w.Code != 404 {
-								t.Fatalf("disabled OIDC %s: %d", path, w.Code)
-							}
-						}
-					}
-				}
-			})
+func TestAuthHTTPDisabledRoutes(t *testing.T) {
+	s := newAuthHTTPServer(t, nil, false)
+	for i := 0; i < 7; i++ {
+		if w := authHTTPRequest(s, "POST", "login", `{}`, ""); w.Code != 404 {
+			t.Fatalf("disabled local: %d", w.Code)
 		}
 	}
-	s := newAuthHTTPServer(t, nil, false, "")
-	s.auth = nil
-	if w := authHTTPRequest(s, "GET", "methods", "", ""); strings.TrimSpace(w.Body.String()) != `{"local":false,"oidc":false}` {
-		t.Fatal(w.Body)
+	if w := authHTTPRequest(s, "GET", "methods", "", ""); w.Code != 404 {
+		t.Fatalf("retired methods: %d", w.Code)
+	}
+	if w := authHTTPRequest(s, "GET", "callback", "", ""); w.Code != 404 {
+		t.Fatalf("retired callback: %d", w.Code)
 	}
 }
 
@@ -117,7 +82,7 @@ func TestLocalLoginHTTPBoundary(t *testing.T) {
 		{"password byte limit", `{"username":"a","password":"` + strings.Repeat("\u00e9", 513) + `"}`, authTestOrigin, "application/json", "", 401},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			s := newAuthHTTPServer(t, nil, true, "")
+			s := newAuthHTTPServer(t, nil, true)
 			logs := captureAuthLogs(s)
 			r := httptest.NewRequest("POST", "/api/v1/auth/login", strings.NewReader(test.body))
 			r.Header.Set("Origin", test.origin)
@@ -143,7 +108,7 @@ func TestLocalLoginHTTPBoundary(t *testing.T) {
 func TestLocalLoginHTTPAdmission(t *testing.T) {
 	for _, kind := range []string{"source", "global", "concurrent"} {
 		t.Run(kind, func(t *testing.T) {
-			s := newAuthHTTPServer(t, nil, true, "")
+			s := newAuthHTTPServer(t, nil, true)
 			attempts := 6
 			if kind == "global" {
 				attempts = 121
@@ -186,268 +151,56 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	s := newAuthHTTPServer(t, pool, true)
+	logs := captureAuthLogs(s)
+	defer assertNoAuthSecrets(t, logs, "http-test-password")
+
+	username := "http-" + uuid.NewString()
+	if _, err := s.auth.CreateLocalCredential(context.Background(), username, "http-test-password"); err != nil {
+		t.Fatal(err)
+	}
+	wrong := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":"wrong"}`, username), authTestOrigin)
+	wrongLog := assertAuthLog(t, logs, "local", "rejected", "credentials_rejected")
+	missing := authHTTPRequest(s, "POST", "login", `{"username":"missing-http-user","password":"wrong"}`, authTestOrigin)
+	missingLog := assertAuthLog(t, logs, "local", "rejected", "credentials_rejected")
+	if wrongLog["account_ref"] != s.auth.LocalAccountRef(username) || missingLog["account_ref"] != s.auth.LocalAccountRef("missing-http-user") {
+		t.Fatal("failed account correlation missing")
+	}
+	if wrong.Code != 401 || missing.Code != 401 || wrong.Body.String() != missing.Body.String() || len(wrong.Result().Cookies()) != 0 || len(missing.Result().Cookies()) != 0 {
+		t.Fatal("credential failures differ")
+	}
+	w := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":"http-test-password"}`, username), authTestOrigin)
+	if w.Code != 204 || len(w.Result().Cookies()) != 1 {
+		t.Fatalf("local login: %d %s", w.Code, w.Body)
+	}
+	cookie := w.Result().Cookies()[0]
+	actor, err := s.auth.Authenticate(context.Background(), cookie)
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, nil)
-	if err != nil {
-		t.Fatal(err)
+	record := assertAuthLog(t, logs, "local", "succeeded", "session_created")
+	if record["identity_id"] != actor.IdentityID.String() || record["request_id"] != w.Header().Get("X-Request-ID") {
+		t.Fatal("success correlation differs")
 	}
-	var issuer, nonce, challenge string
-	var secrets []string
-	idp := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/.well-known/openid-configuration":
-			_ = json.NewEncoder(w).Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "jwks_uri": issuer + "/keys", "id_token_signing_alg_values_supported": []string{"RS256"}})
-		case "/keys":
-			_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, Algorithm: "RS256", Use: "sig"}}})
-		case "/token":
-			_ = r.ParseForm()
-			if r.Form.Get("code") == "rejected-authorization-code-log-bait" {
-				http.Error(w, `{"error":"invalid_grant","error_description":"upstream-secret-log-bait"}`, 400)
-				return
-			}
-			digest := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
-			if base64.RawURLEncoding.EncodeToString(digest[:]) != challenge || r.Form.Get("redirect_uri") != authTestOrigin+"/api/v1/auth/callback" {
-				t.Error("OIDC PKCE or redirect changed")
-				http.Error(w, "invalid grant", 400)
-				return
-			}
-			claims, _ := json.Marshal(map[string]any{"iss": issuer, "aud": "client", "sub": "http-operator", "nonce": nonce, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix()})
-			signed, err := signer.Sign(claims)
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			token, err := signed.CompactSerialize()
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			secrets = append(secrets, token)
-			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "access-token-log-bait", "refresh_token": "refresh-token-log-bait", "token_type": "Bearer", "id_token": token})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer idp.Close()
-	issuer = idp.URL
-	for _, mode := range []string{"local", "oidc", "both"} {
-		t.Run(mode, func(t *testing.T) {
-			provider := issuer
-			if mode == "local" {
-				provider = ""
-			}
-			s := newAuthHTTPServer(t, pool, mode != "oidc", provider)
-			logs := captureAuthLogs(s)
-			defer func() {
-				assertNoAuthSecrets(t, logs, secrets...)
-				assertNoAuthSecrets(t, logs, "http-test-password", "access-token-log-bait", "refresh-token-log-bait", "rejected-authorization-code-log-bait", "upstream-secret-log-bait")
-			}()
-			logout := func(cookie *http.Cookie) {
-				t.Helper()
-				assertAuthenticationAuthorizationParity(t, s, pool, cookie)
-				if cookie.Name != auth.SessionCookieName || !cookie.Secure || !cookie.HttpOnly || cookie.Path != "/" || cookie.SameSite != http.SameSiteLaxMode {
-					t.Fatal("nonstandard session cookie")
-				}
-				if _, err := s.auth.Authenticate(context.Background(), cookie); err != nil {
-					t.Fatal(err)
-				}
-				secrets = append(secrets, cookie.Value)
-				r := httptest.NewRequest("POST", "/api/v1/auth/logout", nil)
-				r.Header.Set("Origin", authTestOrigin)
-				r.AddCookie(cookie)
-				w := httptest.NewRecorder()
-				s.http.Handler.ServeHTTP(w, r)
-				if w.Code != 204 || len(w.Result().Cookies()) != 1 || w.Result().Cookies()[0].MaxAge != -1 {
-					t.Fatalf("logout: %d %s", w.Code, w.Body)
-				}
-				if _, err := s.auth.Authenticate(context.Background(), cookie); err == nil {
-					t.Fatal("revoked session accepted")
-				}
-			}
-			if mode != "oidc" {
-				username := "http-" + uuid.NewString()
-				if _, err := s.auth.CreateLocalCredential(context.Background(), username, "http-test-password"); err != nil {
-					t.Fatal(err)
-				}
-				wrong := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":"wrong"}`, username), authTestOrigin)
-				wrongLog := assertAuthLog(t, logs, "local", "rejected", "credentials_rejected")
-				missing := authHTTPRequest(s, "POST", "login", `{"username":"missing-http-user","password":"wrong"}`, authTestOrigin)
-				missingLog := assertAuthLog(t, logs, "local", "rejected", "credentials_rejected")
-				if wrongLog["account_ref"] != s.auth.LocalAccountRef(username) || missingLog["account_ref"] != s.auth.LocalAccountRef("missing-http-user") {
-					t.Fatal("failed account correlation missing")
-				}
-				if wrong.Code != 401 || missing.Code != 401 || wrong.Body.String() != missing.Body.String() || len(wrong.Result().Cookies()) != 0 || len(missing.Result().Cookies()) != 0 {
-					t.Fatal("credential failures differ")
-				}
-				w := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":"http-test-password"}`, username), authTestOrigin)
-				if w.Code != 204 || len(w.Result().Cookies()) != 1 {
-					t.Fatalf("local login: %d %s", w.Code, w.Body)
-				}
-				actor, err := s.auth.Authenticate(context.Background(), w.Result().Cookies()[0])
-				if err != nil {
-					t.Fatal(err)
-				}
-				record := assertAuthLog(t, logs, "local", "succeeded", "session_created")
-				if record["identity_id"] != actor.IdentityID.String() || record["request_id"] != w.Header().Get("X-Request-ID") {
-					t.Fatal("success correlation differs")
-				}
-				assertNoAuthSecrets(t, logs, username)
-				logout(w.Result().Cookies()[0])
-			}
-			if mode != "local" {
-				do := func(path string, cookie *http.Cookie) *httptest.ResponseRecorder {
-					r := httptest.NewRequest("GET", "/api/v1/auth/"+path, nil)
-					r.Header.Set("X-Request-ID", "oidc-log-request")
-					r = r.WithContext(context.WithValue(r.Context(), oauth2.HTTPClient, idp.Client()))
-					if cookie != nil {
-						r.AddCookie(cookie)
-					}
-					w := httptest.NewRecorder()
-					s.http.Handler.ServeHTTP(w, r)
-					return w
-				}
-				w := do("login", nil)
-				assertAuthLog(t, logs, "oidc", "started", "redirect_created")
-				if w.Code != 302 || len(w.Result().Cookies()) != 1 {
-					t.Fatalf("OIDC start: %d %s", w.Code, w.Body)
-				}
-				location, err := url.Parse(w.Header().Get("Location"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				query := location.Query()
-				nonce, challenge = query.Get("nonce"), query.Get("code_challenge")
-				if query.Get("code_challenge_method") != "S256" || nonce == "" || query.Get("state") == "" {
-					t.Fatal("OIDC protections missing")
-				}
-				cookie := w.Result().Cookies()[0]
-				secrets = append(secrets, cookie.Value, query.Get("state"), nonce)
-				if rejected := do("callback?state=wrong&code=test", cookie); rejected.Code != 401 {
-					t.Fatal("invalid state accepted")
-				}
-				assertAuthLog(t, logs, "oidc", "rejected", "state_rejected")
-				if rejected := do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=rejected-authorization-code-log-bait", cookie); rejected.Code != 401 {
-					t.Fatal("upstream failure accepted")
-				}
-				assertAuthLog(t, logs, "oidc", "rejected", "callback_rejected")
-				t.Run("session-write-failure", func(t *testing.T) {
-					ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-					if ownerURL == "" {
-						t.Skip("isolated owner database URL required")
-					}
-					ctx := context.Background()
-					owner, err := pgxpool.New(ctx, ownerURL)
-					if err != nil {
-						t.Fatal(err)
-					}
-					defer owner.Close()
-					constraint := "auth_oidc_log_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-					if _, err := owner.Exec(ctx, `ALTER TABLE auth_sessions ADD CONSTRAINT `+constraint+` CHECK (false) NOT VALID`); err != nil {
-						t.Fatal(err)
-					}
-					defer func() {
-						if _, err := owner.Exec(ctx, `ALTER TABLE auth_sessions DROP CONSTRAINT `+constraint); err != nil {
-							t.Error(err)
-						}
-					}()
-					var before, after int
-					if err := pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions`).Scan(&before); err != nil {
-						t.Fatal(err)
-					}
-					previousLogs := len(authLogRecords(t, logs))
-					failed := do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=test", cookie)
-					if failed.Code != 401 || failed.Header().Get("Location") != "" || !strings.Contains(failed.Body.String(), "oidc-callback-rejected") {
-						t.Fatal("session failure changed public callback contract")
-					}
-					for _, c := range failed.Result().Cookies() {
-						if c.Name != auth.LoginCookieName || c.MaxAge != -1 {
-							t.Fatal("failed session issued a cookie")
-						}
-					}
-					assertAuthLog(t, logs, "oidc", "unavailable", "infrastructure_failure")
-					if len(authLogRecords(t, logs)) != previousLogs+1 {
-						t.Fatal("duplicate session failure result")
-					}
-					if err := pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions`).Scan(&after); err != nil || after != before {
-						t.Fatal("failed session write did not roll back")
-					}
-					assertNoAuthSecrets(t, logs, constraint, cookie.Value, query.Get("state"), "access-token-log-bait", "refresh-token-log-bait", "upstream-secret-log-bait")
-				})
-				w = do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=test", cookie)
-				if w.Code != 302 {
-					t.Fatalf("OIDC callback: %d %s", w.Code, w.Body)
-				}
-				var session *http.Cookie
-				for _, c := range w.Result().Cookies() {
-					if c.Name == auth.SessionCookieName {
-						session = c
-					}
-				}
-				if session == nil {
-					t.Fatal("missing OIDC session")
-				}
-				actor, err := s.auth.Authenticate(context.Background(), session)
-				if err != nil {
-					t.Fatal(err)
-				}
-				record := assertAuthLog(t, logs, "oidc", "succeeded", "session_created")
-				if record["identity_id"] != actor.IdentityID.String() || record["request_id"] != "oidc-log-request" {
-					t.Fatal("OIDC success correlation differs")
-				}
-				logout(session)
-				fresh := do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=test", cookie)
-				if fresh.Code != 302 {
-					t.Fatalf("existing identity callback: %d", fresh.Code)
-				}
-				for _, c := range fresh.Result().Cookies() {
-					if c.Name == auth.SessionCookieName {
-						session = c
-					}
-				}
-				ctx := context.Background()
-				if _, err := s.auth.Authenticate(ctx, session); err != nil {
-					t.Fatalf("fresh session before disable: %v", err)
-				}
-				var identityID uuid.UUID
-				if err := pool.QueryRow(ctx, `UPDATE identities SET disabled_at=now() WHERE issuer=$1 AND subject='http-operator' RETURNING id`, issuer).Scan(&identityID); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _, _ = pool.Exec(ctx, `UPDATE identities SET disabled_at=NULL WHERE id=$1`, identityID) })
-				request := httptest.NewRequest("GET", "/api/v1/workspaces", nil)
-				request.AddCookie(session)
-				response := httptest.NewRecorder()
-				s.http.Handler.ServeHTTP(response, request)
-				if response.Code != 401 {
-					t.Fatalf("disabled session business API: %d", response.Code)
-				}
-				var before, after int
-				if err := pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions WHERE identity_id=$1`, identityID).Scan(&before); err != nil {
-					t.Fatal(err)
-				}
-				rejected := do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=test", cookie)
-				assertAuthLog(t, logs, "oidc", "rejected", "callback_rejected")
-				if rejected.Code != 401 || rejected.Header().Get("Location") != "" || !strings.Contains(rejected.Body.String(), "oidc-callback-rejected") {
-					t.Fatalf("disabled callback protocol: %d %s", rejected.Code, rejected.Body)
-				}
-				for _, c := range rejected.Result().Cookies() {
-					if c.Name == auth.SessionCookieName || c.Name != auth.LoginCookieName || c.MaxAge != -1 {
-						t.Fatalf("unexpected rejected callback cookie: %s", c.Name)
-					}
-				}
-				if err := pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions WHERE identity_id=$1`, identityID).Scan(&after); err != nil || after != before {
-					t.Fatalf("disabled callback sessions: %d -> %d, %v", before, after, err)
-				}
-			}
-		})
+	assertNoAuthSecrets(t, logs, username, cookie.Value)
+
+	assertAuthenticationAuthorizationParity(t, s, pool, cookie)
+	if cookie.Name != auth.SessionCookieName || !cookie.Secure || !cookie.HttpOnly || cookie.Path != "/" || cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatal("nonstandard session cookie")
+	}
+	r := httptest.NewRequest("POST", "/api/v1/auth/logout", nil)
+	r.Header.Set("Origin", authTestOrigin)
+	r.AddCookie(cookie)
+	logoutResp := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(logoutResp, r)
+	if logoutResp.Code != 204 || len(logoutResp.Result().Cookies()) != 1 || logoutResp.Result().Cookies()[0].MaxAge != -1 {
+		t.Fatalf("logout: %d %s", logoutResp.Code, logoutResp.Body)
+	}
+	if _, err := s.auth.Authenticate(context.Background(), cookie); err == nil {
+		t.Fatal("revoked session accepted")
 	}
 }
 
-// Exercise the same HTTP authorization path with cookies from actual Local and
-// OIDC logins, rather than injecting a principal past the session middleware.
 func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxpool.Pool, cookie *http.Cookie) {
 	t.Helper()
 	ctx := context.Background()
@@ -455,16 +208,13 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 	if err != nil || actor.BreakGlass {
 		t.Fatalf("ordinary principal: %+v %v", actor, err)
 	}
-	workspaceID, targetID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Authentication authorization parity',$2,now(),now())`, workspaceID, "parity-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _, _ = pool.Exec(ctx, `DELETE FROM role_bindings WHERE workspace_id=$1`, workspaceID) }()
-	for _, id := range []uuid.UUID{targetID} {
-		if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'https://parity.example',$2,now(),now())`, id, id.String()); err != nil {
-			t.Fatal(err)
-		}
-	}
+	defer func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM workspace_admins WHERE workspace_id=$1`, workspaceID)
+	}()
 	call := func(method, path, body string, want int) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, "/api/v1/"+path, strings.NewReader(body))
@@ -479,30 +229,12 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 		}
 		return w
 	}
-	binding := fmt.Sprintf(`{"identity_id":%q,"workspace_id":%q,"role":"SecurityAdmin","resource_type":"workspace","reason":"Authentication authorization parity"}`, targetID, workspaceID)
 	call("GET", "nodes", "", 403)
-	call("POST", "role-bindings", binding, 403)
-	for id, role := range map[uuid.UUID]string{actor.IdentityID: "PlatformAdmin"} {
-		if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,$4,'workspace',now())`, uuid.Must(uuid.NewV7()), id, workspaceID, role); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := pool.Exec(ctx, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,now())`, workspaceID, actor.IdentityID); err != nil {
+		t.Fatal(err)
 	}
 	if w := call("GET", "workspaces", "", 200); !strings.Contains(w.Body.String(), workspaceID.String()) {
 		t.Fatalf("authorized workspace missing: %s", w.Body)
 	}
-	// Admin directly grants elevated roles; duplicates still conflict.
-	call("POST", "role-bindings", binding, 201)
-	call("POST", "role-bindings", strings.Replace(binding, `"SecurityAdmin"`, `"Unknown"`, 1), 400)
-	viewer := strings.Replace(binding, `"SecurityAdmin"`, `"Viewer"`, 1)
-	call("POST", "role-bindings", viewer, 201)
-	if w := call("POST", "role-bindings", viewer, 409); !strings.Contains(w.Body.String(), "role-binding-exists") {
-		t.Fatalf("duplicate binding problem: %s", w.Body)
-	}
-	if w := call("POST", "role-bindings", binding, 409); !strings.Contains(w.Body.String(), "role-binding-exists") {
-		t.Fatalf("duplicate elevated binding: %s", w.Body)
-	}
-	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND actor_id=$2 AND source_session_id=$3 AND action='role_binding.create' AND result='succeeded'`, workspaceID, actor.IdentityID.String(), actor.SessionID).Scan(&count); err != nil || count != 2 {
-		t.Fatalf("principal/session audit parity: %d %v", count, err)
-	}
+	call("GET", "nodes", "", 503) // authorized past authz guard; Telemetry reader nil in this server
 }

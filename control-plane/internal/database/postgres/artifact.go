@@ -25,7 +25,7 @@ func (s artifactStore) Active(ctx context.Context) (n int, err error) {
 	return
 }
 func (s artifactStore) Eligible(ctx context.Context, id uuid.UUID, hash []byte) (v artifactstore.Eligible, err error) {
-	err = s.QueryRow(ctx, `SELECT a.node_id,a.certificate_id,a.operation_id,a.certificate_version,a.content_sha256,a.content_size,a.expires_at,c.not_after,r.requester_id FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id JOIN approval_requests r ON r.id=a.approval_id WHERE a.id=$1 AND a.token_sha256=$2 AND a.expires_at>now() AND a.certificate_version=c.version AND c.not_after>now() AND c.state IN ('issued','expiring') AND (a.state='ready' OR (a.state='leased' AND a.lease_until<now())) FOR UPDATE OF a`, id, hash).Scan(&v.NodeID, &v.CertificateID, &v.OperationID, &v.CertificateVersion, &v.Digest, &v.Size, &v.ArtifactExpires, &v.CertificateExpires, &v.RequesterID)
+	err = s.QueryRow(ctx, `SELECT a.node_id,a.certificate_id,a.operation_id,a.certificate_version,a.content_sha256,a.content_size,a.expires_at,c.not_after,a.requester_identity_id FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id WHERE a.id=$1 AND a.token_sha256=$2 AND a.expires_at>now() AND a.certificate_version=c.version AND c.not_after>now() AND c.state IN ('issued','expiring') AND (a.state='ready' OR (a.state='leased' AND a.lease_until<now())) FOR UPDATE OF a`, id, hash).Scan(&v.NodeID, &v.CertificateID, &v.OperationID, &v.CertificateVersion, &v.Digest, &v.Size, &v.ArtifactExpires, &v.CertificateExpires, &v.RequesterID)
 	return
 }
 func (s artifactStore) Lease(ctx context.Context, id, grant, subject uuid.UUID, expires time.Time) error {

@@ -11,7 +11,7 @@ const imageNames = [
   "postgres",
   "otel",
 ];
-const integratedImageNames = ["edge", "relay", "signer", "mysql_backup"];
+const integratedImageNames = ["edge", "relay", "signer"];
 const supportedPlatforms = ["linux/amd64", "linux/arm64"];
 const imageReferencePattern =
   /^[^\s@]+(?:@sha256:[0-9a-f]{64}|:v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?)$/;

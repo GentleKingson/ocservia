@@ -100,7 +100,7 @@ func number(s string) (int64, error) {
 // Reserved markers must start at column zero; CRLF and unknown markers fail.
 func Parse(data []byte, engine string) (Artifact, error) {
 	a := Artifact{}
-	if engine != "postgresql" && engine != "mysql" {
+	if engine != "postgresql" {
 		return a, errors.New("unsupported artifact engine")
 	}
 	if len(data) == 0 || data[len(data)-1] != '\n' || bytes.ContainsRune(data, '\r') {

@@ -41,12 +41,6 @@ export interface ConfigPlanRequest {
   template: ConfigTemplate;
   /**
    *
-   * @type {{ [key: string]: string; }}
-   * @memberof ConfigPlanRequest
-   */
-  nodeVariables?: { [key: string]: string };
-  /**
-   *
    * @type {number}
    * @memberof ConfigPlanRequest
    */
@@ -98,8 +92,6 @@ export function ConfigPlanRequestFromJSONTyped(
   return {
     expectedRevision: json["expected_revision"],
     template: ConfigTemplateFromJSON(json["template"]),
-    nodeVariables:
-      json["node_variables"] == null ? undefined : json["node_variables"],
     ttlSeconds: json["ttl_seconds"],
     reason: json["reason"],
   };
@@ -120,7 +112,6 @@ export function ConfigPlanRequestToJSONTyped(
   return {
     expected_revision: value["expectedRevision"],
     template: ConfigTemplateToJSON(value["template"]),
-    node_variables: value["nodeVariables"],
     ttl_seconds: value["ttlSeconds"],
     reason: value["reason"],
   };

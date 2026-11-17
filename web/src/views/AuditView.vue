@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import { ChevronRight, RefreshCw } from "@lucide/vue";
-import { ResponseError, type AuditEventPage } from "@ocservia/api-client";
-import { useEventListener } from "@vueuse/core";
+import {
+  ResponseError,
+  type AuditEventPage,
+  type AuditVerification,
+} from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { listAuditEvents } from "../api/events";
-import {
-  getWorkspace,
-  workspaceChangedEvent,
-  workspaceContext,
-} from "../api/workspace";
+import { listAuditEvents, verifyAuditChain } from "../api/events";
+import { getWorkspace, workspaceContext } from "../api/workspace";
 import { formatTimestamp } from "../shared/timestamp";
 import DataState from "@/components/common/DataState.vue";
 import PageHeader from "@/components/common/PageHeader.vue";
@@ -34,8 +33,36 @@ const items = ref<AuditEventPage["items"]>([]);
 const loading = ref(false);
 const initialized = ref(false);
 const error = ref("");
+const verifying = ref(false);
+const verification = ref<AuditVerification>();
+const verifyError = ref("");
 let controller: AbortController | undefined;
+let verifyController: AbortController | undefined;
 let sequence = 0;
+let verifySequence = 0;
+
+function parseAuditVerification(value: unknown): AuditVerification | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  const workspaceId = record.workspaceId ?? record.workspace_id;
+  const checkpointValid = record.checkpointValid ?? record.checkpoint_valid;
+  const compactedEvents = record.compactedEvents ?? record.compacted_events;
+  if (
+    typeof workspaceId !== "string" ||
+    typeof record.events !== "number" ||
+    typeof record.valid !== "boolean" ||
+    typeof checkpointValid !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    workspaceId,
+    events: record.events,
+    valid: record.valid,
+    checkpointValid,
+    ...(typeof compactedEvents === "number" ? { compactedEvents } : {}),
+  };
+}
 
 async function refresh(): Promise<void> {
   controller?.abort();
@@ -71,12 +98,46 @@ async function refresh(): Promise<void> {
   }
 }
 
-function workspaceChanged(): void {
-  items.value = [];
-  initialized.value = false;
-  expanded.value = [];
-  void refresh();
+async function verifyChain(): Promise<void> {
+  verifyController?.abort();
+  verifyController = new AbortController();
+  const signal = verifyController.signal;
+  const ticket = ++verifySequence;
+  verifying.value = true;
+  verifyError.value = "";
+  verification.value = undefined;
+  try {
+    await getWorkspace();
+    if (ticket !== verifySequence) return;
+    const result = await verifyAuditChain(signal);
+    if (signal.aborted || ticket !== verifySequence) return;
+    verification.value = result;
+  } catch (cause) {
+    if (signal.aborted || ticket !== verifySequence) return;
+    if (cause instanceof ResponseError && cause.response.status === 409) {
+      try {
+        const parsed = parseAuditVerification(
+          await cause.response.clone().json(),
+        );
+        if (parsed) {
+          if (ticket !== verifySequence) return;
+          verification.value = parsed;
+          return;
+        }
+      } catch {
+        // Fall through to generic verification error when body is not JSON.
+      }
+    }
+    verifyError.value = t(
+      cause instanceof ResponseError && cause.response.status === 403
+        ? "auditForbidden"
+        : "auditVerifyUnavailable",
+    );
+  } finally {
+    if (ticket === verifySequence) verifying.value = false;
+  }
 }
+
 function text(value: unknown): string {
   return typeof value === "string" && value ? value : "—";
 }
@@ -111,7 +172,6 @@ const rows = computed(() => {
             item.resource_type,
             item.resource_id,
             item.request_id,
-            item.approval_id,
           ].some(
             (value) =>
               typeof value === "string" && value.toLowerCase().includes(query),
@@ -138,13 +198,14 @@ const detailFields = [
   ["auditEventHash", "event_hash"],
   ["auditPreviousHash", "previous_event_hash"],
 ] as const;
-useEventListener(window, workspaceChangedEvent, workspaceChanged);
 onMounted(() => {
   void refresh();
 });
 onBeforeUnmount(() => {
   sequence += 1;
+  verifySequence += 1;
   controller?.abort();
+  verifyController?.abort();
 });
 </script>
 
@@ -152,6 +213,15 @@ onBeforeUnmount(() => {
   <main>
     <PageHeader :eyebrow="$t('workspace')" :title="$t('audit')">
       <template #actions>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          :disabled="verifying || loading"
+          @click="verifyChain"
+        >
+          {{ $t(verifying ? "auditVerifying" : "auditVerify") }}
+        </Button>
         <Button
           type="button"
           variant="outline"
@@ -165,6 +235,37 @@ onBeforeUnmount(() => {
         </Button>
       </template>
     </PageHeader>
+    <div
+      v-if="verifyError"
+      class="border-destructive/40 text-destructive mb-4 flex flex-wrap items-center gap-3 rounded-md border px-4 py-3 text-sm"
+      role="alert"
+    >
+      {{ verifyError }}
+    </div>
+    <div
+      v-else-if="verification"
+      data-testid="audit-verification"
+      class="border-border mb-4 flex flex-wrap items-center gap-3 rounded-md border px-4 py-3 text-sm"
+      role="status"
+    >
+      <StatusBadge
+        :tone="
+          verification.valid && verification.checkpointValid
+            ? 'success'
+            : 'danger'
+        "
+        :label="
+          $t(
+            verification.valid && verification.checkpointValid
+              ? 'auditVerifyValid'
+              : 'auditVerifyFailed',
+          )
+        "
+      />
+      <span class="text-muted-foreground">
+        {{ $t("auditVerifySummary", { count: verification.events }) }}
+      </span>
+    </div>
     <div
       v-if="error"
       class="border-destructive/40 text-destructive mb-4 flex flex-wrap items-center gap-3 rounded-md border px-4 py-3 text-sm"
@@ -335,14 +436,6 @@ onBeforeUnmount(() => {
                             class="text-primary font-mono underline-offset-4 hover:underline"
                             >{{ item.node_id }}</RouterLink
                           >
-                        </dd>
-                      </template>
-                      <template v-if="typeof item.approval_id === 'string'">
-                        <dt class="text-muted-foreground">
-                          {{ $t("approvalId") }}
-                        </dt>
-                        <dd class="m-0 mb-2 break-all sm:mb-0">
-                          <code>{{ item.approval_id }}</code>
                         </dd>
                       </template>
                       <template

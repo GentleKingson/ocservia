@@ -3,14 +3,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
-require_test_commands go jq setsid ruby python3
+require_test_commands go jq setsid python3
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/required-go-tests-selftest-XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 echo 'Required-test guard self-test: synthetic events below are NOT database acceptance'
 check() {
-  OCSERVIA_DATABASE_TEST_ENGINE="${3:-mysql}" jq -se --arg group "${2:-database-api}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
+  jq -se --arg group "${2:-database-api}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
     -f "${ROOT}/scripts/check-required-go-tests.jq" "$1"
 }
 jq -n --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
@@ -25,8 +25,8 @@ for mutation in \
   'if .Action == "pass" then .Action = "skip" else . end' \
   'if .Action == "pass" then .Action = "fail" else . end' \
   '.Test += "Renamed"' \
-  'select(.Test != "TestAuthHTTPLoginLogoutIntegration/both/session-write-failure")' \
-  'if .Test == "TestAuthHTTPLoginLogoutIntegration/both/session-write-failure" and .Action == "pass" then .Action = "skip" else . end' \
+  'select(.Test != "TestAuthLogSessionFailureIntegration")' \
+  'if .Test == "TestAuthLogSessionFailureIntegration" and .Action == "pass" then .Action = "skip" else . end' \
   'empty'; do
   jq -c "${mutation}" "${tmp}/pass.json" >"${tmp}/bad.json"
   if check "${tmp}/bad.json" >"${tmp}/error.log" 2>&1; then
@@ -34,71 +34,59 @@ for mutation in \
     exit 1
   fi
 done
-scope=full
-group="backend-mysql-${scope}"
-jq -n --arg scope "${scope}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
+jq -n --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
   [$manifest | split("\n")[] | split(" ")
-   | select(.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql" or .[0] == "mysql-snapshot")
+   | select(.[0] == "postgres-snapshot")
    | {Package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), Test: .[2]}
    | . + {Action: "run"}, . + {Action: "pass"}][]
-' >"${tmp}/mysql.json"
-check "${tmp}/mysql.json" "${group}"
-for name in TestRealTLS TestRealPrivileges TestDatabaseInitializationSmoke TestRealUsageTransactions TestRealOutboxCommitDisconnect/claim-request-lost; do
-  jq -c --arg name "${name}" 'select(.Test != $name)' "${tmp}/mysql.json" >"${tmp}/bad.json"
-  if check "${tmp}/bad.json" "${group}" >/dev/null 2>&1; then
-    echo "${group} accepted missing ${name}" >&2; exit 1
+' >"${tmp}/pg_snapshot.json"
+check "${tmp}/pg_snapshot.json" postgres-snapshot
+for name in TestPostgreSQLCutoverCleanupRollback TestPostgreSQLArtifactFreshAndUpgrade TestPostgreSQLSnapshotCatalogReadPermissions; do
+  jq -c --arg name "${name}" 'select(.Test != $name)' "${tmp}/pg_snapshot.json" >"${tmp}/bad.json"
+  if check "${tmp}/bad.json" postgres-snapshot >/dev/null 2>&1; then
+    echo "postgres-snapshot accepted missing ${name}" >&2; exit 1
   fi
 done
-jq -c 'if .Test == "TestRealUsageTransactions" and .Action == "pass" then .Action = "skip" else . end' "${tmp}/mysql.json" >"${tmp}/bad.json"
-if check "${tmp}/bad.json" "${group}" >/dev/null 2>&1; then
-  echo "${group} accepted skipped regression" >&2; exit 1
-fi
-# Full acceptance must require actual checkpoint cutover crash recovery.
-jq -c 'select(.Test != "TestMySQLCutoverCrashRecovery")' "${tmp}/mysql.json" >"${tmp}/bad.json"
-if check "${tmp}/bad.json" backend-mysql-full >/dev/null 2>&1; then
-  echo 'full database guard accepted missing crash recovery' >&2; exit 1
-fi
-# CI shards: one pattern partitions the full guard; each half still fails closed.
+# Shard pattern partitions a guard cleanly; each half still fails closed.
 shard_check() {
-  OCSERVIA_DATABASE_TEST_ENGINE=mysql jq -se --arg group backend-mysql-full --arg shard_mode "$2" --arg shard_pattern '^Test(MySQLCutover|MySQLArtifact|SnapshotDumpTableRoundtrip)' \
+  jq -se --arg group postgres-snapshot --arg shard_mode "$2" --arg shard_pattern '^TestPostgreSQLCutover' \
     --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" -f "${ROOT}/scripts/check-required-go-tests.jq" "$1"
 }
-full_required="$(check "${tmp}/mysql.json" backend-mysql-full | jq .required)"
-run_required="$(shard_check "${tmp}/mysql.json" run | jq .required)"
-skip_required="$(shard_check "${tmp}/mysql.json" skip | jq .required)"
+full_required="$(check "${tmp}/pg_snapshot.json" postgres-snapshot | jq .required)"
+run_required="$(shard_check "${tmp}/pg_snapshot.json" run | jq .required)"
+skip_required="$(shard_check "${tmp}/pg_snapshot.json" skip | jq .required)"
 ((run_required > 0 && skip_required > 0 && run_required + skip_required == full_required)) || {
-  echo "MySQL shards do not partition the full guard: ${run_required}+${skip_required}!=${full_required}" >&2; exit 1; }
-jq -c 'select(.Test | startswith("TestMySQLCutover") or startswith("TestMySQLArtifact") or . == "TestSnapshotDumpTableRoundtrip" | not)' "${tmp}/mysql.json" >"${tmp}/core.json"
-shard_check "${tmp}/core.json" skip >/dev/null
-if shard_check "${tmp}/core.json" run >/dev/null 2>&1; then echo 'cutover shard accepted missing crash recovery' >&2; exit 1; fi
-jq -c 'select(.Test != "TestRealTLS")' "${tmp}/core.json" >"${tmp}/bad.json"
-if shard_check "${tmp}/bad.json" skip >/dev/null 2>&1; then echo 'core shard accepted missing TestRealTLS' >&2; exit 1; fi
-echo 'MySQL current correctness and recovery guards passed'
+  echo "shard pattern does not partition postgres-snapshot: ${run_required}+${skip_required}!=${full_required}" >&2; exit 1; }
+jq -c 'select(.Test | startswith("TestPostgreSQLCutover") | not)' "${tmp}/pg_snapshot.json" >"${tmp}/non_cutover.json"
+shard_check "${tmp}/non_cutover.json" skip >/dev/null
+if shard_check "${tmp}/non_cutover.json" run >/dev/null 2>&1; then echo 'run shard accepted missing crash recovery' >&2; exit 1; fi
+jq -c 'select(.Test != "TestPostgreSQLArtifactFreshAndUpgrade")' "${tmp}/non_cutover.json" >"${tmp}/bad.json"
+if shard_check "${tmp}/bad.json" skip >/dev/null 2>&1; then echo 'skip shard accepted missing TestPostgreSQLArtifactFreshAndUpgrade' >&2; exit 1; fi
+echo 'PostgreSQL snapshot and recovery guards passed'
 # Exercise every explicit critical inventory, not just a successful go exit.
-engine=mysql
 while read -r group; do
-  OCSERVIA_DATABASE_TEST_ENGINE="${engine}" jq -n --arg group "${group}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
+  jq -n --arg group "${group}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
     $manifest | split("\n")[] | split(" ")
-    | select(.[0] == $group and (length < 4 or .[3] == env.OCSERVIA_DATABASE_TEST_ENGINE))
+    | select(.[0] == $group)
     | {Package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), Test: .[2]}
     | . + {Action: "run"}, . + {Action: "pass"}
   ' >"${tmp}/critical.json"
-  check "${tmp}/critical.json" "${group}" "${engine}"
-  OCSERVIA_DATABASE_TEST_ENGINE="${engine}" jq -ner --arg group "${group}" --arg mode select \
+  check "${tmp}/critical.json" "${group}"
+  jq -ner --arg group "${group}" --arg mode select \
     --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
     -f "${ROOT}/scripts/check-required-go-tests.jq" >/dev/null
   for mutation in 'select(.Action != "run")' 'select(.Action != "pass")' \
     'if .Action == "pass" then .Action = "skip" else . end' \
     'if .Action == "pass" then .Action = "fail" else . end' '.Test += "Renamed"' 'empty'; do
     jq -c "${mutation}" "${tmp}/critical.json" >"${tmp}/bad.json"
-    if check "${tmp}/bad.json" "${group}" "${engine}" >/dev/null 2>&1; then
+    if check "${tmp}/bad.json" "${group}" >/dev/null 2>&1; then
       echo "${group} accepted ${mutation}" >&2; exit 1
     fi
   done
   # Removing any single required child must fail even with its parent pass.
   while read -r name; do
     jq -c --arg name "${name}" 'select(.Test != $name)' "${tmp}/critical.json" >"${tmp}/bad.json"
-    if check "${tmp}/bad.json" "${group}" "${engine}" >/dev/null 2>&1; then
+    if check "${tmp}/bad.json" "${group}" >/dev/null 2>&1; then
       echo "${group} accepted missing ${name}" >&2; exit 1
     fi
   done < <(jq -r '.Test' "${tmp}/critical.json" | sort -u)
@@ -109,13 +97,11 @@ for mode in check select; do
     echo "empty group accepted in ${mode}" >&2; exit 1
   fi
 done
-for script in database-integration.sh database-foundation-integration.sh; do
-  for scope in invalid '' compatibility; do
-  if DATABASE_TEST_SCOPE="${scope}" bash "${ROOT}/scripts/${script}" >"${tmp}/scope.log" 2>&1; then
+for scope in invalid '' compatibility; do
+  if DATABASE_TEST_SCOPE="${scope}" bash "${ROOT}/scripts/database-integration.sh" >"${tmp}/scope.log" 2>&1; then
     echo 'invalid scope accepted' >&2; exit 1
   fi
   grep -Fq 'DATABASE_TEST_SCOPE must be smoke, full or regression' "${tmp}/scope.log"
-  done
 done
 # This small fixture RUNS the slash-separated -run expression, including
 # literal regex metacharacters and a sibling that must never execute.
@@ -188,29 +174,52 @@ esac
 printf '{"Package":"github.com/GentleKingson/ocservia/control-plane/internal/fixture","Test":"TestRequired","Action":"%s"}\n' "${FIXTURE_MODE}"
 SH
 chmod +x "${tmp}/wrapper/bin/go"
-ruby - "${tmp}/wrapper" <<'RUBY'
-root = ARGV.fetch(0)
-env = {"PATH" => "#{root}/bin:#{ENV.fetch('PATH')}", "FIXTURE_STOPPED" => "#{root}/stopped"}
-%w[pass fail missing skip INT TERM].each do |mode|
-  log = "#{root}/#{mode}.log"
-  signal = %w[INT TERM].include?(mode)
-  pid = Process.spawn(env.merge("FIXTURE_MODE" => signal ? "hang" : mode),
-    "bash", "#{root}/scripts/required-go-tests.sh", "fixture", out: log, err: log)
-  if signal
-    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 10
-    until File.read(log).include?('"Action":"run"')
-      raise "JSON was not streamed" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-      sleep 0.05
-    end
-    Process.kill(mode, pid)
-  end
-  _, status = Process.wait2(pid)
-  expected = {"pass" => 0, "fail" => 7, "INT" => 130, "TERM" => 143}[mode]
-  raise "incorrect wrapper status #{mode}: #{status}" if expected ? status.exitstatus != expected : status.success?
-  raise "child process was not terminated" if signal && !File.exist?("#{root}/stopped")
-  File.delete("#{root}/stopped") if signal
-end
-RUBY
+python3 - "${tmp}/wrapper" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+base_env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}", FIXTURE_STOPPED=str(root / "stopped"))
+signals = {"INT": signal.SIGINT, "TERM": signal.SIGTERM}
+expected_codes = {"pass": 0, "fail": 7, "INT": 130, "TERM": 143}
+
+for mode in ["pass", "fail", "missing", "skip", "INT", "TERM"]:
+    log = root / f"{mode}.log"
+    sig = signals.get(mode)
+    env = dict(base_env, FIXTURE_MODE="hang" if sig is not None else mode)
+    with log.open("wb") as stream:
+        proc = subprocess.Popen(
+            ["bash", str(root / "scripts/required-go-tests.sh"), "fixture"],
+            env=env,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+        )
+    if sig is not None:
+        deadline = time.monotonic() + 10
+        while True:
+            if log.exists() and '"Action":"run"' in log.read_text(encoding="utf-8", errors="replace"):
+                break
+            if time.monotonic() > deadline:
+                raise RuntimeError("JSON was not streamed")
+            time.sleep(0.05)
+        proc.send_signal(sig)
+    returncode = proc.wait()
+    expected = expected_codes.get(mode)
+    if expected is not None:
+        if returncode != expected:
+            raise RuntimeError(f"incorrect wrapper status {mode}: {returncode}")
+    elif returncode == 0:
+        raise RuntimeError(f"incorrect wrapper status {mode}: {returncode}")
+    stopped = root / "stopped"
+    if sig is not None:
+        if not stopped.exists():
+            raise RuntimeError("child process was not terminated")
+        stopped.unlink()
+PY
 echo 'Streaming, exit status and process-group signal cleanup passed'
 mkdir "${tmp}/timeout"
 printf 'module github.com/GentleKingson/ocservia/control-plane/internal/fixture\n\ngo 1.26.6\n' >"${tmp}/timeout/go.mod"
@@ -234,8 +243,8 @@ fi
 grep -q 'test timed out after 1s' "${tmp}/timeout.log"
 test -f "${tmp}/timeout-stopped"
 
-# Run the actual foundation routing with disposable command stubs, not databases.
-cp "${ROOT}/scripts/database-foundation-integration.sh" "${ROOT}/scripts/database-postgres-smoke.sh" "${ROOT}/scripts/env.sh" "${tmp}/wrapper/scripts/"
+# Run the actual PostgreSQL smoke routing with disposable command stubs, not databases.
+cp "${ROOT}/scripts/database-postgres-smoke.sh" "${ROOT}/scripts/env.sh" "${tmp}/wrapper/scripts/"
 cp "${ROOT}/scripts/required-go-tests.txt" "${tmp}/wrapper/scripts/"
 mkdir "${tmp}/wrapper/control-plane"
 cat >"${tmp}/wrapper/scripts/required-go-tests.sh" <<'SH'
@@ -244,7 +253,7 @@ printf '%s%s\n' "${REQUIRED_SHARD_RUN:+run=${REQUIRED_SHARD_RUN} }${REQUIRED_SHA
 SH
 cat >"${tmp}/wrapper/scripts/test-enrollment-restart.sh" <<'SH'
 #!/usr/bin/env bash
-[[ "$1" == ocservia-database-e2e-mysql-* || "$1" == ocservia-pg-smoke-* ]] || exit 1
+[[ "$1" == ocservia-pg-smoke-* ]] || exit 1
 printf 'backend-enrollment-restart\n' >>"${ROUTE_LOG}"
 SH
 cat >"${tmp}/wrapper/bin/docker" <<'SH'
@@ -271,41 +280,6 @@ cat >"${tmp}/wrapper/bin/fixture-cc" <<'SH'
 cat >/dev/null
 SH
 chmod +x "${tmp}/wrapper/bin/"*
-export ROUTE_LOG="${tmp}/current.route"
-PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=full ENGINE=mysql \
-  bash "${tmp}/wrapper/scripts/database-foundation-integration.sh" >/dev/null
-test "$(wc -l <"${tmp}/current.route")" -eq 11
-grep -q '^backend-mysql-full -race -timeout=60m ./internal/database/mysql$' "${tmp}/current.route"
-if grep -Eq -- 'history| -skip ' "${tmp}/current.route"; then
-  echo 'full current database route still selects a historical shard or skips tests' >&2; exit 1
-fi
-grep -q '^backend-controller-startup --select -race$' "${tmp}/current.route"
-grep -q '^backend-enrollment --select -race -timeout=10m$' "${tmp}/current.route"
-grep -q '^backend-enrollment-restart$' "${tmp}/current.route"
-grep -q '^backend-policy-userstate --select -race -timeout=10m$' "${tmp}/current.route"
-grep -q '^backend-policy-useroperations --select -race -timeout=10m$' "${tmp}/current.route"
-grep -q '^backend-policy-api --select -race -timeout=10m$' "${tmp}/current.route"
-# The three CI shards together run exactly the unsharded route.
-for shard in mysql-cutover mysql-core services; do
-  export ROUTE_LOG="${tmp}/shard-${shard}.route"
-  PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=full DATABASE_SHARD="${shard}" ENGINE=mysql \
-    bash "${tmp}/wrapper/scripts/database-foundation-integration.sh" >/dev/null
-done
-grep -qx 'run=^Test(MySQLCutover|MySQLArtifact|SnapshotDumpTableRoundtrip) backend-mysql-full -race -timeout=60m ./internal/database/mysql' "${tmp}/shard-mysql-cutover.route"
-grep -qx 'skip=^Test(MySQLCutover|MySQLArtifact|SnapshotDumpTableRoundtrip) backend-mysql-full -race -timeout=60m ./internal/database/mysql' "${tmp}/shard-mysql-core.route"
-# Only the split package and the cheap per-runner configuration check repeat.
-{ cat "${tmp}/current.route"; grep -E '^backend-mysql-full |^test -count=1 \./internal/platform/config ' "${tmp}/current.route"
-  grep -E '^test -count=1 \./internal/platform/config ' "${tmp}/current.route"; } | sort >"${tmp}/expected.route"
-sed -E 's/^(run|skip)=[^ ]+ //' "${tmp}"/shard-*.route | sort >"${tmp}/shards.route"
-cmp -s "${tmp}/expected.route" "${tmp}/shards.route" || {
-  diff "${tmp}/expected.route" "${tmp}/shards.route" >&2; echo 'MySQL shards duplicate, drop or change a full route' >&2; exit 1; }
-for bad in 'smoke unknown-shard' 'smoke services'; do
-  read -r scope shard <<<"${bad}"
-  if PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE="${scope}" DATABASE_SHARD="${shard}" ENGINE=mysql \
-    bash "${tmp}/wrapper/scripts/database-foundation-integration.sh" >/dev/null 2>&1; then
-    echo "invalid MySQL shard accepted: ${bad}" >&2; exit 1
-  fi
-done
 # Run the production PostgreSQL business-suite function with recording command
 # boundaries. This proves complete Integration selectors and isolated API state
 # without pretending that the fixture executes SQL or business acceptance.
@@ -341,7 +315,7 @@ grep -Fxq 'test -p 1 ./internal/telemetry -run Integration -count=1' "${ROUTE_LO
 grep -Fxq 'clone ocservia-pg-smoke-fixture ocservia_latest ocservia_policy_api' "${ROUTE_LOG}"
 grep -Fxq 'checked backend-policy-api --select -race -p 1 -parallel 1|postgres://app/ocservia_policy_api|postgres://owner/ocservia_policy_api' "${ROUTE_LOG}"
 grep -Fxq 'docker exec ocservia-pg-smoke-fixture dropdb -U ocservia_owner ocservia_policy_api' "${ROUTE_LOG}"
-for failed_group in backend-auth backend-policy-api database-auth database-api database-lifecycle; do
+for failed_group in backend-auth backend-policy-api database-auth database-api; do
   export ROUTE_LOG="${tmp}/postgres-failed.route"
   : >"${ROUTE_LOG}"
   status=0
@@ -350,31 +324,18 @@ for failed_group in backend-auth backend-policy-api database-auth database-api d
   [[ "$(tail -n 1 "${ROUTE_LOG}")" == "checked ${failed_group} "* ]] || {
     echo "PostgreSQL routing continued after ${failed_group}" >&2; exit 1; }
 done
-echo 'Full current database routing passed'
-# Exact, ordered smoke routes per backend: a missing, duplicated, replaced or
-# extra entry fails. MySQL Quick leaves the mysql-snapshot crash/rejection
-# suite to Full (backend-mysql-full, checked above); the separate
-# database-mysql-snapshot.sh step still checks checkpoint equivalence.
-printf '%s\n' '--smoke ./internal/platform/app TestDatabaseCoreSmoke' \
-  '--smoke ./internal/database/mysql TestDatabaseInitializationSmoke' \
-  'backend-enrollment-restart' >"${tmp}/expected-mysql-smoke.route"
+# Exact, ordered PostgreSQL smoke route: a missing, duplicated, replaced or extra entry fails.
 printf '%s\n' '--smoke ./internal/platform/app TestDatabaseCoreSmoke' \
   '--smoke ./migrations TestDatabaseInitializationSmoke' \
   'backend-enrollment-restart' \
   'postgres-snapshot --select -race -timeout=10m' >"${tmp}/expected-postgres-smoke.route"
-for pair in database-foundation-integration.sh:mysql database-postgres-smoke.sh:postgres; do
-  script="${pair%%:*}" backend="${pair##*:}"
-  export ROUTE_LOG="${tmp}/${script}.route"
-  PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=smoke ENGINE=mysql PG_MAJOR=18 \
-    bash "${tmp}/wrapper/scripts/${script}" >/dev/null
-  cmp -s "${tmp}/expected-${backend}-smoke.route" "${ROUTE_LOG}" || {
-    diff "${tmp}/expected-${backend}-smoke.route" "${ROUTE_LOG}" >&2
-    echo "${backend} smoke route changed" >&2; exit 1; }
-done
-if grep -q 'mysql-snapshot' "${tmp}/database-foundation-integration.sh.route"; then
-  echo 'MySQL Quick smoke still runs the Full-only mysql-snapshot suite' >&2; exit 1
-fi
-echo 'Current smoke includes core, initialization and restart checks'
+export ROUTE_LOG="${tmp}/database-postgres-smoke.sh.route"
+PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 \
+  bash "${tmp}/wrapper/scripts/database-postgres-smoke.sh" >/dev/null
+cmp -s "${tmp}/expected-postgres-smoke.route" "${ROUTE_LOG}" || {
+  diff "${tmp}/expected-postgres-smoke.route" "${ROUTE_LOG}" >&2
+  echo 'postgres smoke route changed' >&2; exit 1; }
+echo 'Current smoke includes core, initialization, restart and snapshot checks'
 
 # Basic CI has one explicit entry, not the deep acceptance manifest above.
 mkdir "${tmp}/smoke"

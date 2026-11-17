@@ -195,7 +195,7 @@ func TestLocalAccountConcurrentLeaseAndFencingIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.createSession(ctx, LocalIssuer, name, "", "", false, &credential); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, err := s.createSession(ctx, LocalIssuer, name, &credential); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("stale success: %v", err)
 	}
 	if err := s.finishLocalAttempt(name, old, true); err != nil {
@@ -219,7 +219,7 @@ func TestLocalAccountConcurrentLeaseAndFencingIntegration(t *testing.T) {
 	if err := other.finishLocalAttempt(name, next, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.createSession(ctx, LocalIssuer, name, "", "", false, &credential); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, err := s.createSession(ctx, LocalIssuer, name, &credential); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("previous epoch success: %v", err)
 	}
 	if failures, _ := localLimitState(t, s, name); failures != 1 {

@@ -24,7 +24,7 @@ type IssueState struct {
 	WorkspaceID, NodeID                                       uuid.UUID
 	CSR, RequestHash, ReceiptDigest, CSRDigest, SubjectDigest []byte
 	State, ReceiptKey, CommonName                             string
-	ApprovalID, ActorID                                       *uuid.UUID
+	ActorID                                                   *uuid.UUID
 	Version                                                   int64
 	IssueVersion                                              *int64
 	ReceiptCurrent                                            bool
@@ -40,14 +40,14 @@ type IssueReceipt struct {
 }
 
 type Signing struct {
-	ID, ApprovalID, ActorID uuid.UUID
-	RequestHash             []byte
-	Version                 int64
-	At                      time.Time
+	ID, ActorID uuid.UUID
+	RequestHash []byte
+	Version     int64
+	At          time.Time
 }
 
 type Issued struct {
-	ID, ApprovalID          uuid.UUID
+	ID                      uuid.UUID
 	Chain, RequestHash      []byte
 	Serial                  string
 	NotBefore, NotAfter, At time.Time
@@ -75,10 +75,10 @@ type PendingCSR struct {
 }
 
 type PendingArtifact struct {
-	ID, WorkspaceID, NodeID, CertificateID, OperationID, ApprovalID uuid.UUID
-	CertificateVersion                                              uint64
-	TokenSHA256, RequestHash                                        []byte
-	ExpiresAt, CreatedAt                                            value.Timestamp
+	ID, WorkspaceID, NodeID, CertificateID, OperationID, RequesterID uuid.UUID
+	CertificateVersion                                               uint64
+	TokenSHA256, RequestHash                                         []byte
+	ExpiresAt, CreatedAt                                             value.Timestamp
 }
 
 type SecretReference struct {
@@ -96,15 +96,13 @@ type Store interface {
 	ListNode(context.Context, uuid.UUID) ([]Certificate, error)
 	Resource(context.Context, uuid.UUID) (uuid.UUID, uuid.UUID, error)
 	LockIssue(context.Context, uuid.UUID) (IssueState, error)
-	ApprovedReceipt(context.Context, uuid.UUID, uuid.UUID) (IssueReceipt, error)
+	SigningReceipt(context.Context, uuid.UUID) (IssueReceipt, error)
 	LockReceipt(context.Context, uuid.UUID) (IssueReceipt, error)
 	KeyActive(context.Context, uuid.UUID, string, value.Timestamp) (bool, error)
 	StartIssue(context.Context, Signing) error
 	ResumeIssue(context.Context, uuid.UUID, time.Time) error
-	SignerUnavailable(context.Context, uuid.UUID, uuid.UUID, []byte, time.Time) error
+	SignerUnavailable(context.Context, uuid.UUID, []byte, time.Time) error
 	CompleteIssue(context.Context, Issued) (bool, error)
-	IssueBinding(context.Context, uuid.UUID) (IssueState, error)
-	ActionBinding(context.Context, uuid.UUID) (ActionBinding, error)
 	OperationExists(context.Context, uuid.UUID, string) (bool, error)
 	BeginRevocation(context.Context, uuid.UUID, time.Time) error
 	RevocationUnknown(context.Context, uuid.UUID, time.Time) error

@@ -12,6 +12,11 @@ func (s operationStore) LockRolloutClaim(ctx context.Context, rollout, workspace
 	return
 }
 
+func (s operationStore) UpgradeNode(ctx context.Context, node uuid.UUID) (workspace uuid.UUID, architecture, observedVersion string, err error) {
+	err = s.QueryRow(ctx, `SELECT n.workspace_id,COALESCE(o.architecture,''),COALESCE(o.agent_version,'') FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, node).Scan(&workspace, &architecture, &observedVersion)
+	return
+}
+
 func (s operationStore) LockAgentObservation(ctx context.Context, node uuid.UUID) (v operationstore.AgentObservation, err error) {
 	err = s.QueryRow(ctx, `SELECT architecture,agent_version,last_heartbeat_at FROM node_observed_snapshots WHERE node_id=$1 FOR UPDATE`, node).Scan(&v.Architecture, &v.AgentVersion, &v.LastHeartbeatAt)
 	return
@@ -37,6 +42,6 @@ func (s operationStore) RolloutObservation(ctx context.Context, node, workspace 
 }
 
 func (s operationStore) InsertUpgrade(ctx context.Context, v operationstore.PendingUpgrade) error {
-	_, err := s.Exec(ctx, `INSERT INTO agent_upgrade_operations(operation_id,workspace_id,node_id,target_version,package_sha256,architecture,from_version,approval_id,state,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,'queued',$9,$9)`, v.ID, v.WorkspaceID, v.NodeID, v.TargetVersion, v.PackageSHA256, v.Architecture, v.FromVersion, v.ApprovalID, v.CreatedAt)
+	_, err := s.Exec(ctx, `INSERT INTO agent_upgrade_operations(operation_id,workspace_id,node_id,target_version,package_sha256,architecture,from_version,state,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,'queued',$8,$8)`, v.ID, v.WorkspaceID, v.NodeID, v.TargetVersion, v.PackageSHA256, v.Architecture, v.FromVersion, v.CreatedAt)
 	return err
 }

@@ -103,7 +103,6 @@ func TestControlledOperationsRequireTypedTargetsAndReason(t *testing.T) {
 			r.Action = "service.reload"
 			r.ActorIdentityID = uuid.Must(uuid.NewV7())
 			r.ActorSessionID = uuid.Must(uuid.NewV7())
-			r.ApprovalID = uuid.Must(uuid.NewV7())
 			return r
 		}(),
 	} {
@@ -173,18 +172,13 @@ func TestRequestHashBindsTargetActorAndActionButNotAttemptMetadata(t *testing.T)
 }
 
 func agentUpgradeRequest() CreateRequest {
-	return CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "roll out 1.2.3", TargetVersion: "1.2.3", PackageSHA256: make([]byte, 32), Architecture: "arm64", ActorIdentityID: uuid.Must(uuid.NewV7()), ActorSessionID: uuid.Must(uuid.NewV7()), ApprovalID: uuid.Must(uuid.NewV7()), TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+	return CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "roll out 1.2.3", TargetVersion: "1.2.3", PackageSHA256: make([]byte, 32), Architecture: "arm64", ActorIdentityID: uuid.Must(uuid.NewV7()), ActorSessionID: uuid.Must(uuid.NewV7()), TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
 }
 
 func TestAgentUpgradeRequiresActorAndValidReleaseIdentity(t *testing.T) {
 	base := agentUpgradeRequest()
 	if err := validateCreate(base); err != nil {
-		t.Fatalf("approved upgrade rejected: %v", err)
-	}
-	unapproved := base
-	unapproved.ApprovalID = uuid.Nil
-	if err := validateCreate(unapproved); err != nil {
-		t.Fatalf("single administrator upgrade requires no approval: %v", err)
+		t.Fatalf("single administrator upgrade rejected: %v", err)
 	}
 	unidentified := base
 	unidentified.ActorIdentityID = uuid.Nil

@@ -2,7 +2,6 @@ package useroperations
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -66,7 +65,7 @@ func TestQuotaDirectionAndMonthlyBoundary(t *testing.T) {
 	}
 }
 
-func TestStableSchedulerIdentityAndBatchLimit(t *testing.T) {
+func TestStableSchedulerIdentityAndConcurrencyLimit(t *testing.T) {
 	first := operationIdempotencyKey("policy", "node", "alice", "2", "quota", "2026-08-01T00:00:00Z")
 	// Captured from main at 5eb5896 before the port substitution.
 	if first != "i14-d0bab4db91ed94274aca33de89ee0cc44448605f14c9ed502494599b22eb6f7d" || stableTraceparent(first) != "00-4cc2ffdfcb3701893e1ddaf39bd3e959-a48d3e519fe5231b-01" {
@@ -78,72 +77,7 @@ func TestStableSchedulerIdentityAndBatchLimit(t *testing.T) {
 	if len(first) > 128 || tracecontext.TraceID(stableTraceparent(first)) == "" {
 		t.Fatalf("invalid stable identities key=%q trace=%q", first, stableTraceparent(first))
 	}
-	request := BatchRequest{ID: uuid.Must(uuid.NewV7()), WorkspaceID: uuid.Must(uuid.NewV7()), ActorID: "operator", Reason: "ticket", RequestID: "request", Traceparent: testTraceparent, IdempotencyKey: "batch"}
-	request.Items = make([]BatchItemRequest, MaxBatchItems+1)
-	if !errors.Is(validateBatchRequest(request), ErrInvalidRequest) {
-		t.Fatal("oversized batch accepted")
-	}
 	if DefaultGlobalConcurrency != 50 || !strings.HasPrefix(first, "i14-") {
 		t.Fatal("documented global concurrency or key namespace changed")
-	}
-}
-
-func TestBulkDisableRequiresAuthenticatedActor(t *testing.T) {
-	request := BatchRequest{
-		ID: uuid.Must(uuid.NewV7()), WorkspaceID: uuid.Must(uuid.NewV7()),
-		ActorID: "operator", Reason: "ticket", RequestID: "request",
-		Traceparent: testTraceparent, IdempotencyKey: "batch",
-		Items: []BatchItemRequest{{NodeID: uuid.Must(uuid.NewV7()), Username: "alice", Action: "disable", ExpectedVersion: 1, Authorized: true}},
-	}
-	if err := validateBatchRequest(request); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("disable without identity/session=%v", err)
-	}
-	request.ActorIdentityID, request.ActorSessionID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if err := validateBatchRequest(request); err != nil {
-		t.Fatalf("single administrator batch rejected: %v", err)
-	}
-	request.Items[0].Action = "enable"
-	if err := validateBatchRequest(request); err != nil {
-		t.Fatalf("enable-only batch unexpectedly requires approval: %v", err)
-	}
-}
-
-func TestBatchApprovalHashBindsOrderedContent(t *testing.T) {
-	nodeA := uuid.MustParse("00000000-0000-7000-8000-000000000001")
-	nodeB := uuid.MustParse("00000000-0000-7000-8000-000000000002")
-	items := []BatchItemRequest{{NodeID: nodeA, Username: "alice", Action: "disable", ExpectedVersion: 1, Authorized: true}, {NodeID: nodeB, Username: "bob", Action: "enable", ExpectedVersion: 2}}
-	original := BatchRequestHash(items)
-	if fmt.Sprintf("%x", original) != "2ea98c109c8d8f6beefe074d60b2cb09e9211e5447032ed3cd0c1c96e964e907" {
-		t.Fatal("batch approval hash baseline changed")
-	}
-	reordered := BatchRequestHash([]BatchItemRequest{items[1], items[0]})
-	if original == reordered {
-		t.Fatal("reordering batch items did not change the approval hash")
-	}
-	items[0].ExpectedVersion++
-	if original == BatchRequestHash(items) {
-		t.Fatal("substituting batch content did not change the approval hash")
-	}
-	items[0].ExpectedVersion--
-	items[0].Authorized = false
-	if original != BatchRequestHash(items) {
-		t.Fatal("server authorization result leaked into the client content hash")
-	}
-}
-
-func TestBatchValidationRejectsInvalidNamesAndWhitespaceActors(t *testing.T) {
-	request := BatchRequest{
-		ID: uuid.Must(uuid.NewV7()), WorkspaceID: uuid.Must(uuid.NewV7()),
-		ActorID: "operator", Reason: "ticket", RequestID: "request",
-		Traceparent: testTraceparent, IdempotencyKey: "batch",
-		Items: []BatchItemRequest{{NodeID: uuid.Must(uuid.NewV7()), Username: "../alice", Action: "enable", ExpectedVersion: 1, Authorized: true}},
-	}
-	if !errors.Is(validateBatchRequest(request), ErrInvalidRequest) {
-		t.Fatal("invalid batch username accepted")
-	}
-	request.Items[0].Username = "alice"
-	request.ActorID = "  "
-	if !errors.Is(validateBatchRequest(request), ErrInvalidRequest) {
-		t.Fatal("whitespace actor accepted")
 	}
 }

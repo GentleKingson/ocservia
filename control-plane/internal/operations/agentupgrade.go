@@ -6,14 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
@@ -269,7 +268,6 @@ type AgentRollout struct {
 	BatchSize     int                `json:"batch_size"`
 	StopOnFailure bool               `json:"stop_on_failure"`
 	Reason        string             `json:"reason"`
-	ApprovalID    string             `json:"approval_id"`
 	CreatedBy     string             `json:"created_by"`
 	CurrentBatch  int                `json:"current_batch"`
 	PauseCode     string             `json:"pause_code,omitempty"`
@@ -286,7 +284,6 @@ type CreateAgentRolloutRequest struct {
 	BatchSize       int
 	StopOnFailure   bool
 	Reason          string
-	ApprovalID      uuid.UUID
 	ActorID         string
 	ActorIdentityID uuid.UUID
 	ActorSessionID  uuid.UUID
@@ -372,11 +369,22 @@ func nodeIDStrings(ids []uuid.UUID) []string {
 	return values
 }
 
+func agentRolloutRequestHash(target string, sorted []uuid.UUID, batchSize int, stopOnFailure bool) []byte {
+	summary, _ := json.Marshal(struct {
+		TargetVersion string      `json:"target_version"`
+		NodeIDs       []uuid.UUID `json:"node_ids"`
+		BatchSize     int         `json:"batch_size"`
+		StopOnFailure bool        `json:"stop_on_failure"`
+	}{target, sorted, batchSize, stopOnFailure})
+	digest := sha256.Sum256(append([]byte("ocservia/agent-rollout/v1\x00"), summary...))
+	return digest[:]
+}
+
 func rolloutFromRow(rollout rolloutRow, nodes []AgentRolloutNode) AgentRollout {
 	return AgentRollout{
 		ID: rollout.ID.String(), WorkspaceID: rollout.WorkspaceID.String(), TargetVersion: rollout.TargetVersion,
 		State: rollout.State, BatchSize: rollout.BatchSize, StopOnFailure: rollout.StopOnFailure,
-		Reason: rollout.Reason, ApprovalID: rollout.ApprovalID.String(), CreatedBy: rollout.CreatedBy.String(),
+		Reason: rollout.Reason, CreatedBy: rollout.CreatedBy.String(),
 		CurrentBatch: rollout.CurrentBatch, PauseCode: rollout.PauseCode,
 		CreatedAt: rollout.CreatedAt, UpdatedAt: rollout.UpdatedAt, Nodes: nodes, Excluded: rollout.Excluded,
 	}
@@ -489,12 +497,8 @@ func (s *Service) loadRollout(ctx context.Context, id uuid.UUID) (rolloutRow, er
 }
 
 // CreateAgentRollout durably records a canary and rolling agent upgrade
-// rollout. Server-side eligibility recompute excludes ineligible nodes with
-// a reason, the immutable rollout request is bound to the consumed approval,
-// and the rollout id comes from the approval itself so the binding cannot be
-// replayed for a different rollout.
+// rollout after verifying session and workspace administrator authorization.
 func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRolloutRequest) (AgentRollout, bool, error) {
-	request.ApprovalID = uuid.Nil
 	if s.releaseCatalog == nil {
 		return AgentRollout{}, false, ErrRolloutUnavailable
 	}
@@ -511,7 +515,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil || len(sorted) == 0 || len(sorted) > rolloutMaxNodes {
 		return AgentRollout{}, false, ErrRolloutInvalid
 	}
-	requestHash, _ := approvals.AgentRolloutBinding(target, sorted, request.BatchSize, request.StopOnFailure)
+	requestHash := agentRolloutRequestHash(target, sorted, request.BatchSize, request.StopOnFailure)
 	now := s.now()
 	at, err := value.FromTime(now)
 	if err != nil {
@@ -530,10 +534,8 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
-	for _, nodeID := range sorted {
-		if err := rbac.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, "agent.upgrade", rbac.Resource{WorkspaceID: request.WorkspaceID, Type: "node", ID: nodeID}); err != nil {
-			return AgentRollout{}, false, err
-		}
+	if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, request.WorkspaceID); err != nil {
+		return AgentRollout{}, false, err
 	}
 	existingID, existingHash, err := store.FindRollout(ctx, request.WorkspaceID, request.IdempotencyKey)
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
@@ -589,7 +591,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
-	if err := store.InsertRollout(ctx, operationstore.PendingRollout{Rollout: operationstore.Rollout{ID: rolloutID, WorkspaceID: request.WorkspaceID, TargetVersion: target, BatchSize: request.BatchSize, Reason: reason, ApprovalID: request.ApprovalID, RequestHash: requestHash, CreatedBy: request.ActorIdentityID, ActorSession: request.ActorSessionID, Excluded: storedExclusions, CreatedAt: at}, IdempotencyKey: request.IdempotencyKey}); err != nil {
+	if err := store.InsertRollout(ctx, operationstore.PendingRollout{Rollout: operationstore.Rollout{ID: rolloutID, WorkspaceID: request.WorkspaceID, TargetVersion: target, BatchSize: request.BatchSize, Reason: reason, RequestHash: requestHash, CreatedBy: request.ActorIdentityID, ActorSession: request.ActorSessionID, Excluded: storedExclusions, CreatedAt: at}, IdempotencyKey: request.IdempotencyKey}); err != nil {
 		return AgentRollout{}, false, fmt.Errorf("insert agent rollout: %w", err)
 	}
 	for ordinal, node := range eligible {
@@ -1055,24 +1057,23 @@ func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, 
 		return true, nil
 	}
 	operation, _, err := s.Create(ctx, CreateRequest{
-		NodeID:              node.NodeID,
-		IdempotencyKey:      "agent-rollout:" + rolloutID.String() + ":" + node.NodeID.String() + ":" + strconv.Itoa(node.DispatchAttempt),
-		ExpectedVersion:     node.DispatchVersion,
-		Kind:                AgentUpgrade,
-		TargetVersion:       rollout.TargetVersion,
-		PackageSHA256:       node.Digest[:],
-		Architecture:        node.Observation.Architecture,
-		ApprovalID:          rollout.ApprovalID,
-		ApprovalRequestHash: rollout.RequestHash,
-		RolloutID:           rolloutID,
-		Action:              "agent.upgrade",
-		Reason:              rollout.Reason,
-		TTL:                 rolloutUpgradeTTL,
-		RequestID:           "agent-rollout:" + rolloutID.String() + ":" + node.NodeID.String(),
-		Traceparent:         rolloutTraceparent(rolloutID, node.NodeID),
-		ActorID:             rollout.CreatedBy.String(),
-		ActorIdentityID:     rollout.CreatedBy,
-		ActorSessionID:      rollout.ActorSession,
+		NodeID:             node.NodeID,
+		IdempotencyKey:     "agent-rollout:" + rolloutID.String() + ":" + node.NodeID.String() + ":" + strconv.Itoa(node.DispatchAttempt),
+		ExpectedVersion:    node.DispatchVersion,
+		Kind:               AgentUpgrade,
+		TargetVersion:      rollout.TargetVersion,
+		PackageSHA256:      node.Digest[:],
+		Architecture:       node.Observation.Architecture,
+		RolloutRequestHash: rollout.RequestHash,
+		RolloutID:          rolloutID,
+		Action:             "agent.upgrade",
+		Reason:             rollout.Reason,
+		TTL:                rolloutUpgradeTTL,
+		RequestID:          "agent-rollout:" + rolloutID.String() + ":" + node.NodeID.String(),
+		Traceparent:        rolloutTraceparent(rolloutID, node.NodeID),
+		ActorID:            rollout.CreatedBy.String(),
+		ActorIdentityID:    rollout.CreatedBy,
+		ActorSessionID:     rollout.ActorSession,
 	})
 	switch {
 	case err == nil:

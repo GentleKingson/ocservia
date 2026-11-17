@@ -11,7 +11,7 @@ ocservia is a central control plane for clusters of [ocserv](https://ocserv.open
 
 ocservia does not replace ocserv. Every managed server keeps running ocserv, which terminates client tunnels and forwards their traffic. ocservia installs its node daemons alongside it and connects them to a central Controller.
 
-[Try it locally](#-try-it-locally-in-2-minutes) · [Operating model](#-what-makes-ocservia-different) · [Architecture](#-architecture-at-a-glance) · [Production deployment](#-deploying-to-production) · [Documentation](#-documentation)
+[Operating model](#operating-model) · [Deploy the Controller](#1-deploy-the-controller) · [Install a managed node](#2-install-a-managed-node) · [Documentation](#documentation) · [Development](#development)
 
 ## Features
 
@@ -35,7 +35,7 @@ On each managed host, the node agent runs as an unprivileged process. When it ne
 
 ### One Admin can complete management operations
 
-An authenticated Admin can manage nodes, users, configuration, certificates and upgrades without a second identity or approval. The Controller checks current permissions and binds signed commands to the requested content. Short-lived single-use installation tokens automate node activation and root-key registration while preserving TLS verification, key isolation, audit records and recovery checks.
+An authenticated administrator manages nodes, users, configuration, certificates, and upgrades without a second identity or approval step. The Controller checks current workspace permissions and binds signed commands to the requested content. Short-lived single-use installation tokens automate node activation and root-key registration while preserving TLS verification, key isolation, audit records, and recovery checks.
 
 ### 1. Deploy the Controller
 
@@ -49,7 +49,7 @@ bash install.sh
 
 The wizard detects the platform, collects Quick or Manual settings, checks prerequisites and asks for confirmation. It requires a TTY. For automation, use `bash install.sh --non-interactive --config ./install.env`; missing required configuration fails without prompting. Release scripts embed their version, so production installation needs neither Git nor a source checkout.
 
-Operators sign in with local credentials, OpenID Connect (OIDC), or both. A fresh installation has no default administrator account. If you enable local login in a manual setup, create the first administrator with the separate one-shot bootstrap command described in [Production authentication](docs/operations/authentication.md#bootstrap-the-first-local-admin).
+Operators authenticate with local credentials (`OCSERV_LOCAL_AUTH_ENABLED=true`). A fresh installation has no default administrator account. In a manual setup, create the single Local administrator with the one-shot bootstrap command described in [Production authentication](docs/operations/authentication.md#bootstrap-the-first-local-admin).
 
 The default Standalone mode runs the Relay and the Signer on separate hosts. Integrated mode runs them on the Controller host under the root lifecycle and needs additional configuration. Before you run the bootstrap, provision the required secrets as described in [Production deployment](docs/operations/production-deployment.md#prepare-the-configuration).
 
@@ -75,8 +75,8 @@ The installer securely retrieves configuration, installs the package, registers 
 | [Architecture](docs/architecture.md) | Components, call chains, responsibility owners, and permission and state boundaries. |
 | [Stable contracts](docs/reference/stable-contracts.md) | Rules that changes must keep: command delivery and receipts, identity and authorization, database artifacts, and protocol generation. |
 | [Production deployment](docs/operations/production-deployment.md) | Support scope, Controller and Relay installation in Quick or manual, Standalone or Integrated form, and upgrade, rollback and uninstall. |
-| [Agent lifecycle](docs/operations/agent-lifecycle.md) | Node installation, enrollment, activation, upgrade, rollback, rebind, and removal. |
-| [Authentication](docs/operations/authentication.md) | Local, OIDC, and mixed sign-in, the first administrators, and identity and session operations. |
+| [Agent lifecycle](docs/operations/agent-lifecycle.md) | Node installation, enrollment, upgrade, rollback, and removal. |
+| [Authentication](docs/operations/authentication.md) | Single Local admin authentication, bootstrap, and session operations. |
 | [Incident recovery](docs/operations/incident-recovery.md) | Database and Signer backup and restore, Unknown command reconciliation, and credential recovery. |
 | [Validation and release](docs/development/release-checks.md) | Checks for each kind of change, CI layers, three-VM acceptance, and the release process. |
 

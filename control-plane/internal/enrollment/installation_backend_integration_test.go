@@ -22,6 +22,17 @@ import (
 	"github.com/google/uuid"
 )
 
+var errAttestationRollback = errors.New("injected attestation registration rollback")
+
+type attestationRollbackStore struct{ attestationstore.Store }
+
+func (s attestationRollbackStore) BumpNodeRevision(ctx context.Context, node uuid.UUID, at time.Time) error {
+	if err := s.Store.BumpNodeRevision(ctx, node, at); err != nil {
+		return err
+	}
+	return errAttestationRollback
+}
+
 type installationRollbackBackend struct{ database.Backend }
 type installationRollbackTx struct{ database.Tx }
 

@@ -43,12 +43,6 @@ export interface AgentRolloutCreateRequest {
    * @memberof AgentRolloutCreateRequest
    */
   reason: string;
-  /**
-   *
-   * @type {string}
-   * @memberof AgentRolloutCreateRequest
-   */
-  approvalId?: string;
 }
 
 /**
@@ -93,7 +87,6 @@ export function AgentRolloutCreateRequestFromJSONTyped(
     nodeIds: json["node_ids"],
     batchSize: json["batch_size"] == null ? undefined : json["batch_size"],
     reason: json["reason"],
-    approvalId: json["approval_id"] == null ? undefined : json["approval_id"],
   };
 }
 
@@ -116,6 +109,5 @@ export function AgentRolloutCreateRequestToJSONTyped(
     node_ids: value["nodeIds"],
     batch_size: value["batchSize"],
     reason: value["reason"],
-    approval_id: value["approvalId"],
   };
 }

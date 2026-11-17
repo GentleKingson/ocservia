@@ -20,7 +20,6 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
@@ -39,16 +38,6 @@ type SimulationScenario struct {
 	DuplicateEvent  bool    `json:"duplicate_event"`
 	ReturnError     bool    `json:"return_error"`
 	DisconnectAfter bool    `json:"disconnect_after"`
-}
-
-type Operation struct {
-	ID        string          `json:"id"`
-	State     string          `json:"state"`
-	NodeID    *string         `json:"node_id,omitempty"`
-	CommandID *string         `json:"command_id,omitempty"`
-	Version   int64           `json:"version"`
-	CreatedAt value.Timestamp `json:"created_at"`
-	UpdatedAt value.Timestamp `json:"updated_at"`
 }
 
 type Event = eventstore.Event

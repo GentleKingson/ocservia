@@ -26,15 +26,11 @@ run_postgres_business_tests() {
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates -p 1 ./internal/certificates -run Integration)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./internal/approvals ./internal/audit ./internal/privdattestation -run Integration -count=1)
-  # Local/RBAC fixtures retain the current production runtime privileges.
-  # Clone before any auth fixture writes. Lifecycle bootstrap requires no prior
-  # singleton/admin grants; its audit constraints must never affect other suites.
-  clone_database "${container}" ocservia_latest ocservia_lifecycle
+    go test -p 1 ./internal/audit ./internal/privdattestation -run Integration -count=1)
   clone_database "${container}" ocservia_latest ocservia_auth_backend
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_auth_backend}" \
     OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_auth_backend}" \
-    checked_go_tests backend-auth -p 1 -parallel 1 ./internal/api -run '^Test(AuthenticationBackend(HTTP|Safety|Legacy)|LocalResetApprovalPrecheckBackendHTTP)Integration$'
+    checked_go_tests backend-auth -p 1 -parallel 1 ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety)Integration$'
   assert_auth_fixture_cleanup "${container}" ocservia_auth_backend
   docker exec "${container}" dropdb -U ocservia_owner ocservia_auth_backend
   clone_database "${container}" ocservia_latest ocservia_policy_api
@@ -43,19 +39,14 @@ run_postgres_business_tests() {
     checked_go_tests backend-policy-api --select -race -p 1 -parallel 1
   docker exec "${container}" dropdb -U ocservia_owner ocservia_policy_api
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
-    checked_go_tests database-auth -p 1 -parallel 1 ./internal/rbac ./internal/auth -run Integration
+    checked_go_tests database-auth -p 1 -parallel 1 ./internal/auth -run Integration
   assert_auth_fixture_cleanup "${container}" ocservia_latest
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     checked_go_tests database-api -p 1 -parallel 1 ./internal/api \
-      -run '^(TestLocalAccountHTTPSharedLimitsIntegration|TestAuthHTTPLoginLogoutIntegration|TestAuthLogSessionFailureIntegration|TestAuthenticationBackendHTTPIntegration)$'
+      -run '^(TestLocalAccountHTTPSharedLimitsIntegration|TestAuthHTTPLoginLogoutIntegration|TestAuthLogSessionFailureIntegration)$'
   assert_auth_fixture_cleanup "${container}" ocservia_latest
-  OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_lifecycle}" \
-    OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_lifecycle}" \
-    checked_go_tests database-lifecycle -p 1 -parallel 1 ./internal/api -run '^TestLocalUserLifecycleIntegration$'
-  assert_auth_fixture_cleanup "${container}" ocservia_lifecycle
-  docker exec "${container}" dropdb -U ocservia_owner ocservia_lifecycle
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-upgrades --select -p 1)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
-    go test -p 1 ./internal/api -run '^TestApprovalDetailRequiresEveryAuthorityScopeIntegration$|^TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations$' -count=1)
+    go test -p 1 ./internal/api -run '^TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations$' -count=1)
 }

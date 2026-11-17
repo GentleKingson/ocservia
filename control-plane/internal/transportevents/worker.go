@@ -13,16 +13,20 @@ import (
 )
 
 type Worker struct {
-	service   *Service
-	transport *transportclient.Client
-	logger    *slog.Logger
+	service    *Service
+	transport  *transportclient.Client
+	logger     *slog.Logger
+	simulation bool
 }
 
-func NewWorker(service *Service, transport *transportclient.Client, logger *slog.Logger) *Worker {
-	return &Worker{service: service, transport: transport, logger: logger}
+func NewWorker(service *Service, transport *transportclient.Client, logger *slog.Logger, simulation bool) *Worker {
+	return &Worker{service: service, transport: transport, logger: logger, simulation: simulation}
 }
 
 func (w *Worker) Run(ctx context.Context) error {
+	if !w.simulation {
+		return w.transport.RunWatch(ctx, w.service, w.service)
+	}
 	return runWorker(ctx, func(ctx context.Context) error {
 		return w.transport.RunWatch(ctx, w.service, w.service)
 	}, w.dispatch)

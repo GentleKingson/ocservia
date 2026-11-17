@@ -24,12 +24,6 @@ export interface CertificateIssueRequest {
    * @type {string}
    * @memberof CertificateIssueRequest
    */
-  approvalId?: string;
-  /**
-   *
-   * @type {string}
-   * @memberof CertificateIssueRequest
-   */
   reason: string;
 }
 
@@ -57,7 +51,6 @@ export function CertificateIssueRequestFromJSONTyped(
     return json;
   }
   return {
-    approvalId: json["approval_id"] == null ? undefined : json["approval_id"],
     reason: json["reason"],
   };
 }
@@ -77,7 +70,6 @@ export function CertificateIssueRequestToJSONTyped(
   }
 
   return {
-    approval_id: value["approvalId"],
     reason: value["reason"],
   };
 }

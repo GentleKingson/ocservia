@@ -366,12 +366,10 @@ case "${!#}" in
     for clause in "encode(t.token_hash,'hex')='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'" \
       "t.consumed_at BETWEEN t.created_at AND t.expires_at" "n.workspace_id=t.workspace_id" \
       "n.name=t.expected_node_name" "t.expected_node_name='github-hosted-node'" \
-      "t.expected_environment='development'" "t.expected_endpoint_id IS NULL" \
-      "t.expires_at-t.created_at=interval '900 seconds'" "encode(t.bound_endpoint_id,'hex')"; do
+      "t.expected_environment='development'" "encode(t.bound_endpoint_id,'hex')"; do
       [[ "${!#}" == *"$clause"* ]]
     done
     printf '%s\\n' "$DB_TOKEN" ;;
-  "SELECT consumed_node_id"*) printf '%s\\n' "$DB_TOKEN" ;;
   *) exit 2 ;;
 esac
 ''')
@@ -379,10 +377,11 @@ esac
     (binary / 'tailscale').write_text('#!/bin/bash\n[[ "$*" == "ip -4" ]] || exit 2\nprintf "100.64.0.1\\n"\n')
     (binary / 'tailscale').chmod(0o755)
     verified = temp / 'verification'
-    for db_node, db_token, ok in [(node + ':pending:' + endpoint, node + ':' + endpoint, True),
-                                  (node + ':active:' + endpoint, node + ':' + endpoint, False),
-                                  (node + ':pending:' + endpoint, '', False),
-                                  (node + ':pending:' + endpoint, node + ':' + 'c' * 64, False)]:
+    (state / 'bootstrap-token-sha256').write_text('d' * 64 + '\n')
+    for db_node, db_token, ok in [(node + ':active:' + endpoint, node + ':' + endpoint, True),
+                                  (node + ':pending:' + endpoint, node + ':' + endpoint, False),
+                                  (node + ':active:' + endpoint, '', False),
+                                  (node + ':active:' + endpoint, node + ':' + 'c' * 64, False)]:
         shutil.rmtree(verified, ignore_errors=True)
         verify_env = {**env, 'REAL_E2E_ROLE': 'controller', 'COMPOSE_PROJECT': 'real-e2e-test',
                       'ARTIFACT_DIR': str(verified), 'PATH': str(binary) + os.pathsep + os.environ['PATH'],
@@ -391,7 +390,6 @@ esac
             env=verify_env, ok=ok)
         assert (verified / 'result.txt').exists() == ok
         shutil.rmtree(verified, ignore_errors=True)
-        (state / 'bootstrap-token-sha256').write_text('d' * 64 + '\n')
         run('bash', str(ROOT / 'scripts/real-e2e-controller.sh'), 'verify-enrollment', str(result),
             env={**verify_env, 'NODE_INSTALL_E2E': 'true'}, ok=ok)
         assert (verified / 'result.txt').exists() == ok

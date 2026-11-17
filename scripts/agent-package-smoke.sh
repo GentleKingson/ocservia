@@ -279,7 +279,7 @@ sudo install -o root -g root -m 0644 "${work}/legacy-agent.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"
 # shellcheck disable=SC2016 # Variables belong to systemd's service environment.
 printf '%s\n' '[Service]' 'EnvironmentFile=/etc/ocservia-agent/relays.env' 'ExecStart=' \
-  'ExecStart=/usr/libexec/ocservia/ocservia-agent --controller $CONTROLLER_ENDPOINT_ID --node-id $NODE_ID --relay-mode custom --relay-url $RELAY_URL_A --relay-url $RELAY_URL_B --relay-token-file /etc/ocservia-agent/relay-access-token' \
+  'ExecStart=/usr/libexec/ocservia/ocservia-agent --controller $CONTROLLER_ENDPOINT_ID --node-id $NODE_ID --relay-mode custom --relay-url $RELAY_URL_A --relay-token-file /etc/ocservia-agent/relay-access-token' \
   >"${work}/legacy-agent-relays.conf"
 sudo rm -f "${rootfs}/usr/libexec/ocservia/ocservia-agent-relays"
 sudo install -o root -g root -m 0644 "${work}/legacy-agent-relays.conf" \
@@ -510,13 +510,12 @@ backup_dir="${rootfs}/var/lib/ocservia-upgrade/upgrade-backup"
 test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
-test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 13
+test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 9
 sudo test -f "${backup_dir}/ocservia-agent-relays.absent"
 # The fresh package install already placed the durable runner set, so the
 # matched snapshot must carry it as concrete rollback sources.
 for runner_snapshot in ocservia-upgrader.previous ocservia-agent-verify.previous \
-  ocservia-upgrader@.service.previous ocservia-agent-rebind.previous ocservia-agent-retention.previous \
-  ocservia-agent-retention.service.previous ocservia-agent-retention.timer.previous; do
+  ocservia-upgrader@.service.previous; do
   sudo test -f "${backup_dir}/${runner_snapshot}" \
     || { echo "snapshot is missing ${runner_snapshot}" >&2; exit 1; }
 done
@@ -561,13 +560,9 @@ for snapshot in \
   ocservia-agent-relays.conf.previous \
   ocservia-upgrader.previous \
   ocservia-agent-verify.previous \
-  ocservia-agent-rebind.previous \
-  ocservia-agent-retention.previous \
-  ocservia-agent-retention.service.previous \
-  ocservia-agent-retention.timer.previous \
   ocservia-upgrader@.service.previous; do
   case "${snapshot}" in
-    ocservia-agent.previous|ocservia-privd.previous|ocservia-upgrader.previous|ocservia-agent-verify.previous|ocservia-agent-rebind.previous|ocservia-agent-retention.previous) expected_mode=755 ;;
+    ocservia-agent.previous|ocservia-privd.previous|ocservia-upgrader.previous|ocservia-agent-verify.previous) expected_mode=755 ;;
     *) expected_mode=644 ;;
   esac
   test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/${snapshot}")" = "0:0:${expected_mode}:1"
@@ -610,21 +605,6 @@ assert_rejected_rollback_untouched() {
   test "${post_upgrade_state}" = "$(installed_state)" \
     || { echo "${reason} modified installed files" >&2; exit 1; }
 }
-
-printf '%s\n' ocservia-binding-v1 018f0c2e-7b1a-7c3d-8e9f-0123456789ab \
-  d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a \
-  d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a \
-  d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a \
-  clear >"${work}/active-binding"
-sudo install -o root -g root -m 0640 "${work}/active-binding" \
-  "${rootfs}/etc/ocservia-agent/active-binding"
-if capture_rollback "${ARTIFACT_DIR}/rollback-binding-unaware.log"; then
-  echo "rollback accepted a snapshot that cannot enforce the committed binding" >&2
-  exit 1
-fi
-grep -Fq 'cannot enforce the committed Controller binding' "${ARTIFACT_DIR}/rollback-binding-unaware.log"
-assert_rejected_rollback_untouched "rollback with binding-unaware binaries"
-sudo rm -- "${rootfs}/etc/ocservia-agent/active-binding"
 
 printf 'replacement' >"${work}/replacement"
 sudo install -o root -g root -m 0755 "${work}/replacement" \

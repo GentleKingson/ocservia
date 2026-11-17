@@ -74,12 +74,6 @@ export interface AgentRollout {
    * @type {string}
    * @memberof AgentRollout
    */
-  approvalId?: string;
-  /**
-   *
-   * @type {string}
-   * @memberof AgentRollout
-   */
   createdBy: string;
   /**
    *
@@ -218,7 +212,6 @@ export function AgentRolloutFromJSONTyped(
     batchSize: json["batch_size"],
     stopOnFailure: json["stop_on_failure"],
     reason: json["reason"],
-    approvalId: json["approval_id"] == null ? undefined : json["approval_id"],
     createdBy: json["created_by"],
     currentBatch: json["current_batch"],
     pauseCode: json["pause_code"] == null ? undefined : json["pause_code"],
@@ -252,7 +245,6 @@ export function AgentRolloutToJSONTyped(
     batch_size: value["batchSize"],
     stop_on_failure: value["stopOnFailure"],
     reason: value["reason"],
-    approval_id: value["approvalId"],
     created_by: value["createdBy"],
     current_batch: value["currentBatch"],
     pause_code: value["pauseCode"],

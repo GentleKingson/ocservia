@@ -38,7 +38,6 @@ controller_dockerfile_for() {
     transport) printf 'rust/transportd.Dockerfile\n' ;;
     backup) printf 'deploy/production/backup.Dockerfile\n' ;;
     edge|relay|signer) printf 'deploy/production/%s.Dockerfile\n' "$1" ;;
-    mysql_backup) printf 'deploy/production/backup.mysql.Dockerfile\n' ;;
     *) return 1 ;;
   esac
 }

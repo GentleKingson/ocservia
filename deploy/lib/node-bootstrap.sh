@@ -229,7 +229,6 @@ node_bootstrap_prepare() {
   CONTROLLER_ENDPOINT_ID="$(node_bootstrap_data field "${JOIN_STATE_DIR}" config.json controller_endpoint_id)"
   ENROLLMENT_ENVIRONMENT="$(node_bootstrap_data field "${JOIN_STATE_DIR}" config.json environment)"
   RELAY_URL_A="$(node_bootstrap_data field "${JOIN_STATE_DIR}" config.json relay_url)"
-  RELAY_URL_B=""
   BOOTSTRAP_TOKEN_SOURCE="${JOIN_STATE_DIR}/enrollment-token"
   RELAY_ACCESS_TOKEN_SOURCE="${JOIN_STATE_DIR}/relay-token"
   CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${JOIN_STATE_DIR}/command-key.pem"

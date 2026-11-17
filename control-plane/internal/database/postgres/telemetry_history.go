@@ -7,20 +7,11 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
+	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/google/uuid"
 )
 
-type TelemetryHistoryStore struct{ tx database.Tx }
-
-func NewTelemetryHistoryStore(tx database.Tx) *TelemetryHistoryStore {
-	return &TelemetryHistoryStore{tx: tx}
-}
-func (t *transaction) TelemetryHistoryStore() telemetryhistory.Store {
-	return NewTelemetryHistoryStore(t)
-}
-
-func (s *TelemetryHistoryStore) Insert(ctx context.Context, nodeID, batchID uuid.UUID, samples []telemetryhistory.Sample) error {
+func (s telemetryStore) InsertHistory(ctx context.Context, nodeID, batchID uuid.UUID, samples []telemetrystore.Sample) error {
 	for _, sample := range samples {
 		if _, err := s.tx.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, nodeID, batchID, sample.SampledAt, sample.Metric, sample.Value); err != nil {
 			return fmt.Errorf("insert telemetry sample: %w", err)
@@ -29,7 +20,7 @@ func (s *TelemetryHistoryStore) Insert(ctx context.Context, nodeID, batchID uuid
 	return nil
 }
 
-func (s *TelemetryHistoryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since value.Timestamp) ([]telemetryhistory.Point, error) {
+func (s telemetryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since value.Timestamp) ([]telemetrystore.Point, error) {
 	if err := since.Validate(); err != nil {
 		return nil, err
 	}
@@ -49,9 +40,9 @@ func (s *TelemetryHistoryStore) History(ctx context.Context, nodeID uuid.UUID, m
 		return nil, err
 	}
 	defer rows.Close()
-	points := []telemetryhistory.Point{}
+	points := []telemetrystore.Point{}
 	for rows.Next() {
-		var p telemetryhistory.Point
+		var p telemetrystore.Point
 		if err := rows.Scan(&p.At, &p.Metric, &p.Count, &p.Minimum, &p.Maximum, &p.Average); err != nil {
 			return nil, err
 		}
@@ -60,7 +51,7 @@ func (s *TelemetryHistoryStore) History(ctx context.Context, nodeID uuid.UUID, m
 	return points, rows.Err()
 }
 
-func (s *TelemetryHistoryStore) Maintain(ctx context.Context, now time.Time) error {
+func (s telemetryStore) MaintainHistory(ctx context.Context, now time.Time) error {
 	for _, table := range []struct {
 		name, interval string
 		width          time.Duration
@@ -80,4 +71,4 @@ func (s *TelemetryHistoryStore) Maintain(ctx context.Context, now time.Time) err
 	return err
 }
 
-var _ telemetryhistory.Store = (*TelemetryHistoryStore)(nil)
+var _ telemetrystore.Store = telemetryStore{}

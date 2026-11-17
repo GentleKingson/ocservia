@@ -5,10 +5,7 @@ const mocks = vi.hoisted(() => ({
   getWorkspace: vi.fn(),
   getVersion: vi.fn(),
 }));
-vi.mock("../src/api/workspace", () => ({
-  ...mocks,
-  workspaceChangedEvent: "workspace",
-}));
+vi.mock("../src/api/workspace", () => mocks);
 vi.mock("../src/api/platform", () => mocks);
 vi.mock("../src/shared/readiness", () => ({
   useReadinessStore: () => ({ isReady: true }),
@@ -108,16 +105,4 @@ it("discards a delayed response after a workspace refresh", async () => {
   await flush();
   expect(view.workspace?.id).toBe("workspace-b");
   expect(view.loading).toBe(false);
-});
-it("reloads once per workspace change and stops after unmount", async () => {
-  await mount();
-  expect(mocks.getWorkspace).toHaveBeenCalledTimes(1);
-  window.dispatchEvent(new Event("workspace"));
-  await flush();
-  expect(mocks.getWorkspace).toHaveBeenCalledTimes(2);
-  unmount?.();
-  unmount = undefined;
-  window.dispatchEvent(new Event("workspace"));
-  await flush();
-  expect(mocks.getWorkspace).toHaveBeenCalledTimes(2);
 });

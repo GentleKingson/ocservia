@@ -97,12 +97,7 @@ pgpass_escape() {
 }
 
 compose() {
-  local -a files=(-f "${COMPOSE_FILE}")
-  if [[ "${COMPOSE_FILE}" == "${ROOT}/deploy/production/compose.yaml" \
-    && -n "${OCSERV_OIDC_ISSUER:-}${OCSERV_OIDC_CLIENT_ID:-}${OCSERV_OIDC_REDIRECT_URL:-}" ]]; then
-    files+=(-f "${ROOT}/deploy/production/compose.oidc.yaml")
-  fi
-  docker compose "${files[@]}" "$@"
+  docker compose -f "${COMPOSE_FILE}" "$@"
 }
 
 alter_roles() {

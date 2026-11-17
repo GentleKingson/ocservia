@@ -1,7 +1,6 @@
 services:
   migrate:
     environment:
-      OCSERV_DATABASE_BACKEND: postgres
       OCSERV_DATABASE_TLS_CA_FILE: /run/secrets/database_ca
     secrets:
       - source: database_ca
@@ -13,7 +12,6 @@ services:
 
   control-plane:
     environment:
-      OCSERV_DATABASE_BACKEND: postgres
       OCSERV_DATABASE_TLS_CA_FILE: /run/secrets/database_ca
     secrets:
       - source: database_ca

@@ -32,14 +32,11 @@ func TestLocalBootstrapConfig(t *testing.T) {
 		t.Fatal("bootstrap secret file not loaded")
 	}
 	cfg, err = Load(nil, lookup)
-	if err != nil || cfg.LocalBootstrapPassword != "" || cfg.LocalBootstrapApproverPassword != "" || cfg.BootstrapLocalAdmin {
+	if err != nil || cfg.LocalBootstrapPassword != "" || cfg.BootstrapLocalAdmin {
 		t.Fatal("normal startup loaded bootstrap credential")
 	}
-	if cfg, err := Load([]string{"--complete-local-bootstrap"}, lookup); err == nil || cfg.CompleteLocalBootstrap {
-		t.Fatalf("completion CLI: %v", err)
-	}
-	if _, err := Load([]string{"--complete-local-bootstrap", "--bootstrap-local-admin"}, lookup); err == nil {
-		t.Fatal("combined initialization accepted")
+	if _, err := Load([]string{"--complete-local-bootstrap"}, lookup); err == nil {
+		t.Fatal("retired completion CLI accepted")
 	}
 
 	for _, args := range [][]string{{"--bootstrap-local-admin", "--migrate-only"}, {"--bootstrap-local-admin", "--schema-compatibility-check=32"}, {"--password=" + password}, {password}} {

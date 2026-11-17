@@ -135,7 +135,7 @@ start_control() {
     OCSERV_TRUST_SOCKET="${TRUST_SOCKET}" \
     OCSERV_AUDIT_EVENT_KEY_ID="${AUDIT_EVENT_KEY_ID}" \
     OCSERV_TEST_AUDIT_EVENT_KEY_HEX="${AUDIT_EVENT_KEY_HEX}" \
-    "${CONTROL_BIN}" --role=all >"${TMP_ROOT}/control.log" 2>&1 &
+    "${CONTROL_BIN}" >"${TMP_ROOT}/control.log" 2>&1 &
   CONTROL_PID=$!
   PIDS+=("${CONTROL_PID}")
   for _ in $(seq 1 60); do

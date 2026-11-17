@@ -1,23 +1,7 @@
-import type { Page, Route } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { expect, test } from "./csp";
 
 const alphaId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
-const betaId = "019fc0a4-6d92-765c-a8a1-4af556614cc2";
-
-// WebKit cannot fulfill a 3xx in Playwright, so a simulated redirect is a
-// page that replaces itself with the next location.
-function redirect(route: Route, location: string): Promise<void> {
-  return route.fulfill({
-    contentType: "text/html",
-    body: `<script>location.replace(${JSON.stringify(location)})</script>`,
-  });
-}
-
-test.beforeEach(async ({ page }) => {
-  await page.route("**/api/v1/auth/methods", (route) =>
-    route.fulfill({ json: { local: false, oidc: true } }),
-  );
-});
 
 async function installEventSourceProbe(page: Page): Promise<void> {
   await page.addInitScript(() => {
@@ -75,345 +59,50 @@ async function mockReadiness(page: Page): Promise<void> {
   );
 }
 
-test("fresh OIDC login returns to the requested console route", async ({
+test("local login returns to the requested console route and opens the workspace stream", async ({
   page,
 }) => {
   await installEventSourceProbe(page);
   await mockReadiness(page);
-  let workspaceRequests = 0;
-  await page.route("**/api/v1/workspaces", (route) => {
-    workspaceRequests += 1;
-    if (workspaceRequests === 1) {
-      return route.fulfill({
-        status: 401,
-        contentType: "application/problem+json",
-        body: "{}",
-      });
-    }
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        items: [{ id: alphaId, name: "Alpha", slug: "alpha", version: 1 }],
-      }),
-    });
-  });
-  await page.route("**/api/v1/auth/login", (route) =>
-    redirect(route, "/fake-idp"),
-  );
-  await page.route("**/fake-idp", (route) =>
-    redirect(route, "/api/v1/auth/callback?state=test&code=test"),
-  );
-  await page.route("**/api/v1/auth/callback?**", (route) =>
-    redirect(route, "/"),
-  );
-  await page.route("**/api/v1/nodes?**", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ items: [], page: { has_more: false } }),
-    }),
-  );
-
-  await page.goto("/nodes");
-
-  await expect(page).toHaveURL(/\/nodes$/);
-  await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
-  expect(workspaceRequests).toBeGreaterThanOrEqual(2);
-  expect(
-    await page.evaluate(() =>
-      sessionStorage.getItem("ocservia.login.oidc-attempt"),
-    ),
-  ).toBeNull();
-  expect(
-    await page.evaluate(() =>
-      sessionStorage.getItem("ocservia.login.return-to"),
-    ),
-  ).toBeNull();
-});
-
-test("switching workspace clears fleet state and reconnects its stream", async ({
-  page,
-}) => {
-  await installEventSourceProbe(page);
-  await mockReadiness(page);
-  await page.route("**/api/v1/workspaces", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        items: [
-          { id: alphaId, name: "Alpha", slug: "alpha", version: 1 },
-          { id: betaId, name: "Beta", slug: "beta", version: 1 },
-        ],
-      }),
-    }),
-  );
-  await page.route("**/api/v1/nodes?**", (route) => {
-    const workspaceId = route.request().headers()["x-workspace-id"];
-    const name = workspaceId === betaId ? "Beta node" : "Alpha node";
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        items: [
-          {
-            id: workspaceId === betaId ? betaId : alphaId,
-            name,
-            version: 1,
-            trust_status: "active",
-            connection_state: "online",
-            freshness: "fresh",
-            dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-            session_count: 0,
-          },
-        ],
-        page: { has_more: false },
-      }),
-    });
-  });
-
-  await page.goto("/nodes");
-  await expect(page.getByText("Alpha node")).toBeVisible();
-  await page.getByLabel("Workspace").selectOption(betaId);
-
-  await expect(page.getByText("Beta node")).toBeVisible();
-  await expect(page.getByText("Alpha node")).toHaveCount(0);
-  await expect
-    .poll(() =>
-      page.evaluate(() => {
-        const sources = (
-          window as unknown as {
-            __eventSources: Array<{
-              url: string;
-              closed: boolean;
-              emitError: () => void;
-            }>;
-          }
-        ).__eventSources;
-        return {
-          count: sources.length,
-          firstClosed: sources[0]?.closed,
-          latestUrl: sources.at(-1)?.url,
-        };
-      }),
-    )
-    .toMatchObject({
-      count: 2,
-      firstClosed: true,
-      latestUrl: expect.stringContaining(`workspace_id=${betaId}`),
-    });
-});
-
-test("an expired SSE session starts OIDC login and restores the console", async ({
-  page,
-}) => {
-  await installEventSourceProbe(page);
-  await mockReadiness(page);
-  let workspaceRequests = 0;
   let authenticated = false;
-  let logins = 0;
-  await page.route("**/api/v1/workspaces", (route) => {
-    workspaceRequests += 1;
-    if (!authenticated) {
-      return route.fulfill({
-        status: 401,
-        contentType: "application/problem+json",
-        body: "{}",
-      });
-    }
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        items: [{ id: alphaId, name: "Alpha", slug: "alpha", version: 1 }],
-      }),
-    });
-  });
+  await page.route("**/api/v1/workspaces", (route) =>
+    authenticated
+      ? route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: [{ id: alphaId, name: "Alpha", slug: "alpha", version: 1 }],
+          }),
+        })
+      : route.fulfill({
+          status: 401,
+          contentType: "application/problem+json",
+          body: "{}",
+        }),
+  );
   await page.route("**/api/v1/auth/login", (route) => {
     authenticated = true;
-    logins += 1;
-    return redirect(route, "/fake-idp");
+    return route.fulfill({ status: 204 });
   });
-  await page.route("**/fake-idp", (route) =>
-    redirect(route, "/api/v1/auth/callback?state=test&code=test"),
-  );
-  await page.route("**/api/v1/auth/callback?**", (route) =>
-    redirect(route, "/"),
-  );
-  await page.route("**/api/v1/nodes?**", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ items: [], page: { has_more: false } }),
-    }),
-  );
-
-  await page.goto("/nodes");
-  await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
-  await expect
-    .poll(() =>
-      page.evaluate(() =>
-        sessionStorage.getItem("ocservia.login.oidc-attempt"),
-      ),
-    )
-    .toBeNull();
-  expect(logins).toBe(1);
-  // The stream opens after the first snapshot read, not with the heading.
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          (
-            window as unknown as {
-              __eventSources: Array<{ closed: boolean }>;
-            }
-          ).__eventSources.filter((source) => !source.closed).length,
-      ),
-    )
-    .toBe(1);
-  authenticated = false;
-  await page.evaluate(() => {
-    const sources = (
-      window as unknown as {
-        __eventSources: Array<{ emitError: () => void }>;
-      }
-    ).__eventSources;
-    sources.at(-1)?.emitError();
-  });
-
-  await expect(page).toHaveURL(/\/nodes$/);
-  await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
-  await expect.poll(() => logins).toBe(2);
-  await expect.poll(() => workspaceRequests).toBeGreaterThanOrEqual(4);
-});
-
-test("a late response from the previous workspace cannot overwrite the current view", async ({
-  page,
-}) => {
-  await installEventSourceProbe(page);
-  await mockReadiness(page);
-  let releaseAlpha!: () => void;
-  let delayedAlpha = true;
-  const alphaResponseGate = new Promise<void>((resolve) => {
-    releaseAlpha = resolve;
-  });
-  await page.route("**/api/v1/workspaces", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        items: [
-          { id: alphaId, name: "Alpha", slug: "alpha", version: 1 },
-          { id: betaId, name: "Beta", slug: "beta", version: 1 },
-        ],
-      }),
-    }),
-  );
-  await page.route("**/api/v1/nodes?**", async (route) => {
-    const workspaceId = route.request().headers()["x-workspace-id"];
-    const name = workspaceId === betaId ? "Beta node" : "Alpha node";
-    if (workspaceId !== betaId && delayedAlpha) {
-      delayedAlpha = false;
-      await alphaResponseGate;
-    }
-    try {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          items: [
-            {
-              id: workspaceId === betaId ? betaId : alphaId,
-              name,
-              version: 1,
-              trust_status: "active",
-              connection_state: "online",
-              freshness: "fresh",
-              dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-              session_count: 0,
-            },
-          ],
-          page: { has_more: false },
-        }),
-      });
-    } catch {
-      // The browser may abort the stale request during workspace switching.
-    }
-  });
-
-  await page.goto("/nodes");
-  await page.getByLabel("Workspace").selectOption(betaId);
-  await expect(page.getByText("Beta node")).toBeVisible();
-  releaseAlpha();
-  await page.waitForTimeout(300);
-  await expect(page.getByText("Beta node")).toBeVisible();
-  await expect(page.getByText("Alpha node")).toHaveCount(0);
-  await expect
-    .poll(() =>
-      page.evaluate(() => {
-        const sources = (
-          window as unknown as {
-            __eventSources: Array<{ url: string; closed: boolean }>;
-          }
-        ).__eventSources;
-        return sources
-          .filter((source) => !source.closed)
-          .map((source) => source.url);
-      }),
-    )
-    .toEqual([expect.stringContaining(`workspace_id=${betaId}`)]);
-});
-
-test("rapid workspace changes leave only the final workspace stream active", async ({
-  page,
-}) => {
-  await installEventSourceProbe(page);
-  await mockReadiness(page);
-  await page.route("**/api/v1/workspaces", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        items: [
-          { id: alphaId, name: "Alpha", slug: "alpha", version: 1 },
-          { id: betaId, name: "Beta", slug: "beta", version: 1 },
-        ],
-      }),
-    }),
-  );
   await page.route("**/api/v1/nodes?**", (route) => {
-    const workspaceId = route.request().headers()["x-workspace-id"];
-    const isBeta = workspaceId === betaId;
+    expect(route.request().headers()["x-workspace-id"]).toBe(alphaId);
     return route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({
-        items: [
-          {
-            id: isBeta ? betaId : alphaId,
-            name: isBeta ? "Beta node" : "Alpha node",
-            version: 1,
-            trust_status: "active",
-            connection_state: "online",
-            freshness: "fresh",
-            dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-            session_count: 0,
-          },
-        ],
-        page: { has_more: false },
-      }),
+      body: JSON.stringify({ items: [], page: { has_more: false } }),
     });
   });
 
   await page.goto("/nodes");
-  await expect(page.getByText("Alpha node")).toBeVisible();
-  const selector = page.getByLabel("Workspace");
-  await selector.selectOption(betaId);
-  await selector.selectOption(alphaId);
+  await expect(page).toHaveURL(/\/login$/);
+  await page.getByLabel("Username", { exact: true }).fill("admin");
+  await page.getByLabel("Password", { exact: true }).fill("test-only-password");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
 
-  await expect(page.getByText("Alpha node")).toBeVisible();
-  await expect(page.getByText("Beta node")).toHaveCount(0);
+  await expect(page).toHaveURL(/\/nodes$/);
+  await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
+  await expect(page.getByTestId("workspace")).toContainText("Alpha");
+  await expect(page.locator("#workspace-select")).toHaveCount(0);
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -428,4 +117,79 @@ test("rapid workspace changes leave only the final workspace stream active", asy
       }),
     )
     .toEqual([expect.stringContaining(`workspace_id=${alphaId}`)]);
+  expect(
+    await page.evaluate(() =>
+      sessionStorage.getItem("ocservia.login.return-to"),
+    ),
+  ).toBeNull();
+});
+
+test("an expired SSE session redirects to local login and restores the console", async ({
+  page,
+}) => {
+  await installEventSourceProbe(page);
+  await mockReadiness(page);
+  let authenticated = true;
+  let logins = 0;
+  await page.route("**/api/v1/workspaces", (route) =>
+    authenticated
+      ? route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: [{ id: alphaId, name: "Alpha", slug: "alpha", version: 1 }],
+          }),
+        })
+      : route.fulfill({
+          status: 401,
+          contentType: "application/problem+json",
+          body: "{}",
+        }),
+  );
+  await page.route("**/api/v1/auth/login", (route) => {
+    authenticated = true;
+    logins += 1;
+    return route.fulfill({ status: 204 });
+  });
+  await page.route("**/api/v1/nodes?**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], page: { has_more: false } }),
+    }),
+  );
+
+  await page.goto("/nodes");
+  await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __eventSources: Array<{ closed: boolean }>;
+            }
+          ).__eventSources.filter((source) => !source.closed).length,
+      ),
+    )
+    .toBe(1);
+
+  authenticated = false;
+  await page.evaluate(() => {
+    const sources = (
+      window as unknown as {
+        __eventSources: Array<{ emitError: () => void }>;
+      }
+    ).__eventSources;
+    sources.at(-1)?.emitError();
+  });
+
+  await expect(page).toHaveURL(/\/login$/);
+  await page.getByLabel("Username", { exact: true }).fill("admin");
+  await page.getByLabel("Password", { exact: true }).fill("test-only-password");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+
+  await expect(page).toHaveURL(/\/nodes$/);
+  await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
+  expect(logins).toBe(1);
 });

@@ -5,13 +5,6 @@ import type { RouteRecordRaw, Router } from "vue-router";
 // first visit.
 import OverviewView from "../views/OverviewView.vue";
 
-// The development simulator stays reachable only on development runtimes
-// (the vite dev server); production navigation never registers the route.
-// vite.config.ts refuses builds with VITE_DEV_AUTH_TOKEN, so the token term
-// only applies where a runtime sets it without DEV (see test/router.test.ts).
-export const developmentRuntime =
-  import.meta.env.DEV || Boolean(import.meta.env.VITE_DEV_AUTH_TOKEN);
-
 export const routeRecords: RouteRecordRaw[] = [
   {
     path: "/login",
@@ -49,15 +42,6 @@ export const routeRecords: RouteRecordRaw[] = [
     name: "settings",
     component: () => import("../views/SettingsView.vue"),
   },
-  ...(developmentRuntime
-    ? [
-        {
-          path: "/dev",
-          name: "development",
-          component: () => import("../views/DevelopmentView.vue"),
-        },
-      ]
-    : []),
 ];
 
 // A page chunk fails to load after a redeploy removed it (the gateway answers

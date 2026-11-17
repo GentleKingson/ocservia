@@ -26,9 +26,9 @@ trap 'rm -rf -- "${fixture}"' EXIT
 # The auth fixture changes only Controller settings. Never race the unchanged
 # transport container against its trust backend, or continue after failed health.
 (
-  # shellcheck disable=SC2317 # Called by configure_auth_peers.
+  # shellcheck disable=SC2317,SC2329 # Called by the sourced configure_auth_peers.
   compose() { printf '%s\n' "$*" >>"${fixture}/auth-order"; }
-  # shellcheck disable=SC2317 # Called by configure_auth_peers.
+  # shellcheck disable=SC2317,SC2329 # Called by the sourced configure_auth_peers.
   python3() { printf '%s\n' "python3 $*" >>"${fixture}/auth-order"; }
   configure_auth_peers
 )
@@ -39,7 +39,7 @@ trap 'rm -rf -- "${fixture}"' EXIT
 set +e
 (
   set -e
-  # shellcheck disable=SC2317 # Called by configure_auth_peers.
+  # shellcheck disable=SC2317,SC2329 # Called by the sourced configure_auth_peers.
   compose() { printf '%s\n' "$*" >>"${fixture}/auth-failed-order"; return 19; }
   configure_auth_peers
 )
@@ -52,13 +52,13 @@ for BUSINESS_PROFILE in smoke extended; do
     # This separate fixture deliberately sets its own signer mode.
     # shellcheck disable=SC2031
     export PRODUCTION_SIGNER_ACCEPTANCE=true BUSINESS_RUN_RESILIENCE=true BUSINESS_TERMINAL=revocation
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     next_stage() { :; }
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     record() { :; }
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     python3() { printf '%s\n' "$*"; }
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     bash() { printf 'bash %s\n' "$*"; }
     run_business_vpn
     run_business_completion
@@ -77,12 +77,12 @@ for profile in smoke extended; do
   [[ "$(tail -n 1 "${fixture}/${profile}-phases")" == "${ROOT}/scripts/release-business-api.py revocation" ]]
 done
 [[ "$(tail -n 2 "${fixture}/extended-phases" | head -n 1)" == "bash ${ROOT}/scripts/release-business-rollout.sh" ]]
+python3 scripts/test-release-product-identity.py
 python3 scripts/test-release-business-smoke.py
-python3 scripts/test-native-platform-package.py
 python3 scripts/test-release-asset-smoke.py
 node scripts/test-release-upgrade.mjs
 bash scripts/test-release-rust-cache.sh
 # Basic CI routes the Release Check-only Quick acceptance script here; its real
 # lifecycle runs only in Release Check, so at least keep it parseable.
 bash -n scripts/release-quick-acceptance.sh
-ruby scripts/test-release-workflows.rb
+python3 scripts/test-release-workflows.py

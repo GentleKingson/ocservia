@@ -20,7 +20,7 @@ import { mapValues } from "../runtime";
  */
 export interface NodeBootstrapTokenRequest {
   /**
-   * Return a root-only installation token and automatically provision the node. Omit expected_endpoint_id in this mode; the default retains endpoint-bound enrollment and rebind compatibility.
+   * Return a root-only installation token and automatically provision the node. Omit expected_endpoint_id in this mode; the default uses manual endpoint-bound enrollment.
    * @type {boolean}
    * @memberof NodeBootstrapTokenRequest
    */
@@ -44,7 +44,7 @@ export interface NodeBootstrapTokenRequest {
    */
   expectedNodeName?: string;
   /**
-   * Optional possession-bound Agent EndpointID; set this for Controller rebind.
+   * Optional possession-bound Agent EndpointID.
    * @type {string}
    * @memberof NodeBootstrapTokenRequest
    */

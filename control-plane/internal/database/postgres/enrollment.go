@@ -13,33 +13,18 @@ type enrollmentStore struct{ database.Tx }
 
 func (t *transaction) EnrollmentStore() enrollmentstore.EnrollmentStore { return enrollmentStore{t} }
 
-func enrollmentTokenTable(bootstrap bool) string {
-	if bootstrap {
-		return "node_bootstrap_tokens"
-	}
-	return "enrollment_tokens"
-}
-
 func (s enrollmentStore) WorkspaceExists(ctx context.Context, id uuid.UUID) (v bool, err error) {
 	err = s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspaces WHERE id=$1)`, id).Scan(&v)
 	return
 }
 
-func (s enrollmentStore) InsertToken(ctx context.Context, v enrollmentstore.Token, bootstrap bool) error {
-	if bootstrap {
-		_, err := s.Exec(ctx, `INSERT INTO node_bootstrap_tokens(id,workspace_id,token_hash,expected_environment,expected_node_name,expires_at,created_by,created_at,expected_endpoint_id)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, v.ID, v.WorkspaceID, v.Hash, v.Environment, v.ExpectedName, v.ExpiresAt, v.CreatedBy, v.CreatedAt, v.ExpectedEndpoint)
-		return err
-	}
-	_, err := s.Exec(ctx, `INSERT INTO enrollment_tokens(id,workspace_id,token_hash,expected_environment,expected_node_name,expected_endpoint_id,expires_at,created_by,created_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, v.ID, v.WorkspaceID, v.Hash, v.Environment, v.ExpectedName, v.Endpoint, v.ExpiresAt, v.CreatedBy, v.CreatedAt)
+func (s enrollmentStore) InsertToken(ctx context.Context, v enrollmentstore.Token) error {
+	_, err := s.Exec(ctx, `INSERT INTO node_bootstrap_tokens(id,workspace_id,token_hash,expected_environment,expected_node_name,expires_at,created_by,created_at,expected_endpoint_id)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, v.ID, v.WorkspaceID, v.Hash, v.Environment, v.ExpectedName, v.ExpiresAt, v.CreatedBy, v.CreatedAt, v.ExpectedEndpoint)
 	return err
 }
 
-func (s enrollmentStore) TokenByHash(ctx context.Context, hash []byte, bootstrap, lock bool) (v enrollmentstore.Token, err error) {
-	endpoint := "expected_endpoint_id"
-	if bootstrap {
-		endpoint = "bound_endpoint_id"
-	}
-	q := `SELECT id,workspace_id,expected_environment,expected_node_name,` + endpoint + `,expires_at,consumed_at,consumed_node_id,created_at,expected_endpoint_id FROM ` + enrollmentTokenTable(bootstrap) + ` WHERE token_hash=$1`
+func (s enrollmentStore) TokenByHash(ctx context.Context, hash []byte, lock bool) (v enrollmentstore.Token, err error) {
+	q := `SELECT id,workspace_id,expected_environment,expected_node_name,bound_endpoint_id,expires_at,consumed_at,consumed_node_id,created_at,expected_endpoint_id FROM node_bootstrap_tokens WHERE token_hash=$1`
 	if lock {
 		q += " FOR UPDATE"
 	}
@@ -47,12 +32,8 @@ func (s enrollmentStore) TokenByHash(ctx context.Context, hash []byte, bootstrap
 	return
 }
 
-func (s enrollmentStore) ConsumeToken(ctx context.Context, token, node uuid.UUID, endpoint []byte, at value.Timestamp, bootstrap bool) (bool, error) {
-	if bootstrap {
-		n, err := s.Exec(ctx, `UPDATE node_bootstrap_tokens SET bound_endpoint_id=$1,consumed_node_id=$2,consumed_at=$3 WHERE id=$4 AND consumed_at IS NULL`, endpoint, node, at, token)
-		return n == 1, err
-	}
-	n, err := s.Exec(ctx, `UPDATE enrollment_tokens SET consumed_at=$1,consumed_node_id=$2 WHERE id=$3 AND consumed_at IS NULL`, at, node, token)
+func (s enrollmentStore) ConsumeToken(ctx context.Context, token, node uuid.UUID, endpoint []byte, at value.Timestamp) (bool, error) {
+	n, err := s.Exec(ctx, `UPDATE node_bootstrap_tokens SET bound_endpoint_id=$1,consumed_node_id=$2,consumed_at=$3 WHERE id=$4 AND consumed_at IS NULL`, endpoint, node, at, token)
 	return n == 1, err
 }
 
@@ -86,11 +67,6 @@ func (s enrollmentStore) NodeByID(ctx context.Context, id uuid.UUID, lock enroll
 	return scanEnrollmentNode(s.QueryRow(ctx, enrollmentNodeColumns+`WHERE n.id=$1`+enrollmentNodeLock(lock), id))
 }
 
-func (s enrollmentStore) LegacyPendingNode(ctx context.Context, workspace uuid.UUID, name string) (id uuid.UUID, err error) {
-	err = s.QueryRow(ctx, `SELECT n.id FROM nodes n WHERE n.workspace_id=$1 AND n.name=$2 AND n.status='pending' AND NOT EXISTS(SELECT 1 FROM node_endpoint_keys k WHERE k.node_id=n.id) FOR UPDATE OF n`, workspace, name).Scan(&id)
-	return
-}
-
 func (s enrollmentStore) PendingCount(ctx context.Context, workspace uuid.UUID) (v int, err error) {
 	err = s.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE workspace_id=$1 AND status='pending'`, workspace).Scan(&v)
 	return
@@ -103,11 +79,6 @@ func (s enrollmentStore) EndpointExists(ctx context.Context, endpoint []byte) (v
 
 func (s enrollmentStore) InsertNode(ctx context.Context, id, workspace uuid.UUID, name string, at value.Timestamp) error {
 	_, err := s.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,$3,'pending',$4,$4)`, id, workspace, name, at)
-	return err
-}
-
-func (s enrollmentStore) TouchNode(ctx context.Context, id uuid.UUID, at value.Timestamp) error {
-	_, err := s.Exec(ctx, `UPDATE nodes SET version=version+1,updated_at=$2 WHERE id=$1`, id, at)
 	return err
 }
 
@@ -161,11 +132,6 @@ func (s enrollmentStore) PutCapability(ctx context.Context, id uuid.UUID, capabi
 		q += ` ON CONFLICT(node_id,capability) DO UPDATE SET approved=true`
 	}
 	_, err := s.Exec(ctx, q, id, capability, approved)
-	return err
-}
-
-func (s enrollmentStore) ResetCapabilities(ctx context.Context, id uuid.UUID) error {
-	_, err := s.Exec(ctx, `UPDATE node_capabilities SET approved=false WHERE node_id=$1`, id)
 	return err
 }
 

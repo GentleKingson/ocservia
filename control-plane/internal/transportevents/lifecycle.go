@@ -10,6 +10,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
@@ -17,32 +18,32 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-func (s *Service) CreateSimulation(ctx context.Context, scenario SimulationScenario, requestID, traceparent string) (Operation, error) {
+func (s *Service) CreateSimulation(ctx context.Context, scenario SimulationScenario, requestID, traceparent string) (operations.Operation, error) {
 	ctx, span := otel.Tracer("ocservia.transportevents").Start(ctx, "development.simulation.queue", trace.WithSpanKind(trace.SpanKindInternal))
 	defer span.End()
 	heartbeats, delay, err := normalizeScenario(scenario)
 	if err != nil {
-		return Operation{}, err
+		return operations.Operation{}, err
 	}
 	if requestID == "" || tracecontext.TraceID(traceparent) == "" {
-		return Operation{}, fmt.Errorf("%w: request correlation is required", ErrInvalidScenario)
+		return operations.Operation{}, fmt.Errorf("%w: request correlation is required", ErrInvalidScenario)
 	}
 	now := s.now()
 	at, err := value.FromTime(now)
 	if err != nil {
-		return Operation{}, err
+		return operations.Operation{}, err
 	}
 	expires, err := at.Add(time.Minute)
 	if err != nil {
-		return Operation{}, err
+		return operations.Operation{}, err
 	}
 	workspace, node, operation, command, auditID, err := newIDs()
 	if err != nil {
-		return Operation{}, err
+		return operations.Operation{}, err
 	}
 	envelope, err := marshalEnvelope(node, operation, command, traceparent, scenario, heartbeats, delay, now)
 	if err != nil {
-		return Operation{}, err
+		return operations.Operation{}, err
 	}
 	endpoint := sha256.Sum256(append([]byte("ocservia/development-simulator/"), node[:]...))
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
@@ -60,10 +61,10 @@ func (s *Service) CreateSimulation(ctx context.Context, scenario SimulationScena
 		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspace, ActorType: "development_stub", ActorID: "developer", Action: "simulation.probe", ResourceType: "operation", ResourceID: operation, RequestID: requestID, TraceID: tracecontext.TraceID(traceparent), Reason: "development simulation probe", At: now})
 	})
 	if err != nil {
-		return Operation{}, fmt.Errorf("create local simulation: %w", err)
+		return operations.Operation{}, fmt.Errorf("create local simulation: %w", err)
 	}
 	nodeText, commandText := node.String(), command.String()
-	return Operation{ID: operation.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: at, UpdatedAt: at}, nil
+	return operations.Operation{ID: operation.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: at, UpdatedAt: at}, nil
 }
 
 func (s *Service) ClaimSimulationJobs(ctx context.Context, limit int) ([]SimulationJob, error) {

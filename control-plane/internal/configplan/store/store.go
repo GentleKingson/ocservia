@@ -15,13 +15,12 @@ type Node struct {
 }
 
 type Plan struct {
-	ID, WorkspaceID, NodeID, OperationID                   uuid.UUID
-	TemplateName, State, CandidateRedacted, ApprovalStatus string
-	ExpectedRevision                                       int64
-	CandidateHash, Result                                  []byte
-	Warnings                                               value.JSONB
-	ExpiresAt, CreatedAt                                   value.Timestamp
-	ApprovalID                                             *uuid.UUID
+	ID, WorkspaceID, NodeID, OperationID   uuid.UUID
+	TemplateName, State, CandidateRedacted string
+	ExpectedRevision                       int64
+	CandidateHash, Result                  []byte
+	Warnings                               value.JSONB
+	ExpiresAt, CreatedAt                   value.Timestamp
 }
 
 type ApplyInput struct {
@@ -54,10 +53,10 @@ type PendingPlan struct {
 }
 
 type PendingApply struct {
-	ID, WorkspaceID, NodeID, PlanID, ApprovalID uuid.UUID
-	ExpectedRevision, DesiredRevision           uint64
-	CandidateHash, PreviousHash                 []byte
-	CreatedAt                                   value.Timestamp
+	ID, WorkspaceID, NodeID, PlanID   uuid.UUID
+	ExpectedRevision, DesiredRevision uint64
+	CandidateHash, PreviousHash       []byte
+	CreatedAt                         value.Timestamp
 }
 
 type Store interface {

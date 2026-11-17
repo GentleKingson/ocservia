@@ -64,12 +64,9 @@ if [[ "$(jq -r '.manifest_version' "${RELEASE_FILE}")" == 2 ]]; then
     [[ "${value}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$ ]] || fail "invalid ${image} reference"
     export "OCSERV_${image^^}_IMAGE=${value}"
   done
-  case "${OCSERV_DATABASE_BACKEND:-postgres}" in
-    mysql)
-      OCSERV_DATABASE_BACKUP_IMAGE="$(jq -er --arg role "${OCSERV_DATABASE_BACKEND}_backup" '.images[$role]' "${RELEASE_FILE}")"
-      export OCSERV_DATABASE_BACKUP_IMAGE
-      ;;
-  esac
+  if [[ "${OCSERV_DATABASE_BACKEND:-postgres}" != postgres ]]; then
+    fail "OCSERV_DATABASE_BACKEND must be postgres; MySQL is retired"
+  fi
 fi
 
 if [[ -z "${PUBLIC_URL}" ]]; then

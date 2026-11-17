@@ -615,27 +615,12 @@ pub fn read_recent_results(
 #[derive(Clone, Debug)]
 pub struct UpgradeRunner {
     root: PathBuf,
-    binding_operations: Option<PathBuf>,
 }
 
 impl UpgradeRunner {
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self {
-            root,
-            binding_operations: None,
-        }
-    }
-
-    /// Selects the operations namespace from the same committed root binding
-    /// used by privd. Existing callers and isolated fixtures retain their root.
-    #[must_use]
-    pub fn with_binding(
-        mut self,
-        binding: &ocservia_command_authorization::local_binding::LocalBinding,
-    ) -> Self {
-        self.binding_operations = Some(binding.upgrade_directory());
-        self
+        Self { root }
     }
 
     #[must_use]
@@ -645,11 +630,6 @@ impl UpgradeRunner {
 
     #[must_use]
     pub fn operations_dir(&self) -> PathBuf {
-        if let Some(path) = &self.binding_operations {
-            return self
-                .root
-                .join(path.components().skip(1).collect::<PathBuf>());
-        }
         self.root.join("var/lib/ocservia-upgrade/operations")
     }
 
@@ -847,7 +827,7 @@ impl UpgradeRunner {
         } else {
             command.env("DESTDIR", &self.root);
         }
-        let output = command.output().map_err(|failure| failure.to_string())?;
+        let output = command_output(&mut command).map_err(|failure| failure.to_string())?;
         if output.status.success() {
             return Ok(());
         }
@@ -876,7 +856,7 @@ impl UpgradeRunner {
         } else {
             command.env("DESTDIR", &self.root);
         }
-        let output = command.output().map_err(UpgradeStoreError::Io)?;
+        let output = command_output(&mut command).map_err(UpgradeStoreError::Io)?;
         if !output.status.success() {
             return Err(UpgradeStoreError::Package(
                 "verified package staging refused the spool inputs".to_owned(),
@@ -913,6 +893,20 @@ impl UpgradeRunner {
             tracing::warn!(error = %error, staging = %staging.display(), "verified staging cleanup failed");
         }
     }
+}
+
+fn command_output(command: &mut std::process::Command) -> io::Result<std::process::Output> {
+    // Another test thread can briefly hold a freshly written helper script's
+    // writable fd across fork() until execve(), causing ETXTBSY.
+    for attempt in 0..20 {
+        match command.output() {
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy && attempt < 19 => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            result => return result,
+        }
+    }
+    unreachable!("loop returns on final attempt")
 }
 
 fn write_terminal(

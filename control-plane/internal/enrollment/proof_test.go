@@ -18,20 +18,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestCreateTokenRequiresExpectedEndpoint(t *testing.T) {
-	service := &Service{}
-	_, err := service.CreateToken(context.Background(), TokenSpec{
-		WorkspaceID: uuid.Must(uuid.NewV7()),
-		Environment: "production",
-		ActorID:     "operator",
-		RequestID:   uuid.Must(uuid.NewV7()).String(),
-		Reason:      "provision a bound node",
-	})
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("CreateToken without endpoint error = %v, want ErrInvalidRequest", err)
-	}
-}
-
 func TestCreateBootstrapTokenValidatesAuthorityMetadata(t *testing.T) {
 	service := &Service{}
 	_, err := service.CreateBootstrapToken(context.Background(), BootstrapTokenSpec{

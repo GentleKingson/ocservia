@@ -2,26 +2,19 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
-	"github.com/GentleKingson/ocservia/control-plane/migrations"
-	driver "github.com/go-sql-driver/mysql"
+	"github.com/GentleKingson/ocservia/control-plane/internal/databasetest"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func authenticationBackend(t *testing.T) database.Backend {
@@ -33,127 +26,19 @@ func authenticationBackendFixture(t *testing.T) (database.Backend, database.Back
 	return authenticationBackendFixtureWithIsolation(t, false)
 }
 
-// Scheduler HTTP regressions need a private database, not just a workspace:
-// the existing scheduler intentionally scans pending batches across workspaces.
 func authenticationBackendFixtureWithIsolation(t *testing.T, isolated bool) (database.Backend, database.Backend) {
 	t.Helper()
-	ctx := context.Background()
-	if dsn := os.Getenv("OCSERVIA_DATABASE_TEST_DSN"); dsn != "" {
-		options := mysql.Options{Engine: mysql.Engine(os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE")), Environment: "test", DSN: dsn}
-		admin, err := mysql.Open(ctx, options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { admin.Close() })
-		name := "dbtest_http_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-		if _, err = admin.Exec(ctx, "CREATE DATABASE `"+name+"`"); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if _, err := admin.Exec(ctx, "DROP DATABASE `"+name+"`"); err != nil {
-				t.Error(err)
-			}
-		})
-		if _, err = admin.Exec(ctx, "GRANT ALL ON `"+name+"`.* TO 'ocservia_owner'@'%' WITH GRANT OPTION"); err != nil {
-			t.Fatal(err)
-		}
-		config, err := driver.ParseDSN(dsn)
-		if err != nil {
-			t.Fatal("invalid test DSN")
-		}
-		config.DBName, config.User, config.Passwd = name, "ocservia_owner", "database-e2e-owner-test-only"
-		options.DSN = config.FormatDSN()
-		owner, err := mysql.Open(ctx, options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { owner.Close() })
-		if err = owner.Migrate(ctx, ""); err != nil {
-			t.Fatal(err)
-		}
-		if err = owner.MigrateTelemetryHistory(ctx); err != nil {
-			t.Fatal(err)
-		}
-		if err = owner.GrantTestPrivileges(ctx); err != nil {
-			t.Fatal(err)
-		}
-		config.User, config.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
-		options.DSN = config.FormatDSN()
-		runtime, err := mysql.Open(ctx, options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { runtime.Close() })
-		return runtime, owner
-	}
-	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("real PostgreSQL or configured database test backend required")
-	}
 	if isolated {
-		ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-		if ownerURL == "" {
-			t.Fatal("owner URL required for isolated database")
-		}
-		admin, err := pgxpool.New(ctx, ownerURL)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(admin.Close)
-		name := "r203_http_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-		identifier := pgx.Identifier{name}.Sanitize()
-		if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if _, err := admin.Exec(context.Background(), "DROP DATABASE "+identifier); err != nil {
-				t.Error(err)
-			}
-		})
-		open := func(url string) *pgxpool.Pool {
-			t.Helper()
-			cfg, err := pgxpool.ParseConfig(url)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cfg.ConnConfig.Database = name
-			pool, err := pgxpool.NewWithConfig(ctx, cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(pool.Close)
-			return pool
-		}
-		owner, runtime := open(ownerURL), open(dsn)
-		if err := migrations.Migrate(ctx, owner); err != nil {
-			t.Fatal(err)
-		}
-		if err := migrations.GrantRuntimePrivileges(ctx, owner, runtime.Config().ConnConfig.User); err != nil {
-			t.Fatal(err)
-		}
+		runtime, owner := databasetest.OpenIsolated(t, t, "r203_http")
 		return postgres.WrapPool(runtime), postgres.WrapPool(owner)
 	}
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if ownerURL == "" {
-		return postgres.WrapPool(pool), nil
-	}
-	owner, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(owner.Close)
-	return postgres.WrapPool(pool), postgres.WrapPool(owner)
+	return databasetest.OpenRuntime(t), nil
 }
 
 // This executes the actual Controller HTTP login, cookie authentication and
 // logout handlers. It is one workflow, not acceptance of unrelated routes.
 func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
-	backend := authenticationBackend(t)
+	backend, owner := authenticationBackendFixtureWithIsolation(t, true)
 	ctx := context.Background()
 	service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
@@ -168,7 +53,7 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if _, err = service.CreateLocalCredential(ctx, name, password); !errors.Is(err, database.ErrUnique) {
 		t.Fatalf("duplicate credential: %v", err)
 	}
-	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(backend)})
+	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service})
 	login := func(password string) *httptest.ResponseRecorder {
 		return authHTTPRequest(server, "POST", "login", `{"username":"`+name+`","password":"`+password+`"}`, authTestOrigin)
 	}
@@ -187,14 +72,8 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	}
 	// Stored infinite or extended-range expiry must never lengthen the finite
 	// lifetime authenticated by the signed cookie.
-	query := `UPDATE auth_sessions SET expires_at=$1 WHERE id=$2`
-	var sessionID any = principal.SessionID
-	if _, ok := backend.(*mysql.Backend); ok {
-		query = `UPDATE auth_sessions SET expires_at=? WHERE id=?`
-		sessionID = mysql.UUIDBytes(principal.SessionID)
-	}
 	for _, micros := range []int64{value.PositiveInfinity, value.EndTimestamp - 1} {
-		if _, err := backend.Exec(ctx, query, value.Timestamp{Micros: micros, Valid: true}, sessionID); err != nil {
+		if _, err := backend.Exec(ctx, `UPDATE auth_sessions SET expires_at=$1 WHERE id=$2`, value.Timestamp{Micros: micros, Valid: true}, principal.SessionID); err != nil {
 			t.Fatal(err)
 		}
 		bounded, err := service.Authenticate(ctx, cookie)
@@ -228,37 +107,15 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 		t.Fatalf("cancelled provisioning: %v", err)
 	}
 	workspace := uuid.Must(uuid.NewV7())
-	if _, ok := backend.(*mysql.Backend); ok {
-		_, err = backend.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'HTTP management',?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, mysql.UUIDBytes(workspace), name)
-	} else {
-		_, err = backend.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP management',$2,now(),now())`, workspace, name)
-		ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-		if ownerURL == "" {
-			t.Fatal("owner URL required for isolated management fixture cleanup")
-		}
-		owner, openErr := pgxpool.New(ctx, ownerURL)
-		if openErr != nil {
-			t.Fatal(openErr)
-		}
-		t.Cleanup(func() {
-			defer owner.Close()
-			if _, err := owner.Exec(ctx, `DELETE FROM local_auth_bootstrap WHERE workspace_id=$1`, workspace); err != nil {
-				t.Error(err)
-			}
-			if _, err := owner.Exec(ctx, `DELETE FROM role_bindings WHERE workspace_id=$1`, workspace); err != nil {
-				t.Error(err)
-			}
-		})
-	}
-	if err != nil {
+	if _, err := owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP management',$2,now(),now())`, workspace, name); err != nil {
 		t.Fatal(err)
 	}
 	adminName := "admin-" + name
-	adminID, err := service.BootstrapLocalAdmin(ctx, adminName, password, workspace, "approver-"+name, "a separate independent approver password")
+	adminID, err := service.BootstrapLocalAdmin(ctx, adminName, password, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = service.BootstrapLocalAdmin(ctx, adminName, password, workspace, "approver-"+name, "a separate independent approver password"); !errors.Is(err, auth.ErrLocalInitialized) {
+	if _, err = service.BootstrapLocalAdmin(ctx, adminName, password, workspace); !errors.Is(err, auth.ErrLocalInitialized) {
 		t.Fatalf("repeat bootstrap: %v", err)
 	}
 	adminCookie, admin, err := service.AuthenticateLocal(ctx, adminName, password)
@@ -288,59 +145,21 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 		server.http.Handler.ServeHTTP(w, r)
 		return w
 	}
-	memberName := "member-" + name
-	created := call("/api/v1/local-users", `{"username":"`+memberName+`","password":"`+password+`"}`, adminCookie)
-	if created.Code != http.StatusCreated {
-		t.Fatalf("HTTP create: %d %s", created.Code, created.Body)
-	}
-	var member struct {
-		IdentityID uuid.UUID `json:"identity_id"`
-	}
-	if err = json.Unmarshal(created.Body.Bytes(), &member); err != nil {
-		t.Fatal(err)
-	}
-	memberCookie, _, err := service.AuthenticateLocal(ctx, memberName, password)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if denied := call("/api/v1/local-users", `{"username":"denied-`+name+`","password":"`+password+`"}`, memberCookie); denied.Code != http.StatusForbidden {
-		t.Fatalf("member management allowed: %d %s", denied.Code, denied.Body)
-	}
-	newPassword := "a distinct replacement authentication password"
-	changed := call("/api/v1/auth/change-password", `{"current_password":"`+password+`","new_password":"`+newPassword+`"}`, memberCookie)
-	if changed.Code != http.StatusNoContent {
-		t.Fatalf("HTTP password change: %d %s", changed.Code, changed.Body)
-	}
-	if _, err = service.Authenticate(ctx, memberCookie); !errors.Is(err, auth.ErrUnauthenticated) {
-		t.Fatalf("old password session survived: %v", err)
-	}
-	memberCookie, _, err = service.AuthenticateLocal(ctx, memberName, newPassword)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if retired := call("/api/v1/approval-requests", `{}`, adminCookie); retired.Code != http.StatusNotFound {
 		t.Fatalf("retired approval API remained reachable: %d", retired.Code)
 	}
-	resetPassword := "a single administrator replacement password"
-	reset := call("/api/v1/local-users/"+member.IdentityID.String()+":reset-password", `{"password":"`+resetPassword+`"}`, adminCookie)
-	if reset.Code != http.StatusNoContent {
-		t.Fatalf("HTTP administrator reset: %d %s", reset.Code, reset.Body)
+	if retired := call("/api/v1/local-users", `{}`, adminCookie); retired.Code != http.StatusNotFound {
+		t.Fatalf("retired local-users API remained reachable: %d", retired.Code)
 	}
-	if _, err = service.Authenticate(ctx, memberCookie); !errors.Is(err, auth.ErrUnauthenticated) {
-		t.Fatalf("reset left session active: %v", err)
+	newPassword := "a distinct replacement authentication password"
+	changed := call("/api/v1/auth/change-password", `{"current_password":"`+password+`","new_password":"`+newPassword+`"}`, adminCookie)
+	if changed.Code != http.StatusNoContent {
+		t.Fatalf("HTTP password change: %d %s", changed.Code, changed.Body)
 	}
-	memberCookie, _, err = service.AuthenticateLocal(ctx, memberName, resetPassword)
-	if err != nil {
-		t.Fatal(err)
+	if _, err = service.Authenticate(ctx, adminCookie); !errors.Is(err, auth.ErrUnauthenticated) {
+		t.Fatalf("old password session survived: %v", err)
 	}
-	disabled := call("/api/v1/local-users/"+member.IdentityID.String()+":disable", `{}`, adminCookie)
-	if disabled.Code != http.StatusNoContent {
-		t.Fatalf("HTTP disable: %d %s", disabled.Code, disabled.Body)
-	}
-	if _, err = service.Authenticate(ctx, memberCookie); !errors.Is(err, auth.ErrUnauthenticated) {
-		t.Fatalf("disabled session survived: %v", err)
-	}
-	if protected := call("/api/v1/local-users/"+adminID.String()+":disable", `{}`, adminCookie); protected.Code != http.StatusConflict {
-		t.Fatalf("last administrator disabled: %d %s", protected.Code, protected.Body)
+	if _, _, err = service.AuthenticateLocal(ctx, adminName, newPassword); err != nil {
+		t.Fatalf("re-login with changed password: %v", err)
 	}
 }

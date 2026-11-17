@@ -219,7 +219,6 @@ try {
     const replayed = await knownReplay.json();
     expect(replayed.id).toBe(reload.id);
     expect(replayed.command_id).toBe(reload.command_id);
-    expect(reloadHeaders["x-approval-id"]).toBeUndefined();
     const changed = await context.request.post(reloadRequest.url(), {
       headers: replayHeaders,
       data: {
@@ -429,9 +428,6 @@ try {
       ).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
       );
-      expect(
-        exportResponse.request().postDataJSON().approval_id,
-      ).toBeUndefined();
       const grant = await exportResponse.json();
       fs.writeFileSync(`${work}/private/browser-p12-password`, grant.password, {
         mode: 0o600,

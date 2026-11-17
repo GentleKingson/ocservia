@@ -53,7 +53,7 @@ psql < "$tmp/replay.sql" >/dev/null
 # runtime provisioning, never part of a reproducible static snapshot.
 psql -Atc "SELECT format('DROP TABLE %I.%I;', n.nspname,c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname ~ '^telemetry_samples_[0-9]{6}$' ORDER BY c.relname" | psql >/dev/null
 docker exec "$name" pg_dump -U ocservia_owner -d snapshot --schema-only --no-owner --schema=public > "$tmp/schema.raw"
-docker exec "$name" pg_dump -U ocservia_owner -d snapshot --data-only --no-owner --column-inserts --table=roles --table=upstream_sync_records --table=controller_schema_compatibility > "$tmp/seeds.raw"
+docker exec "$name" pg_dump -U ocservia_owner -d snapshot --data-only --no-owner --column-inserts --table=controller_schema_compatibility > "$tmp/seeds.raw"
 # Export deterministic fields from the actual replay; updated_at intentionally
 # uses its schema default at initialization time, just as migration 24 does.
 psql -Atc "SELECT format('INSERT INTO public.scheduler_leadership(id,instance_id,incarnation,epoch,lease_until) VALUES(%s,%L,%s,%s,%L);',id,instance_id,incarnation,epoch,lease_until) FROM scheduler_leadership ORDER BY id" > "$tmp/scheduler.sql"
@@ -112,8 +112,10 @@ PY
 psql -c 'CREATE DATABASE snapshot_equivalence' >/dev/null
 psql -d snapshot_equivalence --single-transaction < "$tmp/schema.sql" >/dev/null
 docker exec "$name" pg_dump -U ocservia_owner -d snapshot_equivalence --schema-only --no-owner --schema=public > "$tmp/equivalent-schema.raw"
-docker exec "$name" pg_dump -U ocservia_owner -d snapshot_equivalence --data-only --no-owner --column-inserts --table=roles --table=upstream_sync_records --table=controller_schema_compatibility > "$tmp/equivalent-seeds.raw"
+docker exec "$name" pg_dump -U ocservia_owner -d snapshot_equivalence --data-only --no-owner --column-inserts --table=controller_schema_compatibility > "$tmp/equivalent-seeds.raw"
 psql -d snapshot_equivalence -Atc "SELECT format('INSERT INTO public.scheduler_leadership(id,instance_id,incarnation,epoch,lease_until) VALUES(%s,%L,%s,%s,%L);',id,instance_id,incarnation,epoch,lease_until) FROM scheduler_leadership ORDER BY id" > "$tmp/equivalent-scheduler.sql"
+psql -d snapshot_equivalence -At -f - < "$tmp/catalog.sql" > "$tmp/equivalent-catalog.json"
+diff -u "$tmp/catalog.json" "$tmp/equivalent-catalog.json"
 for db in snapshot snapshot_equivalence; do
  psql -d "$db" -Atc "SELECT coalesce(json_agg(json_build_object('table',c.relname,'name',x.conname,'definition',pg_get_constraintdef(x.oid,true)) ORDER BY c.relname,x.conname),'[]') FROM pg_constraint x JOIN pg_class c ON c.oid=x.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE x.contype='c' AND n.nspname='public'" > "$tmp/$db-checks.json"
 done

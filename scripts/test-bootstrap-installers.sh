@@ -7,12 +7,28 @@ NODE="${ROOT}/deploy/bootstrap/install-node"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
 
-# Published versioned installer copies must be the actual executable sources.
+# Published versioned installer copies must be standalone executable sources
+# generated from the shared install-env/UI/runtime/bootstrap helpers.
 mkdir "$fixture/prepared"
 "$ROOT/scripts/prepare-bootstrap-release-assets.sh" "$fixture/prepared"
 bash -n "$fixture/prepared/controller-bootstrap.sh"
 bash -n "$fixture/prepared/managed-node-bootstrap.sh"
 [[ -x "$fixture/prepared/controller-bootstrap.sh" && -x "$fixture/prepared/managed-node-bootstrap.sh" ]]
+if grep -Eq 'release-embed|\$\{SCRIPT_LIB\}/' \
+  "$fixture/prepared/controller-bootstrap.sh" "$fixture/prepared/managed-node-bootstrap.sh"; then
+  exit 1
+fi
+for prepared_asset in "$fixture/prepared/controller-bootstrap.sh" "$fixture/prepared/managed-node-bootstrap.sh"; do
+  grep -qxF 'install_env_load() {' "$prepared_asset"
+  grep -qxF 'CONTROLLER_INSTALL_ENV_NAMES=(' "$prepared_asset"
+  grep -qxF 'MANAGED_NODE_INSTALL_ENV_NAMES=(' "$prepared_asset"
+done
+if grep -Eq '^install_env_load\(\)|^(CONTROLLER_|MANAGED_NODE_)?INSTALL_ENV_NAMES=\(' \
+  "$ROOT/deploy/production/controller-bootstrap.sh" \
+  "$ROOT/deploy/production/install.sh" \
+  "$ROOT/deploy/managed-node/install.sh"; then
+  exit 1
+fi
 
 fail() {
   echo "bootstrap installer test: $1" >&2

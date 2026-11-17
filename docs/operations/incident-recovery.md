@@ -2,11 +2,10 @@
 
 This is the single backup and recovery manual for database, Signer, identity,
 credential and Unknown command incidents. Supported deployments run a single
-Controller, a single database instance, and one dedicated Relay. The supported
-PostgreSQL and MySQL versions and deployments are defined in
-[Database support](production-deployment.md#database-support). Both Integrated
-and standalone topologies remain supported, as do bundled and external
-databases.
+Controller, a single PostgreSQL 18.x database instance, and one dedicated Relay
+(see [Database support](production-deployment.md#database-support)). Both
+Integrated and standalone topologies remain supported, as do bundled and
+external PostgreSQL deployments.
 
 Out of scope are Controller high availability, multi-Relay failover, database
 replication clusters, PostgreSQL automatic failover, and point-in-time recovery
@@ -24,18 +23,11 @@ migrations.
 
 ## Authentication outage
 
-Incident handling depends on the configured [authentication mode](authentication.md#choose-a-mode):
+Deployments use Local single-admin authentication (`OCSERV_LOCAL_AUTH_ENABLED=true`) without external OIDC identity providers:
 
-- Local-only deployments run without OIDC configuration, client secrets, or an external IdP.
-- Local + OIDC deployments can continue signing in with Local accounts that were already enabled and initialized before the outage. Those logins still go through the full password, account-state, session, and authorization checks; Local login does not act as a verification bypass or an automatic fallback for failed OIDC requests.
-- OIDC-only deployments must never fall back to Local login during an outage, nor may they skip issuer, signature, or callback checks.
-
-When an IdP is unreachable or failing validation, reject any new SSO login that
-cannot complete full verification. Already established sessions continue under
-their normal expiration, revocation, and account-state rules; do not extend
-session lifetimes to mask the outage. Before closing an OIDC incident, restore
-connectivity to the issuer and confirm that discovery, signing-key refresh, and
-login callbacks succeed.
+- Keep Local account, rate-limit, session, and workspace checks enabled across all incidents; never disable password verification or bypass session checks.
+- Established sessions continue under their normal expiration, revocation, and account-state rules; do not extend session lifetimes during an outage.
+- If the sole workspace Admin has lost access, follow [Lost Local administration authority](#lost-local-administration-authority) rather than inserting unverified sessions or resetting initialization markers.
 
 ## Revocation committed with synchronization pending
 
@@ -55,12 +47,12 @@ Treat these as separate states:
 | Connection owner | The owner lease/epoch authorizes mutations. Offline status or a missing connection/fence is a current snapshot, not proof of a previous close. |
 | Queue convergence | `update_applied`, `close_required` and `close_applied` record progress under the existing RPC contracts. In particular, CloseNode `NOT_FOUND` satisfies current absence, not historical execution. |
 
-1. Preserve the original Request ID, approval ID, node ID, EndpointID, reason,
+1. Preserve the original Request ID, node ID, EndpointID, reason,
    authorization revision, response and Controller/transportd errors. Use
    `GET /api/v1/nodes/{node_id}` with the original authorized workspace to check
    `trust_status` and `connection_state`; an offline result alone is insufficient.
-2. Through an authorized read-only database connection, inspect the exact node
-   and queued intent. For PostgreSQL, replace the UUID placeholder:
+2. Through an authorized read-only PostgreSQL connection, inspect the exact node
+   and queued intent (replace the UUID placeholder):
 
    ```sql
    SELECT n.id, n.status, n.authorization_revision,
@@ -72,21 +64,6 @@ Treat these as separate states:
    LEFT JOIN node_endpoint_keys e ON e.node_id = n.id
    LEFT JOIN node_trust_convergence q ON q.node_id = n.id
    WHERE n.id = '<node-uuidv7>'::uuid;
-   ```
-
-   For MySQL 8.4, UUIDs use binary storage and timestamps below are raw logical
-   microseconds from `2000-01-01`, with sentinel values for infinities:
-
-   ```sql
-   SELECT HEX(n.id) AS node_id, n.status, n.authorization_revision,
-          e.state AS endpoint_state, HEX(e.endpoint_id) AS endpoint_id,
-          q.desired_state, q.revision, q.reason, q.update_applied,
-          q.close_required, q.close_applied, q.attempts, q.available_at,
-          HEX(q.locked_by) AS locked_by, q.locked_until, q.last_error
-   FROM nodes n
-   LEFT JOIN node_endpoint_keys e ON e.node_id = n.id
-   LEFT JOIN node_trust_convergence q ON q.node_id = n.id
-   WHERE n.id = UNHEX(REPLACE('<node-uuidv7>', '-', ''));
    ```
 
 3. Correlate the exact intent with logs for `converge node trust` and
@@ -111,22 +88,13 @@ request does not repair missing transport evidence.
 
 When a deployment loses its last working administrator, halt application writes and preserve the incident evidence. Recover to a
 verified state that has independently controlled credentials by following the
-authorized [backend-specific recovery procedure](#database-recovery),
+authorized [database recovery procedure](#database-recovery),
 leaving all initialization markers and audit history intact. Before reopening
-traffic, use the protected administrative database connection to revoke all
-active restored sessions. On PostgreSQL, run:
+traffic, use the protected administrative PostgreSQL connection to revoke all
+active restored sessions:
 
 ```sql
 UPDATE auth_sessions SET revoked_at=now() WHERE revoked_at IS NULL;
-```
-
-The current MySQL schema stores session timestamps as a BIGINT microsecond epoch
-counted from 2000-01-01 UTC:
-
-```sql
-UPDATE auth_sessions
-SET revoked_at=TIMESTAMPDIFF(MICROSECOND, '2000-01-01 00:00:00', UTC_TIMESTAMP(6))
-WHERE revoked_at IS NULL;
 ```
 
 Log the offline recovery in the incident and change record, confirm that the
@@ -145,54 +113,6 @@ the digest. The session rules are in
 replacement secret and configure its digest as described in
 [Break-glass and deployment checks](authentication.md#break-glass-and-deployment-checks),
 and record who holds custody.
-
-## OIDC issuer correction
-
-Before editing OIDC settings, confirm the provider's authoritative issuer string
-and inspect existing records in `identities`. Failed Discovery or token
-validation never creates an identity row, so there is nothing to migrate from
-failed login attempts alone. Each identity is keyed by `(issuer, subject)`,
-so changing the issuer string alters that unique key. An issuer with a trailing
-slash and one without it represent distinct accounts that the application never
-merges or migrates during login.
-
-When an existing deployment requires a separately approved issuer migration:
-
-1. Open a maintenance window and stop login and session writes on the affected
-   deployment. Record the change ticket, operator, exact old and new
-   issuer strings, and the explicit list of identity IDs and subjects in scope.
-   Gather independent IdP evidence proving that each subject still belongs to
-   the same person; a matching email address or display name is not sufficient
-   proof of subject ownership.
-2. Take a restorable database backup and export the targeted `identities` rows,
-   `role_bindings` (including workspace and resource scopes), active sessions,
-   and any other tables referencing those identity IDs. Store the prior
-   configuration and the before-and-after identity manifest in the restricted
-   change record, omitting raw tokens and client secrets.
-3. Query `identities` across both exact issuer strings, including disabled
-   accounts, to check for target-key collisions on any approved subject, and
-   review `role_bindings` by identity ID with the security owner. If a target
-   `(issuer, subject)` pair already exists, halt the migration; a collision
-   never authorizes merging accounts, deleting the target row, or moving roles.
-4. Rehearse the change on an isolated database restore first. During execution,
-   open an explicit transaction, lock `identities` against concurrent writes,
-   re-run the collision and ownership checks, and update only the approved IDs
-   whose current issuer and subject still match the manifest. Assert that the
-   affected row count equals the approved manifest count, and roll back on any
-   mismatch. Leave identity IDs, subjects, disabled flags, and role bindings
-   unchanged. Revoke active sessions for the migrated users so they must sign in
-   again. Log the committed before-and-after mapping through the operational
-   audit process without altering historical audit rows. Roll out the new issuer
-   setting through normal change control.
-5. Before reopening login traffic, confirm fresh Discovery and token validation,
-   unchanged role ownership, and the absence of duplicate identities. If a
-   rollback is required, stop writes again, check the manifest for old-key
-   conflicts, and transactionally restore only the mapped issuer values and
-   prior configuration. Revoke any sessions created during the migration window
-   without reactivating previously revoked sessions. If identities or role
-   bindings were modified after the cutover, stop for manual review instead of
-   overwriting the newer records, and attach all rollback evidence to the
-   original change ticket.
 
 ## Signer unavailable
 
@@ -341,7 +261,7 @@ second live replica.
 After backup/restore or CRL maintenance, run
 `deploy/production/controller.sh start` with the unchanged
 configuration and current exact source. Check readiness/version, real login,
-node reconnect and a newly approved operation. Missing/incompatible ledger or
+node reconnect and a newly authorized operation. Missing/incompatible ledger or
 lower revision must fail closed.
 
 ### Sealing key bindings
@@ -371,18 +291,15 @@ operator responsibilities.
 
 ## Transport and credentials
 
-Production deployments support only a single dedicated Relay and reject any
-nonempty `RELAY_URL_B` or `OCSERV_RELAY_URL_B`, so no standby Relay exists for
-failover. Recovering from a Relay outage requires bringing that same Relay back
-online at its original address with the existing TLS certificate and
-credentials, then confirming fresh Agent heartbeats and reconciled command
-outcomes. Nodes that depend on the Relay remain unreachable for management
-until the original path returns. Do not point production traffic at public
-relays, reset node identities, or re-enroll nodes to work around a Relay outage.
-During testing, direct peer connectivity can mask a broken Relay path. Upgrading
-an older A/B deployment requires the operator to switch the configuration to a
-single Relay explicitly, after which installer reruns preserve existing node
-identity and trust state.
+Production deployments support only a single dedicated Relay without a secondary
+standby failover Relay. Recovering from a Relay outage requires bringing that
+same Relay back online at its original address with the existing TLS
+certificate and credentials, then confirming fresh Agent heartbeats and
+reconciled command outcomes. Nodes that depend on the Relay remain unreachable
+for management until the original path returns. Do not point production traffic
+at public relays, reset node identities, or re-enroll nodes to work around a
+Relay outage. During testing, direct peer connectivity can mask a broken Relay
+path. Installer reruns preserve existing node identity and trust state.
 
 To recover a lost Controller endpoint key, restore the encrypted offline backup
 to `controller-iroh.key` inside `OCSERV_SECRET_DIR` with owner `65532:65532` and
@@ -402,8 +319,8 @@ replace an audit key silently.
 ### PostgreSQL credential rotation
 
 The rotation script below applies only to bundled PostgreSQL deployments;
-external PostgreSQL and MySQL credentials must be rotated through their own
-database administration workflows. Editing `postgres-app-password`,
+external PostgreSQL credentials must be rotated through their own database
+administration workflows. Editing `postgres-app-password`,
 `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` on disk
 does not update the password verifier stored inside PostgreSQL. Against
 `deploy/production/compose.yaml` (or the file named by
@@ -500,8 +417,7 @@ release tag, source SHA, migration state, backup identifier, and audit
 checkpoint.
 
 Before rolling back the Controller binary, stop new API writes first and keep the
-audit, identity, session, approval, and alert tables intact. Deploy the older
-binary only after active OIDC sessions have been revoked or allowed to expire.
+audit, identity, session, workspace-admin, and alert tables intact.
 Retain all database records. The limits on rolling back across a schema change
 are in [Database and recovery matrix](../reference/stable-contracts.md#database-and-recovery-matrix).
 
@@ -526,11 +442,8 @@ automatic recovery of every Unknown mutation is promised.
 
 Every backup must preserve the full `schema_revisions` table (see
 [Schema provenance after restore](#schema-provenance-after-restore)) and the
-Local bootstrap marker table. The PostgreSQL 18 base backup and the external MySQL 8.4
-logical restore are separate procedures with different tooling. Never run
-PostgreSQL recovery or credential-rotation scripts against MySQL backends. A
-completed backup job alone is never recovery proof without a verified restore.
-The checks that must pass before cutover are the same for both backends and are
+Local bootstrap marker table. A completed backup job alone is never recovery
+proof without a verified restore. The checks that must pass before cutover are
 listed once in [Database recovery](#database-recovery).
 
 ### PostgreSQL
@@ -609,55 +522,6 @@ Neither substitutes for testing an actual production archive.
   migration, and tests the restored runtime account's read and privilege
   boundaries.
 
-### MySQL
-
-Production MySQL operations apply only to external MySQL 8.4 LTS. Bundled
-deployments, other server versions, HA, PITR, storage snapshots, and
-cross-engine migration are not supported under this contract.
-
-Built from `backup.mysql.Dockerfile`, the backup image uses the native MySQL
-client to produce a single-transaction logical dump covering triggers, routines,
-events, binary data, and explicit database creation, without copying a database
-volume. Along with the dump, the worker records the backend and server version
-in metadata, writes SHA-256 checksums, atomically advances `LATEST`, and prunes
-old backups. Database accounts and server-global grants belong to provisioning
-state and do not travel in a schema dump. Operators must recreate them from
-the protected provisioning source and re-run least-privilege checks prior to
-cutover.
-
-Connection settings come from `database-backup.cnf`, a mode-`0444` Compose
-secret in the private launcher-owned secret directory whose `[client]` section
-holds only the dedicated backup user, TLS parameters, and external endpoint.
-The entrypoint copies this file to a mode-`0600` temporary path before calling
-the client. Grant the backup account only the privileges needed to read tables
-and views and to dump triggers, routines, and events; it must never own the
-schema or migration tables. On the pinned client versions, grant `SELECT`,
-`SHOW VIEW`, `TRIGGER`, and `EVENT` on `ocservia.*`, plus the global
-`SHOW_ROUTINE` dynamic privilege required by MySQL 8.4. The `PROCESS` privilege
-is unnecessary because the dump runs with `--no-tablespaces`.
-
-Always restore into a new, isolated MySQL server by running the matching backup
-image with `scripts/mysql-restore-verify.sh`, an absolute path to a completed
-backup directory, and a mode-`0600` target administrator client file. After
-rejecting checksum mismatches, wrong backends, unsafe dump artifacts, or an
-existing target database, the verifier loads the dump and prints a summary of
-the restored state. It checks that `schema_revisions` contains only verified
-rows (including an epoch-2 entry) and that no legacy migration tables exist. It
-also reports the audit authentication shape, identity counts, scheduler epoch,
-idempotency records, and unfinished operations or commands. Passing this script
-alone does not prove the restored database is ready for service. The verifier
-neither compares receipt checksums against the build's SQL artifacts nor
-validates the cryptographic audit chain.
-
-Traffic redirection and command authority remain manual operator gates. Unless
-`--old-writers-fenced` is passed, the restore script exits with status 3 after
-verification. Even with that flag, it rejects an active restored scheduler
-lease and leaves command execution blocked. Then run the matching-build checks
-and the reconciliation in [Database recovery](#database-recovery). This logical
-restore tooling covers recovery of the ocservia schema only; PITR, database
-failover, storage snapshots, and cross-engine migration require separate
-procedures and independent verification evidence.
-
 ### Schema provenance after restore
 
 Every backup must preserve the full `schema_revisions` table, including
@@ -667,38 +531,20 @@ admitted only when the matching build's owner migration run (`--migrate-only`)
 validates it and confirms there are no unknown epochs, revisions, checksums, or
 schema drift. On a restored database, owner migration runs only supported
 forward SQL without replaying `schema.sql`. The receipt histories of fresh and
-checkpoint-upgraded databases, and where to read each backend's current schema
-revision, are in [Upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint)
+checkpoint-upgraded databases, and where to read the current schema revision,
+are in [Upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint)
 and [Database](../reference/stable-contracts.md#database).
 
 The only supported prior upgrade checkpoint is defined in
 [Upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint).
 Restoring a pre-checkpoint backup does not allow adopting or force-cleaning the
-schema. Likewise, any
-PostgreSQL or MySQL instance that already contains user tables or data without a
-trusted receipt is rejected outright instead of being initialized in place.
-Rolling back across a schema change requires restoring a compatible backup paired
-with the matching binary, because reverse SQL migrations are never run against
-an upgraded database.
+schema. Likewise, any PostgreSQL instance that already contains user tables or
+data without a trusted receipt is rejected outright instead of being initialized
+in place. Rolling back across a schema change requires restoring a compatible
+backup paired with the matching binary, because reverse SQL migrations are never
+run against an upgraded database.
 
-When a MySQL migration artifact is interrupted, normal migration runs will
-refuse to proceed. Inside a controlled `test` or `development` recovery
-environment, extract the expected checksum from the exact matching build by
-running `ocserv-db-foundation --mode schema-artifact-checksum` for an
-interrupted initial install or `--mode upgrade-artifact-checksum` for an
-in-flight upgrade, passing `--revision N` to select the logical block (where
-revision zero targets the previous-checkpoint transition). Once reviewed, pass
-that value to `--mode repair --repair-checksum <checksum>`. An interrupted fresh
-installation must finish recovery against its original schema bytes before any
-newer upgrade artifacts are applied. During repair, data changes and journal
-progress commit together in a single InnoDB transaction. DDL steps accept
-only pinned before-and-after schema fingerprints (including cleanup DROP steps,
-which follow the same protocol). Any unexpected objects or partial
-postconditions require manual inspection.
-
-`ocserv-db-foundation` is experimental and refuses to run outside `test` or
-`development`, so those repair flags are not a production recovery path. This
-guide defines no in-place production schema repair. At runtime, the
+This guide defines no in-place production schema repair. At runtime, the
 application database account can read receipts but lacks permission to modify the
 journal or run arbitrary DDL. Never manually update `schema_revisions` to mark
 in-flight work as verified. Legacy manifest or snapshot repair modes and their
@@ -707,17 +553,13 @@ verification.
 
 ## Database recovery
 
-Start by checking `OCSERV_DATABASE_BACKEND` and `OCSERV_DATABASE_DEPLOYMENT` in
+Start by checking `OCSERV_DATABASE_DEPLOYMENT` in
 the active configuration against the
-[production support matrix](production-deployment.md#database-support):
-
-- PostgreSQL: for a transient outage, restart the existing instance; after data
-  loss, follow [verified backup and isolated restore](#restore-a-postgresql-backup).
-  Clustered databases, automatic failover, and PITR readiness fall outside the
-  supported single-instance deployment.
-- MySQL: follow the [logical backup and isolated restore](#mysql)
-  procedure for external MySQL. This workflow does not provide PITR, failover,
-  storage snapshots, or cross-engine migration.
+[production support matrix](production-deployment.md#database-support): for a
+transient PostgreSQL outage, restart the existing instance; after data loss,
+follow [verified backup and isolated restore](#restore-a-postgresql-backup).
+Clustered databases, automatic failover, PITR readiness, and cross-engine
+migration fall outside the supported single-instance deployment.
 
 Before running database recovery, stop certificate and artifact creation,
 reconcile all nonterminal certificate commands, and preserve terminal command
@@ -749,80 +591,35 @@ evidence and initialization markers intact.
 ### Security state reconciliation before cutover
 
 Any restore from a backup rolls back security changes committed after the
-snapshot: revoked sessions, disabled identities, and removed role bindings come
-back, so a stolen session cookie that has not yet expired is accepted again.
-Before reopening user traffic or command dispatch on any restored database, on
-PostgreSQL and MySQL alike:
+snapshot: revoked sessions, disabled identities, password rotations, and node or
+attestation-key revocations come back, so a stolen session cookie that has not yet
+expired is accepted again. Before reopening user traffic or command dispatch on
+any restored database:
 
 1. On the isolated target, through the protected administrative database
-   connection, revoke every unrevoked session with the backend-specific
-   statement shown in [Lost Local administration authority](#lost-local-administration-authority).
+   connection, revoke every unrevoked session with the statement shown in
+   [Lost Local administration authority](#lost-local-administration-authority).
    Keep the rows and their audit links.
-2. Reapply every identity disable, workspace or resource role removal, and
-   security-relevant credential rotation made after the snapshot, using change
-   records, audit evidence and IdP state from outside the restored database, and
-   following [Revoking an OIDC identity or role](authentication.md#revoking-an-oidc-identity-or-role).
-   Revoking sessions does not replace this step: a principal that can still
-   sign in at the IdP regains every role binding the snapshot holds. Keep at
-   least one working administrator.
-3. When restoring a release that still executes historical approval workflows,
-   invalidate every restored `pending` or `approved` approval before allowing
-   requests or dispatch. A consumed approval can return as approved in the
-   snapshot; consuming it again can create a new command ID, so node receipt
-   deduplication does not replace this step. Through the protected administrative
-   connection, shorten its expiry using the backend-specific statements below.
-   Preserve status, approver, consumption and audit evidence: changing an approved
-   row to `expired` without removing its approver violates the schema, and removing
-   the approver would discard evidence. Record the affected IDs and original
-   expiries in the incident record before updating them.
-
-   PostgreSQL (run the whole block in one connection):
-
-   ```sql
-   BEGIN;
-   UPDATE approval_requests SET expires_at = now()
-   WHERE status IN ('pending', 'approved')
-     AND created_at < now() AND expires_at > now();
-   SELECT count(*) AS approvals_still_live FROM approval_requests
-   WHERE status IN ('pending', 'approved') AND expires_at > now();
-   COMMIT;
-   ```
-
-   MySQL (timestamps are microseconds since 2000; use one connection):
-
-   ```sql
-   START TRANSACTION;
-   SET @recovery_cutoff = TIMESTAMPDIFF(MICROSECOND, '2000-01-01', UTC_TIMESTAMP(6));
-   UPDATE approval_requests SET expires_at = @recovery_cutoff
-   WHERE status IN ('pending', 'approved')
-     AND created_at < @recovery_cutoff AND expires_at > @recovery_cutoff;
-   SELECT count(*) AS approvals_still_live FROM approval_requests
-   WHERE status IN ('pending', 'approved') AND expires_at > @recovery_cutoff;
-   COMMIT;
-   ```
-
-   `approvals_still_live` must be zero. Rows created at or after the cutoff remain
-   untouched to preserve `expires_at > created_at`; keep traffic blocked and
-   reconcile the database clock and snapshot history if any remain. Fresh work
-   requires a new authenticated Admin request after recovery. Expiring an
-   approval does not undo an already-dispatched command: reconcile its result
-   separately and never replay an Unknown write.
-4. Reapply post-snapshot node and `privd` attestation-key revocations from
-   independent evidence, using the normal node-revocation and key-revocation
-   workflows on the isolated Controller. Reconcile node authorization revisions,
-   endpoint-key state and pending trust convergence, and verify that `transportd`
-   has received the revoked trust state before reconnecting nodes. Updating only
+2. Reapply every identity disable and workspace-admin change or password rotation
+   made after the snapshot using change records and audit evidence outside the
+   restored database, keeping the bootstrapped administrator intact.
+3. Reapply post-snapshot node and `privd` attestation-key revocations from
+   independent evidence, using the normal node-revocation workflows on the
+   isolated Controller. Reconcile node authorization revisions, endpoint-key
+   state and pending trust convergence, and verify that `transportd` has
+   received the revoked trust state before reconnecting nodes. Updating only
    `nodes.status` is insufficient. Keep affected nodes and receipt processing
    isolated when the revocation history cannot be established.
-5. Reconcile `local_auth_bootstrap` completion, administrator
-   identities, and `break_glass_uses` consumption and `rotation_required` markers
-   against records outside the snapshot. Preserve initialization and consumption
-   evidence; do not delete markers or reopen bootstrap to regain access. Rotate
-   any Break-glass credential consumed after the snapshot, or whose usage cannot
-   be established, in the external protected configuration before cutover. Follow
+4. Reconcile `local_auth_bootstrap` completion, administrator `identities`,
+   `workspace_admins`, `local_credentials`, and `break_glass_uses` consumption
+   and `rotation_required` markers against records outside the snapshot.
+   Preserve initialization and consumption evidence; do not delete markers or
+   reopen bootstrap to regain access. Rotate any Break-glass credential
+   consumed after the snapshot, or whose usage cannot be established, in the
+   external protected configuration before cutover. Follow
    [Lost Local administration authority](#lost-local-administration-authority)
    for recovery and keep Local/Break-glass access closed until reconciled.
-6. Keep the current Signer ledger; never roll it back to match an older
+5. Keep the current Signer ledger; never roll it back to match an older
    Controller database. If the ledger itself must be restored, follow the
    [Signer backup and restore](#signer-backup-and-restore)
    procedure with an independently reconciled `--minimum-revision`, and
@@ -830,31 +627,12 @@ PostgreSQL and MySQL alike:
    snapshot. When the evidence for any of these changes is incomplete, keep the
    affected function closed and reconcile manually; never derive a high-water
    mark from the same old snapshot.
-7. Keep node fence floors, effect receipts and execution history; never lower
+6. Keep node fence floors, effect receipts and execution history; never lower
    a floor or clear a ledger to let the restored Controller connect.
-8. Record the snapshot, the reconciliation cut-off, the changes reapplied and
+7. Record the snapshot, the reconciliation cut-off, the changes reapplied and
    the operator in the incident record.
 
 Never guess the result of an Unknown remote write. Retain logs and scoped
 diagnostics, rotate any credentials that may have been exposed, and coordinate
-with the external OIDC, PKI/HSM, relay, or telemetry operators whenever a failure
+with the external PKI/HSM, relay, or telemetry operators whenever a failure
 crosses an external trust boundary.
-
-## Rebind and retention limits
-
-The steps for moving a node to another Controller are in
-[Rebind to another Controller](agent-lifecycle.md#rebind-to-another-controller),
-and the retention settings are in
-[Independent local retention](agent-lifecycle.md#independent-local-retention).
-The invariants are in [Controller rebind](../reference/stable-contracts.md#controller-rebind).
-
-Rebinding is not a database recovery path: restore a lost Controller database
-with the [database procedure](#database-recovery). Recovery never resets node
-identity, the Agent journal, the root effect store, or keys to make a rebind or
-restore succeed.
-
-When `commit` publishes the new binding with privileged mutations quarantined,
-reconcile the underlying records through
-[Unknown command reconciliation](#unknown-command-reconciliation). The
-quarantine limits are in
-[Resume and inspect](agent-lifecycle.md#resume-and-inspect).

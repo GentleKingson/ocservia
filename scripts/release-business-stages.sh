@@ -8,6 +8,7 @@ configure_auth_peers() {
   compose start transportd
   python3 "${ROOT}/scripts/release-business-api.py" transport_ready
 }
+
 configure_managed_options() {
   managed_options=(--version "v${VERSION}")
   if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then managed_options+=(--root-lifecycle); fi
@@ -16,16 +17,14 @@ configure_managed_options() {
 run_business_browser() {
   local work="$1"
   if [[ "${BUSINESS_PROFILE}" == extended ]]; then
-    next_stage certificate
-    python3 "${ROOT}/scripts/release-business-api.py" certificate
-    record real_certificate_lifecycle
+  next_stage certificate
+  python3 "${ROOT}/scripts/release-business-api.py" certificate
+  record real_certificate_lifecycle
   fi
   next_stage browser
   npm --prefix "${ROOT}/web" ci --ignore-scripts
   (cd "${ROOT}/web" && npx playwright install --with-deps chromium)
   sudo apt-get install -y --no-install-recommends libnss3-tools
-  sudo install -m 644 "${work}/ca.crt" /usr/local/share/ca-certificates/ocservia-business-test-ca.crt
-  sudo update-ca-certificates
   mkdir -p "${HOME}/.pki/nssdb"
   if [[ ! -f "${HOME}/.pki/nssdb/cert9.db" ]]; then certutil -N --empty-password -d "sql:${HOME}/.pki/nssdb"; fi
   certutil -A -d "sql:${HOME}/.pki/nssdb" -n ocservia-business-test-ca -t C,, -i "${work}/ca.crt"
@@ -36,7 +35,7 @@ run_business_browser() {
   if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
     next_stage signer_vpn_user
     python3 "${ROOT}/scripts/release-business-api.py" smoke_user
-    record approved_config_apply_and_vpn_user
+    record config_apply_and_vpn_user
   fi
 }
 
@@ -44,7 +43,7 @@ run_business_vpn() {
   next_stage business_vpn
   python3 "${ROOT}/scripts/release-business-api.py" vpn_after_config_apply
   record real_vpn_after_config_apply
-  if [[ "${BUSINESS_PROFILE}" == extended || "${OCSERV_PACKAGE:-distribution}" == source-1.6.0 ]]; then
+  if [[ "${BUSINESS_PROFILE}" == extended ]]; then
     next_stage configuration_rollback
     python3 "${ROOT}/scripts/release-business-api.py" configuration
     record config_plan_automatic_rollback
@@ -92,4 +91,26 @@ run_business_terminal() {
     record real_node_revocation_and_disconnect
   fi
   next_stage complete
+}
+
+prepare_business_products() {
+  next_stage dependency_setup
+  bash "${ROOT}/scripts/bootstrap.sh" npm-security
+  if [[ -z "${PRODUCTS_DIR:-}" ]]; then
+    bash "${ROOT}/scripts/bootstrap.sh" native-packages
+    # The native builder drops capabilities and needs root-owned task caches.
+    if [[ "$EUID" == 0 ]]; then
+      mkdir -p "$ROOT/rust/target"
+      chown -R 0:0 "$ROOT/.cache" "$ROOT/.tools" "$ROOT/rust/target"
+    fi
+    next_stage agent_package_build
+    env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
+    next_stage controller_image_build
+    bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
+    IMAGES_DIR="$OUTPUT_DIR"
+  else
+    next_stage product_consumption
+    cp "$PRODUCTS_DIR/product-identity.json" "$ARTIFACT_DIR/agent-product-identity.json"
+    cp "$IMAGES_DIR/product-identity.json" "$ARTIFACT_DIR/controller-product-identity.json"
+  fi
 }
