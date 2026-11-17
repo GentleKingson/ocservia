@@ -79,9 +79,7 @@ func (f *outboxFixture) node(t *testing.T) uuid.UUID {
 }
 
 func outboxRequest(node uuid.UUID) operations.CreateRequest {
-	return operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1,
-		Kind: operations.SyntheticEcho, Message: "Outbox transaction test", TTL: time.Hour, RequestID: uuid.NewString(),
-		Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"}
+	return operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1, TTL: time.Hour, RequestID: uuid.NewString(), Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01", Payload: operations.SyntheticEchoPayload{Message: "Outbox transaction test"}}
 }
 
 var lostCommit = errors.New("injected lost commit acknowledgement")

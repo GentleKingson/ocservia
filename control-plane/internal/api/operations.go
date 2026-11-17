@@ -117,11 +117,22 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	operation, replayed, err := s.operations.Create(r.Context(), operations.CreateRequest{
-		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
-		Kind: operations.AgentUpgrade, TargetVersion: target.Version, PackageSHA256: target.PackageSHA256[:], Architecture: target.Architecture,
-		Action: "agent.upgrade", Reason: reason,
-		TTL: time.Duration(ttl) * time.Second, RequestID: requestID(r), Traceparent: requestTraceparent(r),
-		ActorID: actorID(r), ActorIdentityID: principal(r).IdentityID, ActorSessionID: principal(r).SessionID,
+		NodeID:          nodeID,
+		IdempotencyKey:  idempotencyKey,
+		ExpectedVersion: expectedVersion,
+		Action:          "agent.upgrade",
+		Reason:          reason,
+		TTL:             time.Duration(ttl) * time.Second,
+		RequestID:       requestID(r),
+		Traceparent:     requestTraceparent(r),
+		ActorID:         actorID(r),
+		ActorIdentityID: principal(r).IdentityID,
+		ActorSessionID:  principal(r).SessionID,
+		Payload: operations.AgentUpgradePayload{
+			TargetVersion: target.Version,
+			PackageSHA256: target.PackageSHA256[:],
+			Architecture:  target.Architecture,
+		},
 	})
 	if err != nil {
 		s.writeOperationError(w, r, err)
@@ -171,11 +182,38 @@ func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request,
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "reason is required and ttl_seconds must be between 1 and 300")
 		return
 	}
+	var payload operations.Payload
+	switch kind {
+	case operations.SessionDisconnect:
+		payload = operations.SessionDisconnectPayload{SessionID: sessionID, BootID: body.BootID}
+	case operations.SessionTerminate:
+		payload = operations.SessionTerminatePayload{SessionID: sessionID, BootID: body.BootID}
+	case operations.IPBanRemove:
+		if body.BootID != "" {
+			s.writeOperationError(w, r, operations.ErrInvalidRequest)
+			return
+		}
+		payload = operations.IPBanRemovePayload{IP: ip}
+	case operations.ServiceReload:
+		if body.BootID != "" {
+			s.writeOperationError(w, r, operations.ErrInvalidRequest)
+			return
+		}
+		payload = operations.ServiceReloadPayload{}
+	}
 	operation, replayed, err := s.operations.Create(r.Context(), operations.CreateRequest{
-		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
-		Kind: kind, SessionID: sessionID, BootID: body.BootID, IP: ip,
-		TTL: time.Duration(ttl) * time.Second, RequestID: requestID(r), Traceparent: requestTraceparent(r),
-		ActorID: actorID(r), ActorIdentityID: principal(r).IdentityID, ActorSessionID: principal(r).SessionID, Action: action, Reason: strings.TrimSpace(body.Reason),
+		NodeID:          nodeID,
+		IdempotencyKey:  idempotencyKey,
+		ExpectedVersion: expectedVersion,
+		Payload:         payload,
+		TTL:             time.Duration(ttl) * time.Second,
+		RequestID:       requestID(r),
+		Traceparent:     requestTraceparent(r),
+		ActorID:         actorID(r),
+		ActorIdentityID: principal(r).IdentityID,
+		ActorSessionID:  principal(r).SessionID,
+		Action:          action,
+		Reason:          strings.TrimSpace(body.Reason),
 	})
 	if err != nil {
 		s.writeOperationError(w, r, err)
@@ -235,12 +273,34 @@ func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) 
 	}
 	requestID, _ := r.Context().Value(requestIDKey{}).(string)
 	actor := principal(r)
+	var payload operations.Payload
+	switch body.Kind {
+	case operations.SyntheticNoop:
+		if body.Message != "" {
+			s.writeOperationError(w, r, operations.ErrInvalidRequest)
+			return
+		}
+		payload = operations.SyntheticNoopPayload{}
+	case operations.SyntheticEcho:
+		payload = operations.SyntheticEchoPayload{Message: body.Message}
+	default:
+		s.writeOperationError(w, r, operations.ErrInvalidRequest)
+		return
+	}
 	operation, replayed, err := s.operations.Create(r.Context(), operations.CreateRequest{
-		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
-		Kind: body.Kind, Message: body.Message, SupersedePending: body.SupersedePending,
-		TTL: time.Duration(ttl) * time.Second, RequestID: requestID, Traceparent: requestTraceparent(r),
-		ActorID: actorID(r), ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID,
-		Action: "operation.create", Reason: "operator synthetic command",
+		NodeID:           nodeID,
+		IdempotencyKey:   idempotencyKey,
+		ExpectedVersion:  expectedVersion,
+		Payload:          payload,
+		SupersedePending: body.SupersedePending,
+		TTL:              time.Duration(ttl) * time.Second,
+		RequestID:        requestID,
+		Traceparent:      requestTraceparent(r),
+		ActorID:          actorID(r),
+		ActorIdentityID:  actor.IdentityID,
+		ActorSessionID:   actor.SessionID,
+		Action:           "operation.create",
+		Reason:           "operator synthetic command",
 	})
 	if err != nil {
 		s.writeOperationError(w, r, err)

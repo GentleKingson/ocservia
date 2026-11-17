@@ -659,3 +659,33 @@ func TestAPIResponsesAreNotCacheable(t *testing.T) {
 		}
 	}
 }
+
+func TestOperationHandlersRejectForeignPayloadFields(t *testing.T) {
+	// Invalid input must fail at the DTO boundary before any database access.
+	server := &Server{operations: operations.NewBackend(nil, 1, nil)}
+	for _, tc := range []struct {
+		name    string
+		body    string
+		handler func(http.ResponseWriter, *http.Request)
+	}{
+		{"noop message", `{"kind":"noop","message":"unused","expected_version":1}`, server.createSyntheticCommand},
+		{"foreign kind", `{"kind":"service_reload","expected_version":1}`, server.createSyntheticCommand},
+		{"unknown kind", `{"kind":"method.string","expected_version":1}`, server.createSyntheticCommand},
+		{"reload boot", `{"boot_id":"unused","expected_version":1,"reason":"support"}`, server.reloadService},
+		{"unban boot", `{"boot_id":"unused","expected_version":1,"reason":"support"}`, func(w http.ResponseWriter, r *http.Request) {
+			server.createControlledCommand(w, r, operations.IPBanRemove, "ip_ban.remove", "", "192.0.2.1")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body))
+			request.Header.Set("Idempotency-Key", "payload-boundary")
+			request.Header.Set("Content-Type", "application/json")
+			request.SetPathValue("node_id", "01900000-0000-7000-8000-000000000001")
+			response := httptest.NewRecorder()
+			tc.handler(response, request)
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid-request") {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body)
+			}
+		})
+	}
+}

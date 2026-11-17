@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"errors"
 	"testing"
 	"time"
 
@@ -30,12 +31,12 @@ func TestCommandResultResponseTimeoutLeavesCompletionHeadroom(t *testing.T) {
 }
 
 func TestValidateCreateRejectsUntypedOrOversizedSyntheticPayload(t *testing.T) {
-	base := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: SyntheticNoop, TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+	base := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: SyntheticNoopPayload{}}
 	for name, mutate := range map[string]func(*CreateRequest){
-		"unknown kind":   func(r *CreateRequest) { r.Kind = "method.string" },
-		"noop body":      func(r *CreateRequest) { r.Message = "not allowed" },
-		"oversized echo": func(r *CreateRequest) { r.Kind = SyntheticEcho; r.Message = string(make([]byte, 4097)) },
-		"long ttl":       func(r *CreateRequest) { r.TTL = 24*time.Hour + time.Second },
+		"missing payload": func(r *CreateRequest) { r.Payload = nil },
+		"pointer payload": func(r *CreateRequest) { r.Payload = (*SyntheticNoopPayload)(nil) },
+		"oversized echo":  func(r *CreateRequest) { r.Payload = SyntheticEchoPayload{Message: string(make([]byte, 4097))} },
+		"long ttl":        func(r *CreateRequest) { r.TTL = 24*time.Hour + time.Second },
 	} {
 		t.Run(name, func(t *testing.T) {
 			request := base
@@ -48,7 +49,7 @@ func TestValidateCreateRejectsUntypedOrOversizedSyntheticPayload(t *testing.T) {
 }
 
 func TestMarshalEnvelopeUsesTypedOneof(t *testing.T) {
-	request := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 4, Kind: SyntheticEcho, Message: "hello", TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+	request := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 4, TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: SyntheticEchoPayload{Message: "hello"}}
 	signer := testCommandSigner(t)
 	data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), 1, time.Now(), time.Now().Add(time.Minute), signer)
 	if err != nil || payloadType != "synthetic_echo" || len(data) == 0 {
@@ -77,29 +78,24 @@ func TestControlledOperationsRequireTypedTargetsAndReason(t *testing.T) {
 	for name, request := range map[string]CreateRequest{
 		"disconnect": func() CreateRequest {
 			r := base
-			r.Kind = SessionDisconnect
-			r.SessionID = "42"
-			r.BootID = bootID
+			r.Payload = SessionDisconnectPayload{SessionID: "42", BootID: bootID}
 			return r
 		}(),
 		"terminate": func() CreateRequest {
 			r := base
-			r.Kind = SessionTerminate
-			r.SessionID = "42"
-			r.BootID = bootID
+			r.Payload = SessionTerminatePayload{SessionID: "42", BootID: bootID}
 			r.Action = "session.terminate"
 			return r
 		}(),
 		"unban": func() CreateRequest {
 			r := base
-			r.Kind = IPBanRemove
-			r.IP = "192.0.2.9"
+			r.Payload = IPBanRemovePayload{IP: "192.0.2.9"}
 			r.Action = "ip_ban.remove"
 			return r
 		}(),
 		"reload": func() CreateRequest {
 			r := base
-			r.Kind = ServiceReload
+			r.Payload = ServiceReloadPayload{}
 			r.Action = "service.reload"
 			r.ActorIdentityID = uuid.Must(uuid.NewV7())
 			r.ActorSessionID = uuid.Must(uuid.NewV7())
@@ -117,26 +113,23 @@ func TestControlledOperationsRequireTypedTargetsAndReason(t *testing.T) {
 		})
 	}
 	invalid := base
-	invalid.Kind = SessionDisconnect
-	invalid.SessionID = "alice"
-	invalid.BootID = bootID
+	invalid.Payload = SessionDisconnectPayload{SessionID: "alice", BootID: bootID}
 	if err := validateCreate(invalid); err == nil {
 		t.Fatal("username-like session target was accepted")
 	}
-	invalid.SessionID = "042"
+	invalid.Payload = SessionDisconnectPayload{SessionID: "042", BootID: bootID}
 	if err := validateCreate(invalid); err == nil {
 		t.Fatal("non-canonical session target was accepted")
 	}
 	invalid = base
-	invalid.Kind = IPBanRemove
-	invalid.IP = "192.0.2.009"
+	invalid.Payload = IPBanRemovePayload{IP: "192.0.2.009"}
 	if err := validateCreate(invalid); err == nil {
 		t.Fatal("non-canonical IP was accepted")
 	}
 }
 
 func TestServiceReloadRequiresActorSession(t *testing.T) {
-	request := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: ServiceReload, ActorID: "operator", Action: "service.reload", Reason: "change", TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+	request := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, ActorID: "operator", Action: "service.reload", Reason: "change", TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: ServiceReloadPayload{}}
 	if err := validateCreate(request); err == nil {
 		t.Fatal("high-risk reload accepted without actor session")
 	}
@@ -147,13 +140,13 @@ func TestServiceReloadRequiresActorSession(t *testing.T) {
 }
 
 func TestRequestHashBindsTargetActorAndActionButNotAttemptMetadata(t *testing.T) {
-	base := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 4, Kind: ServiceReload, ActorID: "operator", Action: "service.reload", Reason: "support case", TTL: time.Minute, RequestID: "request-one", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+	base := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 4, ActorID: "operator", Action: "service.reload", Reason: "support case", TTL: time.Minute, RequestID: "request-one", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: ServiceReloadPayload{}}
 	baseHash := requestHash(base)
 	for name, mutate := range map[string]func(*CreateRequest){
-		"node":          func(r *CreateRequest) { r.NodeID = uuid.Must(uuid.NewV7()) },
-		"actor":         func(r *CreateRequest) { r.ActorID = "other-operator" },
-		"action":        func(r *CreateRequest) { r.Action = "other.action" },
-		"hold dispatch": func(r *CreateRequest) { r.HoldDispatch = true },
+		"node":    func(r *CreateRequest) { r.NodeID = uuid.Must(uuid.NewV7()) },
+		"actor":   func(r *CreateRequest) { r.ActorID = "other-operator" },
+		"action":  func(r *CreateRequest) { r.Action = "other.action" },
+		"payload": func(r *CreateRequest) { r.Payload = CertificateRevokePayload{HoldDispatch: true} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			request := base
@@ -172,7 +165,24 @@ func TestRequestHashBindsTargetActorAndActionButNotAttemptMetadata(t *testing.T)
 }
 
 func agentUpgradeRequest() CreateRequest {
-	return CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "roll out 1.2.3", TargetVersion: "1.2.3", PackageSHA256: make([]byte, 32), Architecture: "arm64", ActorIdentityID: uuid.Must(uuid.NewV7()), ActorSessionID: uuid.Must(uuid.NewV7()), TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+	return CreateRequest{
+		NodeID:          uuid.Must(uuid.NewV7()),
+		IdempotencyKey:  "stable-key",
+		ExpectedVersion: 1,
+		ActorID:         "operator",
+		Action:          "agent.upgrade",
+		Reason:          "roll out 1.2.3",
+		ActorIdentityID: uuid.Must(uuid.NewV7()),
+		ActorSessionID:  uuid.Must(uuid.NewV7()),
+		TTL:             time.Minute,
+		RequestID:       "request",
+		Traceparent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		Payload: AgentUpgradePayload{
+			TargetVersion: "1.2.3",
+			PackageSHA256: make([]byte, 32),
+			Architecture:  "arm64",
+		},
+	}
 }
 
 func TestAgentUpgradeRequiresActorAndValidReleaseIdentity(t *testing.T) {
@@ -185,46 +195,21 @@ func TestAgentUpgradeRequiresActorAndValidReleaseIdentity(t *testing.T) {
 	if err := validateCreate(unidentified); err == nil {
 		t.Fatal("upgrade accepted without actor identity")
 	}
-	for name, mutate := range map[string]func(*CreateRequest){
-		"non-semver version": func(r *CreateRequest) { r.TargetVersion = "latest" },
-		"partial version":    func(r *CreateRequest) { r.TargetVersion = "1.2" },
-		"v-prefixed version": func(r *CreateRequest) { r.TargetVersion = "v1.2.3" },
-		"short digest":       func(r *CreateRequest) { r.PackageSHA256 = make([]byte, 31) },
-		"foreign arch":       func(r *CreateRequest) { r.Architecture = "x86_64" },
-		"unknown arch":       func(r *CreateRequest) { r.Architecture = "riscv64" },
+	for name, mutate := range map[string]func(*AgentUpgradePayload){
+		"non-semver version": func(r *AgentUpgradePayload) { r.TargetVersion = "latest" },
+		"partial version":    func(r *AgentUpgradePayload) { r.TargetVersion = "1.2" },
+		"v-prefixed version": func(r *AgentUpgradePayload) { r.TargetVersion = "v1.2.3" },
+		"short digest":       func(r *AgentUpgradePayload) { r.PackageSHA256 = make([]byte, 31) },
+		"foreign arch":       func(r *AgentUpgradePayload) { r.Architecture = "x86_64" },
+		"unknown arch":       func(r *AgentUpgradePayload) { r.Architecture = "riscv64" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			request := base
-			mutate(&request)
+			payload := request.Payload.(AgentUpgradePayload)
+			mutate(&payload)
+			request.Payload = payload
 			if err := validateCreate(request); err == nil {
 				t.Fatal("malformed upgrade release identity was accepted")
-			}
-		})
-	}
-	leak := base
-	leak.Kind = SyntheticEcho
-	if err := validateCreate(leak); err == nil {
-		t.Fatal("upgrade release fields leaked into another kind")
-	}
-	for _, tc := range []struct {
-		name   string
-		mutate func(*CreateRequest)
-	}{
-		{"candidate", func(r *CreateRequest) { r.Candidate = []byte("config") }},
-		{"candidate hash", func(r *CreateRequest) { r.CandidateHash = make([]byte, sha256.Size) }},
-		{"expected current hash", func(r *CreateRequest) { r.ExpectedCurrentHash = make([]byte, sha256.Size) }},
-		{"desired revision", func(r *CreateRequest) { r.DesiredRevision = 7 }},
-		{"plan revision", func(r *CreateRequest) { r.PlanRevision = 3 }},
-		{"plan metadata", func(r *CreateRequest) { r.PlanMetadata = &ConfigPlanMetadata{} }},
-		{"apply metadata", func(r *CreateRequest) { r.ApplyMetadata = &ConfigApplyMetadata{} }},
-		{"ocserv version", func(r *CreateRequest) { r.OcservVersion = "1.2.3" }},
-		{"plan capabilities", func(r *CreateRequest) { r.PlanCapabilities = []string{"ocserv.config.capabilities.v1"} }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			request := base
-			tc.mutate(&request)
-			if err := validateCreate(request); err == nil {
-				t.Fatalf("config field %q was silently dropped from an upgrade request", tc.name)
 			}
 		})
 	}
@@ -245,7 +230,7 @@ func TestMarshalEnvelopeSignsAgentUpgradeReleaseIdentity(t *testing.T) {
 		t.Fatalf("upgrade authorization labels = %q/%q", envelope.GetAction(), envelope.GetRequiredCapability())
 	}
 	upgrade := envelope.GetAgentUpgrade()
-	if upgrade == nil || upgrade.GetTargetVersion() != request.TargetVersion || !bytes.Equal(upgrade.GetPackageSha256(), request.PackageSHA256) || upgrade.GetArchitecture() != request.Architecture {
+	if upgrade == nil || upgrade.GetTargetVersion() != request.Payload.(AgentUpgradePayload).TargetVersion || !bytes.Equal(upgrade.GetPackageSha256(), request.Payload.(AgentUpgradePayload).PackageSHA256) || upgrade.GetArchitecture() != request.Payload.(AgentUpgradePayload).Architecture {
 		t.Fatal("upgrade payload did not carry the requested release identity")
 	}
 	claims, err := commandauth.ClaimsFromEnvelopeV1(&envelope)
@@ -283,19 +268,94 @@ func TestRequestHashBindsAgentUpgradeReleaseIdentity(t *testing.T) {
 	baseHash := requestHash(base)
 	for _, tc := range []struct {
 		name   string
-		mutate func(*CreateRequest)
+		mutate func(*AgentUpgradePayload)
 	}{
-		{"target version", func(r *CreateRequest) { r.TargetVersion = "2.0.0" }},
-		{"package digest", func(r *CreateRequest) { r.PackageSHA256[0] ^= 0xff }},
-		{"architecture", func(r *CreateRequest) { r.Architecture = "amd64" }},
+		{"target version", func(r *AgentUpgradePayload) { r.TargetVersion = "2.0.0" }},
+		{"package digest", func(r *AgentUpgradePayload) { r.PackageSHA256[0] ^= 0xff }},
+		{"architecture", func(r *AgentUpgradePayload) { r.Architecture = "amd64" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := base
-			request.PackageSHA256 = append([]byte(nil), base.PackageSHA256...)
-			tc.mutate(&request)
+			payload := request.Payload.(AgentUpgradePayload)
+			payload.PackageSHA256 = append([]byte(nil), payload.PackageSHA256...)
+			tc.mutate(&payload)
+			request.Payload = payload
 			if requestHash(request) == baseHash {
 				t.Fatalf("%s was not bound into the idempotency digest", tc.name)
 			}
 		})
+	}
+}
+
+func TestConfigAndCertificatePayloadValidation(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+	candidate := []byte("config")
+	digest := sha256.Sum256(candidate)
+	plan := ConfigPlanPayload{Candidate: candidate, CandidateHash: digest[:], PlanCapabilities: []string{"ocserv.config.plan"}, PlanMetadata: &ConfigPlanMetadata{TemplateName: "default", CandidateRedacted: "config"}}
+	apply := ConfigApplyPayload{Candidate: candidate, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1, ApplyMetadata: &ConfigApplyMetadata{PlanID: id}}
+	csr := CertificateCSRPayload{CertificateID: id, CommonName: "node.example.test", DNSNames: []string{"node.example.test"}, KeyBits: 2048}
+	p12 := CertificateP12Payload{CertificateID: id, CertificateVersion: 1, CertificateChain: bytes.Repeat([]byte{1}, 64), ArtifactID: id, ArtifactMetadata: &ArtifactMetadata{TokenSHA256: digest[:], RequestHash: digest[:], ExpiresAt: time.Now().UTC().Add(time.Minute)}, SealedPassword: &agentv1.SealedSecretV1{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "secret", Ciphertext: bytes.Repeat([]byte{1}, 32)}}
+	revoke := CertificateRevokePayload{CertificateID: id, CertificateVersion: 1, RevocationReason: "rotate", HoldDispatch: true}
+	for _, tc := range []struct {
+		action  string
+		valid   Payload
+		invalid Payload
+	}{
+		{"config.plan", plan, ConfigPlanPayload{Candidate: []byte("changed"), CandidateHash: digest[:], PlanCapabilities: plan.PlanCapabilities, PlanMetadata: plan.PlanMetadata}},
+		{"config.apply", apply, ConfigApplyPayload{Candidate: candidate, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1}},
+		{"config.apply", apply, ConfigApplyPayload{Candidate: candidate, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1, ApplyMetadata: apply.ApplyMetadata, MaterializedHash: digest[:]}},
+		{"certificate.issue", csr, CertificateCSRPayload{CertificateID: id, CommonName: csr.CommonName, KeyBits: 1024}},
+		{"certificate.private_key.export", p12, CertificateP12Payload{CertificateID: id, CertificateVersion: 1, CertificateChain: p12.CertificateChain, SealedPassword: p12.SealedPassword, ArtifactID: id}},
+		{"certificate.revoke", revoke, CertificateRevokePayload{CertificateID: id, RevocationReason: "rotate"}},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			request := CreateRequest{NodeID: id, IdempotencyKey: "validation", ExpectedVersion: 1, Payload: tc.valid, ActorID: "operator", ActorIdentityID: id, ActorSessionID: id, Action: tc.action, Reason: "support", TTL: time.Minute, RequestID: "request", Traceparent: testTraceparent}
+			if err := validateCreate(request); err != nil {
+				t.Fatalf("valid payload: %v", err)
+			}
+			request.Payload = tc.invalid
+			if err := validateCreate(request); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("invalid payload: %v", err)
+			}
+		})
+	}
+}
+
+func TestRequestHashRetainsCertificateDeliveryAndGeneratedIDRules(t *testing.T) {
+	request := CreateRequest{Payload: CertificateRevokePayload{CertificateID: uuid.Must(uuid.NewV7()), CertificateVersion: 1, RevocationReason: "rotate"}}
+	original := requestHash(request)
+	payload := request.Payload.(CertificateRevokePayload)
+	payload.HoldDispatch = true
+	request.Payload = payload
+	if requestHash(request) == original {
+		t.Fatal("hold dispatch was not bound")
+	}
+	csr := CertificateCSRPayload{CertificateID: uuid.Must(uuid.NewV7()), CommonName: "node.example.test", KeyBits: 2048}
+	request.Payload = csr
+	original = requestHash(request)
+	csr.CertificateID = uuid.Must(uuid.NewV7())
+	request.Payload = csr
+	if requestHash(request) != original {
+		t.Fatal("generated CSR ID changed replay identity")
+	}
+}
+
+func TestUpgradeRolloutPayloadRequiresClaimBinding(t *testing.T) {
+	request := agentUpgradeRequest()
+	payload := request.Payload.(AgentUpgradePayload)
+	payload.RolloutRequestHash = make([]byte, sha256.Size)
+	request.Payload = payload
+	if err := validateCreate(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("unclaimed rollout hash: %v", err)
+	}
+	payload.RolloutID = uuid.Must(uuid.NewV7())
+	request.Payload = payload
+	if err := validateCreate(request); err != nil {
+		t.Fatalf("valid rollout binding: %v", err)
+	}
+	payload.RolloutRequestHash = nil
+	request.Payload = payload
+	if err := validateCreate(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("missing rollout hash: %v", err)
 	}
 }

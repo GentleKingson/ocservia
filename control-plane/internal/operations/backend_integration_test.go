@@ -57,7 +57,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				t.Fatal("duplicate intent", table, n)
 			}
 		}
-		request.Message = "different effect"
+		request.Payload = operations.SyntheticEchoPayload{Message: "different effect"}
 		if _, _, err := service.Create(ctx, request); !errors.Is(err, operations.ErrIdempotencyConflict) {
 			t.Fatal(err)
 		}

@@ -193,12 +193,23 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificat
 		return Certificate{}, false, err
 	}
 	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{
-		NodeID: request.NodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey,
-		Kind: operations.CertificateCSR, CertificateID: certificateID, CommonName: request.CommonName,
-		DNSNames: request.DNSNames, KeyBits: request.KeyBits, ActorID: request.ActorID,
-		ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID,
-		Action: "certificate.issue", Reason: request.Reason, RequestID: request.RequestID,
-		Traceparent: request.Traceparent, TTL: 15 * time.Minute,
+		NodeID:          request.NodeID,
+		ExpectedVersion: request.ExpectedVersion,
+		IdempotencyKey:  request.IdempotencyKey,
+		ActorID:         request.ActorID,
+		ActorIdentityID: request.ActorIdentityID,
+		ActorSessionID:  request.ActorSessionID,
+		Action:          "certificate.issue",
+		Reason:          request.Reason,
+		RequestID:       request.RequestID,
+		Traceparent:     request.Traceparent,
+		TTL:             15 * time.Minute,
+		Payload: operations.CertificateCSRPayload{
+			CertificateID: certificateID,
+			CommonName:    request.CommonName,
+			DNSNames:      request.DNSNames,
+			KeyBits:       request.KeyBits,
+		},
 	})
 	if err != nil {
 		return Certificate{}, false, err
@@ -391,7 +402,25 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	if state != "issued" && state != "expiring" && state != "expired" && state != "revoking" && state != "revocation_unknown" && state != "revoked" || serialNumber == "" {
 		return operations.Operation{}, false, ErrNotReady
 	}
-	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operations.CertificateRevoke, CertificateID: request.CertificateID, CertificateVersion: uint64(request.CertificateVersion), RevocationReason: request.Reason, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, Action: "certificate.revoke", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute, HoldDispatch: true})
+	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{
+		NodeID:          nodeID,
+		ExpectedVersion: request.ExpectedVersion,
+		IdempotencyKey:  request.IdempotencyKey,
+		ActorID:         request.ActorIdentityID.String(),
+		ActorIdentityID: request.ActorIdentityID,
+		ActorSessionID:  request.ActorSessionID,
+		Action:          "certificate.revoke",
+		Reason:          request.Reason,
+		RequestID:       request.RequestID,
+		Traceparent:     request.Traceparent,
+		TTL:             15 * time.Minute,
+		Payload: operations.CertificateRevokePayload{
+			CertificateID:      request.CertificateID,
+			CertificateVersion: uint64(request.CertificateVersion),
+			RevocationReason:   request.Reason,
+			HoldDispatch:       true,
+		},
+	})
 	if err != nil {
 		return operations.Operation{}, false, err
 	}
@@ -534,7 +563,27 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 		return ArtifactGrant{}, false, err
 	}
 	tokenHash := sha256.Sum256([]byte(token))
-	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operations.CertificateP12, CertificateID: request.CertificateID, CertificateVersion: uint64(certificateVersion), CertificateChain: chain, SealedPassword: sealed, ArtifactID: artifactID, ArtifactMetadata: &operations.ArtifactMetadata{TokenSHA256: tokenHash[:], RequestHash: intentHash[:], ExpiresAt: expiresAt}, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, Action: "certificate.private_key.export", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute})
+	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{
+		NodeID:          nodeID,
+		ExpectedVersion: request.ExpectedVersion,
+		IdempotencyKey:  request.IdempotencyKey,
+		ActorID:         request.ActorIdentityID.String(),
+		ActorIdentityID: request.ActorIdentityID,
+		ActorSessionID:  request.ActorSessionID,
+		Action:          "certificate.private_key.export",
+		Reason:          request.Reason,
+		RequestID:       request.RequestID,
+		Traceparent:     request.Traceparent,
+		TTL:             15 * time.Minute,
+		Payload: operations.CertificateP12Payload{
+			CertificateID:      request.CertificateID,
+			CertificateVersion: uint64(certificateVersion),
+			CertificateChain:   chain,
+			SealedPassword:     sealed,
+			ArtifactID:         artifactID,
+			ArtifactMetadata:   &operations.ArtifactMetadata{TokenSHA256: tokenHash[:], RequestHash: intentHash[:], ExpiresAt: expiresAt},
+		},
+	})
 	if err != nil {
 		if errors.Is(err, operations.ErrIdempotencyConflict) {
 			found, lookupErr := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey, intentHash[:])

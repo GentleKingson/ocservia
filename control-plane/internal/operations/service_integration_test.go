@@ -48,7 +48,7 @@ func TestTransactionalCreateIdempotencyAndTypedPayloadIntegration(t *testing.T) 
 	}
 
 	conflict := request
-	conflict.Message = "different"
+	conflict.Payload = SyntheticEchoPayload{Message: "different"}
 	if _, _, err := service.Create(context.Background(), conflict); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("conflicting replay error = %v", err)
 	}
@@ -202,7 +202,22 @@ func TestAgentUpgradeIdempotencyBindsExactReleaseIdentityIntegration(t *testing.
 	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
 		t.Fatal(err)
 	}
-	base := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-exact", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "1.2.3", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-upgrade", Traceparent: testTraceparent}
+	base := CreateRequest{
+		NodeID:          nodeID,
+		IdempotencyKey:  "upgrade-exact",
+		ExpectedVersion: 1,
+		ActorID:         "operator",
+		Action:          "agent.upgrade",
+		Reason:          "integration test",
+		TTL:             time.Minute,
+		RequestID:       "request-upgrade",
+		Traceparent:     testTraceparent,
+		Payload: AgentUpgradePayload{
+			TargetVersion: "1.2.3",
+			PackageSHA256: bytes.Repeat([]byte{0x43}, 32),
+			Architecture:  "amd64",
+		},
+	}
 	authorizeOperation(t, pool, workspaceID, &base)
 	operation, replayed, err := service.Create(ctx, base)
 	if err != nil || replayed || operation.State != "queued" {
@@ -215,25 +230,24 @@ func TestAgentUpgradeIdempotencyBindsExactReleaseIdentityIntegration(t *testing.
 	// An existing idempotency key binds exactly one release identity.
 	for _, tc := range []struct {
 		name   string
-		mutate func(*CreateRequest)
+		mutate func(*AgentUpgradePayload)
 	}{
-		{"target version", func(r *CreateRequest) {
+		{"target version", func(r *AgentUpgradePayload) {
 			r.TargetVersion = "1.2.4"
-			r.RequestID = "request-drift-version"
 		}},
-		{"package digest", func(r *CreateRequest) {
+		{"package digest", func(r *AgentUpgradePayload) {
 			r.PackageSHA256[0] ^= 0xff
-			r.RequestID = "request-drift-digest"
 		}},
-		{"architecture", func(r *CreateRequest) {
+		{"architecture", func(r *AgentUpgradePayload) {
 			r.Architecture = "arm64"
-			r.RequestID = "request-drift-arch"
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := base
-			request.PackageSHA256 = append([]byte(nil), base.PackageSHA256...)
-			tc.mutate(&request)
+			payload := request.Payload.(AgentUpgradePayload)
+			payload.PackageSHA256 = append([]byte(nil), payload.PackageSHA256...)
+			tc.mutate(&payload)
+			request.Payload = payload
 			if _, _, err := service.Create(ctx, request); !errors.Is(err, ErrIdempotencyConflict) {
 				t.Fatalf("drifted %s error = %v", tc.name, err)
 			}
@@ -261,7 +275,22 @@ func TestAgentUpgradeWithoutVersionOrderIntegration(t *testing.T) {
 			if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
 				t.Fatal(err)
 			}
-			request := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-explicit-target", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-explicit-target", Traceparent: testTraceparent}
+			request := CreateRequest{
+				NodeID:          nodeID,
+				IdempotencyKey:  "upgrade-explicit-target",
+				ExpectedVersion: 1,
+				ActorID:         "operator",
+				Action:          "agent.upgrade",
+				Reason:          "integration test",
+				TTL:             time.Minute,
+				RequestID:       "request-explicit-target",
+				Traceparent:     testTraceparent,
+				Payload: AgentUpgradePayload{
+					TargetVersion: "2.0.0",
+					PackageSHA256: bytes.Repeat([]byte{0x43}, 32),
+					Architecture:  "amd64",
+				},
+			}
 			authorizeOperation(t, pool, workspaceID, &request)
 			operation, replayed, err := service.Create(ctx, request)
 			if err != nil || replayed || operation.AgentUpgradeState != "queued" {
@@ -780,7 +809,18 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 }
 
 func controlledTestRequest(nodeID uuid.UUID, key string, kind Kind, action, bootID, sessionID, ip string) CreateRequest {
-	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: kind, BootID: bootID, SessionID: sessionID, IP: ip, ActorID: "operator", Action: action, Reason: "integration test", TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
+	var payload Payload
+	switch kind {
+	case SessionDisconnect:
+		payload = SessionDisconnectPayload{SessionID: sessionID, BootID: bootID}
+	case SessionTerminate:
+		payload = SessionTerminatePayload{SessionID: sessionID, BootID: bootID}
+	case IPBanRemove:
+		payload = IPBanRemovePayload{IP: ip}
+	case ServiceReload:
+		payload = ServiceReloadPayload{}
+	}
+	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Payload: payload, ActorID: "operator", Action: action, Reason: "integration test", TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
 }
 
 func authorizeOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, request *CreateRequest) {
@@ -799,5 +839,16 @@ func authorizeOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID,
 }
 
 func testRequest(nodeID uuid.UUID, key string, kind Kind, message string) CreateRequest {
-	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: kind, Message: message, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
+	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Payload: syntheticTestPayload(kind, message), TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
+}
+
+func syntheticTestPayload(kind Kind, message string) Payload {
+	switch kind {
+	case SyntheticNoop:
+		return SyntheticNoopPayload{}
+	case SyntheticEcho:
+		return SyntheticEchoPayload{Message: message}
+	default:
+		panic("unexpected synthetic kind")
+	}
 }
