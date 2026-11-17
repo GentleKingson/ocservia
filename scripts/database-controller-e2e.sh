@@ -2,11 +2,11 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENGINE="${1:-postgres}"
-case "${ENGINE}" in postgres) ;; *) echo 'expected postgres; MySQL is retired' >&2; exit 2 ;; esac
-ROLE_MODE="${2:-all}"
-case "${ROLE_MODE}" in all) ;; *) echo 'expected all role mode; split roles are retired' >&2; exit 2 ;; esac
-NAME="ocservia-database-controller-${ENGINE}-${ROLE_MODE}-$(date +%s)-$$"
+# Legacy positional arguments are checked only here.
+(($# <= 2)) || { echo 'usage: database-controller-e2e.sh [postgres [all]]' >&2; exit 2; }
+case "${1:-postgres}" in postgres) ;; *) echo 'expected postgres; MySQL is retired' >&2; exit 2 ;; esac
+case "${2:-all}" in all) ;; *) echo 'expected all role mode; split roles are retired' >&2; exit 2 ;; esac
+NAME="ocservia-database-controller-postgres-$(date +%s)-$$"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${ROOT}/artifacts/${NAME}}"
 mkdir -p "${ARTIFACT_DIR}" "${ROOT}/.cache/go-build" "${ROOT}/.cache/go-mod"
 ARTIFACT_DIR="$(cd "${ARTIFACT_DIR}" && pwd)"
@@ -36,7 +36,7 @@ trap 'exit 143' TERM
 WORKFLOW_IMAGE=ocservia-database-e2e-workflow:e2e
 if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
   : "${SINGLE_AGENT_ARCHIVE:?}" "${SINGLE_EXPECTED_AGENT_VERSION:?}"
-  [[ "${RELEASE_WORKFLOW_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ && "${ENGINE}" == postgres ]]
+  [[ "${RELEASE_WORKFLOW_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]
   WORKFLOW_IMAGE="${RELEASE_WORKFLOW_IMAGE}"
 else
 docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target agent-runtime -t ocservia-database-e2e-agent:e2e "${ROOT}" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
@@ -93,4 +93,4 @@ docker run --rm --name "${NAME}-workflow" --network "container:${NAME}" \
   "${MOUNTS[@]}" "${ENVIRONMENT[@]}" "${WORKFLOW_IMAGE}" "${COMMAND[@]}" \
   >"${ARTIFACT_DIR}/workflow.log" 2>&1
 grep -q '^--- PASS: TestControllerTransportBackendE2E ' "${ARTIFACT_DIR}/workflow.log"
-printf 'Controller %s E2E passed; evidence: %s\n' "${ENGINE}" "${ARTIFACT_DIR}"
+printf 'Controller PostgreSQL E2E passed; evidence: %s\n' "${ARTIFACT_DIR}"

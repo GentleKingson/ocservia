@@ -36,7 +36,7 @@ func socketDirectory(t *testing.T) string {
 	return dir
 }
 
-func TestWorkerRoleAssembly(t *testing.T) {
+func TestWorkerAssembly(t *testing.T) {
 	signer, err := commandauth.NewRandomSigner()
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +46,7 @@ func TestWorkerRoleAssembly(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			life := newLifecycle(ctx, time.Second, quietLogger())
-			cfg := config.Config{Role: config.RoleAll, TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock")}
+			cfg := config.Config{TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock")}
 			cfg.LocalSimulator = strings.Contains(mode, "simulator")
 			if strings.Contains(mode, "endpoint") {
 				cfg.ControllerEndpointID = strings.Repeat("ab", 32)
@@ -86,7 +86,7 @@ func TestWorkerPartialStartupClosesTrust(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	life := newLifecycle(ctx, time.Second, quietLogger())
-	cfg := config.Config{Role: config.RoleAll, ControllerEndpointID: strings.Repeat("ab", 32), TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock"), TestResultCommitBarrier: "/missing/result-commit-barrier"}
+	cfg := config.Config{ControllerEndpointID: strings.Repeat("ab", 32), TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock"), TestResultCommitBarrier: "/missing/result-commit-barrier"}
 	signer, err := commandauth.NewRandomSigner()
 	if err != nil {
 		t.Fatal(err)

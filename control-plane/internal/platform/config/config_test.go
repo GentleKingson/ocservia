@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -236,8 +237,27 @@ func TestDevAuthTokenGuard(t *testing.T) {
 	}
 }
 
+func TestLegacySelectorsNormalizeAtEntry(t *testing.T) {
+	values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}
+	lookup := func(key string) (string, bool) { value, ok := values[key]; return value, ok }
+	want, err := Load(nil, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values["OCSERV_DATABASE_BACKEND"] = "postgres"
+	for _, args := range [][]string{nil, {"--role=all"}, {"--role", "all"}} {
+		got, err := Load(args, lookup)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("legacy selectors changed runtime config: args=%v", args)
+		}
+	}
+}
+
 func TestRoleValidation(t *testing.T) {
-	for _, arg := range []string{"--role=invalid", "--role=api", "--role=worker", "--role=scheduler"} {
+	for _, arg := range []string{"--role=", "--role=invalid", "--role=api", "--role=worker", "--role=scheduler"} {
 		_, err := Load([]string{arg}, func(key string) (string, bool) {
 			if key == "OCSERV_DATABASE_URL" {
 				return "postgres://db/test", true

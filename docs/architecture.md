@@ -29,7 +29,7 @@ flowchart LR
 | Piece | Runs on | What it does |
 | --- | --- | --- |
 | Gateway | Controller server | Terminates Controller TLS, serves the static Web bundle, and proxies `/api` to the Controller. Integrated mode places an SNI-routing Edge in front of it. |
-| Go Controller | Controller server | Serves the HTTP API and runs the outbox worker, scheduler, audit subsystem, node directory, and command dispatch pipeline according to `--role`. |
+| Go Controller | Controller server | Serves the HTTP API and runs the outbox worker, scheduler, audit subsystem, node directory, and command dispatch pipeline in one process. |
 | transportd | Controller side | Terminates Iroh overlay connections and exposes a local gRPC Unix domain socket to the Go Controller. It holds no database credentials and checks session authorization through a trust socket served by the Controller. |
 | Supported database | Controller side | Stores control-plane state, task queues, and recovery journals. PostgreSQL is the default backend. |
 | Dedicated Relay | Operator-managed relay host (one) | Forwards encrypted control-plane traffic between the Controller and Agents across NAT or firewall boundaries. Production supports exactly one Relay. |
@@ -45,7 +45,7 @@ Ownership, secrets, interfaces, and failure impact by process:
 | Process | Storage and secrets | Interfaces | If it stops |
 | --- | --- | --- | --- |
 | Gateway | Controller TLS key; no business state | TCP 443 to browsers; HTTP to the Controller | Web UI and HTTP API become unreachable; Controller state and running nodes are unaffected. |
-| Go Controller (`--role=all`, single instance in production) | Owns trust, operations, outbox, and audit state in the database; holds the command-signing key, session and audit keys, database application credential, and Signer token | HTTP behind Gateway; client of the transportd socket; serves the trust socket; HTTPS to Signer | Request validation, durable writes, and command dispatch pause; queued operations remain in the outbox. |
+| Go Controller (single instance) | Owns trust, operations, outbox, and audit state in the database; holds the command-signing key, session and audit keys, database application credential, and Signer token | HTTP behind Gateway; client of the transportd socket; serves the trust socket; HTTPS to Signer | Request validation, durable writes, and command dispatch pause; queued operations remain in the outbox. |
 | Database | Sole durable store for Controller state | Controller only | Same impact as a Controller outage; restore using [database recovery](operations/incident-recovery.md#database-recovery). |
 | transportd | Iroh endpoint key, Relay token, and Controller command verification key; no database credentials | gRPC `TransportService` on a Unix socket; calls the trust socket; Iroh to Agents | Command dispatch and result ingestion pause; in-flight outcomes may become `unknown` until reconciled. |
 | Signer | Issuing intermediate key, HTTPS key, and durable certificate ledger | HTTPS `:9443`, on an internal network reachable by the Controller in Integrated mode | Certificate issuance, revocation, and secret sealing fail while unrelated workflows continue. |
@@ -116,7 +116,7 @@ Recovery procedures preserve command logs, local SQLite journals, endpoint ident
 
 ## Design tradeoffs and capacity
 
-The Controller is structured as a modular monolith in which domain services share relational database transactions. Keeping domain state changes, outbox staging, and audit records in a single local transaction avoids two-phase commit or external message brokers while the deployment model remains single-instance. [Controller assembly and roles](#controller-assembly-and-roles) describes how one binary starts the API, worker, and scheduler roles, with production running a single `all` instance.
+The Controller is structured as a modular monolith in which domain services share relational database transactions. Keeping domain state changes, outbox staging, and audit records in a single local transaction avoids two-phase commit or external message brokers while the deployment model remains single-instance. [Controller assembly and roles](#controller-assembly-and-roles) describes how one process starts the HTTP server, worker, and scheduler together.
 
 Using a database-backed transactional outbox means task leasing, historical audit queries, and live API writes share the same database connection pool and row locks. Polling loops backstop in-memory wakeups so queued commands still drain after transient notification drops. Local `Agent` journals prevent duplicate side effects on redelivery, and ambiguous executions pause for explicit reconciliation.
 
@@ -141,14 +141,14 @@ Each subsection names who owns a behavior and where the boundary sits. Exact rul
 
 ### Controller assembly and roles
 
-`cmd/ocserv-control` starts [`platform/app`](../control-plane/internal/platform/app/), which opens the database, runs the startup checks for the requested mode, and wires the domain services. Domain packages do not import assembly packages. The binary runs as `--role=api`, `--role=worker`, `--role=scheduler`, or `--role=all`, and production runs a single `all` instance.
+`cmd/ocserv-control` starts [`platform/app`](../control-plane/internal/platform/app/), which opens the database, runs the startup checks for the requested mode, and wires the domain services. Domain packages do not import assembly packages. Normal startup runs the HTTP server, worker, and scheduler in one Controller process in every environment. The legacy `--role=all` argument is accepted only at the CLI boundary; `api`, `worker`, and `scheduler` values are rejected, including in tests. One-shot migration, workspace provisioning, and administrator bootstrap commands exit before runtime services are constructed.
 
-- The api role serves the HTTP API and the event streams. Other roles exit before authentication or HTTP construction.
-- The worker role runs the operation outbox worker, ingests transport events, runs trust convergence, and serves the trust socket that transportd calls.
-- The scheduler role runs one maintenance session at a time under a database leadership lease, ticking every 30 seconds. The fixed steps are user operations, Agent rollouts, telemetry rollups, certificate maintenance, audit checkpoints, and history retention. Only a rollout error lets the rest of the pass continue.
-- On `SIGINT`/`SIGTERM` or the first role error, the process stops HTTP admission and event streams, closes the trust socket, and waits up to `OCSERV_SHUTDOWN_TIMEOUT` for in-flight tasks.
+- The HTTP server serves the API and event streams.
+- The worker runs the operation outbox worker, ingests transport events, runs trust convergence, and serves the trust socket that transportd calls.
+- The scheduler runs one maintenance session at a time under a database leadership lease, ticking every 30 seconds. The fixed steps are user operations, Agent rollouts, telemetry rollups, certificate maintenance, audit checkpoints, and history retention. Only a rollout error lets the rest of the pass continue.
+- On `SIGINT`/`SIGTERM` or the first runtime task error, the process stops HTTP admission and event streams, closes the trust socket, and waits up to `OCSERV_SHUTDOWN_TIMEOUT` for in-flight tasks.
 
-The scheduler classifies a failed maintenance session in [`scheduler.go`](../control-plane/internal/platform/app/scheduler.go). Leadership loss, a policy enforcement cleanup failure, and a temporarily unavailable database are logged and wait for the next tick. A cleanup failure also skips the remaining steps of that pass. During a database outage the HTTP server stays running so readiness can report it, and the scheduler neither replays transaction callbacks nor claims a known commit outcome. Any other error is logged as `alert_kind=user_operations.scheduler_failed` and ends the role, so the process exits and the service supervisor restarts it. Cancellation of the process context ends the loop in every case.
+The scheduler classifies a failed maintenance session in [`scheduler.go`](../control-plane/internal/platform/app/scheduler.go). Leadership loss, a policy enforcement cleanup failure, and a temporarily unavailable database are logged and wait for the next tick. A cleanup failure also skips the remaining steps of that pass. During a database outage the HTTP server stays running so readiness can report it, and the scheduler neither replays transaction callbacks nor claims a known commit outcome. Any other error is logged as `alert_kind=user_operations.scheduler_failed` and ends the scheduler, so the process exits and the service supervisor restarts it. Cancellation of the process context ends the loop in every case.
 
 Database ownership is split between two entry points. A separate one-shot `--migrate-only` run uses the owner connection to apply schema changes, verify checksums and receipts, check audit event authentication, and only then grant access to the unprivileged runtime role. The long-running process holds only runtime credentials. Normal startup validates the deployment and audit authenticity, and `/readyz` reads the core tables. Neither is evidence of full checksum or receipt verification. The rules are in [Database](reference/stable-contracts.md#database).
 
@@ -315,7 +315,7 @@ Each linked document holds the detailed behavioral and compatibility rules for i
 
 | Boundary / task | Responsibility and dependency direction | Read next |
 | --- | --- | --- |
-| Startup and assembly | `cmd` and `platform/app` wire dependencies, start configured roles, and coordinate graceful shutdown. Domain packages must not import assembly packages. | [Controller assembly and roles](#controller-assembly-and-roles), [`platform/app`](../control-plane/internal/platform/app/) |
+| Startup and assembly | `cmd` and `platform/app` wire dependencies, start the Controller runtime, and coordinate graceful shutdown. Domain packages must not import assembly packages. | [Controller assembly and roles](#controller-assembly-and-roles), [`platform/app`](../control-plane/internal/platform/app/) |
 | HTTP compatibility | HTTP handlers decode requests, bind caller authentication and authorization context, and encode responses, leaving business invariants and transactions to domain services. | [HTTP layer](#http-layer), [HTTP contracts](reference/stable-contracts.md#http-contracts) |
 | Controller services | Packages depend on narrow consumer interfaces defined where they are used, without speculative abstraction layers. | [Domain services and transactions](#domain-services-and-transactions) |
 | Data and transactions | Domain store interfaces decouple business logic from SQL drivers. The initiating domain service opens and commits `database.Tx` so multiple stores can participate in one atomic transaction without importing driver packages. | [`database` boundary](../control-plane/internal/database/database.go), [Database](reference/stable-contracts.md#database), [Controller delivery](reference/stable-contracts.md#controller-delivery) |

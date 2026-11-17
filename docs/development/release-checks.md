@@ -23,6 +23,23 @@ a result from one layer never stands in for another:
 - The Release workflow rebuilds from the tag and publishes only after its gates
   pass.
 
+## Entry-point compatibility
+
+The Controller accepts legacy `--role=all` and `OCSERV_DATABASE_BACKEND=postgres`
+only at input boundaries; new deployments omit both. The local sealing export
+CLI also accepts `--backend=postgres`. Unsupported values fail closed, and
+split `api`, `worker`, or `scheduler` processes are unsupported even in tests.
+The manual `database-controller-e2e.sh` harness still accepts its old
+`postgres all` positional arguments at entry; new invocations omit them.
+Keep acceptance/rejection tests at these entrypoints. Remove the compatibility
+arguments only in an explicitly announced CLI/configuration contract change,
+after supported installer and operator automation no longer supplies them.
+
+The `/version` response retains `role: "all"` as a stable wire field. Database
+engine identities in schema receipts, existing SQL artifacts and checksums,
+persisted deployment-profile keys, historical audit values, journals, and signed
+protocol bytes retain their original identifiers; they are not runtime configuration selectors.
+
 ## Choose the validation scope
 
 Validation converges onto four explicit tiers:
@@ -118,7 +135,7 @@ Pick the entry point that matches the behavior under test:
   `transportd-stub`, Controller and Web under Docker Compose, then the
   Playwright `e2e` service); it does not exercise a native node.
 - Real processes without a native host:
-  `scripts/database-controller-e2e.sh postgres [all|split]` runs
+  `scripts/database-controller-e2e.sh` runs
   `TestControllerTransportBackendE2E` with the real Controller, `transportd`,
   Agent, `privd`, Relay, and ocserv in one container (no systemd PID 1, no
   managed-node installer). It is manual and outside CI; native systemd behavior

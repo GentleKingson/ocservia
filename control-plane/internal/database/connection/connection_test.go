@@ -7,7 +7,6 @@ import (
 
 func TestExternalPostgreSQLTLSContract(t *testing.T) {
 	base := Options{
-		Backend:     "postgres",
 		Environment: "production",
 		URL:         "postgres://owner:secret@database.example.test:5432/ocservia",
 		CAFile:      "/run/secrets/database_ca",
@@ -25,7 +24,7 @@ func TestExternalPostgreSQLTLSContract(t *testing.T) {
 	}
 
 	configured, err := postgresURL(Options{
-		Backend: "postgres", URL: base.URL + "?sslmode=verify-full", CAFile: base.CAFile,
+		URL: base.URL + "?sslmode=verify-full", CAFile: base.CAFile,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -35,21 +34,21 @@ func TestExternalPostgreSQLTLSContract(t *testing.T) {
 	}
 }
 
-func TestRejectUnsupportedDatabaseBackends(t *testing.T) {
+func TestRejectNonPostgreSQLURLs(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		options Options
 	}{
-		{"mysql production", Options{Backend: "mysql", Environment: "production", URL: "app:secret@tcp(database.example.test:3306)/ocservia?tls=true"}},
-		{"mysql development", Options{Backend: "mysql", Environment: "development", URL: "app:secret@tcp(127.0.0.1:3306)/ocservia?tls=false"}},
-		{"mariadb", Options{Backend: "mariadb", Environment: "test", URL: "app:secret@tcp(127.0.0.1:3306)/db?tls=false"}},
-		{"mysql URL with empty backend", Options{Environment: "development", URL: "mysql://app:secret@127.0.0.1:3306/ocservia"}},
-		{"mysql DSN with postgres backend", Options{Backend: "postgres", Environment: "development", URL: "app:secret@tcp(127.0.0.1:3306)/ocservia?tls=false"}},
+		{"mysql production", Options{Environment: "production", URL: "app:secret@tcp(database.example.test:3306)/ocservia?tls=true"}},
+		{"mysql development", Options{Environment: "development", URL: "app:secret@tcp(127.0.0.1:3306)/ocservia?tls=false"}},
+		{"mariadb", Options{Environment: "test", URL: "app:secret@tcp(127.0.0.1:3306)/db?tls=false"}},
+		{"mysql URL", Options{Environment: "development", URL: "mysql://app:secret@127.0.0.1:3306/ocservia"}},
+		{"mysql DSN", Options{Environment: "development", URL: "app:secret@tcp(127.0.0.1:3306)/ocservia?tls=false"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := ValidateOptions(tc.options)
 			if err == nil {
-				t.Fatalf("unsupported backend option accepted: %+v", tc.options)
+				t.Fatalf("non-PostgreSQL URL accepted: %+v", tc.options)
 			}
 			if strings.Contains(err.Error(), "secret") {
 				t.Fatalf("error leaks credentials: %v", err)
@@ -73,7 +72,7 @@ func TestProductionPostgreSQLPlaintextRequiresDeclaredTarget(t *testing.T) {
 		{"declared bundled host override", Options{Environment: "production", BundledPostgres: true, URL: "postgres://app:secret@postgres:5432/ocservia?sslmode=disable&host=database.example.test"}, false},
 		{"declared bundled multi-host", Options{Environment: "production", BundledPostgres: true, URL: "postgres://app:secret@postgres:5432,database.example.test:5432/ocservia?sslmode=disable"}, false},
 		{"declared bundled with CA", Options{Environment: "production", BundledPostgres: true, CAFile: "/run/secrets/database_ca", URL: "postgres://app:secret@postgres:5432/ocservia?sslmode=verify-full"}, false},
-		{"declared bundled on MySQL", Options{Backend: "mysql", Environment: "production", BundledPostgres: true, URL: "app:secret@tcp(127.0.0.1:3306)/ocservia?tls=false"}, false},
+		{"declared bundled on MySQL", Options{Environment: "production", BundledPostgres: true, URL: "app:secret@tcp(127.0.0.1:3306)/ocservia?tls=false"}, false},
 		{"loopback", Options{Environment: "production", URL: "postgres://app:secret@127.0.0.1:5432/ocservia?sslmode=disable"}, true},
 		{"development remote", Options{Environment: "development", URL: "postgres://app:secret@database.example.test:5432/ocservia?sslmode=disable"}, true},
 	}

@@ -100,6 +100,9 @@ done
 
 for rendered in postgres external-postgres; do
   jq -e '
+    (.services["control-plane"].command == null) and
+    (.services["control-plane"].environment | has("OCSERV_DATABASE_BACKEND") | not) and
+    (.services.migrate.environment | has("OCSERV_DATABASE_BACKEND") | not) and
     (.services.transportd.networks | keys) == ["application", "observability", "relay-egress"] and
     (.networks["relay-egress"].internal // false) == false and
     .networks.application.internal == true and .networks.observability.internal == true and

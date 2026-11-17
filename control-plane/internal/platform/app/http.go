@@ -39,7 +39,7 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 		Address: cfg.HTTPAddress, BodyLimit: cfg.BodyLimit, RequestTimeout: cfg.RequestTimeout,
 		DevAuth: operationAuthEnabled(cfg), DevAuthToken: cfg.DevAuthToken,
 		LocalSimulator: cfg.LocalSimulator, BrowserOrigin: cfg.BrowserOrigin(), AuthTrustedProxies: cfg.AuthTrustedProxyCIDRs, EventStreams: cfg.EventStreams,
-	}, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, modules,
+	}, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, modules,
 		api.Authorization{Authentication: authService, Audit: auditManager})
 	if err != nil {
 		return nil, err

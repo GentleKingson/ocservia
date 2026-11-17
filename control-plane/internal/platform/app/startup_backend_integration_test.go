@@ -33,7 +33,7 @@ func controllerProcessDatabase(t *testing.T) (owner, runtime connection.Options,
 	if ownerURL == "" || runtimeURL == "" {
 		t.Skip("isolated real PostgreSQL database with separate owner/runtime credentials required")
 	}
-	return connection.Options{Backend: "postgres", Environment: "test", URL: ownerURL}, connection.Options{Backend: "postgres", Environment: "test", URL: runtimeURL}, "ocservia_app"
+	return connection.Options{Environment: "test", URL: ownerURL}, connection.Options{Environment: "test", URL: runtimeURL}, "ocservia_app"
 }
 
 // This starts the actual CLI binary, not an httptest router or a replacement
@@ -96,7 +96,6 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		}
 		values := map[string]string{
 			"OCSERV_ENVIRONMENT":               options.Environment,
-			"OCSERV_DATABASE_BACKEND":          options.Backend,
 			"OCSERV_DATABASE_URL":              options.URL,
 			"OCSERV_AUDIT_EVENT_KEY_ID":        "test-audit-event-v1",
 			"OCSERV_TEST_AUDIT_EVENT_KEY_HEX":  strings.Repeat("11", 32),
@@ -130,10 +129,10 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	}
 	runOutput := func(options connection.Options, extra map[string]string, args ...string) ([]byte, error) {
 		t.Helper()
-		// Every invocation here is one-shot. Invalid role-only resources must
-		// never be constructed, even with the default all role and an endpoint.
+		// Every invocation here is one-shot. Invalid runtime resources must
+		// never be constructed, even with a configured endpoint.
 		oneShot := map[string]string{
-			"OCSERV_COMMAND_SIGNING_KEY_FILE": filepath.Join(dir, "missing-role-key"),
+			"OCSERV_COMMAND_SIGNING_KEY_FILE": filepath.Join(dir, "missing-command-key"),
 			"OCSERV_CONTROLLER_ENDPOINT_ID":   strings.Repeat("ab", 32),
 			"OCSERV_TRUST_SOCKET":             filepath.Join(dir, "unused-trust.sock"),
 		}
@@ -426,7 +425,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 			t.Fatal(err)
 		}
 		defer listener.Close()
-		failed := exec.CommandContext(ctx, binary, "--role=all")
+		failed := exec.CommandContext(ctx, binary)
 		trustSocket := filepath.Join(socketDirectory(t), "trust.sock")
 		failed.Env = environment(runtimeOptions, map[string]string{
 			"OCSERV_HTTP_ADDRESS":           listener.Addr().String(),

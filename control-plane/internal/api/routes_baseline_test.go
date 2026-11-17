@@ -98,7 +98,7 @@ POST /api/v1/secret-provider-refs/{secret_ref_action}`
 
 func baselineServer(t *testing.T, dev bool) *Server {
 	t.Helper()
-	s, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: dev, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{Version: "baseline", Commit: "fixture", Role: "all"}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
+	s, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: dev, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, nil, BuildInfo{Version: "baseline", Commit: "fixture"}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
 	if err != nil {
 		t.Fatal(err)
 	}
