@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Disposable hosted runner only: Quick install end to end with locally built
-# release images and a Pebble ACME directory. Run as root through sudo.
+# Disposable hosted runner only: Quick install end to end with shared
+# release image artifacts and a Pebble ACME directory. Run as root through sudo.
 #
 # Checks: initial-admin login, ACME certificates for both names, idempotent
 # reruns, resuming an unrecorded Local bootstrap, root CA custody, no
@@ -8,7 +8,7 @@
 # keeping material and certificates.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-: "${VERSION:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}"
+: "${VERSION:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" "${IMAGES_DIR:?}"
 SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD)"
 CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
 export SOURCE_COMMIT CONTROLLER_ARCH
@@ -27,12 +27,12 @@ CREDENTIALS_DIR=/root/ocservia-initial-credentials
 # controller.sh refuses a release file under a group/world-writable ancestor
 # such as /tmp, so the work directory lives under root-only /root.
 work="$(mktemp -d /root/quick-acceptance.XXXXXX)"
-export BUILDX_BUILDER="quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" OUTPUT_DIR="${work}/products"
+export BUILDX_BUILDER="quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 registry="${BUILDX_BUILDER}-registry" pebble="${BUILDX_BUILDER}-pebble"
 gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
 controller="controller.${gateway}.sslip.io" relay="relay.${gateway}.sslip.io"
 host_trust=/usr/local/share/ca-certificates/ocservia-quick-acceptance-pebble.crt
-stage=build
+stage=preflight
 
 cleanup() {
   local code=$?
@@ -40,14 +40,12 @@ cleanup() {
   set +e
   if ((code)); then
     echo "Quick acceptance failed at stage ${stage}" >&2
-    [[ "${stage}" != build ]] || tail -n 100 "${work}/controller-build.log" >&2
     for log in "${work}"/run-*.log; do [[ ! -f "${log}" ]] || { echo "== ${log##*/}"; cat -- "${log}"; } >&2; done
     for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production) "${pebble}"; do
       docker inspect --format '== {{.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "${container}"
       docker logs --tail 80 "${container}" 2>&1
     done >&2
   fi
-  docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1
   rm -f -- "${host_trust}" && update-ca-certificates --fresh >/dev/null 2>&1
   rm -rf -- "${work}"
   exit "${code}"
@@ -59,14 +57,14 @@ pass() { echo "PASS: $1"; }
 absent() { if grep -qF -- "$@"; then echo "unexpected: $1" >&2; return 1; fi; }
 
 bash "${ROOT}/scripts/release-upgrade-native.sh" "${CONTROLLER_ARCH}"
-bash "${ROOT}/scripts/build-release-controller.sh" >"${work}/controller-build.log" 2>&1
+test -s "${IMAGES_DIR}/product-identity.json"
 
 stage=publish
 docker run -d --restart unless-stopped --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 manifest_args=(--image "postgres=${POSTGRES_IMAGE}" --image "otel=${OTEL_IMAGE}")
 roles=(gateway control transport backup edge relay signer)
 for name in "${roles[@]}"; do
-  docker load -i "${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
+  docker load -i "${IMAGES_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
   [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}")" == "linux/${CONTROLLER_ARCH}" ]]
   docker tag "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}" "localhost:5000/${name}:v${VERSION}"
   docker push "localhost:5000/${name}:v${VERSION}"

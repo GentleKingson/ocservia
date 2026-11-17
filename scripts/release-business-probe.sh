@@ -47,7 +47,13 @@ stage_started="$(date +%s)"
 CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
 [[ "${CONTROLLER_ARCH}" == amd64 || "${CONTROLLER_ARCH}" == arm64 ]]
 export PACKAGE_ARCH="${CONTROLLER_ARCH}" CONTROLLER_ARCH
-export SOURCE_DATE_EPOCH OUTPUT_DIR="${work}/products"
+export SOURCE_DATE_EPOCH OUTPUT_DIR="${PRODUCTS_DIR:-${work}/products}"
+IMAGES_DIR="${IMAGES_DIR:-}"
+# Artifact mode is all-or-nothing; missing inputs never fall back to a build.
+if [[ -n "${PRODUCTS_DIR:-}${IMAGES_DIR}" ]]; then
+  [[ -n "${PRODUCTS_DIR:-}" && -n "$IMAGES_DIR" ]]
+  [[ -s "$PRODUCTS_DIR/product-identity.json" && -s "$IMAGES_DIR/product-identity.json" ]]
+fi
 export DEPLOYMENT_CONFIG_DIR="${work}/bundle"
 SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)"
 export BUILDX_BUILDER="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
@@ -182,28 +188,33 @@ mkdir -m 700 "${work}/private" "${work}/secrets" "${work}/state" "${work}/backup
 bash "${ROOT}/scripts/release-upgrade-native.sh" "$CONTROLLER_ARCH" >"${ARTIFACT_DIR}/native.json"
 { uname -a; cat /etc/os-release; docker version; docker compose version; node --version; } >"${ARTIFACT_DIR}/environment.txt"
 next_stage dependency_setup
-bash "${ROOT}/scripts/bootstrap.sh" native-packages
 bash "${ROOT}/scripts/bootstrap.sh" npm-security
-# The native builder drops all capabilities. A root Business driver therefore
-# needs writable, root-owned task caches before entering that container.
-# The workflow returns these same build caches to the runner after the probe.
-if [[ "$EUID" == 0 ]]; then
-  mkdir -p "$ROOT/rust/target"
-  chown -R 0:0 "$ROOT/.cache" "$ROOT/.tools" "$ROOT/rust/target"
+if [[ -z "${PRODUCTS_DIR:-}" ]]; then
+  bash "${ROOT}/scripts/bootstrap.sh" native-packages
+  # The native builder drops capabilities and needs root-owned task caches.
+  if [[ "$EUID" == 0 ]]; then
+    mkdir -p "$ROOT/rust/target"
+    chown -R 0:0 "$ROOT/.cache" "$ROOT/.tools" "$ROOT/rust/target"
+  fi
+  next_stage agent_package_build
+  env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
+  next_stage controller_image_build
+  bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
+  IMAGES_DIR="$OUTPUT_DIR"
+else
+  next_stage product_consumption
+  cp "$PRODUCTS_DIR/product-identity.json" "$ARTIFACT_DIR/agent-product-identity.json"
+  cp "$IMAGES_DIR/product-identity.json" "$ARTIFACT_DIR/controller-product-identity.json"
 fi
-next_stage agent_package_build
-env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
-next_stage controller_image_build
-bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
 for name in gateway control transport backup edge relay signer; do
-  docker load -i "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar"
+  docker load -i "$IMAGES_DIR/$name-linux-$CONTROLLER_ARCH.tar"
   # Unrelated binfmt handlers could otherwise run a foreign image emulated.
   [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "ghcr.io/gentlekingson/ocservia/$name:$VERSION-linux-$CONTROLLER_ARCH")" == "linux/$CONTROLLER_ARCH" ]]
 done
 export OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE="ghcr.io/gentlekingson/ocservia/signer:$VERSION-linux-$CONTROLLER_ARCH"
 docker tag "ghcr.io/gentlekingson/ocservia/relay:$VERSION-linux-$CONTROLLER_ARCH" "${BUILDX_BUILDER}-relay"
 docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay" --version >"${ARTIFACT_DIR}/relay-version.txt"
-record products_built
+record products_ready
 next_stage dependency_install
 sudo apt-get update -qq
 case "${OCSERV_PACKAGE:-distribution}" in

@@ -23,6 +23,21 @@ on:
       ocserv_package:
         type: string
         default: distribution
+      use_products:
+        type: boolean
+        default: false
+      agent_packages_artifact_id:
+        type: string
+        default: ''
+      controller_images_artifact_id:
+        type: string
+        default: ''
+      agent_packages_manifest_sha256:
+        type: string
+        default: ''
+      controller_images_manifest_sha256:
+        type: string
+        default: ''
 permissions:
   contents: read
 env:
@@ -44,7 +59,31 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Require explicit product consumption mode
+        env:
+          USE_PRODUCTS: ${{ inputs.use_products }}
+          PRODUCT_COORDINATES: ${{ format('{0}{1}{2}{3}', inputs.agent_packages_artifact_id, inputs.controller_images_artifact_id, inputs.agent_packages_manifest_sha256, inputs.controller_images_manifest_sha256) }}
+        run: '[[ "$USE_PRODUCTS" == true || -z "$PRODUCT_COORDINATES" ]]'
+      - uses: ./.github/actions/download-release-product
+        if: inputs.use_products
+        with:
+          artifact-id: ${{ inputs.agent_packages_artifact_id }}
+          manifest-sha256: ${{ inputs.agent_packages_manifest_sha256 }}
+          kind: agent
+          version: ${{ inputs.version }}
+          arch: ${{ inputs.arch }}
+          path: ${{ runner.temp }}/business-packages
+      - uses: ./.github/actions/download-release-product
+        if: inputs.use_products
+        with:
+          artifact-id: ${{ inputs.controller_images_artifact_id }}
+          manifest-sha256: ${{ inputs.controller_images_manifest_sha256 }}
+          kind: controller
+          version: ${{ inputs.version }}
+          arch: ${{ inputs.arch }}
+          path: ${{ runner.temp }}/business-controller-images
       - uses: ./.github/actions/build-cache-credentials
+        if: ${{ !inputs.use_products }}
       - name: Restore Business tool cache
         id: business-tools
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -54,23 +93,27 @@ jobs:
             .tools
           key: tooling-v4-business-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}
       - name: Resolve isolated Agent target cache
+        if: ${{ !inputs.use_products }}
         id: agent-target
         run: |
           builder_hash="$(sha256sum rust/agent-build.Dockerfile | cut -c1-16)"
           echo "path=rust/target/agent-${{ inputs.arch }}-${builder_hash}" >>"${GITHUB_OUTPUT}"
       - name: Restore Rocky Agent compilation cache
+        if: ${{ !inputs.use_products }}
         id: agent-target-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ steps.agent-target.outputs.path }}
           key: release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
           restore-keys: release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
-      - name: Build local products and exercise real business
+      - name: Exercise real business with candidate products
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/business-diagnostics
+          PRODUCTS_DIR: ${{ inputs.use_products && format('{0}/business-packages', runner.temp) || '' }}
+          IMAGES_DIR: ${{ inputs.use_products && format('{0}/business-controller-images', runner.temp) || '' }}
         run: |
           if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-            sudo --preserve-env=ARTIFACT_DIR,VERSION,BUSINESS_TERMINAL,BUSINESS_PROFILE,BUSINESS_RUN_RESILIENCE,PRODUCTION_SIGNER_ACCEPTANCE,OCSERV_PACKAGE,GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_ENVIRONMENT,RUNNER_ARCH,CONTROLLER_ARCH,CARGO_INCREMENTAL \
+            sudo --preserve-env=ARTIFACT_DIR,VERSION,BUSINESS_TERMINAL,BUSINESS_PROFILE,BUSINESS_RUN_RESILIENCE,PRODUCTION_SIGNER_ACCEPTANCE,OCSERV_PACKAGE,GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_ENVIRONMENT,RUNNER_ARCH,CONTROLLER_ARCH,CARGO_INCREMENTAL,PRODUCTS_DIR,IMAGES_DIR \
               --preserve-env=BUILD_CACHE_AVAILABLE,ACTIONS_RUNTIME_TOKEN,ACTIONS_CACHE_URL,ACTIONS_RESULTS_URL \
               bash scripts/release-business-probe.sh
           else
@@ -175,7 +218,7 @@ jobs:
             .tools
           key: ${{ steps.business-tools.outputs.cache-primary-key }}
       - name: Save Rocky Agent compilation cache
-        if: ${{ success() && steps.agent-target-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !inputs.use_products && success() && steps.agent-target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ steps.agent-target.outputs.path }}

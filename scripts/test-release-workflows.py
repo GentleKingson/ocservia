@@ -396,34 +396,93 @@ require_check(
     "Release Check must pass its explicit contract comparison baseline to Full CI",
 )
 require_check(jobs["security"].get("uses") == "./.github/workflows/security.yml", "Security missing")
+business_inputs = jobs["business"]["with"]
 require_check(
     jobs["business"].get("uses") == "./.github/workflows/release-business-diagnostic.yml"
-    and jobs["business"].get("with") == {
-        "arch": "${{ matrix.arch }}",
-        "version": "0.0.0",
-        "profile": "smoke",
-        "production_signer": True,
-        "run-resilience": True,
+    and {key: business_inputs[key] for key in ("arch", "version", "profile", "production_signer", "run-resilience", "use_products")} == {
+        "arch": "${{ matrix.arch }}", "version": "0.0.0", "profile": "smoke",
+        "production_signer": True, "run-resilience": True, "use_products": True,
     },
-    "Integrated Business Smoke and recovery must run",
+    "Integrated Business Smoke and recovery must consume products",
 )
 quick = jobs["quick"]
-require_check(
-    quick.get("needs") == "main"
-    and any("bash scripts/release-quick-acceptance.sh" in s.get("run", "") for s in quick["steps"]),
-    "Quick Install acceptance must run",
-)
-require_check(
-    jobs["products"].get("uses") == "./.github/workflows/release-products.yml"
-    and jobs["products"].get("with") == {"version": "0.0.0", "arch": "${{ matrix.arch }}"},
-    "Release Check must build, scan and smoke the release products",
-)
-for job_id in ("products", "business", "quick"):
+require_check(any("bash scripts/release-quick-acceptance.sh" in s.get("run", "") for s in quick["steps"]), "Quick Install acceptance must run")
+for arch in ("amd64", "arm64"):
+    producer = jobs[f"products-{arch}"]
+    require_check(
+        producer.get("uses") == "./.github/workflows/release-products.yml"
+        and producer.get("needs") == "main"
+        and producer.get("with") == {"version": "0.0.0", "arch": arch, "acceptance_identity": True}
+        and "strategy" not in producer and "continue-on-error" not in producer,
+        f"{arch} must have one native producer with unambiguous outputs",
+    )
+for job_id in ("business", "quick"):
     require_check(
         jobs[job_id].get("strategy") == {"fail-fast": False, "matrix": {"arch": ["amd64", "arm64"]}}
-        and "continue-on-error" not in jobs[job_id],
-        f"{job_id} must run on both native architectures",
+        and "continue-on-error" not in jobs[job_id]
+        and jobs[job_id]["needs"] == ["products-amd64", "products-arm64"],
+        f"{job_id} must consume scanned products on both native architectures",
     )
+quick_download = next(step for step in quick["steps"] if step.get("uses") == "./.github/actions/download-release-product")
+for key in ("agent_packages_artifact_id", "controller_images_artifact_id", "agent_packages_manifest_sha256", "controller_images_manifest_sha256"):
+    coordinate = "${{ matrix.arch == 'arm64' && needs.products-arm64.outputs." + key + " || needs.products-amd64.outputs." + key + " }}"
+    require_check(business_inputs[key] == coordinate, f"Business must consume exact per-architecture {key}")
+    if key.startswith("controller_images"):
+        field = "artifact-id" if key.endswith("artifact_id") else "manifest-sha256"
+        require_check(quick_download["with"][field] == coordinate, f"Business and Quick must consume identical {key}")
+require_check("build-release-controller.sh" not in Path("scripts/release-quick-acceptance.sh").read_text(), "Quick must never rebuild")
+require_check(
+    'if [[ -z "${PRODUCTS_DIR:-}" ]]; then' in probe
+    and 'docker load -i "$IMAGES_DIR/$name-linux-$CONTROLLER_ARCH.tar"' in probe,
+    "Business must skip builds and load downloaded images in artifact mode",
+)
+product_action = yaml.safe_load(Path(".github/actions/download-release-product/action.yml").read_text())
+action_steps = product_action["runs"]["steps"]
+require_check(action_steps[1]["with"] == {
+    "artifact-ids": "${{ inputs.artifact-id }}", "path": "${{ inputs.path }}", "merge-multiple": True,
+}, "downloads must select exact IDs in the current run")
+require_check('--source "$GITHUB_SHA"' in action_steps[-1]["run"] and
+              '--manifest-sha256 "$MANIFEST_SHA256"' in action_steps[-1]["run"], "consumers must verify source and trusted digest")
+with tempfile.TemporaryDirectory() as product_tmp:
+    for artifact_id, manifest_sha, valid in (("123", "a" * 64, True), ("", "a" * 64, False),
+                                            ("123,456", "a" * 64, False), ("123", "", False),
+                                            ("123", "bad", False)):
+        proc = subprocess.run(["bash", "-euo", "pipefail", "-c", action_steps[0]["run"]],
+                              env={**os.environ, "ARTIFACT_ID": artifact_id, "MANIFEST_SHA256": manifest_sha,
+                                   "PRODUCT_PATH": product_tmp + "/download"}, capture_output=True)
+        require_check((proc.returncode == 0) == valid, "invalid or missing product coordinates accepted")
+action_steps = yaml.safe_load(Path(".github/actions/download-release-product/action.yml").read_text())["runs"]["steps"]
+require_check(action_steps[1]["with"] == {
+    "artifact-ids": "${{ inputs.artifact-id }}", "path": "${{ inputs.path }}", "merge-multiple": True,
+}, "product download must use one exact ID without names or patterns")
+require_check('--source "$GITHUB_SHA"' in action_steps[-1]["run"] and
+              '--manifest-sha256 "$MANIFEST_SHA256"' in action_steps[-1]["run"], "product verification must use candidate SHA and producer digest")
+with tempfile.TemporaryDirectory(prefix="product-coordinates-") as coordinates_dir:
+    for artifact_id, sha256, valid in (("123", "a" * 64, True), ("", "a" * 64, False),
+                                      ("123,456", "a" * 64, False), ("missing", "a" * 64, False),
+                                      ("123", "", False), ("123", "bad", False)):
+        coordinates_result = subprocess.run(["bash", "-euo", "pipefail", "-c", action_steps[0]["run"]],
+                                            env={**os.environ, "ARTIFACT_ID": artifact_id, "MANIFEST_SHA256": sha256,
+                                                 "PRODUCT_PATH": str(Path(coordinates_dir) / "new")}, capture_output=True)
+        require_check((coordinates_result.returncode == 0) == valid, "invalid product coordinates accepted")
+for job in products["jobs"].values():
+    identity = next(step for step in job["steps"] if step.get("id") == "identity")
+    require_check(identity["if"] == "inputs.acceptance_identity" and job["outputs"]["manifest_sha256"] == "${{ steps.identity.outputs.sha256 }}", "product digest output missing")
+require_check(products[True]["workflow_call"]["inputs"]["acceptance_identity"]["default"] is False, "ordinary Release asset inventory must remain unchanged")
+product_action = yaml.safe_load(Path(".github/actions/download-release-product/action.yml").read_text())
+action_steps = product_action["runs"]["steps"]
+require_check(
+    action_steps[1]["with"]["artifact-ids"] == "${{ inputs.artifact-id }}"
+    and "name" not in action_steps[1]["with"] and "pattern" not in action_steps[1]["with"]
+    and '--source "$GITHUB_SHA"' in action_steps[-1]["run"]
+    and '--manifest-sha256 "$MANIFEST_SHA256"' in action_steps[-1]["run"],
+    "consumption must download an exact ID and verify candidate identity and bytes",
+)
+consumer_steps = diagnostic["jobs"]["business"]["steps"]
+for kind in ("agent", "controller"):
+    download = next(step for step in consumer_steps if step.get("uses") == "./.github/actions/download-release-product" and step["with"]["kind"] == kind)
+    prefix = "agent_packages" if kind == "agent" else "controller_images"
+    require_check(download["if"] == "inputs.use_products" and download["with"]["artifact-id"] == "${{ inputs." + prefix + "_artifact_id }}", f"Business must download exact {kind} products")
 require_check(
     quick["runs-on"] == "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
     and quick["steps"][-1].get("env", {}).get("CONTROLLER_ARCH") == "${{ matrix.arch }}"
@@ -433,7 +492,7 @@ require_check(
 result = jobs["result"]
 require_check(
     result["if"] == "always()"
-    and sorted(result["needs"]) == ["business", "full-ci", "main", "products", "quick", "security"],
+    and sorted(result["needs"]) == ["business", "full-ci", "main", "products-amd64", "products-arm64", "quick", "security"],
     "Release Check result must handle every dependency",
 )
 command = result["steps"][0]["run"]
