@@ -25,10 +25,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryread"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
-	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
+	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
+	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
@@ -99,7 +97,8 @@ type Session struct {
 	BytesOut    int64     `json:"bytes_out"`
 }
 
-type IPBan = telemetryread.IPBan
+type IPBan = telemetrystore.IPBan
+type ReadSession = telemetrystore.ReadSession
 
 type User struct {
 	Username    string `json:"username"`
@@ -178,7 +177,7 @@ type Node struct {
 	EffectiveActions map[string]ActionAvailability `json:"effective_actions,omitempty"`
 }
 
-type HistoryPoint = telemetryhistory.Point
+type HistoryPoint = telemetrystore.Point
 
 func (s *Service) ListIPBans(ctx context.Context, nodeID uuid.UUID, limit int) ([]IPBan, error) {
 	if nodeID == uuid.Nil || limit < 1 || limit > 200 {
@@ -186,7 +185,7 @@ func (s *Service) ListIPBans(ctx context.Context, nodeID uuid.UUID, limit int) (
 	}
 	var result []IPBan
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetryread.From(tx)
+		store, err := telemetrystore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -364,7 +363,7 @@ func (s *Service) IngestWireTransaction(ctx context.Context, tx database.Tx, exp
 	return s.ingestTx(ctx, tx, batch, size)
 }
 func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, payloadBytes int) (bool, error) {
-	store, err := telemetrywrite.From(tx)
+	store, err := telemetrystore.FromTransaction(tx)
 	if err != nil {
 		return false, err
 	}
@@ -378,7 +377,7 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 		documents = append(documents, e.Detail)
 	}
 	if err := store.ValidateJSON(ctx, documents); err != nil {
-		if errors.Is(err, telemetrywrite.ErrInvalidJSON) {
+		if errors.Is(err, telemetrystore.ErrInvalidJSON) {
 			return false, fmt.Errorf("%w: %v", ErrInvalidTelemetry, err)
 		}
 		return false, err
@@ -391,7 +390,7 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 		return false, nil
 	}
 	snap := batch.Snapshot
-	updated, err := store.UpsertSnapshot(ctx, batch.NodeID, telemetrywrite.Snapshot{
+	updated, err := store.UpsertSnapshot(ctx, batch.NodeID, telemetrystore.Snapshot{
 		ObservedAt: snap.ObservedAt, BootID: snap.BootID, AgentInstance: snap.AgentInstance,
 		AgentVersion: snap.AgentVersion, OcservVersion: snap.OcservVersion, OSRelease: snap.OSRelease, Architecture: snap.Architecture,
 		Ocserv: snap.Ocserv, System: snap.System, Path: snap.Path, Security: snap.Dropped.Security, Health: snap.Dropped.Health, Aggregate: snap.Dropped.Aggregate, Raw: snap.Dropped.Raw,
@@ -400,39 +399,39 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 		return false, fmt.Errorf("upsert observed snapshot: %w", err)
 	}
 	if updated {
-		usage := make([]userusage.Sample, 0, len(batch.Sessions))
+		usage := make([]userstore.UsageSample, 0, len(batch.Sessions))
 		for _, session := range batch.Sessions {
-			usage = append(usage, userusage.Sample{SessionID: session.ID, Username: session.Username, Connected: session.ConnectedAt, RXBytes: session.BytesIn, TXBytes: session.BytesOut, ObservedAt: batch.Snapshot.ObservedAt})
+			usage = append(usage, userstore.UsageSample{SessionID: session.ID, Username: session.Username, Connected: session.ConnectedAt, RXBytes: session.BytesIn, TXBytes: session.BytesOut, ObservedAt: batch.Snapshot.ObservedAt})
 		}
-		if err := userusage.RecordTransaction(ctx, tx, batch.NodeID, usage); err != nil {
-			if errors.Is(err, userusage.ErrInvalidSample) {
+		if err := userstore.RecordUsageTransaction(ctx, tx, batch.NodeID, usage); err != nil {
+			if errors.Is(err, userstore.ErrInvalidUsageSample) {
 				return false, fmt.Errorf("%w: session usage identity conflict", ErrInvalidTelemetry)
 			}
 			return false, fmt.Errorf("record observed user usage: %w", err)
 		}
 
-		sessions := make([]telemetrywrite.Session, 0, len(batch.Sessions))
+		sessions := make([]telemetrystore.Session, 0, len(batch.Sessions))
 		for _, v := range batch.Sessions {
-			sessions = append(sessions, telemetrywrite.Session{ID: v.ID, Username: v.Username, ClientIP: v.ClientIP, ConnectedAt: v.ConnectedAt, BytesIn: v.BytesIn, BytesOut: v.BytesOut})
+			sessions = append(sessions, telemetrystore.Session{ID: v.ID, Username: v.Username, ClientIP: v.ClientIP, ConnectedAt: v.ConnectedAt, BytesIn: v.BytesIn, BytesOut: v.BytesOut})
 		}
 		if err := store.ReplaceSessions(ctx, batch.NodeID, snap.ObservedAt, sessions); err != nil {
 			return false, err
 		}
-		bans := make([]telemetrywrite.IPBan, 0, len(batch.IPBans))
+		bans := make([]telemetrystore.IPBan, 0, len(batch.IPBans))
 		for _, v := range batch.IPBans {
-			bans = append(bans, telemetrywrite.IPBan{IP: v.IP, SecondsRemaining: v.SecondsRemaining})
+			bans = append(bans, telemetrystore.IPBan{IP: v.IP, SecondsRemaining: v.SecondsRemaining})
 		}
 		if err := store.ReplaceIPBans(ctx, batch.NodeID, snap.ObservedAt, bans); err != nil {
 			return false, err
 		}
-		users := make([]telemetrywrite.User, 0, len(batch.Users))
+		users := make([]telemetrystore.User, 0, len(batch.Users))
 		for _, v := range batch.Users {
-			users = append(users, telemetrywrite.User{Username: v.Username, Enabled: v.Enabled, Revision: v.Revision, Fingerprint: v.Fingerprint})
+			users = append(users, telemetrystore.User{Username: v.Username, Enabled: v.Enabled, Revision: v.Revision, Fingerprint: v.Fingerprint})
 		}
 		if err := store.ReplaceUsers(ctx, batch.NodeID, snap.ObservedAt, users); err != nil {
 			return false, err
 		}
-		if err := replaceObservedGroups(ctx, tx, batch); err != nil {
+		if err := replaceObservedGroups(ctx, tx, store, batch); err != nil {
 			return false, fmt.Errorf("replace observed groups: %w", err)
 		}
 
@@ -450,22 +449,18 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 		if !verification.Verified() {
 			continue
 		}
-		if err := store.InsertUpgrade(ctx, batch.NodeID, telemetrywrite.Upgrade{OperationID: report.OperationID, State: report.State, TargetVersion: report.TargetVersion, Detail: report.Detail, CompletedAt: verification.CompletedAt, Proof: verification.EncodedProof, PackageSHA256: verification.PackageSHA256}); err != nil {
+		if err := store.InsertUpgrade(ctx, batch.NodeID, telemetrystore.Upgrade{OperationID: report.OperationID, State: report.State, TargetVersion: report.TargetVersion, Detail: report.Detail, CompletedAt: verification.CompletedAt, Proof: verification.EncodedProof, PackageSHA256: verification.PackageSHA256}); err != nil {
 			return false, err
 		}
 	}
-	if err := insertObservedSecurity(ctx, tx, batch); err != nil {
+	if err := insertObservedSecurity(ctx, store, batch); err != nil {
 		return false, fmt.Errorf("insert security event: %w", err)
 	}
-	history, err := telemetryhistory.FromTransaction(tx)
-	if err != nil {
-		return false, err
-	}
-	samples := make([]telemetryhistory.Sample, 0, len(batch.Samples))
+	samples := make([]telemetrystore.Sample, 0, len(batch.Samples))
 	for _, sample := range batch.Samples {
-		samples = append(samples, telemetryhistory.Sample{SampledAt: sample.SampledAt, Metric: sample.Metric, Value: sample.Value})
+		samples = append(samples, telemetrystore.Sample{SampledAt: sample.SampledAt, Metric: sample.Metric, Value: sample.Value})
 	}
-	if err := history.Insert(ctx, batch.NodeID, batch.ID, samples); err != nil {
+	if err := store.InsertHistory(ctx, batch.NodeID, batch.ID, samples); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -628,9 +623,9 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 	if limit < 1 || limit > 200 {
 		return nil, false, errors.New("node page size must be between 1 and 200")
 	}
-	var stored []telemetryread.Node
+	var stored []telemetrystore.Node
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetryread.From(tx)
+		store, err := telemetrystore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -644,7 +639,7 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 	for _, v := range stored {
 		node := readNode(v, s.now())
 		s.applyAgentVersionState(&node)
-		s.applyAgentUpgradeEligibility(ctx, &node)
+		s.applyAgentUpgradeEligibility(&node, v.UpgradeEligible)
 		result = append(result, node)
 	}
 	hasMore := len(result) > limit
@@ -655,10 +650,10 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 }
 
 func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {
-	var stored telemetryread.Node
+	var stored telemetrystore.Node
 	var actions map[string]ActionAvailability
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetryread.From(tx)
+		store, err := telemetrystore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -679,39 +674,23 @@ func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {
 	node := readNode(stored, s.now())
 	node.EffectiveActions = actions
 	s.applyAgentVersionState(&node)
-	s.applyAgentUpgradeEligibility(ctx, &node)
+	s.applyAgentUpgradeEligibility(&node, stored.UpgradeEligible)
 	return node, nil
 }
 
 // applyAgentUpgradeEligibility derives the single-node upgrade workflow gate
-// from durable state: an online fresh
-// node with the approved upgrade capability, a trusted release for its
-// architecture, and no conflicting active upgrade. It is never persisted and
-// fails closed on any lookup error.
-func (s *Service) applyAgentUpgradeEligibility(ctx context.Context, node *Node) {
+// from durable state: an online fresh node with the approved upgrade
+// capability, a trusted release for its architecture, and no conflicting active
+// upgrade (computed inside the read query). It is never persisted and fails
+// closed when unavailable.
+func (s *Service) applyAgentUpgradeEligibility(node *Node, upgradeEligible bool) {
 	if s.agentUpgradeCatalog == nil || node.ConnectionState != "online" || node.Freshness != "fresh" || node.Architecture == "" {
 		return
 	}
 	if _, trusted := s.agentUpgradeCatalog.Lookup(node.RecommendedAgentVersion, node.Architecture); !trusted {
 		return
 	}
-	nodeID, err := uuid.Parse(node.ID)
-	if err != nil {
-		return
-	}
-	var eligible bool
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetryread.From(tx)
-		if err != nil {
-			return err
-		}
-		eligible, err = store.UpgradeEligibility(ctx, nodeID)
-		return err
-	})
-	if err != nil {
-		return
-	}
-	node.AgentUpgradeEligible = eligible
+	node.AgentUpgradeEligible = upgradeEligible
 }
 
 func agentUpgradeOutcomeState(state agentv1.AgentUpgradeOutcomeState) string {
@@ -747,7 +726,7 @@ func upgradeResultCompletedAtMatches(proof *agentv1.AgentUpgradeResultProof, com
 	return completedAt.Equal(time.UnixMilli(int64(proof.GetCompletedUnixMs())).UTC())
 }
 
-func readNode(v telemetryread.Node, now time.Time) Node {
+func readNode(v telemetrystore.Node, now time.Time) Node {
 	n := Node{ID: v.ID.String(), Name: v.Name, Version: v.Version, ConfigRevision: v.ConfigRevision, TrustStatus: v.Status,
 		BootID: v.BootID, AgentInstanceID: v.InstanceID, AgentVersion: v.AgentVersion,
 		OcservVersion: v.OcservVersion, OSRelease: v.OSRelease, Architecture: v.Architecture,
@@ -778,13 +757,13 @@ func readNode(v telemetryread.Node, now time.Time) Node {
 	return n
 }
 
-func (s *Service) ListSessions(ctx context.Context, nodeID uuid.UUID, after string, limit int) ([]telemetryread.Session, bool, error) {
+func (s *Service) ListSessions(ctx context.Context, nodeID uuid.UUID, after string, limit int) ([]telemetrystore.ReadSession, bool, error) {
 	if limit < 1 || limit > 200 || len(after) > 256 {
 		return nil, false, errors.New("session page is invalid")
 	}
-	var result []telemetryread.Session
+	var result []telemetrystore.ReadSession
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetryread.From(tx)
+		store, err := telemetrystore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -830,7 +809,7 @@ func (s *Service) HistoryFrom(ctx context.Context, nodeID uuid.UUID, metric, res
 	}
 	var points []HistoryPoint
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		history, err := telemetryhistory.FromTransaction(tx)
+		history, err := telemetrystore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -842,8 +821,8 @@ func (s *Service) HistoryFrom(ctx context.Context, nodeID uuid.UUID, metric, res
 
 func (s *Service) Maintain(ctx context.Context) error {
 	now := s.now().UTC()
-	return telemetryhistory.Maintain(ctx, s.backend, now, func(ctx context.Context, tx database.Tx) error {
-		store, err := telemetrywrite.From(tx)
+	return telemetrystore.Maintain(ctx, s.backend, now, func(ctx context.Context, tx database.Tx) error {
+		store, err := telemetrystore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}

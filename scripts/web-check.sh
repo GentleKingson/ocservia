@@ -10,8 +10,8 @@ case "${mode}" in basic|full) ;; *) echo 'usage: web-check.sh [basic|full]' >&2;
 (cd "${ROOT}/web" && npm --ignore-scripts run lint)
 root_javascript=(
   scripts/generate-controller-release-manifest.mjs scripts/redact-release-upgrade-log.mjs
-  scripts/release-business-browser.mjs scripts/release-upgrade-oidc-fixture.mjs
-  scripts/test-release-upgrade.mjs .github/actions/build-cache-credentials/index.js
+  scripts/release-business-browser.mjs scripts/test-release-upgrade.mjs
+  .github/actions/build-cache-credentials/index.js
 )
 (cd "${ROOT}" && web/node_modules/.bin/prettier --check "${root_javascript[@]}")
 (cd "${ROOT}" && web/node_modules/.bin/eslint --config web/eslint.config.ts "${root_javascript[@]}")

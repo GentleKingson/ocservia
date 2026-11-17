@@ -24,12 +24,6 @@ export interface ConfigApplyRequest {
    * @type {string}
    * @memberof ConfigApplyRequest
    */
-  approvalId?: string;
-  /**
-   *
-   * @type {string}
-   * @memberof ConfigApplyRequest
-   */
   reason: string;
 }
 
@@ -55,7 +49,6 @@ export function ConfigApplyRequestFromJSONTyped(
     return json;
   }
   return {
-    approvalId: json["approval_id"] == null ? undefined : json["approval_id"],
     reason: json["reason"],
   };
 }
@@ -73,7 +66,6 @@ export function ConfigApplyRequestToJSONTyped(
   }
 
   return {
-    approval_id: value["approvalId"],
     reason: value["reason"],
   };
 }

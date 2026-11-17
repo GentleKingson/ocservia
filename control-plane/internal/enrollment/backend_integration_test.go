@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -18,72 +17,21 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/databasetest"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
-	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func enrollmentBackend(t *testing.T) database.Backend {
 	t.Helper()
-	ctx := context.Background()
-	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("real PostgreSQL required")
-	}
-	// Claims are global, so each fixture needs its own database. Otherwise a
-	// worker can claim another test's pending intent.
-	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if ownerURL == "" {
-		t.Fatal("owner URL required for isolated enrollment database")
-	}
-	admin, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(admin.Close)
-	name := "enrollment_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		// The restart fixture also invalidates this otherwise idle admin pool.
-		// Cleanup must reconnect rather than reuse a pre-restart connection.
-		admin.Reset()
-		if _, err := admin.Exec(context.Background(), "DROP DATABASE "+identifier); err != nil {
-			t.Error(err)
-		}
-	})
-	open := func(url string) *pgxpool.Pool {
-		t.Helper()
-		cfg, err := pgxpool.ParseConfig(url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg.ConnConfig.Database = name
-		pool, err := pgxpool.NewWithConfig(ctx, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(pool.Close)
-		return pool
-	}
-	owner, runtime := open(ownerURL), open(dsn)
-	if err := migrations.Migrate(ctx, owner); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrations.GrantRuntimePrivileges(ctx, owner, runtime.Config().ConnConfig.User); err != nil {
-		t.Fatal(err)
-	}
+	runtime, _ := databasetest.OpenIsolated(t, t, "enrollment")
 	return postgres.WrapPool(runtime)
 }
 
@@ -137,50 +85,34 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		result := <-results
 		v, err := result.response, result.err
 		if v != nil {
-			if v.Result != agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL {
+			if v.Result != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
 				t.Fatal(v)
 			}
 			copy(node[:], v.NodeId)
 			successes++
 		}
-		if err != nil && !errors.Is(err, ErrInvalidToken) {
+		if err != nil && !errors.Is(err, ErrEndpointMismatch) {
 			t.Fatal(err)
 		}
 	}
-	if successes != 1 || node == uuid.Nil {
-		t.Fatal("one-time enrollment", successes)
+	if successes != 8 || node == uuid.Nil {
+		t.Fatal("bootstrap enrollment", successes)
 	}
-	if err := s.ValidateEnrollment(ctx, request); !errors.Is(err, ErrInvalidToken) {
-		t.Fatal("consumed token validated", err)
+	if err := s.ValidateEnrollment(ctx, request); err != nil {
+		t.Fatal("consumed active bootstrap token replay rejected", err)
 	}
-	if allowed, err := s.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"}); err != nil || allowed {
-		t.Fatal("pending agent permitted", allowed, err)
+	if allowed, err := s.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"}); err != nil || !allowed {
+		t.Fatal("active agent not permitted", allowed, err)
 	}
 	at, _ := value.FromTime(time.Now().UTC())
 	expires, _ := at.Add(time.Hour)
 	requester, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'enrollment',$2,$3,$4)`, requester, requester.String(), at, at)
-	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, uuid.Must(uuid.NewV7()), requester, workspace, at)
+	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,$3)`, workspace, requester, at)
 	exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, session, requester, expires, at)
-	approval := Approval{NodeID: node, Policy: "standard", Capabilities: capabilities, ActorID: requester.String(), IdentityID: requester, SessionID: session, Reason: "activate", RequestID: uuid.NewString()}
-	if _, err := ExportSealingBinding(ctx, b, workspace, node, approval.ApprovalID, hex.EncodeToString(endpoint)); err == nil {
-		t.Fatal("pending enrollment exported")
-	}
-	unauthorized := approval
-	unauthorized.IdentityID = uuid.Must(uuid.NewV7())
-	if _, err := s.Approve(ctx, unauthorized); !errors.Is(err, rbac.ErrForbidden) {
-		t.Fatal("activation accepted unrelated identity", err)
-	}
-	trust, err := s.Approve(ctx, approval)
-	if err != nil || trust.Revision == 0 {
-		t.Fatal(trust, err)
-	}
-	if _, err := s.Approve(ctx, approval); !errors.Is(err, ErrInvalidTransition) {
-		t.Fatal("activation mutated already active binding", err)
-	}
-	exported, err := ExportSealingBinding(ctx, b, workspace, node, approval.ApprovalID, hex.EncodeToString(endpoint))
+	exported, err := ExportSealingBinding(ctx, b, workspace, node, hex.EncodeToString(endpoint))
 	if err != nil {
-		t.Fatal("approved sealing export", err)
+		t.Fatal("active sealing export", err)
 	}
 	var binding struct {
 		NodeID uuid.UUID `json:"node_id"`
@@ -192,19 +124,16 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		t.Fatal("invalid exported binding")
 	}
 	for _, invalid := range []struct {
-		workspace, node, approval uuid.UUID
-		endpoint                  string
+		workspace, node uuid.UUID
+		endpoint        string
 	}{
-		{uuid.New(), node, approval.ApprovalID, hex.EncodeToString(endpoint)},
-		{workspace, uuid.New(), approval.ApprovalID, hex.EncodeToString(endpoint)},
-		{workspace, node, approval.ApprovalID, strings.Repeat("a", 64)},
+		{uuid.New(), node, hex.EncodeToString(endpoint)},
+		{workspace, uuid.New(), hex.EncodeToString(endpoint)},
+		{workspace, node, strings.Repeat("a", 64)},
 	} {
-		if _, err := ExportSealingBinding(ctx, b, invalid.workspace, invalid.node, invalid.approval, invalid.endpoint); err == nil {
+		if _, err := ExportSealingBinding(ctx, b, invalid.workspace, invalid.node, invalid.endpoint); err == nil {
 			t.Fatal("wrong export identity accepted")
 		}
-	}
-	if _, _, _, err := s.ApprovalBinding(ctx, node, nil, "standard", capabilities); !errors.Is(err, database.ErrNotFound) {
-		t.Fatal("active approval binding")
 	}
 	t.Run("legacy-capability-policy", func(t *testing.T) {
 		for _, test := range []struct {
@@ -290,10 +219,10 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		t.Fatal("revocation escaped authority share lock", err)
 	}
 	revoked, err := s.Revoke(ctx, revocation)
-	if err != nil || revoked.Revision != trust.Revision+1 {
+	if err != nil || revoked.Revision != 3 {
 		t.Fatal("revoke", revoked, err)
 	}
-	if _, err := ExportSealingBinding(ctx, b, workspace, node, approval.ApprovalID, hex.EncodeToString(endpoint)); err == nil {
+	if _, err := ExportSealingBinding(ctx, b, workspace, node, hex.EncodeToString(endpoint)); err == nil {
 		t.Fatal("revoked enrollment exported")
 	}
 	if replay, err := s.Revoke(ctx, revocation); err != nil || replay.Revision != revoked.Revision {
@@ -301,7 +230,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}
 	unrelated := revocation
 	unrelated.IdentityID = uuid.Must(uuid.NewV7())
-	if _, err := s.Revoke(ctx, unrelated); !errors.Is(err, rbac.ErrForbidden) {
+	if _, err := s.Revoke(ctx, unrelated); !errors.Is(err, auth.ErrForbidden) {
 		t.Fatal("unrelated identity authorized revoked-node replay", err)
 	}
 	for _, alpn := range []string{"ocserv-platform/enroll/1", "ocserv-platform/agent/1"} {
@@ -353,46 +282,8 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}
 	wideEndpoint := endpointFixture(104)
 	wide := createToken(t, s, workspace, wideEndpoint)
-	exec(`UPDATE enrollment_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, negative, value.Timestamp{Valid: true, Micros: value.EndTimestamp - 1}, wide.ID)
+	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, negative, value.Timestamp{Valid: true, Micros: value.EndTimestamp - 1}, wide.ID)
 	if _, err := s.Enroll(ctx, enrollmentRequest(wide.Value, wideEndpoint)); err != nil {
 		t.Fatal("full finite token expiry", err)
-	}
-	legacy, legacyEndpoint := uuid.New(), endpointFixture(105)
-	legacyName := "legacy-" + legacy.String()
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,$3,'pending',now(),now())`, legacy, workspace, legacyName)
-	legacyToken, err := s.CreateToken(ctx, TokenSpec{WorkspaceID: workspace, Environment: "test", ExpectedNodeName: legacyName, ExpectedEndpointID: legacyEndpoint, ActorID: "operator", Reason: "legacy enrollment", RequestID: uuid.NewString()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v, err := s.Enroll(ctx, enrollmentRequest(legacyToken.Value, legacyEndpoint)); err != nil || !bytes.Equal(v.GetNodeId(), legacy[:]) {
-		t.Fatal("legacy pending node was not reused", v, err)
-	}
-	retrofit, retrofitEndpoint := uuid.New(), endpointFixture(106)
-	if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := enrollmentstore.Enrollment(tx)
-		if err != nil {
-			return err
-		}
-		if err := store.InsertNode(ctx, retrofit, workspace, retrofit.String(), at); err != nil {
-			return err
-		}
-		if err := store.InsertEndpoint(ctx, retrofit, retrofitEndpoint, at); err != nil {
-			return err
-		}
-		if err := store.PutCapability(ctx, retrofit, "ocserv.status.read", true); err != nil {
-			return err
-		}
-		_, err = store.Activate(ctx, retrofit, "{}", "standard", at)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	retrofitToken := createToken(t, s, workspace, retrofitEndpoint)
-	if v, err := s.Enroll(ctx, enrollmentRequest(retrofitToken.Value, retrofitEndpoint)); err != nil || v.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || !bytes.Equal(v.NodeId, retrofit[:]) {
-		t.Fatal("existing node sealing-key binding", v, err)
-	}
-	duplicate := createToken(t, s, workspace, retrofitEndpoint)
-	if _, err := s.Enroll(ctx, enrollmentRequest(duplicate.Value, retrofitEndpoint)); !errors.Is(err, ErrInvalidToken) {
-		t.Fatal("existing sealing keys were replaced", err)
 	}
 }

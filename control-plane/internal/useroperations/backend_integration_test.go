@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,12 +13,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/databasetest"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
-	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
@@ -31,55 +26,8 @@ func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
 
 func userOperationsBackendWithCleanup(t, cleanupT *testing.T) (database.Backend, database.Backend) {
 	t.Helper()
-	// Report setup errors in the current child, but let its parent own the resources.
-	ctx := context.Background()
-	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("real PostgreSQL required")
-	}
-	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if ownerURL == "" {
-		t.Fatal("separate PostgreSQL owner fixture required; runtime must not act as owner")
-	}
-	admin, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cleanupT.Cleanup(admin.Close)
-	name := "policy_cleanup_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		t.Fatal(err)
-	}
-	cleanupT.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, err := admin.Exec(ctx, "DROP DATABASE "+identifier); err != nil {
-			cleanupT.Error("drop user operations fixture", err)
-		}
-	})
-	open := func(url string) *pgxpool.Pool {
-		t.Helper()
-		cfg, err := pgxpool.ParseConfig(url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg.ConnConfig.Database = name
-		pool, err := pgxpool.NewWithConfig(ctx, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cleanupT.Cleanup(pool.Close)
-		return pool
-	}
-	ownerPool, pool := open(ownerURL), open(dsn)
-	if err := migrations.Migrate(ctx, ownerPool); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrations.GrantRuntimePrivileges(ctx, ownerPool, pool.Config().ConnConfig.User); err != nil {
-		t.Fatal(err)
-	}
-	return postgres.WrapPool(pool), postgres.WrapPool(ownerPool)
+	runtime, owner := databasetest.OpenIsolated(t, cleanupT, "policy_cleanup")
+	return postgres.WrapPool(runtime), postgres.WrapPool(owner)
 }
 
 func TestUserOperationsBackendIntegration(t *testing.T) {
@@ -111,7 +59,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, node)
 	for _, id := range []uuid.UUID{requester} {
 		exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'user-operations',$2,$3,$4)`, id, id.String(), at, at)
-		exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, uuid.New(), id, workspace, at)
+		exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,$3)`, workspace, id, at)
 	}
 	for _, pair := range [][2]uuid.UUID{{session, requester}} {
 		exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, pair[0], pair[1], expires, at)
@@ -278,176 +226,6 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	}
 	expiryKey := operationIdempotencyKey("policy", node.String(), "expired", "1", "expiry", "1970-01-01T00:00:00Z")
 	mutator.assertLast(t, ctx, 1, userstate.MutationRequest{NodeID: node, Kind: userstate.UserDisable, Name: "expired", ExpectedVersion: 1, IdempotencyKey: expiryKey, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: expiryKey, Traceparent: stableTraceparent(expiryKey)})
-	exec(`UPDATE nodes SET status='offline' WHERE id=$1`, node)
-	items := []BatchItemRequest{{NodeID: node, Username: "bob", Action: "disable", ExpectedVersion: 1, Authorized: true}, {NodeID: node, Username: "charlie", Action: "disable", ExpectedVersion: 1, Authorized: false}}
-	batchID := uuid.Must(uuid.NewV7())
-	batchRequest := BatchRequest{ID: batchID, WorkspaceID: workspace, ActorIdentityID: requester, ActorSessionID: session, ActorID: "operator", Reason: "ticket", RequestID: uuid.NewString(), Traceparent: testTraceparent, IdempotencyKey: uuid.NewString(), Items: items}
-	batch, replay, err := s.CreateBatch(ctx, batchRequest)
-	if err != nil || replay || len(batch.Items) != 2 || batch.Items[1].State != "forbidden" {
-		t.Fatal("create batch", batch, replay, err)
-	}
-	altered := batchRequest
-	altered.Items = append([]BatchItemRequest(nil), items...)
-	altered.Items[0].ExpectedVersion++
-	if _, _, err := s.CreateBatch(ctx, altered); !errors.Is(err, ErrIdempotencyConflict) {
-		t.Fatal("idempotency binding", err)
-	}
-	if _, replay, err := s.CreateBatch(ctx, batchRequest); err != nil || !replay {
-		t.Fatal("batch replay", replay, err)
-	}
-	key = operationIdempotencyKey("batch", batchID.String(), "0")
-	batchMutation := userstate.MutationRequest{NodeID: node, Kind: userstate.UserDisable, Name: "bob", ExpectedVersion: 1, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "operator", ActorIdentityID: requester, ActorSessionID: session, Reason: "ticket", RequestID: batchRequest.RequestID + ":0", Traceparent: testTraceparent}
-	if _, _, err := users.Mutate(ctx, batchMutation); err != nil {
-		t.Fatal("batch crash window", err)
-	}
-	exec(`UPDATE batch_operation_items SET state='submitting',lease_owner=$1,lease_until=$2 WHERE batch_id=$3 AND item_index=0`, uuid.New(), negative, batchID)
-	mutator.requests, mutator.contexts = nil, nil
-	if err := s.submitBatchItems(ctx, uuid.New(), 10); err != nil {
-		t.Fatal("recover batch", err)
-	}
-	mutator.assertLast(t, ctx, 1, batchMutation)
-	if err := s.refreshBatches(ctx); err != nil {
-		t.Fatal("refresh batch", err)
-	}
-	batch, err = s.GetBatch(ctx, batchID)
-	if err != nil || batch.State != "partial_failed" || batch.Items[0].State != "offline_pending" || batch.Items[0].ChildOperationID == nil {
-		t.Fatal("batch outcome", batch, err)
-	}
-	metrics, err := s.Metrics(ctx, workspace)
-	if err != nil || metrics.ActiveBatchItemTotal != 1 || metrics.StaleBatchClaimTotal != 0 {
-		t.Fatal("metrics", metrics, err)
-	}
-	op := *batch.Items[0].ChildOperationID
-	var outboxCount, auditCount, commandCount int
-	if err := row(`SELECT (SELECT count(*) FROM commands WHERE operation_id=$1),(SELECT count(*) FROM outbox_events b JOIN commands c ON c.id=b.command_id WHERE c.operation_id=$2),(SELECT count(*) FROM audit_events WHERE resource_id=$3)`, op, op, op).Scan(&commandCount, &outboxCount, &auditCount); err != nil || commandCount != 1 || outboxCount != 1 || auditCount != 1 {
-		t.Fatal("batch recovery duplicated durable intent", commandCount, outboxCount, auditCount, err)
-	}
-	for _, state := range []string{"unknown", "succeeded"} {
-		exec(`UPDATE operations SET state=$1 WHERE id=$2`, state, op)
-		if err := s.refreshBatches(ctx); err != nil {
-			t.Fatal(err)
-		}
-		batch, err = s.GetBatch(ctx, batchID)
-		if err != nil || batch.Items[0].State != state {
-			t.Fatal("child refresh", batch, err)
-		}
-	}
-	t.Run("batch-port-errors", func(t *testing.T) {
-		for _, test := range []struct {
-			name, errorType string
-			err             error
-		}{
-			{"backlog", "", userstate.ErrBacklogExceeded},
-			{"version", "stale_revision", userstate.ErrVersionConflict},
-			{"pending", "revision_pending", userstate.ErrRevisionPending},
-			{"recovery", "recovery_required", userstate.ErrRevisionRecovery},
-			{"capability", "capability_unavailable", userstate.ErrCapabilityMissing},
-			{"node", "node_unavailable", userstate.ErrNodeUnavailable},
-			{"other", "submission_failed", errors.New("injected failure")},
-		} {
-			t.Run(test.name, func(t *testing.T) {
-				request := BatchRequest{WorkspaceID: workspace, ActorIdentityID: requester, ActorSessionID: session, ActorID: "operator", Reason: "port errors", RequestID: "port-errors", Traceparent: testTraceparent, IdempotencyKey: uuid.NewString(), Items: []BatchItemRequest{{NodeID: node, Username: "dave", Action: "enable", ExpectedVersion: 1, Authorized: true}, {NodeID: node, Username: "charlie", Action: "enable", ExpectedVersion: 1, Authorized: true}}}
-				batch, _, err := s.CreateBatch(ctx, request)
-				if err != nil {
-					t.Fatal(err)
-				}
-				mutator.requests, mutator.contexts = nil, nil
-				mutator.err = fmt.Errorf("mutator: %w", test.err)
-				if err := s.submitBatchItems(ctx, uuid.New(), 2); err != nil {
-					t.Fatal("batch must classify per-item errors", err)
-				}
-				wantCalls, wantState := 2, "failed"
-				if test.name == "backlog" {
-					wantCalls, wantState = 1, "queued"
-				}
-				if len(mutator.requests) != wantCalls {
-					t.Fatalf("Mutate calls=%d, want %d", len(mutator.requests), wantCalls)
-				}
-				for index, got := range mutator.requests {
-					key := operationIdempotencyKey("batch", batch.ID.String(), fmt.Sprint(index))
-					want := userstate.MutationRequest{NodeID: node, Kind: userstate.UserEnable, Name: request.Items[index].Username, ExpectedVersion: 1, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: request.ActorID, ActorIdentityID: requester, ActorSessionID: session, Reason: request.Reason, RequestID: request.RequestID + ":" + fmt.Sprint(index), Traceparent: request.Traceparent}
-					if !reflect.DeepEqual(got, want) || mutator.contexts[index] != ctx {
-						t.Fatalf("batch item %d request=%+v, want %+v", index, got, want)
-					}
-				}
-				batch, err = s.GetBatch(ctx, batch.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, item := range batch.Items {
-					if item.State != wantState || item.ErrorType != test.errorType || item.ChildOperationID != nil {
-						t.Fatal("batch error result", item)
-					}
-				}
-				var claims int
-				if err := row(`SELECT count(*) FROM batch_operation_items WHERE batch_id=$1 AND (lease_owner IS NOT NULL OR lease_until IS NOT NULL)`, batch.ID).Scan(&claims); err != nil || claims != 0 {
-					t.Fatal("batch error retained claims", claims, err)
-				}
-				// Retire only this injected-backlog fixture before the next case.
-				exec(`UPDATE batch_operation_items SET state='failed' WHERE batch_id=$1`, batch.ID)
-			})
-		}
-		mutator.err = nil
-		mutator.requests, mutator.contexts = nil, nil
-	})
-	claimBatch, _, err := s.CreateBatch(ctx, BatchRequest{WorkspaceID: workspace, ActorIdentityID: requester, ActorSessionID: session, ActorID: "operator", Reason: "claim checks", RequestID: uuid.NewString(), Traceparent: testTraceparent, IdempotencyKey: uuid.NewString(), Items: []BatchItemRequest{{NodeID: node, Username: "dave", Action: "enable", ExpectedVersion: 1, Authorized: true}, {NodeID: node, Username: "charlie", Action: "enable", ExpectedVersion: 1, Authorized: true}}})
-	if err != nil {
-		t.Fatal("claim batch", err)
-	}
-	firstOwner, secondOwner := uuid.New(), uuid.New()
-	firstTx, err := b.Begin(ctx, database.ReadCommitted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rollback(firstTx)
-	firstStore, err := userstore.From(firstTx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstClaim, err := firstStore.ClaimBatchItems(ctx, firstOwner, 1)
-	if err != nil || len(firstClaim) != 1 {
-		t.Fatal("first claim", firstClaim, err)
-	}
-	bounded, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	var secondClaim []userstore.BatchItem
-	if err := s.withStore(bounded, func(store userstore.Store) (err error) {
-		secondClaim, err = store.ClaimBatchItems(bounded, secondOwner, 1)
-		return
-	}); err != nil || len(secondClaim) != 1 || firstClaim[0].Index == secondClaim[0].Index {
-		t.Fatal("skip locked claim", secondClaim, err)
-	}
-	if err := firstTx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.withStore(ctx, func(store userstore.Store) error {
-		return store.FinishBatchItem(ctx, secondClaim[0], firstOwner, nil, "wrong_owner")
-	}); err != nil {
-		t.Fatal(err)
-	}
-	claimBatch, err = s.GetBatch(ctx, claimBatch.ID)
-	if err != nil || claimBatch.Items[secondClaim[0].Index].State != "submitting" {
-		t.Fatal("claim owner fence", claimBatch, err)
-	}
-	if err := s.withStore(ctx, func(store userstore.Store) error { return store.ReleaseBatchClaims(ctx, firstOwner) }); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.withStore(ctx, func(store userstore.Store) error {
-		return store.FinishBatchItem(ctx, secondClaim[0], secondOwner, nil, "stale_revision")
-	}); err != nil {
-		t.Fatal(err)
-	}
-	leaseOwner := uuid.New()
-	defer exec(`UPDATE scheduler_leases SET lease_until=$1 WHERE lease_name=$2 AND owner_id=$3`, negative, leaseName, leaseOwner)
-	if ok, err := s.acquireLease(ctx, leaseOwner, time.Minute); err != nil || !ok {
-		t.Fatal("acquire lease", ok, err)
-	}
-	if ok, err := s.acquireLease(ctx, uuid.New(), time.Minute); err != nil || ok {
-		t.Fatal("held lease", ok, err)
-	}
-	if ok, err := s.acquireLease(ctx, leaseOwner, time.Minute); err != nil || !ok {
-		t.Fatal("renew lease", ok, err)
-	}
 	identity, err := coordination.NewIdentity()
 	if err != nil {
 		t.Fatal(err)
@@ -457,36 +235,15 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	fenced := coordination.WithFence(ctx, leader)
-	mutator.requests, mutator.contexts = nil, nil
-	mutator.err = userstate.ErrBacklogExceeded
-	if err := s.submitBatchItems(fenced, uuid.New(), 1); err != nil || len(mutator.contexts) != 1 || mutator.contexts[0] != fenced || coordination.FenceFromContext(mutator.contexts[0]) != leader {
-		t.Fatal("mutation lost scheduler fencing context", err)
+	if err := s.RunOnce(fenced); err != nil {
+		t.Fatal("fenced scheduler", err)
 	}
-	mutator.err = nil
 	exec(`UPDATE scheduler_leadership SET epoch=epoch+1 WHERE id=1`)
 	if _, _, err := s.SetPolicy(fenced, request); !errors.Is(err, coordination.ErrNotLeader) {
 		t.Fatal("fenced policy replay", err)
 	}
-	if _, _, err := s.CreateBatch(fenced, batchRequest); !errors.Is(err, coordination.ErrNotLeader) {
-		t.Fatal("fenced batch replay", err)
-	}
 	if err := s.RunOnce(fenced); !errors.Is(err, coordination.ErrNotLeader) {
 		t.Fatal("fenced scheduler", err)
-	}
-	if _, err := s.claimBatchItems(fenced, uuid.New(), 10); !errors.Is(err, coordination.ErrNotLeader) {
-		t.Fatal("fenced claim", err)
-	}
-	if len(mutator.requests) != 1 {
-		t.Fatal("stale fence reached user mutator")
-	}
-	claimBatch, err = s.GetBatch(ctx, claimBatch.ID)
-	if err != nil || claimBatch.Items[firstClaim[0].Index].State != "queued" || claimBatch.Items[secondClaim[0].Index].ErrorType != "stale_revision" {
-		t.Fatal("claim rollback and failure", claimBatch, err)
-	}
-	exec(`UPDATE batch_operations SET created_at=$1,updated_at=$2 WHERE id=$3`, negative, positive, claimBatch.ID)
-	claimBatch, err = s.GetBatch(ctx, claimBatch.ID)
-	if err != nil || claimBatch.CreatedAt != negative || claimBatch.UpdatedAt != positive {
-		t.Fatal("batch logical clocks", claimBatch, err)
 	}
 	if _, err := audit.NewBackendManager(b, nil).Verify(ctx, workspace); err != nil {
 		t.Fatal("audit chain", err)

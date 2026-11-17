@@ -212,9 +212,8 @@ select_release_source() {
 }
 
 validate_manifest_file() {
-  local label="$1" path="$2" historical_inventory="${3:-false}" manifest_filter
-  # Saved manifests are immutable evidence. Retired assets may be read there,
-  # but may never be supplied in a newly selected install/upgrade/rollback target.
+  local label="$1" path="$2" manifest_filter
+  [[ -n "${path}" && -f "${path}" && ! -L "${path}" ]] || fail "${label} file missing: ${path:-<unset>}"
   # jq variables in this filter are intentionally not shell variables.
   # shellcheck disable=SC2016
   manifest_filter='
@@ -236,9 +235,7 @@ validate_manifest_file() {
       elif $manifest.manifest_version == 2 then
         ($manifest | keys == ["database_migration", "images", "manifest_version", "platform", "release_tag", "release_version", "signer_state_version", "source_commit"]) and
         ($manifest.signer_state_version == 1) and
-        ($manifest.images | (keys == ["backup", "control", "edge", "gateway", "otel", "postgres", "relay", "signer", "transport"]) or
-          ($historical_inventory and (keys == ["backup", "control", "edge", "gateway", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"] or
-            keys == ["backup", "control", "edge", "gateway", "mariadb_backup", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"])))
+        ($manifest.images | keys == ["backup", "control", "edge", "gateway", "otel", "postgres", "relay", "signer", "transport"])
       else false end) and
       ($manifest.release_version | matches("^[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$")) and
       ($manifest.release_tag | matches("^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$") and . == ("v" + $manifest.release_version)) and
@@ -249,7 +246,7 @@ validate_manifest_file() {
         all(.[]; matches("^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$")))
     end
   '
-  jq -e -s --argjson historical_inventory "${historical_inventory}" "${manifest_filter}" "${path}" >/dev/null ||
+  jq -e -s "${manifest_filter}" "${path}" >/dev/null ||
     fail "${label} is invalid"
 
   CANONICAL_RELEASE="$(mktemp "${STATE_ROOT}/.canonical-release.json.XXXXXX")" ||
@@ -281,11 +278,8 @@ check_active_profile_supported() {
       (keys == ["database_backend", "database_deployment", "deployment_mode", "tls_mode"] and
         .deployment_mode == "integrated" and .tls_mode == "acme")) and
     (.deployment_mode | IN("standalone", "integrated")) and
-    ([.database_backend, .database_deployment] | IN(["postgres", "bundled"], ["postgres", "external"], ["mysql", "external"]))' \
+    ([.database_backend, .database_deployment] | IN(["postgres", "bundled"], ["postgres", "external"]))' \
     "${profile}" >/dev/null || fail "invalid deployment profile"
-  if [[ "$(jq -r '.database_backend' "${profile}")" == "mysql" ]]; then
-    fail "existing MySQL deployment is retired; cross-engine automatic migration is unsupported and existing state/data were not modified"
-  fi
 }
 
 map_manifest_images() {
@@ -311,7 +305,6 @@ map_manifest_images() {
   case "${mode}" in standalone|integrated) ;; *) fail "invalid deployment mode" ;; esac
   case "${backend}:${deployment}" in
     postgres:bundled|postgres:external) ;;
-    mysql:*) fail "MySQL 8.4 LTS support is retired; only PostgreSQL 18.x (bundled or external) is supported and cross-engine automatic migration is unsupported" ;;
     *) fail "invalid database deployment; expected postgres with bundled or external" ;;
   esac
   export OCSERV_DEPLOYMENT_MODE="${mode}"

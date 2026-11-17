@@ -47,9 +47,9 @@
 | --- | --- |
 | 项目入口与职责导航 | [文档导航](README.md#documentation)、[职责与任务导航](docs/architecture.md#ownership-and-task-navigation) |
 | Controller 服务、事务与 HTTP | [组件职责](docs/architecture.md#component-responsibilities)、[HTTP 契约](docs/reference/stable-contracts.md#http-contracts) |
-| Web API、认证协调与 Workspace | [Web 客户端](docs/architecture.md#web-client)、[身份、审批与审计](docs/reference/stable-contracts.md#identity-approval-and-audit)、[认证运维](docs/operations/authentication.md) |
+| Web API、认证协调与 Workspace | [Web 客户端](docs/architecture.md#web-client)、[身份、授权与审计](docs/reference/stable-contracts.md#identity-authorization-and-audit)、[认证运维](docs/operations/authentication.md) |
 | 配置、命令、Agent/privd 与传输 | [命令与恢复](docs/reference/stable-contracts.md#commands-and-recovery)、[配置与节点 TLS](docs/reference/stable-contracts.md#configuration-and-node-tls)、[Agent/privd](docs/architecture.md#agent-privd-and-upgrader)、[入网与传输](docs/reference/stable-contracts.md#enrollment-and-transport) |
-| 数据库、证书与重绑定 | [数据库](docs/reference/stable-contracts.md#database)、[Signer](docs/reference/stable-contracts.md#certificates-and-signer)、[Rebind](docs/reference/stable-contracts.md#controller-rebind) |
+| 数据库与证书 | [数据库](docs/reference/stable-contracts.md#database)、[Signer](docs/reference/stable-contracts.md#certificates-and-signer) |
 | 安装、运行与恢复 | [生产部署](docs/operations/production-deployment.md)、[节点生命周期](docs/operations/agent-lifecycle.md)、[故障恢复](docs/operations/incident-recovery.md) |
 | 验证、CI 与发布 | [验证与发布](docs/development/release-checks.md) |
 

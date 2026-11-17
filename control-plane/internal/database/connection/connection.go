@@ -178,11 +178,8 @@ func (c *Connection) ProvisionManagementWorkspace(ctx context.Context) (id uuid.
 	return id, created, err
 }
 
-// ValidateRuntime runs before starting any role's listeners or background work.
+// ValidateRuntime runs before starting listeners or background work.
 // A valid schema receipt alone does not prove telemetry history is usable.
 func (c *Connection) ValidateRuntime(ctx context.Context) error {
-	if err := database.Require(c.Store, database.Transactions, database.RowLocks); err != nil {
-		return err
-	}
 	return postgres.WrapPool(c.pg).ValidateTelemetryRuntime(ctx)
 }

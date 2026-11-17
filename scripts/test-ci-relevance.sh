@@ -129,7 +129,6 @@ web/src/components/nodes/NodeDetailHeader.vue run_web run_web_browser run_contro
 web/src/features/configuration/useNodeConfiguration.ts run_web run_web_browser run_controller_cache
 web/src/features/user-password.ts run_web run_web_browser run_controller_cache
 web/src/views/AuditView.vue run_web run_web_browser run_controller_cache
-web/src/views/ApprovalsView.vue run_web run_web_browser run_controller_cache
 web/src/views/SettingsView.vue run_web run_web_browser run_controller_cache
 web/e2e/login.spec.ts run_web run_web_browser
 web/playwright.config.ts run_web run_web_browser
@@ -199,7 +198,7 @@ scripts/rollback-agent.sh run_ci_tools run_installers
 scripts/uninstall-agent.sh run_ci_tools run_installers
 .github/workflows/ci.yml run_ci_tools
 .github/workflows/release.yml run_ci_tools run_installers
-.github/workflows/release-upgrade.yml run_ci_tools run_installers
+.github/workflows/release-check.yml run_ci_tools run_installers
 .github/workflows/security.yml run_ci_tools
 scripts/ci-relevance.sh run_ci_tools
 scripts/ci-tools-check.sh run_ci_tools

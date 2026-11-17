@@ -18,7 +18,6 @@ vi.mock("../src/api/enrollment", () => mocks);
 vi.mock("../src/api/workspace", async (original) => ({
   ...(await original<object>()),
   ...mocks,
-  workspaceChangedEvent: "workspace",
 }));
 import NodeInstallDialog from "../src/components/nodes/NodeInstallDialog.vue";
 const renderer = createRenderer<object, object>({
@@ -93,21 +92,19 @@ it("issues only on click, once, and clears the token on closing", async () => {
   view.close();
   expect(view.token).toBe("");
 });
-it.each(["close", "workspace", "unmount", "pagehide"])(
+it.each(["close", "unmount", "pagehide"])(
   "clears received secrets on %s",
   async (action) => {
     const view = await mount();
     await view.issue();
     if (action === "pagehide") window.dispatchEvent(new Event("pagehide"));
     else if (action === "close") view.close();
-    else if (action === "workspace")
-      window.dispatchEvent(new Event("workspace"));
     else unmount?.();
     expect(view.token).toBe("");
     expect(view.expires).toBe("");
   },
 );
-it.each(["close", "workspace", "unmount", "generation", "pagehide"])(
+it.each(["close", "unmount", "generation", "pagehide"])(
   "discards late success on %s",
   async (action) => {
     let resolve!: (value: ReturnType<typeof result>) => void;
@@ -120,10 +117,7 @@ it.each(["close", "workspace", "unmount", "generation", "pagehide"])(
     const request = view.issue();
     if (action === "pagehide") window.dispatchEvent(new Event("pagehide"));
     else if (action === "close") view.close();
-    else if (action === "workspace") {
-      context = { id: "other", generation: 2 };
-      window.dispatchEvent(new Event("workspace"));
-    } else if (action === "generation")
+    else if (action === "generation")
       context = { id: workspaceId, generation: 3 };
     else unmount?.();
     resolve(result());

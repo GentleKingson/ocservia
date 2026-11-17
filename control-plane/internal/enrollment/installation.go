@@ -94,11 +94,8 @@ func installationChild(root, origin string) (string, bool) {
 	return installEnrollmentPrefix + base64.RawURLEncoding.EncodeToString(digest[:]), true
 }
 
-func bootstrapResult(token string) agentv1.HandshakeResult {
-	if strings.HasPrefix(token, installEnrollmentPrefix) {
-		return agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
-	}
-	return agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
+func bootstrapResult(_ string) agentv1.HandshakeResult {
+	return agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
 }
 
 type InstallationConfig struct {
@@ -122,7 +119,7 @@ func (s *Service) InstallationConfig(ctx context.Context, root string) (Installa
 		return InstallationConfig{}, err
 	}
 	defer rollback(tx)
-	token, err := store.TokenByHash(ctx, digest[:], true, false)
+	token, err := store.TokenByHash(ctx, digest[:], false)
 	if errors.Is(err, database.ErrNotFound) {
 		return InstallationConfig{}, ErrInvalidToken
 	}
@@ -178,7 +175,7 @@ func (s *Service) lockInstallation(ctx context.Context, store enrollmentstore.En
 		return enrollmentstore.Token{}, ErrInvalidToken
 	}
 	digest, _ := bootstrapTokenDigest(child)
-	token, err := store.TokenByHash(ctx, digest[:], true, true)
+	token, err := store.TokenByHash(ctx, digest[:], true)
 	if errors.Is(err, database.ErrNotFound) {
 		return enrollmentstore.Token{}, ErrInvalidToken
 	}

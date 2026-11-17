@@ -9,7 +9,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
+	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -102,21 +102,21 @@ func TestUsageCrossStoreTransactionIntegration(t *testing.T) {
 			a, other := NewUsageStore(tx), NewUsageStore(tx)
 			node := uuid.New()
 			now := time.Now().UTC().Truncate(time.Microsecond)
-			sample := userusage.Sample{SessionID: "session", Username: "user", Connected: now, ObservedAt: now, RXBytes: 10, TXBytes: 20}
-			if err := userusage.RecordTx(ctx, a, node, []userusage.Sample{sample}); err != nil {
+			sample := userstore.UsageSample{SessionID: "session", Username: "user", Connected: now, ObservedAt: now, RXBytes: 10, TXBytes: 20}
+			if err := userstore.RecordUsageTx(ctx, a, node, []userstore.UsageSample{sample}); err != nil {
 				return err
 			}
 			at, err := value.FromTime(now)
 			if err != nil {
 				return err
 			}
-			prior, err := other.LockCursor(ctx, node, userusage.Cursor{SessionID: sample.SessionID, Connected: at})
+			prior, err := other.LockCursor(ctx, node, userstore.UsageCursor{SessionID: sample.SessionID, Connected: at})
 			if err != nil || prior.RXBytes != 10 {
 				t.Fatalf("second store cannot see uncommitted cursor: %+v %v", prior, err)
 			}
 			sample.RXBytes = 15
 			sample.ObservedAt = now.Add(time.Second)
-			if err := userusage.RecordTx(ctx, other, node, []userusage.Sample{sample, sample}); err != nil {
+			if err := userstore.RecordUsageTx(ctx, other, node, []userstore.UsageSample{sample, sample}); err != nil {
 				return err
 			}
 			var total int64

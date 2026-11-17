@@ -155,13 +155,10 @@ async function fulfillUpgradePost(route: Route): Promise<void> {
   const body = route.request().postDataJSON() as Record<string, unknown>;
   if (
     body.target_version !== recommended ||
-    typeof body.approval_id !== "string" ||
-    body.approval_id.length === 0 ||
     typeof body.reason !== "string" ||
     body.reason.length === 0 ||
     Object.keys(body).some(
-      (key) =>
-        key !== "target_version" && key !== "approval_id" && key !== "reason",
+      (key) => key !== "target_version" && key !== "reason",
     )
   ) {
     await route.fulfill({
@@ -202,9 +199,6 @@ test("walks the reconciled upgrade lifecycle to success", async ({ page }) => {
   await page.getByTestId("upgrade-agent").click();
   await expect(page.locator("#upgrade-target")).toHaveText(recommended);
   await page.locator("#operation-reason").fill("monthly maintained release");
-  await page
-    .locator("#approval-id")
-    .fill("019fc0a4-6d92-765c-a8a1-4af556614ee5");
   await page.getByRole("button", { name: "Confirm" }).click();
 
   const status = page.getByTestId("operation-status");
@@ -242,9 +236,6 @@ test("surfaces a forced local upgrade failure as the terminal outcome", async ({
   await page
     .locator("#operation-reason")
     .fill("attempt the maintained release");
-  await page
-    .locator("#approval-id")
-    .fill("019fc0a4-6d92-765c-a8a1-4af556614ee6");
   await page.getByRole("button", { name: "Confirm" }).click();
 
   const status = page.getByTestId("operation-status");

@@ -93,7 +93,7 @@ func TestPostgreSQLControllerProductionConfiguration(t *testing.T) {
 	}
 	values["OCSERV_DATABASE_URL"] = "postgres://app:secret@database.example.test:5432/ocservia?sslmode=verify-full"
 	delete(values, "OCSERV_LOCAL_AUTH_ENABLED")
-	if _, err := Load(nil, lookup); err == nil || !strings.Contains(err.Error(), "Local or OIDC authentication") {
+	if _, err := Load(nil, lookup); err == nil || !strings.Contains(err.Error(), "Local authentication") {
 		t.Fatalf("incomplete production authentication accepted: %v", err)
 	}
 }

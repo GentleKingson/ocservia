@@ -67,13 +67,9 @@ INSTALL_ENV_NAMES=(
   OCSERV_PUBLIC_ORIGIN
   OCSERV_SESSION_TTL
   OCSERV_RECOMMENDED_AGENT_VERSION
-  OCSERV_OIDC_REDIRECT_URL
-  OCSERV_OIDC_CLIENT_ID
-  OCSERV_OIDC_ISSUER
   OCSERV_OTEL_BACKEND_ENDPOINT
   OCSERV_PUBLIC_HOST
   OCSERV_RELAY_URL_A
-  OCSERV_RELAY_URL_B
   OCSERV_SECRET_DIR
 )
 
@@ -419,14 +415,14 @@ require_run_tools() {
 }
 
 collect_inputs() {
-  local mode=quick auth=local passphrase_file="" export_dir=""
+  local mode=quick passphrase_file="" export_dir=""
   [[ ! -e "${CONFIG_FILE}" ]] || mode=manual
   install_ui_prompt mode 'Installation preset (quick/manual)' "${mode}"
   case "${mode}" in
     quick)
       QUICK=true
       echo 'Quick: Integrated, bundled PostgreSQL, ACME TLS, Local authentication, root lifecycle.'
-      echo 'Manual supports external databases, Standalone and OIDC with operator-provisioned secrets.'
+      echo 'Manual supports external databases and Standalone with operator-provisioned secrets.'
       install_ui_prompt CONTROLLER_DOMAIN 'Controller DNS name'
       install_ui_prompt RELAY_DOMAIN 'Relay DNS name (distinct from Controller)'
       install_ui_prompt ACME_EMAIL 'ACME contact email'
@@ -461,20 +457,7 @@ collect_inputs() {
         install_ui_prompt OCSERV_RELAY_URL_A 'Dedicated Relay HTTPS URL'
         install_ui_prompt OCSERV_CERTIFICATE_SIGNER_URL 'Signer HTTPS URL'
       fi
-      [[ -z "${OCSERV_OIDC_ISSUER:-}" ]] || auth=oidc
-      [[ -z "${OCSERV_OIDC_ISSUER:-}" || "${OCSERV_LOCAL_AUTH_ENABLED:-false}" != true ]] || auth=both
-      install_ui_prompt auth 'Authentication (local/oidc/both)' "${auth}"
-      case "${auth}" in
-        local) export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_OIDC_ISSUER="" OCSERV_OIDC_CLIENT_ID="" OCSERV_OIDC_REDIRECT_URL="" ;;
-        oidc|both)
-          export OCSERV_LOCAL_AUTH_ENABLED=false
-          [[ "${auth}" != both ]] || export OCSERV_LOCAL_AUTH_ENABLED=true
-          install_ui_prompt OCSERV_OIDC_ISSUER 'OIDC issuer HTTPS URL'
-          install_ui_prompt OCSERV_OIDC_CLIENT_ID 'OIDC client ID'
-          install_ui_prompt OCSERV_OIDC_REDIRECT_URL 'OIDC redirect URL' "https://${OCSERV_PUBLIC_HOST}/api/v1/auth/callback"
-          ;;
-        *) fail "authentication must be local, oidc or both" ;;
-      esac
+      export OCSERV_LOCAL_AUTH_ENABLED=true
       install_ui_prompt OCSERV_CONTROLLER_ENDPOINT_ID 'Controller EndpointID (64 lowercase hex)'
       install_ui_prompt OCSERV_AUDIT_EVENT_KEY_ID 'Audit event key ID' audit-event-v1
       install_ui_prompt OCSERV_SECRET_DIR 'Prepared production secret directory'
@@ -486,15 +469,6 @@ collect_inputs() {
   esac
 }
 
-reject_retired_active_profile() {
-  local state_root="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
-  local profile="${state_root%/}/deployment-profile.json"
-  if [[ -f "${profile}" && ! -L "${profile}" && -r "${profile}" ]] &&
-    grep -Eq '"database_backend"[[:space:]]*:[[:space:]]*"mysql"' "${profile}"; then
-    fail "existing MySQL deployment at ${state_root} is retired; cross-engine automatic migration is unsupported and existing state/data were not modified"
-  fi
-}
-
 validate_manual_inputs() {
   local variable
   [[ "${QUICK}" == false ]] || return 0
@@ -503,10 +477,8 @@ validate_manual_inputs() {
   done
   valid_domain "${OCSERV_PUBLIC_HOST}" || fail "OCSERV_PUBLIC_HOST must be a lowercase DNS name"
   [[ "${OCSERV_CONTROLLER_ENDPOINT_ID}" =~ ^[0-9a-f]{64}$ ]] || fail "Controller EndpointID must be 64 lowercase hex characters"
-  [[ -z "${OCSERV_RELAY_URL_B:-}" ]] || fail "only one dedicated Relay is supported"
   case "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
     postgres:bundled|postgres:external) ;;
-    mysql:*) fail "MySQL 8.4 LTS support is retired; only PostgreSQL 18.x (bundled or external) is supported and cross-engine automatic migration is unsupported" ;;
     *) fail "unsupported database topology; only OCSERV_DATABASE_BACKEND=postgres with bundled or external is supported" ;;
   esac
   if [[ "${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == external ]]; then
@@ -523,11 +495,7 @@ validate_manual_inputs() {
       done ;;
     *) fail "deployment must be standalone or integrated" ;;
   esac
-  if [[ -n "${OCSERV_OIDC_ISSUER:-}${OCSERV_OIDC_CLIENT_ID:-}${OCSERV_OIDC_REDIRECT_URL:-}" ]]; then
-    [[ "${OCSERV_OIDC_ISSUER:-}" == https://* && -n "${OCSERV_OIDC_CLIENT_ID:-}" && "${OCSERV_OIDC_REDIRECT_URL:-}" == https://* ]] || fail "complete OIDC configuration is required"
-  else
-    [[ "${OCSERV_LOCAL_AUTH_ENABLED:-false}" == true ]] || fail "enable Local authentication or configure OIDC"
-  fi
+  [[ "${OCSERV_LOCAL_AUTH_ENABLED:-false}" == true ]] || fail "Local authentication must be enabled"
   [[ "${OCSERV_SECRET_DIR}" == /* && -d "${OCSERV_SECRET_DIR}" && ! -L "${OCSERV_SECRET_DIR}" && "${OCSERV_BACKUP_DIR}" == /* ]] || fail "prepare an absolute secret directory and backup path"
 }
 
@@ -579,7 +547,6 @@ fi
 
 load_config
 validate_manual_inputs
-reject_retired_active_profile
 if [[ "${QUICK}" == true && "${NON_INTERACTIVE}" == true && " ${QUICK_ARGS[*]} " != *" --root-ca-passphrase-file "* ]]; then
   fail "--non-interactive Quick requires --root-ca-passphrase-file"
 fi
@@ -600,7 +567,7 @@ if [[ "${INTERACTIVE}" == true ]]; then
   echo "Release: ${VERSION}; runtime: ${TARGET}; root lifecycle: ${ROOT_LIFECYCLE}; Quick: ${QUICK}"
   if [[ "${QUICK}" == false ]]; then
     echo "Controller: ${OCSERV_PUBLIC_HOST}; deployment: ${OCSERV_DEPLOYMENT_MODE:-standalone}; database: ${OCSERV_DATABASE_BACKEND:-postgres}/${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
-    echo "Local login: ${OCSERV_LOCAL_AUTH_ENABLED:-false}; OIDC: ${OCSERV_OIDC_ISSUER:-disabled}"
+    echo "Local login: ${OCSERV_LOCAL_AUTH_ENABLED:-false}"
     echo "Configuration will be saved to ${CONFIG_FILE} (protected file paths only)."
   fi
   echo 'Existing deployments are never upgraded by this installer.'

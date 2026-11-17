@@ -36,12 +36,6 @@ export interface CertificateRevokeRequest {
    * @type {string}
    * @memberof CertificateRevokeRequest
    */
-  approvalId?: string;
-  /**
-   *
-   * @type {string}
-   * @memberof CertificateRevokeRequest
-   */
   reason: string;
 }
 
@@ -85,7 +79,6 @@ export function CertificateRevokeRequestFromJSONTyped(
   return {
     expectedVersion: json["expected_version"],
     certificateVersion: json["certificate_version"],
-    approvalId: json["approval_id"] == null ? undefined : json["approval_id"],
     reason: json["reason"],
   };
 }
@@ -107,7 +100,6 @@ export function CertificateRevokeRequestToJSONTyped(
   return {
     expected_version: value["expectedVersion"],
     certificate_version: value["certificateVersion"],
-    approval_id: value["approvalId"],
     reason: value["reason"],
   };
 }

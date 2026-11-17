@@ -22,12 +22,6 @@ const configuration = new Configuration({
       body: init?.body,
       credentials: init?.credentials,
     });
-    if (path.endsWith("/auth/methods")) {
-      return new Response(JSON.stringify({ local: true, oidc: false }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
     if (path.endsWith("/auth/login")) {
       return new Response(null, { status: 204 });
     }
@@ -53,7 +47,6 @@ const platform = new PlatformApi(
   }),
 );
 
-assert.deepEqual(await platform.getAuthMethods(), { local: true, oidc: false });
 await platform.loginLocal({
   localLoginRequest: { username: "alice", password: "test-password" },
 });
@@ -65,10 +58,6 @@ assert.deepEqual(JSON.parse(localLogin.body), {
   username: "alice",
   password: "test-password",
 });
-assert.equal(
-  requests.find(({ path }) => path.endsWith("/auth/methods")).authorization,
-  null,
-);
 
 await platform.changeLocalPassword({
   changeLocalPasswordRequest: {

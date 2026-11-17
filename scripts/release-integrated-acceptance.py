@@ -288,11 +288,9 @@ def recovery():
     node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     api.wait_for('established Agent reconnect after recreation',
                  lambda: api.api('nodes/' + node)['connection_state'] == 'online')
-    approval = api.approval('service.reload', 'node', node)
     operation = api.api('nodes/' + node + '/service:reload', {'reason': 'Integrated recreation acceptance', 'ttl_seconds': 300},
                         headers={'Idempotency-Key': secrets.token_hex(16),
-                                 'If-Match': f'"revision-{api.api("nodes/" + node)["version"]}"',
-                                 'X-Approval-ID': approval}, status=202)
+                                 'If-Match': f'"revision-{api.api("nodes/" + node)["version"]}"'}, status=202)
 
     def completed():
         result = api.api('operations/' + operation['id'])

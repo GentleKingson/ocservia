@@ -15,194 +15,22 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TestAgentUpgradeRouteResolvesTrustedReleasesIntegration pins the API trust
-// boundary: only the server-side release catalog may turn a target version
-// into a package digest, the target must be a real upgrade, the approval must
-// match the resolved release identity, and only operators may call it.
-func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	workspaceID, operatorID, viewerID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	operatorSession, viewerSession, approverID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	nodeID, operatorBinding, viewerBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	approverBinding := uuid.Must(uuid.NewV7())
-	fixtures := []struct {
-		query string
-		args  []any
-	}{
-		{`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'upgrade api',$2,now(),now())`, []any{workspaceID, "upgrade-api-" + workspaceID.String()}},
-		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now()),($5,'integration',$6,now(),now())`, []any{operatorID, operatorID.String(), viewerID, viewerID.String(), approverID, approverID.String()}},
-		{`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now()),($3,$4,now()+interval '1 hour',now())`, []any{operatorSession, operatorID, viewerSession, viewerID}},
-		{`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'upgrade-api-node','active',1,now(),now())`, []any{nodeID, workspaceID}},
-		{`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, []any{nodeID}}, {`INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at)
-			VALUES($1,now(),'upgrade-api-boot',$2,'1.2.0','1.2.3','Debian GNU/Linux 12','amd64','{}','{}','{}',now())`, []any{nodeID, uuid.Must(uuid.NewV7())}},
-		{`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Operator','node',$4,$2,now()),($5,$6,$3,'Viewer','node',$4,$6,now())`, []any{operatorBinding, operatorID, workspaceID, nodeID, viewerBinding, viewerID}},
-		{`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, []any{approverBinding, approverID, workspaceID}},
-	}
-	for _, fixture := range fixtures {
-		if _, err := pool.Exec(ctx, fixture.query, fixture.args...); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Privileged synthetic operations additionally require an active privd
-	// attestation key, including the agent upgrade acknowledgement path.
-	if _, err := attestationtest.InstallKey(ctx, pool, nodeID); err != nil {
-		t.Fatal(err)
-	}
-	// Per-statement arguments: pgx rejects statements bound with more
-	// parameters than they reference, which would silently leak the
-	// agent upgrade command history the scripted rollback checks.
-	defer func() {
-		workspace, node := workspaceID, nodeID
-		for _, statement := range []struct {
-			query string
-			args  []any
-		}{
-			{`DELETE FROM node_agent_upgrade_results WHERE node_id=$1`, []any{node}},
-			{`DELETE FROM agent_upgrade_operations WHERE workspace_id=$1`, []any{workspace}},
-			{`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, []any{workspace}},
-			{`DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, []any{workspace}},
-			{`DELETE FROM commands WHERE workspace_id=$1`, []any{workspace}},
-			{`DELETE FROM operations WHERE workspace_id=$1`, []any{workspace}},
-			{`DELETE FROM approval_requests WHERE workspace_id=$1`, []any{workspace}},
-			{`DELETE FROM role_bindings WHERE id IN($1,$2,$3)`, []any{operatorBinding, viewerBinding, approverBinding}},
-			{`DELETE FROM auth_sessions WHERE id IN($1,$2)`, []any{operatorSession, viewerSession}},
-			{`DELETE FROM identities WHERE id IN($1,$2,$3)`, []any{operatorID, viewerID, approverID}},
-			{`DELETE FROM node_observed_snapshots WHERE node_id=$1`, []any{node}},
-			{`DELETE FROM node_capabilities WHERE node_id=$1`, []any{node}},
-			{`DELETE FROM node_privd_attestation_keys WHERE node_id=$1`, []any{node}},
-			{`DELETE FROM nodes WHERE workspace_id=$1`, []any{workspace}},
-			{`DELETE FROM workspaces WHERE id=$1`, []any{workspace}},
-		} {
-			_, _ = pool.Exec(context.Background(), statement.query, statement.args...)
-		}
-	}()
-
-	trustedDigest := bytes.Repeat([]byte{0x43}, 32)
-	olderDigest := bytes.Repeat([]byte{0x44}, 32)
-	manifest := filepath.Join(t.TempDir(), "agent-releases.json")
-	manifestJSON := `{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"` + hex.EncodeToString(trustedDigest) + `"},{"version":"1.0.0","architecture":"amd64","package_sha256":"` + hex.EncodeToString(olderDigest) + `"}]}`
-	if err := os.WriteFile(manifest, []byte(manifestJSON), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	catalog, err := releasecatalog.Load(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := &Server{backend: postgres.WrapPool(pool), rbac: rbac.NewBackend(postgres.WrapPool(pool)), operations: apiOperationService(pool)}
-	server.EnableReleaseCatalog(catalog)
-	server.operations.EnableReleaseCatalog(catalog)
-
-	post := func(t *testing.T, principal auth.Principal, key, ifMatch, body string) *httptest.ResponseRecorder {
-		t.Helper()
-		request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/agent-upgrade", strings.NewReader(body))
-		request.SetPathValue("node_id", nodeID.String())
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Idempotency-Key", key)
-		if ifMatch != "" {
-			request.Header.Set("If-Match", ifMatch)
-		}
-		request.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
-		authorized, err := server.authorizeRoute(request, principal)
-		if err != nil {
-			t.Fatalf("authorize agent upgrade: %v", err)
-		}
-		request = request.WithContext(context.WithValue(authorized, requestIDKey{}, "request-"+key))
-		response := httptest.NewRecorder()
-		server.upgradeAgent(response, request)
-		return response
-	}
-	operator := auth.Principal{IdentityID: operatorID, SessionID: operatorSession, Subject: operatorID.String(), Issuer: "integration"}
-	viewer := auth.Principal{IdentityID: viewerID, SessionID: viewerSession, Subject: viewerID.String(), Issuer: "integration"}
-	validBody := func(target string, approval string) string {
-		return `{"target_version":"` + target + `","approval_id":"` + approval + `","reason":"roll out the maintained release"}`
-	}
-
-	// A viewer must never reach the handler.
-	viewerRequest := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/agent-upgrade", strings.NewReader(validBody("2.0.0", uuid.Must(uuid.NewV7()).String())))
-	viewerRequest.SetPathValue("node_id", nodeID.String())
-	viewerRequest.Header.Set("Content-Type", "application/json")
-	if _, err := server.authorizeRoute(viewerRequest, viewer); err == nil {
-		t.Fatal("viewer must not be authorized to upgrade an agent")
-	}
-
-	if response := post(t, operator, "upgrade-stale", `"revision-2"`, validBody("2.0.0", uuid.Must(uuid.NewV7()).String())); response.Code != http.StatusConflict {
-		t.Fatalf("stale revision status=%d body=%s", response.Code, response.Body.String())
-	}
-	if response := post(t, operator, "upgrade-untrusted", `"revision-1"`, validBody("3.0.0", uuid.Must(uuid.NewV7()).String())); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "release-not-trusted") {
-		t.Fatalf("untrusted release status=%d body=%s", response.Code, response.Body.String())
-	}
-	if response := post(t, operator, "upgrade-older", `"revision-1"`, validBody("1.0.0", uuid.Must(uuid.NewV7()).String())); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "approval-required") {
-		t.Fatalf("older release status=%d body=%s", response.Code, response.Body.String())
-	}
-	if response := post(t, operator, "upgrade-unapproved", `"revision-1"`, validBody("2.0.0", uuid.Must(uuid.NewV7()).String())); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "approval-required") {
-		t.Fatalf("unapproved release status=%d body=%s", response.Code, response.Body.String())
-	}
-
-	// The approval is created through the approval surface bound to exactly
-	// the server-resolved release identity.
-	approvalID := uuid.Must(uuid.NewV7())
-	approvalHash, approvalSummary := approvals.AgentUpgradeBinding(nodeID, "2.0.0", trustedDigest, "amd64")
-	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.upgrade','node',$4,'api integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)`, approvalID, workspaceID, operatorID, nodeID, approverID, approvalHash, approvalSummary); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3)`, approvalID, workspaceID, nodeID); err != nil {
-		t.Fatal(err)
-	}
-	response := post(t, operator, "upgrade-accepted", `"revision-1"`, validBody("2.0.0", approvalID.String()))
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("accepted upgrade status=%d body=%s", response.Code, response.Body.String())
-	}
-	var projectionState string
-	var projectionDigest []byte
-	if err := pool.QueryRow(ctx, `SELECT state,package_sha256 FROM agent_upgrade_operations WHERE node_id=$1`, nodeID).Scan(&projectionState, &projectionDigest); err != nil {
-		t.Fatal(err)
-	}
-	if projectionState != "queued" || !bytes.Equal(projectionDigest, trustedDigest) {
-		t.Fatalf("projection = %q/%x, want queued and the catalog-resolved digest", projectionState, projectionDigest)
-	}
-	if replay := post(t, operator, "upgrade-accepted", `"revision-1"`, validBody("2.0.0", approvalID.String())); replay.Code != http.StatusAccepted || replay.Header().Get("Idempotency-Replayed") != "true" {
-		t.Fatalf("replayed upgrade status=%d replayed=%q", replay.Code, replay.Header().Get("Idempotency-Replayed"))
-	}
-	// A second, independently approved request while the first is still
-	// scheduled must fail on the single-active-upgrade rule.
-	conflictApprovalID := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.upgrade','node',$4,'api integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)`, conflictApprovalID, workspaceID, operatorID, nodeID, approverID, approvalHash, approvalSummary); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3)`, conflictApprovalID, workspaceID, nodeID); err != nil {
-		t.Fatal(err)
-	}
-	if conflict := post(t, operator, "upgrade-conflict", `"revision-1"`, validBody("2.0.0", conflictApprovalID.String())); conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "upgrade-already-active") {
-		t.Fatalf("concurrent upgrade status=%d body=%s", conflict.Code, conflict.Body.String())
-	}
-}
-
 // TestAgentRolloutFleetLifecycleIntegration proves the durable canary and
 // batch advancement flow: server-side eligibility and exclusions, stable
-// ordering with exactly one canary, approval request binding, idempotent
-// creation, canary-first dispatch, no duplicate dispatch on repeated passes,
-// failure and unknown outcomes pausing the rollout, resume requeueing only
-// the non-succeeded nodes with a fresh upgrade attempt, and terminal
+// ordering with exactly one canary, single-admin workspace authorization,
+// idempotent creation, canary-first dispatch, no duplicate dispatch on repeated
+// passes, failure and unknown outcomes pausing the rollout, resume requeueing
+// only the non-succeeded nodes with a fresh upgrade attempt, and terminal
 // completion once every batch has succeeded.
 func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
@@ -215,36 +43,31 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	workspaceID, operatorID, approverID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	ownerPool := pool
+	if ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"); ownerURL != "" && ownerURL != databaseURL {
+		ownerPool, err = pgxpool.New(ctx, ownerURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ownerPool.Close()
+	}
+	workspaceID, operatorID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	operatorSession := uuid.Must(uuid.NewV7())
-	rolloutID := uuid.Must(uuid.NewV7())
-	otherWorkspaceID := uuid.Must(uuid.NewV7())
-	otherNodeID := uuid.Must(uuid.NewV7())
+	otherWorkspaceID, otherNodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeIDs := []uuid.UUID{uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())}
 	slices.SortFunc(nodeIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
 	canaryID, batchID, otherID := nodeIDs[0], nodeIDs[1], nodeIDs[2]
 	offlineNodeID, incapableNodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	operatorBinding, approverBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	// A node-scoped Viewer and a foreign-workspace Viewer must not list the
-	// workspace's rollouts.
-	nodeViewerID, foreignViewerID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	nodeViewerBinding, foreignViewerBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	// A node-scoped Operator may submit agent.upgrade requests but must not read
-	// a workspace rollout through an idempotent replay.
-	nodeOperatorID, nodeOperatorBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	unboundUserID, foreignViewerID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	allNodes := append([]uuid.UUID{offlineNodeID, incapableNodeID}, nodeIDs...)
 	fixtures := []struct {
 		query string
 		args  []any
 	}{
 		{"INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'rollout api',$2,now(),now()),($3,'rollout other',$4,now(),now())", []any{workspaceID, "rollout-api-" + workspaceID.String(), otherWorkspaceID, "rollout-other-" + otherWorkspaceID.String()}},
-		{"INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now())", []any{operatorID, operatorID.String(), approverID, approverID.String()}},
+		{"INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now()),($5,'integration',$6,now(),now())", []any{operatorID, operatorID.String(), unboundUserID, unboundUserID.String(), foreignViewerID, foreignViewerID.String()}},
 		{"INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())", []any{operatorSession, operatorID}},
-		{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Operator','workspace',NULL,$2,now())", []any{operatorBinding, operatorID, workspaceID}},
-		{"INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now())", []any{nodeViewerID, nodeViewerID.String(), foreignViewerID, foreignViewerID.String()}},
-		{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Viewer','workspace',NULL,$2,now())", []any{foreignViewerBinding, foreignViewerID, otherWorkspaceID}},
-		{"INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,now(),now())", []any{nodeOperatorID, nodeOperatorID.String()}},
-		{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')", []any{approverBinding, approverID, workspaceID}},
+		{"INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,now()),($3,$4,now())", []any{workspaceID, operatorID, otherWorkspaceID, foreignViewerID}},
 	}
 	for index, nodeID := range allNodes {
 		fixtures = append(fixtures,
@@ -287,22 +110,12 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			query string
 			args  []any
 		}{"INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'foreign-node','active',1,now(),now())", []any{otherNodeID, otherWorkspaceID}},
-		struct {
-			query string
-			args  []any
-		}{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Viewer','node',$4,$2,now())", []any{nodeViewerBinding, nodeViewerID, workspaceID, canaryID}},
-		struct {
-			query string
-			args  []any
-		}{"INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Operator','node',$4,$2,now())", []any{nodeOperatorBinding, nodeOperatorID, workspaceID, canaryID}},
 	)
 	for _, fixture := range fixtures {
 		if _, err := pool.Exec(ctx, fixture.query, fixture.args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Privileged upgrade operations additionally require an active privd
-	// attestation key on every dispatched node.
 	for _, nodeID := range []uuid.UUID{canaryID, batchID, otherID} {
 		if _, err := attestationtest.InstallKey(ctx, pool, nodeID); err != nil {
 			t.Fatal(err)
@@ -322,17 +135,16 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			{"DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id IN ($1,$2))", []any{workspace, workspaceOther}},
 			{"DELETE FROM commands WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
 			{"DELETE FROM operations WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
-			{"DELETE FROM approval_requests WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
-			{"DELETE FROM role_bindings WHERE id IN ($1,$2,$3,$4,$5)", []any{operatorBinding, nodeViewerBinding, foreignViewerBinding, nodeOperatorBinding, approverBinding}},
+			{"DELETE FROM workspace_admins WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
 			{"DELETE FROM auth_sessions WHERE id=$1", []any{operatorSession}},
-			{"DELETE FROM identities WHERE id IN ($1,$2,$3,$4,$5)", []any{operatorID, approverID, nodeViewerID, foreignViewerID, nodeOperatorID}},
+			{"DELETE FROM identities WHERE id IN ($1,$2,$3)", []any{operatorID, unboundUserID, foreignViewerID}},
 			{"DELETE FROM node_observed_snapshots WHERE node_id=ANY($3)", []any{nil, nil, allNodes}},
 			{"DELETE FROM node_capabilities WHERE node_id=ANY($3)", []any{nil, nil, allNodes}},
 			{"DELETE FROM node_privd_attestation_keys WHERE node_id=ANY($3)", []any{nil, nil, allNodes}},
 			{"DELETE FROM nodes WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
 			{"DELETE FROM workspaces WHERE id IN ($1,$2)", []any{workspace, workspaceOther}},
 		} {
-			_, _ = pool.Exec(context.Background(), statement.query, statement.args...)
+			_, _ = ownerPool.Exec(context.Background(), statement.query, statement.args...)
 		}
 	}()
 
@@ -346,7 +158,11 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{backend: postgres.WrapPool(pool), rbac: rbac.NewBackend(postgres.WrapPool(pool)), operations: apiOperationService(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{backend: postgres.WrapPool(pool), auth: authn, operations: apiOperationService(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	server.EnableReleaseCatalog(catalog)
 	server.operations.EnableReleaseCatalog(catalog)
 
@@ -379,45 +195,25 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		server.getAgentRollout(response, request)
 		return response
 	}
-	rolloutBody := func(batchSize int, approval string, ids ...uuid.UUID) string {
+	rolloutBody := func(batchSize int, ids ...uuid.UUID) string {
 		raw := make([]string, 0, len(ids))
 		for _, id := range ids {
 			raw = append(raw, `"`+id.String()+`"`)
 		}
-		return `{"target_version":"2.0.0","node_ids":[` + strings.Join(raw, ",") + `],"batch_size":` + strconv.Itoa(batchSize) + `,"reason":"fleet rollout integration","approval_id":"` + approval + `"}`
+		return `{"target_version":"2.0.0","node_ids":[` + strings.Join(raw, ",") + `],"batch_size":` + strconv.Itoa(batchSize) + `,"reason":"fleet rollout integration"}`
 	}
 
 	requested := append([]uuid.UUID{}, allNodes...)
 	slices.SortFunc(requested, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
 
-	// The approval is bound to the canonical sorted request: target version,
-	// sorted node set, batch size two, stop-on-failure.
-	requestHash, requestSummary := approvals.AgentRolloutBinding("2.0.0", requested, 2, true)
-	approvalID := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, "INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.rollout','batch_operation',$4,'fleet rollout integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)", approvalID, workspaceID, operatorID, rolloutID, approverID, requestHash, requestSummary); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, "INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) SELECT $1,$2,'node',unnest($3::uuid[])", approvalID, workspaceID, requested); err != nil {
-		t.Fatal(err)
-	}
-
-	// A foreign workspace node can never satisfy the approval binding: the
-	// request hash covers the exact approved node set, so the mismatch fails
-	// closed before any eligibility lookup.
-	if foreign := postRollout("rollout-foreign", rolloutBody(2, approvalID.String(), otherNodeID)); foreign.Code != http.StatusConflict {
+	if foreign := postRollout("rollout-foreign", rolloutBody(2, otherNodeID)); foreign.Code != http.StatusBadRequest {
 		t.Fatalf("foreign workspace node status=%d body=%s", foreign.Code, foreign.Body.String())
 	}
-	// Batch sizes are bounded.
-	if unbounded := postRollout("rollout-unbounded", rolloutBody(25, approvalID.String(), nodeIDs...)); unbounded.Code != http.StatusBadRequest {
+	if unbounded := postRollout("rollout-unbounded", rolloutBody(25, nodeIDs...)); unbounded.Code != http.StatusBadRequest {
 		t.Fatalf("oversized batch status=%d body=%s", unbounded.Code, unbounded.Body.String())
 	}
-	// A mismatched approval binding fails closed: a different node set hashes
-	// differently than the approved request.
-	if mismatch := postRollout("rollout-mismatch", rolloutBody(2, approvalID.String(), nodeIDs...)); mismatch.Code != http.StatusConflict {
-		t.Fatalf("mismatched approval status=%d body=%s", mismatch.Code, mismatch.Body.String())
-	}
 
-	createBody := rolloutBody(2, approvalID.String(), requested[4], requested[0], requested[2], requested[3], requested[1])
+	createBody := rolloutBody(2, requested[4], requested[0], requested[2], requested[3], requested[1])
 	response := postRollout("rollout-create-1", createBody)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("created rollout status=%d body=%s", response.Code, response.Body.String())
@@ -441,7 +237,8 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != rolloutID.String() || created.State != "queued" || created.CurrentBatch != 0 {
+	rolloutID := uuid.MustParse(created.ID)
+	if created.State != "queued" || created.CurrentBatch != 0 {
 		t.Fatalf("rollout header = %+v", created)
 	}
 	if len(created.Nodes) != 3 || len(created.Excluded) != 2 {
@@ -458,13 +255,6 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			t.Fatalf("batch 1 must hold the remaining nodes: %+v", node)
 		}
 	}
-	exclusionReasons := map[string]string{}
-	for _, exclusion := range created.Excluded {
-		exclusionReasons[exclusion.NodeID] = exclusion.Reason
-	}
-	if exclusionReasons[offlineNodeID.String()] != "offline" || exclusionReasons[incapableNodeID.String()] != "missing_capability" {
-		t.Fatalf("exclusion reasons = %+v", created.Excluded)
-	}
 	assertExclusions := func(label string, rollout rolloutResponse) {
 		t.Helper()
 		reasons := map[string]string{}
@@ -475,6 +265,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			t.Fatalf("%s rollout exclusions = %+v", label, rollout.Excluded)
 		}
 	}
+	assertExclusions("created", created)
 	replay := postRollout("rollout-create-1", createBody)
 	if replay.Code != http.StatusCreated || replay.Header().Get("Idempotency-Replayed") != "true" {
 		t.Fatalf("replayed rollout status=%d replayed=%q", replay.Code, replay.Header().Get("Idempotency-Replayed"))
@@ -506,29 +297,25 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		return response, nil
 	}
 	if listed, err := listRollouts(operator, ""); err != nil || listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), rolloutID.String()) {
-		t.Fatalf("workspace operator rollout list err=%v response=%+v", err, listed)
+		t.Fatalf("workspace admin rollout list err=%v response=%+v", err, listed)
 	}
-	nodeViewer := auth.Principal{IdentityID: nodeViewerID, Subject: nodeViewerID.String(), Issuer: "integration"}
-	if listed, err := listRollouts(nodeViewer, ""); err == nil && listed.Code != http.StatusForbidden {
-		t.Fatalf("node-scoped viewer listed workspace rollouts status=%d body=%s", listed.Code, listed.Body.String())
+	unboundUser := auth.Principal{IdentityID: unboundUserID, Subject: unboundUserID.String(), Issuer: "integration"}
+	if listed, err := listRollouts(unboundUser, ""); err == nil {
+		t.Fatalf("unbound identity listed workspace rollouts status=%d body=%s", listed.Code, listed.Body.String())
 	}
 	foreignViewer := auth.Principal{IdentityID: foreignViewerID, Subject: foreignViewerID.String(), Issuer: "integration"}
 	if listed, err := listRollouts(foreignViewer, workspaceID.String()); err == nil {
-		t.Fatalf("foreign workspace viewer listed rollouts status=%d body=%s", listed.Code, listed.Body.String())
+		t.Fatalf("foreign workspace admin listed rollouts status=%d body=%s", listed.Code, listed.Body.String())
 	}
 	var fetched rolloutResponse
 	if err := json.Unmarshal(got.Body.Bytes(), &fetched); err != nil {
 		t.Fatal(err)
 	}
 	assertExclusions("fetched", fetched)
-	if conflict := postRollout("rollout-create-1", rolloutBody(5, approvalID.String(), nodeIDs...)); conflict.Code != http.StatusConflict {
+	if conflict := postRollout("rollout-create-1", rolloutBody(5, nodeIDs...)); conflict.Code != http.StatusConflict {
 		t.Fatalf("idempotency conflict status=%d body=%s", conflict.Code, conflict.Body.String())
 	}
 
-	// Replay re-checks current Workspace-level operation.read: a node-scoped
-	// Operator passes route authorization for agent.upgrade yet must not read
-	// the stored rollout, and a creator whose binding was narrowed after the
-	// first request is refused as well.
 	replayRequest := func(actor auth.Principal) *http.Request {
 		t.Helper()
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/agent-rollouts", strings.NewReader(createBody))
@@ -540,25 +327,19 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		}
 		return request.WithContext(authorized)
 	}
-	assertReplayDenied := func(label string, request *http.Request) {
-		t.Helper()
-		response := httptest.NewRecorder()
-		server.createAgentRollout(response, request)
-		if response.Code != http.StatusForbidden || response.Header().Get("Location") != "" || response.Header().Get("Idempotency-Replayed") != "" || strings.Contains(response.Body.String(), rolloutID.String()) {
-			t.Fatalf("%s replay status=%d headers=%v body=%s", label, response.Code, response.Header(), response.Body.String())
-		}
-	}
-	nodeOperator := auth.Principal{IdentityID: nodeOperatorID, SessionID: operatorSession, Subject: nodeOperatorID.String(), Issuer: "integration"}
-	nodeOperatorReplay := replayRequest(nodeOperator)
-	assertReplayDenied("node-scoped operator", nodeOperatorReplay)
-	narrowedReplay := replayRequest(operator)
-	if _, err := pool.Exec(ctx, "DELETE FROM role_bindings WHERE id=$1", operatorBinding); err != nil {
+	revokedReplay := replayRequest(operator)
+	if _, err := ownerPool.Exec(ctx, "DELETE FROM workspace_admins WHERE workspace_id=$1 AND identity_id=$2", workspaceID, operatorID); err != nil {
 		t.Fatal(err)
 	}
-	assertReplayDenied("narrowed creator", narrowedReplay)
-	if _, err := pool.Exec(ctx, "INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'Operator','workspace',NULL,$2,now())", operatorBinding, operatorID, workspaceID); err != nil {
+	revokedResp := httptest.NewRecorder()
+	server.createAgentRollout(revokedResp, revokedReplay)
+	if revokedResp.Code != http.StatusForbidden || revokedResp.Header().Get("Location") != "" || revokedResp.Header().Get("Idempotency-Replayed") != "" || strings.Contains(revokedResp.Body.String(), rolloutID.String()) {
+		t.Fatalf("revoked admin replay status=%d headers=%v body=%s", revokedResp.Code, revokedResp.Header(), revokedResp.Body.String())
+	}
+	if _, err := pool.Exec(ctx, "INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,now())", workspaceID, operatorID); err != nil {
 		t.Fatal(err)
 	}
+
 	advance := func() error {
 		return server.operations.AdvanceAgentRollouts(ctx)
 	}
@@ -575,14 +356,12 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		}
 	}
 
-	// First advance: the queued rollout starts and dispatches the canary only.
 	if err := advance(); err != nil {
 		t.Fatal(err)
 	}
 	if countNodeUpgrades(canaryID) != 1 || countNodeUpgrades(batchID) != 0 || countNodeUpgrades(otherID) != 0 {
 		t.Fatalf("canary dispatch must be exactly one node upgrade")
 	}
-	// Repeated passes are idempotent: no duplicate upgrade operation.
 	if err := advance(); err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +369,6 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatalf("repeated advance duplicated the canary upgrade")
 	}
 
-	// Unknown outcome pauses the rollout.
 	setState(canaryID, "unknown")
 	if err := advance(); err != nil {
 		t.Fatal(err)
@@ -603,8 +381,6 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatalf("unknown outcome must pause: state=%s pause=%s", rolloutState, pauseCode)
 	}
 
-	// Resume requeues the unknown node with a fresh attempt; the next pass
-	// dispatches attempt two instead of replaying the old operation.
 	resume := func(id uuid.UUID, key string) *httptest.ResponseRecorder {
 		t.Helper()
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/agent-rollouts/"+id.String()+"/resume", strings.NewReader("{}"))
@@ -630,7 +406,6 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatalf("resume must dispatch a fresh upgrade attempt, got %d operations", countNodeUpgrades(canaryID))
 	}
 
-	// Canary succeeds; batch one starts and both nodes are dispatched.
 	setState(canaryID, "succeeded")
 	if err := advance(); err != nil {
 		t.Fatal(err)
@@ -639,7 +414,6 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatalf("batch one must dispatch after canary success")
 	}
 
-	// One failure pauses; succeeded nodes are never redispatched on resume.
 	setState(batchID, "failed")
 	if err := advance(); err != nil {
 		t.Fatal(err)
@@ -660,7 +434,6 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatalf("resume must requeue only the failed node: batch=%d other=%d", countNodeUpgrades(batchID), countNodeUpgrades(otherID))
 	}
 
-	// The final success completes the rollout.
 	setState(batchID, "succeeded")
 	setState(otherID, "succeeded")
 	if err := advance(); err != nil {
@@ -673,29 +446,33 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatalf("completed rollout state=%s, want succeeded", rolloutState)
 	}
 
-	createApprovedRollout := func(id uuid.UUID, key string, batchSize int) uuid.UUID {
+	createRollout := func(key string, batchSize int) uuid.UUID {
 		t.Helper()
-		hash, summary := approvals.AgentRolloutBinding("2.0.0", nodeIDs, batchSize, true)
-		approvalID := uuid.Must(uuid.NewV7())
-		if _, err := pool.Exec(ctx, "INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.rollout','batch_operation',$4,'fleet rollout integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)", approvalID, workspaceID, operatorID, id, approverID, hash, summary); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, "INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) SELECT $1,$2,'node',unnest($3::uuid[])", approvalID, workspaceID, nodeIDs); err != nil {
-			t.Fatal(err)
-		}
-		response := postRollout(key, rolloutBody(batchSize, approvalID.String(), nodeIDs...))
+		response := postRollout(key, rolloutBody(batchSize, nodeIDs...))
 		if response.Code != http.StatusCreated {
-			t.Fatalf("create rollout %s status=%d body=%s", id, response.Code, response.Body.String())
+			t.Fatalf("create rollout %s status=%d body=%s", key, response.Code, response.Body.String())
 		}
-		return approvalID
+		var body struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return uuid.MustParse(body.ID)
 	}
-	countRolloutNodeUpgrades := func(approvalID, nodeID uuid.UUID) int {
+	countRolloutNodeUpgrades := func(rID, nID uuid.UUID) int {
 		t.Helper()
 		var count int
-		if err := pool.QueryRow(ctx, "SELECT count(*) FROM agent_upgrade_operations WHERE approval_id=$1 AND node_id=$2", approvalID, nodeID).Scan(&count); err != nil {
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM agent_upgrade_operations u JOIN operations o ON o.id=u.operation_id WHERE o.request_id=$1", "agent-rollout:"+rID.String()+":"+nID.String()).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		return count
+	}
+	completeRolloutUpgrades := func(rID uuid.UUID, filter string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, "UPDATE agent_upgrade_operations u SET state='succeeded',completed_at=now() FROM operations o WHERE o.id=u.operation_id AND o.request_id LIKE $1 AND u.completed_at IS NULL", filter); err != nil {
+			t.Fatal(err)
+		}
 	}
 	assertPausedSkip := func(id, nodeID uuid.UUID, wantBatch int, reason string) {
 		t.Helper()
@@ -712,10 +489,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		}
 	}
 
-	// A canary that becomes ineligible after creation pauses batch zero. No
-	// later batch operation may be created without an operator resume.
-	canarySkipRolloutID := uuid.Must(uuid.NewV7())
-	canarySkipApprovalID := createApprovedRollout(canarySkipRolloutID, "rollout-canary-skip", 2)
+	canarySkipRolloutID := createRollout("rollout-canary-skip", 2)
 	if _, err := pool.Exec(ctx, "UPDATE nodes SET status='offline' WHERE id=$1", canaryID); err != nil {
 		t.Fatal(err)
 	}
@@ -723,7 +497,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPausedSkip(canarySkipRolloutID, canaryID, 0, "offline")
-	if countRolloutNodeUpgrades(canarySkipApprovalID, canaryID)+countRolloutNodeUpgrades(canarySkipApprovalID, batchID)+countRolloutNodeUpgrades(canarySkipApprovalID, otherID) != 0 {
+	if countRolloutNodeUpgrades(canarySkipRolloutID, canaryID)+countRolloutNodeUpgrades(canarySkipRolloutID, batchID)+countRolloutNodeUpgrades(canarySkipRolloutID, otherID) != 0 {
 		t.Fatal("an ineligible canary must not dispatch any rollout operation")
 	}
 	if _, err := pool.Exec(ctx, "UPDATE nodes SET status='active' WHERE id=$1", canaryID); err != nil {
@@ -735,38 +509,29 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if err := advance(); err != nil {
 		t.Fatal(err)
 	}
-	if countRolloutNodeUpgrades(canarySkipApprovalID, canaryID) != 1 || countRolloutNodeUpgrades(canarySkipApprovalID, batchID) != 0 || countRolloutNodeUpgrades(canarySkipApprovalID, otherID) != 0 {
+	if countRolloutNodeUpgrades(canarySkipRolloutID, canaryID) != 1 || countRolloutNodeUpgrades(canarySkipRolloutID, batchID) != 0 || countRolloutNodeUpgrades(canarySkipRolloutID, otherID) != 0 {
 		t.Fatal("resuming a skipped canary must retry the canary before ordinary batches")
 	}
-	if _, err := pool.Exec(ctx, "UPDATE agent_upgrade_operations SET state='succeeded',completed_at=now() WHERE approval_id=$1 AND completed_at IS NULL", canarySkipApprovalID); err != nil {
-		t.Fatal(err)
-	}
+	completeRolloutUpgrades(canarySkipRolloutID, "agent-rollout:"+canarySkipRolloutID.String()+":%")
 	if err := advance(); err != nil {
 		t.Fatal(err)
 	}
-	if countRolloutNodeUpgrades(canarySkipApprovalID, batchID) != 1 || countRolloutNodeUpgrades(canarySkipApprovalID, otherID) != 1 {
+	if countRolloutNodeUpgrades(canarySkipRolloutID, batchID) != 1 || countRolloutNodeUpgrades(canarySkipRolloutID, otherID) != 1 {
 		t.Fatal("ordinary batches may start only after the retried canary succeeds")
 	}
-	if _, err := pool.Exec(ctx, "UPDATE agent_upgrade_operations SET state='succeeded',completed_at=now() WHERE approval_id=$1 AND completed_at IS NULL", canarySkipApprovalID); err != nil {
-		t.Fatal(err)
-	}
+	completeRolloutUpgrades(canarySkipRolloutID, "agent-rollout:"+canarySkipRolloutID.String()+":%")
 	if err := advance(); err != nil {
 		t.Fatal(err)
 	}
 
-	// If an ordinary-batch node loses eligibility while the canary runs, its
-	// batch remains current and the following batch is not dispatched.
-	batchSkipRolloutID := uuid.Must(uuid.NewV7())
-	batchSkipApprovalID := createApprovedRollout(batchSkipRolloutID, "rollout-batch-skip", 1)
+	batchSkipRolloutID := createRollout("rollout-batch-skip", 1)
 	if err := advance(); err != nil {
 		t.Fatal(err)
 	}
-	if countRolloutNodeUpgrades(batchSkipApprovalID, canaryID) != 1 {
+	if countRolloutNodeUpgrades(batchSkipRolloutID, canaryID) != 1 {
 		t.Fatal("batch-skip rollout must dispatch its canary first")
 	}
-	if _, err := pool.Exec(ctx, "UPDATE agent_upgrade_operations SET state='succeeded',completed_at=now() WHERE approval_id=$1 AND node_id=$2 AND completed_at IS NULL", batchSkipApprovalID, canaryID); err != nil {
-		t.Fatal(err)
-	}
+	completeRolloutUpgrades(batchSkipRolloutID, "agent-rollout:"+batchSkipRolloutID.String()+":"+canaryID.String())
 	if _, err := pool.Exec(ctx, "UPDATE nodes SET status='offline' WHERE id=$1", batchID); err != nil {
 		t.Fatal(err)
 	}
@@ -774,7 +539,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPausedSkip(batchSkipRolloutID, batchID, 1, "offline")
-	if countRolloutNodeUpgrades(batchSkipApprovalID, batchID) != 0 || countRolloutNodeUpgrades(batchSkipApprovalID, otherID) != 0 {
+	if countRolloutNodeUpgrades(batchSkipRolloutID, batchID) != 0 || countRolloutNodeUpgrades(batchSkipRolloutID, otherID) != 0 {
 		t.Fatal("an ineligible ordinary-batch node must hold it and every later batch")
 	}
 }

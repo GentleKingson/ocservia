@@ -17,13 +17,11 @@ import {
   UserGroupResourceStateToJSON,
   UserPolicyFromJSON,
   UserPolicyToJSON,
-  UserBatchFromJSON,
-  UserBatchToJSON,
 } from "@ocservia/api-client";
 import { formatTimestamp } from "../src/shared/timestamp";
 
 describe("telemetry timestamps", () => {
-  it("retains policy and batch clocks without finite Date coercion", () => {
+  it("retains policy clocks without finite Date coercion", () => {
     const policy = UserPolicyFromJSON({
       expires_at: "infinity",
       period_start: "1970-01-01T00:00:00Z",
@@ -33,15 +31,6 @@ describe("telemetry timestamps", () => {
       expires_at: "infinity",
       period_start: "1970-01-01T00:00:00Z",
       observed_at: "+294276-12-31T23:59:59.999999Z",
-    });
-    const batch = UserBatchFromJSON({
-      items: [],
-      created_at: "-infinity",
-      updated_at: "infinity",
-    });
-    expect(UserBatchToJSON(batch)).toMatchObject({
-      created_at: "-infinity",
-      updated_at: "infinity",
     });
   });
   it("retains resource array dimensions, NULL members and observation time", () => {

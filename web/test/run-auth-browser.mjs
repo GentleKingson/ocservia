@@ -38,17 +38,10 @@ if (gateway) extraSpecs.push("csp-control.spec.ts");
 // These existing browser regressions are not selected by `vitest run test`.
 const required = new Set([
   "local-only login restores return path and initializes the shell without storing passwords",
-  "combined login shows generic credential and rate-limit errors, and SSO uses GET",
-  "OIDC-only redirects without a click",
-  "unavailable methods fail closed and can be retried",
-  "OIDC return followed by 401 stops automatic login and permits manual retry",
-  "fixed failure marker prevents auto SSO without accepting external returnTo",
-  "callback rejection is terminal and revisiting login offers manual retry",
-  "fresh OIDC login returns to the requested console route",
-  "switching workspace clears fleet state and reconnects its stream",
-  "an expired SSE session starts OIDC login and restores the console",
-  "a late response from the previous workspace cannot overwrite the current view",
-  "rapid workspace changes leave only the final workspace stream active",
+  "local login shows generic credential and rate-limit errors",
+  "signed-out visits never render the console shell before login",
+  "local login returns to the requested console route and opens the workspace stream",
+  "an expired SSE session redirects to local login and restores the console",
 ]);
 if (gateway)
   required.add("gateway CSP blocks violations observably in the page");

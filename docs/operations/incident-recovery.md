@@ -23,18 +23,11 @@ migrations.
 
 ## Authentication outage
 
-Incident handling depends on the configured [authentication mode](authentication.md#choose-a-mode):
+Deployments use Local single-admin authentication (`OCSERV_LOCAL_AUTH_ENABLED=true`) without external OIDC identity providers:
 
-- Local-only deployments run without OIDC configuration, client secrets, or an external IdP.
-- Local + OIDC deployments can continue signing in with Local accounts that were already enabled and initialized before the outage. Those logins still go through the full password, account-state, session, and authorization checks; Local login does not act as a verification bypass or an automatic fallback for failed OIDC requests.
-- OIDC-only deployments must never fall back to Local login during an outage, nor may they skip issuer, signature, or callback checks.
-
-When an IdP is unreachable or failing validation, reject any new SSO login that
-cannot complete full verification. Already established sessions continue under
-their normal expiration, revocation, and account-state rules; do not extend
-session lifetimes to mask the outage. Before closing an OIDC incident, restore
-connectivity to the issuer and confirm that discovery, signing-key refresh, and
-login callbacks succeed.
+- Keep Local account, rate-limit, session, and workspace checks enabled across all incidents; never disable password verification or bypass session checks.
+- Established sessions continue under their normal expiration, revocation, and account-state rules; do not extend session lifetimes during an outage.
+- If the sole workspace Admin has lost access, follow [Lost Local administration authority](#lost-local-administration-authority) rather than inserting unverified sessions or resetting initialization markers.
 
 ## Revocation committed with synchronization pending
 
@@ -54,7 +47,7 @@ Treat these as separate states:
 | Connection owner | The owner lease/epoch authorizes mutations. Offline status or a missing connection/fence is a current snapshot, not proof of a previous close. |
 | Queue convergence | `update_applied`, `close_required` and `close_applied` record progress under the existing RPC contracts. In particular, CloseNode `NOT_FOUND` satisfies current absence, not historical execution. |
 
-1. Preserve the original Request ID, approval ID, node ID, EndpointID, reason,
+1. Preserve the original Request ID, node ID, EndpointID, reason,
    authorization revision, response and Controller/transportd errors. Use
    `GET /api/v1/nodes/{node_id}` with the original authorized workspace to check
    `trust_status` and `connection_state`; an offline result alone is insufficient.
@@ -120,54 +113,6 @@ the digest. The session rules are in
 replacement secret and configure its digest as described in
 [Break-glass and deployment checks](authentication.md#break-glass-and-deployment-checks),
 and record who holds custody.
-
-## OIDC issuer correction
-
-Before editing OIDC settings, confirm the provider's authoritative issuer string
-and inspect existing records in `identities`. Failed Discovery or token
-validation never creates an identity row, so there is nothing to migrate from
-failed login attempts alone. Each identity is keyed by `(issuer, subject)`,
-so changing the issuer string alters that unique key. An issuer with a trailing
-slash and one without it represent distinct accounts that the application never
-merges or migrates during login.
-
-When an existing deployment requires a separately approved issuer migration:
-
-1. Open a maintenance window and stop login and session writes on the affected
-   deployment. Record the change ticket, operator, exact old and new
-   issuer strings, and the explicit list of identity IDs and subjects in scope.
-   Gather independent IdP evidence proving that each subject still belongs to
-   the same person; a matching email address or display name is not sufficient
-   proof of subject ownership.
-2. Take a restorable database backup and export the targeted `identities` rows,
-   `role_bindings` (including workspace and resource scopes), active sessions,
-   and any other tables referencing those identity IDs. Store the prior
-   configuration and the before-and-after identity manifest in the restricted
-   change record, omitting raw tokens and client secrets.
-3. Query `identities` across both exact issuer strings, including disabled
-   accounts, to check for target-key collisions on any approved subject, and
-   review `role_bindings` by identity ID with the security owner. If a target
-   `(issuer, subject)` pair already exists, halt the migration; a collision
-   never authorizes merging accounts, deleting the target row, or moving roles.
-4. Rehearse the change on an isolated database restore first. During execution,
-   open an explicit transaction, lock `identities` against concurrent writes,
-   re-run the collision and ownership checks, and update only the approved IDs
-   whose current issuer and subject still match the manifest. Assert that the
-   affected row count equals the approved manifest count, and roll back on any
-   mismatch. Leave identity IDs, subjects, disabled flags, and role bindings
-   unchanged. Revoke active sessions for the migrated users so they must sign in
-   again. Log the committed before-and-after mapping through the operational
-   audit process without altering historical audit rows. Roll out the new issuer
-   setting through normal change control.
-5. Before reopening login traffic, confirm fresh Discovery and token validation,
-   unchanged role ownership, and the absence of duplicate identities. If a
-   rollback is required, stop writes again, check the manifest for old-key
-   conflicts, and transactionally restore only the mapped issuer values and
-   prior configuration. Revoke any sessions created during the migration window
-   without reactivating previously revoked sessions. If identities or role
-   bindings were modified after the cutover, stop for manual review instead of
-   overwriting the newer records, and attach all rollback evidence to the
-   original change ticket.
 
 ## Signer unavailable
 
@@ -316,7 +261,7 @@ second live replica.
 After backup/restore or CRL maintenance, run
 `deploy/production/controller.sh start` with the unchanged
 configuration and current exact source. Check readiness/version, real login,
-node reconnect and a newly approved operation. Missing/incompatible ledger or
+node reconnect and a newly authorized operation. Missing/incompatible ledger or
 lower revision must fail closed.
 
 ### Sealing key bindings
@@ -346,18 +291,15 @@ operator responsibilities.
 
 ## Transport and credentials
 
-Production deployments support only a single dedicated Relay and reject any
-nonempty `RELAY_URL_B` or `OCSERV_RELAY_URL_B`, so no standby Relay exists for
-failover. Recovering from a Relay outage requires bringing that same Relay back
-online at its original address with the existing TLS certificate and
-credentials, then confirming fresh Agent heartbeats and reconciled command
-outcomes. Nodes that depend on the Relay remain unreachable for management
-until the original path returns. Do not point production traffic at public
-relays, reset node identities, or re-enroll nodes to work around a Relay outage.
-During testing, direct peer connectivity can mask a broken Relay path. Upgrading
-an older A/B deployment requires the operator to switch the configuration to a
-single Relay explicitly, after which installer reruns preserve existing node
-identity and trust state.
+Production deployments support only a single dedicated Relay without a secondary
+standby failover Relay. Recovering from a Relay outage requires bringing that
+same Relay back online at its original address with the existing TLS
+certificate and credentials, then confirming fresh Agent heartbeats and
+reconciled command outcomes. Nodes that depend on the Relay remain unreachable
+for management until the original path returns. Do not point production traffic
+at public relays, reset node identities, or re-enroll nodes to work around a
+Relay outage. During testing, direct peer connectivity can mask a broken Relay
+path. Installer reruns preserve existing node identity and trust state.
 
 To recover a lost Controller endpoint key, restore the encrypted offline backup
 to `controller-iroh.key` inside `OCSERV_SECRET_DIR` with owner `65532:65532` and
@@ -475,8 +417,7 @@ release tag, source SHA, migration state, backup identifier, and audit
 checkpoint.
 
 Before rolling back the Controller binary, stop new API writes first and keep the
-audit, identity, session, approval, and alert tables intact. Deploy the older
-binary only after active OIDC sessions have been revoked or allowed to expire.
+audit, identity, session, workspace-admin, and alert tables intact.
 Retain all database records. The limits on rolling back across a schema change
 are in [Database and recovery matrix](../reference/stable-contracts.md#database-and-recovery-matrix).
 
@@ -650,66 +591,35 @@ evidence and initialization markers intact.
 ### Security state reconciliation before cutover
 
 Any restore from a backup rolls back security changes committed after the
-snapshot: revoked sessions, disabled identities, and removed role bindings come
-back, so a stolen session cookie that has not yet expired is accepted again.
-Before reopening user traffic or command dispatch on any restored database:
+snapshot: revoked sessions, disabled identities, password rotations, and node or
+attestation-key revocations come back, so a stolen session cookie that has not yet
+expired is accepted again. Before reopening user traffic or command dispatch on
+any restored database:
 
 1. On the isolated target, through the protected administrative database
    connection, revoke every unrevoked session with the statement shown in
    [Lost Local administration authority](#lost-local-administration-authority).
    Keep the rows and their audit links.
-2. Reapply every identity disable, workspace or resource role removal, and
-   security-relevant credential rotation made after the snapshot, using change
-   records, audit evidence and IdP state from outside the restored database, and
-   following [Revoking an OIDC identity or role](authentication.md#revoking-an-oidc-identity-or-role).
-   Revoking sessions does not replace this step: a principal that can still
-   sign in at the IdP regains every role binding the snapshot holds. Keep at
-   least one working administrator.
-3. When restoring a release that still executes historical approval workflows,
-   invalidate every restored `pending` or `approved` approval before allowing
-   requests or dispatch. A consumed approval can return as approved in the
-   snapshot; consuming it again can create a new command ID, so node receipt
-   deduplication does not replace this step. Through the protected administrative
-   connection, shorten its expiry using the statement below.
-   Preserve status, approver, consumption and audit evidence: changing an approved
-   row to `expired` without removing its approver violates the schema, and removing
-   the approver would discard evidence. Record the affected IDs and original
-   expiries in the incident record before updating them.
-
-   Run the whole block in one PostgreSQL connection:
-
-   ```sql
-   BEGIN;
-   UPDATE approval_requests SET expires_at = now()
-   WHERE status IN ('pending', 'approved')
-     AND created_at < now() AND expires_at > now();
-   SELECT count(*) AS approvals_still_live FROM approval_requests
-   WHERE status IN ('pending', 'approved') AND expires_at > now();
-   COMMIT;
-   ```
-
-   `approvals_still_live` must be zero. Rows created at or after the cutoff remain
-   untouched to preserve `expires_at > created_at`; keep traffic blocked and
-   reconcile the database clock and snapshot history if any remain. Fresh work
-   requires a new authenticated Admin request after recovery. Expiring an
-   approval does not undo an already-dispatched command: reconcile its result
-   separately and never replay an Unknown write.
-4. Reapply post-snapshot node and `privd` attestation-key revocations from
-   independent evidence, using the normal node-revocation and key-revocation
-   workflows on the isolated Controller. Reconcile node authorization revisions,
-   endpoint-key state and pending trust convergence, and verify that `transportd`
-   has received the revoked trust state before reconnecting nodes. Updating only
+2. Reapply every identity disable and workspace-admin change or password rotation
+   made after the snapshot using change records and audit evidence outside the
+   restored database, keeping the bootstrapped administrator intact.
+3. Reapply post-snapshot node and `privd` attestation-key revocations from
+   independent evidence, using the normal node-revocation workflows on the
+   isolated Controller. Reconcile node authorization revisions, endpoint-key
+   state and pending trust convergence, and verify that `transportd` has
+   received the revoked trust state before reconnecting nodes. Updating only
    `nodes.status` is insufficient. Keep affected nodes and receipt processing
    isolated when the revocation history cannot be established.
-5. Reconcile `local_auth_bootstrap` completion, administrator
-   identities, and `break_glass_uses` consumption and `rotation_required` markers
-   against records outside the snapshot. Preserve initialization and consumption
-   evidence; do not delete markers or reopen bootstrap to regain access. Rotate
-   any Break-glass credential consumed after the snapshot, or whose usage cannot
-   be established, in the external protected configuration before cutover. Follow
+4. Reconcile `local_auth_bootstrap` completion, administrator `identities`,
+   `workspace_admins`, `local_credentials`, and `break_glass_uses` consumption
+   and `rotation_required` markers against records outside the snapshot.
+   Preserve initialization and consumption evidence; do not delete markers or
+   reopen bootstrap to regain access. Rotate any Break-glass credential
+   consumed after the snapshot, or whose usage cannot be established, in the
+   external protected configuration before cutover. Follow
    [Lost Local administration authority](#lost-local-administration-authority)
    for recovery and keep Local/Break-glass access closed until reconciled.
-6. Keep the current Signer ledger; never roll it back to match an older
+5. Keep the current Signer ledger; never roll it back to match an older
    Controller database. If the ledger itself must be restored, follow the
    [Signer backup and restore](#signer-backup-and-restore)
    procedure with an independently reconciled `--minimum-revision`, and
@@ -717,31 +627,12 @@ Before reopening user traffic or command dispatch on any restored database:
    snapshot. When the evidence for any of these changes is incomplete, keep the
    affected function closed and reconcile manually; never derive a high-water
    mark from the same old snapshot.
-7. Keep node fence floors, effect receipts and execution history; never lower
+6. Keep node fence floors, effect receipts and execution history; never lower
    a floor or clear a ledger to let the restored Controller connect.
-8. Record the snapshot, the reconciliation cut-off, the changes reapplied and
+7. Record the snapshot, the reconciliation cut-off, the changes reapplied and
    the operator in the incident record.
 
 Never guess the result of an Unknown remote write. Retain logs and scoped
 diagnostics, rotate any credentials that may have been exposed, and coordinate
-with the external OIDC, PKI/HSM, relay, or telemetry operators whenever a failure
+with the external PKI/HSM, relay, or telemetry operators whenever a failure
 crosses an external trust boundary.
-
-## Rebind and retention limits
-
-The steps for moving a node to another Controller are in
-[Rebind to another Controller](agent-lifecycle.md#rebind-to-another-controller),
-and the retention settings are in
-[Independent local retention](agent-lifecycle.md#independent-local-retention).
-The invariants are in [Controller rebind](../reference/stable-contracts.md#controller-rebind).
-
-Rebinding is not a database recovery path: restore a lost Controller database
-with the [database procedure](#database-recovery). Recovery never resets node
-identity, the Agent journal, the root effect store, or keys to make a rebind or
-restore succeed.
-
-When `commit` publishes the new binding with privileged mutations quarantined,
-reconcile the underlying records through
-[Unknown command reconciliation](#unknown-command-reconciliation). The
-quarantine limits are in
-[Resume and inspect](agent-lifecycle.md#resume-and-inspect).

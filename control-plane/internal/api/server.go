@@ -10,9 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/configplanhttp"
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/nodehttp"
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/useroperationshttp"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
@@ -23,8 +20,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
-	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
@@ -59,7 +54,7 @@ type Server struct {
 	enrollment          *enrollment.Service
 	transport           *transportclient.Client
 	fences              ownersession.FencedExecutor
-	nodeHTTP            *nodehttp.Handler
+	nodes               NodeReader
 	registeredMethods   []routeMethodRule
 	releaseCatalog      *releasecatalog.Catalog
 	auth                *auth.Service
@@ -68,14 +63,11 @@ type Server struct {
 	localLoginBudget    *authAdmission
 	privdRegisterBudget *authAdmission
 	authLogs            authLogState
-	rbac                *rbac.Service
 	audit               *audit.Manager
 	userstate           *userstate.Service
-	userOpsHTTP         *useroperationshttp.Handler
-	configPlanHTTP      *configplanhttp.Handler
-	configPlanLookup    configPlanLookup
+	userOperations      UserOperations
+	configPlans         ConfigPlans
 	certificates        *certificates.Service
-	privdAttestation    *privdattestation.Service
 	eventStreamsMu      sync.Mutex
 	eventConfig         eventstream.Config
 	eventAdmission      *eventstream.Manager
@@ -99,24 +91,16 @@ type HTTPConfig struct {
 	EventStreams       eventstream.Config
 }
 
-// ConfigPlans supplies both views from one instance, never independent inputs.
-type ConfigPlans interface {
-	configplanhttp.Plans
-	configPlanLookup
-}
-
-// Modules is construction input only. Handlers retain their narrow capabilities.
-// Nil capabilities explicitly disable the optional feature, not its routes.
+// Modules is construction input only. Nil capabilities disable the optional feature, not its routes.
 type Modules struct {
-	Nodes          nodehttp.Reader
+	Nodes          NodeReader
 	ConfigPlans    ConfigPlans
-	UserOperations useroperationshttp.Operations
+	UserOperations UserOperations
 	Certificates   *certificates.Service
 }
 
 type Authorization struct {
 	Authentication *auth.Service
-	RBAC           *rbac.Service
 	Audit          *audit.Manager
 }
 
@@ -126,8 +110,6 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	if err := config.EventStreams.Validate(); err != nil {
 		return nil, fmt.Errorf("configure SSE admission: %w", err)
 	}
-	// Normalize the known concrete service-to-interface boundaries. Do not turn
-	// arbitrary missing dependencies into replacements or successful no-ops.
 	if service, ok := modules.Nodes.(*telemetry.Service); ok && service == nil {
 		modules.Nodes = nil
 	}
@@ -137,20 +119,18 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	if service, ok := modules.UserOperations.(*useroperations.Service); ok && service == nil {
 		modules.UserOperations = nil
 	}
-	s := &Server{backend: backend, build: build, logger: logger, bodyLimit: config.BodyLimit, requestTimeout: config.RequestTimeout, devAuth: config.DevAuth, devAuthToken: config.DevAuthToken,
-		auth: authorization.Authentication, rbac: authorization.RBAC, audit: authorization.Audit, certificates: modules.Certificates, configPlanLookup: modules.ConfigPlans}
+	s := &Server{
+		backend: backend, build: build, logger: logger, bodyLimit: config.BodyLimit,
+		requestTimeout: config.RequestTimeout, devAuth: config.DevAuth, devAuthToken: config.DevAuthToken,
+		auth: authorization.Authentication, audit: authorization.Audit,
+		nodes: modules.Nodes, configPlans: modules.ConfigPlans,
+		userOperations: modules.UserOperations, certificates: modules.Certificates,
+	}
 	s.EnableBrowserOrigin(config.BrowserOrigin)
 	s.ConfigureAuthProxies(config.AuthTrustedProxies)
 	s.breakGlassBudget = newAuthAdmission(5, 0, 4)
 	s.localLoginBudget = newAuthAdmission(5, 120, 4)
 	s.privdRegisterBudget = newAuthAdmission(30, 120, 4)
-	var authorizer useroperationshttp.Authorizer
-	if authorization.RBAC != nil {
-		authorizer = authorization.RBAC
-	}
-	s.nodeHTTP = nodehttp.New(modules.Nodes, logger, workspace, s.nodeActionAllowed)
-	s.configPlanHTTP = configplanhttp.New(modules.ConfigPlans, configPlanRequestInfo, s.allowConfigPlanSecret)
-	s.userOpsHTTP = useroperationshttp.New(modules.UserOperations, authorizer, userOperationsRequestInfo, logger)
 	if err := s.initEventStreams(config.EventStreams); err != nil {
 		return nil, fmt.Errorf("configure SSE admission: %w", err)
 	}
@@ -162,14 +142,12 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	return s, nil
 }
 
-var _ nodehttp.Reader = (*telemetry.Service)(nil)
-
 // NewBackend is a default-only compatibility constructor. Optional modules and
 // authentication are explicitly disabled, not waiting for later injection.
 func NewBackend(address string, backend database.Backend, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string) *Server {
 	s, err := NewServer(HTTPConfig{Address: address, BodyLimit: bodyLimit, RequestTimeout: requestTimeout, DevAuth: devAuth, DevAuthToken: devAuthToken, EventStreams: eventstream.DefaultConfig()}, backend, build, logger, Modules{}, Authorization{})
 	if err != nil {
-		panic(err) // Only the package's valid default configuration is used here.
+		panic(err)
 	}
 	return s
 }
@@ -202,18 +180,13 @@ func (s *Server) EnableReleaseCatalog(catalog *releasecatalog.Catalog) {
 
 func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = service }
 
-func (s *Server) EnablePrivdAttestation(service *privdattestation.Service) {
-	s.privdAttestation = service
-}
-
 func (s *Server) EnableEnrollment(service *enrollment.Service, transport *transportclient.Client) {
 	s.enrollment = service
 	s.transport = transport
 }
 
 // EnableOwnerFencing runs administrative trust updates and connection closes
-// issued by API handlers inside the connection owner's fencing interval, so
-// a stale owner cannot drive connection state through the API role.
+// issued by API handlers inside the connection owner's fencing interval.
 func (s *Server) EnableOwnerFencing(fences ownersession.FencedExecutor) {
 	s.fences = fences
 }
@@ -233,11 +206,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.closeEventStreams()
 	err := s.http.Shutdown(ctx)
 	if err != nil {
-		// Shutdown alone leaves active connections open after its deadline.
 		err = errors.Join(err, s.http.Close())
 	}
-	// TimeoutHandler can finish the HTTP request before its inner database
-	// handler returns. Admission is closed above, so no Add can race this wait.
 	done := make(chan struct{})
 	go func() { s.requests.Wait(); close(done) }()
 	select {

@@ -41,7 +41,6 @@ const rollout = (state: string) => ({
   batch_size: 2,
   stop_on_failure: true,
   reason: "partial rollout",
-  approval_id: "019fc0a4-6d92-765c-a8a1-4af556614da6",
   created_by: "019fc0a4-6d92-765c-a8a1-4af556614da7",
   current_batch: 1,
   pause_code: state === "paused" ? "batch_failed" : "",

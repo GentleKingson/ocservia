@@ -1,6 +1,7 @@
 import {
   EventsApi,
   type AuditEventPage,
+  type AuditVerification,
   type PlatformEventPage,
 } from "@ocservia/api-client";
 import { configuration, devAuthToken, requestInit } from "./transport";
@@ -47,4 +48,11 @@ export async function listAuditEvents(
     { xWorkspaceID, pageSize: 50 },
     requestInit(signal),
   );
+}
+
+export async function verifyAuditChain(
+  signal?: AbortSignal,
+): Promise<AuditVerification> {
+  const xWorkspaceID = await getWorkspaceId();
+  return events.verifyAuditChain({ xWorkspaceID }, requestInit(signal));
 }

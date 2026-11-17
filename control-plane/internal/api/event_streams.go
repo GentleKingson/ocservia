@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
@@ -288,7 +287,7 @@ func eventStreamCursor(r *http.Request) (uuid.UUID, bool) {
 	if cursor == "" {
 		cursor = strings.TrimSpace(r.URL.Query().Get("after"))
 	}
-	return httpx.ParseOptionalUUIDv7(cursor)
+	return parseOptionalUUIDv7(cursor)
 }
 
 func eventAdmissionKey(principal auth.Principal, workspaceID uuid.UUID, resource string) eventstream.AdmissionKey {

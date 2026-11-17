@@ -116,7 +116,7 @@ cat >"${repo}/deploy/production/controller.sh" <<'EOF'
 set -euo pipefail
 controller_log="${INSTALL_TEST_CONTROLLER_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.controller.log}"
 printf '%s\n' "$*" >>"${controller_log}"
-printf 'relay-a:%s\nrelay-b:%s\n' "${OCSERV_RELAY_URL_A-<unset>}" "${OCSERV_RELAY_URL_B-<unset>}" >>"${controller_log}"
+printf 'relay-a:%s\n' "${OCSERV_RELAY_URL_A-<unset>}" >>"${controller_log}"
 exit "${MOCK_CONTROLLER_EXIT:-0}"
 EOF
 
@@ -558,13 +558,11 @@ if can_root; then
       export OCSERV_SECRET_DIR="${fixture}/secrets"
       export OCSERV_BACKUP_DIR="${fixture}/backup"
       export OCSERV_PUBLIC_HOST=controller.example.test
-      export OCSERV_OIDC_ISSUER=https://id.example.test
-      export OCSERV_OIDC_CLIENT_ID=ocservia
+      export OCSERV_LOCAL_AUTH_ENABLED=true
       export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test/v1
       export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1
       export OCSERV_CONTROLLER_ENDPOINT_ID=0000000000000000000000000000000000000000000000000000000000000000
       export OCSERV_RELAY_URL_A=https://relay-a.example.test
-      export OCSERV_RELAY_URL_B=
       export OCSERV_HTTPS_ADDRESS=127.0.0.1
       export OCSERV_APPLICATION_SUBNET=198.18.80.0/24
       export OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25
@@ -593,32 +591,22 @@ if can_root; then
     assert_log_contains "${root_controller_log}" "install --release-file ${state_root}/release-bundles/v0.1.2/controller-release-${native_arch}.json"
     as_root chown -R "$(id -u):$(id -g)" "${repo}"
     echo "the operator root-lifecycle command forwards only production configuration across sudo env_reset"
-    for single_b in unset empty override; do
-      reset_logs
-      reset_checkout
-      printf 'OCSERV_RELAY_URL_A=https://relay-file.example.test\n' >"${repo}/install.env"
-      if [[ "${single_b}" == empty ]]; then printf 'OCSERV_RELAY_URL_B=\n' >>"${repo}/install.env"; fi
-      if [[ "${single_b}" == override ]]; then printf 'OCSERV_RELAY_URL_B=https://relay-b.example.test\n' >>"${repo}/install.env"; fi
-      RUN_STATUS=0
-      # Each fixture intentionally isolates its PATH and exported settings.
-      # shellcheck disable=SC2030,SC2031
-      RUN_OUTPUT="$(
-        export PATH="${root_lifecycle_bin}"
-        export OCSERV_CONTROLLER_STATE_ROOT="${state_root}"
-        unset OCSERV_RELAY_URL_A OCSERV_RELAY_URL_B
-        if [[ "${single_b}" == override ]]; then export OCSERV_RELAY_URL_B=; fi
-        cd -- "${repo}"
-        "${repo}/deploy/production/install.sh" --root-lifecycle 2>&1
-      )" || RUN_STATUS=$?
-      assert_status 0
-      assert_log_contains "${root_controller_log}" 'relay-a:https://relay-file.example.test'
-      if [[ "${single_b}" == unset ]]; then
-        assert_log_contains "${root_controller_log}" 'relay-b:<unset>'
-      else
-        grep -qx 'relay-b:' "${root_controller_log}" || die 'sudo lost explicit empty Relay B'
-      fi
-      as_root chown -R "$(id -u):$(id -g)" "${repo}"
-    done
+    reset_logs
+    reset_checkout
+    printf 'OCSERV_RELAY_URL_A=https://relay-file.example.test\n' >"${repo}/install.env"
+    RUN_STATUS=0
+    # Each fixture intentionally isolates its PATH and exported settings.
+    # shellcheck disable=SC2030,SC2031
+    RUN_OUTPUT="$(
+      export PATH="${root_lifecycle_bin}"
+      export OCSERV_CONTROLLER_STATE_ROOT="${state_root}"
+      unset OCSERV_RELAY_URL_A
+      cd -- "${repo}"
+      "${repo}/deploy/production/install.sh" --root-lifecycle 2>&1
+    )" || RUN_STATUS=$?
+    assert_status 0
+    assert_log_contains "${root_controller_log}" 'relay-a:https://relay-file.example.test'
+    as_root chown -R "$(id -u):$(id -g)" "${repo}"
   fi
 
   # 6d. --root-lifecycle resolves install.env as the launcher user and
@@ -881,7 +869,7 @@ assert_status 0 "statically quoted install.env values must load"
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-quoted.example.test"
 echo "one static quote layer is stripped without expansion"
 
-# 8i. retired MySQL backend configuration and existing MySQL deployment profiles fail closed before host bootstrap or download.
+# 8i. unsupported non-PostgreSQL backend configurations fail closed before host bootstrap or download.
 reset_logs
 reset_checkout
 install_docker_client_stub
@@ -889,28 +877,11 @@ EXTRA_ENV=(OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external)
 capture
 EXTRA_ENV=()
 assert_status 1 "OCSERV_DATABASE_BACKEND=mysql must fail closed"
-assert_output "MySQL 8.4 LTS support is retired"
+assert_output "unsupported database configuration"
 assert_log_empty "${bootstrap_log}"
 assert_log_empty "${curl_log}"
 assert_log_empty "${controller_log}"
-
-reset_logs
-reset_checkout
-install_docker_client_stub
-mkdir -p -- "${state_root}"
-chmod 0700 -- "${state_root}"
-printf '%s\n' '{"database_backend":"mysql","database_deployment":"external","deployment_mode":"standalone"}' \
-  >"${state_root}/deployment-profile.json"
-chmod 0600 -- "${state_root}/deployment-profile.json"
-capture
-assert_status 1 "existing MySQL deployment profile must fail closed before host bootstrap"
-assert_output "existing MySQL deployment"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
-assert_log_empty "${controller_log}"
-[[ -f "${state_root}/deployment-profile.json" ]] || die "existing MySQL deployment profile was removed"
-rm -rf -- "${state_root}"
-echo "retired MySQL configuration and active MySQL profiles fail closed without host mutation"
+echo "unsupported database configurations fail closed without host mutation"
 
 reset_logs
 reset_checkout

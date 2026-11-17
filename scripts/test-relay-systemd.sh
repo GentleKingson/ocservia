@@ -42,29 +42,30 @@ P12_PASSWORD_SEAL_KEY_ID=p12
 P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
 systemctl daemon-reload
-for b in unset empty dual; do
-  printf 'RELAY_URL_A=https://relay-a.example.test\n' >/etc/ocservia-agent/relays.env
-  case "$b" in empty) printf 'RELAY_URL_B=\n' >>/etc/ocservia-agent/relays.env ;;
-    dual) printf 'RELAY_URL_B=https://relay-b.example.test\n' >>/etc/ocservia-agent/relays.env ;;
+for mode in missing empty valid; do
+  case "$mode" in
+    missing) : >/etc/ocservia-agent/relays.env ;;
+    empty) printf 'RELAY_URL_A=\n' >/etc/ocservia-agent/relays.env ;;
+    valid) printf 'RELAY_URL_A=https://relay-a.example.test\n' >/etc/ocservia-agent/relays.env ;;
   esac
   rm -f /var/lib/ocservia-agent/argv.json
   systemctl reset-failed ocservia-agent.service || true
-  systemctl start ocservia-agent.service || [[ "$b" == dual ]]
-  if [[ "$b" == dual ]]; then
+  systemctl start ocservia-agent.service || [[ "$mode" != valid ]]
+  if [[ "$mode" != valid ]]; then
     for _ in {1..30}; do
       systemctl is-failed --quiet ocservia-agent.service && break
       sleep 0.1
     done
     [[ "$(systemctl show ocservia-agent.service -p ExecMainStatus --value)" == 2 ]]
     [[ ! -e /var/lib/ocservia-agent/argv.json ]]
-    echo "PASS systemd nonempty B: rejected before Agent execution"
+    echo "PASS systemd $mode RELAY_URL_A: rejected before Agent execution"
     continue
   fi
   for _ in {1..30}; do
     [[ ! -s /var/lib/ocservia-agent/argv.json ]] || break
     sleep 0.1
   done
-  python3 - "$b" "$(id -u ocserv-agent)" "$(id -g ocserv-agent)" <<'PY'
+  python3 - "$mode" "$(id -u ocserv-agent)" "$(id -g ocserv-agent)" <<'PY'
 import json, sys
 with open("/var/lib/ocservia-agent/argv.json") as source:
     result = json.load(source)
@@ -78,5 +79,5 @@ print(json.dumps(result))
 PY
   systemctl stop ocservia-agent.service
   [[ "$(systemctl show ocservia-agent.service -p ExecMainStatus --value)" == 23 ]]
-  echo "PASS systemd $b: literal argv, UID/GID, exec and SIGTERM exit status"
+  echo "PASS systemd $mode: literal argv, UID/GID, exec and SIGTERM exit status"
 done

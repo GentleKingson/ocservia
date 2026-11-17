@@ -46,7 +46,7 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	workspace, node, requester, approver := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	workspace, node, requester, requesterSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'complete',$2,now(),now())`, workspace, "complete-"+workspace.String())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,'complete','active',1,now(),now())`, node, workspace)
 	defer func() {
@@ -54,7 +54,9 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 			t.Error(err)
 		}
 	}()
-	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, requester, "config-apply-"+requester.String(), approver, "config-apply-"+approver.String())
+	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now())`, requester, "config-apply-"+requester.String())
+	exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,now()+interval '1 hour',now())`, requesterSession, requester)
+	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,now()-interval '1 minute')`, workspace, requester)
 	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at) VALUES($1,now(),'complete',$2,'0.7.0','1.2.4','test','{}','{}','{}',now())`, node, uuid.Must(uuid.NewV7()))
 	for _, capability := range []string{configprofile.PlanCapability, configprofile.ApplyCapability} {
 		exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,$2,true)`, node, capability)
@@ -75,14 +77,11 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 	trace := "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
-	planOperation, _, err := ops.Create(ctx, operations.CreateRequest{NodeID: node, IdempotencyKey: "complete-plan", ExpectedVersion: 1, Kind: operations.ConfigPlan, Candidate: rendered.Candidate, CompleteCandidate: rendered.CompleteCandidate, CandidateHash: rendered.Hash[:], PlanCapabilities: rendered.RequiredCapabilities, OcservVersion: "1.2.4", TTL: 15 * time.Minute, ActorID: requester.String(), ActorIdentityID: requester, Action: "config.plan", Reason: "complete plan", RequestID: "complete-plan", Traceparent: trace, PlanMetadata: &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}}})
+	planOperation, _, err := ops.Create(ctx, operations.CreateRequest{NodeID: node, IdempotencyKey: "complete-plan", ExpectedVersion: 1, Kind: operations.ConfigPlan, Candidate: rendered.Candidate, CompleteCandidate: rendered.CompleteCandidate, CandidateHash: rendered.Hash[:], PlanCapabilities: rendered.RequiredCapabilities, OcservVersion: "1.2.4", TTL: 15 * time.Minute, ActorID: requester.String(), ActorIdentityID: requester, ActorSessionID: requesterSession, Action: "config.plan", Reason: "complete plan", RequestID: "complete-plan", Traceparent: trace, PlanMetadata: &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	planID := uuid.MustParse(planOperation.ID)
-	if _, err := service.ApprovalBinding(ctx, planID); !errors.Is(err, ErrApprovalNotReady) {
-		t.Fatal("unverified plan approval", err)
-	}
 	envelope := func(operationID string) *agentv1.CommandEnvelope {
 		t.Helper()
 		var raw []byte
@@ -122,25 +121,11 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 	}
 	current, physical := bytes.Repeat([]byte{0x41}, 32), bytes.Repeat([]byte{0x42}, 32)
 	ingest(planOperation.ID, &agentv1.ConfigPlanResult{CandidateHash: rendered.Hash[:], MaterializedHash: physical, CurrentHash: current, DiffRedacted: safeDiff(rendered.Redacted), CurrentUnchanged: true, StagingCleaned: true})
-	binding, err := service.ApprovalBinding(ctx, planID)
-	if err != nil {
-		plan, readErr := service.Get(ctx, planID)
-		t.Fatalf("binding: %v; plan=%+v read=%v", err, plan, readErr)
-	}
-	approval := uuid.Must(uuid.NewV7())
-	exec(`INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary)VALUES($1,$2,$3,'config.apply','config_plan',$4,'reviewed','approved',$5,'reviewed',now()+interval '10 minutes',now(),now(),$6,$7::jsonb)`, approval, workspace, requester, planID, approver, binding.RequestHash, binding.RequestSummary)
-	exec(`INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id)VALUES($1,$2,'node',$3)`, approval, workspace, node)
-	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at)VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approver, workspace)
-	request := ApplyRequest{PlanID: planID, ApprovalID: approval, IdempotencyKey: "complete-apply", ActorID: requester.String(), ActorIdentityID: requester, ActorSessionID: uuid.Must(uuid.NewV7()), RequestID: "complete-apply", Traceparent: trace, Reason: "approved complete apply"}
-	// Consuming the approval happens before capability checking, but a rejected
-	// transaction must roll it back together with its command/outbox intent.
+	request := ApplyRequest{PlanID: planID, IdempotencyKey: "complete-apply", ActorID: requester.String(), ActorIdentityID: requester, ActorSessionID: requesterSession, RequestID: "complete-apply", Traceparent: trace, Reason: "complete apply"}
+	// Capability checking failure rolls back any transaction side effects.
 	exec(`UPDATE node_capabilities SET approved=false WHERE node_id=$1 AND capability=$2`, node, configprofile.ApplyCapability)
 	if _, _, err := service.Apply(ctx, request); !errors.Is(err, operations.ErrCapabilityMissing) {
 		t.Fatal("old node accepted complete apply", err)
-	}
-	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM approval_requests WHERE id=$1`, approval).Scan(&status); err != nil || status != "approved" {
-		t.Fatal("failed transaction consumed approval", status, err)
 	}
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM operations WHERE workspace_id=$1 AND idempotency_key='complete-apply'`, workspace).Scan(&count); err != nil || count != 0 {
@@ -157,17 +142,13 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 	}
 	command := envelope(applied.ID)
 	payload := command.GetCompleteConfigApply()
-	if payload == nil || !bytes.Equal(payload.MaterializedHash, physical) || !bytes.Equal(command.ApprovalRequestSha256, binding.RequestHash) || command.RequiredCapability != configprofile.ApplyCapability {
-		t.Fatal("incomplete signed approval binding")
+	if payload == nil || !bytes.Equal(payload.MaterializedHash, physical) || command.RequiredCapability != configprofile.ApplyCapability {
+		t.Fatal("incomplete signed complete-config apply payload")
 	}
 	ingest(applied.ID, &agentv1.ConfigApplyResult{CandidateHash: rendered.Hash[:], PreviousHash: current, ObservedHash: physical, AppliedRevision: 1, Healthy: true})
 	var revision int64
 	var observed []byte
 	if err := pool.QueryRow(ctx, `SELECT revision,candidate_hash FROM node_config_state WHERE node_id=$1`, node).Scan(&revision, &observed); err != nil || revision != 1 || !bytes.Equal(observed, rendered.Hash[:]) {
 		t.Fatal("logical state projection after physical result", revision, observed, err)
-	}
-	request.IdempotencyKey = "reused-approval"
-	if _, _, err := service.Apply(ctx, request); err == nil {
-		t.Fatal("consumed approval expanded to another operation")
 	}
 }

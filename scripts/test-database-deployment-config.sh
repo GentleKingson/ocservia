@@ -18,6 +18,7 @@ done
 owner=(); ((EUID == 0)) || owner=(sudo)
 "${owner[@]}" install -o 0 -g 65532 -m 440 /dev/null "${work}/secrets/controller-command-verification-key.pem"
 "${owner[@]}" chown 65534:65532 "${work}/secrets/audit-event-key" "${work}/secrets/controller-command-signing-key.pem"
+"${owner[@]}" chmod 0440 "${work}/secrets/relay-access-token"
 "${owner[@]}" chown 65532:65532 "${work}/secrets/relay-access-token" "${work}/secrets/controller-iroh.key"
 "${owner[@]}" chown 999:999 "${work}/backups"
 "${owner[@]}" chmod 0700 "${work}/backups"
@@ -31,7 +32,7 @@ export OCSERV_PUBLIC_HOST=controller.example.test OCSERV_AUDIT_EVENT_KEY_ID=test
 OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '%064d' 1)"
 export OCSERV_CONTROLLER_ENDPOINT_ID
 export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test
-export OCSERV_RELAY_URL_A=https://relay-a.example.test OCSERV_RELAY_URL_B=
+export OCSERV_RELAY_URL_A=https://relay-a.example.test
 
 "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/postgres.json"
 jq -e '

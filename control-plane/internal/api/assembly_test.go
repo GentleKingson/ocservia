@@ -17,13 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/configplanhttp"
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/nodehttp"
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/useroperationshttp"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/google/uuid"
@@ -34,7 +31,7 @@ func testHTTPConfig(devAuth bool) HTTPConfig {
 }
 
 type constructionReader struct {
-	nodehttp.Reader
+	NodeReader
 	calls int
 }
 
@@ -53,15 +50,15 @@ func TestHTTPConstruction(t *testing.T) {
 	wantEvents := config.EventStreams
 	reader := &constructionReader{}
 	plans := configplan.NewBackend(nil, nil)
-	authz := rbac.NewBackend(nil)
-	modules, authorization := Modules{Nodes: reader, ConfigPlans: plans}, Authorization{RBAC: authz}
+	authz := &auth.Service{}
+	modules, authorization := Modules{Nodes: reader, ConfigPlans: plans}, Authorization{Authentication: authz}
 	s := newTestServer(t, config, nil, modules, authorization)
 	other := newTestServer(t, config, nil, modules, authorization)
 	config.AuthTrustedProxies[0] = netip.MustParsePrefix("10.0.0.3/32")
 	config.EventStreams = eventstream.Config{}
 	config.BrowserOrigin, config.DevAuth = "https://changed.example", false
-	modules.Nodes, modules.ConfigPlans, authorization.RBAC = nil, nil, nil
-	if s.authProxies[0] != proxy || s.browserOrigin != "https://admin.example.test" || !s.devAuth || s.rbac != authz || s.configPlanLookup != plans {
+	modules.Nodes, modules.ConfigPlans, authorization.Authentication = nil, nil, nil
+	if s.authProxies[0] != proxy || s.browserOrigin != "https://admin.example.test" || !s.devAuth || s.auth != authz || s.configPlans != plans || s.nodes != reader {
 		t.Fatal("constructor retained mutable input or lost shared service")
 	}
 	w := httptest.NewRecorder()
@@ -69,7 +66,7 @@ func TestHTTPConstruction(t *testing.T) {
 	if w.Code != 200 || reader.calls != 1 {
 		t.Fatalf("first read: %d calls=%d", w.Code, reader.calls)
 	}
-	if s.nodeHTTP == other.nodeHTTP || s.configPlanHTTP == other.configPlanHTTP || s.userOpsHTTP == other.userOpsHTTP || s.eventAdmission == other.eventAdmission || s.platformEvents == other.platformEvents || s.operationEvents == other.operationEvents || s.breakGlassBudget == other.breakGlassBudget || s.localLoginBudget == other.localLoginBudget {
+	if s.eventAdmission == other.eventAdmission || s.platformEvents == other.platformEvents || s.operationEvents == other.operationEvents || s.breakGlassBudget == other.breakGlassBudget || s.localLoginBudget == other.localLoginBudget {
 		t.Fatal("HTTP-owned state shared across Servers")
 	}
 	for i := 0; i < 3; i++ {
@@ -120,14 +117,13 @@ func TestHTTPConstructionTypedNil(t *testing.T) {
 	var nodes *telemetry.Service
 	var plans *configplan.Service
 	var operations *useroperations.Service
-	var roles *rbac.Service
-	s := newTestServer(t, testHTTPConfig(true), nil, Modules{Nodes: nodes, ConfigPlans: plans, UserOperations: operations}, Authorization{RBAC: roles})
-	if s.configPlanLookup != nil || s.rbac != nil {
+	s := newTestServer(t, testHTTPConfig(true), nil, Modules{Nodes: nodes, ConfigPlans: plans, UserOperations: operations}, Authorization{})
+	if s.nodes != nil || s.configPlans != nil || s.userOperations != nil {
 		t.Fatal("typed nil retained")
 	}
 	for _, route := range []struct{ method, path string }{
 		{"GET", "/api/v1/nodes"}, {"GET", "/api/v1/config-plans/" + baselineID},
-		{"POST", "/api/v1/nodes/" + baselineID + "/config-plans"}, {"GET", "/api/v1/user-operations/metrics"},
+		{"POST", "/api/v1/nodes/" + baselineID + "/config-plans"}, {"GET", "/api/v1/nodes/" + baselineID + "/users/alice/policy"},
 	} {
 		w := httptest.NewRecorder()
 		s.http.Handler.ServeHTTP(w, baselineRequest(route.method, route.path, nil))
@@ -153,11 +149,6 @@ func TestHTTPConstructionRejectsInvalidSSE(t *testing.T) {
 }
 
 func TestHTTPAssemblyBoundary(t *testing.T) {
-	for _, handler := range []reflect.Type{reflect.TypeOf(&nodehttp.Handler{}), reflect.TypeOf(&configplanhttp.Handler{}), reflect.TypeOf(&useroperationshttp.Handler{})} {
-		if handler.NumMethod() != 1 || handler.Method(0).Name != "Register" {
-			t.Errorf("module exposes mutable capabilities: %s", handler)
-		}
-	}
 	server := reflect.TypeOf(Server{})
 	for i := 0; i < server.NumField(); i++ {
 		field := server.Field(i)

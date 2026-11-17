@@ -13,7 +13,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
+	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -115,45 +115,10 @@ func TestAuthSourceTrustAndNormalization(t *testing.T) {
 	}
 }
 
-func TestAuthRouteAdmissionAndIsolation(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
-	var err error
-	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	budget := newAuthAdmission(1, 1, 1)
-	calls := 0
-	handler := server.limitAuthentication(budget, func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(http.StatusNoContent) })
-	for i, want := range []int{http.StatusNoContent, http.StatusTooManyRequests} {
-		response := httptest.NewRecorder()
-		handler(response, httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil))
-		if response.Code != want || (i == 1 && response.Header().Get("Retry-After") == "") {
-			t.Fatalf("status=%d headers=%v", response.Code, response.Header())
-		}
-	}
-	if calls != 1 {
-		t.Fatal("limited request reached authentication work")
-	}
-	// Exhaust callback through the real router; login and break-glass remain separate.
-	for i := 0; i < 31; i++ {
-		response := httptest.NewRecorder()
-		server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/auth/callback", nil))
-		if i == 30 && response.Code != http.StatusTooManyRequests {
-			t.Fatalf("callback bypassed route limit: %d", response.Code)
-		}
-	}
-	release, _ := server.breakGlassBudget.admit(netip.MustParseAddr("192.0.2.1"), time.Now(), false)
-	if release == nil {
-		t.Fatal("OIDC saturation consumed break-glass budget")
-	}
-	release()
-}
-
 func TestBreakGlassInvalidTokensLimitedBeforeService(t *testing.T) {
 	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
 	var err error
-	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
+	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +142,7 @@ func TestBreakGlassInvalidTokensLimitedBeforeService(t *testing.T) {
 func TestBreakGlassEmptyTokenIsRejected(t *testing.T) {
 	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
 	var err error
-	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
+	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,25 +159,23 @@ func TestBreakGlassEmptyTokenIsRejected(t *testing.T) {
 	}
 }
 
-func TestPrivdRegistrationLimitedWithoutOIDCBeforeWork(t *testing.T) {
+func TestInstallationRegistrationLimitedBeforeWork(t *testing.T) {
 	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
-	path := "/api/v1/nodes/018f0c2e-7b1a-7c3d-8e9f-0123456789ab/privd-attestation-keys:register"
+	path := "/api/v1/node-bootstrap/register"
 	send := func() *httptest.ResponseRecorder {
-		// Invalid encodings stop in the handler, so a 400 proves the request
-		// was admitted and a 429 that it was refused before any decoding work.
-		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"version":1,"key_id":"k","public_key":"!","controller_nonce":"!","credential_context_sha256":"!","signature":"!","credential":"c"}`))
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"node_id":"018f0c2e-7b1a-7c3d-8e9f-0123456789ab","registration":{"version":1,"key_id":"k","public_key":"!","controller_nonce":"!","credential_context_sha256":"!","signature":"!"}}`))
 		request.Header.Set("Content-Type", "application/json")
 		response := httptest.NewRecorder()
 		server.http.Handler.ServeHTTP(response, request)
 		return response
 	}
-	// Disabled provisioning keeps its 404 and spends no budget.
+	// Disabled installation keeps its 404 and spends no budget.
 	for i := 0; i < 31; i++ {
 		if response := send(); response.Code != http.StatusNotFound {
 			t.Fatalf("disabled attempt=%d status=%d", i, response.Code)
 		}
 	}
-	server.EnablePrivdAttestation(privdattestation.NewBackend(postgres.WrapPool(&pgxpool.Pool{})))
+	server.EnableEnrollment(enrollment.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), "", "test", nil), nil)
 	for i := 0; i < 31; i++ {
 		response := send()
 		want := http.StatusBadRequest

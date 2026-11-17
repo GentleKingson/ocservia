@@ -19,7 +19,7 @@ func (s configurationStore) Node(ctx context.Context, id uuid.UUID) (v configura
 }
 
 func (s configurationStore) Capabilities(ctx context.Context, id uuid.UUID) ([]string, error) {
-	rows, err := s.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 AND approved=true AND (capability IN ('ocserv.config.plan','ocserv.config.complete.plan') OR capability LIKE 'config.%') ORDER BY capability`, id)
+	rows, err := s.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 AND approved=true AND capability='ocserv.config.complete.plan' ORDER BY capability`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -38,10 +38,9 @@ func (s configurationStore) Capabilities(ctx context.Context, id uuid.UUID) ([]s
 func (s configurationStore) Get(ctx context.Context, id uuid.UUID) (v configurationstore.Plan, err error) {
 	err = s.QueryRow(ctx, `SELECT p.id,p.workspace_id,p.node_id,p.operation_id,p.template_name,p.expected_revision,p.candidate_hash,
 		o.state,p.candidate_redacted,p.warnings,p.expires_at,p.created_at,
-		COALESCE((SELECT r.result FROM agent_command_results r WHERE r.command_id=o.command_id AND r.receipt_verification_status='verified' ORDER BY r.created_at DESC LIMIT 1),''::bytea),a.id,COALESCE(a.status,'')
-		FROM config_plans p JOIN operations o ON o.id=p.operation_id
-		LEFT JOIN LATERAL (SELECT id,status FROM approval_requests WHERE resource_type='config_plan' AND resource_id=p.id AND action='config.apply' ORDER BY created_at DESC LIMIT 1) a ON true WHERE p.id=$1`, id).
-		Scan(&v.ID, &v.WorkspaceID, &v.NodeID, &v.OperationID, &v.TemplateName, &v.ExpectedRevision, &v.CandidateHash, &v.State, &v.CandidateRedacted, &v.Warnings, &v.ExpiresAt, &v.CreatedAt, &v.Result, &v.ApprovalID, &v.ApprovalStatus)
+		COALESCE((SELECT r.result FROM agent_command_results r WHERE r.command_id=o.command_id AND r.receipt_verification_status='verified' ORDER BY r.created_at DESC LIMIT 1),''::bytea)
+		FROM config_plans p JOIN operations o ON o.id=p.operation_id WHERE p.id=$1`, id).
+		Scan(&v.ID, &v.WorkspaceID, &v.NodeID, &v.OperationID, &v.TemplateName, &v.ExpectedRevision, &v.CandidateHash, &v.State, &v.CandidateRedacted, &v.Warnings, &v.ExpiresAt, &v.CreatedAt, &v.Result)
 	return
 }
 
@@ -84,7 +83,7 @@ func (s configurationStore) InsertPlan(ctx context.Context, v configurationstore
 }
 
 func (s configurationStore) InsertApply(ctx context.Context, v configurationstore.PendingApply) error {
-	_, err := s.Exec(ctx, `INSERT INTO config_apply_operations(operation_id,workspace_id,node_id,plan_id,approval_id,expected_revision,desired_revision,candidate_hash,previous_hash,state,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,$10)`, v.ID, v.WorkspaceID, v.NodeID, v.PlanID, rbacID(v.ApprovalID), v.ExpectedRevision, v.DesiredRevision, v.CandidateHash, v.PreviousHash, v.CreatedAt)
+	_, err := s.Exec(ctx, `INSERT INTO config_apply_operations(operation_id,workspace_id,node_id,plan_id,expected_revision,desired_revision,candidate_hash,previous_hash,state,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,'queued',$9,$9)`, v.ID, v.WorkspaceID, v.NodeID, v.PlanID, v.ExpectedRevision, v.DesiredRevision, v.CandidateHash, v.PreviousHash, v.CreatedAt)
 	return err
 }
 

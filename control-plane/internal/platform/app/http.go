@@ -17,8 +17,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
-	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
@@ -44,12 +42,8 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 		return nil, fmt.Errorf("configure SSE admission: %w", err)
 	}
 	var authService *auth.Service
-	if cfg.LocalAuthEnabled() || cfg.OIDCEnabled() {
+	if cfg.LocalAuthEnabled() || cfg.BreakGlassEnabled || len(cfg.SessionKey) == 32 {
 		authConfig := auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL, BreakGlassEnabled: cfg.BreakGlassEnabled, BreakGlassTokenHash: cfg.BreakGlassTokenHash}
-		if cfg.OIDCEnabled() {
-			authConfig.Issuer, authConfig.ClientID = cfg.OIDCIssuer, cfg.OIDCClientID
-			authConfig.ClientSecret, authConfig.RedirectURL = cfg.OIDCClientSecret, cfg.OIDCRedirectURL
-		}
 		authService, err = auth.NewBackend(backend, authConfig)
 		if err != nil {
 			return nil, fmt.Errorf("configure authentication: %w", err)
@@ -60,7 +54,7 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 		DevAuth: operationAuthEnabled(cfg), DevAuthToken: cfg.DevAuthToken,
 		BrowserOrigin: cfg.BrowserOrigin(), AuthTrustedProxies: cfg.AuthTrustedProxyCIDRs, EventStreams: cfg.EventStreams,
 	}, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, services.modules,
-		api.Authorization{Authentication: authService, RBAC: rbac.NewBackend(backend), Audit: auditManager})
+		api.Authorization{Authentication: authService, Audit: auditManager})
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +64,6 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 	server.EnableOperations(services.operations)
 	server.EnableReleaseCatalog(services.releaseCatalog)
 	server.EnableUserState(services.userState)
-	server.EnablePrivdAttestation(privdattestation.NewBackend(backend))
 	server.EnableEnrollment(services.enrollment, services.transport)
 	if services.enrollment != nil && (cfg.InstallationRelayURL != "" || cfg.InstallationRelayToken != "") {
 		if err := services.enrollment.ConfigureInstallation(enrollment.InstallationTrust{Origin: cfg.BrowserOrigin(), RelayURL: cfg.InstallationRelayURL, RelayToken: cfg.InstallationRelayToken}); err != nil {

@@ -225,10 +225,6 @@ jobs:
             bash /source/scripts/test-release-agent-state-check.sh
           docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
             bash /source/scripts/test-agent-upgrade-retry.sh
-          docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
-            python3 /source/scripts/test-rebind-agent.py
-          docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
-            python3 /source/scripts/test-retain-agent.py
 
   web:
     needs: ci-relevance
@@ -303,7 +299,7 @@ jobs:
           npm run build
           args=()
           for project in ${BROWSER_PROJECTS}; do args+=("--project=${project}"); done
-          specs=(agent-rollout.spec.ts node-forms.spec.ts user-password.spec.ts shell-navigation.spec.ts apple-layout.spec.ts nodes-list.spec.ts node-detail.spec.ts operations.spec.ts approval-queue.spec.ts approvals-audit.spec.ts certificate-lifecycle.spec.ts)
+          specs=(agent-rollout.spec.ts node-forms.spec.ts user-password.spec.ts shell-navigation.spec.ts apple-layout.spec.ts nodes-list.spec.ts node-detail.spec.ts operations.spec.ts audit.spec.ts certificate-lifecycle.spec.ts)
           if [[ -z "${BROWSER_GATEWAYS}" ]]; then
             node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}"
           fi

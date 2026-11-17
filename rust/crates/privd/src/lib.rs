@@ -781,12 +781,6 @@ fn validate_privileged_payload(
         }
     }
     match command.payload.as_ref() {
-        Some(command_envelope::Payload::ConfigPlan(payload)) => {
-            validate_candidate(&payload.candidate, &payload.candidate_hash)?;
-        }
-        Some(command_envelope::Payload::ConfigApply(payload)) => {
-            validate_candidate(&payload.candidate, &payload.candidate_hash)?;
-        }
         Some(
             command_envelope::Payload::CompleteConfigPlan(_)
             | command_envelope::Payload::CompleteConfigApply(_),
@@ -940,20 +934,6 @@ fn validate_upgrade_release(
         return Err(error(
             ErrorKind::InvalidRequest,
             "agent upgrade architecture does not match this host",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_candidate(candidate: &[u8], candidate_hash: &[u8]) -> Result<(), PrivdError> {
-    if candidate.is_empty()
-        || candidate.len() > 256 * 1024
-        || candidate_hash.len() != 32
-        || Sha256::digest(candidate).as_slice() != candidate_hash
-    {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "configuration candidate binding invalid",
         ));
     }
     Ok(())
@@ -1195,20 +1175,10 @@ fn effect_binding(
             payload.group_name.clone(),
             payload.desired_revision,
         ),
-        command_envelope::Payload::ConfigPlan(payload) => (
-            "config_plan",
-            hex::encode(&payload.candidate_hash),
-            claims.expected_revision,
-        ),
         command_envelope::Payload::CompleteConfigPlan(payload) => (
             "config_plan",
             hex::encode(&payload.candidate_hash),
             claims.expected_revision,
-        ),
-        command_envelope::Payload::ConfigApply(payload) => (
-            "config_apply",
-            "ocserv.conf".to_owned(),
-            payload.desired_revision,
         ),
         command_envelope::Payload::CompleteConfigApply(payload) => (
             "config_apply",
@@ -1277,11 +1247,6 @@ fn desired_effect_binding(command: &CommandEnvelope) -> Option<CommandEffectBind
         command_envelope::Payload::GroupApply(payload) => (
             "group_apply",
             payload.group_name.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::ConfigApply(payload) => (
-            "config_apply",
-            "ocserv.conf".to_owned(),
             payload.desired_revision,
         ),
         command_envelope::Payload::CompleteConfigApply(payload) => (
@@ -1622,13 +1587,6 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        Some(command_envelope::Payload::ConfigPlan(payload)) => (
-            "config_plan",
-            adapter
-                .config_plan(&payload.candidate, &payload.candidate_hash)
-                .await
-                .map(privd_response::Result::ConfigPlan),
-        ),
         Some(command_envelope::Payload::CompleteConfigPlan(payload)) => (
             "config_plan",
             adapter
@@ -1640,19 +1598,6 @@ async fn execute_signed_payload(
             "config_apply",
             adapter
                 .complete_config_apply(payload, effect)
-                .await
-                .map(privd_response::Result::ConfigApply),
-        ),
-        Some(command_envelope::Payload::ConfigApply(payload)) => (
-            "config_apply",
-            adapter
-                .config_apply(
-                    &payload.candidate,
-                    &payload.candidate_hash,
-                    &payload.expected_current_hash,
-                    payload.desired_revision,
-                    effect,
-                )
                 .await
                 .map(privd_response::Result::ConfigApply),
         ),
@@ -1888,12 +1833,8 @@ fn privileged_command_kind(command: &CommandEnvelope) -> Option<PrivilegedComman
             Some(PrivilegedCommandKind::UserPasswordRotate)
         }
         command_envelope::Payload::GroupApply(_) => Some(PrivilegedCommandKind::GroupApply),
-        command_envelope::Payload::ConfigPlan(_)
-        | command_envelope::Payload::CompleteConfigPlan(_) => {
-            Some(PrivilegedCommandKind::ConfigPlan)
-        }
-        command_envelope::Payload::ConfigApply(_)
-        | command_envelope::Payload::CompleteConfigApply(_) => {
+        command_envelope::Payload::CompleteConfigPlan(_) => Some(PrivilegedCommandKind::ConfigPlan),
+        command_envelope::Payload::CompleteConfigApply(_) => {
             Some(PrivilegedCommandKind::ConfigApply)
         }
         command_envelope::Payload::CertificateCsr(_) => Some(PrivilegedCommandKind::CertificateCsr),
@@ -2030,21 +1971,21 @@ mod tests {
 
     use ed25519_dalek::{Signer as _, SigningKey};
     use ocservia_agent_protocol::{
-        ArtifactConsumeRequest, ArtifactReadRequest, CertificateCsrRequest, ConfigApplyRequest,
-        ConfigPlanRequest, GroupApplyRequest, IpBanRemoveRequest, ReadRequest,
-        ServiceReloadRequest, SessionMutationRequest, UserSecretRequest, privd_request,
+        ArtifactConsumeRequest, ArtifactReadRequest, ReadRequest, privd_request,
     };
     use ocservia_command_authorization::{
         ConnectionFenceClaimsV2, FENCE_SIGNATURE_VERSION_ED25519_V1, FenceBindingClaimsV2,
         canonical_artifact_grant_v1, canonical_connection_fence_v2, canonical_fence_binding_v2,
         canonical_v1, claims_from_envelope_v1, semantic_payload_hash_v2, verification_key_id,
     };
+    use ocservia_contracts::config_profile;
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         AgentUpgrade, ArtifactGrantV1, ArtifactGrantVersion, CertificateP12,
-        CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode, ConfigApply,
-        ConnectionFenceV2, FenceBindingV2, FenceSignatureVersion, SealedSecretPurpose,
-        SealedSecretV1, SealedSecretVersion, SemanticPayloadHashVersion, ServiceReload, UserCreate,
-        command_envelope,
+        CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode,
+        CompleteConfigApply, CompleteConfigCandidate, CompleteConfigDirective, ConnectionFenceV2,
+        FenceBindingV2, FenceSignatureVersion, SealedSecretPurpose, SealedSecretV1,
+        SealedSecretVersion, SemanticPayloadHashVersion, ServiceReload, UserCreate,
+        command_envelope, complete_config_directive,
     };
     use ocservia_ocserv_adapter::{FixedResources, Limits};
     use ocservia_upgrader::UpgradeTrigger;
@@ -2817,9 +2758,7 @@ mod tests {
         }
         let mut agent_selected_effect = command_request(command);
         agent_selected_effect.operation =
-            Some(privd_request::Operation::IpBanRemove(IpBanRemoveRequest {
-                ip: "192.0.2.1".to_owned(),
-            }));
+            Some(privd_request::Operation::ServiceStatus(ReadRequest {}));
         let response = dispatch(agent_selected_effect, &node_id, &keys, &adapter).await;
         assert!(matches!(
             response.result,
@@ -3313,37 +3252,83 @@ mod tests {
 
     #[tokio::test]
     async fn signed_config_hash_cannot_authorize_substituted_candidate_bytes() {
+        use complete_config_directive::Value::{Literal, Tls};
+
         let signing = SigningKey::from_bytes(&[14; 32]);
         let keys = keyring(&signing);
         let node_id = *Uuid::now_v7().as_bytes();
         let now = unix_seconds();
-        let candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n".to_vec();
-        let candidate_hash = Sha256::digest(&candidate).to_vec();
+        let tls =
+            ocservia_contracts::generated::ocserv::platform::agent::v1::NodeLocalTlsReference {
+                secret_ref_id: vec![0x12; 16],
+                version: "v1".to_owned(),
+                certificate_sha256: vec![0x23; 32],
+                spki_sha256: vec![0x34; 32],
+                ca_sha256: Vec::new(),
+            };
+        let directive = |name: &str, value| CompleteConfigDirective {
+            name: name.to_owned(),
+            value: Some(value),
+        };
+        let candidate = CompleteConfigCandidate {
+            node_id: node_id.to_vec(),
+            expected_revision: 1,
+            directives: vec![
+                directive(
+                    "auth",
+                    Literal("plain[passwd=/etc/ocserv/ocpasswd]".to_owned()),
+                ),
+                directive("cookie-timeout", Literal("300".to_owned())),
+                directive("device", Literal("vpns".to_owned())),
+                directive("dns", Literal("1.1.1.1".to_owned())),
+                directive("ipv4-network", Literal("192.0.2.0/24".to_owned())),
+                directive("max-clients", Literal("64".to_owned())),
+                directive("max-same-clients", Literal("2".to_owned())),
+                directive("server-cert", Tls(tls.clone())),
+                directive("server-key", Tls(tls)),
+                directive("socket-file", Literal("/run/ocserv.socket".to_owned())),
+                directive("tcp-port", Literal("443".to_owned())),
+                directive("udp-port", Literal("0".to_owned())),
+            ],
+        };
+        let candidate_hash = Sha256::digest(
+            config_profile::canonical(&candidate).expect("canonical complete config"),
+        )
+        .to_vec();
         let mut command = signed_command(
             &signing,
             node_id,
             now,
             now + 60,
             "config.apply",
-            "ocserv.config.apply",
-            command_envelope::Payload::ConfigApply(ConfigApply {
-                candidate,
+            config_profile::APPLY_CAPABILITY,
+            command_envelope::Payload::CompleteConfigApply(CompleteConfigApply {
+                candidate: Some(candidate),
                 candidate_hash,
+                materialized_hash: vec![0x33; 32],
                 expected_current_hash: vec![0x44; 32],
                 desired_revision: 2,
+                plan_id: Uuid::now_v7().as_bytes().to_vec(),
+                plan_expires_at: Some(Timestamp {
+                    seconds: now + 60,
+                    nanos: 0,
+                }),
             }),
         );
-        let Some(command_envelope::Payload::ConfigApply(payload)) = command.payload.as_mut() else {
+        let Some(command_envelope::Payload::CompleteConfigApply(payload)) =
+            command.payload.as_mut()
+        else {
             panic!("config payload")
         };
-        payload.candidate[0] ^= 1;
+        payload.candidate.as_mut().expect("candidate").directives[10].value =
+            Some(complete_config_directive::Value::Literal("8443".to_owned()));
         let adapter = Adapter::new(FixedResources::default(), Limits::default());
         let response = dispatch(command_request(command), &node_id, &keys, &adapter).await;
         assert!(matches!(
             response.result,
             Some(privd_response::Result::Error(ref failure))
                 if ErrorKind::try_from(failure.kind).unwrap_or(ErrorKind::Unspecified)
-                    == ErrorKind::InvalidRequest
+                    == ErrorKind::PermissionDenied
         ));
     }
 
@@ -3575,14 +3560,6 @@ mod tests {
         let node_id = *Uuid::now_v7().as_bytes();
         let adapter = Adapter::new(FixedResources::default(), Limits::default());
         let mutations = vec![
-            privd_request::Operation::UserPasswordRotate(UserSecretRequest::default()),
-            privd_request::Operation::GroupApply(GroupApplyRequest::default()),
-            privd_request::Operation::ConfigPlan(ConfigPlanRequest::default()),
-            privd_request::Operation::ConfigApply(ConfigApplyRequest::default()),
-            privd_request::Operation::CertificateCsr(CertificateCsrRequest::default()),
-            privd_request::Operation::SessionDisconnect(SessionMutationRequest::default()),
-            privd_request::Operation::IpBanRemove(IpBanRemoveRequest::default()),
-            privd_request::Operation::ServiceReload(ServiceReloadRequest {}),
             privd_request::Operation::ArtifactRead(ArtifactReadRequest::default()),
             privd_request::Operation::ArtifactConsume(ArtifactConsumeRequest::default()),
         ];
@@ -3761,8 +3738,8 @@ mod tests {
         let mut stream = UnixStream::connect(&socket)
             .await
             .expect("same UID connect");
-        let request = unsigned_request(Some(privd_request::Operation::ServiceReload(
-            ServiceReloadRequest {},
+        let request = unsigned_request(Some(privd_request::Operation::ArtifactRead(
+            ArtifactReadRequest::default(),
         )));
         write_frame(&mut stream, &request)
             .await

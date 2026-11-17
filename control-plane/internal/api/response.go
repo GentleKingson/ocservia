@@ -1,15 +1,27 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func writeProblem(w http.ResponseWriter, r *http.Request, status int, kind, title, detail string) {
-	httpx.WriteProblem(w, r, status, kind, title, detail)
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":     kind,
+		"title":    title,
+		"status":   status,
+		"detail":   detail,
+		"instance": r.URL.Path,
+		"trace_id": trace.SpanContextFromContext(r.Context()).TraceID().String(),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
-	httpx.WriteJSON(w, status, value)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }

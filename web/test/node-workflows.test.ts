@@ -64,7 +64,6 @@ vi.mock("../src/api/users", async (original) => ({
 }));
 
 import NodeDetailView from "../src/views/NodeDetailView.vue";
-import { workspaceChangedEvent } from "../src/api/workspace";
 import {
   beginNodeMutation,
   finishNodeMutation,
@@ -105,7 +104,6 @@ interface View {
   configPlan?: ConfigPlan;
   configOperation?: Operation;
   configReason: string;
-  configApplyApprovalId: string;
   configApplyReason: string;
   certificateDialog: boolean;
   certificateLoading: boolean;
@@ -115,7 +113,6 @@ interface View {
   certificateGrant?: { downloadToken?: string; password?: string };
   certificateCommonName: string;
   certificateReason: string;
-  certificateApprovalId: string;
   policyDialog: { username: string } | undefined;
   openConfigPlan(): Promise<void>;
   submitConfigPlan(): Promise<void>;
@@ -243,12 +240,6 @@ async function changeContext(view: View, kind: string) {
       version: 31,
       configRevision: 7,
     };
-  } else if (kind === "workspace") {
-    mocks.workspaceContext.mockReturnValue({
-      id: "workspace-a",
-      generation: 3,
-    });
-    window.dispatchEvent(new Event(workspaceChangedEvent));
   } else if (kind === "unmount") {
     unmount?.();
   } else {
@@ -260,7 +251,7 @@ async function changeContext(view: View, kind: string) {
 }
 
 describe("node workflow context isolation", () => {
-  it.each(["node", "workspace", "close", "unmount"])(
+  it.each(["node", "close", "unmount"])(
     "stops configuration polling on %s without another mutation",
     async (kind) => {
       const view = await mount();
@@ -283,7 +274,7 @@ describe("node workflow context isolation", () => {
     },
   );
 
-  it.each(["node", "workspace", "close", "unmount"])(
+  it.each(["node", "close", "unmount"])(
     "stops CSR polling on %s without another mutation",
     async (kind) => {
       const view = await mount();
@@ -441,12 +432,6 @@ describe("node workflow context isolation", () => {
       expect.any(AbortSignal),
     );
     expect(view.configPlan?.id).toBe(plan.id);
-    unmount?.();
-    const calls = (mocks.fleet.select as ReturnType<typeof vi.fn>).mock.calls
-      .length;
-    window.dispatchEvent(new Event(workspaceChangedEvent));
-    await nextTick();
-    expect(mocks.fleet.select).toHaveBeenCalledTimes(calls);
   });
 
   it("never restores another Workspace's reference", async () => {
@@ -458,8 +443,6 @@ describe("node workflow context isolation", () => {
       id: "workspace-b",
       generation: 2,
     });
-    window.dispatchEvent(new Event(workspaceChangedEvent));
-    await nextTick();
     await nextTick();
     await view.openConfigPlan();
     expect(mocks.getConfigPlan).not.toHaveBeenCalled();
@@ -852,7 +835,7 @@ describe("transient password workflow", () => {
     expect(view.desiredDialog?.kind).toBe("create");
     expect(view.desiredPassword).toBe("");
   });
-  it.each(["node", "workspace", "close", "unmount"])(
+  it.each(["node", "close", "unmount"])(
     "discards a late key after %s and clears inputs",
     async (change) => {
       const view = await mount();
@@ -869,12 +852,6 @@ describe("transient password workflow", () => {
       if (change === "node") {
         mocks.route.params.nodeId = "node-b";
         await nextTick();
-      } else if (change === "workspace") {
-        mocks.workspaceContext.mockReturnValue({
-          id: "workspace-b",
-          generation: 2,
-        });
-        window.dispatchEvent(new Event(workspaceChangedEvent));
       } else if (change === "close") view.desiredDialog = undefined;
       else unmount?.();
       expect(signal.aborted).toBe(true);

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { RefreshCw } from "@lucide/vue";
 import type { AgentRollout, Operation } from "@ocservia/api-client";
-import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -9,7 +8,6 @@ import { getOperation, listOperations } from "../api/operations";
 import {
   getWorkspace,
   sameWorkspaceContext,
-  workspaceChangedEvent,
   workspaceContext,
 } from "../api/workspace";
 import { listAgentRollouts } from "../api/agents";
@@ -175,16 +173,6 @@ function refresh(): void {
   void loadRollouts();
 }
 
-// Rows and details from the previous workspace disappear before new reads.
-function refreshForWorkspace(): void {
-  invalidateDetail();
-  detailState.value = { error: "" };
-  rollouts.value = [];
-  rolloutsUnavailable.value = false;
-  refresh();
-}
-
-useEventListener(window, workspaceChangedEvent, refreshForWorkspace);
 onMounted(() => {
   refresh();
 });

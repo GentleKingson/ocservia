@@ -11,11 +11,7 @@ import type {
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  getWorkspace,
-  workspaceContext,
-  workspaceChangedEvent,
-} from "../src/api/workspace";
+import { getWorkspace, workspaceContext } from "../src/api/workspace";
 import { listEvents, platformEventsEvent } from "../src/api/events";
 import { listNodes } from "../src/api/nodes";
 import { listOperations, operationSummary } from "../src/api/operations";
@@ -30,7 +26,6 @@ vi.mock("../src/api/workspace", async (original) => ({
   ...(await original<typeof import("../src/api/workspace")>()),
   getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
-  workspaceChangedEvent: "ocservia:workspace-changed",
 }));
 vi.mock("../src/api/events", () => ({
   listEvents: vi.fn(),
@@ -452,36 +447,6 @@ describe("operational overview", () => {
     overview.stop();
   });
 
-  it("clears old workspace data and rejects late responses after a switch", async () => {
-    let releaseWorkspaceA!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      releaseWorkspaceA = resolve;
-    });
-    vi.mocked(listOperations).mockImplementationOnce(() =>
-      gate.then(() => {
-        throw new Error("late response");
-      }),
-    );
-    const overview = useOverviewStore();
-    overview.start();
-    await vi.advanceTimersByTimeAsync(0);
-
-    vi.mocked(workspaceContext).mockReturnValue({
-      id: "other-workspace",
-      generation: 2,
-    });
-    window.dispatchEvent(new Event(workspaceChangedEvent));
-    expect(overview.operations).toEqual([]);
-    expect(overview.events).toEqual([]);
-    expect(overview.operationsLoaded).toBe(false);
-
-    releaseWorkspaceA();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(overview.operationsUnavailable).toBe(false);
-    expect(listOperations).toHaveBeenCalledTimes(2);
-    overview.stop();
-  });
-
   it("refreshes operations and events when platform events arrive", async () => {
     const overview = useOverviewStore();
     overview.start();
@@ -540,8 +505,6 @@ describe("operational overview", () => {
     overview.stop();
 
     window.dispatchEvent(new Event(platformEventsEvent));
-    await vi.advanceTimersByTimeAsync(1_000);
-    window.dispatchEvent(new Event(workspaceChangedEvent));
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(listOperations).toHaveBeenCalledTimes(1);

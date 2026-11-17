@@ -84,25 +84,10 @@ import {
   SyntheticCommandRequestToJSON,
 } from "../models/SyntheticCommandRequest";
 import {
-  type UserBatch,
-  UserBatchFromJSON,
-  UserBatchToJSON,
-} from "../models/UserBatch";
-import {
-  type UserBatchRequest,
-  UserBatchRequestFromJSON,
-  UserBatchRequestToJSON,
-} from "../models/UserBatchRequest";
-import {
   type UserCreateRequest,
   UserCreateRequestFromJSON,
   UserCreateRequestToJSON,
 } from "../models/UserCreateRequest";
-import {
-  type UserOperationMetrics,
-  UserOperationMetricsFromJSON,
-  UserOperationMetricsToJSON,
-} from "../models/UserOperationMetrics";
 import {
   type UserPolicy,
   UserPolicyFromJSON,
@@ -142,13 +127,6 @@ export interface CreateSyntheticCommandRequest {
   ifMatch?: string;
 }
 
-export interface CreateUserBatchRequest {
-  idempotencyKey: string;
-  userBatchRequest: UserBatchRequest;
-  xWorkspaceID?: string;
-  xApprovalID?: string;
-}
-
 export interface DisableNodeUserRequest {
   nodeId: string;
   username: string;
@@ -186,15 +164,6 @@ export interface GetOperationSummaryRequest {
   xWorkspaceID?: string;
 }
 
-export interface GetUserBatchRequest {
-  batchId: string;
-  xWorkspaceID?: string;
-}
-
-export interface GetUserOperationMetricsRequest {
-  xWorkspaceID?: string;
-}
-
 export interface ListAgentRolloutsRequest {
   xWorkspaceID?: string;
   limit?: number;
@@ -210,7 +179,6 @@ export interface ReloadNodeServiceRequest {
   nodeId: string;
   idempotencyKey: string;
   controlledOperationRequest: ControlledOperationRequest;
-  xApprovalID?: string;
   ifMatch?: string;
 }
 
@@ -657,100 +625,6 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Operation> {
     const response = await this.createSyntheticCommandRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
-  /**
-   * Creates request options for createUserBatch without sending the request
-   */
-  async createUserBatchRequestOpts(
-    requestParameters: CreateUserBatchRequest,
-  ): Promise<runtime.RequestOpts> {
-    if (requestParameters["idempotencyKey"] == null) {
-      throw new runtime.RequiredError(
-        "idempotencyKey",
-        'Required parameter "idempotencyKey" was null or undefined when calling createUserBatch().',
-      );
-    }
-
-    if (requestParameters["userBatchRequest"] == null) {
-      throw new runtime.RequiredError(
-        "userBatchRequest",
-        'Required parameter "userBatchRequest" was null or undefined when calling createUserBatch().',
-      );
-    }
-
-    const queryParameters: any = {};
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    headerParameters["Content-Type"] = "application/json";
-
-    if (requestParameters["xWorkspaceID"] != null) {
-      headerParameters["X-Workspace-ID"] = String(
-        requestParameters["xWorkspaceID"],
-      );
-    }
-
-    if (requestParameters["idempotencyKey"] != null) {
-      headerParameters["Idempotency-Key"] = String(
-        requestParameters["idempotencyKey"],
-      );
-    }
-
-    if (requestParameters["xApprovalID"] != null) {
-      headerParameters["X-Approval-ID"] = String(
-        requestParameters["xApprovalID"],
-      );
-    }
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/user-batches`;
-
-    return {
-      path: urlPath,
-      method: "POST",
-      headers: headerParameters,
-      query: queryParameters,
-      body: UserBatchRequestToJSON(requestParameters["userBatchRequest"]),
-    };
-  }
-
-  /**
-   * Create a parent batch whose items are authorized and executed independently
-   */
-  async createUserBatchRaw(
-    requestParameters: CreateUserBatchRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<UserBatch>> {
-    const requestOptions =
-      await this.createUserBatchRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      UserBatchFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Create a parent batch whose items are authorized and executed independently
-   */
-  async createUserBatch(
-    requestParameters: CreateUserBatchRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<UserBatch> {
-    const response = await this.createUserBatchRaw(
       requestParameters,
       initOverrides,
     );
@@ -1350,147 +1224,6 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
-   * Creates request options for getUserBatch without sending the request
-   */
-  async getUserBatchRequestOpts(
-    requestParameters: GetUserBatchRequest,
-  ): Promise<runtime.RequestOpts> {
-    if (requestParameters["batchId"] == null) {
-      throw new runtime.RequiredError(
-        "batchId",
-        'Required parameter "batchId" was null or undefined when calling getUserBatch().',
-      );
-    }
-
-    const queryParameters: any = {};
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    if (requestParameters["xWorkspaceID"] != null) {
-      headerParameters["X-Workspace-ID"] = String(
-        requestParameters["xWorkspaceID"],
-      );
-    }
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/user-batches/{batch_id}`;
-    urlPath = urlPath.replace(
-      "{batch_id}",
-      encodeURIComponent(String(requestParameters["batchId"])),
-    );
-
-    return {
-      path: urlPath,
-      method: "GET",
-      headers: headerParameters,
-      query: queryParameters,
-    };
-  }
-
-  /**
-   * Get parent and per-item authorization, command, and result state
-   */
-  async getUserBatchRaw(
-    requestParameters: GetUserBatchRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<UserBatch>> {
-    const requestOptions =
-      await this.getUserBatchRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      UserBatchFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Get parent and per-item authorization, command, and result state
-   */
-  async getUserBatch(
-    requestParameters: GetUserBatchRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<UserBatch> {
-    const response = await this.getUserBatchRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
-  /**
-   * Creates request options for getUserOperationMetrics without sending the request
-   */
-  async getUserOperationMetricsRequestOpts(
-    requestParameters: GetUserOperationMetricsRequest,
-  ): Promise<runtime.RequestOpts> {
-    const queryParameters: any = {};
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    if (requestParameters["xWorkspaceID"] != null) {
-      headerParameters["X-Workspace-ID"] = String(
-        requestParameters["xWorkspaceID"],
-      );
-    }
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/user-operations/metrics`;
-
-    return {
-      path: urlPath,
-      method: "GET",
-      headers: headerParameters,
-      query: queryParameters,
-    };
-  }
-
-  /**
-   * Get workspace quota, expiry, and batch scheduler health counters
-   */
-  async getUserOperationMetricsRaw(
-    requestParameters: GetUserOperationMetricsRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<UserOperationMetrics>> {
-    const requestOptions =
-      await this.getUserOperationMetricsRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      UserOperationMetricsFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Get workspace quota, expiry, and batch scheduler health counters
-   */
-  async getUserOperationMetrics(
-    requestParameters: GetUserOperationMetricsRequest = {},
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<UserOperationMetrics> {
-    const response = await this.getUserOperationMetricsRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
-  /**
    * Creates request options for listAgentRollouts without sending the request
    */
   async listAgentRolloutsRequestOpts(
@@ -1664,12 +1397,6 @@ export class OperationsApi extends runtime.BaseAPI {
     const headerParameters: runtime.HTTPHeaders = {};
 
     headerParameters["Content-Type"] = "application/json";
-
-    if (requestParameters["xApprovalID"] != null) {
-      headerParameters["X-Approval-ID"] = String(
-        requestParameters["xApprovalID"],
-      );
-    }
 
     if (requestParameters["idempotencyKey"] != null) {
       headerParameters["Idempotency-Key"] = String(

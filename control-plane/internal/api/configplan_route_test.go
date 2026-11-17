@@ -12,7 +12,7 @@ func TestConfigPlanApplyHTTPRoute(t *testing.T) {
 		w := httptest.NewRecorder()
 		s.http.Handler.ServeHTTP(w, baselineRequest("POST", path, nil))
 		assertBaselineProblem(t, w, path, 401, "unauthenticated", "Authentication required", "operation state requires an authenticated principal")
-		if w.Header().Get("WWW-Authenticate") != "OIDC" || w.Header().Get("Allow") != "" {
+		if w.Header().Get("WWW-Authenticate") != "" || w.Header().Get("Allow") != "" {
 			t.Fatalf("authentication headers: %v", w.Header())
 		}
 	})

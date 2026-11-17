@@ -120,9 +120,6 @@ func (s *Server) admitAuthentication(w http.ResponseWriter, r *http.Request, bud
 	release, retry, kind := budget.admitReason(s.authSource(r), time.Now(), emergency)
 	if release == nil {
 		if authResultRoute(r) {
-			if r.Method != http.MethodPost {
-				kind += oidcSourceLimited - localSourceLimited
-			}
 			s.logAuth(r, kind, uuid.Nil, "")
 		}
 		w.Header().Set("Retry-After", strconv.Itoa(int((retry+time.Second-1)/time.Second)))
@@ -130,20 +127,4 @@ func (s *Server) admitAuthentication(w http.ResponseWriter, r *http.Request, bud
 		writeProblem(w, r, http.StatusTooManyRequests, "https://ocservia.dev/problems/authentication-limit", "Authentication limit reached", "retry authentication after the indicated delay")
 	}
 	return release
-}
-
-func (s *Server) limitAuthentication(budget *authAdmission, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Preserve the disabled-auth response without spending a budget.
-		if s.auth == nil || !s.auth.OIDCEnabled() {
-			next(w, r)
-			return
-		}
-		release := s.admitAuthentication(w, r, budget, false)
-		if release == nil {
-			return
-		}
-		defer release()
-		next(w, r)
-	}
 }

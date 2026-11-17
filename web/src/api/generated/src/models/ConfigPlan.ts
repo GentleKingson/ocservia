@@ -118,18 +118,6 @@ export interface ConfigPlan {
    */
   currentHash?: string;
   /**
-   *
-   * @type {string}
-   * @memberof ConfigPlan
-   */
-  approvalId?: string;
-  /**
-   *
-   * @type {ConfigPlanApprovalStatusEnum}
-   * @memberof ConfigPlan
-   */
-  approvalStatus?: ConfigPlanApprovalStatusEnum;
-  /**
    * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
    * @type {string}
    * @memberof ConfigPlan
@@ -156,19 +144,6 @@ export const ConfigPlanValidationEnum = {
 } as const;
 export type ConfigPlanValidationEnum =
   (typeof ConfigPlanValidationEnum)[keyof typeof ConfigPlanValidationEnum];
-
-/**
- * @export
- */
-export const ConfigPlanApprovalStatusEnum = {
-  Pending: "pending",
-  Approved: "approved",
-  Rejected: "rejected",
-  Expired: "expired",
-  Consumed: "consumed",
-} as const;
-export type ConfigPlanApprovalStatusEnum =
-  (typeof ConfigPlanApprovalStatusEnum)[keyof typeof ConfigPlanApprovalStatusEnum];
 
 /**
  * Check if a given object implements the ConfigPlan interface.
@@ -288,9 +263,6 @@ export function ConfigPlanFromJSONTyped(
     stagingCleaned: json["staging_cleaned"],
     currentHash:
       json["current_hash"] == null ? undefined : json["current_hash"],
-    approvalId: json["approval_id"] == null ? undefined : json["approval_id"],
-    approvalStatus:
-      json["approval_status"] == null ? undefined : json["approval_status"],
     expiresAt: json["expires_at"],
     createdAt: json["created_at"],
   };
@@ -324,8 +296,6 @@ export function ConfigPlanToJSONTyped(
     current_unchanged: value["currentUnchanged"],
     staging_cleaned: value["stagingCleaned"],
     current_hash: value["currentHash"],
-    approval_id: value["approvalId"],
-    approval_status: value["approvalStatus"],
     expires_at: value["expiresAt"],
     created_at: value["createdAt"],
   };

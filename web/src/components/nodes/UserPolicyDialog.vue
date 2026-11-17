@@ -3,14 +3,16 @@ import { onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { workspaceContext } from "../../api/workspace";
 import {
+  expiryInputType,
   loadUserPolicy,
   policyToForm,
   saveUserPolicy,
   type UserPolicyForm,
-} from "../../adapters/user-policy";
+} from "../../features/user-policy";
 import { createNodeWorkflow } from "../../features/node-workflow";
-import UserPolicyFields from "../../upstream/UserPolicyFields.vue";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import FormField from "../common/FormField.vue";
 import OperationDialog from "../common/OperationDialog.vue";
@@ -93,6 +95,13 @@ async function submitPolicy(): Promise<void> {
     if (policyWorkflow.isCurrent(context)) policyLoading.value = false;
   }
 }
+
+function updatePolicyField<K extends keyof UserPolicyForm>(
+  key: K,
+  value: UserPolicyForm[K],
+): void {
+  policyForm.value = { ...policyForm.value, [key]: value };
+}
 </script>
 
 <template>
@@ -103,7 +112,101 @@ async function submitPolicy(): Promise<void> {
     @close="emit('close')"
     @submit="submitPolicy"
   >
-    <UserPolicyFields v-model="policyForm" />
+    <fieldset class="m-0 grid min-w-0 gap-4 border-0 p-0">
+      <legend class="mb-4 p-0 text-sm font-semibold">
+        {{ $t("quotaAndExpiry") }}
+      </legend>
+      <FormField
+        id="quota-period"
+        :label="$t('quotaPeriod')"
+        :help="$t('quotaPeriodHelp')"
+        v-slot="{ describedBy }"
+      >
+        <NativeSelect
+          id="quota-period"
+          :aria-describedby="describedBy"
+          :model-value="policyForm.period"
+          @update:model-value="
+            updatePolicyField('period', $event as UserPolicyForm['period'])
+          "
+        >
+          <option value="none">{{ $t("quotaNone") }}</option>
+          <option value="monthly">{{ $t("quotaMonthly") }}</option>
+          <option value="lifetime">{{ $t("quotaLifetime") }}</option>
+        </NativeSelect>
+      </FormField>
+      <FormField id="quota-direction" :label="$t('quotaDirection')">
+        <NativeSelect
+          id="quota-direction"
+          :model-value="policyForm.direction"
+          :disabled="policyForm.period === 'none'"
+          @update:model-value="
+            updatePolicyField(
+              'direction',
+              $event as UserPolicyForm['direction'],
+            )
+          "
+        >
+          <option value="rx">{{ $t("quotaReceive") }}</option>
+          <option value="tx">{{ $t("quotaTransmit") }}</option>
+          <option value="rxtx">{{ $t("quotaCombined") }}</option>
+        </NativeSelect>
+      </FormField>
+      <FormField
+        id="quota-value"
+        :label="$t('quotaSize')"
+        :help="$t('quotaSizeHelp')"
+        v-slot="{ describedBy }"
+      >
+        <div class="flex gap-2">
+          <Input
+            id="quota-value"
+            class="max-w-48"
+            type="number"
+            min="0"
+            step="0.01"
+            :aria-describedby="describedBy"
+            :disabled="policyForm.period === 'none'"
+            :model-value="policyForm.quotaValue"
+            @update:model-value="
+              updatePolicyField('quotaValue', Number($event))
+            "
+          />
+          <NativeSelect
+            class="w-24"
+            :model-value="policyForm.quotaUnit"
+            :disabled="policyForm.period === 'none'"
+            :aria-label="$t('quotaUnit')"
+            @update:model-value="
+              updatePolicyField(
+                'quotaUnit',
+                $event as UserPolicyForm['quotaUnit'],
+              )
+            "
+          >
+            <option value="MiB">MiB</option>
+            <option value="GiB">GiB</option>
+          </NativeSelect>
+        </div>
+      </FormField>
+      <FormField
+        id="expires-at"
+        :label="$t('expiresAtUtc')"
+        :help="$t('expiresAtHelp')"
+        v-slot="{ describedBy }"
+      >
+        <Input
+          id="expires-at"
+          :type="expiryInputType(policyForm.expiresAtUtcInput)"
+          step="1"
+          :aria-describedby="describedBy"
+          :model-value="policyForm.expiresAtUtcInput"
+          @update:model-value="
+            updatePolicyField('expiresAtUtcInput', String($event))
+          "
+        />
+      </FormField>
+    </fieldset>
     <FormField id="policy-reason" :label="$t('reason')">
       <Textarea
         id="policy-reason"

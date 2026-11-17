@@ -2,10 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-if [[ -n "${OCSERV_RELAY_URL_B:-}" ]]; then
-  echo 'only one dedicated Relay is supported; leave OCSERV_RELAY_URL_B empty' >&2
-  exit 2
-fi
 
 unset COMPOSE_PROFILES COMPOSE_ENV_FILES
 export COMPOSE_DISABLE_ENV_FILE=1
@@ -35,7 +31,6 @@ case "${deployment_mode}" in
       done
     done
     if [[ "${OCSERV_PUBLIC_HOST}" == "${OCSERV_RELAY_PUBLIC_HOST}" \
-      || -n "${OCSERV_RELAY_URL_B:-}" \
       || "${OCSERV_RELAY_URL_A:-https://${OCSERV_RELAY_PUBLIC_HOST}}" != "https://${OCSERV_RELAY_PUBLIC_HOST}" \
       || "${OCSERV_CERTIFICATE_SIGNER_URL:-https://signer:9443/sign}" != https://signer:9443/sign \
       || "${OCSERV_PUBLIC_ORIGIN:-https://${OCSERV_PUBLIC_HOST}}" != "https://${OCSERV_PUBLIC_HOST}" \
@@ -78,12 +73,8 @@ case "${deployment_mode}:${tls_mode}" in
     ;;
   *) echo "OCSERV_TLS_MODE must be manual, or acme with Integrated" >&2; exit 2 ;;
 esac
-oidc_enabled=false
-if [[ -n "${OCSERV_OIDC_ISSUER:-}${OCSERV_OIDC_CLIENT_ID:-}${OCSERV_OIDC_REDIRECT_URL:-}" ]]; then
-  oidc_enabled=true
-fi
-if [[ "${oidc_enabled}" == false && "${OCSERV_LOCAL_AUTH_ENABLED:-false}" != true ]]; then
-  echo "enable Local authentication or configure OIDC for production" >&2
+if [[ "${OCSERV_LOCAL_AUTH_ENABLED:-true}" != true ]]; then
+  echo "enable Local authentication (OCSERV_LOCAL_AUTH_ENABLED=true) for production" >&2
   exit 2
 fi
 otel_enabled=false
@@ -96,10 +87,6 @@ database_deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
 case "${database_backend}:${database_deployment}" in
   postgres:bundled) database_overlay="compose.postgres.yaml" ;;
   postgres:external) database_overlay="compose.external-postgres.yaml" ;;
-  mysql:*)
-    echo "MySQL is retired and cross-engine automatic migration is unsupported; OCSERV_DATABASE_BACKEND must be postgres" >&2
-    exit 2
-    ;;
   *)
     echo "OCSERV_DATABASE_BACKEND must be postgres and OCSERV_DATABASE_DEPLOYMENT must be bundled or external" >&2
     exit 2
@@ -148,9 +135,6 @@ if [[ "${database_deployment}" == bundled ]]; then
   general_secrets+=(postgres-owner-password postgres-app-password postgres-backup-password postgres.pgpass)
 else
   general_secrets+=(postgres.pgpass database-ca.pem)
-fi
-if [[ "${oidc_enabled}" == true ]]; then
-  general_secrets+=(oidc-client-secret)
 fi
 if [[ "${otel_enabled}" == true ]]; then
   general_secrets+=(otel-client.crt otel-client.key otel-ca.crt)
@@ -293,9 +277,6 @@ done
 compose=(docker compose --env-file /dev/null -p ocservia-production
   -f "${ROOT}/deploy/production/compose.yaml"
   -f "${ROOT}/deploy/production/${database_overlay}")
-if [[ "${oidc_enabled}" == true ]]; then
-  compose+=(-f "${ROOT}/deploy/production/compose.oidc.yaml")
-fi
 if [[ "${relay_ca}" == true ]]; then
   compose+=(-f "${ROOT}/deploy/production/compose.relay-ca.yaml")
 fi

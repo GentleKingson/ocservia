@@ -2,7 +2,7 @@
 # Disposable hosted runner only: Quick install end to end with locally built
 # release images and a Pebble ACME directory. Run as root through sudo.
 #
-# Checks: two-account login, ACME certificates for both names, idempotent
+# Checks: initial-admin login, ACME certificates for both names, idempotent
 # reruns, resuming an unrecorded Local bootstrap, root CA custody, no
 # credentials in output, published ports, and upgrade/rollback/upgrade
 # keeping material and certificates.
@@ -194,7 +194,7 @@ stage=rerun
 materials() { find /etc/ocservia "${CREDENTIALS_DIR}" -type f ! -name complete -print0 | sort -z | xargs -0 sha256sum; }
 before="$(materials)"
 "${quick[@]}" >"${work}/run-rerun.log" 2>&1
-grep -qF "initial Local administrators already exist" "${work}/run-rerun.log"
+grep -qF "initial Local administrator already exists" "${work}/run-rerun.log"
 [[ "$(materials)" == "${before}" && "$(served)" == "${certificates}" ]]
 accounts
 pass "a rerun keeps material and certificates"

@@ -73,13 +73,8 @@ func TestPasswordWriteEntrypointsRejectBeforeDatabase(t *testing.T) {
 		calls := []func() (uuid.UUID, error){
 			func() (uuid.UUID, error) { return s.CreateLocalCredential(ctx, "alice", password) },
 			func() (uuid.UUID, error) {
-				return s.BootstrapLocalAdmin(ctx, "alice", password, id, "approver", "distinct-approver-secret")
+				return s.BootstrapLocalAdmin(ctx, "alice", password, id)
 			},
-		}
-		for _, action := range []string{"create", "reset-password"} {
-			calls = append(calls, func() (uuid.UUID, error) {
-				return s.MutateLocalUser(ctx, LocalUserMutation{Action: action, Username: "alice", Password: password, IdentityID: id, WorkspaceID: id, ActorID: id, SessionID: id, ApprovalID: id, RequestID: "policy-test"})
-			})
 		}
 		for _, call := range calls {
 			if got, err := call(); got != uuid.Nil || !errors.Is(err, ErrPasswordPolicy) {

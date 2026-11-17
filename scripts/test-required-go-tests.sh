@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
-require_test_commands go jq setsid ruby python3
+require_test_commands go jq setsid python3
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/required-go-tests-selftest-XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
 trap 'exit 130' INT
@@ -25,8 +25,8 @@ for mutation in \
   'if .Action == "pass" then .Action = "skip" else . end' \
   'if .Action == "pass" then .Action = "fail" else . end' \
   '.Test += "Renamed"' \
-  'select(.Test != "TestAuthHTTPLoginLogoutIntegration/both/session-write-failure")' \
-  'if .Test == "TestAuthHTTPLoginLogoutIntegration/both/session-write-failure" and .Action == "pass" then .Action = "skip" else . end' \
+  'select(.Test != "TestAuthLogSessionFailureIntegration")' \
+  'if .Test == "TestAuthLogSessionFailureIntegration" and .Action == "pass" then .Action = "skip" else . end' \
   'empty'; do
   jq -c "${mutation}" "${tmp}/pass.json" >"${tmp}/bad.json"
   if check "${tmp}/bad.json" >"${tmp}/error.log" 2>&1; then
@@ -202,29 +202,52 @@ esac
 printf '{"Package":"github.com/GentleKingson/ocservia/control-plane/internal/fixture","Test":"TestRequired","Action":"%s"}\n' "${FIXTURE_MODE}"
 SH
 chmod +x "${tmp}/wrapper/bin/go"
-ruby - "${tmp}/wrapper" <<'RUBY'
-root = ARGV.fetch(0)
-env = {"PATH" => "#{root}/bin:#{ENV.fetch('PATH')}", "FIXTURE_STOPPED" => "#{root}/stopped"}
-%w[pass fail missing skip INT TERM].each do |mode|
-  log = "#{root}/#{mode}.log"
-  signal = %w[INT TERM].include?(mode)
-  pid = Process.spawn(env.merge("FIXTURE_MODE" => signal ? "hang" : mode),
-    "bash", "#{root}/scripts/required-go-tests.sh", "fixture", out: log, err: log)
-  if signal
-    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 10
-    until File.read(log).include?('"Action":"run"')
-      raise "JSON was not streamed" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-      sleep 0.05
-    end
-    Process.kill(mode, pid)
-  end
-  _, status = Process.wait2(pid)
-  expected = {"pass" => 0, "fail" => 7, "INT" => 130, "TERM" => 143}[mode]
-  raise "incorrect wrapper status #{mode}: #{status}" if expected ? status.exitstatus != expected : status.success?
-  raise "child process was not terminated" if signal && !File.exist?("#{root}/stopped")
-  File.delete("#{root}/stopped") if signal
-end
-RUBY
+python3 - "${tmp}/wrapper" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+base_env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}", FIXTURE_STOPPED=str(root / "stopped"))
+signals = {"INT": signal.SIGINT, "TERM": signal.SIGTERM}
+expected_codes = {"pass": 0, "fail": 7, "INT": 130, "TERM": 143}
+
+for mode in ["pass", "fail", "missing", "skip", "INT", "TERM"]:
+    log = root / f"{mode}.log"
+    sig = signals.get(mode)
+    env = dict(base_env, FIXTURE_MODE="hang" if sig is not None else mode)
+    with log.open("wb") as stream:
+        proc = subprocess.Popen(
+            ["bash", str(root / "scripts/required-go-tests.sh"), "fixture"],
+            env=env,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+        )
+    if sig is not None:
+        deadline = time.monotonic() + 10
+        while True:
+            if log.exists() and '"Action":"run"' in log.read_text(encoding="utf-8", errors="replace"):
+                break
+            if time.monotonic() > deadline:
+                raise RuntimeError("JSON was not streamed")
+            time.sleep(0.05)
+        proc.send_signal(sig)
+    returncode = proc.wait()
+    expected = expected_codes.get(mode)
+    if expected is not None:
+        if returncode != expected:
+            raise RuntimeError(f"incorrect wrapper status {mode}: {returncode}")
+    elif returncode == 0:
+        raise RuntimeError(f"incorrect wrapper status {mode}: {returncode}")
+    stopped = root / "stopped"
+    if sig is not None:
+        if not stopped.exists():
+            raise RuntimeError("child process was not terminated")
+        stopped.unlink()
+PY
 echo 'Streaming, exit status and process-group signal cleanup passed'
 mkdir "${tmp}/timeout"
 printf 'module github.com/GentleKingson/ocservia/control-plane/internal/fixture\n\ngo 1.26.6\n' >"${tmp}/timeout/go.mod"

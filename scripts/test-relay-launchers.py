@@ -28,7 +28,6 @@ env = os.environ | {
     "USER_PASSWORD_SEAL_KEY_ID": "user", "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256": "a" * 64,
     "P12_PASSWORD_SEAL_KEY_ID": "p12", "P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256": "b" * 64,
 }
-cases = [None, "", "https://relay-b.example.test"]
 try:
     for binary in (agent, transport):
         binary.parent.mkdir(parents=True, exist_ok=True)
@@ -38,36 +37,32 @@ try:
         ("deploy/production/transportd-relays.sh", "OCSERV_"),
         ("deploy/production/systemd/agent-relays.sh", ""),
     ]:
-        for b in cases:
-            current = env | {prefix + "RELAY_URL_A": "https://relay-a.example.test"}
-            current.pop(prefix + "RELAY_URL_B", None)
-            if b is not None:
-                current[prefix + "RELAY_URL_B"] = b
-            args = [str(ROOT / wrapper)]
-            if prefix:
-                args += ["--relay-token-file", "/protected/token file", "--socket", "/tmp/a socket"]
-            result = subprocess.run(args, env=current, capture_output=True, text=True)
-            if b:
-                assert result.returncode != 0 and not result.stdout
-                assert "one dedicated Relay" in result.stderr
-                continue
-            assert result.returncode == 0
-            argv = json.loads(result.stdout)
-            urls = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--relay-url"]
-            assert urls == ["https://relay-a.example.test"] + ([b] if b else []), argv
-            assert argv[argv.index("--relay-mode") + 1] == "custom"
-            assert "--relay-token-file" in argv and "" not in argv
-            if not prefix:
-                assert argv[argv.index("--controller-command-key-file") + 1] == env["CONTROLLER_COMMAND_VERIFICATION_KEY_FILE"]
-            print(f"PASS {wrapper}: B={b!r}")
+        current = env | {prefix + "RELAY_URL_A": "https://relay-a.example.test"}
+        args = [str(ROOT / wrapper)]
+        if prefix:
+            args += ["--relay-token-file", "/protected/token file", "--socket", "/tmp/a socket"]
+        result = subprocess.run(args, env=current, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        argv = json.loads(result.stdout)
+        urls = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--relay-url"]
+        assert urls == ["https://relay-a.example.test"], argv
+        assert argv[argv.index("--relay-mode") + 1] == "custom"
+        assert "--relay-token-file" in argv and "" not in argv
+        if not prefix:
+            assert argv[argv.index("--controller-command-key-file") + 1] == env["CONTROLLER_COMMAND_VERIFICATION_KEY_FILE"]
+        print(f"PASS {wrapper}: single dedicated relay")
         for value in ["https://bad host", 'https://bad"host', "https://$(touch /tmp/relay-injection)"]:
-            current = env | {prefix + "RELAY_URL_A": value, prefix + "RELAY_URL_B": ""}
+            current = env | {prefix + "RELAY_URL_A": value}
             argv = json.loads(subprocess.check_output([str(ROOT / wrapper)], env=current, text=True))
             assert argv[argv.index("--relay-url") + 1] == value
             assert not Path("/tmp/relay-injection").exists()
-        current = env | {prefix + "RELAY_URL_B": "https://relay-b.example.test"}
-        current.pop(prefix + "RELAY_URL_A", None)
-        assert subprocess.run([str(ROOT / wrapper)], env=current, capture_output=True).returncode != 0
+        for missing in (None, ""):
+            current = env.copy()
+            if missing is None:
+                current.pop(prefix + "RELAY_URL_A", None)
+            else:
+                current[prefix + "RELAY_URL_A"] = missing
+            assert subprocess.run([str(ROOT / wrapper)], env=current, capture_output=True).returncode != 0
         ca = ca_paths[1 if prefix else 0]
         if not ca.parent.exists():
             ca.parent.mkdir(parents=True)
@@ -102,25 +97,21 @@ try:
         print(f"PASS {wrapper}: optional protected Relay CA")
     with tempfile.TemporaryDirectory() as temporary:
         config = Path(temporary) / "install.env"
-        for file_b, override in [(None, None), ("", None), ("https://relay-b.example.test", ""), ("https://relay-b.example.test", None)]:
-            config.write_text("OCSERV_RELAY_URL_A=https://relay-a.example.test\n" +
-                              (f"OCSERV_RELAY_URL_B={file_b}\n" if file_b is not None else ""))
+        for override in (None, "https://relay-override.example.test"):
+            config.write_text("OCSERV_RELAY_URL_A=https://relay-a.example.test\n")
             current = env.copy()
             current.pop("OCSERV_RELAY_URL_A", None)
-            current.pop("OCSERV_RELAY_URL_B", None)
             if override is not None:
-                current["OCSERV_RELAY_URL_B"] = override
+                current["OCSERV_RELAY_URL_A"] = override
             result = subprocess.run([
                 "bash", "-c",
-                'source "$1/deploy/lib/install-env.sh"; install_env_load "$2" OCSERV_RELAY_URL_A OCSERV_RELAY_URL_B >&2; exec "$1/deploy/production/transportd-relays.sh"',
+                'source "$1/deploy/lib/install-env.sh"; install_env_load "$2" OCSERV_RELAY_URL_A >&2; exec "$1/deploy/production/transportd-relays.sh"',
                 "relay-test", str(ROOT), str(config)
             ], env=current, text=True, capture_output=True)
-            if file_b and override is None:
-                assert result.returncode != 0 and not result.stdout
-                assert "one dedicated Relay" in result.stderr
-            else:
-                assert result.returncode == 0
-                assert json.loads(result.stdout).count("--relay-url") == 1
+            assert result.returncode == 0, result.stderr
+            argv = json.loads(result.stdout)
+            expected = override or "https://relay-a.example.test"
+            assert [argv[i + 1] for i, arg in enumerate(argv) if arg == "--relay-url"] == [expected], argv
     print("PASS literal argv and install.env unset/empty/override contracts")
 finally:
     for ca in ca_paths:

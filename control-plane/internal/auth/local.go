@@ -55,7 +55,7 @@ func (s *Service) localCredential(ctx context.Context, username string) (localCr
 	return localCredential{identityID: c.ID, passwordHash: c.Hash, disabled: c.Disabled}, err
 }
 
-// AuthenticateLocal returns the same session cookie and principal as OIDC.
+// AuthenticateLocal verifies credentials and creates an authenticated session.
 func (s *Service) AuthenticateLocal(ctx context.Context, username, password string) (cookie *http.Cookie, principal Principal, resultErr error) {
 	if !s.localEnabled {
 		return nil, Principal{}, ErrLocalDisabled
@@ -101,5 +101,5 @@ func (s *Service) AuthenticateLocal(ctx context.Context, username, password stri
 		return nil, Principal{}, ErrUnauthenticated
 	}
 	credential.attemptLease = lease
-	return s.createSession(ctx, LocalIssuer, username, "", "", false, &credential)
+	return s.createSession(ctx, LocalIssuer, username, &credential)
 }

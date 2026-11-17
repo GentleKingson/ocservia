@@ -82,7 +82,7 @@ def prepare():
         return  # The single production lifecycle owns the first init and serve.
     admin('init')
     run('docker', 'run', '-d', '--name', CONTAINER, '--read-only', '--cap-drop=ALL',
-        '--security-opt=no-new-privileges:true', '--network', 'container:' + os.environ['OCSERVIA_BUSINESS_TEST_OIDC_CONTAINER'],
+        '--security-opt=no-new-privileges:true', '--network', 'container:' + os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_NET_CONTAINER'],
         '-v', f'{STATE}/secrets:/run/secrets:ro', '-v', f'{STATE}/data:/var/lib/ocservia-signer',
         IMAGE, 'serve', '--listen', ':19444')
     health()

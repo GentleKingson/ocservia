@@ -2,11 +2,11 @@
 -- ocservia:format=1
 -- ocservia:engine=postgresql
 -- ocservia:epoch=2
--- ocservia:revision=2
--- ocservia:history-sha256=f28f8c011013e180bb456f29362f250f83596e15acd692d062883815704f5adc
+-- ocservia:revision=3
+-- ocservia:history-sha256=153e171051c19dac0caecd6d2fd13c582fe574ad1482a4ec8dafa8167e57bf88
 
 -- ocservia:step=001:baseline
--- ocservia:metadata={"catalog_sha256":"2701cf9af3ad577f17af4a919ddc49c1b74b03561ade5bc255f9487b1b53be68"}
+-- ocservia:metadata={"catalog_sha256":"f021bb005b544187af3888a0ea3c65e5e6d7abec18b8f117a4b4236f90c139d3"}
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
 SET LOCAL idle_in_transaction_session_timeout = 0;
@@ -256,7 +256,6 @@ CREATE TABLE public.agent_rollouts (
     batch_size integer CONSTRAINT "agent_rollouts_batch_size_not_null" NOT NULL,
     stop_on_failure boolean DEFAULT true CONSTRAINT "agent_rollouts_stop_on_failure_not_null" NOT NULL,
     reason text CONSTRAINT "agent_rollouts_reason_not_null" NOT NULL,
-    approval_id uuid,
     request_hash bytea CONSTRAINT "agent_rollouts_request_hash_not_null" NOT NULL,
     created_by uuid CONSTRAINT "agent_rollouts_created_by_not_null" NOT NULL,
     actor_session_id uuid CONSTRAINT "agent_rollouts_actor_session_id_not_null" NOT NULL,
@@ -286,7 +285,6 @@ CREATE TABLE public.agent_upgrade_operations (
     package_sha256 bytea CONSTRAINT "agent_upgrade_operations_package_sha256_not_null" NOT NULL,
     architecture text CONSTRAINT "agent_upgrade_operations_architecture_not_null" NOT NULL,
     from_version text DEFAULT ''::text CONSTRAINT "agent_upgrade_operations_from_version_not_null" NOT NULL,
-    approval_id uuid,
     state text CONSTRAINT "agent_upgrade_operations_state_not_null" NOT NULL,
     scheduled_at timestamp with time zone,
     completed_at timestamp with time zone,
@@ -298,58 +296,6 @@ CREATE TABLE public.agent_upgrade_operations (
 );
 
 COMMENT ON TABLE public.agent_upgrade_operations IS 'Per-operation projection for reconciled single-node agent upgrades; mirrors the operations lifecycle.';
-
-CREATE TABLE public.approval_authority_resources (
-    approval_id uuid CONSTRAINT "approval_authority_resources_approval_id_not_null" NOT NULL,
-    workspace_id uuid CONSTRAINT "approval_authority_resources_workspace_id_not_null" NOT NULL,
-    resource_type text CONSTRAINT "approval_authority_resources_resource_type_not_null" NOT NULL,
-    resource_id uuid CONSTRAINT "approval_authority_resources_resource_id_not_null" NOT NULL,
-    CONSTRAINT approval_authority_resources_resource_type_check CHECK ((resource_type = ANY (ARRAY['workspace'::text, 'node'::text, 'resource'::text, 'secret_ref'::text, 'certificate'::text, 'config_plan'::text, 'batch_operation'::text, 'role_binding'::text])))
-);
-
-CREATE TABLE public.approval_batch_items (
-    approval_id uuid CONSTRAINT "approval_batch_items_approval_id_not_null" NOT NULL,
-    item_index integer CONSTRAINT "approval_batch_items_item_index_not_null" NOT NULL,
-    node_id uuid CONSTRAINT "approval_batch_items_node_id_not_null" NOT NULL,
-    username text CONSTRAINT "approval_batch_items_username_not_null" NOT NULL,
-    action text CONSTRAINT "approval_batch_items_action_not_null" NOT NULL,
-    expected_version bigint CONSTRAINT "approval_batch_items_expected_version_not_null" NOT NULL,
-    CONSTRAINT approval_batch_items_action_check CHECK ((action = ANY (ARRAY['disable'::text, 'enable'::text]))),
-    CONSTRAINT approval_batch_items_expected_version_check CHECK ((expected_version > 0)),
-    CONSTRAINT approval_batch_items_item_index_check CHECK ((item_index >= 0)),
-    CONSTRAINT approval_batch_items_username_check CHECK ((username ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'::text))
-);
-
-CREATE TABLE public.approval_requests (
-    id uuid CONSTRAINT "approval_requests_id_not_null" NOT NULL,
-    workspace_id uuid CONSTRAINT "approval_requests_workspace_id_not_null" NOT NULL,
-    requester_id uuid CONSTRAINT "approval_requests_requester_id_not_null" NOT NULL,
-    action text CONSTRAINT "approval_requests_action_not_null" NOT NULL,
-    resource_type text CONSTRAINT "approval_requests_resource_type_not_null" NOT NULL,
-    resource_id uuid CONSTRAINT "approval_requests_resource_id_not_null" NOT NULL,
-    reason text CONSTRAINT "approval_requests_reason_not_null" NOT NULL,
-    status text CONSTRAINT "approval_requests_status_not_null" NOT NULL,
-    approver_id uuid,
-    approval_reason text,
-    expires_at timestamp with time zone CONSTRAINT "approval_requests_expires_at_not_null" NOT NULL,
-    approved_at timestamp with time zone,
-    consumed_at timestamp with time zone,
-    created_at timestamp with time zone CONSTRAINT "approval_requests_created_at_not_null" NOT NULL,
-    request_hash bytea,
-    request_summary jsonb,
-    authority_snapshot_at timestamp with time zone DEFAULT now() CONSTRAINT "approval_requests_authority_snapshot_at_not_null" NOT NULL,
-    CONSTRAINT approval_request_content_pair CHECK (((request_hash IS NULL) = (request_summary IS NULL))),
-    CONSTRAINT approval_requests_action_check CHECK (((length(action) >= 1) AND (length(action) <= 128))),
-    CONSTRAINT approval_requests_check CHECK ((requester_id IS DISTINCT FROM approver_id)),
-    CONSTRAINT approval_requests_check1 CHECK (((status = ANY (ARRAY['approved'::text, 'consumed'::text])) = (approver_id IS NOT NULL))),
-    CONSTRAINT approval_requests_check2 CHECK (((status = 'consumed'::text) = (consumed_at IS NOT NULL))),
-    CONSTRAINT approval_requests_check3 CHECK ((expires_at > created_at)),
-    CONSTRAINT approval_requests_reason_check CHECK (((length(reason) >= 1) AND (length(reason) <= 512))),
-    CONSTRAINT approval_requests_request_hash_check CHECK (((request_hash IS NULL) OR (octet_length(request_hash) = 32))),
-    CONSTRAINT approval_requests_request_summary_check CHECK (((request_summary IS NULL) OR (jsonb_typeof(request_summary) = ANY (ARRAY['array'::text, 'object'::text])))),
-    CONSTRAINT approval_requests_resource_type_check CHECK (((length(resource_type) >= 1) AND (length(resource_type) <= 64))),
-    CONSTRAINT approval_requests_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'expired'::text, 'consumed'::text])))
-);
 
 CREATE TABLE public.artifact_operations (
     id uuid CONSTRAINT "artifact_operations_id_not_null" NOT NULL,
@@ -368,7 +314,6 @@ CREATE TABLE public.artifact_operations (
     consumed_at timestamp with time zone,
     created_at timestamp with time zone CONSTRAINT "artifact_operations_created_at_not_null" NOT NULL,
     updated_at timestamp with time zone CONSTRAINT "artifact_operations_updated_at_not_null" NOT NULL,
-    approval_id uuid,
     certificate_version bigint CONSTRAINT "artifact_operations_certificate_version_not_null" NOT NULL,
     active_grant_id uuid,
     active_grant_subject text,
@@ -379,6 +324,7 @@ CREATE TABLE public.artifact_operations (
     consume_actor_id uuid,
     consume_session_id uuid,
     consume_request_id text,
+    requester_identity_id uuid CONSTRAINT "artifact_operations_requester_identity_id_not_null" NOT NULL,
     CONSTRAINT artifact_operations_certificate_version_check CHECK ((certificate_version > 0)),
     CONSTRAINT artifact_operations_check CHECK ((((state = 'ready'::text) AND (content_sha256 IS NOT NULL) AND (content_size IS NOT NULL)) OR (state <> 'ready'::text))),
     CONSTRAINT artifact_operations_consume_check CHECK ((((state = 'consuming'::text) AND (consume_grant IS NOT NULL) AND ((octet_length(consume_grant) >= 1) AND (octet_length(consume_grant) <= 4096)) AND (consume_sha256 IS NOT NULL) AND (octet_length(consume_sha256) = 32) AND (consume_size > 0) AND (consume_actor_id IS NOT NULL) AND (consume_session_id IS NOT NULL) AND (consume_request_id IS NOT NULL) AND ((length(consume_request_id) >= 1) AND (length(consume_request_id) <= 128))) OR (state <> 'consuming'::text))),
@@ -458,53 +404,6 @@ CREATE TABLE public.auth_sessions (
     CONSTRAINT auth_sessions_check CHECK ((expires_at > created_at))
 );
 
-CREATE TABLE public.batch_operation_items (
-    batch_id uuid CONSTRAINT "batch_operation_items_batch_id_not_null" NOT NULL,
-    item_index integer CONSTRAINT "batch_operation_items_item_index_not_null" NOT NULL,
-    node_id uuid CONSTRAINT "batch_operation_items_node_id_not_null" NOT NULL,
-    username text CONSTRAINT "batch_operation_items_username_not_null" NOT NULL,
-    action text CONSTRAINT "batch_operation_items_action_not_null" NOT NULL,
-    expected_version bigint CONSTRAINT "batch_operation_items_expected_version_not_null" NOT NULL,
-    state text CONSTRAINT "batch_operation_items_state_not_null" NOT NULL,
-    child_operation_id uuid,
-    error_type text,
-    lease_owner uuid,
-    lease_until timestamp with time zone,
-    updated_at timestamp with time zone CONSTRAINT "batch_operation_items_updated_at_not_null" NOT NULL,
-    CONSTRAINT batch_operation_items_action_check CHECK ((action = ANY (ARRAY['disable'::text, 'enable'::text]))),
-    CONSTRAINT batch_operation_items_check CHECK (((lease_owner IS NULL) = (lease_until IS NULL))),
-    CONSTRAINT batch_operation_items_expected_version_check CHECK ((expected_version > 0)),
-    CONSTRAINT batch_operation_items_item_index_check CHECK ((item_index >= 0)),
-    CONSTRAINT batch_operation_items_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'submitting'::text, 'submitted'::text, 'succeeded'::text, 'failed'::text, 'unknown'::text, 'offline_pending'::text, 'forbidden'::text]))),
-    CONSTRAINT batch_operation_items_username_check CHECK ((username ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'::text))
-);
-
-COMMENT ON TABLE public.batch_operation_items IS 'Each item is authorized independently and owns a distinct child operation and command.';
-
-CREATE TABLE public.batch_operations (
-    id uuid CONSTRAINT "batch_operations_id_not_null" NOT NULL,
-    workspace_id uuid CONSTRAINT "batch_operations_workspace_id_not_null" NOT NULL,
-    state text CONSTRAINT "batch_operations_state_not_null" NOT NULL,
-    actor_identity_id uuid,
-    actor_session_id uuid,
-    approval_id uuid,
-    actor_id text CONSTRAINT "batch_operations_actor_id_not_null" NOT NULL,
-    reason text CONSTRAINT "batch_operations_reason_not_null" NOT NULL,
-    request_id text CONSTRAINT "batch_operations_request_id_not_null" NOT NULL,
-    traceparent text CONSTRAINT "batch_operations_traceparent_not_null" NOT NULL,
-    idempotency_key text CONSTRAINT "batch_operations_idempotency_key_not_null" NOT NULL,
-    request_hash bytea CONSTRAINT "batch_operations_request_hash_not_null" NOT NULL,
-    created_at timestamp with time zone CONSTRAINT "batch_operations_created_at_not_null" NOT NULL,
-    updated_at timestamp with time zone CONSTRAINT "batch_operations_updated_at_not_null" NOT NULL,
-    CONSTRAINT batch_operations_actor_id_check CHECK (((length(actor_id) >= 1) AND (length(actor_id) <= 256))),
-    CONSTRAINT batch_operations_idempotency_key_check CHECK (((length(idempotency_key) >= 1) AND (length(idempotency_key) <= 128))),
-    CONSTRAINT batch_operations_reason_check CHECK (((length(reason) >= 1) AND (length(reason) <= 512))),
-    CONSTRAINT batch_operations_request_hash_check CHECK ((octet_length(request_hash) = 32)),
-    CONSTRAINT batch_operations_request_id_check CHECK (((length(request_id) >= 1) AND (length(request_id) <= 128))),
-    CONSTRAINT batch_operations_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'succeeded'::text, 'partial_failed'::text, 'failed'::text]))),
-    CONSTRAINT batch_operations_traceparent_check CHECK ((traceparent ~ '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'::text))
-);
-
 CREATE TABLE public.break_glass_uses (
     credential_fingerprint bytea CONSTRAINT "break_glass_uses_credential_fingerprint_not_null" NOT NULL,
     identity_id uuid CONSTRAINT "break_glass_uses_identity_id_not_null" NOT NULL,
@@ -531,7 +430,6 @@ CREATE TABLE public.certificates (
     not_after timestamp with time zone,
     revoked_at timestamp with time zone,
     revocation_reason text,
-    issue_approval_id uuid,
     issue_request_hash bytea,
     issue_actor_identity_id uuid,
     created_at timestamp with time zone CONSTRAINT "certificates_created_at_not_null" NOT NULL,
@@ -619,7 +517,6 @@ CREATE TABLE public.config_apply_operations (
     workspace_id uuid CONSTRAINT "config_apply_operations_workspace_id_not_null" NOT NULL,
     node_id uuid CONSTRAINT "config_apply_operations_node_id_not_null" NOT NULL,
     plan_id uuid CONSTRAINT "config_apply_operations_plan_id_not_null" NOT NULL,
-    approval_id uuid,
     expected_revision bigint CONSTRAINT "config_apply_operations_expected_revision_not_null" NOT NULL,
     desired_revision bigint CONSTRAINT "config_apply_operations_desired_revision_not_null" NOT NULL,
     candidate_hash bytea CONSTRAINT "config_apply_operations_candidate_hash_not_null" NOT NULL,
@@ -741,29 +638,6 @@ CREATE TABLE public.desired_users (
 
 COMMENT ON TABLE public.desired_users IS 'Node-scoped desired user state. Password material is never stored here.';
 
-CREATE TABLE public.enrollment_tokens (
-    id uuid CONSTRAINT "enrollment_tokens_id_not_null" NOT NULL,
-    workspace_id uuid CONSTRAINT "enrollment_tokens_workspace_id_not_null" NOT NULL,
-    token_hash bytea CONSTRAINT "enrollment_tokens_token_hash_not_null" NOT NULL,
-    expected_environment text CONSTRAINT "enrollment_tokens_expected_environment_not_null" NOT NULL,
-    expected_node_name text,
-    expected_endpoint_id bytea,
-    expires_at timestamp with time zone CONSTRAINT "enrollment_tokens_expires_at_not_null" NOT NULL,
-    consumed_at timestamp with time zone,
-    consumed_node_id uuid,
-    created_by text CONSTRAINT "enrollment_tokens_created_by_not_null" NOT NULL,
-    created_at timestamp with time zone CONSTRAINT "enrollment_tokens_created_at_not_null" NOT NULL,
-    CONSTRAINT enrollment_tokens_check CHECK ((expires_at > created_at)),
-    CONSTRAINT enrollment_tokens_check1 CHECK (((consumed_at IS NULL) = (consumed_node_id IS NULL))),
-    CONSTRAINT enrollment_tokens_created_by_check CHECK (((length(created_by) >= 1) AND (length(created_by) <= 256))),
-    CONSTRAINT enrollment_tokens_expected_endpoint_id_check CHECK (((expected_endpoint_id IS NULL) OR (octet_length(expected_endpoint_id) = 32))),
-    CONSTRAINT enrollment_tokens_expected_environment_check CHECK (((length(expected_environment) >= 1) AND (length(expected_environment) <= 64))),
-    CONSTRAINT enrollment_tokens_expected_node_name_check CHECK (((expected_node_name IS NULL) OR ((length(expected_node_name) >= 1) AND (length(expected_node_name) <= 128)))),
-    CONSTRAINT enrollment_tokens_token_hash_check CHECK ((octet_length(token_hash) = 32))
-);
-
-COMMENT ON COLUMN public.enrollment_tokens.token_hash IS 'SHA-256 digest only; plaintext enrollment tokens must never be persisted.';
-
 CREATE TABLE public.identities (
     id uuid CONSTRAINT "identities_id_not_null" NOT NULL,
     issuer text CONSTRAINT "identities_issuer_not_null" NOT NULL,
@@ -792,11 +666,7 @@ CREATE TABLE public.local_auth_bootstrap (
     identity_id uuid CONSTRAINT "local_auth_bootstrap_identity_id_not_null" NOT NULL,
     workspace_id uuid CONSTRAINT "local_auth_bootstrap_workspace_id_not_null" NOT NULL,
     created_at timestamp with time zone CONSTRAINT "local_auth_bootstrap_created_at_not_null" NOT NULL,
-    completion_pending boolean DEFAULT false CONSTRAINT "local_auth_bootstrap_completion_pending_not_null" NOT NULL,
-    completed_at timestamp with time zone,
-    approver_identity_id uuid,
-    CONSTRAINT local_auth_bootstrap_singleton_check CHECK (singleton),
-    CONSTRAINT local_initialization_state CHECK (((completion_pending AND (completed_at IS NULL) AND (approver_identity_id IS NULL)) OR ((NOT completion_pending) AND (completed_at IS NOT NULL))))
+    CONSTRAINT local_auth_bootstrap_singleton_check CHECK (singleton)
 );
 
 COMMENT ON TABLE public.local_auth_bootstrap IS 'One-shot Local initialization marker and fixed RBAC management workspace. Never cleared by password changes or disable.';
@@ -971,7 +841,6 @@ CREATE TABLE public.node_privd_attestation_keys (
     revoked_at timestamp with time zone,
     predecessor_key_id text,
     successor_key_id text,
-    registration_credential_id uuid,
     CONSTRAINT node_privd_attestation_keys_algorithm_check CHECK ((algorithm = 'ed25519'::text)),
     CONSTRAINT node_privd_attestation_keys_check CHECK (((valid_until IS NULL) OR (valid_until >= activated_at))),
     CONSTRAINT node_privd_attestation_keys_check1 CHECK (((state = 'revoked'::text) = (revoked_at IS NOT NULL))),
@@ -1161,44 +1030,6 @@ CREATE TABLE public.outbox_events (
 
 COMMENT ON TABLE public.outbox_events IS 'Transactional outbox; delivery correctness never depends on LISTEN/NOTIFY.';
 
-CREATE TABLE public.privd_attestation_enrollment_credentials (
-    id uuid CONSTRAINT "privd_attestation_enrollment_credentials_id_not_null" NOT NULL,
-    node_id uuid CONSTRAINT "privd_attestation_enrollment_credentials_node_id_not_null" NOT NULL,
-    secret_sha256 bytea CONSTRAINT "privd_attestation_enrollment_credentials_secret_sha256_not_null" NOT NULL,
-    controller_nonce bytea CONSTRAINT privd_attestation_enrollment_credenti_controller_nonce_not_null NOT NULL,
-    credential_context_sha256 bytea CONSTRAINT privd_attestation_enrollment_credential_context_sha256_not_null NOT NULL,
-    expires_at timestamp with time zone CONSTRAINT "privd_attestation_enrollment_credentials_expires_at_not_null" NOT NULL,
-    consumed_at timestamp with time zone,
-    created_by_identity_id uuid CONSTRAINT privd_attestation_enrollment_cr_created_by_identity_id_not_null NOT NULL,
-    created_by_session_id uuid CONSTRAINT privd_attestation_enrollment_cre_created_by_session_id_not_null NOT NULL,
-    created_at timestamp with time zone DEFAULT now() CONSTRAINT "privd_attestation_enrollment_credentials_created_at_not_null" NOT NULL,
-    CONSTRAINT privd_attestation_enrollment_cr_credential_context_sha256_check CHECK ((octet_length(credential_context_sha256) = 32)),
-    CONSTRAINT privd_attestation_enrollment_credentials_check CHECK ((expires_at > created_at)),
-    CONSTRAINT privd_attestation_enrollment_credentials_check1 CHECK (((consumed_at IS NULL) OR (consumed_at >= created_at))),
-    CONSTRAINT privd_attestation_enrollment_credentials_controller_nonce_check CHECK ((octet_length(controller_nonce) = 32)),
-    CONSTRAINT privd_attestation_enrollment_credentials_id_check CHECK ((uuid_extract_version(id) = 7)),
-    CONSTRAINT privd_attestation_enrollment_credentials_secret_sha256_check CHECK ((octet_length(secret_sha256) = 32))
-);
-
-CREATE TABLE public.role_bindings (
-    id uuid CONSTRAINT "role_bindings_id_not_null" NOT NULL,
-    identity_id uuid CONSTRAINT "role_bindings_identity_id_not_null" NOT NULL,
-    workspace_id uuid CONSTRAINT "role_bindings_workspace_id_not_null" NOT NULL,
-    role_name text CONSTRAINT "role_bindings_role_name_not_null" NOT NULL,
-    resource_type text DEFAULT 'workspace'::text CONSTRAINT "role_bindings_resource_type_not_null" NOT NULL,
-    resource_id uuid,
-    created_by uuid,
-    created_at timestamp with time zone CONSTRAINT "role_bindings_created_at_not_null" NOT NULL,
-    approval_id uuid,
-    CONSTRAINT role_bindings_check CHECK (((resource_type = 'workspace'::text) = (resource_id IS NULL))),
-    CONSTRAINT role_bindings_resource_type_check CHECK ((resource_type = ANY (ARRAY['workspace'::text, 'node'::text, 'resource'::text, 'secret_ref'::text, 'certificate'::text, 'config_plan'::text, 'batch_operation'::text, 'role_binding'::text])))
-);
-
-CREATE TABLE public.roles (
-    name text CONSTRAINT "roles_name_not_null" NOT NULL,
-    CONSTRAINT roles_name_check CHECK ((name = ANY (ARRAY['Viewer'::text, 'Operator'::text, 'UserManager'::text, 'ConfigManager'::text, 'Auditor'::text, 'SecurityAdmin'::text, 'PlatformAdmin'::text])))
-);
-
 CREATE TABLE public.scheduler_leadership (
     id integer CONSTRAINT "scheduler_leadership_id_not_null" NOT NULL,
     instance_id uuid CONSTRAINT "scheduler_leadership_instance_id_not_null" NOT NULL,
@@ -1209,14 +1040,6 @@ CREATE TABLE public.scheduler_leadership (
     CONSTRAINT scheduler_leadership_epoch_check CHECK ((epoch >= 0)),
     CONSTRAINT scheduler_leadership_id_check CHECK ((id = 1)),
     CONSTRAINT scheduler_leadership_incarnation_check CHECK ((incarnation >= 0))
-);
-
-CREATE TABLE public.scheduler_leases (
-    lease_name text CONSTRAINT "scheduler_leases_lease_name_not_null" NOT NULL,
-    owner_id uuid CONSTRAINT "scheduler_leases_owner_id_not_null" NOT NULL,
-    lease_until timestamp with time zone CONSTRAINT "scheduler_leases_lease_until_not_null" NOT NULL,
-    updated_at timestamp with time zone CONSTRAINT "scheduler_leases_updated_at_not_null" NOT NULL,
-    CONSTRAINT scheduler_leases_lease_name_check CHECK (((length(lease_name) >= 1) AND (length(lease_name) <= 128)))
 );
 
 CREATE TABLE public.schema_revisions (
@@ -1393,23 +1216,6 @@ ALTER TABLE public.transport_events ALTER COLUMN ingest_sequence ADD GENERATED A
     CACHE 1
 );
 
-CREATE TABLE public.upstream_sync_records (
-    id uuid CONSTRAINT "upstream_sync_records_id_not_null" NOT NULL,
-    repository text CONSTRAINT "upstream_sync_records_repository_not_null" NOT NULL,
-    old_ref text CONSTRAINT "upstream_sync_records_old_ref_not_null" NOT NULL,
-    old_commit text CONSTRAINT "upstream_sync_records_old_commit_not_null" NOT NULL,
-    new_ref text CONSTRAINT "upstream_sync_records_new_ref_not_null" NOT NULL,
-    new_commit text CONSTRAINT "upstream_sync_records_new_commit_not_null" NOT NULL,
-    classification jsonb CONSTRAINT "upstream_sync_records_classification_not_null" NOT NULL,
-    rollback_ref text CONSTRAINT "upstream_sync_records_rollback_ref_not_null" NOT NULL,
-    synced_at timestamp with time zone CONSTRAINT "upstream_sync_records_synced_at_not_null" NOT NULL,
-    CONSTRAINT upstream_sync_records_classification_check CHECK ((jsonb_typeof(classification) = 'object'::text)),
-    CONSTRAINT upstream_sync_records_new_commit_check CHECK ((new_commit ~ '^[0-9a-f]{40}$'::text)),
-    CONSTRAINT upstream_sync_records_old_commit_check CHECK ((old_commit ~ '^[0-9a-f]{40}$'::text))
-);
-
-COMMENT ON TABLE public.upstream_sync_records IS 'Pinned, auditable upstream comparison metadata; local execution and privileged deployment code are never imported.';
-
 CREATE TABLE public.user_policy_enforcements (
     node_id uuid CONSTRAINT "user_policy_enforcements_node_id_not_null" NOT NULL,
     username text CONSTRAINT "user_policy_enforcements_username_not_null" NOT NULL,
@@ -1455,6 +1261,12 @@ CREATE TABLE public.user_usage_cursors (
     CONSTRAINT user_usage_cursors_username_check CHECK ((username ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'::text))
 );
 
+CREATE TABLE public.workspace_admins (
+    workspace_id uuid CONSTRAINT "workspace_admins_workspace_id_not_null" NOT NULL,
+    identity_id uuid CONSTRAINT "workspace_admins_identity_id_not_null" NOT NULL,
+    created_at timestamp with time zone DEFAULT now() CONSTRAINT "workspace_admins_created_at_not_null" NOT NULL
+);
+
 CREATE TABLE public.workspaces (
     id uuid CONSTRAINT "workspaces_id_not_null" NOT NULL,
     name text CONSTRAINT "workspaces_name_not_null" NOT NULL,
@@ -1486,15 +1298,6 @@ ALTER TABLE ONLY public.agent_rollouts
 ALTER TABLE ONLY public.agent_upgrade_operations
     ADD CONSTRAINT agent_upgrade_operations_pkey PRIMARY KEY (operation_id);
 
-ALTER TABLE ONLY public.approval_authority_resources
-    ADD CONSTRAINT approval_authority_resources_pkey PRIMARY KEY (approval_id, resource_type, resource_id);
-
-ALTER TABLE ONLY public.approval_batch_items
-    ADD CONSTRAINT approval_batch_items_pkey PRIMARY KEY (approval_id, item_index);
-
-ALTER TABLE ONLY public.approval_requests
-    ADD CONSTRAINT approval_requests_pkey PRIMARY KEY (id);
-
 ALTER TABLE ONLY public.artifact_operations
     ADD CONSTRAINT artifact_operations_operation_id_key UNIQUE (operation_id);
 
@@ -1512,15 +1315,6 @@ ALTER TABLE ONLY public.audit_events
 
 ALTER TABLE ONLY public.auth_sessions
     ADD CONSTRAINT auth_sessions_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY public.batch_operation_items
-    ADD CONSTRAINT batch_operation_items_pkey PRIMARY KEY (batch_id, item_index);
-
-ALTER TABLE ONLY public.batch_operations
-    ADD CONSTRAINT batch_operations_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY public.batch_operations
-    ADD CONSTRAINT batch_operations_workspace_id_idempotency_key_key UNIQUE (workspace_id, idempotency_key);
 
 ALTER TABLE ONLY public.break_glass_uses
     ADD CONSTRAINT break_glass_uses_pkey PRIMARY KEY (credential_fingerprint);
@@ -1572,12 +1366,6 @@ ALTER TABLE ONLY public.desired_user_policies
 
 ALTER TABLE ONLY public.desired_users
     ADD CONSTRAINT desired_users_pkey PRIMARY KEY (node_id, username);
-
-ALTER TABLE ONLY public.enrollment_tokens
-    ADD CONSTRAINT enrollment_tokens_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY public.enrollment_tokens
-    ADD CONSTRAINT enrollment_tokens_token_hash_key UNIQUE (token_hash);
 
 ALTER TABLE ONLY public.identities
     ADD CONSTRAINT identities_issuer_subject_key UNIQUE (issuer, subject);
@@ -1645,9 +1433,6 @@ ALTER TABLE ONLY public.node_privd_attestation_keys
 ALTER TABLE ONLY public.node_privd_attestation_keys
     ADD CONSTRAINT node_privd_attestation_keys_public_key_key UNIQUE (public_key);
 
-ALTER TABLE ONLY public.node_privd_attestation_keys
-    ADD CONSTRAINT node_privd_attestation_keys_registration_credential_id_key UNIQUE (registration_credential_id);
-
 ALTER TABLE ONLY public.node_sealing_keys
     ADD CONSTRAINT node_sealing_keys_node_id_key_id_key UNIQUE (node_id, key_id);
 
@@ -1696,26 +1481,8 @@ ALTER TABLE ONLY public.outbox_events
 ALTER TABLE ONLY public.outbox_events
     ADD CONSTRAINT outbox_events_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY public.privd_attestation_enrollment_credentials
-    ADD CONSTRAINT privd_attestation_enrollment_credentials_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY public.privd_attestation_enrollment_credentials
-    ADD CONSTRAINT privd_attestation_enrollment_credentials_secret_sha256_key UNIQUE (secret_sha256);
-
-ALTER TABLE ONLY public.role_bindings
-    ADD CONSTRAINT role_bindings_identity_id_workspace_id_role_name_resource_t_key UNIQUE NULLS NOT DISTINCT (identity_id, workspace_id, role_name, resource_type, resource_id);
-
-ALTER TABLE ONLY public.role_bindings
-    ADD CONSTRAINT role_bindings_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY public.roles
-    ADD CONSTRAINT roles_pkey PRIMARY KEY (name);
-
 ALTER TABLE ONLY public.scheduler_leadership
     ADD CONSTRAINT scheduler_leadership_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY public.scheduler_leases
-    ADD CONSTRAINT scheduler_leases_pkey PRIMARY KEY (lease_name);
 
 ALTER TABLE ONLY public.schema_revisions
     ADD CONSTRAINT schema_revisions_pkey PRIMARY KEY (epoch, revision);
@@ -1759,12 +1526,6 @@ ALTER TABLE ONLY public.transport_events
 ALTER TABLE ONLY public.transport_events
     ADD CONSTRAINT transport_events_pkey PRIMARY KEY (event_id);
 
-ALTER TABLE ONLY public.upstream_sync_records
-    ADD CONSTRAINT upstream_sync_records_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY public.upstream_sync_records
-    ADD CONSTRAINT upstream_sync_records_repository_old_commit_new_commit_key UNIQUE (repository, old_commit, new_commit);
-
 ALTER TABLE ONLY public.user_policy_enforcements
     ADD CONSTRAINT user_policy_enforcements_pkey PRIMARY KEY (node_id, username, policy_version, cause, period_start);
 
@@ -1776,6 +1537,9 @@ ALTER TABLE ONLY public.user_policy_mutations
 
 ALTER TABLE ONLY public.user_usage_cursors
     ADD CONSTRAINT user_usage_cursors_pkey PRIMARY KEY (node_id, session_id, connected_at);
+
+ALTER TABLE ONLY public.workspace_admins
+    ADD CONSTRAINT workspace_admins_pkey PRIMARY KEY (workspace_id, identity_id);
 
 ALTER TABLE ONLY public.workspaces
     ADD CONSTRAINT workspaces_pkey PRIMARY KEY (id);
@@ -1801,8 +1565,6 @@ CREATE INDEX agent_upgrade_operations_operation_idx ON public.agent_upgrade_oper
 
 CREATE INDEX agent_upgrade_operations_pending_idx ON public.agent_upgrade_operations USING btree (node_id) WHERE ((completed_at IS NULL) AND (state = ANY (ARRAY['queued'::text, 'accepted'::text, 'running'::text, 'unknown'::text])));
 
-CREATE INDEX approval_requests_scope_idx ON public.approval_requests USING btree (workspace_id, resource_type, resource_id, action, status, expires_at);
-
 CREATE UNIQUE INDEX artifact_operations_active_grant_idx ON public.artifact_operations USING btree (active_grant_id) WHERE (active_grant_id IS NOT NULL);
 
 CREATE INDEX artifact_operations_expiry_idx ON public.artifact_operations USING btree (expires_at) WHERE (state = ANY (ARRAY['pending'::text, 'ready'::text, 'leased'::text]));
@@ -1814,10 +1576,6 @@ CREATE INDEX audit_detail_retention_idx ON public.audit_events USING btree (occu
 CREATE INDEX audit_events_workspace_time_idx ON public.audit_events USING btree (workspace_id, occurred_at DESC, id DESC);
 
 CREATE INDEX auth_sessions_expiry_idx ON public.auth_sessions USING btree (expires_at) WHERE (revoked_at IS NULL);
-
-CREATE INDEX batch_operation_items_claim_idx ON public.batch_operation_items USING btree (updated_at, batch_id, item_index) WHERE (state = ANY (ARRAY['queued'::text, 'submitting'::text]));
-
-CREATE INDEX batch_operations_active_idx ON public.batch_operations USING btree (updated_at, id) WHERE (state = ANY (ARRAY['queued'::text, 'running'::text, 'partial_failed'::text]));
 
 CREATE INDEX certificates_node_expiry_idx ON public.certificates USING btree (node_id, not_after) WHERE (state = ANY (ARRAY['issued'::text, 'expiring'::text]));
 
@@ -1832,8 +1590,6 @@ CREATE INDEX config_apply_operations_node_created_idx ON public.config_apply_ope
 CREATE UNIQUE INDEX config_apply_operations_one_active_node_idx ON public.config_apply_operations USING btree (node_id) WHERE (state = ANY (ARRAY['queued'::text, 'dispatched'::text, 'accepted'::text, 'running'::text, 'unknown'::text]));
 
 CREATE INDEX config_plans_node_created_idx ON public.config_plans USING btree (node_id, created_at DESC, id DESC);
-
-CREATE INDEX enrollment_tokens_workspace_expiry_idx ON public.enrollment_tokens USING btree (workspace_id, expires_at DESC);
 
 CREATE INDEX local_auth_attempts_expiry ON public.local_auth_attempts USING btree (expires_at);
 
@@ -1864,10 +1620,6 @@ CREATE INDEX operations_workspace_created_idx ON public.operations USING btree (
 CREATE UNIQUE INDEX operations_workspace_idempotency_idx ON public.operations USING btree (workspace_id, idempotency_key) WHERE (idempotency_key IS NOT NULL);
 
 CREATE INDEX outbox_events_dispatch_idx ON public.outbox_events USING btree (available_at, id) WHERE (published_at IS NULL);
-
-CREATE INDEX privd_attestation_credentials_node_active_idx ON public.privd_attestation_enrollment_credentials USING btree (node_id, expires_at) WHERE (consumed_at IS NULL);
-
-CREATE INDEX role_bindings_authorization_idx ON public.role_bindings USING btree (identity_id, workspace_id, resource_type, resource_id, role_name);
 
 CREATE INDEX security_detail_retention_idx ON public.telemetry_security_events USING btree (observed_at, event_id) WHERE (details_compacted_at IS NULL);
 
@@ -1901,9 +1653,6 @@ ALTER TABLE ONLY public.agent_rollout_nodes
     ADD CONSTRAINT agent_rollout_nodes_rollout_id_fkey FOREIGN KEY (rollout_id) REFERENCES public.agent_rollouts(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.agent_rollouts
-    ADD CONSTRAINT agent_rollouts_approval_id_fkey FOREIGN KEY (approval_id) REFERENCES public.approval_requests(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.agent_rollouts
     ADD CONSTRAINT agent_rollouts_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.agent_upgrade_operations
@@ -1911,30 +1660,6 @@ ALTER TABLE ONLY public.agent_upgrade_operations
 
 ALTER TABLE ONLY public.agent_upgrade_operations
     ADD CONSTRAINT agent_upgrade_operations_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.approval_authority_resources
-    ADD CONSTRAINT approval_authority_resources_approval_id_fkey FOREIGN KEY (approval_id) REFERENCES public.approval_requests(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY public.approval_authority_resources
-    ADD CONSTRAINT approval_authority_resources_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.approval_batch_items
-    ADD CONSTRAINT approval_batch_items_approval_id_fkey FOREIGN KEY (approval_id) REFERENCES public.approval_requests(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY public.approval_batch_items
-    ADD CONSTRAINT approval_batch_items_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.approval_requests
-    ADD CONSTRAINT approval_requests_approver_id_fkey FOREIGN KEY (approver_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.approval_requests
-    ADD CONSTRAINT approval_requests_requester_id_fkey FOREIGN KEY (requester_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.approval_requests
-    ADD CONSTRAINT approval_requests_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.artifact_operations
-    ADD CONSTRAINT artifact_operations_approval_id_fkey FOREIGN KEY (approval_id) REFERENCES public.approval_requests(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.artifact_operations
     ADD CONSTRAINT artifact_operations_certificate_id_fkey FOREIGN KEY (certificate_id) REFERENCES public.certificates(id) ON DELETE RESTRICT;
@@ -1946,6 +1671,9 @@ ALTER TABLE ONLY public.artifact_operations
     ADD CONSTRAINT artifact_operations_operation_id_fkey FOREIGN KEY (operation_id) REFERENCES public.operations(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.artifact_operations
+    ADD CONSTRAINT artifact_operations_requester_identity_id_fkey FOREIGN KEY (requester_identity_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.artifact_operations
     ADD CONSTRAINT artifact_operations_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.audit_checkpoints
@@ -1953,9 +1681,6 @@ ALTER TABLE ONLY public.audit_checkpoints
 
 ALTER TABLE ONLY public.audit_checkpoints
     ADD CONSTRAINT audit_checkpoints_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.audit_events
-    ADD CONSTRAINT audit_events_approval_id_fkey FOREIGN KEY (approval_id) REFERENCES public.approval_requests(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.audit_events
     ADD CONSTRAINT audit_events_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE RESTRICT;
@@ -1966,27 +1691,6 @@ ALTER TABLE ONLY public.audit_events
 ALTER TABLE ONLY public.auth_sessions
     ADD CONSTRAINT auth_sessions_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY public.batch_operation_items
-    ADD CONSTRAINT batch_operation_items_batch_id_fkey FOREIGN KEY (batch_id) REFERENCES public.batch_operations(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY public.batch_operation_items
-    ADD CONSTRAINT batch_operation_items_child_operation_id_fkey FOREIGN KEY (child_operation_id) REFERENCES public.operations(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.batch_operation_items
-    ADD CONSTRAINT batch_operation_items_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.batch_operations
-    ADD CONSTRAINT batch_operations_actor_identity_id_fkey FOREIGN KEY (actor_identity_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.batch_operations
-    ADD CONSTRAINT batch_operations_actor_session_id_fkey FOREIGN KEY (actor_session_id) REFERENCES public.auth_sessions(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.batch_operations
-    ADD CONSTRAINT batch_operations_approval_id_fkey FOREIGN KEY (approval_id) REFERENCES public.approval_requests(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.batch_operations
-    ADD CONSTRAINT batch_operations_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE RESTRICT;
-
 ALTER TABLE ONLY public.break_glass_uses
     ADD CONSTRAINT break_glass_uses_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
 
@@ -1995,9 +1699,6 @@ ALTER TABLE ONLY public.certificates
 
 ALTER TABLE ONLY public.certificates
     ADD CONSTRAINT certificates_issue_actor_identity_id_fkey FOREIGN KEY (issue_actor_identity_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.certificates
-    ADD CONSTRAINT certificates_issue_approval_id_fkey FOREIGN KEY (issue_approval_id) REFERENCES public.approval_requests(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.certificates
     ADD CONSTRAINT certificates_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE RESTRICT;
@@ -2025,9 +1726,6 @@ ALTER TABLE ONLY public.commands
 
 ALTER TABLE ONLY public.commands
     ADD CONSTRAINT commands_workspace_id_node_id_fkey FOREIGN KEY (workspace_id, node_id) REFERENCES public.nodes(workspace_id, id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.config_apply_operations
-    ADD CONSTRAINT config_apply_operations_approval_id_fkey FOREIGN KEY (approval_id) REFERENCES public.approval_requests(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.config_apply_operations
     ADD CONSTRAINT config_apply_operations_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE RESTRICT;
@@ -2074,15 +1772,6 @@ ALTER TABLE ONLY public.desired_user_policies
 ALTER TABLE ONLY public.desired_users
     ADD CONSTRAINT desired_users_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
-ALTER TABLE ONLY public.enrollment_tokens
-    ADD CONSTRAINT enrollment_tokens_workspace_id_consumed_node_id_fkey FOREIGN KEY (workspace_id, consumed_node_id) REFERENCES public.nodes(workspace_id, id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.enrollment_tokens
-    ADD CONSTRAINT enrollment_tokens_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.local_auth_bootstrap
-    ADD CONSTRAINT local_auth_bootstrap_approver_identity_id_fkey FOREIGN KEY (approver_identity_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
-
 ALTER TABLE ONLY public.local_auth_bootstrap
     ADD CONSTRAINT local_auth_bootstrap_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
 
@@ -2128,9 +1817,6 @@ ALTER TABLE ONLY public.node_observed_snapshots
 ALTER TABLE ONLY public.node_privd_attestation_keys
     ADD CONSTRAINT node_privd_attestation_keys_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
-ALTER TABLE ONLY public.node_privd_attestation_keys
-    ADD CONSTRAINT node_privd_attestation_keys_registration_credential_id_fkey FOREIGN KEY (registration_credential_id) REFERENCES public.privd_attestation_enrollment_credentials(id);
-
 ALTER TABLE ONLY public.node_sealing_keys
     ADD CONSTRAINT node_sealing_keys_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE RESTRICT;
 
@@ -2163,30 +1849,6 @@ ALTER TABLE ONLY public.operations
 
 ALTER TABLE ONLY public.outbox_events
     ADD CONSTRAINT outbox_events_command_id_fkey FOREIGN KEY (command_id) REFERENCES public.commands(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.privd_attestation_enrollment_credentials
-    ADD CONSTRAINT privd_attestation_enrollment_creden_created_by_identity_id_fkey FOREIGN KEY (created_by_identity_id) REFERENCES public.identities(id);
-
-ALTER TABLE ONLY public.privd_attestation_enrollment_credentials
-    ADD CONSTRAINT privd_attestation_enrollment_credent_created_by_session_id_fkey FOREIGN KEY (created_by_session_id) REFERENCES public.auth_sessions(id);
-
-ALTER TABLE ONLY public.privd_attestation_enrollment_credentials
-    ADD CONSTRAINT privd_attestation_enrollment_credentials_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY public.role_bindings
-    ADD CONSTRAINT role_bindings_approval_id_fkey FOREIGN KEY (approval_id) REFERENCES public.approval_requests(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.role_bindings
-    ADD CONSTRAINT role_bindings_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.identities(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.role_bindings
-    ADD CONSTRAINT role_bindings_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY public.role_bindings
-    ADD CONSTRAINT role_bindings_role_name_fkey FOREIGN KEY (role_name) REFERENCES public.roles(name) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY public.role_bindings
-    ADD CONSTRAINT role_bindings_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.secret_provider_refs
     ADD CONSTRAINT secret_provider_refs_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE RESTRICT;
@@ -2230,6 +1892,12 @@ ALTER TABLE ONLY public.user_policy_mutations
 ALTER TABLE ONLY public.user_usage_cursors
     ADD CONSTRAINT user_usage_cursors_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.workspace_admins
+    ADD CONSTRAINT workspace_admins_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.workspace_admins
+    ADD CONSTRAINT workspace_admins_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
 REVOKE ALL ON FUNCTION public.audit_compact_detail(p_id uuid, p_hash bytea, p_key text, p_mac bytea, p_at timestamp with time zone) FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION public.check_audit_compaction() FROM PUBLIC;
@@ -2248,10 +1916,6 @@ REVOKE ALL ON FUNCTION public.telemetry_prune_rollups(maintenance_time timestamp
 
 REVOKE ALL ON FUNCTION public.telemetry_reject_runtime_default() FROM PUBLIC;
 
-GRANT SELECT,INSERT ON TABLE public.approval_authority_resources TO ocservia_app;
-
-GRANT SELECT,INSERT ON TABLE public.approval_batch_items TO ocservia_app;
-
 GRANT SELECT,INSERT,UPDATE ON TABLE public.artifact_operations TO ocservia_app;
 
 GRANT SELECT,INSERT,UPDATE ON TABLE public.certificates TO ocservia_app;
@@ -2259,6 +1923,8 @@ GRANT SELECT,INSERT,UPDATE ON TABLE public.certificates TO ocservia_app;
 GRANT SELECT,INSERT ON TABLE public.node_sealing_keys TO ocservia_app;
 
 GRANT SELECT,INSERT,UPDATE ON TABLE public.secret_provider_refs TO ocservia_app;
+
+GRANT SELECT,INSERT ON TABLE public.workspace_admins TO ocservia_app;
 
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
@@ -2273,16 +1939,6 @@ SET LOCAL client_min_messages = warning;
 SET LOCAL row_security = off;
 
 INSERT INTO public.controller_schema_compatibility (singleton, "current_schema", minimum_compatible_controller_schema) VALUES (true, 39, 39);
-
-INSERT INTO public.roles (name) VALUES ('Viewer');
-INSERT INTO public.roles (name) VALUES ('Operator');
-INSERT INTO public.roles (name) VALUES ('UserManager');
-INSERT INTO public.roles (name) VALUES ('ConfigManager');
-INSERT INTO public.roles (name) VALUES ('Auditor');
-INSERT INTO public.roles (name) VALUES ('SecurityAdmin');
-INSERT INTO public.roles (name) VALUES ('PlatformAdmin');
-
-INSERT INTO public.upstream_sync_records (id, repository, old_ref, old_commit, new_ref, new_commit, classification, rollback_ref, synced_at) VALUES ('019fdc5b-b939-72a1-ae67-8efd197e5688', 'mmtaee/ocserv-dashboard', 'v4.9', 'b8f59026c4d879f40c1da43dc00d97e34f9790bc', 'master', '4d25478580d899b77460bdf0cf0a590cfdd26030', '{"A": [], "B": ["web/src/components/auth/SetupForm.vue"], "C": ["quota and expiry semantics mapped to node-scoped desired policy and scheduler"], "D": ["Docker/native occtl execution", "local cron journal", "direct password/config files", "permanent deletion"]}', 'publication: revert PR15 independently; implementation: stop I14 scheduler/API, reconcile commands, revert PR14, then apply migration 000013 down only when policy and batch data need not be retained', '2026-08-07 16:41:52+00');
 
 INSERT INTO public.scheduler_leadership(id,instance_id,incarnation,epoch,lease_until) VALUES(1,'00000000-0000-0000-0000-000000000000',0,0,'-infinity');
 -- ocservia:end-step

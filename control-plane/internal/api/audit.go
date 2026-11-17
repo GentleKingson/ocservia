@@ -39,14 +39,14 @@ func (s *Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		var id uuid.UUID
 		var occurred value.Timestamp
 		var actorType, actorID, action, resourceType, requestID, result string
-		var resourceID, nodeID, commandID, approvalID *uuid.UUID
+		var resourceID, nodeID, commandID *uuid.UUID
 		var traceID, reason, errorType *string
 		var previous, hash []byte
-		if err := rows.Scan(&id, &occurred, &actorType, &actorID, &action, &resourceType, &resourceID, &nodeID, &requestID, &traceID, &commandID, &approvalID, &result, &reason, &errorType, &previous, &hash); err != nil {
+		if err := rows.Scan(&id, &occurred, &actorType, &actorID, &action, &resourceType, &resourceID, &nodeID, &requestID, &traceID, &commandID, &result, &reason, &errorType, &previous, &hash); err != nil {
 			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit records are temporarily unavailable")
 			return
 		}
-		items = append(items, map[string]any{"id": id, "occurred_at": occurred, "actor_type": actorType, "actor_id": actorID, "action": action, "resource_type": resourceType, "resource_id": resourceID, "node_id": nodeID, "request_id": requestID, "trace_id": traceID, "command_id": commandID, "approval_id": approvalID, "result": result, "reason": reason, "error_type": errorType, "previous_event_hash": hex.EncodeToString(previous), "event_hash": hex.EncodeToString(hash)})
+		items = append(items, map[string]any{"id": id, "occurred_at": occurred, "actor_type": actorType, "actor_id": actorID, "action": action, "resource_type": resourceType, "resource_id": resourceID, "node_id": nodeID, "request_id": requestID, "trace_id": traceID, "command_id": commandID, "result": result, "reason": reason, "error_type": errorType, "previous_event_hash": hex.EncodeToString(previous), "event_hash": hex.EncodeToString(hash)})
 	}
 	if err := rows.Err(); err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit records are temporarily unavailable")

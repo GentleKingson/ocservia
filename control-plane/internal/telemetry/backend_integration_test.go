@@ -9,8 +9,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/observedstate"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
+	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
@@ -148,7 +147,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		t.Fatalf("session cursor repeated IPv6 session: %+v %v %v", next, more, err)
 	}
 	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := observedstate.FromTransaction(tx)
+		store, err := telemetrystore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -167,15 +166,11 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		if !bytes.Equal(event.Detail.Bytes(), expected.Bytes()) {
 			t.Fatalf("security detail lost precision: %s", event.Detail.Bytes())
 		}
-		history, err := telemetryhistory.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
 		since, err := value.FromTime(now.Add(-time.Hour))
 		if err != nil {
 			return err
 		}
-		points, err := history.History(ctx, node, "connection_rtt_ms", "raw", since)
+		points, err := store.History(ctx, node, "connection_rtt_ms", "raw", since)
 		if err != nil {
 			return err
 		}

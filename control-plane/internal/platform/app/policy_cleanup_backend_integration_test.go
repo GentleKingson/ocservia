@@ -102,7 +102,7 @@ func (s *policyCleanupState) assertPermissions(t *testing.T, ctx context.Context
 	}
 	for _, query := range []string{
 		"DELETE FROM desired_user_policies WHERE false", "DELETE FROM user_policy_mutations WHERE false",
-		"DELETE FROM scheduler_leadership WHERE false", "DELETE FROM batch_operations WHERE false",
+		"DELETE FROM scheduler_leadership WHERE false", "DELETE FROM observed_user_usage WHERE false",
 		"TRUNCATE TABLE user_policy_enforcements", "CREATE TABLE cleanup_forbidden(id int)",
 		"ALTER TABLE user_policy_enforcements ADD COLUMN cleanup_forbidden int",
 	} {

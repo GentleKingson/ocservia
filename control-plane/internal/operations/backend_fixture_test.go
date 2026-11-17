@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"net/url"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,12 +16,11 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/databasetest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/schedulerlease"
-	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type outboxFixture struct {
@@ -36,51 +33,10 @@ type outboxFixture struct {
 // runtime account; only provisioning and deliberate fault injection use owner.
 func newOutboxFixture(t *testing.T) *outboxFixture {
 	t.Helper()
-	ctx := context.Background()
 	f := &outboxFixture{workspace: uuid.Must(uuid.NewV7())}
-	name := "dbtest_outbox_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	ownerURL, runtimeURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"), os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if runtimeURL == "" {
-		t.Skip("real PostgreSQL required")
-	}
-	if ownerURL == "" {
-		t.Fatal("OCSERV_TEST_OWNER_DATABASE_URL required for disposable Outbox transaction test database")
-	}
-	admin, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(admin.Close)
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(ctx, "DROP DATABASE "+name); err != nil {
-			t.Error(err)
-		}
-	})
-	open := func(raw string) *pgxpool.Pool {
-		t.Helper()
-		u, err := url.Parse(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		u.Path = "/" + name
-		pool, err := pgxpool.New(ctx, u.String())
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(pool.Close)
-		return pool
-	}
-	owner := open(ownerURL)
-	if err := migrations.Migrate(ctx, owner); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrations.GrantRuntimePrivileges(ctx, owner, "ocservia_app"); err != nil {
-		t.Fatal(err)
-	}
-	f.owner, f.backend = postgres.WrapPool(owner), postgres.WrapPool(open(runtimeURL))
+	runtime, owner := databasetest.OpenIsolated(t, t, "dbtest_outbox")
+	f.owner, f.backend = postgres.WrapPool(owner), postgres.WrapPool(runtime)
+	var err error
 	f.signer, err = commandauth.NewRandomSigner()
 	if err != nil {
 		t.Fatal(err)

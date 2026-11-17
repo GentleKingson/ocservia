@@ -115,7 +115,7 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 		candidate := node
 		candidate.AgentVersionState = state
 		candidate.AgentUpgradeEligible = false
-		service.applyAgentUpgradeEligibility(ctx, &candidate)
+		service.applyAgentUpgradeEligibility(&candidate, true)
 		if !candidate.AgentUpgradeEligible {
 			t.Fatalf("display version state %q blocked target eligibility", state)
 		}

@@ -9,9 +9,24 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/useroperationshttp"
 )
+
+func ordinaryBaselinePaths() map[string]string {
+	compatibility := map[string]bool{}
+	for _, pattern := range strings.Split(compatibilityBaseline, "\n") {
+		compatibility[pattern] = true
+	}
+	paths := map[string]string{}
+	for _, line := range strings.Split(routeBaseline, "\n") {
+		fields := strings.Split(line, "|")
+		if compatibility[fields[0]] {
+			continue
+		}
+		_, path := baselineRoutePath(fields[0], fields[1])
+		paths[path] = fields[2]
+	}
+	return paths
+}
 
 func TestModuleMethodRegistration(t *testing.T) {
 	t.Run("ordinary-static", func(t *testing.T) {
@@ -23,9 +38,6 @@ func TestModuleMethodRegistration(t *testing.T) {
 			w.WriteHeader(202)
 		})
 		s := &Server{registeredMethods: registrar.rules}
-		if _, ok := legacyRouteMethod("/test/ordinary"); ok {
-			t.Fatal("test route exists in the old method table")
-		}
 		for _, method := range []string{"POST", "GET", "HEAD", "OPTIONS", "BREW"} {
 			w := httptest.NewRecorder()
 			s.routeErrors(mux).ServeHTTP(w, httptest.NewRequest(method, "/test/ordinary", nil))
@@ -52,7 +64,7 @@ func TestModuleMethodRegistration(t *testing.T) {
 	registrar.HandleFunc("GET /test/items/{item}", handler)
 	s.registeredMethods = registrar.rules
 	if _, ok := compatibilityRouteMethod("/test/items/a"); ok {
-		t.Fatal("test route must not be known to the legacy table")
+		t.Fatal("test route must not be known to the compatibility table")
 	}
 	if methods, ok := s.routeMethods("/test/items/a"); !ok || methods.allow() != "GET" {
 		t.Fatalf("single registration did not derive methods: %v %v", methods, ok)
@@ -159,8 +171,6 @@ func mustRegistrationPanic(t *testing.T, register func()) {
 }
 
 func TestModuleMethodPrecedence(t *testing.T) {
-	// Counterfactual methods make an erroneous fallback observable: the detail
-	// compatibility rule would allow GET, but a derived hit must end lookup.
 	for _, path := range []string{"/api/v1/operations/summary", "/api/v1/operations/queue-metrics"} {
 		mux := http.NewServeMux()
 		registrar := &methodRegistrar{mux: mux}
@@ -183,12 +193,8 @@ func TestModuleMethodPrecedence(t *testing.T) {
 		}
 	}
 	for _, line := range strings.Split(compatibilityBaseline, "\n") {
-		_, path := baselineRoutePath(line, "")
-		if line == "POST /api/v1/approval-requests/{approval_id}" {
-			path += ":approve"
-		}
-		want, wantOK := legacyRouteMethod(path)
-		if methods, ok := production.routeMethods(path); !ok || !wantOK || methods.allow() != want {
+		wantMethod, path := baselineRoutePath(line, "")
+		if methods, ok := production.routeMethods(path); !ok || methods.allow() != wantMethod {
 			t.Fatalf("compatibility route changed: %s %v/%v", path, methods, ok)
 		}
 	}
@@ -199,10 +205,9 @@ func TestModuleMethodIsolationAndOrder(t *testing.T) {
 	if &s.registeredMethods[0] == &other.registeredMethods[0] || &s.registeredMethods[0].methods[0] == &other.registeredMethods[0].methods[0] {
 		t.Fatal("Servers share method metadata")
 	}
-	// Reorder all actual registration groups, not a duplicate test route table.
 	registrations := []func(*methodRegistrar){
 		func(r *methodRegistrar) { s.registerHealthRoutes(r) },
-		func(r *methodRegistrar) { s.registerAuthRoutes(r, r.mux) },
+		func(r *methodRegistrar) { s.registerAuthRoutes(r) },
 		func(r *methodRegistrar) { s.registerDevelopmentRoutes(r) },
 		func(r *methodRegistrar) { s.registerOperationsRoutes(r, r.mux) },
 		func(r *methodRegistrar) { s.registerEnrollmentRoutes(r) },
@@ -210,15 +215,15 @@ func TestModuleMethodIsolationAndOrder(t *testing.T) {
 		func(r *methodRegistrar) { s.registerUserRoutes(r, r.mux) },
 		func(r *methodRegistrar) { s.registerConfigPlanRoutes(r) },
 		func(r *methodRegistrar) { s.registerCertificateRoutes(r, r.mux) },
-		func(r *methodRegistrar) { s.registerAuthorizationRoutes(r, r.mux) },
+		func(r *methodRegistrar) { s.registerAuthorizationRoutes(r) },
 	}
+	corpus := ordinaryBaselinePaths()
 	for _, order := range [][]int{{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, {9, 8, 7, 6, 5, 4, 3, 2, 1, 0}, {4, 5, 6, 7, 8, 9, 0, 1, 2, 3}} {
 		registrar := &methodRegistrar{mux: http.NewServeMux()}
 		for _, i := range order {
 			registrations[i](registrar)
 		}
-		for _, path := range ordinaryPathCorpus() {
-			path = httptest.NewRequest("GET", path, nil).URL.Path
+		for path := range corpus {
 			want, wantOK := registeredRouteMethods(s.registeredMethods, path)
 			got, ok := registeredRouteMethods(registrar.rules, path)
 			if !slices.Equal(got, want) || ok != wantOK {
@@ -238,12 +243,10 @@ func TestModuleMethodIsolationAndOrder(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		wg.Go(func() {
-			for _, path := range ordinaryPathCorpus() {
-				path = httptest.NewRequest("GET", path, nil).URL.Path
+			for path, wantAllow := range corpus {
 				methods, ok := s.routeMethods(path)
-				want, wantOK := legacyRouteMethod(path)
-				if methods.allow() != strings.ReplaceAll(want, "_OR_", ", ") || ok != wantOK {
-					t.Errorf("concurrent query changed rules for %s", path)
+				if !ok || methods.allow() != wantAllow {
+					t.Errorf("concurrent query changed rules for %s: %v/%v want %s", path, methods, ok, wantAllow)
 				}
 			}
 		})
@@ -252,11 +255,10 @@ func TestModuleMethodIsolationAndOrder(t *testing.T) {
 }
 
 type unreachableConfigPlans struct{ ConfigPlans }
-type unreachableUserOperations struct{ useroperationshttp.Operations }
+type unreachableUserOperations struct{ UserOperations }
 
 func TestModuleMethodRejectedWrites(t *testing.T) {
 	reader := &constructionReader{}
-	// Embedded capabilities panic if unexpectedly called, including writes.
 	s := newTestServer(t, testHTTPConfig(true), nil, Modules{Nodes: reader, ConfigPlans: &unreachableConfigPlans{}, UserOperations: &unreachableUserOperations{}}, Authorization{})
 	for _, tc := range []struct{ method, path, allow string }{
 		{"PUT", "/api/v1/nodes", "GET"},
@@ -268,9 +270,6 @@ func TestModuleMethodRejectedWrites(t *testing.T) {
 		{"POST", "/api/v1/config-plans/" + baselineID, "GET"},
 		{"PUT", "/api/v1/config-plans/" + baselineID + "/apply", "POST"},
 		{"POST", "/api/v1/nodes/" + baselineID + "/users/alice/policy", "GET, PUT"},
-		{"PUT", "/api/v1/user-batches", "POST"},
-		{"POST", "/api/v1/user-batches/" + baselineID, "GET"},
-		{"POST", "/api/v1/user-operations/metrics", "GET"},
 	} {
 		w := httptest.NewRecorder()
 		s.http.Handler.ServeHTTP(w, baselineRequest(tc.method, tc.path, strings.NewReader("broken JSON")))

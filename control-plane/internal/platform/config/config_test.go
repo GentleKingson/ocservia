@@ -145,10 +145,7 @@ func TestAuditEventTestKeyCannotBeUsedInProduction(t *testing.T) {
 		"OCSERV_TEST_AUDIT_EVENT_KEY_HEX": strings.Repeat("11", 32),
 		"OCSERV_AUDIT_EVENT_KEY_ID":       "test-key",
 		"OCSERV_DATABASE_URL":             "postgres://owner:test@postgres/ocservia",
-		"OCSERV_OIDC_ISSUER":              "https://issuer.example.test",
-		"OCSERV_OIDC_CLIENT_ID":           "client",
-		"OCSERV_OIDC_CLIENT_SECRET":       strings.Repeat("x", 32),
-		"OCSERV_OIDC_REDIRECT_URL":        "https://app.example.test/api/v1/auth/callback",
+		"OCSERV_LOCAL_AUTH_ENABLED":       "true",
 		"OCSERV_SESSION_KEY":              strings.Repeat("11", 32),
 		"OCSERV_AUDIT_CHECKPOINT_KEY":     strings.Repeat("22", 32),
 		"OCSERV_COMMAND_SIGNING_KEY_FILE": "/run/secrets/controller-command-signing-key.pem",
@@ -240,14 +237,16 @@ func TestDevAuthTokenGuard(t *testing.T) {
 }
 
 func TestRoleValidation(t *testing.T) {
-	_, err := Load([]string{"--role=invalid"}, func(key string) (string, bool) {
-		if key == "OCSERV_DATABASE_URL" {
-			return "postgres://db/test", true
+	for _, arg := range []string{"--role=invalid", "--role=api", "--role=worker", "--role=scheduler"} {
+		_, err := Load([]string{arg}, func(key string) (string, bool) {
+			if key == "OCSERV_DATABASE_URL" {
+				return "postgres://db/test", true
+			}
+			return "", false
+		})
+		if err == nil {
+			t.Fatalf("Load() accepted %s", arg)
 		}
-		return "", false
-	})
-	if err == nil {
-		t.Fatal("Load() accepted invalid role")
 	}
 }
 
@@ -453,10 +452,7 @@ func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
 	}
 	cfg.Environment = "production"
 	cfg.DatabaseURL = "postgres://127.0.0.1/test"
-	cfg.OIDCIssuer = "https://id.example.test"
-	cfg.OIDCClientID = "ocservia"
-	cfg.OIDCClientSecret = strings.Repeat("s", 11)
-	cfg.OIDCRedirectURL = "https://ocservia.example.test/api/v1/auth/callback"
+	cfg.LocalAuth = true
 	cfg.PublicOrigin = "https://ocservia.example.test"
 	cfg.SessionKey = make([]byte, 32)
 	cfg.AuditCheckpointKey = make([]byte, 32)

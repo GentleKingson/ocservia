@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
@@ -19,7 +18,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/oauth2"
 )
 
 func captureAuthLogs(s *Server) *bytes.Buffer {
@@ -72,7 +70,7 @@ func assertNoAuthSecrets(t *testing.T, b *bytes.Buffer, secrets ...string) {
 }
 
 func TestAuthLogKindsAndBoundedFields(t *testing.T) {
-	s := newAuthHTTPServer(t, nil, true, "")
+	s := newAuthHTTPServer(t, nil, true)
 	b := captureAuthLogs(s)
 	id := uuid.New()
 	r := httptest.NewRequest("POST", "/api/v1/auth/login", nil)
@@ -130,7 +128,7 @@ func TestAuthLogConcurrentAggregation(t *testing.T) {
 		}()
 	}
 	workers.Wait()
-	_, counts := state.admit(oidcStarted, now.Add(time.Minute))
+	_, counts := state.admit(localCredentialsRejected, now.Add(time.Minute))
 	if emitted.Load() != authLogSamples || counts[localSourceLimited] != 1600-authLogSamples {
 		t.Fatal("concurrent logging exceeded sample budget or lost counts")
 	}
@@ -138,7 +136,7 @@ func TestAuthLogConcurrentAggregation(t *testing.T) {
 
 func TestAuthLogSourceAndAdmission(t *testing.T) {
 	for _, peer := range []string{"192.0.2.1:1234", "10.0.0.2:1234"} {
-		s := newAuthHTTPServer(t, nil, true, "")
+		s := newAuthHTTPServer(t, nil, true)
 		s.ConfigureAuthProxies([]netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")})
 		b := captureAuthLogs(s)
 		for i := 0; i < 100; i++ {
@@ -181,7 +179,7 @@ func TestAuthLogSourceAndAdmission(t *testing.T) {
 		{localConcurrencyLimited, newAuthAdmission(5, 100, 1)},
 		{localSourceCapacityLimited, newAuthAdmission(5, 100, 1)},
 	} {
-		s := newAuthHTTPServer(t, nil, true, "")
+		s := newAuthHTTPServer(t, nil, true)
 		b := captureAuthLogs(s)
 		s.localLoginBudget = test.budget
 		switch test.kind {
@@ -220,7 +218,7 @@ func TestAuthLogFailureAndInfrastructure(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool.Close()
-	s := newAuthHTTPServer(t, pool, true, "")
+	s := newAuthHTTPServer(t, pool, true)
 	b := captureAuthLogs(s)
 	w := authHTTPRequest(s, "POST", "login", `{"username":"valid-name","password":"password-log-bait"}`, authTestOrigin)
 	if w.Code != 503 || len(w.Result().Cookies()) != 0 {
@@ -229,7 +227,7 @@ func TestAuthLogFailureAndInfrastructure(t *testing.T) {
 	assertAuthLog(t, b, "local", "unavailable", "infrastructure_failure")
 	assertNoAuthSecrets(t, b, "db-connection-bait", "password-log-bait", "valid-name")
 	for _, panics := range []bool{false, true} {
-		s := newAuthHTTPServer(t, nil, true, "https://idp.example.test")
+		s := newAuthHTTPServer(t, nil, true)
 		s.logger = slog.New(brokenAuthHandler{panic: panics})
 		for i := 0; i < 20; i++ {
 			w := authHTTPRequest(s, "POST", "login", `{"username":"","password":""}`, authTestOrigin)
@@ -241,28 +239,7 @@ func TestAuthLogFailureAndInfrastructure(t *testing.T) {
 				t.Fatal("logger failure changed rejection")
 			}
 		}
-		if w := authHTTPRequest(s, "GET", "callback?code=authorization-code-log-bait", "", ""); w.Code != http.StatusUnauthorized {
-			t.Fatal("logger failure changed callback")
-		}
 	}
-}
-
-func TestAuthLogOIDCStartFailureRedacted(t *testing.T) {
-	idp := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "client-secret-log-bait id-token-log-bait", 503)
-	}))
-	defer idp.Close()
-	s := newAuthHTTPServer(t, nil, false, idp.URL)
-	b := captureAuthLogs(s)
-	r := httptest.NewRequest("GET", "/api/v1/auth/login", nil)
-	r = r.WithContext(context.WithValue(r.Context(), oauth2.HTTPClient, idp.Client()))
-	w := httptest.NewRecorder()
-	s.http.Handler.ServeHTTP(w, r)
-	if w.Code != 503 || len(w.Result().Cookies()) != 0 {
-		t.Fatal("failed discovery issued login")
-	}
-	assertAuthLog(t, b, "oidc", "unavailable", "start_failed")
-	assertNoAuthSecrets(t, b, "client-secret-log-bait", "id-token-log-bait", idp.URL)
 }
 
 func TestAuthLogSessionFailureIntegration(t *testing.T) {
@@ -281,7 +258,7 @@ func TestAuthLogSessionFailureIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer owner.Close()
-	s := newAuthHTTPServer(t, pool, true, "")
+	s := newAuthHTTPServer(t, pool, true)
 	b := captureAuthLogs(s)
 	name, password := "auth-log-"+uuid.NewString(), "session-password-log-bait"
 	id, err := s.auth.CreateLocalCredential(ctx, name, password)

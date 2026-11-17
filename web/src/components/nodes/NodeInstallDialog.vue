@@ -6,7 +6,6 @@ import { createNodeBootstrapToken } from "../../api/enrollment";
 import {
   getWorkspace,
   sameWorkspaceContext,
-  workspaceChangedEvent,
   workspaceContext,
 } from "../../api/workspace";
 import {
@@ -52,7 +51,6 @@ function close(): void {
   emit("close");
 }
 onBeforeUnmount(clear);
-useEventListener(defaultWindow, workspaceChangedEvent, close);
 // Full-document navigation can retain the page in the browser back/forward cache.
 useEventListener(defaultWindow, "pagehide", close);
 onMounted(async () => {

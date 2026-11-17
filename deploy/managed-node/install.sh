@@ -23,7 +23,6 @@
 # file from any directory holding the node configuration):
 #   export CONTROLLER_ENDPOINT_ID=<64-lowercase-hex>
 #   export RELAY_URL_A=https://relay-a.example.com
-#   export RELAY_URL_B=
 #   export RELAY_ACCESS_TOKEN_SOURCE=/protected/relay-access-token
 #   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=/protected/key.pem
 #   export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
@@ -35,7 +34,6 @@
 #   # Without BOOTSTRAP_TOKEN_SOURCE, this stops at ENROLLMENT_READY instead;
 #   # create an endpoint-bound token for the printed EndpointID, install it as
 #   # /etc/ocservia-agent/enrollment-token root:ocserv-agent 0640, and rerun.
-#   # approve the node (docs/operations/agent-lifecycle.md#approve-the-node), then:
 #   sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
 #   deploy/managed-node/install.sh --version vX.Y.Z   # -> SERVICES_ACTIVE (read-only verification)
 #
@@ -101,10 +99,9 @@ ENROLLMENT_TOKEN_FILE="${AGENT_CONF_DIR}/enrollment-token"
 USER_SEAL_KEY_FILE="${AGENT_CONF_DIR}/user-password-seal-private.pem"
 P12_SEAL_KEY_FILE="${AGENT_CONF_DIR}/p12-password-seal-private.pem"
 IDENTITY_DIR="${SYSROOT}/var/lib/ocservia-agent/identity"
-# The pristine placeholder relay URLs installed by the verified package from
+# The pristine placeholder relay URL installed by the verified package from
 # deploy/production/systemd/relays.env.example.
 PLACEHOLDER_RELAY_URL_A="https://relay-a.example.com"
-PLACEHOLDER_RELAY_URL_B=""
 PLACEHOLDER_NODE_ID="00000000-0000-7000-8000-000000000000"
 SUPPORTED_HOSTS="Ubuntu 22.04/24.04/26.04 and Debian 12/13 (dpkg), Rocky Linux 9 (rpm), x86_64/aarch64, systemd"
 VERSION="${DEFAULT_VERSION}"
@@ -142,7 +139,6 @@ ROOT_LIFECYCLE_ENV_NAMES=(
   P12_PASSWORD_SEAL_KEY_ID
   RELAY_ACCESS_TOKEN_SOURCE
   RELAY_URL_A
-  RELAY_URL_B
   USER_PASSWORD_SEAL_KEY_ID
 )
 
@@ -373,7 +369,6 @@ if [[ "${JOIN_MODE}" == false && -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
     P12_PASSWORD_SEAL_KEY_ID \
     RELAY_ACCESS_TOKEN_SOURCE \
     RELAY_URL_A \
-    RELAY_URL_B \
     USER_PASSWORD_SEAL_KEY_ID
 fi
 
@@ -548,8 +543,6 @@ require_commands() {
 
 validate_operator_inputs() {
   local variable
-  RELAY_URL_B="${RELAY_URL_B:-}"
-  [[ -z "$RELAY_URL_B" ]] || fail 'only one dedicated Relay is supported; leave RELAY_URL_B empty'
   for variable in CONTROLLER_ENDPOINT_ID RELAY_URL_A \
     RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE; do
     [[ -n "${!variable:-}" ]] ||
@@ -724,7 +717,7 @@ write_config_atomic() {
 }
 
 ensure_relays_env() {
-  local metadata existing_a existing_b staging
+  local metadata existing_a staging
   if path_exists "${RELAYS_ENV_FILE}"; then
     metadata="$(stat_string "${RELAYS_ENV_FILE}")"
     if ! priv test -f "${RELAYS_ENV_FILE}" || priv test -L "${RELAYS_ENV_FILE}"; then
@@ -733,18 +726,17 @@ ensure_relays_env() {
     [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
       fail "the existing ${RELAYS_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
     existing_a="$(priv sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
-    existing_b="$(priv sed -n 's/^RELAY_URL_B=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
-    if [[ "${existing_a}" == "${RELAY_URL_A}" && "${existing_b}" == "${RELAY_URL_B}" ]]; then
+    if [[ "${existing_a}" == "${RELAY_URL_A}" ]]; then
       echo "preserved existing relay configuration (${RELAYS_ENV_FILE})"
       return
     fi
-    [[ "${existing_a}" == "${PLACEHOLDER_RELAY_URL_A}" && "${existing_b}" == "${PLACEHOLDER_RELAY_URL_B}" ]] ||
-      fail "the existing ${RELAYS_ENV_FILE} requests ${existing_a} / ${existing_b}, not the configured dedicated relays; resolve the mismatch deliberately instead of overwriting node configuration"
+    [[ "${existing_a}" == "${PLACEHOLDER_RELAY_URL_A}" ]] ||
+      fail "the existing ${RELAYS_ENV_FILE} requests ${existing_a}, not the configured dedicated relay; resolve the mismatch deliberately instead of overwriting node configuration"
   fi
   staging="$(mktemp "${STAGING_DIR}/relays-env.XXXXXX")"
-  printf 'RELAY_URL_A=%s\nRELAY_URL_B=%s\n' "${RELAY_URL_A}" "${RELAY_URL_B}" >"${staging}"
+  printf 'RELAY_URL_A=%s\n' "${RELAY_URL_A}" >"${staging}"
   write_config_atomic "${staging}" "${RELAYS_ENV_FILE}" 0640
-  echo "wrote dedicated relay URLs to ${RELAYS_ENV_FILE}"
+  echo "wrote dedicated relay URL to ${RELAYS_ENV_FILE}"
 }
 
 ensure_protected_install() {
@@ -787,9 +779,6 @@ prepare_bootstrap_token() {
 }
 
 detect_enrolled_node() {
-  if priv test -e "${AGENT_CONF_DIR}/active-binding" || priv test -L "${AGENT_CONF_DIR}/active-binding"; then
-    fail "this node has an explicit Controller rebind; use ocservia-agent-rebind for binding recovery and the native package lifecycle for upgrades, not bootstrap enrollment"
-  fi
   # Establishes whether this node already completed enrollment, before any
   # step that could create node state. The enrolled state is a validation
   # boundary: from here on the bootstrap must not regenerate identity or
@@ -889,9 +878,9 @@ validate_enrolled_identity() {
 
 validate_enrolled_relays() {
   # On an enrolled node relays.env is the running relay configuration. It
-  # must already exist, be safe, and name exactly the configured dedicated
-  # relays; a validation-only rerun never writes it.
-  local metadata existing_a existing_b
+  # must already exist, be safe, and name the configured dedicated relay;
+  # a validation-only rerun never writes it.
+  local metadata existing_a
   if ! path_exists "${RELAYS_ENV_FILE}"; then
     fail "the enrolled node is missing its relay configuration ${RELAYS_ENV_FILE}; restoring it is a deliberate recovery operation, not a bootstrap rerun (docs/operations/agent-lifecycle.md#install-a-managed-node)"
   fi
@@ -902,9 +891,8 @@ validate_enrolled_relays() {
   [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
     fail "the enrolled relay configuration ${RELAYS_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
   existing_a="$(priv sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
-  existing_b="$(priv sed -n 's/^RELAY_URL_B=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
-  [[ "${existing_a}" == "${RELAY_URL_A}" && "${existing_b}" == "${RELAY_URL_B}" ]] ||
-    fail "the enrolled ${RELAYS_ENV_FILE} names ${existing_a:-<none>} / ${existing_b:-<none>}, not the configured dedicated relays; a rerun never rewrites the running relay configuration — resolve the mismatch deliberately"
+  [[ "${existing_a}" == "${RELAY_URL_A}" ]] ||
+    fail "the enrolled ${RELAYS_ENV_FILE} names ${existing_a:-<none>}, not the configured dedicated relay; a rerun never rewrites the running relay configuration — resolve the mismatch deliberately"
 }
 
 validate_enrolled_relay_token() {
@@ -1033,7 +1021,7 @@ is_final_node_id() {
 services_enabled_and_active() {
   # Read-only observation, the only post-activation signal available without
   # Controller credentials: it proves the operator completed the deliberate
-  # enable step, not Controller-side approval or an accepted session. The
+  # enable step, not an accepted session. The
   # queries never mutate anything; this observation never enables, starts,
   # stops, or masks a service.
   local unit
@@ -1047,7 +1035,7 @@ print_controller_unobserved() {
   echo "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
   echo "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
   echo "CONTROLLER_FRESHNESS: NOT_OBSERVED"
-  echo "next: use an administrator session on the Controller host to GET /api/v1/nodes/${1}; approval/activation responses use status, inventory uses trust_status, connection_state and freshness"
+  echo "next: use an administrator session on the Controller host to GET /api/v1/nodes/${1}; trust_status, connection_state and freshness reflect Controller state"
 }
 
 print_enrolled_local() {
@@ -1055,7 +1043,7 @@ print_enrolled_local() {
   echo "NODE_ID: ${1}"
   echo "SERVICES: ${2:-NOT_OBSERVED}"
   print_controller_unobserved "${1}"
-  echo "next: verify approval in the Controller (docs/operations/agent-lifecycle.md#approve-the-node), then deliberately enable ocservia-privd.service and ocservia-agent.service; the bootstrap never initially starts or enables Agent/privd"
+  echo "next: register privd attestation and verify activation in the Controller (docs/operations/agent-lifecycle.md), then deliberately enable ocservia-privd.service and ocservia-agent.service"
 }
 
 print_services_active() {
@@ -1177,7 +1165,7 @@ if [[ "${JOIN_MODE}" == true ]]; then
   node_bootstrap_prepare
 fi
 if [[ "${INTERACTIVE}" == true ]]; then
-  echo 'Agent installation preserves existing identity; approval and initial service activation remain separate.'
+  echo 'Agent installation preserves existing identity; initial service activation remains separate.'
   install_ui_prompt CONTROLLER_ENDPOINT_ID 'Controller EndpointID (64 lowercase hex)'
   install_ui_prompt RELAY_URL_A 'Dedicated Relay HTTPS URL'
   install_ui_prompt RELAY_ACCESS_TOKEN_SOURCE 'Protected Relay access token file'
@@ -1194,7 +1182,7 @@ if [[ "${INTERACTIVE}" == true ]]; then
   install_ui_confirm
   install_ui_save "${CONFIG_FILE}" BOOTSTRAP_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
     CONTROLLER_ENDPOINT_ID ENROLLMENT_ENVIRONMENT P12_PASSWORD_SEAL_KEY_ID RELAY_ACCESS_TOKEN_SOURCE \
-    RELAY_URL_A RELAY_URL_B USER_PASSWORD_SEAL_KEY_ID
+    RELAY_URL_A USER_PASSWORD_SEAL_KEY_ID
 fi
 if [[ "${ROOT_LIFECYCLE}" == true && "${INTERACTIVE}" == true ]]; then
   ((EUID == 0)) || forward_root_lifecycle
@@ -1203,13 +1191,6 @@ if [[ "${ROOT_LIFECYCLE}" == true && "${INTERACTIVE}" == true ]]; then
   unset SUDO_USER
 fi
 
-if path_exists "${RELAYS_ENV_FILE}"; then
-  if ! priv test -f "${RELAYS_ENV_FILE}" || priv test -L "${RELAYS_ENV_FILE}"; then
-    fail "the existing relay configuration is not a regular file"
-  fi
-  existing_b="$(priv sed -n 's/^RELAY_URL_B=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
-  [[ -z "$existing_b" ]] || fail 'existing configuration has a second Relay; retain one Relay deliberately before rerunning'
-fi
 create_launcher_staging
 if native_package_satisfied; then
   echo "native package ocservia-agent $(expected_installed_version) already installed; skipping the release download and package installation"

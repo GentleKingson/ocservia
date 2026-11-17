@@ -72,7 +72,7 @@ services:
       OCSERV_ENVIRONMENT: production
       OCSERV_DATABASE_URL_FILE: /run/secrets/database_owner_url
       OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
-      OCSERV_LOCAL_AUTH_ENABLED: ${OCSERV_LOCAL_AUTH_ENABLED:-false}
+      OCSERV_LOCAL_AUTH_ENABLED: ${OCSERV_LOCAL_AUTH_ENABLED:-true}
       OCSERV_PUBLIC_ORIGIN: ${OCSERV_PUBLIC_ORIGIN:-https://${OCSERV_PUBLIC_HOST}}
       OCSERV_SESSION_KEY_FILE: /run/secrets/session_key
       OCSERV_SESSION_TTL: ${OCSERV_SESSION_TTL:-8h}
@@ -81,11 +81,6 @@ services:
       OCSERV_AUDIT_EVENT_KEY_ID: ${OCSERV_AUDIT_EVENT_KEY_ID:?set the audit event HMAC key ID}
       OCSERV_AUDIT_EVENT_KEY_FILE: /run/secrets/audit_event_key
     secrets:
-      - source: relay_access_token
-        target: relay_access_token
-        uid: "65532"
-        gid: "65532"
-        mode: 0440
       - database_owner_url
       - session_key
       - audit_checkpoint_key
@@ -113,7 +108,7 @@ services:
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
       OCSERV_AUTH_TRUSTED_PROXY_CIDRS: ${OCSERV_AUTH_TRUSTED_PROXY_CIDRS-${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}/32}
       OCSERV_DATABASE_URL_FILE: /run/secrets/database_app_url
-      OCSERV_LOCAL_AUTH_ENABLED: ${OCSERV_LOCAL_AUTH_ENABLED:-false}
+      OCSERV_LOCAL_AUTH_ENABLED: ${OCSERV_LOCAL_AUTH_ENABLED:-true}
       OCSERV_PUBLIC_ORIGIN: ${OCSERV_PUBLIC_ORIGIN:-https://${OCSERV_PUBLIC_HOST}}
       OCSERV_SESSION_KEY_FILE: /run/secrets/session_key
       OCSERV_SESSION_TTL: ${OCSERV_SESSION_TTL:-8h}
@@ -148,6 +143,11 @@ services:
       - database_app_url
       - session_key
       - audit_checkpoint_key
+      - source: relay_access_token
+        target: relay_access_token
+        uid: "65532"
+        gid: "65532"
+        mode: 0440
       - source: audit_event_key
         target: audit_event_key
         uid: "65534"
@@ -192,7 +192,6 @@ services:
     entrypoint: ["/usr/local/libexec/ocservia-transportd-relays"]
     environment:
       OCSERV_RELAY_URL_A: ${OCSERV_RELAY_URL_A:?set the dedicated HTTPS relay URL}
-      OCSERV_RELAY_URL_B: ${OCSERV_RELAY_URL_B:-}
     command:
       - --socket
       - /run/ocserv-platform/transportd.sock
@@ -293,7 +292,7 @@ services:
           pids: 256
 
 networks:
-  # Only transportd needs outbound HTTPS to independent dedicated Relays.
+  # Only transportd needs outbound HTTPS to the dedicated Relay.
   relay-egress: {}
   frontend: {}
   application:

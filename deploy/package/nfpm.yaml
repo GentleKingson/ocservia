@@ -14,8 +14,7 @@ description: |
   ocservia node-side Agent and privd, packaged as the release archive
   plus its verifier. Installation checks the embedded plain archive checksum
   in root-owned staging before install-agent.sh runs, and no
-  Agent service is enabled automatically. The independent history retention
-  timer is enabled on installation.
+  Agent service is enabled automatically.
 homepage: https://github.com/GentleKingson/ocservia
 license: Apache-2.0
 depends:

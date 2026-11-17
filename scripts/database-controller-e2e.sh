@@ -5,12 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE="${1:-postgres}"
 case "${ENGINE}" in postgres) ;; *) echo 'expected postgres; MySQL is retired' >&2; exit 2 ;; esac
 ROLE_MODE="${2:-all}"
-case "${ROLE_MODE}" in all|split) ;; *) echo 'expected all or split role mode' >&2; exit 2 ;; esac
-if [[ -n "${OCSERV_REBIND_E2E:-}" ]]; then
-  [[ "${ROLE_MODE}" == all && ( "${OCSERV_REBIND_E2E}" == revoked || "${OCSERV_REBIND_E2E}" == unreachable ) ]] || {
-    echo 'Rebind E2E requires all role mode and revoked or unreachable disposition' >&2; exit 2;
-  }
-fi
+case "${ROLE_MODE}" in all) ;; *) echo 'expected all role mode; split roles are retired' >&2; exit 2 ;; esac
 NAME="ocservia-database-controller-${ENGINE}-${ROLE_MODE}-$(date +%s)-$$"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${ROOT}/artifacts/${NAME}}"
 mkdir -p "${ARTIFACT_DIR}" "${ROOT}/.cache/go-build" "${ROOT}/.cache/go-mod"
@@ -55,7 +50,7 @@ docker image inspect "${WORKFLOW_IMAGE}" >"${ARTIFACT_DIR}/workflow-image.json"
 # Nothing is published on the host, and runtime processes cannot use public
 # discovery as an accidental substitute for the one dedicated TLS Relay.
 docker network create --internal "${NAME}" >/dev/null
-ENVIRONMENT=(-e "OCSERV_REBIND_E2E=${OCSERV_REBIND_E2E:-}" -e OCSERVIA_DATABASE_TEST_CONTROLLER_E2E=1 -e "OCSERVIA_DATABASE_TEST_CONTROLLER_ROLE_MODE=${ROLE_MODE}" -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
+ENVIRONMENT=(-e OCSERVIA_DATABASE_TEST_CONTROLLER_E2E=1 -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
 MOUNTS=()
 COMMAND=(go test -buildvcs=false -count=1 -race -timeout=15m -v ./internal/platform/app -run '^TestControllerTransportBackendE2E$')
 POSTGRES_IMAGE=postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
@@ -86,9 +81,6 @@ for _ in {1..90}; do
 done
 docker exec "${NAME}" pg_isready -h 127.0.0.1 -U ocservia_owner -d ocservia >/dev/null
 docker exec "${NAME}" psql -U ocservia_owner -d ocservia -v ON_ERROR_STOP=1 -c "CREATE ROLE ocservia_app LOGIN PASSWORD 'test-runtime-only'" >/dev/null
-if [[ -n "${OCSERV_REBIND_E2E:-}" ]]; then
-  docker exec "${NAME}" psql -U ocservia_owner -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ocservia_rebind_target' >/dev/null
-fi
 docker image inspect "${POSTGRES_IMAGE}" >"${ARTIFACT_DIR}/database-image.json"
 docker exec "${NAME}" psql -U ocservia_owner -d ocservia -Atc 'SELECT version()' >"${ARTIFACT_DIR}/database-version.txt"
 ENVIRONMENT+=(-e 'OCSERV_TEST_OWNER_DATABASE_URL=postgres://ocservia_owner:test-owner-only@127.0.0.1:5432/ocservia?sslmode=disable' \
