@@ -1617,12 +1617,12 @@ Production installation uses fixed GitHub Release assets directly; no static hos
 ```bash
 wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/controller-bootstrap.sh -O install.sh
 bash install.sh
-# On a managed node, download managed-node-bootstrap.sh instead.
+# Managed nodes use managed-node-bootstrap.sh with --join-token-file or --resume-install; see Agent lifecycle.
 ```
 
-`install-controller` and `install-node` remain optional thin bootstrap launcher wrappers, also published with an embedded fixed version. No arguments requests the versioned installer wizard; explicit legacy arguments retain CLI behavior. `--non-interactive` and `--config PATH` pass through to the versioned installer. Neither stage selects `latest` or `main`.
+`install-controller` and `install-node` remain optional thin bootstrap launcher wrappers with an embedded fixed version. With no arguments, the Controller collects configuration and the node requests a hidden installation token. Controller `--config PATH` and node `--join-token-file PATH` or `--resume-install` are the unattended inputs; node `--config` is retired. Neither stage selects `latest` or `main`.
 
-The interaction follows the explicit unattended switches and confirmation model of [Rustup](https://rust-lang.github.io/rustup/installation/index.html) and [Homebrew](https://docs.brew.sh/Installation#unattended-installation). This installer requires a TTY for its default wizard and refuses to install when one is absent. Configuration collection is the only distinction between the wizard and CLI; both delegate to the same lifecycle authorities.
+The interaction follows the explicit unattended switches and confirmation model of [Rustup](https://rust-lang.github.io/rustup/installation/index.html) and [Homebrew](https://docs.brew.sh/Installation#unattended-installation). The default configuration wizard and hidden token prompt require a TTY. Each installer delegates interactive and unattended inputs to its own single lifecycle flow.
 
 Release preparation stamps both wrappers and both standalone versioned installer scripts. The Controller installer downloads `controller-runtime-vX.Y.Z.tar.gz` and its published `.sha256`, verifies archive paths/types, version and checksums, and retains the bundle under the existing `OCSERV_CONTROLLER_SOURCE_ROOT` path. The bundle holds only production Compose, lifecycle scripts and public bind-mount configuration. Its `RELEASE` records the release tag and source commit; `SHA256SUMS` detects local drift. These hashes detect corruption and do not add a separate signing authority beyond HTTPS and immutable Release publication. The Agent installer continues to download the platform-native package and freeze it in protected staging.
 

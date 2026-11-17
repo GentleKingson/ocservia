@@ -521,3 +521,147 @@ describe("domain request contracts", () => {
     expect(request().headers.get("Idempotency-Key")).toBeTruthy();
   });
 });
+
+describe("audit and rollout wire decoding", () => {
+  it("decodes real audit fields without closing historical result codes", async () => {
+    const api = await loadApi();
+    await api.getWorkspace();
+    fetchMock.mockResolvedValueOnce(
+      json({
+        items: [
+          {
+            id: "audit-a",
+            occurred_at: "-infinity",
+            actor_type: "user",
+            actor_id: "admin",
+            action: "node.approve",
+            resource_type: "node",
+            resource_id: null,
+            node_id: null,
+            request_id: "request-a",
+            trace_id: null,
+            command_id: null,
+            approval_id: null,
+            result: "historical-result",
+            reason: null,
+            error_type: null,
+            previous_event_hash: "",
+            event_hash: "abc",
+          },
+        ],
+      }),
+    );
+    const page = await api.listAuditEvents();
+    expect(page.items[0]).toMatchObject({
+      actorId: "admin",
+      requestId: "request-a",
+      resourceId: null,
+      previousEventHash: "",
+      eventHash: "abc",
+      result: "historical-result",
+      occurredAt: "-infinity",
+    });
+  });
+
+  it.each([200, 409])(
+    "decodes audit verification HTTP %s exactly once",
+    async (status) => {
+      const api = await loadApi();
+      await api.getWorkspace();
+      fetchMock.mockClear();
+      fetchMock.mockResolvedValueOnce(
+        json(
+          {
+            workspace_id: alpha.id,
+            events: 3,
+            compacted_events: 1,
+            valid: status === 200,
+            checkpoint_valid: status === 200,
+          },
+          status,
+        ),
+      );
+      expect(await api.verifyAuditChain()).toEqual({
+        workspaceId: alpha.id,
+        events: 3,
+        compactedEvents: 1,
+        valid: status === 200,
+        checkpointValid: status === 200,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(request().method).toBe("POST");
+    },
+  );
+
+  it.each([
+    { type: "about:blank", title: "Conflict", status: 409 },
+    {
+      workspace_id: beta.id,
+      events: 0,
+      compacted_events: 0,
+      valid: false,
+      checkpoint_valid: false,
+    },
+    {
+      workspace_id: alpha.id,
+      events: -1,
+      compacted_events: 0,
+      valid: false,
+      checkpoint_valid: false,
+    },
+    {
+      workspace_id: alpha.id,
+      events: 0,
+      compacted_events: 0,
+      valid: "false",
+      checkpoint_valid: false,
+    },
+  ])(
+    "rejects malformed or foreign audit verification without resubmitting",
+    async (body) => {
+      const api = await loadApi();
+      await api.getWorkspace();
+      fetchMock.mockClear();
+      fetchMock.mockResolvedValueOnce(json(body, 409));
+      await expect(api.verifyAuditChain()).rejects.toThrow(
+        "Invalid audit verification response",
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("decodes known exclusions and preserves unfamiliar stored JSON on reads and resume", async () => {
+    const api = await loadApi();
+    await api.getWorkspace();
+    const wire = {
+      id: "rollout-a",
+      workspace_id: alpha.id,
+      created_at: "-infinity",
+      updated_at: "infinity",
+      excluded: [
+        { node_id: "node-a", reason: "future_reason" },
+        null,
+        ["legacy"],
+        { extra: true },
+      ],
+    };
+    for (const load of [
+      () => api.getAgentRollout("rollout-a"),
+      () => api.resumeAgentRollout("rollout-a"),
+      async () => (await api.listAgentRollouts()).rollouts[0],
+    ]) {
+      fetchMock.mockResolvedValueOnce(json({ ...wire, rollouts: [wire] }));
+      const value = await load();
+      expect(value).toBeDefined();
+      if (!value) throw new Error("Missing rollout");
+      expect(value.excluded).toEqual([
+        { nodeId: "node-a", reason: "future_reason", raw: "" },
+        { nodeId: "", reason: "", raw: "null" },
+        { nodeId: "", reason: "", raw: '["legacy"]' },
+        { nodeId: "", reason: "", raw: '{"extra":true}' },
+      ]);
+      expect(value.createdAt).toBe("-infinity");
+      expect(value.updatedAt).toBe("infinity");
+    }
+  });
+});

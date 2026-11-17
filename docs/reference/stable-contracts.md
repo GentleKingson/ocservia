@@ -605,10 +605,11 @@ All four endpoints are bounded, rate-limited, no-store,
 credential-authenticated without an administrator browser session, and reject
 Agent child credentials.
 
-An alternative manual configuration workflow pre-generates the long-lived
-endpoint identity on the host (`--prepare-enrollment`), then runs bootstrap
-enrollment with an `obt1_` token supplied via `BOOTSTRAP_TOKEN_SOURCE` or
-`--enrollment-token-file`. Once consumed, an `obt1_` bootstrap token may be
+Manual Agent CLI recovery pre-generates or loads the long-lived endpoint
+identity on the host (`--prepare-enrollment`), then uses the existing protected
+`obt1_` credential through `--enrollment-token-file`. The standard installer
+accepts installation tokens or retained bootstrap state, never install.env or
+operator-supplied child-token configuration. Once consumed, an `obt1_` bootstrap token may be
 replayed only by that same `EndpointID` while the node has not yet transitioned
 to another endpoint or state, returning the committed node ID. The command lines
 are in [Enroll the node](../operations/agent-lifecycle.md#enroll-the-node).

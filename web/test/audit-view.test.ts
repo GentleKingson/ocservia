@@ -8,7 +8,10 @@ const mocks = vi.hoisted(() => ({
   workspaceContext: vi.fn(),
 }));
 vi.mock("../src/api/events", () => mocks);
-vi.mock("../src/api/workspace", () => mocks);
+vi.mock("../src/api/workspace", async (original) => ({
+  ...(await original<typeof import("../src/api/workspace")>()),
+  ...mocks,
+}));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 import AuditView from "../src/views/AuditView.vue";
 const renderer = createRenderer<object, object>({
@@ -27,7 +30,7 @@ let unmount: (() => void) | undefined;
 const record = {
   id: "audit-a",
   action: "node.approve",
-  occurred_at: "2026-09-30T00:00:00Z",
+  occurredAt: "2026-09-30T00:00:00Z",
 };
 interface View {
   items: object[];
@@ -116,7 +119,7 @@ it("filters only the loaded slice", async () => {
   const failed = {
     id: "audit-b",
     action: "user.disable",
-    actor_id: "admin",
+    actorId: "admin",
     result: "failed",
   };
   mocks.listAuditEvents.mockResolvedValue({
@@ -139,7 +142,7 @@ it("filters only the loaded slice", async () => {
   view.toggle("id:audit-a");
   expect(view.expanded).toEqual(["id:audit-b"]);
 });
-it("verifies the audit hash chain on 200 and parses 409 invalid results", async () => {
+it("renders valid and invalid audit evidence decoded by the API", async () => {
   const validResult = {
     workspaceId: "workspace-a",
     events: 12,
@@ -152,19 +155,12 @@ it("verifies the audit hash chain on 200 and parses 409 invalid results", async 
   expect(view.verification).toEqual(validResult);
   expect(view.verifyError).toBe("");
 
-  mocks.verifyAuditChain.mockRejectedValueOnce(
-    new ResponseError(
-      new Response(
-        JSON.stringify({
-          workspace_id: "workspace-a",
-          events: 12,
-          valid: false,
-          checkpoint_valid: false,
-        }),
-        { status: 409, headers: { "Content-Type": "application/json" } },
-      ),
-    ),
-  );
+  mocks.verifyAuditChain.mockResolvedValueOnce({
+    workspaceId: "workspace-a",
+    events: 12,
+    valid: false,
+    checkpointValid: false,
+  });
   await view.verifyChain();
   expect(view.verification).toEqual({
     workspaceId: "workspace-a",

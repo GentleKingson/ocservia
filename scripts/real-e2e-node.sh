@@ -112,14 +112,25 @@ EOF
     cp "${ready_dir}/install-command" "${WORK}/install-command"
     cp "${ready_dir}/controller-origin" "${WORK}/controller-origin"
   fi
-  BOOTSTRAP_TOKEN_SOURCE='' bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" \
-    >"${SECRETS}/managed-prepare.log"
+  # Fixture preparation uses the Agent's offline CLI, not a second installer.
+  # Do not overwrite keys from an earlier attempt.
+  for key in user-password-seal-private.pem p12-password-seal-private.pem; do
+    if ! sudo test -e "/etc/ocservia-agent/${key}"; then
+      openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 \
+        -out "${SECRETS}/${key}" 2>"${SECRETS}/${key}.log"
+      sudo install -o root -g root -m 0600 "${SECRETS}/${key}" "/etc/ocservia-agent/${key}"
+      rm -f -- "${SECRETS}/${key}"
+    fi
+  done
+  # The runner owns this log; sudo only executes the offline Agent CLI.
+  # shellcheck disable=SC2024
+  sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
+    --controller "${controller}" --prepare-enrollment >"${SECRETS}/managed-prepare.log"
   assert_not_started
   # The runner owns this private evidence file; sudo only reads the root identity.
   # shellcheck disable=SC2024
   sudo sha256sum /var/lib/ocservia-agent/identity/endpoint.key \
     /var/lib/ocservia-agent/identity/controller.endpoint >"${SECRETS}/identity.sha256"
-  grep -Fxq ENROLLMENT_READY "${SECRETS}/managed-prepare.log"
   endpoint="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
     --controller "${controller}" --prepare-enrollment)"
   require_endpoint "${endpoint}"
@@ -189,7 +200,7 @@ enroll() {
   printf '%s\n' "${node_id}" >"${OUTBOX}/enrollment-result/node-id"
   runner_instance_id >"${OUTBOX}/enrollment-result/runner-instance"
   if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
-    printf 'ENROLLMENT_READY=PASS\nONLINE=PASS\nIDENTITY_UNCHANGED=PASS\nPRIVD_AUTOMATIC_REGISTRATION=PASS\nRELEASE_ASSET_DOWNLOAD=NOT_TESTED\n' \
+    printf 'IDENTITY_PREPARED=PASS\nONLINE=PASS\nIDENTITY_UNCHANGED=PASS\nPRIVD_AUTOMATIC_REGISTRATION=PASS\nRELEASE_ASSET_DOWNLOAD=NOT_TESTED\n' \
       >"${RUNNER_TEMP}/real-e2e-evidence-node/node-install.txt"
   fi
 }

@@ -492,8 +492,8 @@ enrolled_identity="$(identity_digest)"
 if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
   python3 "${ROOT}/scripts/release-business-api.py" bootstrap_verify
   # A rerun validates identity and active services without re-enrolling.
-  bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-rerun.log"
-  grep -Fxq SERVICES_ACTIVE "${ARTIFACT_DIR}/managed-rerun.log"
+  bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --resume-install "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-rerun.log"
+  grep -Fxq ONLINE "${ARTIFACT_DIR}/managed-rerun.log"
   grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-rerun.log"
   [[ "$(identity_digest)" == "${enrolled_identity}" ]]
   record bootstrap_token_enrollment_and_rerun_identity
@@ -516,8 +516,8 @@ if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   python3 "$ROOT/scripts/release-production-signer.py" import
   record production_signer_active_binding
 fi
-bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"
-grep -q SERVICES_ACTIVE "${ARTIFACT_DIR}/managed-active.log"
+bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --resume-install "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"
+grep -Fxq ONLINE "${ARTIFACT_DIR}/managed-active.log"
 grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-active.log"
 [[ "$(identity_digest)" == "${enrolled_identity}" ]]
 record native_node_services

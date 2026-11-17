@@ -8,7 +8,12 @@ import {
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { listAuditEvents, verifyAuditChain } from "../api/events";
-import { getWorkspace, workspaceContext } from "../api/workspace";
+import {
+  getWorkspace,
+  workspaceContext,
+  type WorkspaceContext,
+} from "../api/workspace";
+import { createReadRequest } from "../shared/read-request";
 import { formatTimestamp } from "../shared/timestamp";
 import DataState from "@/components/common/DataState.vue";
 import PageHeader from "@/components/common/PageHeader.vue";
@@ -36,105 +41,57 @@ const error = ref("");
 const verifying = ref(false);
 const verification = ref<AuditVerification>();
 const verifyError = ref("");
-let controller: AbortController | undefined;
-let verifyController: AbortController | undefined;
-let sequence = 0;
-let verifySequence = 0;
-
-function parseAuditVerification(value: unknown): AuditVerification | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const record = value as Record<string, unknown>;
-  const workspaceId = record.workspaceId ?? record.workspace_id;
-  const checkpointValid = record.checkpointValid ?? record.checkpoint_valid;
-  const compactedEvents = record.compactedEvents ?? record.compacted_events;
-  if (
-    typeof workspaceId !== "string" ||
-    typeof record.events !== "number" ||
-    typeof record.valid !== "boolean" ||
-    typeof checkpointValid !== "boolean"
-  ) {
-    return undefined;
-  }
-  return {
-    workspaceId,
-    events: record.events,
-    valid: record.valid,
-    checkpointValid,
-    ...(typeof compactedEvents === "number" ? { compactedEvents } : {}),
-  };
-}
+const reads = createReadRequest();
+const verificationReads = createReadRequest();
 
 async function refresh(): Promise<void> {
-  controller?.abort();
-  controller = new AbortController();
-  const signal = controller.signal;
-  const ticket = ++sequence;
+  const request = reads.begin();
+  let context: WorkspaceContext | undefined;
   loading.value = true;
   error.value = "";
   try {
     await getWorkspace();
-    if (ticket !== sequence) return;
-    const context = workspaceContext();
-    const page = await listAuditEvents(signal);
-    const current = workspaceContext();
-    if (
-      signal.aborted ||
-      ticket !== sequence ||
-      context.id !== current.id ||
-      context.generation !== current.generation
-    )
-      return;
+    if (!request.current()) return;
+    context = workspaceContext();
+    const page = await listAuditEvents(request.signal);
+    if (!request.current(context)) return;
     items.value = page.items;
     initialized.value = true;
   } catch (cause) {
-    if (signal.aborted || ticket !== sequence) return;
+    if (!request.current(context)) return;
     error.value = t(
       cause instanceof ResponseError && cause.response.status === 403
         ? "auditForbidden"
         : "auditUnavailable",
     );
   } finally {
-    if (ticket === sequence) loading.value = false;
+    if (request.finish()) loading.value = false;
   }
 }
 
 async function verifyChain(): Promise<void> {
-  verifyController?.abort();
-  verifyController = new AbortController();
-  const signal = verifyController.signal;
-  const ticket = ++verifySequence;
+  // Verification is a read expressed as POST. Cancellation never retries it.
+  const request = verificationReads.begin();
+  let context: WorkspaceContext | undefined;
   verifying.value = true;
   verifyError.value = "";
   verification.value = undefined;
   try {
     await getWorkspace();
-    if (ticket !== verifySequence) return;
-    const result = await verifyAuditChain(signal);
-    if (signal.aborted || ticket !== verifySequence) return;
+    if (!request.current()) return;
+    context = workspaceContext();
+    const result = await verifyAuditChain(request.signal);
+    if (!request.current(context)) return;
     verification.value = result;
   } catch (cause) {
-    if (signal.aborted || ticket !== verifySequence) return;
-    if (cause instanceof ResponseError && cause.response.status === 409) {
-      try {
-        const parsed = parseAuditVerification(
-          await cause.response.clone().json(),
-        );
-        if (parsed) {
-          if (ticket !== verifySequence) return;
-          verification.value = parsed;
-          return;
-        }
-      } catch {
-        // Fall through to generic verification error when body is not JSON.
-      }
-    }
+    if (!request.current(context)) return;
     verifyError.value = t(
       cause instanceof ResponseError && cause.response.status === 403
         ? "auditForbidden"
         : "auditVerifyUnavailable",
     );
   } finally {
-    if (ticket === verifySequence) verifying.value = false;
+    if (request.finish()) verifying.value = false;
   }
 }
 
@@ -155,7 +112,7 @@ const rows = computed(() => {
   return items.value
     .map((item, index) => {
       // Server ids are primary keys, so expansion follows the event when newer
-      // records shift positions. The list contract leaves items untyped: a
+      // records shift positions. Historical records may omit fields: a
       // missing or repeated id keeps the row visible under a positional key.
       const id = typeof item.id === "string" ? item.id : "";
       const key = id && !seen.has(id) ? `id:${id}` : `row:${String(index)}`;
@@ -168,10 +125,10 @@ const rows = computed(() => {
         (!query ||
           [
             item.action,
-            item.actor_id,
-            item.resource_type,
-            item.resource_id,
-            item.request_id,
+            item.actorId,
+            item.resourceType,
+            item.resourceId,
+            item.requestId,
           ].some(
             (value) =>
               typeof value === "string" && value.toLowerCase().includes(query),
@@ -190,22 +147,20 @@ function resultLabel(item: AuditItem): string {
     : text(result);
 }
 const detailFields = [
-  ["auditActorType", "actor_type"],
-  ["auditTrace", "trace_id"],
-  ["auditCommand", "command_id"],
+  ["auditActorType", "actorType"],
+  ["auditTrace", "traceId"],
+  ["auditCommand", "commandId"],
   ["reason", "reason"],
-  ["auditErrorType", "error_type"],
-  ["auditEventHash", "event_hash"],
-  ["auditPreviousHash", "previous_event_hash"],
+  ["auditErrorType", "errorType"],
+  ["auditEventHash", "eventHash"],
+  ["auditPreviousHash", "previousEventHash"],
 ] as const;
 onMounted(() => {
   void refresh();
 });
 onBeforeUnmount(() => {
-  sequence += 1;
-  verifySequence += 1;
-  controller?.abort();
-  verifyController?.abort();
+  reads.cancel();
+  verificationReads.cancel();
 });
 </script>
 
@@ -387,18 +342,18 @@ onBeforeUnmount(() => {
                     </Button>
                   </TableCell>
                   <TableCell class="text-muted-foreground">{{
-                    formatTimestamp(text(item.occurred_at))
+                    formatTimestamp(text(item.occurredAt))
                   }}</TableCell>
                   <TableCell>{{ text(item.action) }}</TableCell>
                   <TableCell class="whitespace-normal">
                     <code class="text-xs break-all">{{
-                      text(item.actor_id)
+                      text(item.actorId)
                     }}</code>
                   </TableCell>
                   <TableCell class="whitespace-normal">
-                    {{ text(item.resource_type) }}<br /><code
+                    {{ text(item.resourceType) }}<br /><code
                       class="text-xs break-all"
-                      >{{ text(item.resource_id) }}</code
+                      >{{ text(item.resourceId) }}</code
                     >
                   </TableCell>
                   <TableCell>
@@ -409,7 +364,7 @@ onBeforeUnmount(() => {
                   </TableCell>
                   <TableCell class="whitespace-normal">
                     <code class="text-xs break-all">{{
-                      text(item.request_id)
+                      text(item.requestId)
                     }}</code>
                   </TableCell>
                 </TableRow>
@@ -423,7 +378,7 @@ onBeforeUnmount(() => {
                     <dl
                       class="sticky left-2 m-0 grid w-[calc(100cqw-1rem)] gap-x-6 gap-y-1 text-sm sm:grid-cols-[max-content_1fr] sm:gap-y-2"
                     >
-                      <template v-if="typeof item.node_id === 'string'">
+                      <template v-if="typeof item.nodeId === 'string'">
                         <dt class="text-muted-foreground">
                           {{ $t("auditNode") }}
                         </dt>
@@ -431,10 +386,10 @@ onBeforeUnmount(() => {
                           <RouterLink
                             :to="{
                               name: 'node-detail',
-                              params: { nodeId: item.node_id },
+                              params: { nodeId: item.nodeId },
                             }"
                             class="text-primary font-mono underline-offset-4 hover:underline"
-                            >{{ item.node_id }}</RouterLink
+                            >{{ item.nodeId }}</RouterLink
                           >
                         </dd>
                       </template>

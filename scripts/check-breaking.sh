@@ -231,7 +231,13 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
     if (name === "AgentRolloutCreateRequest") {
       schema.description = "The immutable rollout request hash binds target version, sorted node set, batch size and stop-on-failure policy.";
     }
-    assertExact(name, candidateSchemas[name], schema);
+    const candidateSchema = structuredClone(candidateSchemas[name]);
+    if (name === "AgentRollout") {
+      // Exclusion read models can evolve independently of approval removal.
+      // Keep the original baseline field below so oasdiff still checks it.
+      candidateSchema.properties.excluded = schema.properties.excluded;
+    }
+    assertExact(name, candidateSchema, schema);
     schemas[name] = schema;
   }
 
@@ -240,6 +246,30 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
   assertExact("NodeBootstrapToken", candidateSchemas.NodeBootstrapToken, bootstrapToken);
   schemas.NodeBootstrapToken = bootstrapToken;
 };
+
+// The handler has always returned verification JSON for a failed audit.
+// Correct only that erroneous baseline response; no runtime contract changed.
+const auditConflict = {
+  description: "The chain or latest checkpoint failed verification.",
+  content: { "application/json": { schema: { $ref: "#/components/schemas/AuditVerification" } } },
+};
+const normalizeAuditConflict = (before, after) => {
+  const responses = before.paths["/audit:verify"]?.post?.responses;
+  if (responses?.["409"]?.$ref !== "#/components/responses/Problem") return;
+  assertExact("audit verification 409", after.paths["/audit:verify"]?.post?.responses?.["409"], auditConflict);
+  responses["409"] = structuredClone(auditConflict);
+};
+const badAudit = structuredClone(candidate);
+badAudit.paths["/audit:verify"].post.responses["409"] = {
+  ...auditConflict, content: { "text/plain": { schema: { type: "string" } } },
+};
+if (baseline.paths["/audit:verify"]?.post?.responses?.["409"]?.$ref === "#/components/responses/Problem") {
+  let rejected = false;
+  try { normalizeAuditConflict(structuredClone(baseline), badAudit); }
+  catch (error) { rejected = String(error).includes("audit verification 409"); }
+  if (!rejected) throw new Error("Audit correction accepted an unrelated response change");
+}
+normalizeAuditConflict(baseline, candidate);
 
 // Prove the allowlist rejects an unrelated breaking change inside a migrated
 // schema, parameter list, or retired path/method.
@@ -278,6 +308,20 @@ EOF
   )
   oasdiff breaking --fail-on ERR \
     "${temporary}/main.yaml" "${ROOT}/openapi/openapi.yaml"
+  (cd "${ROOT}/web" && node --input-type=module - \
+    "${ROOT}/openapi/openapi.yaml" "${temporary}/bad-exclusion.yaml" <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { parse, stringify } from "yaml";
+const [, , source, destination] = process.argv;
+const document = parse(readFileSync(source, "utf8"));
+document.components.schemas.AgentRollout.properties.excluded = { type: "string" };
+writeFileSync(destination, stringify(document));
+EOF
+  )
+  if oasdiff breaking --fail-on ERR "${ROOT}/openapi/openapi.yaml" "${temporary}/bad-exclusion.yaml"; then
+    echo "Rollout exclusion breaking fixture was not rejected" >&2
+    exit 1
+  fi
 else
   echo "No OpenAPI contract exists on ${base_ref}; validating compatibility detection with a fixture."
   (cd "${ROOT}/web" && node --input-type=module - \

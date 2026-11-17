@@ -5,11 +5,11 @@ import type {
 } from "@ocservia/api-client";
 import { defineStore } from "pinia";
 import { computed, onScopeDispose, ref, watch } from "vue";
+import { createReadRequest } from "./read-request";
 import { createForegroundRefresh } from "./foreground-refresh";
 
 import {
   getWorkspace,
-  sameWorkspaceContext,
   workspaceContext,
   type WorkspaceContext,
 } from "../api/workspace";
@@ -34,24 +34,9 @@ export const useOverviewStore = defineStore("overview", () => {
   // Last successful load of each source, kept while a later refresh fails.
   const operationsAt = ref<Date>();
   const eventsAt = ref<Date>();
-  let operationsController: AbortController | undefined;
-  let eventsController: AbortController | undefined;
-  let operationsSequence = 0;
-  let eventsSequence = 0;
+  const operationsReads = createReadRequest();
+  const eventsReads = createReadRequest();
   let started = false;
-
-  function isCurrent(
-    context: WorkspaceContext,
-    controller: AbortController,
-    sequence: number,
-    current: number,
-  ): boolean {
-    return (
-      !controller.signal.aborted &&
-      current === sequence &&
-      sameWorkspaceContext(workspaceContext(), context)
-    );
-  }
 
   async function currentContext(): Promise<WorkspaceContext> {
     // Development authentication can run without a persisted workspace.
@@ -66,27 +51,19 @@ export const useOverviewStore = defineStore("overview", () => {
   }
 
   async function loadOperations(): Promise<void> {
-    operationsController?.abort();
-    const controller = new AbortController();
-    operationsController = controller;
-    const sequence = ++operationsSequence;
+    const request = operationsReads.begin();
     let context: WorkspaceContext | undefined;
     try {
       context = await currentContext();
-      const isLatest = () =>
-        Boolean(
-          context &&
-          operationsController === controller &&
-          isCurrent(context, controller, sequence, operationsSequence),
-        );
+      const isLatest = () => request.current(context);
       if (!isLatest()) return;
       // Operations are listed newest-first, so a single page bounds every
       // refresh to one request. The page feeds the recent list only; the
       // active/unknown totals come from the workspace summary, which stays
       // accurate when the backlog outgrows the page limit.
       const [page, counts] = await Promise.all([
-        listOperations(undefined, controller.signal),
-        operationSummary(controller.signal),
+        listOperations(undefined, request.signal),
+        operationSummary(request.signal),
       ]);
       if (!isLatest()) return;
       operations.value = page.items;
@@ -96,23 +73,14 @@ export const useOverviewStore = defineStore("overview", () => {
       operationsUnavailable.value = false;
     } catch {
       if (!context) return;
-      if (
-        operationsController === controller &&
-        isCurrent(context, controller, sequence, operationsSequence)
-      )
-        operationsUnavailable.value = true;
+      if (request.current(context)) operationsUnavailable.value = true;
     } finally {
-      if (operationsController === controller) {
-        operationsController = undefined;
-      }
+      request.finish();
     }
   }
 
   async function loadEvents(): Promise<void> {
-    eventsController?.abort();
-    const controller = new AbortController();
-    eventsController = controller;
-    const sequence = ++eventsSequence;
+    const request = eventsReads.begin();
     const incremental = eventsLoaded.value;
     // The first load reads one newest-first page so the cost stays bounded
     // no matter how much durable history the workspace has. Incremental
@@ -121,22 +89,17 @@ export const useOverviewStore = defineStore("overview", () => {
     let context: WorkspaceContext | undefined;
     try {
       context = await currentContext();
-      const isLatest = () =>
-        Boolean(
-          context &&
-          eventsController === controller &&
-          isCurrent(context, controller, sequence, eventsSequence),
-        );
+      const isLatest = () => request.current(context);
       if (!isLatest()) return;
       const collected: PlatformEvent[] = [];
       if (!incremental) {
-        const page = await listEvents(undefined, controller.signal, "desc");
+        const page = await listEvents(undefined, request.signal, "desc");
         if (!isLatest()) return;
         collected.push(...[...page.items].reverse());
       } else {
         let cursor = since;
         do {
-          const page = await listEvents(cursor, controller.signal);
+          const page = await listEvents(cursor, request.signal);
           if (!isLatest()) return;
           collected.push(...page.items);
           cursor = page.page.hasMore ? page.page.nextCursor : undefined;
@@ -151,15 +114,9 @@ export const useOverviewStore = defineStore("overview", () => {
       eventsUnavailable.value = false;
     } catch {
       if (!context) return;
-      if (
-        eventsController === controller &&
-        isCurrent(context, controller, sequence, eventsSequence)
-      )
-        eventsUnavailable.value = true;
+      if (request.current(context)) eventsUnavailable.value = true;
     } finally {
-      if (eventsController === controller) {
-        eventsController = undefined;
-      }
+      request.finish();
     }
   }
 
@@ -180,8 +137,8 @@ export const useOverviewStore = defineStore("overview", () => {
         ? 60_000
         : 15_000,
     () => {
-      operationsController?.abort();
-      eventsController?.abort();
+      operationsReads.cancel();
+      eventsReads.cancel();
     },
   );
 
@@ -197,12 +154,8 @@ export const useOverviewStore = defineStore("overview", () => {
   }
 
   function clearState(): void {
-    operationsController?.abort();
-    eventsController?.abort();
-    operationsController = undefined;
-    eventsController = undefined;
-    operationsSequence += 1;
-    eventsSequence += 1;
+    operationsReads.cancel();
+    eventsReads.cancel();
     operations.value = [];
     events.value = [];
     summary.value = { active: 0, unknown: 0 };

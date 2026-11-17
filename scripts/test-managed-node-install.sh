@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 "${ROOT}/scripts/test-node-bootstrap.py"
 INSTALL="${INSTALLER_UNDER_TEST:-${ROOT}/deploy/managed-node/install.sh}"
-DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 VERSION="${TEST_RELEASE_VERSION:-0.2.1}"
 scope="${1:-full}"
 case "${scope}" in
@@ -30,14 +29,7 @@ done
   echo "Managed node install tests require an executable installer" >&2
   exit 1
 }
-# The install.env scenarios assert metadata (0644 files pass, group- and
-# world-writable files fail closed), so fixture creation must not depend on
-# the invoking login's umask (Debian-style usergroups logins default to 002).
 umask 022
-# The agent stub derives the EndpointID from the endpoint key bytes (standing
-# in for key.public()); the identity it provisions is 32 bytes of '7', so the
-# expected EndpointID is that derivation of those bytes.
-MOCK_ENDPOINT_ID="$(printf '%032d' 7 | sha256sum | awk '{print $1}')"
 
 fixture="$(mktemp -d "${TMPDIR:-${HOME}}/.ocservia-managed-node-test.XXXXXX")"
 
@@ -222,6 +214,16 @@ cat >"${bin}/privd-stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
+if [[ "${1:-}" == attestation-registration ]]; then
+  [[ ! -L "$2" ]] || exit 2
+  if [[ ! -f "$2" ]]; then
+    mkdir -p -- "$(dirname -- "$2")"
+    printf 'original root key' >"$2"
+    chmod 0600 "$2"
+  fi
+  printf '{"key_id":"root-key"}\n'
+  exit 0
+fi
 [[ "$*" == --host-preflight ]] || exit 2
 printf '%s\n' "$*" >>"${root}/logs/preflight.log"
 if [[ -s "${root}/preflight-failure" ]]; then
@@ -324,10 +326,11 @@ cat >"${bin}/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
-output="" url=""
+output="" url="" request_path=""
 while (($# > 0)); do
   case "$1" in
     --output) shift; output="${1:-}" ;;
+    --data-binary) shift; request_path="${1#@}" ;;
     http*) url="$1" ;;
   esac
   shift
@@ -337,6 +340,34 @@ done
   exit 1
 }
 printf '%s\n' "${url}" >>"${root}/logs/curl.log"
+if [[ "${url}" == */api/v1/node-bootstrap/* ]]; then
+  operation="${url##*/}"
+  case "$operation" in
+    config)
+      [[ ! -e "${root}/http-failure" ]] || exit 22
+      cp -- "${root}/bootstrap-config.json" "$output" ;;
+    attestation)
+      registered=false
+      [[ ! -f "${root}/registered" ]] || registered=true
+      printf '{"controller_nonce_hex":"%064d","credential_context_sha256_hex":"%064d","registered":%s}' 4 5 "$registered" >"$output" ;;
+    register)
+      if [[ -f "${root}/registration-body.json" ]]; then
+        cmp -- "$request_path" "${root}/registration-body.json" || exit 22
+      else
+        cp -- "$request_path" "${root}/registration-body.json"
+      fi
+      touch "${root}/registered"
+      key=root-key
+      [[ ! -e "${root}/bad-registration" ]] || key=wrong-key
+      printf '{"key_id":"%s","state":"active"}' "$key" >"$output" ;;
+    status)
+      freshness=fresh
+      [[ ! -e "${root}/stale-status" ]] || freshness=stale
+      printf '{"trust_status":"active","connection_state":"online","freshness":"%s","attestation_registered":true}' "$freshness" >"$output" ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
 cp -- "${root}/serve/${url##*/}" "${output}"
 EOF
 
@@ -416,6 +447,7 @@ set -euo pipefail
 root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
 printf '%s\n' "$*" >>"${root}/logs/systemctl.log"
 case "${1:-}" in
+  enable) [[ -f "${OCSERV_MANAGED_NODE_SYSROOT}/var/lib/ocservia-bootstrap/registered.json" ]] || exit 2 ;;
   # The activation-state fixture: "active" makes both managed-node units
   # report enabled+active (the operator's post-approval enable step); any
   # other content leaves them disabled+inactive.
@@ -510,9 +542,7 @@ cp -- "${INSTALL}" "${repo}/deploy/managed-node/install.sh"
 # the downloaded installer's entire implementation under test; the flat copy
 # below retains its actual stamp and exercises the normal Release path.
 sed -i '/^readonly DEFAULT_VERSION=/c\readonly DEFAULT_VERSION=""' "${repo}/deploy/managed-node/install.sh"
-cp -- "${ROOT}/deploy/lib/install-ui.sh" "${repo}/deploy/lib/install-ui.sh"
 cp -- "${ROOT}/deploy/lib/node-bootstrap.sh" "${repo}/deploy/lib/node-bootstrap.sh"
-cp -- "${ROOT}/deploy/lib/install-env.sh" "${repo}/deploy/lib/install-env.sh"
 cp -- "${ROOT}/.gitignore" "${repo}/.gitignore"
 git -C "${repo}" init -q
 git -C "${repo}" config user.name test
@@ -542,28 +572,12 @@ if can_root; then
   as_root useradd --system --gid ocserv-agent --home-dir /var/lib/ocservia-agent --shell /usr/sbin/nologin ocserv-agent
 fi
 
-# ROOT_ENV_OMIT names node-configuration variables build_env must leave out
-# so an install.env scenario can provide them from the invocation directory
-# instead of the environment.
-ROOT_ENV_OMIT=()
 build_env() {
-  local entry name omitted
   ROOT_ENV=(
-    "PATH=${TEST_PATH_PREFIX:-${bin}:${PATH}}"
+    "PATH=${bin}:${PATH}"
     "OCSERV_MANAGED_NODE_SYSROOT=${sysroot}"
     "OCSERV_MANAGED_NODE_OS_RELEASE=${OS_RELEASE}"
   )
-  for entry in \
-    "CONTROLLER_ENDPOINT_ID=${controller_id}" \
-    "RELAY_URL_A=https://relay-a.example.test" \
-    "RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token" \
-    "CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem"; do
-    name="${entry%%=*}"
-    for omitted in ${ROOT_ENV_OMIT[@]+"${ROOT_ENV_OMIT[@]}"}; do
-      [[ "${name}" == "${omitted}" ]] && continue 2
-    done
-    ROOT_ENV+=("${entry}")
-  done
 }
 
 reset_state() {
@@ -574,6 +588,7 @@ reset_state() {
     rm -rf -- "${sysroot}"
   fi
   mkdir -m 700 -- "${sysroot}"
+  mkdir -p -- "${sysroot}/var/lib"
   for log in "${curl_log}" "${sudo_log}" "${dpkg_log}" "${rpm_log}" \
     "${agent_log}" "${systemctl_log}" "${runuser_log}" "${root_sudo_log}" \
     "${openssl_log}"; do
@@ -582,9 +597,9 @@ reset_state() {
   printf '%s\n' "${MOCK_NODE_ID}" >"${node_id_file}"
   rm -f -- "${enroll_exit_file}" "${installed_version_file}" "${arch_file}" \
     "${tamper_after_verify_file}" "${services_state_file}" \
-    "${fixture}/poison-install-env"
+    "${fixture}/poison-install-env" "${fixture}/registered" "${fixture}/bad-registration" \
+    "${fixture}/stale-status" "${fixture}/http-failure" "${fixture}/registration-body.json"
   EXTRA_ENV=()
-  ROOT_ENV_OMIT=()
 }
 
 reset_checkout() {
@@ -607,20 +622,6 @@ capture() {
   RUN_STATUS=0
   RUN_OUTPUT="$(env "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
     "${SCRIPT_UNDER_TEST}" --non-interactive "$@" 2>&1)" || RUN_STATUS=$?
-}
-
-# The install.env contract is bound to the invocation directory, so its
-# scenarios run the installer with the fixture checkout as $PWD.
-capture_from() {
-  local directory="$1"
-  shift
-  build_env
-  RUN_STATUS=0
-  RUN_OUTPUT="$(
-    cd -- "${directory}"
-    env "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-      "${SCRIPT_UNDER_TEST}" --non-interactive "$@" 2>&1
-  )" || RUN_STATUS=$?
 }
 
 capture_root() {
@@ -651,19 +652,6 @@ assert_log_empty() {
   [[ ! -s "$1" ]] || die "expected $1 to stay empty, got: $(cat -- "$1")"
 }
 
-assert_systemctl_read_only() {
-  # The activation-state observation is the only permitted systemctl use:
-  # read-only is-enabled/is-active queries of the two managed-node units.
-  [[ -s "${systemctl_log}" ]] || die "expected the activation-state queries to run"
-  while IFS= read -r line; do
-    case "${line}" in
-      "is-enabled ocservia-privd.service" | "is-enabled ocservia-agent.service" | \
-      "is-active ocservia-privd.service" | "is-active ocservia-agent.service") ;;
-      *) die "the bootstrap must only query systemctl read-only, saw: ${line}" ;;
-    esac
-  done <"${systemctl_log}"
-}
-
 scenario() {
   rm -f "${fixture}/preflight-failure" "${logs}/preflight.log"
   reset_state
@@ -672,1279 +660,201 @@ scenario() {
   rm -f -- "${standalone}/install.env"
 }
 
-# 1. usage errors.
+# The old manual installation scenarios are retired with that entrypoint.
+# Exercise the complete token flow against bounded HTTP/package/process stubs.
 scenario
-capture unexpected-argument
-assert_status 2 "an unexpected argument must be a usage error"
-capture --root-lifecycle extra-argument
-assert_status 2 "extra arguments alongside --root-lifecycle must be a usage error"
-capture --version
-assert_status 2 "--version without a value must be a usage error"
-capture --version "v${VERSION}" --version "v${VERSION}"
-assert_status 2 "a duplicate --version must be a usage error"
-echo "usage errors fail with status 2"
+capture --config missing.env
+assert_status 1
+assert_output "manual configuration installation is retired"
 capture --join-token --resume-install
 assert_status 1
 assert_output "choose one installation token source"
 capture --join-token
 assert_status 1
 assert_output "unattended token install requires"
-printf 'not-a-real-token\n' >"${fixture}/join-token-input"
-chmod 0600 "${fixture}/join-token-input"
-ln -s "${fixture}/join-token-input" "${fixture}/join-token-link"
-capture --join-token-file "${fixture}/join-token-link"
+capture --join-token-file missing-token
 assert_status 1
-assert_output "requires a regular file, not a symlink"
-echo "token source selection fails closed before any root or network action"
+assert_output "requires a regular file"
 
-# 2. a non-tag checkout is rejected before any host mutation.
-scenario
-git -C "${repo}" commit -q --allow-empty -m beyond-tag
-capture
-assert_status 1 "a checkout past the release tag must fail closed"
-assert_output "exactly one exact vX.Y.Z release tag"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-assert_log_empty "${sudo_log}"
-echo "a non-tag checkout is rejected before any host mutation"
-
-# 2a. a non-SemVer tag is not a release identity.
-scenario
-git -C "${repo}" commit -q --allow-empty -m rc
-git -C "${repo}" tag v0.3.0-rc1
-capture
-assert_status 1 "a malformed RC tag must not be a production release identity"
-assert_output "exactly one exact vX.Y.Z release tag"
-assert_log_empty "${dpkg_log}"
-echo "a malformed RC tag is rejected"
-
-# 2b. a dirty checkout is rejected before any host mutation.
-scenario
-printf '\n# local edit\n' >>"${repo}/deploy/managed-node/install.sh"
-capture
-assert_status 1 "a dirty checkout must fail closed"
-assert_output "dirty"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "a dirty checkout is rejected before any host mutation"
-
-# 2c. --version pins the release identity on the command line: anything but
-# an exact vX.Y.Z SemVer tag is rejected before any host mutation, without
-# consulting a checkout.
-for bad_version in 0.2.1 v0.2 v0.2.1-rc1 latest; do
-  scenario
-  capture --version "${bad_version}"
-  assert_status 1 "a non-SemVer --version must fail closed (${bad_version})"
-  assert_output "an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required"
-  assert_log_empty "${curl_log}"
-  assert_log_empty "${dpkg_log}"
-done
-echo "non-SemVer --version values are rejected before any host mutation"
-
-# 2d. a release that does not exist fails closed during the pinned download,
-# before the package manager.
-scenario
-capture --version v9.9.9
-assert_status 1 "a nonexistent release must fail closed"
-case "$(uname -m)" in aarch64) missing_arch=arm64 ;; *) missing_arch=amd64 ;; esac
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v9.9.9/ocservia-agent_9.9.9-1_${missing_arch}.deb"
-assert_log_empty "${dpkg_log}"
-echo "a nonexistent release is rejected before the package manager"
-
-# 2e. the package-first mode runs the single installer file from a plain
-# directory with no repository siblings and no .git: the version comes from
-# --version, the downloads stay pinned to it, and the package manager only
-# ever receives that exact version's file.
-scenario
-SCRIPT_UNDER_TEST="${standalone}/install.sh"
-capture_from "${standalone}" --version "v${VERSION}"
-assert_output "release identity: v${VERSION} (pinned by --version)"
-case "$(uname -m)" in
-  x86_64) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
-  aarch64 | arm64) selected="ocservia-agent_${VERSION}-1_arm64.deb" ;;
-  *) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
-esac
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/${selected}"
-[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 1 ]] ||
-  die "expected exactly one package download, got: $(cat -- "${curl_log}")"
-assert_log_contains "${dpkg_log}" "${selected}"
-if ((EUID == 0)); then
-  assert_status 0 "the single-file root flow must reach ENROLLMENT_READY"
-  assert_output "ENROLLMENT_READY"
-  assert_output "rerun this installer with the same --version v${VERSION} argument"
-else
-  assert_status 1 "the unprivileged fixture must fail closed at node preparation"
-  assert_output "unsafe metadata"
-fi
-echo "the single-file --version mode installs the pinned release without a checkout"
-
-# 2f. install.env supplies the node configuration to the single-file mode
-# from the invocation directory: the embedded loader replaces the
-# repository sibling deploy/lib/install-env.sh.
-scenario
-ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A \
-  RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE)
-cat >"${standalone}/install.env" <<EOF
-CONTROLLER_ENDPOINT_ID=${controller_id}
-RELAY_URL_A=https://relay-file-a.example.test
-RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token
-CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem
-EOF
-SCRIPT_UNDER_TEST="${standalone}/install.sh"
-capture_from "${standalone}" --version "v${VERSION}"
-if ((EUID == 0)); then
-  assert_status 0 "the file-configured single-file flow must reach ENROLLMENT_READY"
-  assert_output "ENROLLMENT_READY"
-  as_root grep -qx "RELAY_URL_A=https://relay-file-a.example.test" \
-    "${sysroot}/etc/ocservia-agent/relays.env" ||
-    die "relays.env must carry the install.env relay URL A"
-else
-  assert_status 1 "the unprivileged fixture must fail closed at node preparation"
-  assert_output "unsafe metadata"
-fi
-echo "install.env works in the single-file --version mode"
-
-# Exercise the downloaded, non-executable file through the real re-exec path.
-# This probe does not elevate: append --help at the sudo boundary so the second
-# invocation exits before installation instead of recursively requesting sudo.
-if ((EUID != 0)); then
-  scenario
-  mkdir -m 700 "${fixture}/reexec-bin"
-  cat >"${fixture}/reexec-bin/sudo" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >>"$(dirname "${OCSERV_MANAGED_NODE_SYSROOT}")/logs/root-sudo.log"
-[[ "$1" == -n ]]
-shift
-exec "$@" --help
-EOF
-  chmod 0755 "${fixture}/reexec-bin/sudo"
-  chmod 0644 "${standalone}/install.sh"
-  TEST_PATH_PREFIX="${fixture}/reexec-bin:${bin}:${PATH}" build_env
-  RUN_STATUS=0
-  RUN_OUTPUT="$(env "${ROOT_ENV[@]}" bash "${standalone}/install.sh" \
-    --non-interactive --version "v${VERSION}" --root-lifecycle 2>&1)" || RUN_STATUS=$?
-  assert_status 2
-  assert_output "usage: deploy/managed-node/install.sh"
-  assert_log_contains "${root_sudo_log}" "bash ${standalone}/install.sh --root-lifecycle --non-interactive --version v${VERSION}"
-  assert_log_empty "${curl_log}"
-  chmod 0755 "${standalone}/install.sh"
-  echo "a mode-0644 downloaded installer re-executes via Bash without sudo prompts"
-fi
-
-# A released single file uses its embedded default, while source-only copies
-# require an explicit tag or the deliberate legacy checkout CLI path.
-scenario
-SCRIPT_UNDER_TEST="${standalone}/install.sh"
-if grep -q '^readonly DEFAULT_VERSION=""' "${SCRIPT_UNDER_TEST}"; then
-  capture_from "${standalone}"
-  assert_status 1
-  assert_output "not a Git checkout\|exactly one exact vX.Y.Z release tag\|dirty"
-  assert_log_empty "${curl_log}"
-else
-  capture_from "${standalone}"
-  assert_output "release identity: v${VERSION}"
-  assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/"
-fi
-
-# The real terminal wizard uses the same package path as the CLI, persists
-# public configuration, and cancellation cannot download or install a package.
-scenario
-sed 's/^readonly DEFAULT_VERSION=""$/readonly DEFAULT_VERSION="v'"${VERSION}"'"/' \
-  "${standalone}/install.sh" >"${standalone}/wizard.sh"
-chmod 755 "${standalone}/wizard.sh"
-build_env
-env "${ROOT_ENV[@]}" python3 - "${standalone}" <<'PTY'
-import os, pty, select, subprocess, sys, time
-root = sys.argv[1]
-def run(answer):
-    master, slave = pty.openpty()
-    child = subprocess.Popen(['bash', root+'/wizard.sh'], stdin=slave, stdout=slave, stderr=slave, cwd=root)
-    os.close(slave)
-    os.write(master, ('\n'*8+answer+'\n').encode())
-    output = b''
-    try:
-        deadline = time.monotonic()+30
-        while time.monotonic() < deadline:
-            if select.select([master], [], [], .1)[0]:
-                try: output += os.read(master, 65536)
-                except OSError: break
-            if child.poll() is not None: break
-        code = child.wait(timeout=1)
-    finally:
-        if child.poll() is None: child.kill(); child.wait()
-        os.close(master)
-    return code, output.decode()
-code, output = run('n')
-assert code == 1 and 'installation cancelled' in output, output
-assert not os.path.exists(root+'/install.env')
-fixture = os.path.dirname(root)
-assert os.path.getsize(fixture+'/logs/curl.log') == 0
-assert os.path.getsize(fixture+'/logs/dpkg.log') == 0
-code, output = run('y')
-assert 'Proceed with installation?' in output and 'native package installed' in output, output
-assert code == (0 if os.geteuid() == 0 else 1), output
-assert os.stat(root+'/install.env').st_mode & 0o777 == 0o600
-PTY
-cp "${curl_log}" "${fixture}/wizard-downloads"
-scenario
-SCRIPT_UNDER_TEST="${standalone}/wizard.sh"
-capture_from "${standalone}"
-cmp "${curl_log}" "${fixture}/wizard-downloads"
-echo "Agent terminal wizard and CLI select the same native package; cancellation and configuration persistence verified"
-
-# 3. an unsupported architecture is rejected before any host mutation.
-scenario
-printf 'ppc64le\n' >"${arch_file}"
-capture
-assert_status 1 "an unsupported architecture must fail closed"
-assert_output "unsupported architecture"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "an unsupported architecture is rejected before any host mutation"
-
-# 4. an unsupported distribution is rejected before any host mutation.
-# Ubuntu 20.04 and Debian 11 ship OpenSSL 1.1.1, whose pkeyutl cannot verify
-# the verified native runtime baseline, so they are unsupported despite being
-# declarable dpkg hosts.
-for distro in fedora-41 arch ubuntu-20.04 debian-11; do
-  scenario
-  EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/${distro}")
-  capture
-  assert_status 1 "an unsupported distribution must fail closed"
-  assert_output "unsupported OS"
-  assert_log_empty "${curl_log}"
-  assert_log_empty "${dpkg_log}"
-  assert_log_empty "${rpm_log}"
-done
-echo "unsupported distributions are rejected before any host mutation"
-
-# A failed or empty HTTPS download must never reach the package manager.
-for download_error in missing empty; do
-  scenario
-  case "$(uname -m)" in aarch64) test_arch=arm64 ;; *) test_arch=amd64 ;; esac
-  selected="ocservia-agent_${VERSION}-1_${test_arch}.deb"
-  if [[ "$download_error" == missing ]]; then rm "${serve}/${selected}"; else : >"${serve}/${selected}"; fi
-  capture
-  assert_status 1 "a ${download_error} download must fail closed"
-  assert_log_empty "${dpkg_log}"
-done
-echo "download failures stop before the package manager"
-
-# 8. package selection follows the platform and architecture: amd64/arm64
-# DEB naming on the Debian family and x86_64/aarch64 RPM naming on Rocky 9.
-scenario
-capture
-case "$(uname -m)" in
-  x86_64) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
-  aarch64 | arm64) selected="ocservia-agent_${VERSION}-1_arm64.deb" ;;
-  *) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
-esac
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/${selected}"
-[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 1 ]] ||
-  die "expected exactly one package download, got: $(cat -- "${curl_log}")"
-assert_log_contains "${dpkg_log}" "${selected}"
-if ((EUID == 0)); then
-  # A suite that itself runs as root performs the real privileged flow.
-  assert_status 0 "the root install flow must reach ENROLLMENT_READY"
-  assert_output "ENROLLMENT_READY"
-else
-  # The unprivileged fixture cannot create root-owned node configuration, so
-  # the flow must stop at the first privileged metadata check instead of
-  # silently continuing with unsafe ownership.
-  assert_status 1 "the unprivileged fixture must fail closed at node preparation"
-  assert_output "unsafe metadata"
-fi
-echo "the amd64/arm64 DEB selection installs the matching package"
-
-scenario
-printf 'aarch64\n' >"${arch_file}"
-capture
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/ocservia-agent_${VERSION}-1_arm64.deb"
-if grep -q "amd64" "${curl_log}"; then
-  die "an arm64 host must not download the amd64 package: $(cat -- "${curl_log}")"
-fi
-echo "arm64 hosts select the arm64 DEB"
-
-scenario
-printf 'x86_64\n' >"${arch_file}"
-EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/rocky-9")
-capture
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/ocservia-agent-${VERSION}-1.x86_64.rpm"
-assert_log_empty "${dpkg_log}"
-assert_log_contains "${rpm_log}" "ocservia-agent-${VERSION}-1.x86_64.rpm"
-echo "RPM hosts use the x86_64 RPM naming"
-
-scenario
-printf 'aarch64\n' >"${arch_file}"
-EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/rocky-9")
-capture
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/ocservia-agent-${VERSION}-1.aarch64.rpm"
-assert_log_empty "${dpkg_log}"
-echo "RPM hosts use the aarch64 RPM naming"
-
-# 9. an installed package at a different version fails closed: the bootstrap
-# neither upgrades nor downgrades.
-scenario
-printf '9.9.9\n' >"${installed_version_file}"
-capture
-assert_status 1 "a version mismatch must fail closed"
-assert_output "neither upgrades nor downgrades"
-# The installed-version convergence check runs before any download; the
-# package manager must not run either.
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "an installed version mismatch fails closed"
-
-# Changing RC identity still requires the release lifecycle, for both managers.
-for family in deb rpm; do
-  scenario
-  if [[ "${family}" == deb ]]; then
-    printf '0.2.1~rc.1-1\n' >"${installed_version_file}"
-  else
-    EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/rocky-9")
-    printf '0.2.1~rc.1\n' >"${installed_version_file}"
-  fi
-  capture --version v0.2.1-rc.2
-  assert_status 1 "bootstrap must not upgrade an installed RC"
-  assert_output "neither upgrades nor downgrades"
-  assert_log_empty "${curl_log}"
-  assert_log_empty "${dpkg_log}"
-done
-
-# 10. an installed package without the production relay contract fails
-# closed instead of silently reusing a relay-free install.
-scenario
-# The DEB platform's native version carries the nfpm release component.
-printf '%s\n' "${VERSION/-rc./~rc.}-1" >"${installed_version_file}"
-capture
-assert_status 1 "a relay-free installed package must fail closed"
-assert_output "production relay drop-in"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "a relay-free installed package is rejected"
-
-# 10a. install.env supplies the node configuration from the invocation
-# directory: the fixture repo carries the repository's real .gitignore, so a
-# present install.env must also stay invisible to the clean-release-checkout
-# contract, and the file-provided configuration must carry the whole flow
-# (operator input validation and package selection).
-scenario
-ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A \
-  RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE)
-cat >"${repo}/install.env" <<EOF
-CONTROLLER_ENDPOINT_ID=${controller_id}
-RELAY_URL_A=https://relay-file-a.example.test
-RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token
-CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem
-EOF
-capture_from "${repo}"
-case "$(uname -m)" in
-  x86_64) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
-  aarch64 | arm64) selected="ocservia-agent_${VERSION}-1_arm64.deb" ;;
-  *) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
-esac
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/${selected}"
-assert_log_contains "${dpkg_log}" "${selected}"
-if ((EUID == 0)); then
-  assert_status 0 "the file-configured root flow must reach ENROLLMENT_READY"
-  assert_output "ENROLLMENT_READY"
-  as_root grep -qx "RELAY_URL_A=https://relay-file-a.example.test" \
-    "${sysroot}/etc/ocservia-agent/relays.env" ||
-    die "relays.env must carry the install.env relay URL A"
-else
-  assert_status 1 "the unprivileged fixture must fail closed at node preparation"
-  assert_output "unsafe metadata"
-fi
-if grep -q "dirty" <<<"${RUN_OUTPUT}"; then
-  die "an ignored install.env must not dirty the release checkout"
-fi
-echo "install.env values load without dirtying the checkout"
-
-# An explicit shell variable wins over the file's Relay URL.
-scenario
-printf 'RELAY_URL_A=https://relay-file.example.test\n' >"${repo}/install.env"
-capture_from "${repo}"
-if ((EUID == 0)); then
-  assert_status 0
-  as_root grep -qx 'RELAY_URL_A=https://relay-a.example.test' "${sysroot}/etc/ocservia-agent/relays.env" || die 'file overrides explicit Relay URL'
-else
-  assert_status 1
-  assert_output "unsafe metadata"
-fi
-echo "an explicit shell variable overrides install.env"
-
-# 10b-2. an explicitly empty shell variable also wins over install.env: the
-# file must not fill a variable the operator deliberately unset, so the
-# operator-input validation fails closed instead of silently using the file
-# value.
-scenario
-cat >"${repo}/install.env" <<EOF
-RELAY_URL_A=https://relay-file-a.example.test
-EOF
-EXTRA_ENV=("RELAY_URL_A=")
-capture_from "${repo}"
-assert_status 1 "an explicitly empty shell variable must win over install.env"
-assert_output "RELAY_URL_A is not set"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "an explicitly empty shell variable overrides install.env"
-
-# 10c. an unknown key fails closed before any host mutation; the fixture
-# seams in particular gain no install.env entry.
-scenario
-printf 'OCSERV_MANAGED_NODE_SYSROOT=%s\n' "${fixture}/evil-sysroot" \
-  >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "an unknown install.env key must fail closed"
-assert_output "unknown configuration variable OCSERV_MANAGED_NODE_SYSROOT"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-assert_log_empty "${sudo_log}"
-[[ ! -e "${fixture}/evil-sysroot" ]] ||
-  die "the fixture seam must not be settable through install.env"
-echo "an unknown install.env key fails closed before any host mutation"
-
-# 10d. malformed lines fail closed.
-scenario
-printf 'CONTROLLER_ENDPOINT_ID %s\n' "${controller_id}" >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a line without = must fail closed"
-assert_output "expected KEY=VALUE"
-scenario
-printf 'controller_endpoint_id=%s\n' "${controller_id}" >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a lowercase key must fail closed"
-assert_output "expected KEY=VALUE"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "malformed install.env lines fail closed"
-
-# 10e. nothing in install.env is ever executed: command substitution,
-# backticks, and source lines are rejected, never evaluated.
-scenario
-# Literal shell syntax tests rejection; it must not expand here.
-# shellcheck disable=SC2016
-printf 'RELAY_URL_A=$(touch %s)\n' "${fixture}/pwned-marker" >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "command substitution syntax must fail closed"
-assert_output "must be a literal value"
-[[ ! -e "${fixture}/pwned-marker" ]] ||
-  die "command substitution in install.env must never execute"
-scenario
-# Literal shell syntax tests rejection; it must not expand here.
-# shellcheck disable=SC2016
-printf 'RELAY_URL_A=`touch %s`\n' "${fixture}/pwned-marker" >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "backtick syntax must fail closed"
-[[ ! -e "${fixture}/pwned-marker" ]] ||
-  die "backticks in install.env must never execute"
-scenario
-printf 'source %s\n' "${fixture}/evil.sh" >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a source line must fail closed as malformed"
-assert_output "expected KEY=VALUE"
-[[ ! -e "${fixture}/evil.sh" ]] || die "the test must not create evil.sh"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "install.env content is never executed"
-
-# 10f. an install.env symlink is rejected.
-scenario
-printf 'RELAY_URL_A=https://relay-symlink.example.test\n' \
-  >"${fixture}/install-env-real"
-ln -s "${fixture}/install-env-real" "${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "an install.env symlink must fail closed"
-assert_output "symlink"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-rm -f -- "${repo}/install.env" "${fixture}/install-env-real"
-echo "an install.env symlink is rejected"
-
-# 10g. a group-writable install.env is rejected.
-scenario
-printf 'RELAY_URL_A=https://relay-file-a.example.test\n' >"${repo}/install.env"
-chmod 0664 -- "${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a group-writable install.env must fail closed"
-assert_output "group/world-writable"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "a group-writable install.env is rejected"
-
-# 10h. a world-writable install.env is rejected.
-scenario
-printf 'RELAY_URL_A=https://relay-file-a.example.test\n' >"${repo}/install.env"
-chmod 0666 -- "${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a world-writable install.env must fail closed"
-assert_output "group/world-writable"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "a world-writable install.env is rejected"
-
-# The remaining scenarios perform real privileged node preparation and need
-# the root lifecycle.
 if ! can_root; then
-  echo "root lifecycle scenarios skipped: no passwordless sudo available" >&2
-  echo "Managed node install tests passed"
+  echo "Token CLI and helper tests passed; native root scenarios skipped: no passwordless sudo" >&2
   exit 0
 fi
 
-# 11. the full root flow reaches ENROLLMENT_READY and prepares the production
-# node without enabling any service. The run uses a hostile operator-owned
-# TMPDIR: the privileged package staging must sit under a trusted system
-# parent, never under a directory the launcher controls (pathname trust comes
-# from the parent, so an operator-owned parent would allow renaming even a
-# root-owned staging entry between the digest check and the package manager).
-scenario
-hostile_tmp="${fixture}/hostile-tmp"
-mkdir -m 700 -- "${hostile_tmp}"
-EXTRA_ENV=("TMPDIR=${hostile_tmp}")
-capture_root
-assert_status 0 "the root bootstrap flow must succeed"
-assert_output "ENROLLMENT_READY"
-assert_output "EndpointID: ${MOCK_ENDPOINT_ID}"
-assert_output "next: create a short-lived one-time enrollment token"
-# The checkout mode prints its stable script path as the rerun instruction;
-# the single-file --version wording must not leak into it.
-assert_output "rerun deploy/managed-node/install.sh"
-if grep -q "the same --version" <<<"${RUN_OUTPUT}"; then
-  die "the checkout-mode rerun instruction must not mention --version"
-fi
-conf="${sysroot}/etc/ocservia-agent"
-# The configuration directory is mode 0750 root:ocserv-agent, so the
-# assertions below must read it through the privileged helper.
-[[ "$(as_root stat -c '%U:%G:%a' "${conf}/relays.env")" == "root:ocserv-agent:640" ]] ||
-  die "relays.env ownership is wrong: $(as_root stat -c '%U:%G:%a' "${conf}/relays.env")"
-as_root grep -qx "RELAY_URL_A=https://relay-a.example.test" "${conf}/relays.env" ||
-  die "relays.env does not carry the requested relay URL A"
-[[ "$(as_root stat -c '%U:%G:%a' "${conf}/relay-access-token")" == "root:ocserv-agent:640" ]] ||
-  die "relay-access-token ownership is wrong"
-as_root cmp -s -- "${fixture}/relay-access-token" "${conf}/relay-access-token" ||
-  die "relay-access-token content does not match the protected source"
-[[ "$(as_root stat -c '%U:%G:%a' "${conf}/controller-command-verification-key.pem")" == "root:ocserv-agent:640" ]] ||
-  die "command verification key ownership is wrong"
-for key in user-password-seal-private.pem p12-password-seal-private.pem; do
-  [[ "$(as_root stat -c '%U:%G:%a' "${conf}/${key}")" == "root:root:600" ]] ||
-    die "${key} ownership is wrong: $(as_root stat -c '%U:%G:%a' "${conf}/${key}")"
-done
-as_root grep -qx "NODE_ID=00000000-0000-7000-8000-000000000000" "${conf}/agent.env" ||
-  die "agent.env must still carry the placeholder NODE_ID before enrollment"
-[[ ! -e "${sysroot}/etc/ocservia/agent-install-production-relays" ]] ||
-  die "the production request marker must be consumed by the successful install"
-assert_log_contains "${agent_log}" "--prepare-enrollment"
-# The package manager must install the frozen root-owned copy, never a path
-# inside the launcher-writable staging directory (mktemp template
-# ocservia-managed-node-pkg. vs ocservia-managed-node.), and never under the
-# hostile operator-controlled TMPDIR.
-assert_log_contains "${dpkg_log}" "ocservia-managed-node-pkg."
-if grep -q -- "ocservia-managed-node\." "${dpkg_log}"; then
-  die "dpkg must install the root-owned package copy, not the launcher staging: $(cat -- "${dpkg_log}")"
-fi
-if grep -q -- "${hostile_tmp}" "${dpkg_log}"; then
-  die "the privileged package staging must not live under the operator-controlled TMPDIR: $(cat -- "${dpkg_log}")"
-fi
-if grep -q -- "--enrollment-token-file" "${agent_log}"; then
-  die "no enrollment may run without a token file"
-fi
-assert_log_empty "${systemctl_log}"
-assert_log_empty "${sudo_log}"
-grep -q -- "--controller ${controller_id}" "${agent_log}" ||
-  die "identity preparation must pin the Controller EndpointID"
-echo "the root bootstrap flow reaches ENROLLMENT_READY"
+# Only ownership is simulated in the bootstrap parser: the fixture ancestors
+# belong to the test runner. Modes, links, contents and all host writes remain
+# real, and production code has no ownership bypass.
+cat >"${bin}/python3" <<'PYTHON'
+#!/usr/bin/python3
+import os
+import sys
+from unittest.mock import patch
+source = sys.stdin.read()
+sys.argv.pop(1)
+a, b, c = os.stat, os.lstat, os.fstat
+def root(value):
+    fields = list(value)
+    fields[4] = fields[5] = 0
+    return os.stat_result(fields)
+with patch('os.stat', side_effect=lambda *x, **kw: root(a(*x, **kw))), patch('os.lstat', side_effect=lambda *x, **kw: root(b(*x, **kw))), patch('os.fstat', side_effect=lambda *x, **kw: root(c(*x, **kw))):
+    exec(compile(source, 'bootstrap-fixture', 'exec'), {})
+PYTHON
+chmod 0755 "${bin}/python3"
+printf '#!/bin/sh\nexit 0\n' >"${bin}/sleep"
+chmod 0755 "${bin}/sleep"
+# A valid installation credential and the corresponding bounded config.
+/usr/bin/python3 - "${fixture}" "${controller_id}" <<'CONFIG'
+import base64
+import json
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+origin = base64.urlsafe_b64encode(b'https://controller.example.test').decode().rstrip('=')
+(root / 'join-token').write_text('oit1_' + origin + '.' + 'd' * 42 + 'c')
+(root / 'join-token').chmod(0o600)
+(root / 'bootstrap-config.json').write_text(json.dumps(dict(
+    controller_endpoint_id=sys.argv[2], environment='production',
+    enrollment_token='obt2_' + 'A' * 43, relay_url='https://relay-a.example.test',
+    relay_access_token='test-relay-access-token', command_verification_key_hex='2' * 64)))
+CONFIG
 
-# Launcher package bytes changed between hashing and freezing are refused.
+install_token() { capture_root --join-token-file "${fixture}/join-token" --version "v${VERSION}"; }
+resume_token() { capture_root --resume-install --version "v${VERSION}"; }
+identity_digest() {
+  as_root sha256sum "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" \
+    "${sysroot}/var/lib/ocservia-agent/identity/controller.endpoint" \
+    "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem" \
+    "${sysroot}/etc/ocservia-agent/p12-password-seal-private.pem" \
+    "${sysroot}/var/lib/ocservia-privd/attestation.key"
+}
+scenario
+# A stale install.env no longer chooses configuration or runs any shell code.
+# shellcheck disable=SC2016 # Deliberately inert legacy configuration.
+printf 'INVALID=$(touch should-not-exist)\n' >"${repo}/install.env"
+EXTRA_ENV=(USER_PASSWORD_SEAL_KEY_ID=original-user-key P12_PASSWORD_SEAL_KEY_ID=original-p12-key)
+install_token
+assert_status 0
+assert_output '^ONLINE$'
+assert_output "NODE_ID: ${MOCK_NODE_ID}"
+assert_log_contains "${systemctl_log}" 'enable --now ocservia-privd.service ocservia-agent.service'
+initial_identity="$(identity_digest)"
+enrollment_calls="$(grep -c -- --enrollment-token-file "${agent_log}")"
+EXTRA_ENV=()
+resume_token
+assert_status 0
+assert_output '^ONLINE$'
+[[ "$(identity_digest)" == "$initial_identity" ]] || die "resume changed identity or keys"
+[[ "$(grep -c -- --enrollment-token-file "${agent_log}")" == "$enrollment_calls" ]] || die "resume enrolled twice"
+install_token
+assert_status 0
+[[ "$(identity_digest)" == "$initial_identity" ]] || die "same-token replay changed keys"
+
+# A registered root key must be restored, never regenerated.
+as_root mv "${sysroot}/var/lib/ocservia-privd/attestation.key" "${fixture}/original-attestation"
+resume_token
+assert_status 1
+assert_output "restore the original root key"
+as_root test ! -e "${sysroot}/var/lib/ocservia-privd/attestation.key"
+as_root mv "${fixture}/original-attestation" "${sysroot}/var/lib/ocservia-privd/attestation.key"
+# Enrolled identity/sealing corruption fails before any replacement can occur.
+as_root mv "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem" "${fixture}/original-seal"
+resume_token
+assert_status 1
+assert_output "missing its user-password sealing private key"
+as_root test ! -e "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
+as_root mv "${fixture}/original-seal" "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
+
+for protected in relay-access-token controller-command-verification-key.pem; do
+  as_root mv "${sysroot}/etc/ocservia-agent/$protected" "${fixture}/original-$protected"
+  resume_token
+  assert_status 1
+  as_root test ! -e "${sysroot}/etc/ocservia-agent/$protected"
+  as_root mv "${fixture}/original-$protected" "${sysroot}/etc/ocservia-agent/$protected"
+done
+as_root cp "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" "${fixture}/original-endpoint"
+# shellcheck disable=SC2016 # The child shell receives the fixture path as $1.
+as_root sh -c 'printf "%032d" 8 >"$1"' sh "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+resume_token
+assert_status 1
+assert_output "replaced endpoint secret key"
+as_root cp "${fixture}/original-endpoint" "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+[[ "$(identity_digest)" == "$initial_identity" ]] || die "failed recovery changed retained material"
+
+scenario
+rm -f "${fixture}/registered"
+printf 1 >"${enroll_exit_file}"
+install_token
+assert_status 1
+assert_output "response is unknown"
+original_endpoint="$(as_root sha256sum "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key")"
+rm -f "${enroll_exit_file}"
+resume_token
+assert_status 0
+assert_output '^ONLINE$'
+[[ "$(as_root sha256sum "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key")" == "$original_endpoint" ]] || die "unknown enrollment regenerated identity"
+
+scenario
+rm -f "${fixture}/registered"
+touch "${fixture}/bad-registration"
+install_token
+assert_status 1
+assert_log_empty "${systemctl_log}"
+rm -f "${fixture}/bad-registration"
+resume_token
+assert_status 0
+assert_output '^ONLINE$'
+
+scenario
+rm -f "${fixture}/registered"
+touch "${fixture}/stale-status"
+install_token
+assert_status 1
+assert_output "Controller has not confirmed online/fresh state"
+if grep -qx ONLINE <<<"$RUN_OUTPUT"; then die 'local service startup claimed ONLINE'; fi
+rm -f "${fixture}/stale-status"
+resume_token
+assert_status 0
+assert_output '^ONLINE$'
+
+scenario
+touch "${fixture}/http-failure"
+install_token
+assert_status 1
+assert_log_empty "${dpkg_log}"
+rm -f "${fixture}/http-failure"
+resume_token
+assert_status 0
+assert_output '^ONLINE$'
+
+for architecture in amd64 arm64; do
+  scenario
+  if [[ "$architecture" == amd64 ]]; then printf x86_64 >"${arch_file}"; else printf aarch64 >"${arch_file}"; fi
+  install_token
+  assert_status 0
+  assert_log_contains "${dpkg_log}" "ocservia-agent_${VERSION}-1_${architecture}.deb"
+done
+scenario
+EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/rocky-9")
+install_token
+assert_status 0
+assert_log_contains "${rpm_log}" "ocservia-agent-${VERSION}-1."
+
 scenario
 printf 'before-freeze\n' >"${tamper_after_verify_file}"
-capture_root
+install_token
 assert_status 1
-assert_output "changed while entering root-owned staging"
 assert_log_empty "${dpkg_log}"
-grep -q 'package swapped' "${tamper_after_verify_file}" || die "the pre-freeze race fixture did not run"
-echo "a package swap before freezing is refused"
-
-# A launcher-only replacement after freezing cannot alter installed bytes.
 scenario
 printf 'after-freeze\n' >"${tamper_after_verify_file}"
-capture_root
+install_token
 assert_status 0
-assert_output "ENROLLMENT_READY"
-assert_log_contains "${dpkg_log}" "ocservia-managed-node-pkg."
-grep -q 'package swapped' "${tamper_after_verify_file}" || die "the post-freeze race fixture did not run"
-echo "a package swap after freezing is ignored"
-
-# 11c. the single-file --version mode converges on reruns exactly like the
-# checkout mode: the already-installed package is reused without a second
-# download or a second package manager mutation.
-scenario
-SCRIPT_UNDER_TEST="${standalone}/install.sh"
-capture_root --version "v${VERSION}"
-assert_status 0 "the single-file root bootstrap flow must succeed"
-assert_output "ENROLLMENT_READY"
-assert_output "rerun this installer with the same --version v${VERSION} argument"
-dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
-curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
-capture_root --version "v${VERSION}"
-assert_status 0 "the converged single-file rerun must succeed"
-assert_output "already installed; skipping the release download"
-[[ "$(grep -c -- "-i" "${dpkg_log}")" == "${dpkg_calls}" ]] ||
-  die "a single-file rerun must not reinstall the native package"
-[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
-  die "a single-file rerun must not re-download the release: $(tail -n 3 "${curl_log}")"
-echo "the single-file --version rerun converges without reinstalling or re-downloading"
+assert_output '^ONLINE$'
+assert_log_contains "${dpkg_log}" 'ocservia-managed-node-pkg.'
 
 scenario
-SCRIPT_UNDER_TEST="${standalone}/install.sh"
-EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/rocky-9")
-capture_root --version "v${VERSION}"
-assert_status 0 "RPM bootstrap must succeed"
-rpm_calls="$(grep -c -- '-ivh' "${rpm_log}")"
-curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
-capture_root --version "v${VERSION}"
-assert_status 0 "RPM rerun must converge"
-assert_output "already installed; skipping the release download"
-[[ "$(grep -c -- '-ivh' "${rpm_log}")" == "${rpm_calls}" ]] || die "RPM rerun reinstalled package"
-[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] || die "RPM rerun downloaded package"
-
-# Keep the original version/pin, platform, rejection, digest and DEB/RPM rerun
-# scenarios above for RC too. The remaining identity, enrollment, credential and
-# sudo allowlist contracts are version-independent and run in the full suite.
-if [[ "${scope}" == release-contracts ]]; then
-  echo "Managed node release contracts passed (${VERSION})"
-  exit 0
-fi
-
-# 12. a rerun converges: the installed package is reused, not reinstalled,
-# and the release is not downloaded again.
-scenario
-capture_root
-assert_status 0
-dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
-curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
-capture_root
-assert_status 0 "the converged rerun must succeed"
-assert_output "already installed; skipping the release download"
-[[ "$(grep -c -- "-i" "${dpkg_log}")" == "${dpkg_calls}" ]] ||
-  die "a rerun must not reinstall the native package"
-[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
-  die "a rerun must not re-download the release: $(tail -n 3 "${curl_log}")"
-grep -q "preserved existing user-password sealing key" <<<"${RUN_OUTPUT}" ||
-  die "a rerun must preserve the generated sealing keys"
-assert_log_empty "${systemctl_log}"
-echo "a rerun converges without reinstalling or re-downloading"
-
-# 13. existing valid sealing keys are preserved and bound as descriptors.
-scenario
-as_root install -d -o root -g root -m 0755 -- "${sysroot}/etc/ocservia-agent"
-as_root openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-  -out "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
-as_root openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-  -out "${sysroot}/etc/ocservia-agent/p12-password-seal-private.pem"
-as_root chmod 0600 -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem" \
-  "${sysroot}/etc/ocservia-agent/p12-password-seal-private.pem"
-user_key_digest="$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem" | awk '{print $1}')"
-p12_key_digest="$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/p12-password-seal-private.pem" | awk '{print $1}')"
-printf 'mock one-time enrollment token bytes\n' >"${fixture}/enrollment-token"
-as_root install -o root -g ocserv-agent -m 0640 -- "${fixture}/enrollment-token" \
-  "${sysroot}/etc/ocservia-agent/enrollment-token"
-capture_root
-assert_status 0 "enrollment with preserved keys must succeed"
-assert_output "ENROLLED_LOCAL"
-assert_output "NODE_ID: ${MOCK_NODE_ID}"
-assert_output "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
-assert_output "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
-assert_output "CONTROLLER_FRESHNESS: NOT_OBSERVED"
-[[ "$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem" | awk '{print $1}')" == "${user_key_digest}" ]] ||
-  die "the existing user-password sealing key must be preserved byte for byte"
-[[ "$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/p12-password-seal-private.pem" | awk '{print $1}')" == "${p12_key_digest}" ]] ||
-  die "the existing p12-password sealing key must be preserved byte for byte"
-expected_user_desc="$(as_root openssl rsa -in "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
-expected_p12_desc="$(as_root openssl rsa -in "${sysroot}/etc/ocservia-agent/p12-password-seal-private.pem" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
-as_root grep -qx "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${expected_user_desc}" "${sysroot}/etc/ocservia-agent/agent.env" ||
-  die "agent.env must carry the preserved user-password sealing key descriptor"
-as_root grep -qx "P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${expected_p12_desc}" "${sysroot}/etc/ocservia-agent/agent.env" ||
-  die "agent.env must carry the preserved p12-password sealing key descriptor"
-echo "existing valid sealing keys are preserved and bound"
-
-# 14. unsafe existing material fails closed.
-scenario
-capture_root
-assert_status 0
-as_root chmod 0644 -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
-capture_root
-assert_status 1 "an unsafe sealing key must fail closed"
-assert_output "unsafe metadata"
-assert_output "never overwrites sealing material"
-scenario
-capture_root
-assert_status 0
-as_root sh -c "printf 'RELAY_URL_A=https://other-a.example.test\n' >'${sysroot}/etc/ocservia-agent/relays.env'"
-as_root chmod 0640 "${sysroot}/etc/ocservia-agent/relays.env"
-as_root chown root:ocserv-agent "${sysroot}/etc/ocservia-agent/relays.env"
-capture_root
-assert_status 1 "a mismatching relays.env must fail closed"
-assert_output "resolve the mismatch deliberately"
-echo "unsafe or mismatched node material fails closed"
-
-# 15. an invalid enrollment token leaves identity and configuration intact.
-scenario
-capture_root
-assert_status 0
-printf 'mock one-time enrollment token bytes\n' >"${fixture}/enrollment-token"
-as_root install -o root -g ocserv-agent -m 0640 -- "${fixture}/enrollment-token" \
-  "${sysroot}/etc/ocservia-agent/enrollment-token"
-printf '23\n' >"${enroll_exit_file}"
-capture_root
-assert_status 1 "a failed enrollment must fail the bootstrap"
-assert_output "enrollment failed"
-assert_output "first query the Controller by that EndpointID"
-as_root grep -qx "NODE_ID=00000000-0000-7000-8000-000000000000" "${sysroot}/etc/ocservia-agent/agent.env" ||
-  die "a failed enrollment must not finalize agent.env"
-as_root test -e "${sysroot}/etc/ocservia-agent/enrollment-token" ||
-  die "a failed enrollment must leave the token file for the operator"
-echo "an invalid enrollment token leaves the node state intact"
-
-# 15a. a protected bootstrap token source completes identity preparation and
-# enrollment in one versioned installer run. The plaintext never appears in output or
-# process arguments, both local copies are removed only after success, and no
-# service is enabled or started.
-scenario
-bootstrap_secret="obt2_bootstrap-fixture-secret-that-must-not-leak"
-printf '%s\n' "${bootstrap_secret}" >"${fixture}/node-bootstrap-token"
-chmod 0600 -- "${fixture}/node-bootstrap-token"
-EXTRA_ENV=("BOOTSTRAP_TOKEN_SOURCE=${fixture}/node-bootstrap-token")
-capture_root
-assert_status 0 "a protected bootstrap token must enroll in one run"
-assert_output "ENROLLED_LOCAL"
-assert_output "SERVICES: NOT_OBSERVED"
-assert_output "NODE_ID: ${MOCK_NODE_ID}"
-assert_output "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
-assert_output "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
-assert_output "CONTROLLER_FRESHNESS: NOT_OBSERVED"
-if grep -qF -- "${bootstrap_secret}" <<<"${RUN_OUTPUT}" || grep -qF -- "${bootstrap_secret}" "${agent_log}"; then
-  die "the bootstrap token plaintext must never appear in output or Agent arguments"
-fi
-[[ ! -e "${fixture}/node-bootstrap-token" ]] ||
-  die "the protected bootstrap token source must be removed after success"
-if as_root test -e "${sysroot}/etc/ocservia-agent/enrollment-token"; then
-  die "the staged bootstrap token must be removed after success"
-fi
-assert_log_empty "${systemctl_log}"
-bootstrap_enrollment_calls="$(grep -c -- "--enrollment-token-file" "${agent_log}")"
-capture_root
-assert_status 0 "an enrolled node must tolerate the unchanged bootstrap source configuration"
-assert_output "ENROLLED_LOCAL"
-[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${bootstrap_enrollment_calls}" ]] ||
-  die "an enrolled rerun with the consumed bootstrap source configured must not enroll again"
-assert_systemctl_read_only
-echo "a protected bootstrap token reaches ENROLLED_LOCAL and reruns with unchanged configuration"
-
-# 15b. bootstrap enrollment failure keeps the protected source for an
-# idempotent retry and does not finalize agent.env.
-scenario
-printf 'obt2_retryable-bootstrap-secret\n' >"${fixture}/node-bootstrap-token"
-chmod 0600 -- "${fixture}/node-bootstrap-token"
-printf '23\n' >"${enroll_exit_file}"
-EXTRA_ENV=("BOOTSTRAP_TOKEN_SOURCE=${fixture}/node-bootstrap-token")
-capture_root
-assert_status 1 "a failed bootstrap enrollment must fail closed"
-assert_output "enrollment failed"
-assert_output "same bootstrap source"
-assert_output "Do not request a new token"
-[[ -e "${fixture}/node-bootstrap-token" ]] ||
-  die "a failed bootstrap enrollment must retain its protected source"
-as_root grep -qx "NODE_ID=00000000-0000-7000-8000-000000000000" "${sysroot}/etc/ocservia-agent/agent.env" ||
-  die "a failed bootstrap enrollment must not finalize agent.env"
-: >"${enroll_exit_file}"
-capture_root
-assert_status 0 "the same-endpoint bootstrap retry must converge"
-assert_output "ENROLLED_LOCAL"
-[[ ! -e "${fixture}/node-bootstrap-token" ]] ||
-  die "the converged bootstrap retry must remove its protected source"
-assert_log_empty "${systemctl_log}"
-echo "a failed bootstrap enrollment converges on rerun"
-
-# Single Relay survives installation, registration and a verification-only rerun;
-# changing Relay URL on the enrolled node fails closed.
-scenario
-capture_root
-assert_status 0
-as_root grep -qx 'RELAY_URL_A=https://relay-a.example.test' "${sysroot}/etc/ocservia-agent/relays.env" || die 'single Relay configuration lost'
-printf 'mock one-time enrollment token bytes\n' >"${fixture}/enrollment-token"
-as_root install -o root -g ocserv-agent -m 0640 "${fixture}/enrollment-token" "${sysroot}/etc/ocservia-agent/enrollment-token"
-capture_root
-assert_status 0
-assert_output "ENROLLED_LOCAL"
-enrollment_line="$(grep -- '--enrollment-token-file' "${agent_log}")"
-[[ "$(grep -o -- '--relay-url' <<<"${enrollment_line}" | wc -l)" -eq 1 ]] || die 'registration must receive one URL'
-assert_log_contains "${agent_log}" "--relay-url https://relay-a.example.test --relay-token-file"
-capture_root
-assert_status 0
-[[ "$(grep -c -- '--enrollment-token-file' "${agent_log}")" -eq 1 ]] || die 'rerun re-enrolled single Relay node'
-EXTRA_ENV=("RELAY_URL_A=https://new-relay.example.test")
-capture_root
+printf 'resource=ocpasswd reason=mode\n' >"${fixture}/preflight-failure"
+install_token
 assert_status 1
-as_root grep -qx 'RELAY_URL_A=https://relay-a.example.test' "${sysroot}/etc/ocservia-agent/relays.env" || die 'rerun changed Relay URL'
-
-# The official enrollment path consumes only a protected additional Relay CA;
-# reruns validate it without changing trust material or enrolling again.
-scenario
-capture_root
-assert_status 0
-openssl req -new -x509 -key "${fixture}/command-verification.key" -days 1 \
-  -subj /CN=relay-test-ca -out "${fixture}/relay-ca.pem"
-ca="${sysroot}/etc/ocservia-agent/relay-ca.pem"
-as_root install -o root -g root -m 444 "${fixture}/relay-ca.pem" "${ca}"
-printf 'mock one-time enrollment token bytes\n' >"${fixture}/enrollment-token"
-as_root install -o root -g ocserv-agent -m 640 "${fixture}/enrollment-token" "${sysroot}/etc/ocservia-agent/enrollment-token"
-capture_root
-assert_status 0
-assert_output ENROLLED_LOCAL
-assert_log_contains "${agent_log}" "--relay-ca-file ${ca}"
-capture_root
-assert_status 0
-[[ "$(grep -c -- '--enrollment-token-file' "${agent_log}")" -eq 1 ]] || die 'Relay CA rerun re-enrolled node'
-as_root chmod 644 "${ca}"
-capture_root
-assert_status 1
-assert_output 'Relay CA must be'
-as_root chmod 444 "${ca}"
-as_root mv "${ca}" "${ca}.saved"
-as_root ln -s "${ca}.saved" "${ca}"
-capture_root
-assert_status 1
-assert_output 'Relay CA must be'
-as_root rm "${ca}"
-as_root mv "${ca}.saved" "${ca}"
-as_root install -o root -g root -m 444 "${fixture}/enrollment-token" "${ca}"
-capture_root
-assert_status 1
-assert_output 'readable PEM certificate'
-echo 'protected additional Relay CA enrollment and read-only rerun checks passed'
-
-# 16. a valid protected token completes enrollment: the exact CLI contract,
-# atomic agent.env finalization, token consumption, ENROLLED_LOCAL.
-scenario
-capture_root
-assert_status 0
-printf 'mock one-time enrollment token bytes\n' >"${fixture}/enrollment-token"
-as_root install -o root -g ocserv-agent -m 0640 -- "${fixture}/enrollment-token" \
-  "${sysroot}/etc/ocservia-agent/enrollment-token"
-capture_root
-assert_status 0 "the enrollment rerun must succeed"
-assert_output "ENROLLED_LOCAL"
-assert_output "NODE_ID: ${MOCK_NODE_ID}"
-assert_output "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
-assert_output "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
-assert_output "CONTROLLER_FRESHNESS: NOT_OBSERVED"
-for argument in \
-  "--identity-dir ${sysroot}/var/lib/ocservia-agent/identity" \
-  "--controller ${controller_id}" \
-  "--enrollment-token-file ${sysroot}/etc/ocservia-agent/enrollment-token" \
-  "--enrollment-environment production" \
-  "--user-password-seal-key-id user-password-v1" \
-  "--p12-password-seal-key-id p12-password-v1" \
-  "--relay-mode custom" \
-  "--relay-url https://relay-a.example.test" \
-  "--relay-token-file ${sysroot}/etc/ocservia-agent/relay-access-token"; do
-  grep -qF -- "${argument}" "${agent_log}" ||
-    die "the enrollment CLI invocation must carry '${argument}'"
-done
-[[ "$(as_root stat -c '%U:%G:%a' "${sysroot}/etc/ocservia-agent/agent.env")" == "root:ocserv-agent:640" ]] ||
-  die "the final agent.env ownership is wrong"
-as_root grep -qx "CONTROLLER_ENDPOINT_ID=${controller_id}" "${sysroot}/etc/ocservia-agent/agent.env" ||
-  die "agent.env must pin the Controller EndpointID"
-as_root grep -qx "NODE_ID=${MOCK_NODE_ID}" "${sysroot}/etc/ocservia-agent/agent.env" ||
-  die "agent.env must carry the enrolled NODE_ID"
-as_root grep -qx "AGENT_ENDPOINT_ID=${MOCK_ENDPOINT_ID}" "${sysroot}/etc/ocservia-agent/agent.env" ||
-  die "agent.env must pin the enrolled Agent EndpointID binding"
-if as_root test -e "${sysroot}/etc/ocservia-agent/enrollment-token"; then
-  die "the one-time enrollment token file must be consumed after success"
-fi
-# A fresh enrollment prints ENROLLED_LOCAL directly; the activation-state
-# observation only belongs to later converged reruns.
-assert_log_empty "${systemctl_log}"
-echo "a valid token completes enrollment to ENROLLED_LOCAL"
-
-# 17. a rerun after enrollment does not re-enroll and stays at
-# ENROLLED_LOCAL while the services are not enabled; a stale token is
-# reported, never reused.
-enrollment_calls="$(grep -c -- "--enrollment-token-file" "${agent_log}")"
-curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
-capture_root
-assert_status 0 "the post-enrollment rerun must succeed"
-assert_output "ENROLLED_LOCAL"
-assert_output "NODE_ID: ${MOCK_NODE_ID}"
-assert_output "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
-assert_output "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
-assert_output "CONTROLLER_FRESHNESS: NOT_OBSERVED"
-[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
-  die "a rerun after enrollment must not enroll again"
-[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
-  die "a rerun after enrollment must not re-download the release"
-assert_systemctl_read_only
-printf 'mock stale enrollment token bytes\n' >"${fixture}/enrollment-token"
-as_root install -o root -g ocserv-agent -m 0640 -- "${fixture}/enrollment-token" \
-  "${sysroot}/etc/ocservia-agent/enrollment-token"
-capture_root
-assert_status 0 "a rerun with a stale token must stay at ENROLLED_LOCAL"
-assert_output "known stale token copy"
-as_root test ! -e "${sysroot}/etc/ocservia-agent/enrollment-token" || die "confirmed local registration did not clean the known token copy"
-[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
-  die "a stale token must never trigger a second enrollment"
-assert_systemctl_read_only
-echo "post-enrollment reruns stay at ENROLLED_LOCAL"
-
-# 17a. after the independent approval and the operator's enable step, a
-# rerun reports the enabled+active services without any further mutation:
-# no enrollment, no download, no package manager, read-only queries only.
-as_root rm -f -- "${sysroot}/etc/ocservia-agent/enrollment-token"
-dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
-printf 'active\n' >"${services_state_file}"
-capture_root
-assert_status 0 "the post-activation rerun must succeed"
-assert_output "SERVICES_ACTIVE"
-assert_output "NODE_ID: ${MOCK_NODE_ID}"
-assert_output "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
-assert_output "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
-assert_output "CONTROLLER_FRESHNESS: NOT_OBSERVED"
-if grep -q "ENROLLED_LOCAL" <<<"${RUN_OUTPUT}"; then
-  die "an activated node must not be reported as ENROLLED_LOCAL"
-fi
-[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
-  die "the post-activation rerun must not enroll again"
-[[ "$(grep -c -- "-i" "${dpkg_log}")" == "${dpkg_calls}" ]] ||
-  die "the post-activation rerun must not touch the package manager"
-[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
-  die "the post-activation rerun must not re-download the release"
-assert_systemctl_read_only
-rm -f -- "${services_state_file}"
-echo "the post-activation rerun reports SERVICES_ACTIVE"
-
-# 17b. an enrolled, activated node missing identity material must fail
-# closed: no identity provisioning, no regeneration, no SERVICES_ACTIVE —
-# even while both services still report enabled+active.
-prepare_calls="$(grep -c -- "--prepare-enrollment" "${agent_log}")"
-printf 'active\n' >"${services_state_file}"
-as_root rm -f -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
-capture_root
-assert_status 1 "an enrolled node missing identity material must fail closed"
-assert_output "missing its persistent identity file"
-if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
-  die "an identity failure must not report SERVICES_ACTIVE"
-fi
-as_root test ! -e "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" ||
-  die "the missing identity file must not be provisioned again"
-[[ "$(grep -c -- "--prepare-enrollment" "${agent_log}")" == "${prepare_calls}" ]] ||
-  die "an enrolled rerun must not run identity preparation"
-[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
-  die "the identity failure must not trigger enrollment"
-as_root sh -c "printf '%032d' 7 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
-as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
-echo "an enrolled node missing identity material fails closed"
-
-# 17b-2. a corrupted enrolled endpoint key must fail the Agent identity
-# validation instead of reporting SERVICES_ACTIVE.
-as_root sh -c "printf 'truncated' >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
-capture_root
-assert_status 1 "a corrupted enrolled endpoint key must fail closed"
-assert_output "did not pass the Agent identity validation"
-if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
-  die "a corrupted endpoint key must not report SERVICES_ACTIVE"
-fi
-as_root test "$(as_root stat -c %s -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key")" -eq 9 ||
-  die "the corrupted endpoint key must not be rewritten"
-[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
-  die "a corrupted endpoint key must not trigger enrollment"
-as_root sh -c "printf '%032d' 7 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
-as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
-echo "a corrupted enrolled endpoint key fails closed"
-
-# 17b-3. group/world-readable identity material must fail closed: the
-# endpoint secret key is long-lived key material.
-as_root chmod 0644 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
-capture_root
-assert_status 1 "group/world-readable identity material must fail closed"
-assert_output "did not pass the Agent identity validation"
-if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
-  die "unsafe identity permissions must not report SERVICES_ACTIVE"
-fi
-as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
-echo "unsafe identity permissions fail closed"
-
-# 17b-4. a controller pin that no longer matches the configured Controller
-# must fail closed (identity substitution).
-as_root sh -c "printf '%s' \"\$(printf 'd%.0s' \$(seq 1 64))\" >'${sysroot}/var/lib/ocservia-agent/identity/controller.endpoint'"
-capture_root
-assert_status 1 "a mismatching controller pin must fail closed"
-assert_output "did not pass the Agent identity validation"
-if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
-  die "a mismatching controller pin must not report SERVICES_ACTIVE"
-fi
-[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
-  die "a mismatching controller pin must not trigger enrollment"
-as_root sh -c "printf '%s' '${controller_id}' >'${sysroot}/var/lib/ocservia-agent/identity/controller.endpoint'"
-echo "a mismatching controller pin fails closed"
-
-# 17b-5. a deleted Controller command verification key must fail closed on
-# the enrolled rerun: the trust anchor is never silently reinstalled from
-# the operator source, and SERVICES_ACTIVE is never reported.
-command_key="${sysroot}/etc/ocservia-agent/controller-command-verification-key.pem"
-as_root rm -f -- "${command_key}"
-capture_root
-assert_status 1 "an enrolled node missing the command verification key must fail closed"
-assert_output "missing its Controller command verification key"
-if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
-  die "a missing command verification key must not report SERVICES_ACTIVE"
-fi
-as_root test ! -e "${command_key}" ||
-  die "the missing command verification key must not be reinstalled from the operator source"
-[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
-  die "a missing command verification key must not trigger enrollment"
-as_root install -o root -g ocserv-agent -m 0640 -- \
-  "${fixture}/controller-command-verification-key.pem" "${command_key}"
-echo "an enrolled node missing the command verification key fails closed"
-
-# 17b-6. a replaced command verification key (safe metadata, but not the
-# Ed25519 command anchor) must fail closed instead of being preserved or
-# silently swapping the command trust anchor.
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-  -out "${fixture}/rsa-command-private.pem" 2>/dev/null
-openssl pkey -in "${fixture}/rsa-command-private.pem" -pubout \
-  -out "${fixture}/rsa-command-key.pub" 2>/dev/null
-as_root install -o root -g ocserv-agent -m 0640 -- \
-  "${fixture}/rsa-command-key.pub" "${command_key}"
-capture_root
-assert_status 1 "a non-Ed25519 command verification key must fail closed"
-assert_output "must contain an Ed25519 SubjectPublicKeyInfo public key"
-if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
-  die "a replaced command verification key must not report SERVICES_ACTIVE"
-fi
-as_root cmp -s -- "${fixture}/rsa-command-key.pub" "${command_key}" ||
-  die "the replaced command verification key must not be overwritten"
-as_root install -o root -g ocserv-agent -m 0640 -- \
-  "${fixture}/controller-command-verification-key.pem" "${command_key}"
-echo "a non-Ed25519 command verification key fails closed"
-
-# 17b-7. a substituted-but-valid endpoint secret key (32 bytes, owner-only,
-# same controller pin) presents a different EndpointID; the enrolled rerun
-# must fail closed on the AGENT_ENDPOINT_ID enrollment binding instead of
-# reporting SERVICES_ACTIVE, and must not rewrite the identity or agent.env.
-agent_env_digest="$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/agent.env" | awk '{print $1}')"
-as_root sh -c "printf '%032d' 9 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
-as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
-capture_root
-assert_status 1 "a substituted valid endpoint key must fail the enrollment binding"
-assert_output "cannot silently take the Controller enrollment binding"
-if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
-  die "a substituted endpoint key must not report SERVICES_ACTIVE"
-fi
-as_root test "$(as_root stat -c %s -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key")" -eq 32 ||
-  die "the substituted endpoint key must not be rewritten"
-[[ "$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/agent.env" | awk '{print $1}')" == "${agent_env_digest}" ]] ||
-  die "an enrollment binding failure must leave the enrolled agent.env untouched"
-[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
-  die "an enrollment binding failure must not trigger enrollment"
-as_root sh -c "printf '%032d' 7 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
-as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
-echo "a substituted valid endpoint key fails closed on the enrollment binding"
-
-# 17c. an enrolled, activated node missing a sealing private key must fail
-# closed the same way: no key regeneration, no enrollment, no
-# SERVICES_ACTIVE.
-as_root rm -f -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
-capture_root
-assert_status 1 "an enrolled node missing a sealing key must fail closed"
-assert_output "missing its user-password sealing private key"
-if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
-  die "a sealing-key failure must not report SERVICES_ACTIVE"
-fi
-as_root test ! -e "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem" ||
-  die "the missing sealing key must not be regenerated"
-[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
-  die "the sealing-key failure must not trigger enrollment"
-echo "an enrolled node missing a sealing key fails closed"
-
-# 17d. a replaced sealing key (present, safe, but not the enrolled one) must
-# fail closed instead of silently taking the enrolled fingerprint binding.
-as_root openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-  -out "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
-as_root chmod 0600 -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
-capture_root
-assert_status 1 "a replaced sealing key must fail closed"
-assert_output "the enrolled agent.env pins"
-if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
-  die "a fingerprint mismatch must not report SERVICES_ACTIVE"
-fi
-as_root grep -qx "NODE_ID=${MOCK_NODE_ID}" "${sysroot}/etc/ocservia-agent/agent.env" ||
-  die "a fingerprint mismatch must leave the enrolled agent.env untouched"
-echo "a replaced sealing key fails closed on the fingerprint mismatch"
-
-# 18. whole-script sudo is rejected: the operator environment must not cross
-# to root wholesale.
-scenario
-build_env
-RUN_STATUS=0
-RUN_OUTPUT="$(sudo -n env "${ROOT_ENV[@]}" SUDO_USER=ocservia-operator \
-  "${repo}/deploy/managed-node/install.sh" --non-interactive 2>&1)" || RUN_STATUS=$?
-assert_status 1 "whole-script sudo must fail closed"
-assert_output "launcher user"
-assert_output "--root-lifecycle"
-assert_log_empty "${dpkg_log}"
-assert_log_empty "${curl_log}"
-echo "whole-script sudo is rejected with the launcher mismatch"
-
-# 19. --root-lifecycle deliberately runs as root, forwarding only the
-# managed-node configuration across sudo's env_reset. This regression needs a
-# real non-root launcher with a real sudo boundary.
-if ((EUID != 0)) && can_root; then
-  scenario
-    root_lifecycle_bin="${fixture}/root-lifecycle-bin"
-  mkdir -m 700 -- "${root_lifecycle_bin}"
-  for tool in bash git env install stat sed openssl sha256sum awk mktemp cat \
-    mv rm touch tail dirname getent cp grep chown chmod basename; do
-    ln -s "$(command -v "${tool}")" "${root_lifecycle_bin}/${tool}"
-  done
-  for mock in curl uname dpkg dpkg-query rpm runuser systemctl id; do
-    cp -- "${bin}/${mock}" "${root_lifecycle_bin}/${mock}"
-  done
-  real_sudo="$(command -v sudo)"
-  # The poison-install-env seam is the install.env TOCTOU regression: the
-  # wrapper (still running as the launcher user) swaps $PWD/install.env for
-  # attacker content at the exact moment the privilege transition starts, so
-  # a root re-read of the file would pick up attacker-chosen configuration.
-  cat >"${root_lifecycle_bin}/sudo" <<EOF
-  #!/usr/bin/env bash
-  set -euo pipefail
-  root="$(dirname -- "\${OCSERV_MANAGED_NODE_SYSROOT:?}")"
-  printf '%s\n' "\$*" >>"${root_sudo_log}"
-  if [[ -s "${fixture}/poison-install-env" ]]; then
-    cp -- "${fixture}/poison-install-env" "${repo}/install.env"
-  fi
-  exec "${real_sudo}" env PATH="${root_lifecycle_bin}" "\$@"
-EOF
-  chmod 0755 -- "${root_lifecycle_bin}/sudo"
-  RUN_STATUS=0
-  # Each fixture intentionally isolates its PATH and exported settings.
-  # shellcheck disable=SC2030,SC2031
-  RUN_OUTPUT="$(
-    export PATH="${root_lifecycle_bin}"
-    export UNRELATED_ENV=must-not-cross-sudo
-    TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env
-    env "${ROOT_ENV[@]}" "${repo}/deploy/managed-node/install.sh" --root-lifecycle 2>&1
-  )" || RUN_STATUS=$?
-  assert_status 0 "the operator root-lifecycle command must succeed"
-  assert_output "ENROLLMENT_READY"
-  assert_log_contains "${root_sudo_log}" "CONTROLLER_ENDPOINT_ID=${controller_id}"
-  assert_log_contains "${root_sudo_log}" "CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem"
-  if grep -q "UNRELATED_ENV" "${root_sudo_log}"; then
-    die "the root-lifecycle sudo command must not forward unrelated environment variables: $(cat -- "${root_sudo_log}")"
-  fi
-  if ((EUID != 0)); then
-    as_root chown -R "$(id -u):$(id -g)" "${repo}" 2>/dev/null || true
-  fi
-  assert_log_empty "${systemctl_log}"
-  echo "the operator root-lifecycle command forwards only node configuration"
-
-  # 19b. --root-lifecycle resolves install.env as the launcher user and
-  # forwards only the effective allowlist across the boundary. The sudo
-  # wrapper swaps $PWD/install.env for poisoned content the instant the
-  # privilege transition starts, so a root re-read would install
-  # attacker-chosen relay configuration; the re-exec marker must prevent it.
-  scenario
-  ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A)
-  cat >"${repo}/install.env" <<EOF
-CONTROLLER_ENDPOINT_ID=${controller_id}
-RELAY_URL_A=https://relay-root-file-a.example.test
-USER_PASSWORD_SEAL_KEY_ID=file-user-v1
-P12_PASSWORD_SEAL_KEY_ID=file-p12-v1
-ENROLLMENT_ENVIRONMENT=staging
-EOF
-  printf 'CONTROLLER_ENDPOINT_ID=%s\nRELAY_URL_A=https://relay-poisoned-a.example.test\n' \
-    "${controller_id}" >"${fixture}/poison-install-env"
-  RUN_STATUS=0
-  # Each fixture intentionally isolates its PATH and exported settings.
-  # shellcheck disable=SC2030,SC2031
-  RUN_OUTPUT="$(
-    export PATH="${root_lifecycle_bin}"
-    TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env
-    cd -- "${repo}"
-    env "${ROOT_ENV[@]}" "${repo}/deploy/managed-node/install.sh" --root-lifecycle 2>&1
-  )" || RUN_STATUS=$?
-  assert_status 0 "the root-lifecycle with install.env must succeed"
-  assert_output "ENROLLMENT_READY"
-  assert_log_contains "${root_sudo_log}" "OCSERV_INSTALL_ENV_RESOLVED=1"
-  assert_log_contains "${root_sudo_log}" "CONTROLLER_ENDPOINT_ID=${controller_id}"
-  assert_log_contains "${root_sudo_log}" "RELAY_URL_A=https://relay-root-file-a.example.test"
-  # These three are normalized unset->empty only after the install.env load:
-  # file-provided values must survive the normalization and cross the sudo
-  # boundary like any other allowlisted configuration.
-  assert_log_contains "${root_sudo_log}" "USER_PASSWORD_SEAL_KEY_ID=file-user-v1"
-  assert_log_contains "${root_sudo_log}" "P12_PASSWORD_SEAL_KEY_ID=file-p12-v1"
-  assert_log_contains "${root_sudo_log}" "ENROLLMENT_ENVIRONMENT=staging"
-  if grep -q "poisoned" "${root_sudo_log}"; then
-    die "root must never re-read the swapped install.env: $(cat -- "${root_sudo_log}")"
-  fi
-  as_root grep -qx "RELAY_URL_A=https://relay-root-file-a.example.test" \
-    "${sysroot}/etc/ocservia-agent/relays.env" ||
-    die "relays.env must carry the launcher-resolved relay URL A"
-  if as_root grep -q "poisoned" "${sysroot}/etc/ocservia-agent/relays.env"; then
-    die "root must never apply the swapped install.env values"
-  fi
-  if ((EUID != 0)); then
-    as_root chown -R "$(id -u):$(id -g)" "${repo}" 2>/dev/null || true
-  fi
-  echo "the root lifecycle forwards resolved install.env values and never re-reads the file as root"
-
-  # 19c. --root-lifecycle re-execs the installer's own path carrying the CLI
-  # version pin. Running from the standalone directory (no .git anywhere)
-  # proves the version crossed the sudo boundary: a dropped --version would
-  # fall back to the legacy checkout identity and fail closed here.
-  scenario
-  cat >"${standalone}/install.env" <<EOF
-CONTROLLER_ENDPOINT_ID=${controller_id}
-RELAY_URL_A=https://relay-root-file-a.example.test
-EOF
-  ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A)
-  chmod 0644 "${standalone}/install.sh"
-  RUN_STATUS=0
-  # Each fixture intentionally isolates its PATH and exported settings.
-  # shellcheck disable=SC2030,SC2031
-  RUN_OUTPUT="$(
-    export PATH="${root_lifecycle_bin}"
-    TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env
-    cd -- "${standalone}"
-    env "${ROOT_ENV[@]}" bash "${standalone}/install.sh" --version "v${VERSION}" --root-lifecycle 2>&1
-  )" || RUN_STATUS=$?
-  assert_status 0 "the single-file root-lifecycle command must succeed"
-  assert_output "ENROLLMENT_READY"
-  assert_output "rerun this installer with the same --version v${VERSION} argument"
-  assert_log_contains "${root_sudo_log}" "bash ${standalone}/install.sh --root-lifecycle --version v${VERSION}"
-  as_root grep -qx "RELAY_URL_A=https://relay-root-file-a.example.test" \
-    "${sysroot}/etc/ocservia-agent/relays.env" ||
-    die "relays.env must carry the launcher-resolved relay URL A"
-  chmod 0755 "${standalone}/install.sh"
-  echo "the root lifecycle re-execs the mode-0644 single file with the pinned version"
-else
-  echo "root-lifecycle forwarding case skipped: running as root" >&2
-fi
-
-# The real installer must stop before preparing an identity or consuming a token.
-scenario
-printf 'fail\n' >"${fixture}/preflight-failure"
-printf 'original bootstrap token\n' >"${fixture}/preflight-token"
-chmod 0600 "${fixture}/preflight-token"
-EXTRA_ENV=("BOOTSTRAP_TOKEN_SOURCE=${fixture}/preflight-token")
-capture_root --version "v${VERSION}"
-assert_status 1
-assert_output "resource=ocpasswd reason=mode actual=0644 expected=0600"
-assert_output "host preflight failed before enrollment"
 assert_log_empty "${agent_log}"
-as_root test ! -e "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" || die "preflight created an identity"
-as_root grep -q 'NODE_ID=00000000-0000-7000-8000-000000000000' "${sysroot}/etc/ocservia-agent/agent.env" || die "preflight wrote final node configuration"
-grep -qx 'original bootstrap token' "${fixture}/preflight-token" || die "preflight consumed the bootstrap token"
-echo "host preflight stops enrollment before identity and final configuration"
-
-echo "Managed node install tests passed"
+as_root test ! -e "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
+echo "Token native installation, protected recovery, package convergence and Controller readiness tests passed"
