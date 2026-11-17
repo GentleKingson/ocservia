@@ -57,14 +57,14 @@ describe("telemetry timestamps", () => {
     expect(resource.observedAt).toBe("infinity");
     expect(UserGroupResourceStateToJSON(resource)).toEqual(wire);
   });
-  it("retains rollout clocks and complete stored exclusions", () => {
-    const excluded = [null, ["nested"], { node_id: "node", extra: true }];
+  it("retains rollout clocks and decodes current exclusions", () => {
+    const excluded = [{ node_id: "node", reason: "offline" }];
     const rollout = AgentRolloutFromJSON({
       excluded,
       created_at: "-infinity",
       updated_at: "infinity",
     });
-    expect(rollout.excluded).toEqual(excluded);
+    expect(rollout.excluded).toEqual([{ nodeId: "node", reason: "offline" }]);
     expect(rollout.createdAt).toBe("-infinity");
     expect(rollout.updatedAt).toBe("infinity");
   });

@@ -1481,7 +1481,9 @@ paths:
         "200":
           description: Chain and checkpoint are valid.
           content: { application/json: { schema: { $ref: "#/components/schemas/AuditVerification" } } }
-        "409": { $ref: "#/components/responses/Problem" }
+        "409":
+          description: The chain or latest checkpoint failed verification.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AuditVerification" } } }
         default: { $ref: "#/components/responses/Problem" }
 components:
   securitySchemes:
@@ -2166,6 +2168,15 @@ components:
         from_version: { type: string }
         failure_code: { type: string }
       description: One selected node in stable sorted order; operation_id links to the underlying single-node upgrade operation.
+    AgentRolloutExclusion:
+      type: object
+      additionalProperties: false
+      required: [node_id, reason]
+      properties:
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        reason:
+          type: string
+          description: Eligibility reason; readers retain unknown historical reason codes.
     AgentRollout:
       type: object
       additionalProperties: false
@@ -2190,7 +2201,12 @@ components:
         excluded:
           type: array
           maxItems: 500
-          items: {}
+          items:
+            anyOf:
+              - { $ref: "#/components/schemas/AgentRolloutExclusion" }
+              - type: [object, array, string, number, boolean, "null"]
+                description: Unclassified historical stored JSON.
+          description: Current entries follow AgentRolloutExclusion. Historical stored JSON values remain readable unchanged.
       description: Durable server-side orchestration state; failed and unknown node outcomes always pause the rollout.
     AgentRolloutPage:
       type: object
@@ -2683,6 +2699,29 @@ components:
       required: [items]
       properties:
         items: { type: array, maxItems: 1000, items: { $ref: "#/components/schemas/Workspace" } }
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, node_id, request_id, trace_id, command_id, result, reason, error_type, previous_event_hash, event_hash]
+      properties:
+        id: { type: string, format: uuid }
+        occurred_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        actor_type: { type: string }
+        actor_id: { type: string }
+        action: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: [string, "null"], format: uuid }
+        node_id: { type: [string, "null"], format: uuid }
+        request_id: { type: string }
+        trace_id: { type: [string, "null"] }
+        command_id: { type: [string, "null"], format: uuid }
+        result:
+          type: string
+          description: Historical result codes remain readable without a closed enum.
+        reason: { type: [string, "null"] }
+        error_type: { type: [string, "null"] }
+        previous_event_hash: { type: string }
+        event_hash: { type: string }
     AuditEventPage:
       type: object
       additionalProperties: false
@@ -2691,11 +2730,11 @@ components:
         items:
           type: array
           maxItems: 200
-          items: { type: object, additionalProperties: true }
+          items: { $ref: "#/components/schemas/AuditEvent" }
     AuditVerification:
       type: object
       additionalProperties: false
-      required: [workspace_id, events, valid, checkpoint_valid]
+      required: [workspace_id, events, compacted_events, valid, checkpoint_valid]
       properties:
         workspace_id: { $ref: "#/components/schemas/UuidV7" }
         events: { type: integer, format: int64, minimum: 0 }

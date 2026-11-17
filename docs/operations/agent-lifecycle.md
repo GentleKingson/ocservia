@@ -13,9 +13,9 @@ root-key registration and startup in one run. It prints `ONLINE` only after
 the Controller reports active trust, a registered privd key, an online session
 and fresh telemetry. A local service process alone is not an online result.
 
-The advanced manual path may stop at `ENROLLMENT_READY` (no token),
-`ENROLLED_LOCAL` (identity registered), or `SERVICES_ACTIVE` (local processes
-running). These intermediate results do not establish Controller reachability.
+Manual Agent CLI enrollment reports only a local binding. It does not establish
+Controller reachability; use the documented recovery steps below and verify
+Controller-observed state before declaring the node ready.
 
 ## Install a managed node
 
@@ -65,42 +65,18 @@ original binding. Expiration still blocks a new enrollment or first key
 registration; inspect the existing node before issuing replacement authority.
 An expired token never permits a different node or replacement privd key.
 
-The following configuration-driven installation remains an advanced manual
-path. Use the token workflow above for unattended first installation.
+The no-argument installer and `--interactive` use the same hidden token prompt
+as `--join-token`. `--non-interactive` requires `--join-token-file` or
+`--resume-install`; it never falls back to configuration-driven enrollment.
 
-### Prepare the node configuration
+The configuration-driven installer and its questionnaire are retired. `--config`
+fails with migration guidance, and `install.env` never selects a node installation
+flow. Existing manual enrollment and uncertain-response recovery use the Agent
+CLI described under [Enroll the node](#enroll-the-node). Preserve the original
+EndpointID, sealing keys and privd key; do not mint replacement authority to
+work around an ambiguous response.
 
-Download the exact Release installer into a private working directory:
-
-```bash
-mkdir ocservia-node-install && cd ocservia-node-install
-wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/managed-node-bootstrap.sh -O install.sh
-bash install.sh
-```
-
-The no-argument wizard detects the platform and asks for endpoint, Relay and protected key/token paths, validates inputs and requests confirmation. It saves public configuration and file paths in mode-0600 `install.env`. It requires a TTY; without one it fails before installation. The Release embeds the fixed version and needs no Git.
-
-For unattended configuration, download the matching template:
-
-```bash
-wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/install.env.example -O install.env
-chmod 0600 install.env
-editor install.env
-```
-
-Fill in the managed-node section of `install.env` and leave the Controller section commented out or removed.
-
-At a minimum, set the following parameters:
-
-| Setting | Purpose |
-| --- | --- |
-| `CONTROLLER_ENDPOINT_ID` | Binds the node to the expected Controller identity. |
-| `RELAY_URL_A` | Required literal HTTPS URL for the dedicated Relay (without credentials, query string, or fragment). Production supports only one dedicated Relay. |
-| `RELAY_ACCESS_TOKEN_SOURCE` | Protected file path containing the relay access token. |
-| `CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE` | Protected file path containing the Controller command verification public key. |
-| `BOOTSTRAP_TOKEN_SOURCE` | Optional protected file path containing a bootstrap token for single-run enrollment. |
-
-The installer reads `./install.env` from the current working directory. Variables exported in the shell take precedence over entries in the file.
+### Private Relay CA
 
 If the Relay uses a private CA, install its public PEM certificate bundle at `/etc/ocservia-agent/relay-ca.pem` before you run the installer. The file must be:
 
@@ -118,33 +94,19 @@ To configure production relays during installation, set `INSTALL_PRODUCTION_RELA
 
 The production drop-in executes the packaged fixed launcher `/usr/libexec/ocservia/ocservia-agent-relays`, which constructs a single Relay URL argument and replaces itself with the Agent, leaving base development units and direct binary invocations unchanged. Archive and native installations, upgrades, rollback snapshots, and uninstall all include this launcher. The lower-level package installer and upgrades preserve operator configuration and identity. Uninstall removes the launcher but retains configuration and state unless the existing purge option is used.
 
-### Run the installer
+### Unattended installation and recovery
 
-For unattended installation, invoke the downloaded installer with the prepared configuration:
-
-```bash
-bash install.sh --non-interactive --config ./install.env
-```
-
-To run the entire installation lifecycle directly as `root`, pass `--root-lifecycle`:
+Use the same pinned release and a private token file:
 
 ```bash
-bash install.sh --non-interactive --config ./install.env --root-lifecycle
+bash install.sh --non-interactive --join-token-file /protected/install-token
+bash install.sh --non-interactive --resume-install
 ```
 
-`--config` defaults to `./install.env`. Exported settings override file values. Explicit legacy arguments remain CLI calls; `--version` overrides the embedded tag. `--non-interactive` fails for missing inputs and uses sudo without password prompts. Both modes call the same package and enrollment workflow.
-
-The script then:
-
-1. Detects the host distribution.
-2. Downloads the matching `.deb` or `.rpm` over HTTPS into a root-owned staging directory and installs it.
-3. Runs the `privd` host preflight checks.
-4. Generates the two password-sealing keys if they do not exist yet. Existing keys are preserved.
-5. Writes the relay configuration and initializes the persistent node identity.
-
-Enrollment and the running services both use the single configured `RELAY_URL_A` URL.
-
-The installer leaves the `Agent` and `privd` services stopped in `--config` mode (or activates and verifies `ONLINE` in `--join-token` mode). If a different version of `ocservia-agent` is already installed on the host, the installer exits without upgrading or downgrading the package. Never rerun an unpinned or `latest` installer script as a shortcut for upgrading.
+Both use the same package, identity, enrollment and root-key registration flow
+as the hidden prompt. A retry preserves root bootstrap state and the existing
+keys. Only Controller-confirmed active trust, a registered privd key, an online
+session and fresh telemetry produce `ONLINE`.
 
 ### Package verification and staging
 
@@ -193,7 +155,7 @@ Each release publishes the node archive and its plain `.sha256`, plus native DEB
 
 The `.deb` and `.rpm` packages embed only the archive, its plain checksum, and the verifier under `/usr/share/ocservia-agent`, and depend on `openssl`, `python3`, and `util-linux`. Their scriptlets contain no layout logic: `postinst` refuses a host-architecture mismatch, verifies the archive into trusted staging, and runs the verified `install-agent.sh` on a fresh host or `upgrade-agent.sh` on an existing installation.
 
-Installing or upgrading a package never enables or starts the Agent or privd units outside the one-token bootstrap flow. Operators using the configuration-driven installer must first provision `/etc/ocservia-agent/agent.env` and the keys, then enable both units manually. An upgrade or an identical-package retry runs `systemctl try-restart` on `ocservia-privd` and `ocservia-agent`, restarting units that are already running while leaving stopped units stopped.
+Installing or upgrading a package never enables or starts the Agent or privd units outside the one-token bootstrap flow. Operators using manual archive provisioning must first provision `/etc/ocservia-agent/agent.env` and the keys, then enable both units manually. An upgrade or an identical-package retry runs `systemctl try-restart` on `ocservia-privd` and `ocservia-agent`, restarting units that are already running while leaving stopped units stopped.
 
 A production managed node requests the relay contract before invoking the package manager by creating `/etc/ocservia/agent-install-production-relays` as a regular file. `postinst` then passes `INSTALL_PRODUCTION_RELAYS=true` into the verified lifecycle on both fresh installs and upgrades, sourcing the production relay drop-in and `relays.env` exclusively from the verified embedded payload (never from a source checkout). This marker file is consumed only after the verified lifecycle succeeds, keeping a failed install or upgrade retryable. A real package removal (as opposed to an upgrade) deletes any unconsumed request so it cannot affect a later plain install. Once installed, the drop-in records the standing production intent, and subsequent upgrades reinstall it whenever the drop-in is already present, with or without the marker. Without the marker or an existing drop-in, a native install stays relay-free.
 
@@ -255,39 +217,33 @@ The response returns the `oit1_` root token once. `ttl_seconds` can shorten the
 Never place the token in a URL, log, or shared shell history; stage it in a
 protected root-owned file (mode `0600`) when invoking `--join-token-file`.
 
-For unattended bootstrap via `install.sh --config`, omit `installation` or set
-`BOOTSTRAP_TOKEN_SOURCE` to a single-use `obt1_` bootstrap token file; the
-installer prepares the persistent EndpointID via `--prepare-enrollment`, completes
-bootstrap enrollment over the single configured `RELAY_URL_A`, writes `NODE_ID`
-and `AGENT_ENDPOINT_ID` to `/etc/ocservia-agent/agent.env`, and removes the
-temporary token copy once local state commits.
+Existing manual enrollment credentials remain usable through the Agent's
+`--enrollment-token-file` CLI. Keep the original identity directory and exact
+credential when reconciling an uncertain response; the standard installer does
+not load these credentials from install.env.
 
 ### Finish enrollment
 
-What happens after the configuration-driven installer (`--config`) depends on whether `BOOTSTRAP_TOKEN_SOURCE` was supplied:
-
-| Installer result | What to do next |
-| --- | --- |
-| `ONLINE` (`--join-token` / `--join-token-file`) | Installation token flow completed enrollment, node activation, root `privd` attestation registration via `/api/v1/node-bootstrap/{attestation,register}`, and service startup; Controller reports online and fresh telemetry. |
-| `ENROLLED_LOCAL` | Local configuration enrollment succeeded. Verify node trust and connection status in the Controller UI and ensure `privd` attestation is registered before enabling services. |
-| `ENROLLMENT_READY` | No token was provided. Issue a short-lived bootstrap token (`POST /api/v1/node-bootstrap-tokens` with `expected_endpoint_id` set to the printed EndpointID), supply it via `BOOTSTRAP_TOKEN_SOURCE`, and rerun the installer. |
-
-The installer deletes one-time token files and the `BOOTSTRAP_TOKEN_SOURCE` file only after enrollment succeeds. If enrollment fails or the result is ambiguous, stop and follow the next section.
+The standard token installer completes root-key registration and startup, then
+checks Controller readiness. Manual Agent CLI enrollment records only the local
+binding; provision the trust files and start the daemons deliberately using the
+steps below. A lost enrollment response must be reconciled with the original
+EndpointID and credential before issuing replacement authority.
 
 ### Recover an uncertain enrollment response
 
 If an enrollment response is lost or your SSH session drops mid-run, keep the original EndpointID, identity directory, and protected token material intact. Never generate a new identity or issue a new token just because the client did not receive a response:
 
-- With a bootstrap or installation token (`--join-token-file` or `BOOTSTRAP_TOKEN_SOURCE`), rerun the same installer with the original identity directory and token binding so the Controller's same-endpoint recovery path can return the record it already committed. The Controller rejects a replay if the presenting EndpointID differs or refuses any bootstrap enrollment for an EndpointID already present from another attempt.
+- For an installation token, rerun the same pinned installer with `--resume-install`. For manual Agent CLI enrollment, repeat the exact command with the original identity directory and protected credential. The Controller's same-endpoint recovery path can return the record it already committed. The Controller rejects a replay if the presenting EndpointID differs or refuses any bootstrap enrollment for an EndpointID already present from another attempt.
 - Always check node status by `EndpointID` in the Controller inventory before issuing any replacement token.
 
-Once local enrollment is confirmed, the installer deletes only its fixed internal copy of the token. If power loss, `SIGKILL`, or another interruption stops the process between configuration commit and cleanup, rerunning the installer validates the existing identity and binding (failing closed on unsafe file metadata), completes any pending token cleanup, and prints the local summary. Whenever enrollment fails or remains uncertain, the installer retains recovery material along with the long-term identity, Relay token, public trust files, and sealing private keys.
+Once local enrollment is confirmed, the installer deletes only its fixed internal copy of the token. If power loss, `SIGKILL`, or another interruption stops the process between configuration commit and cleanup, rerunning the installer validates the existing identity and binding (failing closed on unsafe file metadata), completes pending token cleanup and root-key registration, and polls Controller readiness. Whenever enrollment fails or remains uncertain, the installer retains recovery material along with the long-term identity, Relay token, public trust files, and sealing private keys.
 
 Root `privd` result attestation keys are registered automatically by the one-token bootstrap flow through `POST /api/v1/node-bootstrap/attestation` and `POST /api/v1/node-bootstrap/register`. The packaged default key path is `PRIVD_ATTESTATION_KEY_FILE=/var/lib/ocservia-privd/attestation.key` in `/etc/ocservia-agent/privd.env`, and receipt contents are defined in [Privd receipt v1](../reference/stable-contracts.md#privd-receipt-v1).
 
 ## Start and verify the node
 
-The configuration-driven installer (`--config`) leaves systemd units stopped so operators can verify trust files before starting the daemons (whereas `--join-token` / `--join-token-file` enables and starts them automatically):
+Manual Agent CLI enrollment leaves systemd units stopped. Verify the trust files before starting the daemons; the standard token installer completes these steps automatically:
 
 ```bash
 sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
@@ -296,13 +252,12 @@ systemctl status ocservia-privd.service ocservia-agent.service
 
 Local `systemctl` status shows only that the units run on the host. Confirm the node on the Controller. In the selected Workspace, open the node, or query `GET /api/v1/nodes/{node_id}` from an authorized workspace Admin session, and inspect `trust_status`, `connection_state` and `freshness`. The node is operational when they are `active`, `online` and `fresh` with a recent heartbeat. Never copy that administrator session onto the managed node.
 
-Once the node is active and its services are running, you can rerun the same release installer with the original `install.env` and source paths. The rerun is idempotent and works as a convergence check:
-
-```bash
-bash install.sh --non-interactive --config ./install.env
-```
-
-On an active node, the script reports `SERVICES_ACTIVE`. It does not reinstall the package, overwrite the identity, keys, relay configuration, or `agent.env`, or restart the services. It does rerun the host preflight, verify the enrolled identity and trust files (failing closed on any discrepancy), and remove any leftover token file. You still need to check trust state, connection state, and telemetry freshness on the Controller. After the Agent has been upgraded or rolled back to a different version, do not run an older release's installer on the host. It stops on the version mismatch.
+For token installations, rerun the same release with `--resume-install`. The
+installer skips the matching native package, validates the existing identity,
+sealing keys and trust files, reuses the exact enrollment and privd binding,
+and verifies readiness with the Controller. Missing or substituted enrolled
+material fails closed. After an upgrade or rollback, do not run an older
+release installer; a package-version mismatch stops before enrollment.
 
 ## Revoke a node
 

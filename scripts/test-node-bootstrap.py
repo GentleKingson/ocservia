@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import pty
 from pathlib import Path
 import shutil
 import stat
@@ -71,6 +72,48 @@ class BootstrapTest(unittest.TestCase):
         p = self.state / 'response.json'
         p.write_text(json.dumps(value))
         p.chmod(0o600)
+
+    @unittest.skipIf(os.geteuid() == 0, 'dispatch probe runs before actual sudo')
+    def test_installer_token_sources_share_root_dispatch(self):
+        bin_dir = self.work / 'bin'
+        bin_dir.mkdir()
+        sudo = bin_dir / 'sudo'
+        sudo.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >"$TEST_DISPATCH"\n')
+        sudo.chmod(0o700)
+        log = self.work / 'dispatch'
+        env = dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH'],
+                   TEST_DISPATCH=str(log))
+        # A stale manual install.env must never select the standard flow.
+        (self.work / 'install.env').write_text('INVALID=must-not-be-read\n')
+        installer = str(ROOT / 'deploy/managed-node/install.sh')
+
+        def dispatch(args):
+            master, slave = pty.openpty()
+            try:
+                result = subprocess.run(['bash', installer, '--version', 'v9.8.7', *args],
+                                        cwd=self.work, env=env, stdin=slave,
+                                        stdout=slave, stderr=slave, timeout=10)
+                self.assertEqual(result.returncode, 0)
+                arguments = log.read_text().splitlines()
+                self.assertNotIn(self.token, log.read_text())
+                return arguments
+            finally:
+                os.close(slave)
+                os.close(master)
+        default = dispatch([])
+        self.assertEqual(default, dispatch(['--join-token']))
+        self.assertEqual(default, dispatch(['--interactive']))
+        self.assertIn('--root-lifecycle', default)
+        self.assertIn('--join-token', default)
+        for source in (['--join-token-file', str(self.token_file)], ['--resume-install']):
+            arguments = dispatch(source)
+            self.assertIn('--root-lifecycle', arguments)
+            self.assertIn(source[0], arguments)
+            self.assertNotIn('--join-token', arguments)
+        result = subprocess.run(['bash', installer, '--non-interactive'], cwd=self.work,
+                                env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unattended token install requires', result.stderr)
 
     def test_config_request_and_recovery(self):
         self.run_action('init', self.token_file)

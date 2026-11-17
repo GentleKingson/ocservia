@@ -20,6 +20,13 @@ import {
   AgentRolloutNodeToJSON,
   AgentRolloutNodeToJSONTyped,
 } from "./AgentRolloutNode";
+import type { AgentRolloutExcludedInner } from "./AgentRolloutExcludedInner";
+import {
+  AgentRolloutExcludedInnerFromJSON,
+  AgentRolloutExcludedInnerFromJSONTyped,
+  AgentRolloutExcludedInnerToJSON,
+  AgentRolloutExcludedInnerToJSONTyped,
+} from "./AgentRolloutExcludedInner";
 
 /**
  * Durable server-side orchestration state; failed and unknown node outcomes always pause the rollout.
@@ -106,11 +113,11 @@ export interface AgentRollout {
    */
   nodes?: Array<AgentRolloutNode>;
   /**
-   *
-   * @type {Array<any>}
+   * Current entries follow AgentRolloutExclusion. Historical stored JSON values remain readable unchanged.
+   * @type {Array<AgentRolloutExcludedInner>}
    * @memberof AgentRollout
    */
-  excluded?: Array<any>;
+  excluded?: Array<AgentRolloutExcludedInner>;
 }
 
 /**
@@ -221,7 +228,12 @@ export function AgentRolloutFromJSONTyped(
       json["nodes"] == null
         ? undefined
         : (json["nodes"] as Array<any>).map(AgentRolloutNodeFromJSON),
-    excluded: json["excluded"] == null ? undefined : json["excluded"],
+    excluded:
+      json["excluded"] == null
+        ? undefined
+        : (json["excluded"] as Array<any>).map(
+            AgentRolloutExcludedInnerFromJSON,
+          ),
   };
 }
 
@@ -254,6 +266,11 @@ export function AgentRolloutToJSONTyped(
       value["nodes"] == null
         ? undefined
         : (value["nodes"] as Array<any>).map(AgentRolloutNodeToJSON),
-    excluded: value["excluded"],
+    excluded:
+      value["excluded"] == null
+        ? undefined
+        : (value["excluded"] as Array<any>).map(
+            AgentRolloutExcludedInnerToJSON,
+          ),
   };
 }

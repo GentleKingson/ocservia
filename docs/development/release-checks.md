@@ -716,7 +716,7 @@ pushes images to a loopback registry and runs
 production Signer, Integrated configuration upgrades and rollbacks test digest
 and version-tag references against those local images, not compatibility across
 historical releases. Package scriptlets validate the embedded archive checksum in
-root-owned staging, and managed-node preparation through `SERVICES_ACTIVE` runs
+root-owned staging, and token installation through Controller-confirmed `ONLINE` runs
 through the shipped installer.
 
 After the direct Admin positive ConfigPlan apply, both profiles bring up an
@@ -1198,9 +1198,9 @@ browser context to log in as the temporary Admin, verifies the authorized
 Workspace (the fixture has one, shown as text; multiple-Workspace selection stays
 covered by the Web regressions), fills the install dialog and reads its
 secret-free `install.env`. The configuration travels in the controller-ready
-artifact. The Agent validates its exact literal fields and paths, runs the native
-installer with an explicitly empty bootstrap source, and verifies
-`ENROLLMENT_READY`, persistent identity files and stopped Agent/privd before
+artifact. The Agent validates its exact literal fields and paths, uses the packaged
+Agent offline identity preparation and fixture-owned sealing-key provisioning,
+and verifies persistent identity files and stopped Agent/privd before
 publishing its endpoint. The Controller uses the same UI configuration to create
 one installation token;
 a durable attempt marker and no retry loop prevent replay after failed or unknown
@@ -1275,6 +1275,15 @@ bash scripts/test-agent-upgrade-retry.sh
 docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
   python3 /source/scripts/test-relay-launchers.py
 ```
+
+The node installer has one token pipeline for the hidden prompt, protected
+file and retained bootstrap state. The configuration questionnaire, install.env
+allowlist and manual installer branch are retired. Business fixtures already
+use installation tokens; the three-VM fixture prepares its existing identity
+with the Agent offline CLI and provisions fixture sealing keys directly before
+running the same token installer. Manual uncertain-response recovery remains
+in the Agent CLI procedures; none of these checks resets identities or keys.
+
 
 `test-relay-launchers.py` swaps the fixed binary paths for argv recorders. The
 systemd unit check `test-relay-systemd.sh` needs root inside a separate

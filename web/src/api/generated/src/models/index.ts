@@ -2,10 +2,14 @@
 /* eslint-disable */
 export * from "./AgentRollout";
 export * from "./AgentRolloutCreateRequest";
+export * from "./AgentRolloutExcludedInner";
+export * from "./AgentRolloutExcludedInnerAnyOf";
+export * from "./AgentRolloutExclusion";
 export * from "./AgentRolloutNode";
 export * from "./AgentRolloutPage";
 export * from "./AgentUpgradeRequest";
 export * from "./ArtifactGrant";
+export * from "./AuditEvent";
 export * from "./AuditEventPage";
 export * from "./AuditVerification";
 export * from "./BreakGlassRequest";
