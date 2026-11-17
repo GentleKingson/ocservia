@@ -213,6 +213,7 @@ with tempfile.TemporaryDirectory(prefix="ci-entrypoints-") as tmp_dir:
             "Makefile",
         )
     )
+    files.extend((root / ".github/actions/download-release-product").glob("*"))
     for src in files:
         dst = work / src.relative_to(root)
         dst.parent.mkdir(parents=True, exist_ok=True)

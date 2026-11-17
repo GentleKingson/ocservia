@@ -130,7 +130,8 @@ products = yaml.safe_load(Path(".github/workflows/release-products.yml").read_te
 for step_id in ("agent-target", "agent-target-cache"):
     actual = next((s for s in business if s.get("id") == step_id), None)
     expected = next((s for s in products if s.get("id") == step_id), None)
-    check(actual == expected, f"Business {step_id} must match the native release builder")
+    check(actual.get("if") == "${{ !inputs.use_products }}", f"Business {step_id} must skip artifact mode")
+    check({key: value for key, value in actual.items() if key != "if"} == expected, f"Business {step_id} must match the native release builder")
 check(all("rust/target" not in [line.strip() for line in str((s.get("with") or {}).get("path", "")).splitlines()] for s in business), "Business must not cache all Rust targets")
 
 targets = []

@@ -8,11 +8,19 @@ on:
       arch:
         type: string
         required: true
+      acceptance_identity:
+        description: Bind artifacts for Release Check consumers; ordinary Release asset inventory stays unchanged
+        type: boolean
+        default: false
     outputs:
       agent_packages_artifact_id:
         value: ${{ jobs.build-agent-packages.outputs.artifact_id }}
       controller_images_artifact_id:
         value: ${{ jobs.build-controller-images.outputs.artifact_id }}
+      agent_packages_manifest_sha256:
+        value: ${{ jobs.build-agent-packages.outputs.manifest_sha256 }}
+      controller_images_manifest_sha256:
+        value: ${{ jobs.build-controller-images.outputs.manifest_sha256 }}
 permissions:
   contents: read
 env:
@@ -22,6 +30,7 @@ jobs:
     name: Build & Smoke Agent Packages (${{ inputs.arch }})
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      manifest_sha256: ${{ steps.identity.outputs.sha256 }}
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     steps:
@@ -108,6 +117,17 @@ jobs:
         with:
           path: ${{ steps.agent-target.outputs.path }}
           key: ${{ steps.agent-target-cache.outputs.cache-primary-key }}
+      - name: Bind agent product identity and digests
+        id: identity
+        if: inputs.acceptance_identity
+        env:
+          PRODUCT_VERSION: ${{ env.version }}
+          PRODUCT_ARCH: ${{ inputs.arch }}
+        run: |
+          sha256="$(python3 scripts/release-product-identity.py create --kind agent \
+            --directory "$RUNNER_TEMP/packages" --source "$GITHUB_SHA" \
+            --version "$PRODUCT_VERSION" --arch "$PRODUCT_ARCH")"
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
       - name: Upload package set
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -130,6 +150,7 @@ jobs:
     name: Build Controller Images (${{ inputs.arch }})
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      manifest_sha256: ${{ steps.identity.outputs.sha256 }}
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     permissions:
@@ -205,6 +226,17 @@ jobs:
           CONTROLLER_ARCH: ${{ inputs.arch }}
           VERSION: ${{ env.version }}
         run: scripts/release-controller-image-smoke.sh
+      - name: Bind controller product identity and digests
+        id: identity
+        if: inputs.acceptance_identity
+        env:
+          PRODUCT_VERSION: ${{ env.version }}
+          PRODUCT_ARCH: ${{ inputs.arch }}
+        run: |
+          sha256="$(python3 scripts/release-product-identity.py create --kind controller \
+            --directory "$RUNNER_TEMP/controller-images" --source "$GITHUB_SHA" \
+            --version "$PRODUCT_VERSION" --arch "$PRODUCT_ARCH")"
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
       - name: Upload Controller image archives
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -212,6 +244,7 @@ jobs:
           name: controller-images-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/controller-images/*.tar
+            ${{ runner.temp }}/controller-images/product-identity.json
           retention-days: 7
           if-no-files-found: error
       - name: Remove Controller BuildKit builder

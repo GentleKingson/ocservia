@@ -1532,7 +1532,18 @@ merge to `main`, an operator triggers Release Check manually via
 unexpected skip blocks qualification. Each run executes from scratch, without
 inheriting earlier results or nominating a persistent candidate. Full CI inside
 Release Check is the Basic CI Full profile (see [Basic CI](#basic-ci)), not
-comprehensive acceptance. Business and Quick Install workflows build candidate
+comprehensive acceptance. In Release Check, each native architecture builds its
+Agent packages and Controller images once in `release-products.yml`. Image
+scanning, native image smoke and the package lifecycle gate finish before the
+products are uploaded. Business consumes those Agent packages and images;
+Quick Install consumes the same Controller image artifacts for Pebble ACME,
+reruns, upgrades and rollbacks. Both select exact artifact IDs returned by the
+producer, then verify the producer's identity-manifest SHA-256, candidate commit,
+version, architecture, complete file inventory and every file's SHA-256 before
+use. Missing or mismatched products fail without rebuilding. Explicit per-arch
+producer jobs avoid ambiguous matrix outputs, and failed-job reruns keep the
+successful producer's exact IDs rather than reconstructing artifact names from
+the new run attempt. Manual Business diagnostics still build candidate
 artifacts locally and install from a loopback registry on disposable native
 runners of the selected architecture; they do not publish GHCR images.
 
