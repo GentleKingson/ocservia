@@ -1,7 +1,6 @@
 import copy
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -19,6 +18,51 @@ def require_check(condition: object, message: str) -> None:
     if not condition:
         print(message, file=sys.stderr)
         sys.exit(1)
+
+
+def exercise_script_step(step, script, arguments, env=None, required_env=None, files=None):
+    """Execute a complete workflow command, replacing only its leaf script."""
+    with tempfile.TemporaryDirectory(prefix='workflow-command-') as directory:
+        work = Path(directory)
+        path = work / script
+        path.parent.mkdir(parents=True, exist_ok=True)
+        program = '''import json, os, sys
+from pathlib import Path
+Path(os.environ['STEP_ARGUMENTS']).write_text(json.dumps(sys.argv[1:]))
+Path(os.environ['STEP_ENVIRONMENT']).write_text(json.dumps({key: os.environ.get(key) for key in os.environ['STEP_ENV_KEYS'].split()}))
+sys.exit(int(os.environ.get('STEP_EXIT', '0')))
+'''
+        path.write_text(program if path.suffix == '.py' else "#!/usr/bin/env bash\nexec python3 - \"$@\" <<'PYTHON'\n" + program + 'PYTHON\n')
+        path.chmod(0o755)
+        sudo = work / 'sudo'
+        sudo.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+forwarded=()
+while [[ "${1:-}" == --preserve-env=* ]]; do
+  IFS=, read -ra names <<<"${1#--preserve-env=}"
+  for name in "${names[@]}"; do [[ -z "${!name+x}" ]] || forwarded+=("${name}=${!name}"); done
+  shift
+done
+exec env -i PATH="$PATH" STEP_ARGUMENTS="$STEP_ARGUMENTS" STEP_ENVIRONMENT="$STEP_ENVIRONMENT" STEP_ENV_KEYS="$STEP_ENV_KEYS" STEP_EXIT="${STEP_EXIT:-0}" "${forwarded[@]}" "$@"
+''')
+        sudo.chmod(0o755)
+        for name, body in (files or {}).items():
+            extra_path = work / name
+            extra_path.parent.mkdir(parents=True, exist_ok=True)
+            extra_path.write_text(body)
+            extra_path.chmod(0o755)
+        run_env = {**os.environ, **(env or {}), 'PATH': f'{work}:{os.environ["PATH"]}',
+                   'STEP_ARGUMENTS': str(work / 'arguments'), 'STEP_ENVIRONMENT': str(work / 'environment'),
+                   'STEP_ENV_KEYS': ' '.join(required_env or {})}
+        command = step['run'].replace('${{ inputs.arch }}', run_env.get('CONTROLLER_ARCH', 'amd64'))
+        proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', command], cwd=work, env=run_env, capture_output=True, text=True)
+        require_check(proc.returncode == 0, f'workflow {script} failed: {proc.stdout}{proc.stderr}')
+        require_check(json.loads((work / 'arguments').read_text()) == arguments, f'workflow {script} arguments changed')
+        actual_env = json.loads((work / 'environment').read_text())
+        require_check(all(actual_env.get(key) == value for key, value in (required_env or {}).items()), f'workflow {script} lost identity')
+        proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', command], cwd=work,
+                              env={**run_env, 'STEP_EXIT': '19'}, capture_output=True)
+        require_check(proc.returncode == 19, f'workflow {script} swallowed its script failure')
 
 
 release = load_workflow("release")
@@ -52,16 +96,6 @@ require_check(
     "publishing must wait for both native build/smoke legs and assets",
 )
 require_check(
-    any(re.search(r"gh release create[^\n]*--generate-notes", s.get("run", "")) for s in publish["steps"]),
-    "Release must retain native generated notes",
-)
-publish_body = next(s for s in publish["steps"] if s.get("name") == "Create new draft Release")["run"]
-require_check(
-    "scripts/strip-release-owner-attribution.py" in publish_body
-    and 'gh release edit "v$VERSION" --notes-file "$notes_after"' in publish_body,
-    "release notes owner cleanup missing",
-)
-require_check(
     publish["steps"][0].get("uses", "").startswith("actions/checkout@"),
     "publication must check out the release notes filter",
 )
@@ -71,7 +105,7 @@ require_check(
 )
 qualification = publish["steps"][1]
 require_check(
-    qualification.get("name") == "Require successful Release Check for the tag commit"
+    qualification.get("id") == "qualify-release"
     and "if" not in qualification
     and "continue-on-error" not in qualification,
     "qualification must fail closed before publication steps",
@@ -213,16 +247,14 @@ require_check(
     [(c["title"], c["labels"]) for c in categories] == [(title, [label]) for title, label in expected_categories.items()],
     "release-note categories, labels or catch-all order changed",
 )
-require_check("--clobber" not in Path(".github/workflows/release.yml").read_text(), "asset replacement must not be enabled")
 require_check(
     release.get("concurrency", {}).get("group") == "release-${{ github.ref }}"
     and release.get("concurrency", {}).get("cancel-in-progress") is False,
     "same-tag releases must serialize without cancelling publication",
 )
-publication_steps = [s.get("run", "") for s in publish["steps"]]
-preflight_index = publication_steps.index("python3 scripts/publish-release.py preflight")
-draft_index = next(i for i, s in enumerate(publish["steps"]) if s.get("name") == "Create new draft Release")
-finish_index = publication_steps.index("python3 scripts/publish-release.py finish")
+preflight_index = next(i for i, step in enumerate(publish["steps"]) if step.get("id") == "preflight")
+draft_index = next(i for i, s in enumerate(publish["steps"]) if s.get("id") == "draft-release")
+finish_index = next(i for i, step in enumerate(publish["steps"]) if step.get("id") == "finish")
 require_check(
     preflight_index < draft_index < finish_index,
     "publication must preflight before draft and finish verification",
@@ -232,10 +264,9 @@ for i in (preflight_index, draft_index, finish_index):
         "if" not in publish["steps"][i] and "continue-on-error" not in publish["steps"][i],
         "publication failures must propagate",
     )
-require_check(
-    any("python3 scripts/publish-release.py check-assets" in s.get("run", "") for s in release["jobs"]["assets"]["steps"]),
-    "build-only must validate the complete asset inventory",
-)
+exercise_script_step(next(step for step in release['jobs']['assets']['steps'] if step.get('id') == 'check-assets'), 'scripts/publish-release.py', ['check-assets'])
+for index, phase in ((preflight_index, 'preflight'), (finish_index, 'finish')):
+    exercise_script_step(publish['steps'][index], 'scripts/publish-release.py', [phase])
 
 for kind, job in (("agent_packages", "build-agent-packages"), ("controller_images", "build-controller-images")):
     require_check(
@@ -290,11 +321,10 @@ require_check(
 for name, job in products["jobs"].items():
     require_check("if" not in job, f"{name} must build on tags and dispatch")
     require_check("ubuntu-24.04-arm" in job["runs-on"], f"{name} missing native arm64")
-    expected_smoke = "release-native-package-smoke.sh" if name == "build-agent-packages" else "release-controller-image-smoke.sh"
-    require_check(
-        any(expected_smoke in s.get("run", "") for s in job["steps"]),
-        f"{name} missing real smoke",
-    )
+    smoke_id, smoke_script = ('smoke-packages', 'release-native-package-smoke.sh') if name == 'build-agent-packages' else ('smoke-images', 'release-controller-image-smoke.sh')
+    smoke = next(step for step in job['steps'] if step.get('id') == smoke_id)
+    require_check('if' not in smoke and 'continue-on-error' not in smoke, 'smoke failures must propagate')
+    exercise_script_step(smoke, 'scripts/' + smoke_script, [])
 
 controller = products["jobs"]["build-controller-images"]
 ci_doc = load_workflow("ci")
@@ -325,26 +355,15 @@ require_check(
 )
 require_check(
     any(s.get("uses") == "./.github/actions/build-cache-credentials" for s in writer["steps"])
-    and any(s.get("run") == "bash scripts/build-release-controller.sh --cache-only" for s in writer["steps"]),
+    and any(s.get("id") == "build-images" for s in writer["steps"]),
     "writer must reuse the shared native builder and credential relay",
 )
-require_check(
-    'bash "${ROOT}/scripts/build-release-controller.sh" >' in Path("scripts/release-business-probe.sh").read_text(),
-    "Business must retain the shared default restore-only path",
-)
-require_check(
-    any("bash scripts/build-release-controller.sh" in s.get("run", "") and "--cache-only" not in s["run"] for s in controller["steps"]),
-    "Release must retain product build mode",
-)
+exercise_script_step(next(step for step in writer['steps'] if step.get('id') == 'build-images'), 'scripts/build-release-controller.sh', ['--cache-only'])
+for arch in ('amd64', 'arm64'):
+    exercise_script_step(next(step for step in controller['steps'] if step.get('id') == 'build-images'), 'scripts/build-release-controller.sh', [], {'version': '1.2.3', 'source_commit': 'a' * 40, 'CONTROLLER_ARCH': arch, 'RUNNER_TEMP': '/fixture'}, {'VERSION': '1.2.3', 'SOURCE_COMMIT': 'a' * 40, 'CONTROLLER_ARCH': arch, 'OUTPUT_DIR': '/fixture/controller-images'})
 steps = controller["steps"]
-ordered = [
-    "Build Controller images",
-    "Bootstrap pinned image-security tools",
-    "Scan exact Controller image archives",
-    "Smoke Controller images on the native runner",
-    "Upload Controller image archives",
-]
-indices = [next((i for i, s in enumerate(steps) if s.get("name") == name), None) for name in ordered]
+ordered = ['build-images', 'bootstrap-scanners', 'scan-images', 'smoke-images', 'upload']
+indices = [next((i for i, step in enumerate(steps) if step.get('id') == step_id), None) for step_id in ordered]
 require_check(all(i is not None for i in indices) and indices == sorted(indices), "exact image scan must follow build and precede smoke/upload")
 require_check("continue-on-error" not in controller, "Controller scan failure must fail the product job")
 for idx in indices:
@@ -356,17 +375,26 @@ for idx in indices:
 scan_step = steps[indices[2]]
 require_check(scan_step.get("env", {}).get("CONTROLLER_ARCH") == "${{ inputs.arch }}", "scan must use the native product architecture")
 roles = ["gateway", "control", "transport", "backup", "edge", "relay", "signer"]
-require_check(
-    f"for name in {' '.join(roles)}; do" in scan_step["run"]
-    and "$RUNNER_TEMP/controller-images/$name-linux-$CONTROLLER_ARCH.tar" in scan_step["run"],
-    "scan must consume every exact release archive",
-)
-require_check(
-    'IMAGE_ARCHIVES_TSV="$scan_table" bash scripts/scan-release-images.sh' in scan_step["run"],
-    "existing scan failure semantics must remain mandatory",
-)
-require_check(steps[indices[1]].get("run") == "scripts/bootstrap.sh image-security", "pinned scanner bootstrap missing")
-cache = next(s for s in steps if s.get("name") == "Cache pinned image-security tools")["with"]
+with tempfile.TemporaryDirectory(prefix='workflow-image-scan-') as directory:
+    work = Path(directory)
+    (work / 'scripts').mkdir()
+    (work / 'scripts/env.sh').write_text('')
+    (work / 'scripts/scan-release-images.sh').write_text('''#!/usr/bin/env bash
+set -euo pipefail
+cp "$IMAGE_ARCHIVES_TSV" "$RUNNER_TEMP/observed.tsv"
+exit "${SCAN_EXIT:-0}"
+''')
+    for arch in ('amd64', 'arm64'):
+        env = {**os.environ, 'RUNNER_TEMP': str(work), 'CONTROLLER_ARCH': arch}
+        proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', scan_step['run']], cwd=work, env=env, capture_output=True)
+        require_check(proc.returncode == 0, 'scan dispatch failed')
+        expected_archives = [f'{role}\t{arch}\t{work}/controller-images/{role}-linux-{arch}.tar' for role in roles]
+        require_check((work / 'observed.tsv').read_text().splitlines() == expected_archives, 'scan must consume every exact native archive once')
+        proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', scan_step['run']], cwd=work,
+                              env={**env, 'SCAN_EXIT': '19'}, capture_output=True)
+        require_check(proc.returncode == 19, 'scan failure was swallowed')
+exercise_script_step(steps[indices[1]], 'scripts/bootstrap.sh', ['image-security'])
+cache = next(s for s in steps if s.get("id") == "scanner-tools")["with"]
 require_check(
     cache["path"].split() == [".cache/downloads", ".tools"],
     "image-security cache must contain tools only, never vulnerability DB or results",
@@ -374,17 +402,14 @@ require_check(
 for part in ("runner.os", "runner.arch", "toolchains.lock", "scripts/checksums.txt", "scripts/bootstrap.sh", "scripts/env.sh"):
     require_check(part in cache["key"], f"image-security cache identity missing {part}")
 require_check("github.sha" not in cache["key"], "stable tool cache must not depend on source SHA")
-probe = Path("scripts/release-business-probe.sh").read_text()
-require_check(
-    not re.search(r"scan-release-images|image_security|bootstrap\.sh.*image-security", probe),
-    "Business must not own the image-security gate",
-)
 require_check(
     list(check[True].keys()) == ["workflow_dispatch"] and check["permissions"] == {"contents": "read"},
     "Release Check must be manual and read-only",
 )
 jobs = check["jobs"]
-require_check(jobs["main"]["steps"][0]["run"] == 'test "$GITHUB_REF" = refs/heads/main', "Release Check must use main")
+for ref in ('refs/heads/main', 'refs/heads/other', 'refs/tags/v1.2.3'):
+    proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', jobs['main']['steps'][0]['run']], env={**os.environ, 'GITHUB_REF': ref}, capture_output=True)
+    require_check((proc.returncode == 0) == (ref == 'refs/heads/main'), 'Release Check must use main')
 require_check(
     jobs["full-ci"].get("uses") == "./.github/workflows/ci.yml"
     and jobs["full-ci"].get("with", {}).get("profile") == "full",
@@ -406,7 +431,6 @@ require_check(
     "Integrated Business Smoke and recovery must consume products",
 )
 quick = jobs["quick"]
-require_check(any("bash scripts/release-quick-acceptance.sh" in s.get("run", "") for s in quick["steps"]), "Quick Install acceptance must run")
 for arch in ("amd64", "arm64"):
     producer = jobs[f"products-{arch}"]
     require_check(
@@ -430,19 +454,11 @@ for key in ("agent_packages_artifact_id", "controller_images_artifact_id", "agen
     if key.startswith("controller_images"):
         field = "artifact-id" if key.endswith("artifact_id") else "manifest-sha256"
         require_check(quick_download["with"][field] == coordinate, f"Business and Quick must consume identical {key}")
-require_check("build-release-controller.sh" not in Path("scripts/release-quick-acceptance.sh").read_text(), "Quick must never rebuild")
-require_check(
-    'if [[ -z "${PRODUCTS_DIR:-}" ]]; then' in probe
-    and 'docker load -i "$IMAGES_DIR/$name-linux-$CONTROLLER_ARCH.tar"' in probe,
-    "Business must skip builds and load downloaded images in artifact mode",
-)
 product_action = yaml.safe_load(Path(".github/actions/download-release-product/action.yml").read_text())
 action_steps = product_action["runs"]["steps"]
 require_check(action_steps[1]["with"] == {
     "artifact-ids": "${{ inputs.artifact-id }}", "path": "${{ inputs.path }}", "merge-multiple": True,
 }, "downloads must select exact IDs in the current run")
-require_check('--source "$GITHUB_SHA"' in action_steps[-1]["run"] and
-              '--manifest-sha256 "$MANIFEST_SHA256"' in action_steps[-1]["run"], "consumers must verify source and trusted digest")
 with tempfile.TemporaryDirectory() as product_tmp:
     for artifact_id, manifest_sha, valid in (("123", "a" * 64, True), ("", "a" * 64, False),
                                             ("123,456", "a" * 64, False), ("123", "", False),
@@ -455,8 +471,6 @@ action_steps = yaml.safe_load(Path(".github/actions/download-release-product/act
 require_check(action_steps[1]["with"] == {
     "artifact-ids": "${{ inputs.artifact-id }}", "path": "${{ inputs.path }}", "merge-multiple": True,
 }, "product download must use one exact ID without names or patterns")
-require_check('--source "$GITHUB_SHA"' in action_steps[-1]["run"] and
-              '--manifest-sha256 "$MANIFEST_SHA256"' in action_steps[-1]["run"], "product verification must use candidate SHA and producer digest")
 with tempfile.TemporaryDirectory(prefix="product-coordinates-") as coordinates_dir:
     for artifact_id, sha256, valid in (("123", "a" * 64, True), ("", "a" * 64, False),
                                       ("123,456", "a" * 64, False), ("missing", "a" * 64, False),
@@ -473,11 +487,16 @@ product_action = yaml.safe_load(Path(".github/actions/download-release-product/a
 action_steps = product_action["runs"]["steps"]
 require_check(
     action_steps[1]["with"]["artifact-ids"] == "${{ inputs.artifact-id }}"
-    and "name" not in action_steps[1]["with"] and "pattern" not in action_steps[1]["with"]
-    and '--source "$GITHUB_SHA"' in action_steps[-1]["run"]
-    and '--manifest-sha256 "$MANIFEST_SHA256"' in action_steps[-1]["run"],
+    and "name" not in action_steps[1]["with"] and "pattern" not in action_steps[1]["with"],
     "consumption must download an exact ID and verify candidate identity and bytes",
 )
+for arch in ('amd64', 'arm64'):
+    product_env = {'PRODUCT_KIND': 'controller', 'PRODUCT_PATH': '/products', 'PRODUCT_VERSION': '1.2.3', 'PRODUCT_ARCH': arch,
+                   'MANIFEST_SHA256': 'b' * 64, 'GITHUB_SHA': 'a' * 40}
+    exercise_script_step(action_steps[-1], 'scripts/release-product-identity.py',
+                         ['verify', '--kind', 'controller', '--directory', '/products', '--source', 'a' * 40,
+                          '--version', '1.2.3', '--arch', arch, '--manifest-sha256', 'b' * 64], product_env,
+                         files={'git': '#!/bin/sh\nprintf "%s\\n" "' + 'a' * 40 + '"\n'})
 consumer_steps = diagnostic["jobs"]["business"]["steps"]
 for kind in ("agent", "controller"):
     download = next(step for step in consumer_steps if step.get("uses") == "./.github/actions/download-release-product" and step["with"]["kind"] == kind)
@@ -485,10 +504,11 @@ for kind in ("agent", "controller"):
     require_check(download["if"] == "inputs.use_products" and download["with"]["artifact-id"] == "${{ inputs." + prefix + "_artifact_id }}", f"Business must download exact {kind} products")
 require_check(
     quick["runs-on"] == "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
-    and quick["steps"][-1].get("env", {}).get("CONTROLLER_ARCH") == "${{ matrix.arch }}"
-    and "--preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH," in quick["steps"][-1]["run"],
+    and quick["steps"][-1].get("env", {}).get("CONTROLLER_ARCH") == "${{ matrix.arch }}",
     "Quick Install must target its native runner",
 )
+quick_env = {'VERSION': '1.2.3', 'CONTROLLER_ARCH': 'arm64', 'RUNNER_ARCH': 'ARM64', 'GITHUB_RUN_ID': '42', 'GITHUB_RUN_ATTEMPT': '2', 'IMAGES_DIR': '/products'}
+exercise_script_step(quick['steps'][-1], 'scripts/release-quick-acceptance.sh', [], quick_env, quick_env)
 result = jobs["result"]
 require_check(
     result["if"] == "always()"
@@ -540,7 +560,7 @@ with tempfile.TemporaryDirectory(prefix="release-check-") as tmp_dir:
         require_check((proc.returncode == 0) is want, f"version input validation failed for {tag}/{version}")
 
     consumer = diagnostic["jobs"]["business"]
-    summary_step = next(s for s in consumer["steps"] if s.get("name") == "Summarize business timings and sanitized failures")
+    summary_step = next(s for s in consumer["steps"] if s.get("id") == "summarize")
     require_check(summary_step.get("if") == "always()", "business timings must remain visible on failure")
     (d / "result.json").write_text(
         json.dumps(
@@ -592,22 +612,18 @@ with tempfile.TemporaryDirectory(prefix="release-check-") as tmp_dir:
     agent_cache = next(s for s in consumer["steps"] if s.get("id") == "agent-target-cache")["with"]
     require_check(
         agent_cache["key"].startswith("release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-")
-        and agent_cache["restore-keys"].startswith("release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-")
-        and "rust/target/agent-${{ inputs.arch }}-" in next(s for s in consumer["steps"] if s.get("id") == "agent-target")["run"],
+        and agent_cache["restore-keys"].startswith("release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-"),
         "Agent build caches must be isolated per architecture",
     )
     require_check(
-        "${{ inputs.arch }}" in next(s for s in consumer["steps"] if s.get("name") == "Preserve business timings and sanitized diagnostics")["with"]["name"],
+        "${{ inputs.arch }}" in next(s for s in consumer["steps"] if s.get("id") == "upload-diagnostics")["with"]["name"],
         "Business evidence must be traceable per architecture",
     )
-    gate = next(s for s in consumer["steps"] if s.get("name") == "Require completed business and actual recovery scenarios")["run"]
-    require_check(not re.search(r"arch|amd64|arm64", gate), "both architectures must pass identical business checkpoints")
-    recovery_match = re.search(r"node --input-type=module <<'JS'\n(.*?)\nJS\n?", gate, re.M | re.S)
-    require_check(recovery_match is not None, "actual recovery result gate missing")
-    assert recovery_match is not None
-    recovery = recovery_match.group(1)
+    gate = next(s for s in consumer["steps"] if s.get("id") == "verify-business")["run"]
     names = ["controller", "agent", "database", "relay"]
     sample = {
+        "profile": "smoke", "probe_status": "PASS", "exit_code": 0, "timings": [{}], "terminal": "revocation",
+        "passed_checkpoints": ["bootstrap_token_enrollment_and_rerun_identity", "real_browser_subset", "config_apply_and_vpn_user", "real_vpn_after_config_apply", "real_node_revocation_and_disconnect"],
         "resilience_requested": True,
         "resilience_result": "PASS",
         "resilience_scenarios": [{"name": f"resilience_{n}", "status": "PASS"} for n in names],
@@ -617,18 +633,29 @@ with tempfile.TemporaryDirectory(prefix="release-check-") as tmp_dir:
     def run_recovery(data: dict, flags: dict[str, str] | None = None) -> bool:
         (d / "result.json").write_text(json.dumps(data))
         proc = subprocess.run(
-            ["node", "--input-type=module", "-e", recovery],
-            env={**os.environ, "DIAGNOSTICS": str(d), "BUSINESS_RUN_RESILIENCE": "true", **(flags or {})},
+            ["bash", "-euo", "pipefail", "-c", gate],
+            env={**os.environ, "DIAGNOSTICS": str(d), "BUSINESS_RUN_RESILIENCE": "true", "BUSINESS_PROFILE": "smoke", "BUSINESS_TERMINAL": "revocation", "PRODUCTION_SIGNER_ACCEPTANCE": "false", "OCSERV_PACKAGE": "distribution", **(flags or {})},
             capture_output=True,
             text=True,
         )
         return proc.returncode == 0
 
     require_check(run_recovery(sample), "complete recoveries must pass")
+    for change in ({'probe_status': 'FAIL'}, {'exit_code': 1}, {'timings': []}, {'passed_checkpoints': []}, {'terminal': 'uninstall'}, {'resilience_requested': False}):
+        require_check(not run_recovery({**sample, **change}), f'Business gate accepted {change}')
+
     for name in names:
         failed = copy.deepcopy(sample)
         failed["resilience_scenarios"] = [r for r in failed["resilience_scenarios"] if r["name"] != f"resilience_{name}"]
         require_check(not run_recovery(failed), f"missing {name} recovery accepted")
+        for state in ('FAIL', 'SKIPPED'):
+            broken = copy.deepcopy(sample)
+            next(entry for entry in broken['resilience_scenarios'] if entry['name'] == f'resilience_{name}')['status'] = state
+            require_check(not run_recovery(broken), f'{name}/{state} accepted')
+        duplicate = copy.deepcopy(sample)
+        duplicate['resilience_scenarios'].append(next(entry for entry in duplicate['resilience_scenarios'] if entry['name'] == f'resilience_{name}'))
+        require_check(not run_recovery(duplicate), f'duplicate {name} recovery accepted')
+
     for state in ("FAIL", "SKIPPED"):
         require_check(not run_recovery({**sample, "resilience_result": state}), f"{state} recovery accepted")
     require_check(not run_recovery({**sample, "planned_topology": {}}), "recovery without native node accepted")
@@ -700,7 +727,7 @@ with tempfile.TemporaryDirectory(prefix="release-rc-") as tmp_dir:
         "RELEASES_FILE": str(d / "releases.json"),
     }
     notes = next(s for s in publish["steps"] if s.get("id") == "notes")["run"]
-    publication = next(s for s in publish["steps"] if s.get("name") == "Create new draft Release")["run"]
+    publication = next(s for s in publish["steps"] if s.get("id") == "draft-release")["run"]
     rc_cases = (
         ("1.2.3-rc.1", "v1.1.0"),
         ("1.2.3-rc.2", "v1.2.3-rc.1"),

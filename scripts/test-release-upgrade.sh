@@ -2,6 +2,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
+# shellcheck source=scripts/release-business-stages.sh
+source "${ROOT}/scripts/release-business-stages.sh"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
 # Profile fixtures intentionally keep their environment inside this subshell.
@@ -12,8 +14,7 @@ trap 'rm -rf -- "${fixture}"' EXIT
   VERSION=1.0.2
   for PRODUCTION_SIGNER_ACCEPTANCE in false true; do
     managed_options=()
-    # shellcheck disable=SC1090
-    source <(sed -n '/^managed_options=/,+1p' scripts/release-business-probe.sh)
+    configure_managed_options
     [[ "${managed_options[0]} ${managed_options[1]}" == '--version v1.0.2' ]]
     if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
       [[ "${managed_options[2]}" == --root-lifecycle && "${#managed_options[@]}" == 3 ]]
@@ -24,8 +25,6 @@ trap 'rm -rf -- "${fixture}"' EXIT
 )
 # The auth fixture changes only Controller settings. Never race the unchanged
 # transport container against its trust backend, or continue after failed health.
-# shellcheck disable=SC1090
-source <(sed -n '/^configure_auth_peers() {/,/^}/p' scripts/release-business-probe.sh)
 (
   # shellcheck disable=SC2317,SC2329 # Called by the sourced configure_auth_peers.
   compose() { printf '%s\n' "$*" >>"${fixture}/auth-order"; }
@@ -61,8 +60,8 @@ for BUSINESS_PROFILE in smoke extended; do
     python3() { printf '%s\n' "$*"; }
     # shellcheck disable=SC2317,SC2329
     bash() { printf 'bash %s\n' "$*"; }
-    # shellcheck disable=SC1090
-    source <(sed -n '/^next_stage business_vpn/,$p' scripts/release-business-probe.sh)
+    run_business_vpn
+    run_business_completion
   ) >"${fixture}/${BUSINESS_PROFILE}-phases"
 done
 grep -q 'release-business-api.py vpn_after_config_apply' "${fixture}/smoke-phases"

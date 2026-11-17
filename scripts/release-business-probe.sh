@@ -11,6 +11,8 @@ export SOURCE_COMMIT
 # shellcheck source=scripts/env.sh
 # shellcheck disable=SC1091
 source "$ROOT/scripts/env.sh"
+# shellcheck source=scripts/release-business-stages.sh
+source "$ROOT/scripts/release-business-stages.sh"
 : "${BUSINESS_TERMINAL:=revocation}"
 export BUSINESS_TERMINAL
 [[ "$BUSINESS_TERMINAL" == revocation || "$BUSINESS_TERMINAL" == uninstall ]]
@@ -94,13 +96,6 @@ next_stage() {
   printf '%s\t%s\n' "${stage}" "$((now - stage_started))" >>"${ARTIFACT_DIR}/timings.tsv"
   stage="$1"
   stage_started="${now}"
-}
-configure_auth_peers() {
-  # --no-deps makes ordering our responsibility. The launcher stops both peers;
-  # wait for the trust backend before starting the unchanged transport container.
-  compose up -d --no-deps --wait control-plane
-  compose start transportd
-  python3 "${ROOT}/scripts/release-business-api.py" transport_ready
 }
 cleanup() {
   local code=$?
@@ -187,25 +182,7 @@ trap 'printf "probe failed at line %s, stage %s\n" "${LINENO}" "${stage}" >&2' E
 mkdir -m 700 "${work}/private" "${work}/secrets" "${work}/state" "${work}/backup" "${work}/bundle"
 bash "${ROOT}/scripts/release-upgrade-native.sh" "$CONTROLLER_ARCH" >"${ARTIFACT_DIR}/native.json"
 { uname -a; cat /etc/os-release; docker version; docker compose version; node --version; } >"${ARTIFACT_DIR}/environment.txt"
-next_stage dependency_setup
-bash "${ROOT}/scripts/bootstrap.sh" npm-security
-if [[ -z "${PRODUCTS_DIR:-}" ]]; then
-  bash "${ROOT}/scripts/bootstrap.sh" native-packages
-  # The native builder drops capabilities and needs root-owned task caches.
-  if [[ "$EUID" == 0 ]]; then
-    mkdir -p "$ROOT/rust/target"
-    chown -R 0:0 "$ROOT/.cache" "$ROOT/.tools" "$ROOT/rust/target"
-  fi
-  next_stage agent_package_build
-  env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
-  next_stage controller_image_build
-  bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
-  IMAGES_DIR="$OUTPUT_DIR"
-else
-  next_stage product_consumption
-  cp "$PRODUCTS_DIR/product-identity.json" "$ARTIFACT_DIR/agent-product-identity.json"
-  cp "$IMAGES_DIR/product-identity.json" "$ARTIFACT_DIR/controller-product-identity.json"
-fi
+prepare_business_products
 for name in gateway control transport backup edge relay signer; do
   docker load -i "$IMAGES_DIR/$name-linux-$CONTROLLER_ARCH.tar"
   # Unrelated binfmt handlers could otherwise run a foreign image emulated.
@@ -410,8 +387,7 @@ export CONTROLLER_ENDPOINT_ID="${OCSERV_CONTROLLER_ENDPOINT_ID}" RELAY_URL_A="${
 export RELAY_ACCESS_TOKEN_SOURCE="${OCSERV_SECRET_DIR}/relay-access-token"
 export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${work}/command.pub.pem"
 export USER_PASSWORD_SEAL_KEY_ID=business-test-user-seal P12_PASSWORD_SEAL_KEY_ID=business-test-p12-seal ENROLLMENT_ENVIRONMENT=production
-managed_options=(--version "v${VERSION}")
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then managed_options+=(--root-lifecycle); fi
+configure_managed_options
 # The managed installer preflight reads the real native ocserv resources.
 # Prepare and start this task-owned VPN fixture before enrollment, then bind
 # its TLS material to the enrolled node through the existing ConfigPlan path.
@@ -545,27 +521,7 @@ grep -q SERVICES_ACTIVE "${ARTIFACT_DIR}/managed-active.log"
 grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-active.log"
 [[ "$(identity_digest)" == "${enrolled_identity}" ]]
 record native_node_services
-if [[ "${BUSINESS_PROFILE}" == extended ]]; then
-next_stage certificate
-python3 "${ROOT}/scripts/release-business-api.py" certificate
-record real_certificate_lifecycle
-fi
-next_stage browser
-npm --prefix "${ROOT}/web" ci --ignore-scripts
-(cd "${ROOT}/web" && npx playwright install --with-deps chromium)
-sudo apt-get install -y --no-install-recommends libnss3-tools
-mkdir -p "${HOME}/.pki/nssdb"
-if [[ ! -f "${HOME}/.pki/nssdb/cert9.db" ]]; then certutil -N --empty-password -d "sql:${HOME}/.pki/nssdb"; fi
-certutil -A -d "sql:${HOME}/.pki/nssdb" -n ocservia-business-test-ca -t C,, -i "${work}/ca.crt"
-python3 "${ROOT}/scripts/release-business-api.py" browser_prepare
-NODE_EXTRA_CA_CERTS="${work}/ca.crt" node "${ROOT}/scripts/release-business-browser.mjs"
-python3 "${ROOT}/scripts/release-business-api.py" browser_verify
-record real_browser_subset
-if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
-  next_stage signer_vpn_user
-  python3 "${ROOT}/scripts/release-business-api.py" smoke_user
-  record config_apply_and_vpn_user
-fi
+run_business_browser "${work}"
 next_stage vpn_client_setup
 sudo ip netns add business-test-client
 sudo ip link add biztest-host type veth peer name biztest-peer
@@ -584,46 +540,5 @@ if [ "$reason" = connect ]; then
 fi
 EOF
 chmod 700 "${work}/vpn-script"
-next_stage business_vpn
-python3 "${ROOT}/scripts/release-business-api.py" vpn_after_config_apply
-record real_vpn_after_config_apply
-if [[ "${BUSINESS_PROFILE}" == extended ]]; then
-  next_stage configuration_rollback
-  python3 "${ROOT}/scripts/release-business-api.py" configuration
-  record config_plan_automatic_rollback
-  next_stage vpn_after_rollback
-  python3 "${ROOT}/scripts/release-business-api.py" vpn_after_rollback
-  record real_vpn_after_rollback
-fi
-if [[ "${BUSINESS_PROFILE}" == extended ]]; then
-  next_stage supplemental_business
-  python3 "${ROOT}/scripts/release-business-api.py" business
-  record real_vpn_business_and_recovery
-fi
-if [[ "$BUSINESS_RUN_RESILIENCE" == true ]]; then
-  next_stage single_instance_recovery
-  python3 "${ROOT}/scripts/release-business-api.py" resilience
-  resilience_result=PASS
-  record single_instance_recovery
-fi
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true && "$BUSINESS_PROFILE" == extended ]]; then
-  next_stage integrated_recovery
-  python3 "$ROOT/scripts/release-integrated-acceptance.py" recovery
-  record integrated_recreation_and_authorized_sse
-fi
-if [[ "$BUSINESS_PROFILE" == extended ]]; then
-  # Last version-dependent stage: the rollout replaces the Agent, so no later check may assume VERSION.
-  next_stage agent_rollout
-  bash "${ROOT}/scripts/release-business-rollout.sh"
-  record real_browser_agent_rollout
-fi
-# Default release acceptance retains terminal revocation; manual diagnostics
-# may instead prove package removal without changing the node's trust.
-next_stage "node_${BUSINESS_TERMINAL}"
-python3 "${ROOT}/scripts/release-business-api.py" "$BUSINESS_TERMINAL"
-if [[ "$BUSINESS_TERMINAL" == uninstall ]]; then
-  record real_node_uninstall_and_offline
-else
-  record real_node_revocation_and_disconnect
-fi
-next_stage complete
+run_business_vpn
+run_business_completion

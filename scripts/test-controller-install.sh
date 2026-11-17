@@ -93,6 +93,9 @@ cat >"${repo}/deploy/production/bootstrap-host.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 bootstrap_log="${INSTALL_TEST_BOOTSTRAP_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.bootstrap.log}"
+for name in OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL; do
+  printf '%s=%s\n' "${name}" "${!name-<unset>}" >>"${bootstrap_log}"
+done
 printf 'launcher:%s\n' "${SUDO_USER:-<unset>}" >>"${bootstrap_log}"
 printf '%s\n' "$*" >>"${bootstrap_log}"
 printf 'OCSERV_PUBLIC_HOST=%s\n' "${OCSERV_PUBLIC_HOST:-<unset>}" >>"${bootstrap_log}"
@@ -116,6 +119,9 @@ cat >"${repo}/deploy/production/controller.sh" <<'EOF'
 set -euo pipefail
 controller_log="${INSTALL_TEST_CONTROLLER_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.controller.log}"
 printf '%s\n' "$*" >>"${controller_log}"
+for name in OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL; do
+  printf '%s=%s\n' "${name}" "${!name-<unset>}" >>"${controller_log}"
+done
 printf 'relay-a:%s\n' "${OCSERV_RELAY_URL_A-<unset>}" >>"${controller_log}"
 exit "${MOCK_CONTROLLER_EXIT:-0}"
 EOF
@@ -706,6 +712,49 @@ assert_log_contains "${bootstrap_log}" "otel:otel.example.test:4317"
 assert_log_contains "${bootstrap_log}" "recommended:0.2.0"
 echo "install.env values load without dirtying the release checkout"
 
+# Run the documented Local auth configuration through the real installer and, on the CI
+# launcher account, its real sudo env_reset transition. No source allowlist is read.
+awk -v dir="${fixture}" '
+  /^```dotenv$/ { block++; active=1; next }
+  /^```$/ { active=0 }
+  active { print > (dir "/auth-" block ".env") }
+' "${ROOT}/docs/operations/authentication.md"
+for lifecycle in launcher root; do
+  if [[ "${lifecycle}" == root ]] && ! can_root; then
+    die "auth forwarding requires passwordless sudo"
+  fi
+  reset_logs
+  reset_checkout
+  install_docker_client_stub
+  cp "${fixture}/auth-1.env" "${repo}/install.env"
+  RUN_STATUS=0
+  RUN_OUTPUT="$( (
+    unset OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL
+    unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL
+    if [[ "${lifecycle}" == root ]] && (( EUID != 0 )); then
+      cd "${repo}"
+      PATH="${root_lifecycle_bin}" OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
+        "${repo}/deploy/production/install.sh" --root-lifecycle
+    else
+      run_installer_from "${repo}"
+    fi
+  ) 2>&1)" || RUN_STATUS=$?
+  assert_status 0
+  expected="${fixture}/auth-1.env"
+  actual_bootstrap="${bootstrap_log}"
+  actual_controller="${controller_log}"
+  if [[ "${lifecycle}" == root ]] && (( EUID != 0 )); then
+    actual_bootstrap="${root_bootstrap_log}"
+    actual_controller="${root_controller_log}"
+    as_root chown -R "$(id -u):$(id -g)" "${repo}"
+  fi
+  while IFS= read -r setting; do
+    grep -Fxq "${setting}" "${actual_bootstrap}" || die "bootstrap lost Local auth configuration: ${setting}"
+    grep -Fxq "${setting}" "${actual_controller}" || die "activation lost Local auth configuration: ${setting}"
+  done <"${expected}"
+done
+echo "documented Local auth configuration reaches bootstrap and activation across the sudo boundary"
+
 # 8a. an explicit shell variable wins over install.env.
 reset_logs
 reset_checkout
@@ -721,7 +770,7 @@ assert_status 0 "an explicit shell variable must win over install.env"
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-env.example.test"
 assert_log_contains "${bootstrap_log}" "recommended:0.3.0"
 if grep -q "controller-file.example.test" "${bootstrap_log}"; then
-  die "the file value must not override the explicit shell variable: $(cat -- "${bootstrap_log}")"
+die "the file value must not override the explicit shell variable: $(cat -- "${bootstrap_log}")"
 fi
 echo "an explicit shell variable overrides install.env"
 
@@ -741,7 +790,7 @@ assert_status 0 "an explicitly empty shell variable must win over install.env"
 assert_log_contains "${bootstrap_log}" "recommended:"
 assert_log_contains "${bootstrap_log}" "install"
 if grep -q -- "--backup-dir" "${bootstrap_log}"; then
-  die "install.env must not fill the deliberately emptied OCSERV_BACKUP_DIR: $(cat -- "${bootstrap_log}")"
+die "install.env must not fill the deliberately emptied OCSERV_BACKUP_DIR: $(cat -- "${bootstrap_log}")"
 fi
 echo "an explicitly empty shell variable overrides install.env"
 
@@ -798,7 +847,7 @@ capture_from "${repo}"
 assert_status 1 "command substitution syntax must fail closed"
 assert_output "must be a literal value"
 [[ ! -e "${fixture}/pwned-marker" ]] ||
-  die "command substitution in install.env must never execute"
+die "command substitution in install.env must never execute"
 reset_logs
 reset_checkout
 # Literal shell syntax tests rejection; it must not expand here.
@@ -807,7 +856,7 @@ printf 'OCSERV_PUBLIC_HOST=`touch %s`\n' "${fixture}/pwned-marker" >"${repo}/ins
 capture_from "${repo}"
 assert_status 1 "backtick syntax must fail closed"
 [[ ! -e "${fixture}/pwned-marker" ]] ||
-  die "backticks in install.env must never execute"
+die "backticks in install.env must never execute"
 reset_logs
 reset_checkout
 printf 'source %s\n' "${fixture}/evil.sh" >"${repo}/install.env"
@@ -919,4 +968,3 @@ assert_status 1 "runtime drift must fail before host bootstrap"
 assert_output 'runtime content changed'
 assert_log_empty "${bootstrap_log}"
 assert_log_empty "${curl_log}"
-echo "Controller install tests passed (including runtime identity without Git)"

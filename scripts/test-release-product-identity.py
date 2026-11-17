@@ -69,10 +69,8 @@ def main():
                 verify()
 
         # Execute the real Business build/consume branch with recording doubles.
-        driver = (ROOT / 'scripts/release-business-probe.sh').read_text()
-        branch = driver.split('next_stage dependency_setup\n', 1)[1].split(
-            'for name in gateway control transport backup edge relay signer; do', 1)[0]
         shell = '''set -euo pipefail
+source "$ROOT/scripts/release-business-stages.sh"
 next_stage() { echo "stage:$1"; }
 bash() { echo "build:$*"; }
 env() { echo "build:$*"; }
@@ -81,7 +79,7 @@ chown() { :; }
 '''
         env = {**os.environ, 'ROOT': str(ROOT), 'ARTIFACT_DIR': str(work),
                'OUTPUT_DIR': str(work), 'IMAGES_DIR': str(work / 'controller-amd64')}
-        result = subprocess.run(['bash', '-c', shell + branch],
+        result = subprocess.run(['bash', '-c', shell + '\nprepare_business_products\n'],
                                 env={**env, 'PRODUCTS_DIR': str(work / 'agent-amd64')},
                                 check=True, capture_output=True, text=True)
         assert 'stage:product_consumption' in result.stdout
@@ -91,7 +89,7 @@ chown() { :; }
         assert 'package_build' not in result.stdout and 'image_build' not in result.stdout
         assert (work / 'agent-product-identity.json').read_bytes() == (
             work / 'agent-amd64/product-identity.json').read_bytes()
-        result = subprocess.run(['bash', '-c', shell + branch], env={**env, 'PRODUCTS_DIR': ''},
+        result = subprocess.run(['bash', '-c', shell + '\nprepare_business_products\n'], env={**env, 'PRODUCTS_DIR': ''},
                                 check=True, capture_output=True, text=True)
         assert result.stdout.count('stage:agent_package_build') == 1
         assert result.stdout.count('stage:controller_image_build') == 1

@@ -70,7 +70,7 @@ for job_id, flag in worker_flags.items():
         reject(f"{job_id} must follow routing")
 for job_id in ("go", "rust"):
     steps = jobs[job_id]["steps"]
-    heavy = [s for s in steps if re.search(r"scripts/(go-check|rust-check)\.sh|bootstrap\.sh rust-basic", s.get("run", ""))]
+    heavy = [s for s in steps if s.get("id") in ("go-check", "rust-tools", "rust-check")]
     if not heavy or not all(s.get("if") == f"needs.ci-relevance.outputs.run_{job_id} == 'true'" for s in heavy):
         reject(f"{job_id} heavy steps must not run for tools/installers alone")
 database = jobs["database-smoke"]
@@ -85,7 +85,7 @@ if "database-history-full" in jobs:
     reject("heavy history must not be a Basic CI job")
 if "inputs.profile || 'quick'" not in workflow["concurrency"]["group"] or "github.ref" not in workflow["concurrency"]["group"]:
     reject("Quick and Full must have separate concurrency groups")
-guard = next(s for s in jobs["go"]["steps"] if s.get("name") == "CI guard and workflow contracts")
+guard = next(s for s in jobs["go"]["steps"] if s.get("id") == "ci-tools")
 if guard["if"] != "needs.ci-relevance.outputs.run_ci_tools == 'true'":
     reject("CI self-tests must be path selected")
 for job_id, job in jobs.items():
@@ -176,7 +176,7 @@ for profile in ("quick", "full"):
         if check_summary(needs):
             reject("summary accepted missing Controller cache routing")
 
-standard = next((s for s in jobs["go"]["steps"] if s.get("run") == "scripts/go-check.sh standard"), None)
+standard = next((s for s in jobs["go"]["steps"] if s.get("id") == "go-check"), None)
 if not (standard and standard.get("if") == "needs.ci-relevance.outputs.run_go == 'true'"):
     reject("standard Go checks must follow run_go")
 if {k: guard["env"][k] for k in ("CI_SUITES", "CI_RUN_GO")} != {
@@ -192,7 +192,7 @@ if (
 ):
     reject("contract PR comparison must receive the actual head")
 for suite in ("source-style", "contracts"):
-    step = next((item for item in jobs["go"]["steps"] if item.get("run") == f"scripts/bootstrap.sh {suite}"), None)
+    step = next((item for item in jobs["go"]["steps"] if item.get("id") == f"{suite}-tools"), None)
     if not (step and step.get("if") == f"contains(needs.ci-relevance.outputs.ci_suites, '{suite}')"):
         reject(f"{suite} dependencies must follow their exact suite")
 
@@ -242,6 +242,44 @@ with tempfile.TemporaryDirectory(prefix="ci-entrypoints-") as tmp_dir:
         p = work / "bin" / name
         p.write_text('#!/usr/bin/env bash\nprintf \'%s|%s|%s\\n\' "${0##*/}" "${PWD}" "$*" >> "${CI_TRACE}"\n')
         p.chmod(0o755)
+    workspace = json.loads(subprocess.check_output(
+        ['bash', '-c', 'source "$1/scripts/env.sh"; go work edit -json "$1/go.work"', 'workspace', str(root)], text=True))
+    workspace_modules = [item['DiskPath'].removeprefix('./') for item in workspace['Use']]
+    for module in workspace_modules:
+        (work / module).mkdir(parents=True, exist_ok=True)
+    (work / 'bin/go').write_text('''#!/usr/bin/env bash
+case "$*" in 'env CGO_ENABLED') echo 1; exit ;; 'env CC') echo cc; exit ;; esac
+printf '%s|%s|%s\\n' "${0##*/}" "$PWD" "$*" >>"$CI_TRACE"
+''')
+    (work / 'scripts/bootstrap.sh').write_text('''#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"$CI_TRACE"
+exit "${BOOTSTRAP_EXIT:-0}"
+''')
+    for suite in ('source-style', 'contracts'):
+        step = next(item for item in jobs['go']['steps'] if item.get('id') == f'{suite}-tools')
+        trace = tmp / 'bootstrap-trace'
+        trace.write_text('')
+        env = {**os.environ, 'CI_TRACE': str(trace)}
+        proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', step['run']], env=env, cwd=work, capture_output=True)
+        assert proc.returncode == 0 and trace.read_text().splitlines() == [suite], suite
+        proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', step['run']],
+                              env={**env, 'BOOTSTRAP_EXIT': '19'}, cwd=work, capture_output=True)
+        assert proc.returncode == 19, f'{suite} bootstrap failure was swallowed'
+    for mode in ('standard', 'race', 'full'):
+        trace = tmp / 'go-trace'
+        trace.write_text('')
+        env = {**os.environ, 'CI_TRACE': str(trace), 'PATH': f'{work / "bin"}:{os.environ["PATH"]}'}
+        proc = subprocess.run(['bash', str(work / 'scripts/go-check.sh'), mode],
+                              env=env, cwd=work, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        expected = []
+        if mode != 'race':
+            expected.append(f'gofmt|{work}|-l ' + ' '.join(str(work / module) for module in workspace_modules))
+            for module in workspace_modules:
+                expected.extend(f'go|{work / module}|{args}' for args in ('vet ./...', 'test -count=1 ./...'))
+        if mode != 'standard':
+            expected.extend(f'go|{work / module}|test -race -count=1 ./...' for module in workspace_modules)
+        assert trace.read_text().splitlines() == expected, (mode, trace.read_text())
     route = tmp / "route"
     route.mkdir()
 
@@ -303,7 +341,7 @@ with tempfile.TemporaryDirectory(prefix="ci-entrypoints-") as tmp_dir:
         if routing["run_go"] == "true":
             run(env, "bash", "-eo", "pipefail", "-c", standard["run"], cwd=work)
         calls = trace.read_text().splitlines()
-        if routing["run_go"] == "true" and not all(f"go|{work / mod}|test -count=1 ./..." in calls for mod in ("control-plane", "signer")):
+        if routing["run_go"] == "true" and not all(f"go|{work / mod}|test -count=1 ./..." in calls for mod in workspace_modules):
             reject(f"{name} skipped a Go workspace module")
         if any(line.startswith("test-g6-") for line in calls):
             reject(f"{name} retained retired G6 contract checks")
@@ -357,36 +395,31 @@ if sorted(c["profile"] for c in checks) != ["go-security", "npm-security", "rust
     reject("security scans must cover secrets and all three dependency ecosystems")
 if not any((s.get("with") or {}).get("fetch-depth") == "${{ matrix.profile != 'secret-scan' && 1 || 0 }}" for s in scan["steps"]):
     reject("secret scans need complete history")
-bootstrap_text = (root / "scripts/bootstrap.sh").read_text()
-dispatch = 'case "${PROFILE}" in' + bootstrap_text.split('case "${PROFILE}" in')[-1]
-stubs = "\n".join(f"{name}() {{ echo {name}; }}" for name in re.findall(r"^(install_\w+|verify_\w+)\(\)", bootstrap_text, re.M))
-expected_profiles = {
-    "source-style": ["verify_host_command", "verify_host_command", "install_ruff"],
-    "contracts": ["install_node", "install_npm", "install_contract_tools", "verify_java", "install_web_dependencies"],
-    "go-security": ["install_go", "install_govulncheck"],
-    "rust-security": ["install_rust", "install_cargo_audit", "install_cargo_deny"],
-    "npm-security": ["install_node", "install_npm"],
-    "package-tools": ["install_nfpm"],
-    "image-security": ["install_syft", "install_grype", "verify_host_command"],
-}
-for profile, expected in expected_profiles.items():
-    proc = subprocess.run(["bash", "-eu", "-c", stubs + "\n" + dispatch], env={**os.environ, "PROFILE": profile}, capture_output=True, text=True)
-    if proc.returncode != 0 or proc.stdout.split() != expected:
-        reject(f"{profile} installs unrelated tools/dependencies: {proc.stdout}")
 rust_scan = next(c for c in checks if c["profile"] == "rust-security")["command"]
-if [line.strip() for line in rust_scan.splitlines()] != [
-    "cd rust",
-    "cargo audit",
-    "cargo audit --file ../deploy/production/relay.Cargo.lock",
-    "cargo deny --locked check advisories",
-]:
-    reject("workspace and Relay advisory scans must remain fresh and fail closed")
+with tempfile.TemporaryDirectory(prefix='security-dispatch-') as tmp_dir:
+    work = Path(tmp_dir)
+    (work / 'rust').mkdir()
+    log = work / 'calls'
+    cargo = work / 'cargo'
+    cargo.write_text('''#!/usr/bin/env bash
+printf '%s|%s\\n' "$PWD" "$*" >>"$SCAN_CALLS"
+[[ "${FAIL_COMMAND:-}" != "$*" ]] || exit 19
+''')
+    cargo.chmod(0o755)
+    expected = ['audit', 'audit --file ../deploy/production/relay.Cargo.lock', 'deny --locked check advisories']
+    for failure in (None, *expected):
+        log.write_text('')
+        env = {**os.environ, 'PATH': f'{work}:{os.environ["PATH"]}', 'SCAN_CALLS': str(log), 'FAIL_COMMAND': failure or ''}
+        proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', rust_scan], env=env, cwd=work, capture_output=True)
+        count = expected.index(failure) + 1 if failure else len(expected)
+        assert log.read_text().splitlines() == [f'{work / "rust"}|{args}' for args in expected[:count]]
+        assert proc.returncode == (19 if failure else 0), 'advisory failure propagation changed'
 
 products = yaml.safe_load((root / ".github/workflows/release-products.yml").read_text())
 build_steps = products["jobs"]["build-agent-packages"]["steps"]
-restore = next((s for s in build_steps if s.get("name") == "Restore native-package tool cache"), None)
-save = next((s for s in build_steps if s.get("name") == "Save native-package tool cache"), None)
-release_build = next((s for s in build_steps if "bash scripts/build-release-agent.sh" in s.get("run", "")), None)
+restore = next((s for s in build_steps if s.get("id") == "native-package-tools-cache"), None)
+save = next((s for s in build_steps if s.get("uses", "").startswith("actions/cache/save@") and s.get("with", {}).get("key") == "${{ steps.native-package-tools-cache.outputs.cache-primary-key }}"), None)
+release_build = next((s for s in build_steps if s.get("id") == "build-packages"), None)
 if not (restore and restore.get("id") == "native-package-tools-cache"):
     reject("release tool cache restore must expose its primary key")
 if not (save and save["with"]["path"] == restore["with"]["path"] and save["with"]["key"] == "${{ steps.native-package-tools-cache.outputs.cache-primary-key }}"):
@@ -404,13 +437,5 @@ PY
 
 if "${ROOT}/scripts/go-check.sh" unsupported >/dev/null 2>&1; then
   echo "go-check.sh accepted an unsupported execution mode" >&2
-  exit 1
-fi
-
-# Every go.work module must reach gofmt, vet and the unit/race tests in go-check.sh.
-workspace_modules="$(sed -n 's#^[[:space:]]*\./\([^[:space:]]*\)$#\1#p' "${ROOT}/go.work" | sort)"
-checked_modules="$(sed -n 's/^GO_MODULES=(\(.*\))$/\1/p' "${ROOT}/scripts/go-check.sh" | tr ' ' '\n' | sort)"
-if [[ -z "${workspace_modules}" || "${workspace_modules}" != "${checked_modules}" ]]; then
-  echo "go-check.sh GO_MODULES must match the go.work modules" >&2
   exit 1
 fi

@@ -10,6 +10,7 @@ python3 - "${ROOT}" <<'PY'
 import glob
 import hashlib
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -220,12 +221,80 @@ with tempfile.TemporaryDirectory(prefix="bootstrap-platforms-") as tmp_dir:
         script(bin_dir / "uname", "echo unsupported")
         run(env, bash, bootstrap, "go-test", error="unsupported-unsupported/go-test; no artifact mappings")
 
+    # Run complete profiles against disposable pinned tools, never the network.
+    work = tmp / 'profiles'
+    (work / 'scripts').mkdir(parents=True)
+    for name in ('bootstrap.sh', 'env.sh'):
+        shutil.copy2(root / 'scripts' / name, work / 'scripts')
+    shutil.copy2(root / 'toolchains.lock', work)
+    versions = dict(line.split('=', 1) for line in (root / 'toolchains.lock').read_text().splitlines() if re.match(r'^[a-z_]+=', line))
+    trace = work / 'trace'
+    bin_dir = work / 'bin'
+    script(bin_dir / 'uname', 'case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac')
+    for name in ('jq', 'shellcheck', 'python3', 'java'):
+        script(bin_dir / name, 'exit 0')
+    tools = {
+        'go/bin/go': f"printf 'go{versions['go']}\\nlinux\\namd64\\n'",
+        'node/bin/node': f"echo v{versions['node']}",
+        'node/bin/npm': f"if [[ \"$*\" == --version ]]; then echo {versions['npm']}; else [[ \"$*\" == ci ]]; fi",
+        'cargo/bin/rustc': f"echo 'rustc {versions['rust']} (fixture)'",
+        'cargo/bin/cargo': f"case \"$*\" in 'audit --version') echo {versions['cargo_audit']} ;; 'deny --version') echo {versions['cargo_deny']} ;; *) echo cargo ;; esac",
+        'cargo/bin/rustup': 'exit 0', 'cargo/bin/rustfmt': 'exit 0',
+        'cargo/bin/cargo-audit': f"echo {versions['cargo_audit']}",
+        'cargo/bin/cargo-deny': f"echo {versions['cargo_deny']}",
+        'bin/ruff': f"echo 'ruff {versions['ruff']}'", 'bin/buf': f"echo {versions['buf']}",
+        'bin/oasdiff': f"echo {versions['oasdiff']}", 'bin/govulncheck': f"echo v{versions['govulncheck']}",
+        'bin/nfpm': f"echo 'GitVersion: {versions['nfpm']}'",
+        'bin/syft': f"echo {versions['syft']}", 'bin/grype': f"echo {versions['grype']}",
+    }
+    for path, body in tools.items():
+        script(work / '.tools' / path, '''printf '%s|%s|%s\\n' "${0##*/}" "$PWD" "$*" >>"$FIXTURE_TRACE"
+[[ "${FIXTURE_FAIL_TOOL:-}" != "${0##*/}" ]] || exit 19
+''' + body)
+    manifest = work / 'scripts/checksums.txt'
+    jar = f"openapi-generator-cli-{versions['openapi_generator']}.jar"
+    (work / '.tools' / jar).write_text('fixture jar')
+    manifest.write_text(f"{sha256_file(work / '.tools' / jar)}  {jar}\n")
+    for name in ('syft', 'grype'):
+        artifact = f"{name}_{versions[name]}_linux_amd64.tar.gz"
+        archive = work / artifact
+        subprocess.run(['tar', '-czf', str(archive), '-C', str(work / '.tools/bin'), name], check=True)
+        with manifest.open('a') as stream:
+            stream.write(f'{sha256_file(archive)}  {artifact}\n')
+    script(bin_dir / 'curl', '''printf 'curl|%s|%s\\n' "$PWD" "$*" >>"$FIXTURE_TRACE"
+while (($#)); do
+  if [[ "$1" == --output ]]; then output="$2"; shift; fi
+  url="$1"; shift
+done
+case "${url##*/}" in
+  syft_*_linux_amd64.tar.gz|grype_*_linux_amd64.tar.gz) cp "$FIXTURE_ARCHIVE_DIR/${url##*/}" "$output" ;;
+  *) exit 81 ;;
+esac''')
+    (work / 'web').mkdir()
+    env = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'FIXTURE_TRACE': str(trace), 'FIXTURE_ARCHIVE_DIR': str(work)}
+    profiles = {
+        'source-style': ['ruff'], 'contracts': ['node', 'npm', 'buf', 'oasdiff'],
+        'go-security': ['go', 'govulncheck'], 'rust-security': ['rustc', 'cargo', 'cargo-audit', 'cargo-deny'],
+        'npm-security': ['node', 'npm'], 'package-tools': ['nfpm'], 'image-security': ['syft', 'grype'],
+    }
+    for profile, expected in profiles.items():
+        trace.write_text('')
+        run(env, bash, work / 'scripts/bootstrap.sh', profile)
+        calls = [line.split('|') for line in trace.read_text().splitlines()]
+        observed = {call[0] for call in calls} - ({'curl'} if profile == 'image-security' else set())
+        assert observed == set(expected), (profile, calls)
+        installs = [call for call in calls if call[0] == 'npm' and call[2] != '--version']
+        assert installs == ([['npm', str(work / 'web'), 'ci']] if profile == 'contracts' else []), profile
+        failed = subprocess.run([bash, str(work / 'scripts/bootstrap.sh'), profile],
+                                env={**env, 'FIXTURE_FAIL_TOOL': expected[-1]}, capture_output=True, text=True)
+        assert failed.returncode != 0, f'{profile} ignored a required tool failure'
+
     work = tmp / "missing-tools"
     (work / "scripts").mkdir(parents=True, exist_ok=True)
     for name in (
         "env.sh", "go-test-environment.sh", "go-check.sh", "required-go-tests.sh",
         "test-required-go-tests.sh", "test-bootstrap-profiles.sh",
-        "database-integration.sh", "database-postgres-smoke.sh",
+        "database-integration.sh", "database-postgres-tests.sh", "database-postgres-smoke.sh",
     ):
         shutil.copy2(root / "scripts" / name, work / "scripts" / name)
     bin_dir = work / "bin"
@@ -270,7 +339,7 @@ with tempfile.TemporaryDirectory(prefix="bootstrap-platforms-") as tmp_dir:
         run(
             {**env, "DATABASE_TEST_SCOPE": "full", "PG_MAJOR": major, "FIXTURE_DOCKER": "1"},
             bash,
-            work / "scripts" / "database-integration.sh",
+            work / "scripts" / "database-integration.sh", "database-postgres-tests.sh",
             error="access to a running Docker daemon",
         )
     if (work / "launched").exists():
