@@ -1,4 +1,4 @@
-import { createRenderer, nextTick, reactive, ssrContextKey } from "vue";
+import { nextTick, reactive } from "vue";
 import type { NodeObservedState } from "@ocservia/api-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -24,21 +24,7 @@ vi.mock("../src/api/workspace", async (original) => ({
   workspaceContext: mocks.workspaceContext,
 }));
 
-import NodeDetailView from "../src/views/NodeDetailView.vue";
-
-// Exercise the actual SFC setup without adding a DOM or another test framework.
-const renderer = createRenderer<object, object>({
-  createElement: () => ({}),
-  createText: () => ({}),
-  createComment: () => ({}),
-  insert: () => {},
-  remove: () => {},
-  setText: () => {},
-  setElementText: () => {},
-  parentNode: () => null,
-  nextSibling: () => null,
-  patchProp: () => {},
-});
+import { mountNodeDetail } from "./node-detail-renderer";
 
 interface ConfigView {
   configReason: string;
@@ -56,21 +42,22 @@ async function mount(revision: unknown = 7): Promise<ConfigView> {
     version: 31,
     configRevision: revision,
   };
-  const app = renderer.createApp({ ...NodeDetailView, render: () => null });
-  app.provide(ssrContextKey, {});
-  const instance = app.mount({});
+  const { app, instance } = mountNodeDetail();
   unmount = () => {
     app.unmount();
   };
   await nextTick();
   await nextTick();
-  return (instance.$ as unknown as { setupState: ConfigView }).setupState;
+  return (instance.$refs.configuration as { $: { setupState: ConfigView } }).$
+    .setupState;
 }
 
 beforeEach(() => {
   vi.stubGlobal("window", new EventTarget());
   mocks.route = reactive({ params: { nodeId: "node-a" } });
   mocks.fleet = reactive({
+    sessions: [],
+    ipBans: [],
     initialized: true,
     selecting: false,
     selectionError: "",

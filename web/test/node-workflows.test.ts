@@ -1,4 +1,4 @@
-import { createRenderer, nextTick, reactive, ssrContextKey } from "vue";
+import { nextTick, reactive } from "vue";
 import type {
   ArtifactGrant,
   Certificate,
@@ -63,7 +63,7 @@ vi.mock("../src/api/users", async (original) => ({
   setUserPolicy: mocks.setUserPolicy,
 }));
 
-import NodeDetailView from "../src/views/NodeDetailView.vue";
+import { mountNodeDetail } from "./node-detail-renderer";
 import {
   beginNodeMutation,
   finishNodeMutation,
@@ -73,57 +73,52 @@ import {
   type NodeWorkflowContext,
 } from "../src/features/node-workflow";
 
-const renderer = createRenderer<object, object>({
-  createElement: () => ({}),
-  createText: () => ({}),
-  createComment: () => ({}),
-  insert: () => {},
-  remove: () => {},
-  setText: () => {},
-  setElementText: () => {},
-  parentNode: () => null,
-  nextSibling: () => null,
-  patchProp: () => {},
-});
-
 interface View {
-  desiredDialog: { kind: string } | undefined;
-  desiredPassword: string;
-  desiredName: string;
-  desiredReason: string;
-  desiredLoading: boolean;
-  desiredError: string;
-  openDesired(kind: "create" | "rotate"): void;
-  submitDesired(): Promise<void>;
-  detailState: string;
-  detailLoading: boolean;
-  selectRouteNode(): Promise<void>;
-  configDialog: boolean;
-  configLoading: boolean;
-  configError: string;
-  configPlan?: ConfigPlan;
-  configOperation?: Operation;
-  configReason: string;
-  configApplyReason: string;
-  certificateDialog: boolean;
-  certificateLoading: boolean;
-  certificateError: string;
-  certificate?: Certificate;
-  certificateOperation?: Operation;
-  certificateGrant?: { downloadToken?: string; password?: string };
-  certificateCommonName: string;
-  certificateReason: string;
-  policyDialog: { username: string } | undefined;
-  openConfigPlan(): Promise<void>;
-  submitConfigPlan(): Promise<void>;
-  submitConfigApply(): Promise<void>;
-  openCertificate(): Promise<void>;
-  submitCertificateRequest(): Promise<void>;
-  submitCertificateIssue(): Promise<void>;
-  createP12(): Promise<void>;
-  downloadP12(): Promise<void>;
-  revokeCurrentCertificate(): Promise<void>;
-  openPolicy(username: string): void;
+  configuration: {
+    configDialog: boolean;
+    configLoading: boolean;
+    configError: string;
+    configPlan?: ConfigPlan;
+    configOperation?: Operation;
+    configReason: string;
+    configApplyReason: string;
+    openConfigPlan(): Promise<void>;
+    submitConfigPlan(): Promise<void>;
+    submitConfigApply(): Promise<void>;
+  };
+  certificates: {
+    certificateDialog: boolean;
+    certificateLoading: boolean;
+    certificateError: string;
+    certificate?: Certificate;
+    certificateOperation?: Operation;
+    certificateGrant?: { downloadToken?: string; password?: string };
+    certificateCommonName: string;
+    certificateReason: string;
+    openCertificate(): Promise<void>;
+    submitCertificateRequest(): Promise<void>;
+    submitCertificateIssue(): Promise<void>;
+    createP12(): Promise<void>;
+    downloadP12(): Promise<void>;
+    revokeCurrentCertificate(): Promise<void>;
+  };
+  userGroup: {
+    desiredDialog: { kind: string } | undefined;
+    desiredPassword: string;
+    desiredName: string;
+    desiredReason: string;
+    desiredLoading: boolean;
+    desiredError: string;
+    openDesired(kind: "create" | "rotate"): void;
+    submitDesired(): Promise<void>;
+  };
+  page: {
+    detailState: string;
+    detailLoading: boolean;
+    selectRouteNode(): Promise<void>;
+    policyDialog: { username: string } | undefined;
+    openPolicy(username: string): void;
+  };
 }
 
 function deferred<T>() {
@@ -168,16 +163,22 @@ async function mount(): Promise<View> {
     version: 31,
     configRevision: 7,
   };
-  const app = renderer.createApp({ ...NodeDetailView, render: () => null });
-  app.provide(ssrContextKey, {});
-  const instance = app.mount({});
+  const { app, instance } = mountNodeDetail();
   unmount = () => {
     app.unmount();
     unmount = undefined;
   };
   await nextTick();
   await nextTick();
-  return (instance.$ as unknown as { setupState: View }).setupState;
+  type Owner<K extends keyof View> = { $: { setupState: View[K] } };
+  return {
+    page: (instance as unknown as Owner<"page">).$.setupState,
+    configuration: (instance.$refs.configuration as Owner<"configuration">).$
+      .setupState,
+    certificates: (instance.$refs.certificates as Owner<"certificates">).$
+      .setupState,
+    userGroup: (instance.$refs.userGroup as Owner<"userGroup">).$.setupState,
+  };
 }
 
 beforeEach(() => {
@@ -192,6 +193,8 @@ beforeEach(() => {
   });
   mocks.route = reactive({ params: { nodeId: "node-a" } });
   mocks.fleet = reactive({
+    sessions: [],
+    ipBans: [],
     initialized: true,
     selecting: false,
     selectionError: "",
@@ -243,8 +246,8 @@ async function changeContext(view: View, kind: string) {
   } else if (kind === "unmount") {
     unmount?.();
   } else {
-    view.configDialog = false;
-    view.certificateDialog = false;
+    view.configuration.configDialog = false;
+    view.certificates.certificateDialog = false;
   }
   await nextTick();
   await nextTick();
@@ -255,13 +258,13 @@ describe("node workflow context isolation", () => {
     "stops configuration polling on %s without another mutation",
     async (kind) => {
       const view = await mount();
-      await view.openConfigPlan();
+      await view.configuration.openConfigPlan();
       mocks.createConfigPlan.mockResolvedValueOnce({
         ...plan,
         state: "queued",
       });
-      view.configReason = "plan";
-      const pending = view.submitConfigPlan();
+      view.configuration.configReason = "plan";
+      const pending = view.configuration.submitConfigPlan();
       await nextTick();
       expect(vi.getTimerCount()).toBe(1);
       await changeContext(view, kind);
@@ -270,7 +273,7 @@ describe("node workflow context isolation", () => {
       await pending;
       expect(mocks.getConfigPlan).not.toHaveBeenCalled();
       expect(mocks.createConfigPlan).toHaveBeenCalledTimes(1);
-      expect(view.configPlan).toBeUndefined();
+      expect(view.configuration.configPlan).toBeUndefined();
     },
   );
 
@@ -278,13 +281,13 @@ describe("node workflow context isolation", () => {
     "stops CSR polling on %s without another mutation",
     async (kind) => {
       const view = await mount();
-      await view.openCertificate();
+      await view.certificates.openCertificate();
       mocks.createCertificate.mockResolvedValueOnce({
         ...certificate,
         state: "csr_pending",
       });
-      view.certificateReason = "CSR";
-      const pending = view.submitCertificateRequest();
+      view.certificates.certificateReason = "CSR";
+      const pending = view.certificates.submitCertificateRequest();
       await nextTick();
       await changeContext(view, kind);
       expect(vi.getTimerCount()).toBe(0);
@@ -292,7 +295,7 @@ describe("node workflow context isolation", () => {
       await pending;
       expect(mocks.getCertificate).not.toHaveBeenCalled();
       expect(mocks.createCertificate).toHaveBeenCalledTimes(1);
-      expect(view.certificate).toBeUndefined();
+      expect(view.certificates.certificate).toBeUndefined();
     },
   );
 
@@ -305,22 +308,22 @@ describe("node workflow context isolation", () => {
       mocks.listNodeCertificates
         .mockReturnValueOnce(old.promise)
         .mockReturnValueOnce(fresh.promise);
-      const first = view.openCertificate();
+      const first = view.certificates.openCertificate();
       const signal = mocks.listNodeCertificates.mock
         .calls[0]?.[1] as AbortSignal;
-      view.certificateDialog = false;
+      view.certificates.certificateDialog = false;
       await nextTick();
-      const second = view.openCertificate();
+      const second = view.certificates.openCertificate();
       if (result === "success") old.resolve([certificate]);
       else old.reject(new Error("old failure"));
       await first;
       expect(signal.aborted).toBe(true);
-      expect(view.certificate).toBeUndefined();
-      expect(view.certificateError).toBe("");
-      expect(view.certificateLoading).toBe(true);
+      expect(view.certificates.certificate).toBeUndefined();
+      expect(view.certificates.certificateError).toBe("");
+      expect(view.certificates.certificateLoading).toBe(true);
       fresh.resolve([]);
       await second;
-      expect(view.certificateLoading).toBe(false);
+      expect(view.certificates.certificateLoading).toBe(false);
     },
   );
 
@@ -328,39 +331,39 @@ describe("node workflow context isolation", () => {
     "ignores late plan %s and finally in another node",
     async (result) => {
       const view = await mount();
-      await view.openConfigPlan();
+      await view.configuration.openConfigPlan();
       const old = deferred<ConfigPlan>();
       const fresh = deferred<ConfigPlan>();
       mocks.createConfigPlan
         .mockReturnValueOnce(old.promise)
         .mockReturnValueOnce(fresh.promise);
-      view.configReason = "old";
-      const first = view.submitConfigPlan();
+      view.configuration.configReason = "old";
+      const first = view.configuration.submitConfigPlan();
       await changeContext(view, "node");
-      await view.openConfigPlan();
-      view.configReason = "new";
-      const second = view.submitConfigPlan();
+      await view.configuration.openConfigPlan();
+      view.configuration.configReason = "new";
+      const second = view.configuration.submitConfigPlan();
       if (result === "success") old.resolve(plan);
       else old.reject(new Error("old failure"));
       await first;
-      expect(view.configPlan).toBeUndefined();
-      expect(view.configError).toBe("");
-      expect(view.configLoading).toBe(true);
+      expect(view.configuration.configPlan).toBeUndefined();
+      expect(view.configuration.configError).toBe("");
+      expect(view.configuration.configLoading).toBe(true);
       fresh.resolve({ ...plan, id: "plan-b" });
       await second;
-      expect(view.configPlan?.id).toBe("plan-b");
+      expect(view.configuration.configPlan?.id).toBe("plan-b");
     },
   );
 
   it("does not apply a retained plan after a node switch", async () => {
     const view = await mount();
-    await view.openConfigPlan();
-    view.configReason = "plan";
-    await view.submitConfigPlan();
+    await view.configuration.openConfigPlan();
+    view.configuration.configReason = "plan";
+    await view.configuration.submitConfigPlan();
     await changeContext(view, "node");
-    view.configApplyReason = "apply";
-    await view.submitConfigApply();
-    expect(view.configDialog).toBe(false);
+    view.configuration.configApplyReason = "apply";
+    await view.configuration.submitConfigApply();
+    expect(view.configuration.configDialog).toBe(false);
     expect(mocks.applyConfigPlan).not.toHaveBeenCalled();
   });
 
@@ -377,53 +380,59 @@ describe("node workflow context isolation", () => {
     read.mockReturnValueOnce(old.promise);
     let pending: Promise<void>;
     if (config) {
-      await view.openConfigPlan();
+      await view.configuration.openConfigPlan();
       mocks.createConfigPlan.mockResolvedValueOnce({
         ...plan,
         state: "queued",
       });
-      view.configReason = "plan";
-      pending = view.submitConfigPlan();
+      view.configuration.configReason = "plan";
+      pending = view.configuration.submitConfigPlan();
     } else {
-      await view.openCertificate();
+      await view.certificates.openCertificate();
       mocks.createCertificate.mockResolvedValueOnce({
         ...certificate,
         state: "csr_pending",
       });
-      view.certificateReason = "CSR";
-      pending = view.submitCertificateRequest();
+      view.certificates.certificateReason = "CSR";
+      pending = view.certificates.submitCertificateRequest();
     }
     await vi.advanceTimersByTimeAsync(500);
     const signal = read.mock.calls[0]?.[1] as AbortSignal;
     await changeContext(view, "close");
     expect(signal.aborted).toBe(true);
-    if (config) await view.openConfigPlan();
+    if (config) await view.configuration.openConfigPlan();
     else {
       mocks.listNodeCertificates.mockResolvedValueOnce([certificate]);
-      await view.openCertificate();
+      await view.certificates.openCertificate();
     }
     if (scenario.endsWith("success"))
       old.resolve({ ...(config ? plan : certificate), id: "late" });
     else old.reject(new Error("late read"));
     await pending;
-    expect(config ? view.configPlan?.id : view.certificate?.id).toBe(
-      config ? plan.id : certificate.id,
-    );
-    expect(config ? view.configError : view.certificateError).toBe("");
+    expect(
+      config
+        ? view.configuration.configPlan?.id
+        : view.certificates.certificate?.id,
+    ).toBe(config ? plan.id : certificate.id);
+    expect(
+      config
+        ? view.configuration.configError
+        : view.certificates.certificateError,
+    ).toBe("");
   });
 
   it("invalidates a same-tick A to B to A navigation and removes its workspace listener", async () => {
     const view = await mount();
-    await view.openConfigPlan();
+    await view.configuration.openConfigPlan();
     const old = deferred<ConfigPlan>();
     mocks.createConfigPlan.mockReturnValueOnce(old.promise);
-    view.configReason = "plan";
-    const pending = view.submitConfigPlan();
+    view.configuration.configReason = "plan";
+    const pending = view.configuration.submitConfigPlan();
     mocks.route.params.nodeId = "node-b";
     mocks.route.params.nodeId = "node-a";
     await nextTick();
     await nextTick();
-    const reopening = view.openConfigPlan();
+    const reopening = view.configuration.openConfigPlan();
     old.resolve(plan);
     await pending;
     await reopening;
@@ -431,69 +440,69 @@ describe("node workflow context isolation", () => {
       plan.id,
       expect.any(AbortSignal),
     );
-    expect(view.configPlan?.id).toBe(plan.id);
+    expect(view.configuration.configPlan?.id).toBe(plan.id);
   });
 
   it("never restores another Workspace's reference", async () => {
     const view = await mount();
-    await view.openConfigPlan();
-    view.configReason = "plan";
-    await view.submitConfigPlan();
+    await view.configuration.openConfigPlan();
+    view.configuration.configReason = "plan";
+    await view.configuration.submitConfigPlan();
     mocks.workspaceContext.mockReturnValue({
       id: "workspace-b",
       generation: 2,
     });
     await nextTick();
-    await view.openConfigPlan();
+    await view.configuration.openConfigPlan();
     expect(mocks.getConfigPlan).not.toHaveBeenCalled();
-    expect(view.configPlan).toBeUndefined();
+    expect(view.configuration.configPlan).toBeUndefined();
   });
 
   it("retains a late accepted plan across unmount and reads it without resubmitting", async () => {
     let view = await mount();
-    await view.openConfigPlan();
+    await view.configuration.openConfigPlan();
     const accepted = deferred<ConfigPlan>();
     mocks.createConfigPlan.mockReturnValueOnce(accepted.promise);
-    view.configReason = "plan";
-    const pending = view.submitConfigPlan();
+    view.configuration.configReason = "plan";
+    const pending = view.configuration.submitConfigPlan();
     unmount?.();
     accepted.resolve(plan);
     await pending;
     view = await mount();
-    await view.openConfigPlan();
+    await view.configuration.openConfigPlan();
     expect(mocks.getConfigPlan).toHaveBeenCalledWith(
       plan.id,
       expect.any(AbortSignal),
     );
-    expect(view.configPlan?.id).toBe(plan.id);
+    expect(view.configuration.configPlan?.id).toBe(plan.id);
     expect(mocks.createConfigPlan).toHaveBeenCalledTimes(1);
   });
 
   it("retains a late accepted Apply ID without tracking it in the new node", async () => {
     const view = await mount();
-    await view.openConfigPlan();
-    view.configReason = "plan";
-    await view.submitConfigPlan();
+    await view.configuration.openConfigPlan();
+    view.configuration.configReason = "plan";
+    await view.configuration.submitConfigPlan();
     const accepted = deferred<Operation>();
     mocks.applyConfigPlan.mockReturnValueOnce(accepted.promise);
-    view.configApplyReason = "apply";
-    const pending = view.submitConfigApply();
+    view.configuration.configApplyReason = "apply";
+    const pending = view.configuration.submitConfigApply();
     await changeContext(view, "node");
-    await view.openConfigPlan();
+    await view.configuration.openConfigPlan();
     accepted.resolve(operation);
     await pending;
-    expect(view.configDialog).toBe(true);
+    expect(view.configuration.configDialog).toBe(true);
     expect(mocks.fleet.trackOperation).not.toHaveBeenCalled();
     mocks.route.params.nodeId = "node-a";
     mocks.fleet.selected = { id: "node-a", configRevision: 7 };
     await nextTick();
     await nextTick();
-    await view.openConfigPlan();
+    await view.configuration.openConfigPlan();
     expect(mocks.getOperation).toHaveBeenCalledWith(
       operation.id,
       expect.any(AbortSignal),
     );
-    expect(view.configOperation?.id).toBe(operation.id);
+    expect(view.configuration.configOperation?.id).toBe(operation.id);
     expect(mocks.applyConfigPlan).toHaveBeenCalledTimes(1);
   });
 
@@ -506,7 +515,7 @@ describe("node workflow context isolation", () => {
     async (method) => {
       const view = await mount();
       mocks.listNodeCertificates.mockResolvedValueOnce([certificate]);
-      await view.openCertificate();
+      await view.certificates.openCertificate();
       const accepted = deferred<unknown>();
       const api =
         method === "submitCertificateIssue"
@@ -515,14 +524,14 @@ describe("node workflow context isolation", () => {
             ? mocks.createCertificateP12
             : mocks.revokeCertificate;
       api.mockReturnValueOnce(accepted.promise);
-      view.certificateReason = "request";
-      const pending = view[method]();
+      view.certificates.certificateReason = "request";
+      const pending = view.certificates[method]();
       await changeContext(view, "workspace");
       mocks.workspaceContext.mockReturnValue({
         id: "workspace-b",
         generation: 4,
       });
-      await view.openCertificate();
+      await view.certificates.openCertificate();
       accepted.resolve(
         method === "submitCertificateIssue"
           ? certificate
@@ -537,8 +546,8 @@ describe("node workflow context isolation", () => {
             : operation,
       );
       await pending;
-      expect(view.certificate).toBeUndefined();
-      expect(view.certificateGrant).toBeUndefined();
+      expect(view.certificates.certificate).toBeUndefined();
+      expect(view.certificates.certificateGrant).toBeUndefined();
       expect(mocks.fleet.trackOperation).not.toHaveBeenCalled();
       expect(mocks.getCertificate).not.toHaveBeenCalled();
       expect(api).toHaveBeenCalledTimes(1);
@@ -550,19 +559,21 @@ describe("node workflow context isolation", () => {
     async (kind) => {
       const view = await mount();
       mocks.listNodeCertificates.mockResolvedValue([certificate]);
-      await view.openCertificate();
-      view.certificateReason = "export";
-      await view.createP12();
+      await view.certificates.openCertificate();
+      view.certificates.certificateReason = "export";
+      await view.certificates.createP12();
       const blob = deferred<Blob>();
       const click = vi.fn();
       const createElement = vi.fn(() => ({ href: "", download: "", click }));
       vi.stubGlobal("document", { createElement });
       mocks.downloadCertificateArtifact.mockReturnValueOnce(blob.promise);
-      const pending = view.downloadP12();
+      const pending = view.certificates.downloadP12();
       await changeContext(view, kind);
       const reopening =
-        kind === "unmount" ? Promise.resolve() : view.openCertificate();
-      if (kind === "close") await view.downloadP12();
+        kind === "unmount"
+          ? Promise.resolve()
+          : view.certificates.openCertificate();
+      if (kind === "close") await view.certificates.downloadP12();
       blob.resolve(new Blob(["p12"]));
       await pending;
       await reopening;
@@ -572,22 +583,24 @@ describe("node workflow context isolation", () => {
         "artifact-a",
         "one-time-token",
       );
-      expect(view.certificateGrant?.downloadToken).toBeUndefined();
+      expect(view.certificates.certificateGrant?.downloadToken).toBeUndefined();
       if (kind === "close" || kind === "workspace")
-        expect(view.certificateGrant?.password).toBe("one-time-secret");
-      expect(view.certificateError).toBe("");
+        expect(view.certificates.certificateGrant?.password).toBe(
+          "one-time-secret",
+        );
+      expect(view.certificates.certificateError).toBe("");
     },
   );
 
   it("recovers an accepted P12 grant after unmount without persisting its credentials or resending", async () => {
     let view = await mount();
     mocks.listNodeCertificates.mockResolvedValue([certificate]);
-    await view.openCertificate();
-    view.certificateReason = "export";
+    await view.certificates.openCertificate();
+    view.certificates.certificateReason = "export";
     const saved = vi.spyOn(sessionStorage, "setItem");
     const accepted = deferred<unknown>();
     mocks.createCertificateP12.mockReturnValueOnce(accepted.promise);
-    const pending = view.createP12();
+    const pending = view.certificates.createP12();
     unmount?.();
     accepted.resolve({
       artifactId: "artifact-a",
@@ -600,9 +613,9 @@ describe("node workflow context isolation", () => {
     expect(JSON.stringify(saved.mock.calls)).not.toContain("private-");
     expect(JSON.stringify(saved.mock.calls)).toContain(operation.id);
     view = await mount();
-    await view.openCertificate();
-    expect(view.certificateOperation?.id).toBe(operation.id);
-    expect(view.certificateGrant).toMatchObject({
+    await view.certificates.openCertificate();
+    expect(view.certificates.certificateOperation?.id).toBe(operation.id);
+    expect(view.certificates.certificateGrant).toMatchObject({
       password: "private-password",
       downloadToken: "private-token",
     });
@@ -614,20 +627,20 @@ describe("node workflow context isolation", () => {
     "blocks a second mutation while acknowledgement is pending across %s",
     async (kind) => {
       let view = await mount();
-      await view.openConfigPlan();
+      await view.configuration.openConfigPlan();
       const accepted = deferred<ConfigPlan>();
       mocks.createConfigPlan.mockReturnValueOnce(accepted.promise);
-      view.configReason = "first";
-      const first = view.submitConfigPlan();
-      view.configDialog = false;
+      view.configuration.configReason = "first";
+      const first = view.configuration.submitConfigPlan();
+      view.configuration.configDialog = false;
       if (kind === "remount") {
         unmount?.();
         view = await mount();
       }
-      const reopening = view.openConfigPlan();
+      const reopening = view.configuration.openConfigPlan();
       await nextTick();
-      view.configReason = "second";
-      await view.submitConfigPlan();
+      view.configuration.configReason = "second";
+      await view.configuration.submitConfigPlan();
       const callsBeforeAcknowledgement =
         mocks.createConfigPlan.mock.calls.length;
       accepted.resolve(plan);
@@ -680,7 +693,7 @@ describe("node workflow context isolation", () => {
     async (method) => {
       let view = await mount();
       mocks.listNodeCertificates.mockResolvedValue([certificate]);
-      await view.openCertificate();
+      await view.certificates.openCertificate();
       const api =
         method === "submitCertificateRequest"
           ? mocks.createCertificate
@@ -691,14 +704,14 @@ describe("node workflow context isolation", () => {
               : mocks.revokeCertificate;
       const accepted = deferred<unknown>();
       api.mockReturnValueOnce(accepted.promise);
-      view.certificateReason = "first";
-      const first = view[method]();
+      view.certificates.certificateReason = "first";
+      const first = view.certificates[method]();
       unmount?.();
       view = await mount();
-      const reopening = view.openCertificate();
+      const reopening = view.certificates.openCertificate();
       await nextTick();
-      view.certificateReason = "second";
-      await view[method]();
+      view.certificates.certificateReason = "second";
+      await view.certificates[method]();
       const calls = api.mock.calls.length;
       accepted.resolve(
         method === "createP12"
@@ -717,18 +730,20 @@ describe("node workflow context isolation", () => {
       await reopening;
       expect(calls).toBe(1);
       expect(api).toHaveBeenCalledTimes(1);
-      expect(view.certificateLoading).toBe(false);
+      expect(view.certificates.certificateLoading).toBe(false);
       if (method === "createP12")
-        expect(view.certificateGrant?.password).toBe("private-password");
+        expect(view.certificates.certificateGrant?.password).toBe(
+          "private-password",
+        );
     },
   );
 
   it("keeps grant credentials isolated and clears them at expiry", async () => {
     const view = await mount();
     mocks.listNodeCertificates.mockResolvedValue([certificate]);
-    await view.openCertificate();
-    view.certificateReason = "export";
-    await view.createP12();
+    await view.certificates.openCertificate();
+    view.certificates.certificateReason = "export";
+    await view.certificates.createP12();
     const context: NodeWorkflowContext = {
       nodeId: "node-a",
       workspace: { id: "workspace-a", generation: 1 },
@@ -748,12 +763,12 @@ describe("node workflow context isolation", () => {
     expect(
       readCertificateGrant(context, "different-certificate"),
     ).toBeUndefined();
-    await view.createP12();
+    await view.certificates.createP12();
     expect(mocks.createCertificateP12).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(readCertificateGrant(context, certificate.id)).toBeUndefined();
-    expect(view.certificateGrant?.password).toBeUndefined();
-    expect(view.certificateGrant?.downloadToken).toBeUndefined();
+    expect(view.certificates.certificateGrant?.password).toBeUndefined();
+    expect(view.certificates.certificateGrant?.downloadToken).toBeUndefined();
     expect(response.password).toBeUndefined();
     expect(response.downloadToken).toBeUndefined();
     expect(vi.getTimerCount()).toBe(0);
@@ -764,39 +779,41 @@ describe("node workflow context isolation", () => {
     async (kind) => {
       const view = await mount();
       if (kind === "config") {
-        await view.openConfigPlan();
-        view.configReason = "plan";
-        await view.submitConfigPlan();
-        view.configApplyReason = "apply";
-        await view.submitConfigApply();
+        await view.configuration.openConfigPlan();
+        view.configuration.configReason = "plan";
+        await view.configuration.submitConfigPlan();
+        view.configuration.configApplyReason = "apply";
+        await view.configuration.submitConfigApply();
       } else {
         mocks.listNodeCertificates.mockResolvedValue([certificate]);
-        await view.openCertificate();
-        view.certificateReason = "export";
-        await view.createP12();
-        view.certificateDialog = false;
+        await view.certificates.openCertificate();
+        view.certificates.certificateReason = "export";
+        await view.certificates.createP12();
+        view.certificates.certificateDialog = false;
       }
       mocks.getOperation.mockResolvedValueOnce({
         ...operation,
         nodeId: "node-b",
       });
-      if (kind === "config") await view.openConfigPlan();
-      else await view.openCertificate();
+      if (kind === "config") await view.configuration.openConfigPlan();
+      else await view.certificates.openCertificate();
       expect(
-        kind === "config" ? view.configOperation : view.certificateOperation,
+        kind === "config"
+          ? view.configuration.configOperation
+          : view.certificates.certificateOperation,
       ).toBeUndefined();
     },
   );
 
   it("opens the policy dialog only for the current node and closes it on context change", async () => {
     const view = await mount();
-    view.openPolicy("alice");
-    expect(view.policyDialog).toEqual({ username: "alice" });
+    view.page.openPolicy("alice");
+    expect(view.page.policyDialog).toEqual({ username: "alice" });
     await changeContext(view, "node");
-    expect(view.policyDialog).toBeUndefined();
+    expect(view.page.policyDialog).toBeUndefined();
     mocks.fleet.selected = undefined;
-    view.openPolicy("bob");
-    expect(view.policyDialog).toBeUndefined();
+    view.page.openPolicy("bob");
+    expect(view.page.policyDialog).toBeUndefined();
   });
 });
 
@@ -810,9 +827,9 @@ it.each([
     mocks.fleet.nodes = [{ id: "some-other-node" }];
     mocks.fleet.selected = undefined;
     mocks.fleet.selectionError = error;
-    await view.selectRouteNode();
-    expect(view.detailLoading).toBe(false);
-    expect(view.detailState).toBe(expected);
+    await view.page.selectRouteNode();
+    expect(view.page.detailLoading).toBe(false);
+    expect(view.page.detailState).toBe(expected);
   },
 );
 
@@ -821,19 +838,19 @@ describe("transient password workflow", () => {
     const view = await mount();
     const pending = deferred<never>();
     mocks.getUserPasswordSealingKey.mockReturnValue(pending.promise);
-    view.openDesired("create");
-    view.desiredPassword = "temporary password fixture";
-    view.desiredName = "alice";
-    view.desiredReason = "create fixture";
-    const submit = view.submitDesired();
-    expect(view.desiredPassword).toBe("");
-    expect(view.desiredLoading).toBe(true);
+    view.userGroup.openDesired("create");
+    view.userGroup.desiredPassword = "temporary password fixture";
+    view.userGroup.desiredName = "alice";
+    view.userGroup.desiredReason = "create fixture";
+    const submit = view.userGroup.submitDesired();
+    expect(view.userGroup.desiredPassword).toBe("");
+    expect(view.userGroup.desiredLoading).toBe(true);
     pending.reject(new Error("unavailable"));
     await submit;
-    expect(view.desiredError).toBe("passwordKeyUnavailable");
-    expect(view.desiredLoading).toBe(false);
-    expect(view.desiredDialog?.kind).toBe("create");
-    expect(view.desiredPassword).toBe("");
+    expect(view.userGroup.desiredError).toBe("passwordKeyUnavailable");
+    expect(view.userGroup.desiredLoading).toBe(false);
+    expect(view.userGroup.desiredDialog?.kind).toBe("create");
+    expect(view.userGroup.desiredPassword).toBe("");
   });
   it.each(["node", "close", "unmount"])(
     "discards a late key after %s and clears inputs",
@@ -843,21 +860,21 @@ describe("transient password workflow", () => {
       mocks.getUserPasswordSealingKey.mockReturnValue(pending.promise);
       const create = vi.fn();
       mocks.fleet.createUser = create;
-      view.openDesired("create");
-      view.desiredPassword = "temporary password fixture";
-      view.desiredReason = "create fixture";
-      const submit = view.submitDesired();
+      view.userGroup.openDesired("create");
+      view.userGroup.desiredPassword = "temporary password fixture";
+      view.userGroup.desiredReason = "create fixture";
+      const submit = view.userGroup.submitDesired();
       const signal = mocks.getUserPasswordSealingKey.mock
         .calls[0]?.[1] as AbortSignal;
       if (change === "node") {
         mocks.route.params.nodeId = "node-b";
         await nextTick();
-      } else if (change === "close") view.desiredDialog = undefined;
+      } else if (change === "close") view.userGroup.desiredDialog = undefined;
       else unmount?.();
       expect(signal.aborted).toBe(true);
       pending.resolve({} as never);
       await submit;
-      expect(view.desiredPassword).toBe("");
+      expect(view.userGroup.desiredPassword).toBe("");
       expect(create).not.toHaveBeenCalled();
     },
   );
