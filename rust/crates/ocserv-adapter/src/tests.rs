@@ -722,7 +722,7 @@ async fn staging_files_are_removed_on_timeout_cancellation_and_startup() {
         .await;
     assert!(
         matches!(timeout_result, Err(AdapterError::DeadlineExceeded)),
-        "unexpected password staging timeout result: {timeout_result:?}"
+        "password staging should reach its deadline"
     );
     assert!(staging_files(&directory).is_empty());
     assert_eq!(
@@ -757,7 +757,7 @@ async fn staging_files_are_removed_on_timeout_cancellation_and_startup() {
         .await;
     assert!(
         matches!(decrypt_timeout_result, Err(AdapterError::DeadlineExceeded)),
-        "unexpected password decrypt timeout result: {decrypt_timeout_result:?}"
+        "password decryption should reach its deadline"
     );
     assert!(staging_files(&directory).is_empty());
     assert_eq!(
@@ -843,7 +843,7 @@ async fn staging_files_are_removed_on_timeout_cancellation_and_startup() {
         .await;
     assert!(
         matches!(lock_timeout_result, Err(AdapterError::DeadlineExceeded)),
-        "unexpected password lock timeout result: {lock_timeout_result:?}"
+        "password locking should reach its deadline"
     );
     assert!(staging_files(&directory).is_empty());
     assert_eq!(
