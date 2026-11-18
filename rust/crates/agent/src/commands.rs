@@ -1,0 +1,802 @@
+use crate::artifacts::{handle_artifact_consume, handle_artifact_stream};
+use crate::session::{
+    ActiveSessionAuthority, FenceDecision, SessionContext, fenced_artifact_authority,
+    gate_signed_read_only_stale_diagnostic, refresh_fence_epoch_floor, verify_fenced_operation,
+};
+use crate::startup::invalid;
+use crate::{ARTIFACT_FRAME_MASK, HANDSHAKE_TIMEOUT};
+use ocservia_agent::{
+    CommandContext, CommandError, CommandExecutor, CommandOutcome, ExternalCommand,
+    ExternalEffectObservation, ExternalPreparation, MAX_COMMAND_BYTES, PrivdClient,
+};
+use ocservia_agent_protocol::{
+    DesiredEffectState, ErrorKind, PrivdResponse, privd_request, privd_response,
+};
+use ocservia_command_journal::{CommandRecord, CommandState};
+use ocservia_contracts::decode_strict_command_envelope;
+use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+    AgentEvent, AgentEventType, CommandDeliveryMode, CommandEnvelope, CommandResult,
+    CommandResultState, FenceOperationKind, PrivdReceiptVersion, PrivilegedResultProof,
+    SemanticPayloadHashVersion, command_envelope,
+};
+use ocservia_contracts::session::{ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME};
+use prost::Message;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+use uuid::Uuid;
+
+pub(super) async fn handle_command_stream(
+    send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    session: &mut SessionContext<'_>,
+    authority: &ActiveSessionAuthority,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut length = [0_u8; 4];
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut length))
+        .await
+        .map_err(|_| invalid("command length timed out"))??;
+    let framed_length = u32::from_be_bytes(length);
+    if framed_length & ARTIFACT_FRAME_MASK == ARTIFACT_FETCH_FRAME {
+        let (grant, active_fence) = fenced_artifact_authority(authority, framed_length)?;
+        return handle_artifact_stream(
+            send,
+            recv,
+            framed_length & !ARTIFACT_FRAME_MASK,
+            session.node_id,
+            session.endpoint_id,
+            session.command_keys,
+            session.privd,
+            grant,
+            active_fence,
+            session.journal,
+            session.fence_epoch_floor,
+        )
+        .await;
+    }
+    if framed_length & ARTIFACT_FRAME_MASK == ARTIFACT_CONSUME_FRAME {
+        let (grant, active_fence) = fenced_artifact_authority(authority, framed_length)?;
+        return handle_artifact_consume(
+            send,
+            recv,
+            framed_length & !ARTIFACT_FRAME_MASK,
+            session.node_id,
+            session.endpoint_id,
+            session.command_keys,
+            session.privd,
+            grant,
+            active_fence,
+            session.journal,
+            session.fence_epoch_floor,
+        )
+        .await;
+    }
+    if framed_length & ARTIFACT_FRAME_MASK != 0 {
+        return Err(invalid("command frame kind invalid").into());
+    }
+    let length = framed_length as usize;
+    if length == 0 || length > MAX_COMMAND_BYTES {
+        return Err(invalid("command size invalid").into());
+    }
+    let mut bytes = vec![0_u8; length];
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut bytes))
+        .await
+        .map_err(|_| invalid("command body timed out"))??;
+    let envelope = decode_strict_command_envelope(bytes.as_slice())?;
+    let result = process_command(session, authority, &envelope).await?;
+    send_command_result(send, &result).await
+}
+
+async fn process_command(
+    session: &mut SessionContext<'_>,
+    authority: &ActiveSessionAuthority,
+    envelope: &CommandEnvelope,
+) -> Result<CommandResult, Box<dyn std::error::Error + Send + Sync>> {
+    refresh_fence_epoch_floor(session.journal, session.fence_epoch_floor)?;
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+    let now_unix_seconds = i64::try_from(now.as_secs())?;
+    if stale_command_owner(
+        session,
+        authority,
+        envelope,
+        now_unix_seconds,
+        now.subsec_nanos(),
+    )? {
+        let result = rejected_result(envelope, "stale_owner_epoch", now_unix_seconds);
+        return Ok(result);
+    }
+    let grant = authority.grant();
+    let context = CommandContext {
+        node_id: *session.node_id.as_bytes(),
+        authorization_revision: grant.authorization_revision,
+        capabilities: grant.negotiated_capabilities.clone(),
+        session_expires_at_unix_seconds: grant.expires_at_unix_seconds,
+        command_keys: session.command_keys.clone(),
+        now_unix_seconds,
+        cancelled: false,
+    };
+    if matches!(
+        envelope.payload,
+        Some(
+            command_envelope::Payload::SyntheticNoop(_)
+                | command_envelope::Payload::SyntheticEcho(_)
+        )
+    ) {
+        wait_for_synthetic_barrier(
+            session.synthetic_barrier_file,
+            envelope.command_id.as_slice(),
+        )
+        .await?;
+    }
+    let external = matches!(
+        envelope.payload,
+        Some(
+            command_envelope::Payload::SessionDisconnect(_)
+                | command_envelope::Payload::SessionTerminate(_)
+                | command_envelope::Payload::IpBanRemove(_)
+                | command_envelope::Payload::ServiceReload(_)
+                | command_envelope::Payload::UserCreate(_)
+                | command_envelope::Payload::UserDisable(_)
+                | command_envelope::Payload::UserEnable(_)
+                | command_envelope::Payload::UserPasswordRotate(_)
+                | command_envelope::Payload::GroupApply(_)
+                | command_envelope::Payload::CompleteConfigPlan(_)
+                | command_envelope::Payload::CompleteConfigApply(_)
+                | command_envelope::Payload::CertificateCsr(_)
+                | command_envelope::Payload::CertificateRevoke(_)
+                | command_envelope::Payload::CertificateP12(_)
+                | command_envelope::Payload::AgentUpgrade(_)
+        )
+    );
+    tracing::info!(
+        event_type = "command_delivery_authorized",
+        message_id = %hex::encode(&envelope.message_id),
+        command_id = %hex::encode(&envelope.command_id),
+        node_id = %hex::encode(&envelope.node_id),
+        delivery_mode = envelope.delivery_mode,
+        semantic_payload_sha256 = %hex::encode(&envelope.semantic_payload_sha256),
+        semantic_payload_hash_version = envelope.semantic_payload_hash_version,
+        "command delivery passed session authorization"
+    );
+    let execution = if external {
+        execute_external_command(session, envelope, &context, now_unix_seconds).await
+    } else {
+        session.command_executor.deliver(envelope, &context)
+    };
+    let result = delivery_result(execution, envelope, now_unix_seconds);
+    tracing::info!(
+        event_type = "command_delivery_result",
+        message_id = %hex::encode(&envelope.message_id),
+        command_id = %hex::encode(&envelope.command_id),
+        delivery_mode = envelope.delivery_mode,
+        state = result.state,
+        replayed = result.replayed,
+        error_code = %result.error_code,
+        "command delivery produced a result"
+    );
+    log_synthetic_effect(session.command_executor, envelope, &result);
+    Ok(result)
+}
+
+fn delivery_result(
+    execution: Result<CommandOutcome, CommandError>,
+    envelope: &CommandEnvelope,
+    now_unix_seconds: i64,
+) -> CommandResult {
+    match execution {
+        Ok(outcome) => command_result(&outcome.record, outcome.replayed),
+        Err(CommandError::Rejected(code)) => rejected_result(envelope, code, now_unix_seconds),
+        Err(CommandError::IdentityConflict) => {
+            rejected_result(envelope, "command_identity_conflict", now_unix_seconds)
+        }
+        Err(CommandError::PayloadConflict) => {
+            rejected_result(envelope, "idempotency_payload_conflict", now_unix_seconds)
+        }
+        Err(CommandError::PreEffectJournalFailure(error)) => {
+            tracing::error!(command_id = %hex::encode(&envelope.command_id), error = %error, "command journal failure");
+            rejected_result(envelope, "journal_unavailable", now_unix_seconds)
+        }
+        Err(CommandError::OutcomeUnknown {
+            code,
+            record,
+            source,
+        }) => {
+            tracing::error!(command_id = %hex::encode(&envelope.command_id), error = %source, "command outcome requires reconciliation");
+            unknown_result(record.as_ref(), code)
+        }
+        Err(CommandError::InjectedCrash(_)) => unreachable!("crash injection is test-only"),
+    }
+}
+
+fn log_synthetic_effect(
+    executor: &CommandExecutor,
+    envelope: &CommandEnvelope,
+    result: &CommandResult,
+) {
+    if matches!(
+        envelope.payload,
+        Some(command_envelope::Payload::SyntheticNoop(_))
+    ) && let Ok(key) = <&[u8; 16]>::try_from(envelope.idempotency_key.as_slice())
+    {
+        let journal = executor.journal();
+        if let (Ok(effect), Ok(executions)) = (
+            journal.synthetic_effect(key),
+            journal.synthetic_execution_count(),
+        ) {
+            use sha2::{Digest as _, Sha256};
+            tracing::info!(
+            event_type = "synthetic_effect_observed",
+            command_id = %hex::encode(&envelope.command_id),
+            message_id = %hex::encode(&envelope.message_id),
+            idempotency_key = %hex::encode(key),
+            effect_present = effect.is_some(),
+            effect_executed_at = effect.as_ref().map(|value| value.executed_at),
+            journal_total_executions = executions,
+            result_sha256 = %hex::encode(Sha256::digest(&result.result)),
+            effect_result_sha256 = %effect.as_ref().map_or_else(String::new, |value| hex::encode(Sha256::digest(&value.result))),
+            effect_payload_sha256 = %effect.as_ref().map_or_else(String::new, |value| hex::encode(value.payload_sha256)),
+            "read-only synthetic journal observation"
+            );
+        } else {
+            tracing::warn!(
+                event_type = "synthetic_effect_observation_failed",
+                command_id = %hex::encode(&envelope.command_id),
+                "synthetic journal diagnostic unavailable"
+            );
+        }
+    }
+}
+
+fn stale_command_owner(
+    session: &SessionContext<'_>,
+    authority: &ActiveSessionAuthority,
+    envelope: &CommandEnvelope,
+    now_unix_seconds: i64,
+    now_nanos: u32,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(match authority {
+        ActiveSessionAuthority::SignedReadOnlyV11(_) => {
+            let fence = envelope
+                .connection_fence
+                .as_ref()
+                .ok_or_else(|| invalid("signed read-only session received an unfenced command"))?;
+            matches!(
+                gate_signed_read_only_stale_diagnostic(
+                    session.command_keys,
+                    *session.fence_epoch_floor,
+                    &session.node_id,
+                    &session.endpoint_id,
+                    fence,
+                    &envelope.command_id,
+                    now_unix_seconds,
+                    now_nanos,
+                )?,
+                FenceDecision::RejectedStaleOwnerEpoch
+            )
+        }
+        ActiveSessionAuthority::FencedV11 {
+            grant,
+            connection_fence,
+        } => {
+            verify_fenced_operation(
+                session.command_keys,
+                grant,
+                connection_fence,
+                *session.fence_epoch_floor,
+                &session.node_id,
+                &session.endpoint_id,
+                envelope.connection_fence.as_ref(),
+                envelope.fence_binding.as_ref(),
+                FenceOperationKind::Command,
+                &envelope.command_id,
+                &envelope.required_capability,
+                now_unix_seconds,
+                now_nanos,
+            )?;
+            false
+        }
+    })
+}
+
+async fn send_command_result(
+    mut send: iroh::endpoint::SendStream,
+    result: &CommandResult,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let event = AgentEvent {
+        r#type: AgentEventType::CommandResult.into(),
+        payload: result.encode_to_vec(),
+    };
+    let encoded = event.encode_to_vec();
+    send.write_all(&u32::try_from(encoded.len())?.to_be_bytes())
+        .await?;
+    send.write_all(&encoded).await?;
+    send.finish()?;
+    Ok(())
+}
+
+fn synthetic_barrier_target(raw: &str) -> Result<Option<Uuid>, io::Error> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let value = raw.strip_suffix('\n').unwrap_or(raw);
+    if value.is_empty() || value.contains(['\n', '\r']) {
+        return Err(invalid("synthetic barrier target is invalid"));
+    }
+    let target =
+        Uuid::parse_str(value).map_err(|_| invalid("synthetic barrier target is not a UUID"))?;
+    if target.to_string() != value {
+        return Err(invalid("synthetic barrier target is not canonical"));
+    }
+    Ok(Some(target))
+}
+
+pub(super) fn synthetic_receipt_path(barrier_path: &Path) -> PathBuf {
+    let mut path = barrier_path.as_os_str().to_owned();
+    path.push(".received");
+    PathBuf::from(path)
+}
+
+async fn read_synthetic_barrier(path: &Path) -> Result<Option<Option<Uuid>>, io::Error> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(raw) => Ok(Some(synthetic_barrier_target(&raw)?)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) async fn wait_for_synthetic_barrier(
+    path: Option<&Path>,
+    command_id: &[u8],
+) -> Result<(), io::Error> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let command_id = Uuid::from_slice(command_id)
+        .map_err(|_| invalid("synthetic barrier command ID is invalid"))?;
+    let Some(target) = read_synthetic_barrier(path).await? else {
+        return Ok(());
+    };
+    if let Some(target) = target {
+        if target != command_id {
+            return Ok(());
+        }
+        tokio::fs::write(
+            synthetic_receipt_path(path),
+            format!("{command_id}\n").as_bytes(),
+        )
+        .await?;
+    }
+    while let Some(target) = read_synthetic_barrier(path).await? {
+        if target.is_some_and(|target| target != command_id) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(())
+}
+
+async fn execute_external_command(
+    session: &mut SessionContext<'_>,
+    envelope: &CommandEnvelope,
+    context: &CommandContext,
+    now: i64,
+) -> Result<CommandOutcome, CommandError> {
+    let mode = CommandDeliveryMode::try_from(envelope.delivery_mode)
+        .unwrap_or(CommandDeliveryMode::Unspecified);
+    let (command, reconciled_response) = match mode {
+        CommandDeliveryMode::ExecuteOrReplay => {
+            match session
+                .command_executor
+                .prepare_external(envelope, context)?
+            {
+                ExternalPreparation::Execute(command) => (command, None),
+                ExternalPreparation::Replay(outcome) => return Ok(outcome),
+            }
+        }
+        CommandDeliveryMode::ReconcileOnly => {
+            let response = session.privd.call_reconcile(envelope).await;
+            if response.as_ref().ok().and_then(response_proof).is_some() {
+                let command = session
+                    .command_executor
+                    .begin_attested_recovery(envelope, context)?;
+                (command, Some(response))
+            } else {
+                let observed = observe_external_effect(session.privd, envelope).await;
+                return session
+                    .command_executor
+                    .reconcile_external(envelope, context, observed);
+            }
+        }
+        CommandDeliveryMode::RetryIfEffectAbsent => (
+            session.command_executor.retry_external(envelope, context)?,
+            None,
+        ),
+        CommandDeliveryMode::Unspecified => {
+            return Err(CommandError::Rejected("delivery_mode_invalid"));
+        }
+    };
+    let response = match reconciled_response {
+        Some(response) => response,
+        None => {
+            session
+                .privd
+                .call_command(envelope, command.accepted_at())
+                .await
+        }
+    };
+    match response {
+        Ok(response) => {
+            settle_privd_response(session.command_executor, &command, envelope, response, now)
+        }
+        Err(_) => {
+            session
+                .command_executor
+                .mark_external_unknown(&command, "privd_transport_unknown", now)
+        }
+    }
+}
+
+fn settle_privd_response(
+    executor: &mut CommandExecutor,
+    command: &ExternalCommand,
+    envelope: &CommandEnvelope,
+    response: PrivdResponse,
+    now: i64,
+) -> Result<CommandOutcome, CommandError> {
+    let Some((proof, completed_at)) = response_proof(&response) else {
+        return executor.mark_external_unknown(command, "privd_receipt_missing_or_malformed", now);
+    };
+    let mut applied_revision = None;
+    let terminal = match response.result {
+        Some(privd_response::Result::Mutation(result)) if result.applied => {
+            applied_revision = desired_resource(envelope);
+            Ok(result.encode_to_vec())
+        }
+        Some(privd_response::Result::ConfigPlan(result)) => Ok(result.encode_to_vec()),
+        Some(privd_response::Result::ConfigApply(result)) => {
+            applied_revision = Some(
+                desired_resource(envelope).ok_or(CommandError::Rejected("config_apply_invalid"))?,
+            );
+            Ok(result.encode_to_vec())
+        }
+        Some(privd_response::Result::CertificateCsr(result)) => Ok(result.encode_to_vec()),
+        Some(privd_response::Result::CertificateRevoke(result)) => Ok(result.encode_to_vec()),
+        Some(privd_response::Result::CertificateP12(result)) => Ok(result.encode_to_vec()),
+        Some(privd_response::Result::AgentUpgradeScheduled(result)) => Ok(result.encode_to_vec()),
+        Some(privd_response::Result::Error(error)) if terminal_privd_error(error.kind) => {
+            let code = terminal_privd_error_code(error.kind).unwrap_or("privd_rejected");
+            Err(code)
+        }
+        _ => {
+            return executor.mark_external_unknown(command, "privd_outcome_unknown", now);
+        }
+    };
+    if let (Some((resource_type, resource_key, revision)), Ok(bytes)) =
+        (applied_revision, &terminal)
+    {
+        return executor.complete_external_applied_attested(
+            command,
+            resource_type,
+            &resource_key,
+            revision,
+            bytes,
+            &proof,
+            completed_at,
+        );
+    }
+    executor.complete_external_attested(
+        command,
+        terminal.as_deref().map_err(|code| *code),
+        &proof,
+        completed_at,
+    )
+}
+
+pub(super) fn response_proof(response: &PrivdResponse) -> Option<(Vec<u8>, i64)> {
+    let proof = response.privileged_result_proof.as_ref()?;
+    if PrivdReceiptVersion::try_from(proof.version).ok()? != PrivdReceiptVersion::V1
+        || proof.signature.len() != 64
+    {
+        return None;
+    }
+    let receipt = proof.receipt_v1.as_ref()?;
+    if PrivdReceiptVersion::try_from(receipt.receipt_version).ok()? != PrivdReceiptVersion::V1
+        || receipt.completed_at.as_ref()?.seconds < 0
+    {
+        return None;
+    }
+    let encoded = proof.encode_to_vec();
+    (encoded.len() <= 65_536).then_some((encoded, receipt.completed_at.as_ref()?.seconds))
+}
+
+pub(super) fn terminal_privd_error(kind: i32) -> bool {
+    terminal_privd_error_code(kind).is_some()
+}
+
+pub(super) fn terminal_privd_error_code(kind: i32) -> Option<&'static str> {
+    match ErrorKind::try_from(kind).unwrap_or(ErrorKind::Unspecified) {
+        ErrorKind::CapacityExceeded => Some("capacity_exceeded"),
+        ErrorKind::InvalidRequest | ErrorKind::PermissionDenied | ErrorKind::MalformedOutput => {
+            Some("privd_rejected")
+        }
+        _ => None,
+    }
+}
+
+fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, String, u64)> {
+    match envelope.payload.as_ref()? {
+        command_envelope::Payload::UserCreate(value) => {
+            Some(("user", value.username.clone(), value.desired_revision))
+        }
+        command_envelope::Payload::UserDisable(value) => {
+            Some(("user", value.username.clone(), value.desired_revision))
+        }
+        command_envelope::Payload::UserEnable(value) => {
+            Some(("user", value.username.clone(), value.desired_revision))
+        }
+        command_envelope::Payload::UserPasswordRotate(value) => {
+            Some(("user", value.username.clone(), value.desired_revision))
+        }
+        command_envelope::Payload::GroupApply(value) => {
+            Some(("group", value.group_name.clone(), value.desired_revision))
+        }
+        command_envelope::Payload::CompleteConfigApply(value) => {
+            Some(("config", "ocserv.conf".to_owned(), value.desired_revision))
+        }
+        command_envelope::Payload::CertificateCsr(value) => {
+            Uuid::from_slice(&value.certificate_id).ok().map(|id| {
+                (
+                    "certificate_key",
+                    id.to_string(),
+                    envelope.expected_revision,
+                )
+            })
+        }
+        command_envelope::Payload::CertificateRevoke(value) => {
+            Uuid::from_slice(&value.certificate_id).ok().map(|id| {
+                (
+                    "certificate_revoke",
+                    id.to_string(),
+                    envelope.expected_revision,
+                )
+            })
+        }
+        command_envelope::Payload::CertificateP12(value) => {
+            Uuid::from_slice(&value.artifact_id).ok().map(|id| {
+                (
+                    "certificate_artifact",
+                    id.to_string(),
+                    envelope.expected_revision,
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
+pub(super) async fn observe_external_effect(
+    privd: &PrivdClient,
+    envelope: &CommandEnvelope,
+) -> ExternalEffectObservation {
+    // Planning is side-effect free. After privd startup cleanup, an interrupted
+    // validation can always be retried from the immutable candidate.
+    if matches!(
+        envelope.payload,
+        Some(command_envelope::Payload::CompleteConfigPlan(_))
+    ) {
+        return ExternalEffectObservation::Absent;
+    }
+    // Certificate key creation and deletion are both idempotent for their
+    // controller-issued UUID. Retrying is safer than guessing a terminal state.
+    if matches!(
+        envelope.payload,
+        Some(
+            command_envelope::Payload::CertificateCsr(_)
+                | command_envelope::Payload::CertificateRevoke(_)
+                | command_envelope::Payload::CertificateP12(_)
+        )
+    ) {
+        return ExternalEffectObservation::Absent;
+    }
+    let target_boot = match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::SessionDisconnect(target)) => Some(&target.boot_id),
+        Some(command_envelope::Payload::SessionTerminate(target)) => Some(&target.boot_id),
+        _ => None,
+    };
+    if let Some(target_boot) = target_boot {
+        let Ok(current_boot) = tokio::fs::read_to_string("/proc/sys/kernel/random/boot_id").await
+        else {
+            return ExternalEffectObservation::Unknown;
+        };
+        if current_boot.trim() != target_boot {
+            return ExternalEffectObservation::Unknown;
+        }
+    }
+    let Some(payload) = envelope.payload.as_ref() else {
+        return ExternalEffectObservation::Unknown;
+    };
+    let response = match payload {
+        command_envelope::Payload::SessionDisconnect(_)
+        | command_envelope::Payload::SessionTerminate(_) => {
+            privd
+                .call(privd_request::Operation::SessionList(
+                    ocservia_agent_protocol::ReadRequest {},
+                ))
+                .await
+        }
+        command_envelope::Payload::IpBanRemove(_) => {
+            privd
+                .call(privd_request::Operation::IpBanList(
+                    ocservia_agent_protocol::ReadRequest {},
+                ))
+                .await
+        }
+        payload if desired_effect_identity(payload).is_some() => {
+            privd.call_reconcile(envelope).await
+        }
+        _ => return ExternalEffectObservation::Unknown,
+    };
+    let Ok(response) = response else {
+        return ExternalEffectObservation::Unknown;
+    };
+    let Some(result) = response.result else {
+        return ExternalEffectObservation::Unknown;
+    };
+    map_external_effect(payload, result)
+}
+
+pub(super) fn map_external_effect(
+    payload: &command_envelope::Payload,
+    result: privd_response::Result,
+) -> ExternalEffectObservation {
+    match (payload, result) {
+        (
+            command_envelope::Payload::SessionDisconnect(target),
+            privd_response::Result::SessionList(current),
+        ) => {
+            if current
+                .sessions
+                .iter()
+                .any(|session| session.id == target.session_id)
+            {
+                ExternalEffectObservation::Absent
+            } else {
+                ExternalEffectObservation::AppliedExact
+            }
+        }
+        (
+            command_envelope::Payload::SessionTerminate(target),
+            privd_response::Result::SessionList(current),
+        ) => {
+            if current
+                .sessions
+                .iter()
+                .any(|session| session.id == target.session_id)
+            {
+                ExternalEffectObservation::Absent
+            } else {
+                ExternalEffectObservation::AppliedExact
+            }
+        }
+        (
+            command_envelope::Payload::IpBanRemove(target),
+            privd_response::Result::IpBanList(current),
+        ) => {
+            if current.bans.iter().any(|ban| ban.ip == target.ip) {
+                ExternalEffectObservation::Absent
+            } else {
+                ExternalEffectObservation::AppliedExact
+            }
+        }
+        (payload, privd_response::Result::DesiredEffectObservation(observation))
+            if desired_effect_identity(payload).is_some() =>
+        {
+            match DesiredEffectState::try_from(observation.state)
+                .unwrap_or(DesiredEffectState::Unspecified)
+            {
+                DesiredEffectState::AppliedExact => ExternalEffectObservation::AppliedExact,
+                DesiredEffectState::SupersededByNewerRevision => {
+                    ExternalEffectObservation::SupersededByNewerRevision
+                }
+                DesiredEffectState::Absent => ExternalEffectObservation::Absent,
+                DesiredEffectState::Unknown | DesiredEffectState::Unspecified => {
+                    ExternalEffectObservation::Unknown
+                }
+            }
+        }
+        _ => ExternalEffectObservation::Unknown,
+    }
+}
+
+fn desired_effect_identity(
+    payload: &command_envelope::Payload,
+) -> Option<(&'static str, &str, u64)> {
+    match payload {
+        command_envelope::Payload::UserCreate(value) => {
+            Some(("user_create", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserDisable(value) => {
+            Some(("user_disable", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserEnable(value) => {
+            Some(("user_enable", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserPasswordRotate(value) => Some((
+            "user_password_rotate",
+            &value.username,
+            value.desired_revision,
+        )),
+        command_envelope::Payload::GroupApply(value) => {
+            Some(("group_apply", &value.group_name, value.desired_revision))
+        }
+        command_envelope::Payload::CompleteConfigApply(value) => {
+            Some(("config_apply", "ocserv.conf", value.desired_revision))
+        }
+        _ => None,
+    }
+}
+
+fn unknown_result(record: &CommandRecord, code: &str) -> CommandResult {
+    let mut result = command_result(record, false);
+    result.state = CommandResultState::Unknown.into();
+    result.result.clear();
+    code.clone_into(&mut result.error_code);
+    result
+}
+
+fn command_result(record: &CommandRecord, replayed: bool) -> CommandResult {
+    let state = match record.state {
+        CommandState::Succeeded => CommandResultState::Succeeded,
+        CommandState::Failed => CommandResultState::Failed,
+        CommandState::Unknown | CommandState::Accepted | CommandState::Running => {
+            CommandResultState::Unknown
+        }
+    };
+    let proof = record
+        .privileged_result_proof
+        .as_deref()
+        .and_then(|encoded| PrivilegedResultProof::decode(encoded).ok());
+    let receipt = proof.as_ref().and_then(|value| value.receipt_v1.as_ref());
+    CommandResult {
+        command_id: record.command_id.to_vec(),
+        idempotency_key: record.idempotency_key.to_vec(),
+        payload_sha256: record.payload_sha256.to_vec(),
+        state: state.into(),
+        result: record.result.clone().unwrap_or_default(),
+        error_code: record.error_code.clone().unwrap_or_default(),
+        accepted_at: receipt
+            .and_then(|value| value.accepted_at)
+            .or(Some(prost_types::Timestamp {
+                seconds: record.accepted_at,
+                nanos: 0,
+            })),
+        completed_at: receipt.and_then(|value| value.completed_at).or(Some(
+            prost_types::Timestamp {
+                seconds: record.updated_at,
+                nanos: 0,
+            },
+        )),
+        replayed: receipt.is_some_and(|value| value.replayed) || proof.is_none() && replayed,
+        semantic_payload_hash_version: record.payload_hash_version,
+        privileged_result_proof: proof,
+    }
+}
+
+fn rejected_result(envelope: &CommandEnvelope, code: &str, now: i64) -> CommandResult {
+    CommandResult {
+        command_id: envelope.command_id.clone(),
+        idempotency_key: envelope.idempotency_key.clone(),
+        payload_sha256: Vec::new(),
+        state: CommandResultState::Rejected.into(),
+        result: Vec::new(),
+        error_code: code.to_owned(),
+        accepted_at: None,
+        completed_at: Some(prost_types::Timestamp {
+            seconds: now,
+            nanos: 0,
+        }),
+        replayed: false,
+        semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
+        privileged_result_proof: None,
+    }
+}

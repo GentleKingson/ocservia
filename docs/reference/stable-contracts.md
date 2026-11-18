@@ -190,7 +190,7 @@ bounds, and SQLite read-only, disk-full, and corruption faults.
 
 ### Session and command matrix
 
-The table below summarizes runtime admission rules enforced by [`enrollment.Service.AuthorizeSession`](../../control-plane/internal/enrollment/service.go), [`transportd`](../../rust/crates/transportd/src/lib.rs), [`Agent`](../../rust/crates/agent/src/main.rs), and `privd`:
+The table below summarizes runtime admission rules enforced by [`enrollment.Service.AuthorizeSession`](../../control-plane/internal/enrollment/service.go), [`transportd`](../../rust/crates/transportd/src/lib.rs), [`Agent`](../../rust/crates/agent/src/session.rs), and `privd`:
 
 | Offered state | Required behavior / upgrade path | Existing verification |
 | --- | --- | --- |

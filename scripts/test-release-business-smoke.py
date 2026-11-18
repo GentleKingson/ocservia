@@ -2,7 +2,6 @@
 """Focused checks for Business Smoke and manual integration."""
 import base64
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,6 +9,8 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import release_business_scenarios as business
 
 
 def main():
@@ -22,10 +23,8 @@ def main():
         (work / 'private/smoke-vpn-password').write_text('test-password')
         env = {'OCSERVIA_BUSINESS_TEST_WORK_DIR': str(work), 'ARTIFACT_DIR': str(work / 'evidence'),
                'OCSERVIA_BUSINESS_TEST_WORKSPACE_ID': 'workspace', 'OCSERVIA_BUSINESS_TEST_NODE_ID': 'node', 'BUSINESS_PROFILE': 'smoke'}
-        spec = importlib.util.spec_from_file_location('release_business_api', root / 'scripts/release-business-api.py')
-        with patch.dict(os.environ, env), patch('ssl.create_default_context'):
-            business = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(business)
+        with patch.dict(os.environ, env):
+            business.environment()
 
         # Single-admin workspace isolation checks refuse wrong password,
         # anonymous access, and foreign workspaces.

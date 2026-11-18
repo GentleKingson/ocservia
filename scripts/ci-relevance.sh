@@ -86,7 +86,7 @@ classify_path() {
     .github/workflows/real-e2e.yml|deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*)
       tools_suite cross-vm ;;
     # Also imported by real-e2e-business.py.
-    scripts/release-business-api.py) tools_suite release; run_installers=true; tools_suite cross-vm ;;
+    scripts/release-business-api.py|scripts/release_business_runtime.py|scripts/release_business_scenarios.py) tools_suite release; run_installers=true; tools_suite cross-vm ;;
     # Documentation that no installer, image build or release asset reads.
     deploy/production/integrated/README.md|deploy/production/relay-build.md) run_docs=true ;;
     deploy/managed-node/install.sh|deploy/production/install.sh|deploy/production/controller-bootstrap.sh|\

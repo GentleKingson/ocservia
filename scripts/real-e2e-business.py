@@ -3,7 +3,6 @@
 import base64
 from datetime import datetime, timezone
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -13,14 +12,12 @@ import subprocess
 import sys
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
-WORK = Path(os.environ['OCSERVIA_BUSINESS_TEST_WORK_DIR'])
+import release_business_scenarios as business
+
+WORK = business.environment().work
 OUTBOX = WORK / 'outbox'
 STATE = WORK / 'state'
 PRIVATE = WORK / 'private'
-spec = importlib.util.spec_from_file_location('release_business', ROOT / 'scripts/release-business-api.py')
-business = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(business)
 
 
 def hex64(path):
@@ -50,7 +47,7 @@ def plan_result(plan_id):
     status = {key: value if value in states else 'unclassified' for key, value in (
         ('state', item['state']), ('validation', item['validation']), ('operation_state', operation['state']))}
     status.update({key: item.get(key) is True for key in ('current_unchanged', 'staging_cleaned')})
-    (business.EVIDENCE / 'config-plan-status.json').write_text(json.dumps(status) + '\n')
+    (business.environment().evidence / 'config-plan-status.json').write_text(json.dumps(status) + '\n')
     if item['state'] in ('failed', 'expired', 'cancelled'):
         raise RuntimeError('cross-VM configuration plan reached a terminal failure')
     return item if item['state'] == 'succeeded' else None
@@ -60,7 +57,7 @@ def issue_token(endpoint):
     assert endpoint == hex64(STATE / 'agent-endpoint-id')
     response = business.api('node-bootstrap-tokens', {
         'installation': True,
-        'workspace_id': os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], 'environment': 'development',
+        'workspace_id': business.environment().workspace, 'environment': 'development',
         'expected_node_name': 'github-hosted-node', 'expected_endpoint_id': endpoint,
         'ttl_seconds': 600, 'reason': 'cross-VM native business enrollment'}, status=201)
     root = response['token']

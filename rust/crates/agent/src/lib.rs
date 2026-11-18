@@ -80,6 +80,32 @@ impl ExternalCommand {
     pub const fn accepted_at(&self) -> i64 {
         self.accepted_at
     }
+
+    fn accepted_record(&self, journal: &Journal) -> Result<CommandRecord, CommandError> {
+        journal
+            .command(&self.key)
+            .map_err(pre_effect_failure)?
+            .ok_or(CommandError::Rejected("command_not_accepted"))
+    }
+
+    fn attested_outcome(
+        &self,
+        before: CommandRecord,
+        persisted: Result<CommandRecord, rusqlite::Error>,
+    ) -> Result<CommandOutcome, CommandError> {
+        let record = persisted.map_err(|source| CommandError::OutcomeUnknown {
+            code: "attested_result_persistence_failed",
+            record: Box::new(before),
+            source: Box::new(source),
+        })?;
+        if record.command_id != self.command_id {
+            return Err(CommandError::IdentityConflict);
+        }
+        Ok(CommandOutcome {
+            record,
+            replayed: false,
+        })
+    }
 }
 
 /// Result of preparing an external effect.
@@ -409,34 +435,17 @@ impl CommandExecutor {
             Ok(_) => (CommandState::Failed, None, Some("result_too_large")),
             Err(code) => (CommandState::Failed, None, Some(code)),
         };
-        let before = self
-            .journal
-            .command(&command.key)
-            .map_err(pre_effect_failure)?
-            .ok_or(CommandError::Rejected("command_not_accepted"))?;
-        let record = self
-            .journal
-            .transition_command_attested(
-                &command.key,
-                &[CommandState::Running],
-                state,
-                bytes,
-                code,
-                proof,
-                now,
-            )
-            .map_err(|source| CommandError::OutcomeUnknown {
-                code: "attested_result_persistence_failed",
-                record: Box::new(before),
-                source: Box::new(source),
-            })?;
-        if record.command_id != command.command_id {
-            return Err(CommandError::IdentityConflict);
-        }
-        Ok(CommandOutcome {
-            record,
-            replayed: false,
-        })
+        let before = command.accepted_record(&self.journal)?;
+        let record = self.journal.transition_command_attested(
+            &command.key,
+            &[CommandState::Running],
+            state,
+            bytes,
+            code,
+            proof,
+            now,
+        );
+        command.attested_outcome(before, record)
     }
 
     /// Atomically persists an applied revision with its root-signed proof.
@@ -455,34 +464,20 @@ impl CommandExecutor {
         proof: &[u8],
         now: i64,
     ) -> Result<CommandOutcome, CommandError> {
-        let before = self
-            .journal
-            .command(&command.key)
-            .map_err(pre_effect_failure)?
-            .ok_or(CommandError::Rejected("command_not_accepted"))?;
-        let record = self
-            .journal
-            .complete_external_with_revision_attested(
-                &command.key,
-                &command.command_id,
-                AppliedResourceRevision {
-                    resource_type,
-                    resource_key,
-                    revision,
-                },
-                result,
-                proof,
-                now,
-            )
-            .map_err(|source| CommandError::OutcomeUnknown {
-                code: "attested_result_persistence_failed",
-                record: Box::new(before),
-                source: Box::new(source),
-            })?;
-        Ok(CommandOutcome {
-            record,
-            replayed: false,
-        })
+        let before = command.accepted_record(&self.journal)?;
+        let record = self.journal.complete_external_with_revision_attested(
+            &command.key,
+            &command.command_id,
+            AppliedResourceRevision {
+                resource_type,
+                resource_key,
+                revision,
+            },
+            result,
+            proof,
+            now,
+        );
+        command.attested_outcome(before, record)
     }
 
     /// Persists an uncertain external outcome without permitting an automatic retry.

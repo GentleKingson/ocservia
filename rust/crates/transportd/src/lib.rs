@@ -8,6 +8,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod admission;
+mod artifacts;
+mod events;
+mod registry;
+#[cfg(test)]
+use admission::record_attempt;
+use admission::{AttemptRejection, SecurityHook, record_global_attempt, trust_rejection_error};
+use artifacts::{artifact_stream_deadline, finalize_artifact_consumption, relay_artifact_stream};
 use futures_util::StreamExt as _;
 use iroh::endpoint::{
     AfterHandshakeOutcome, Connection, EndpointHooks, PathEvent, QuicTransportConfig, RelayMode,
@@ -38,6 +46,7 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
 };
 use ocservia_contracts::session::{ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME};
 use prost::Message;
+use registry::finish_session;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
@@ -670,132 +679,6 @@ impl TrustAuthority {
     }
 }
 
-#[derive(Debug)]
-struct SecurityHook {
-    policy: IdentityPolicy,
-    agent_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
-    enrollment_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
-    budgets: Arc<TrustBudgetSet>,
-}
-
-impl SecurityHook {
-    fn new(policy: IdentityPolicy, trust: &TrustAuthority) -> Self {
-        Self {
-            policy,
-            agent_attempts: Mutex::new(HashMap::new()),
-            enrollment_attempts: Mutex::new(HashMap::new()),
-            budgets: Arc::clone(&trust.budgets),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AttemptRejection {
-    Rate,
-    Capacity,
-}
-
-fn trust_rejection_error(rejection: AttemptRejection) -> AcceptError {
-    match rejection {
-        AttemptRejection::Rate => protocol_error("trust authority rate exceeded"),
-        AttemptRejection::Capacity => protocol_error("trust authority capacity reached"),
-    }
-}
-
-fn record_attempt(
-    attempts: &mut HashMap<EndpointId, VecDeque<Instant>>,
-    endpoint: EndpointId,
-    now: Instant,
-    identity_capacity: usize,
-) -> Result<(), AttemptRejection> {
-    attempts.retain(|_, endpoint_attempts| {
-        while endpoint_attempts
-            .front()
-            .is_some_and(|at| now.duration_since(*at) >= Duration::from_mins(1))
-        {
-            endpoint_attempts.pop_front();
-        }
-        !endpoint_attempts.is_empty()
-    });
-    if !attempts.contains_key(&endpoint) && attempts.len() >= identity_capacity {
-        return Err(AttemptRejection::Capacity);
-    }
-    let endpoint_attempts = attempts.entry(endpoint).or_default();
-    if endpoint_attempts.len() >= MAX_ATTEMPTS_PER_MINUTE {
-        return Err(AttemptRejection::Rate);
-    }
-    endpoint_attempts.push_back(now);
-    Ok(())
-}
-
-fn record_global_attempt(
-    attempts: &mut VecDeque<Instant>,
-    now: Instant,
-    limit: usize,
-) -> Result<(), AttemptRejection> {
-    while attempts
-        .front()
-        .is_some_and(|at| now.duration_since(*at) >= Duration::from_mins(1))
-    {
-        attempts.pop_front();
-    }
-    if attempts.len() >= limit {
-        return Err(AttemptRejection::Rate);
-    }
-    attempts.push_back(now);
-    Ok(())
-}
-
-impl EndpointHooks for SecurityHook {
-    async fn after_handshake(&self, connection: &Connection) -> AfterHandshakeOutcome {
-        let endpoint = connection.remote_id();
-        let alpn = connection.alpn();
-        if alpn != ENROLL_ALPN && alpn != AGENT_ALPN {
-            return reject(0x100, b"unsupported protocol");
-        }
-        if self.policy.revoked(endpoint)
-            || (alpn == AGENT_ALPN && !self.policy.permits(endpoint, alpn))
-        {
-            return reject(0x101, b"endpoint not permitted");
-        }
-        let (attempts, identity_capacity) = if alpn == ENROLL_ALPN {
-            (&self.enrollment_attempts, MAX_ENROLLMENT_CONNECTIONS)
-        } else {
-            (&self.agent_attempts, MAX_AGENT_CONNECTIONS)
-        };
-        let mut attempts = attempts.lock().await;
-        if record_attempt(&mut attempts, endpoint, Instant::now(), identity_capacity).is_err() {
-            return reject(0x103, b"connection rate exceeded");
-        }
-        drop(attempts);
-        let class = if alpn == ENROLL_ALPN {
-            TrustClass::UnknownEnrollmentPreAuth
-        } else {
-            TrustClass::KnownAgentHandshake
-        };
-        let _budget = match self.budgets.acquire(class).await {
-            Ok(permit) => permit,
-            Err(AttemptRejection::Capacity) => {
-                return reject(0x102, b"connection class capacity reached");
-            }
-            Err(AttemptRejection::Rate) => {
-                return reject(0x103, b"connection class rate exceeded");
-            }
-        };
-        // Enrollment has no token at this hook. It is admitted locally only;
-        // the first bounded application frame performs a pre-auth credential
-        // check, and only a valid credential reaches EnrollmentCompletion.
-        AfterHandshakeOutcome::Accept
-    }
-}
-
-fn reject(code: u32, reason: &[u8]) -> AfterHandshakeOutcome {
-    AfterHandshakeOutcome::Reject {
-        error_code: VarInt::from_u32(code),
-        reason: reason.to_vec(),
-    }
-}
-
 #[derive(Clone)]
 struct Shared {
     inner: Arc<Inner>,
@@ -910,58 +793,6 @@ impl Shared {
         }
     }
 
-    async fn publish(&self, event: TransportEvent) {
-        self.publish_event(event, false).await;
-    }
-
-    /// Publishes one node telemetry frame. `security` frames carry evidence and
-    /// are delivered with the full subscriber queue; routine frames leave half
-    /// of it for control events.
-    async fn publish_telemetry(&self, event: TransportEvent, security: bool) {
-        self.publish_event(event, !security).await;
-    }
-
-    async fn publish_event(&self, event: TransportEvent, routine_telemetry: bool) {
-        if *self.inner.shutdown.borrow() {
-            return;
-        }
-        let capacity = self.inner.event_capacity;
-        let mut state = self.inner.events.lock().await;
-        let retainable = if is_telemetry(&event) {
-            let bytes = event.payload.len();
-            while state.telemetry_retained >= (capacity / 2).max(1)
-                || state.telemetry_retained_bytes + bytes > MAX_RETAINED_TELEMETRY_BYTES
-            {
-                if !state.evict_oldest_telemetry() {
-                    break;
-                }
-            }
-            // A full queue of control events is never displaced by telemetry.
-            state.retained.len() < capacity || state.evict_oldest_telemetry()
-        } else {
-            if state.retained.len() == capacity && !state.evict_oldest_telemetry() {
-                state.pop_oldest();
-            }
-            true
-        };
-        if retainable {
-            if is_telemetry(&event) {
-                state.telemetry_retained += 1;
-                state.telemetry_retained_bytes += event.payload.len();
-            }
-            state.retained.push_back(event.clone());
-        }
-        let reserve = capacity / 2;
-        state.subscribers.retain(|sender| {
-            if routine_telemetry && sender.capacity() <= reserve {
-                // Routine telemetry yields to control events for a slow
-                // consumer instead of evicting it.
-                return !sender.is_closed();
-            }
-            matches!(sender.try_send(Ok(event.clone())), Ok(()))
-        });
-    }
-
     /// Charges one telemetry frame to the node's bucket. `false` means the
     /// node exceeded its budget and the frame must not be published.
     async fn admit_telemetry(&self, node_id: &[u8], bytes: usize) -> bool {
@@ -1017,38 +848,6 @@ impl Shared {
         true
     }
 
-    async fn remove(&self, node_id: &[u8], reason: &[u8]) -> Option<RegisteredConnection> {
-        // Invalidate any live trust decision made before this close attempt,
-        // including when the requested node has not registered yet.
-        self.inner.registration_tokens.lock().await.remove(node_id);
-        let mut registry = self.inner.connections.lock().await;
-        let registered = registry.remove(node_id);
-        if let Some(registered) = &registered {
-            registered.connection.close(VarInt::from_u32(0x104), reason);
-            self.publish(event_with_term(
-                node_id,
-                &registered.metadata.endpoint_id,
-                TransportEventType::Disconnected,
-                reason.to_vec(),
-                &registered.fence,
-            ))
-            .await;
-        }
-        drop(registry);
-        registered
-    }
-
-    async fn registration_token(&self, node_id: &[u8]) -> Arc<()> {
-        let mut tokens = self.inner.registration_tokens.lock().await;
-        tokens.retain(|_, token| token.strong_count() > 0);
-        if let Some(token) = tokens.get(node_id).and_then(Weak::upgrade) {
-            return token;
-        }
-        let token = Arc::new(());
-        tokens.insert(node_id.to_vec(), Arc::downgrade(&token));
-        token
-    }
-
     /// Verifies one Controller-signed operation binding against the node's
     /// registered fence term. The steps are fail-closed and ordered: both
     /// signatures and their node/endpoint pinning first, then the carrier
@@ -1064,13 +863,7 @@ impl Shared {
         operation_id: &[u8],
     ) -> Result<Option<RegisteredFence>, Status> {
         let node_id = fixed16(node_id)?;
-        let registered = self
-            .inner
-            .fences
-            .lock()
-            .await
-            .get(node_id.as_slice())
-            .cloned();
+        let registered = self.registered_fence(&node_id).await;
         let Some(registered) = registered else {
             return Err(Status::permission_denied(
                 "no owner fence is registered for this node",
@@ -1136,20 +929,6 @@ impl Shared {
 
     fn keyring(&self) -> &Arc<ControllerCommandKeyring> {
         &self.inner.keyring
-    }
-
-    /// Closes any live session that is not grounded in the newly recorded
-    /// fence term after an Apply.
-    async fn retire_superseded_owner(&self, node_id: &[u8], registered: &RegisteredFence) {
-        let retired = {
-            let connections = self.inner.connections.lock().await;
-            connections
-                .get(node_id)
-                .is_some_and(|entry| entry.fence.verified.fence_id != registered.verified.fence_id)
-        };
-        if retired {
-            self.remove(node_id, b"owner fence superseded").await;
-        }
     }
 
     async fn shutdown(&self) {
@@ -1280,12 +1059,8 @@ impl IrohTransportService {
         )?;
         let registered = self
             .shared
-            .inner
-            .fences
-            .lock()
+            .registered_fence(&node_id)
             .await
-            .get(node_id.as_slice())
-            .cloned()
             .ok_or_else(|| {
                 Status::permission_denied("no owner fence is registered for this node")
             })?;
@@ -1443,37 +1218,15 @@ impl TransportService for IrohTransportService {
         {
             return Err(Status::invalid_argument("artifact request is invalid"));
         }
-        let (connection, endpoint_bytes, session_fence) = self
-            .shared
-            .inner
-            .connections
-            .lock()
-            .await
-            .get(&node_id)
-            .map(|entry| {
-                (
-                    entry.connection.clone(),
-                    entry.metadata.endpoint_id.clone(),
-                    entry.fence.clone(),
-                )
-            })
-            .ok_or_else(|| Status::unavailable("node is not connected"))?;
         // Acceptance boundary contract: no response headers and no artifact
         // frames may leave this handler before verify_operation_binding has
         // accepted the fence binding. The controller holds its ownership
         // guard until the first validated frame of this stream, so deferring
         // or front-loading any output past this point would reopen the
         // stale-owner fetch window the guard exists to close.
-        let dispatch_fence = self
+        let (connection, connection_fence) = self
             .shared
-            .verify_operation_binding(
-                &node_id,
-                Some(&fixed32(&endpoint_bytes)?),
-                Some(&session_fence),
-                request.fence_binding.as_ref(),
-                FenceOperationKind::Artifact,
-                &artifact_id,
-            )
+            .artifact_connection(&node_id, request.fence_binding.as_ref(), &artifact_id)
             .await?;
         let stream_deadline = artifact_stream_deadline(grant)?;
         let payload = ArtifactFetchRequest {
@@ -1481,9 +1234,7 @@ impl TransportService for IrohTransportService {
             purpose: request.purpose,
             max_bytes: request.max_bytes,
             grant: request.grant,
-            connection_fence: dispatch_fence
-                .as_ref()
-                .map(|registered| registered.fence.clone()),
+            connection_fence,
             fence_binding: request.fence_binding,
         }
         .encode_to_vec();
@@ -1524,40 +1275,16 @@ impl TransportService for IrohTransportService {
         let expected_artifact_id = grant.artifact_id.clone();
         let expected_grant_id = grant.grant_id.clone();
         let confirm_only = request.confirm_only;
-        let (connection, endpoint_bytes, session_fence) = self
+        let (connection, connection_fence) = self
             .shared
-            .inner
-            .connections
-            .lock()
-            .await
-            .get(&node_id)
-            .map(|entry| {
-                (
-                    entry.connection.clone(),
-                    entry.metadata.endpoint_id.clone(),
-                    entry.fence.clone(),
-                )
-            })
-            .ok_or_else(|| Status::unavailable("node is not connected"))?;
-        let dispatch_fence = self
-            .shared
-            .verify_operation_binding(
-                &node_id,
-                Some(&fixed32(&endpoint_bytes)?),
-                Some(&session_fence),
-                request.fence_binding.as_ref(),
-                FenceOperationKind::Artifact,
-                &expected_grant_id,
-            )
+            .artifact_connection(&node_id, request.fence_binding.as_ref(), &expected_grant_id)
             .await?;
         let payload = AgentArtifactConsumeRequest {
             grant: request.grant,
             sha256: request.sha256,
             size: request.size,
             confirm_only,
-            connection_fence: dispatch_fence
-                .as_ref()
-                .map(|registered| registered.fence.clone()),
+            connection_fence,
             fence_binding: request.fence_binding,
         }
         .encode_to_vec();
@@ -1619,31 +1346,7 @@ impl TransportService for IrohTransportService {
         if *shutdown.borrow() {
             return Err(Status::unavailable("transport is shutting down"));
         }
-        let mut state = self.shared.inner.events.lock().await;
-        state.subscribers.retain(|sender| !sender.is_closed());
-        if !after.is_empty() && !state.retained.iter().any(|item| item.event_id == after) {
-            return Err(Status::out_of_range("event cursor is outside retention"));
-        }
-        if state.subscribers.len() == self.shared.inner.event_capacity {
-            return Err(Status::resource_exhausted(
-                "event subscriber capacity reached",
-            ));
-        }
-        let backlog = state
-            .retained
-            .iter()
-            .skip_while(|item| !after.is_empty() && item.event_id != after)
-            .skip(usize::from(!after.is_empty()))
-            .cloned()
-            .collect::<Vec<_>>();
-        let (sender, receiver) = mpsc::channel(self.shared.inner.event_capacity);
-        for item in backlog {
-            sender
-                .try_send(Ok(item))
-                .map_err(|_| Status::internal("retained event queue overflow"))?;
-        }
-        state.subscribers.push(sender);
-        drop(state);
+        let receiver = self.shared.subscribe_events(&after).await?;
         let shutdown_signal =
             async move { while !*shutdown.borrow() && shutdown.changed().await.is_ok() {} };
         Ok(Response::new(Box::pin(
@@ -1726,22 +1429,9 @@ impl TransportService for IrohTransportService {
             && retained_state == state
             && retained_revision > previous_revision
         {
-            let should_close = self
-                .shared
-                .inner
-                .connections
-                .lock()
-                .await
-                .get(&node_id)
-                .is_some_and(|entry| entry.authorization_revision < retained_revision);
-            if should_close {
-                let reason = if state == NodeTrustState::Revoked {
-                    b"node revoked".as_slice()
-                } else {
-                    b"node authorization changed".as_slice()
-                };
-                let _ = self.shared.remove(&node_id, reason).await;
-            }
+            self.shared
+                .retire_prior_authorization(&node_id, retained_revision, state)
+                .await;
         }
         let disposition = match disposition {
             PolicyUpdateDisposition::Applied => TrustUpdateDisposition::Applied,
@@ -1763,77 +1453,7 @@ impl TransportService for IrohTransportService {
         let fence = request
             .fence
             .ok_or_else(|| Status::invalid_argument("owner fence is required"))?;
-        let node_id = validate_uuid(&fence.node_id, "node_id")?;
-        let endpoint_id = fixed32(&fence.endpoint_id)?;
-        let keyring = self.shared.keyring();
-        let (now_seconds, now_nanos) = unix_now_parts();
-        let verified = keyring
-            .verify_connection_fence_v2_at(
-                &fence,
-                &fixed16(&node_id)?,
-                &endpoint_id,
-                now_seconds,
-                now_nanos,
-            )
-            .map_err(|_| Status::permission_denied("owner fence is invalid"))?;
-        if lease_expired_at(verified.lease_until_seconds, verified.lease_until_nanos) {
-            return Err(Status::failed_precondition("owner fence lease has expired"));
-        }
-        // A live registered session pins the endpoint this fence must claim,
-        // so a fence cannot be planted for a node owned by another endpoint.
-        {
-            let connections = self.shared.inner.connections.lock().await;
-            if connections.get(&node_id).is_some_and(|entry| {
-                entry.metadata.endpoint_id.as_slice() != endpoint_id.as_slice()
-            }) {
-                return Err(Status::permission_denied(
-                    "owner fence endpoint does not match the registered session",
-                ));
-            }
-        }
-        let registered = RegisteredFence {
-            verified: verified.clone(),
-            fence,
-            endpoint_id,
-        };
-        let disposition = {
-            let mut fences = self.shared.inner.fences.lock().await;
-            if let Some(existing) = fences.get(&node_id)
-                && existing.verified.owner_epoch > verified.owner_epoch
-            {
-                let retained_epoch = existing.verified.owner_epoch;
-                return Ok(Response::new(RegisterOwnerFenceResponse {
-                    disposition: OwnerFenceDisposition::Stale.into(),
-                    retained_epoch,
-                }));
-            }
-            match fence_registration_decision(fences.get(&node_id), &registered) {
-                FenceRegistration::Stale => OwnerFenceDisposition::Stale,
-                FenceRegistration::EpochCollision => {
-                    return Err(Status::invalid_argument(
-                        "owner epoch is already claimed by a different fence",
-                    ));
-                }
-                FenceRegistration::Refresh => {
-                    fences.insert(node_id.clone(), registered.clone());
-                    OwnerFenceDisposition::Refreshed
-                }
-                FenceRegistration::Apply => {
-                    fences.insert(node_id.clone(), registered.clone());
-                    OwnerFenceDisposition::Applied
-                }
-            }
-        };
-        let retained_epoch = verified.owner_epoch;
-        if disposition == OwnerFenceDisposition::Applied {
-            self.shared
-                .retire_superseded_owner(&node_id, &registered)
-                .await;
-        }
-        Ok(Response::new(RegisterOwnerFenceResponse {
-            disposition: disposition.into(),
-            retained_epoch,
-        }))
+        self.shared.register_fence(fence).await.map(Response::new)
     }
 
     async fn get_owner_fence(
@@ -1843,12 +1463,9 @@ impl TransportService for IrohTransportService {
         let node_id = validate_uuid(&request.into_inner().node_id, "node_id")?;
         let fence = self
             .shared
-            .inner
-            .fences
-            .lock()
+            .registered_fence(&fixed16(&node_id)?)
             .await
-            .get(fixed16(&node_id)?.as_slice())
-            .map(|registered| registered.fence.clone())
+            .map(|registered| registered.fence)
             .ok_or_else(|| Status::not_found("owner fence is not registered"))?;
         Ok(Response::new(GetOwnerFenceResponse { fence: Some(fence) }))
     }
@@ -2041,80 +1658,15 @@ impl ProtocolHandler for SessionHandler {
                 return Err(trust_rejection_error(rejection));
             }
         }
-        let mut registry = self.shared.inner.connections.lock().await;
-        // Trust updates change policy before taking the registry lock. Checking
-        // both local policy and this node's close token makes a concurrent revoke
-        // either reject this session here or close it after registration.
-        if self.policy.revoked(connection.remote_id())
-            || !Arc::ptr_eq(
-                &self.shared.registration_token(&node_id).await,
+        self.shared
+            .register_session(
+                &self.policy,
+                &connection,
+                metadata,
+                session,
                 &registration_token,
             )
-        {
-            connection.close(VarInt::from_u32(0x101), b"session revoked");
-            return Err(protocol_error("endpoint was revoked during handshake"));
-        }
-        {
-            let mut fences = self.shared.inner.fences.lock().await;
-            match fence_registration_decision(fences.get(&node_id), &session.fence) {
-                FenceRegistration::Stale => {
-                    drop(fences);
-                    drop(registry);
-                    connection.close(VarInt::from_u32(0x109), b"stale owner epoch");
-                    return Err(protocol_error(
-                        "session fence epoch is lower than the registered owner epoch",
-                    ));
-                }
-                FenceRegistration::EpochCollision => {
-                    drop(fences);
-                    drop(registry);
-                    connection.close(VarInt::from_u32(0x10a), b"owner epoch reused");
-                    return Err(protocol_error(
-                        "two distinct fences claim the same owner epoch",
-                    ));
-                }
-                FenceRegistration::Apply | FenceRegistration::Refresh => {
-                    fences.insert(node_id.clone(), session.fence.clone());
-                }
-            }
-        }
-        let replaced = registry.insert(
-            node_id.clone(),
-            RegisteredConnection {
-                metadata: metadata.clone(),
-                connection: connection.clone(),
-                max_message_size,
-                negotiated_capabilities: session.negotiated_capabilities,
-                authorization_revision: session.authorization_revision,
-                session_expires_at: session.session_expires_at,
-                fence: session.fence.clone(),
-            },
-        );
-        if let Some(previous) = replaced {
-            previous
-                .connection
-                .close(VarInt::from_u32(0x106), b"superseded connection");
-            self.shared
-                .publish(event_with_term(
-                    &node_id,
-                    &previous.metadata.endpoint_id,
-                    TransportEventType::Disconnected,
-                    b"connection superseded".to_vec(),
-                    &previous.fence,
-                ))
-                .await;
-        }
-        self.shared
-            .publish(event_with_term(
-                &node_id,
-                &metadata.endpoint_id,
-                TransportEventType::Connected,
-                metadata.path_detail.as_bytes().to_vec(),
-                &session.fence,
-            ))
-            .await;
-        drop(registry);
-
+            .await?;
         let monitors = (
             monitor_paths(self.shared.clone(), node_id.clone(), connection.clone()),
             monitor_telemetry(
@@ -2128,39 +1680,6 @@ impl ProtocolHandler for SessionHandler {
         let _closed = connection.closed().await;
         finish_session(&self.shared, &node_id, &connection, monitors, permit).await;
         Ok(())
-    }
-}
-
-async fn finish_session(
-    shared: &Shared,
-    node_id: &[u8],
-    connection: &Connection,
-    monitors: (
-        tokio::task::JoinHandle<()>,
-        tokio::task::JoinHandle<()>,
-        tokio::task::JoinHandle<()>,
-    ),
-    _permit: OwnedSemaphorePermit,
-) {
-    monitors.0.abort();
-    monitors.1.abort();
-    monitors.2.abort();
-    let mut registry = shared.inner.connections.lock().await;
-    let finishing = registry
-        .get(node_id)
-        .filter(|entry| entry.connection.stable_id() == connection.stable_id())
-        .map(|entry| entry.fence.clone());
-    if let Some(fence) = finishing {
-        registry.remove(node_id);
-        shared
-            .publish(event_with_term(
-                node_id,
-                connection.remote_id().as_bytes(),
-                TransportEventType::Disconnected,
-                b"connection closed".to_vec(),
-                &fence,
-            ))
-            .await;
     }
 }
 
@@ -2879,178 +2398,6 @@ fn fence_registration_decision(
             FenceRegistration::Refresh
         }
         _ => FenceRegistration::Apply,
-    }
-}
-
-/// Runs one artifact finalize exchange with the Agent and validates the
-/// response against the exact consumed grant carrier.
-async fn finalize_artifact_consumption(
-    connection: Connection,
-    payload: Vec<u8>,
-    expected_artifact_id: Vec<u8>,
-    expected_grant_id: Vec<u8>,
-    confirm_only: bool,
-) -> Result<AgentArtifactConsumeResponse, Status> {
-    let (mut send, mut recv) = connection
-        .open_bi()
-        .await
-        .map_err(|_| Status::unavailable("failed to open artifact finalize stream"))?;
-    let length = u32::try_from(payload.len())
-        .map_err(|_| Status::resource_exhausted("artifact finalize request is too large"))?
-        | ARTIFACT_CONSUME_FRAME;
-    send.write_all(&length.to_be_bytes())
-        .await
-        .map_err(|_| Status::unavailable("failed to write artifact finalize length"))?;
-    send.write_all(&payload)
-        .await
-        .map_err(|_| Status::unavailable("failed to write artifact finalize request"))?;
-    send.finish()
-        .map_err(|_| Status::unavailable("failed to finish artifact finalize request"))?;
-    let mut size = [0_u8; 4];
-    recv.read_exact(&mut size)
-        .await
-        .map_err(|_| Status::unavailable("artifact finalize response ended"))?;
-    let size = u32::from_be_bytes(size) as usize;
-    if size == 0 || size > 64 * 1024 {
-        return Err(Status::data_loss("artifact finalize response is invalid"));
-    }
-    let mut bytes = vec![0; size];
-    recv.read_exact(&mut bytes)
-        .await
-        .map_err(|_| Status::unavailable("artifact finalize response ended"))?;
-    let response = AgentArtifactConsumeResponse::decode(bytes.as_slice())
-        .map_err(|_| Status::data_loss("artifact finalize response is invalid"))?;
-    if response.artifact_id != expected_artifact_id
-        || response.grant_id != expected_grant_id
-        || (!confirm_only && !response.consumed)
-    {
-        return Err(Status::data_loss(
-            "artifact finalize response is inconsistent",
-        ));
-    }
-    Ok(response)
-}
-
-/// Converts the grant expiry into one absolute stream deadline. The grant is
-/// authoritative for how long this export may run; chunks never extend it.
-fn artifact_stream_deadline(grant: &ArtifactGrantV1) -> Result<tokio::time::Instant, Status> {
-    let expires_at = grant
-        .expires_at
-        .as_ref()
-        .and_then(|expires_at| SystemTime::try_from(*expires_at).ok())
-        .ok_or_else(|| Status::invalid_argument("artifact grant expiry is invalid"))?;
-    let remaining = expires_at
-        .duration_since(SystemTime::now())
-        .map_err(|_| Status::deadline_exceeded("artifact grant has expired"))?;
-    Ok(tokio::time::Instant::now() + remaining)
-}
-
-/// Streams one artifact fetch from the Agent to the Controller consumer,
-/// validating every chunk against the exact request carrier before it is
-/// forwarded. Consumer cancellation and the grant deadline bound the whole
-/// forwarding future; the Agent stream is then reset/stopped without closing
-/// the shared Agent connection.
-async fn relay_artifact_stream(
-    connection: Connection,
-    payload: Vec<u8>,
-    artifact_id: Vec<u8>,
-    max_bytes: u64,
-    sender: mpsc::Sender<Result<ArtifactChunk, Status>>,
-    deadline: tokio::time::Instant,
-) {
-    let mut streams = None;
-    let outcome = tokio::select! {
-        outcome = forward_artifact_chunks(
-            &connection,
-            &payload,
-            &artifact_id,
-            max_bytes,
-            &sender,
-            &mut streams,
-        ) => outcome,
-        () = sender.closed() => Err(Status::cancelled("artifact consumer disconnected")),
-        () = tokio::time::sleep_until(deadline) => {
-            Err(Status::deadline_exceeded("artifact grant expired"))
-        }
-    };
-    let Err(error) = outcome else { return };
-    if let Some((mut send, mut recv)) = streams {
-        let _ = send.reset(ARTIFACT_STREAM_ABORT);
-        let _ = recv.stop(ARTIFACT_STREAM_ABORT);
-    }
-    // Never wait for a consumer that is not draining the channel.
-    let _ = sender.try_send(Err(error));
-}
-
-async fn forward_artifact_chunks(
-    connection: &Connection,
-    payload: &[u8],
-    artifact_id: &[u8],
-    max_bytes: u64,
-    sender: &mpsc::Sender<Result<ArtifactChunk, Status>>,
-    streams: &mut Option<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
-) -> Result<(), Status> {
-    let (send, recv) = streams.insert(
-        connection
-            .open_bi()
-            .await
-            .map_err(|_| Status::unavailable("failed to open artifact stream"))?,
-    );
-    let length = u32::try_from(payload.len())
-        .map_err(|_| Status::resource_exhausted("artifact request is too large"))?
-        | ARTIFACT_FETCH_FRAME;
-    send.write_all(&length.to_be_bytes())
-        .await
-        .map_err(|_| Status::unavailable("failed to write artifact request length"))?;
-    send.write_all(payload)
-        .await
-        .map_err(|_| Status::unavailable("failed to write artifact request"))?;
-    send.finish()
-        .map_err(|_| Status::unavailable("failed to finish artifact request"))?;
-    let mut expected_offset = 0_u64;
-    loop {
-        let mut size = [0_u8; 4];
-        tokio::time::timeout(Duration::from_secs(30), recv.read_exact(&mut size))
-            .await
-            .map_err(|_| Status::deadline_exceeded("artifact stream timed out"))?
-            .map_err(|_| Status::unavailable("artifact stream ended"))?;
-        let size = u32::from_be_bytes(size) as usize;
-        if size == 0 || size > MAX_FRAME_BYTES {
-            return Err(Status::resource_exhausted("artifact chunk is invalid"));
-        }
-        let mut bytes = vec![0; size];
-        recv.read_exact(&mut bytes)
-            .await
-            .map_err(|_| Status::unavailable("artifact chunk ended"))?;
-        let chunk = ArtifactChunk::decode(bytes.as_slice())
-            .map_err(|_| Status::data_loss("artifact chunk protobuf is invalid"))?;
-        if chunk.artifact_id != artifact_id
-            || chunk.offset != expected_offset
-            || chunk.data.len() > 256 * 1024
-            || expected_offset.saturating_add(chunk.data.len() as u64) > max_bytes
-            || (!chunk.eof && !chunk.sha256.is_empty())
-            || (chunk.eof && chunk.sha256.len() != 32)
-        {
-            return Err(Status::data_loss("artifact chunk is inconsistent"));
-        }
-        expected_offset = expected_offset.saturating_add(chunk.data.len() as u64);
-        let eof = chunk.eof;
-        if eof {
-            // Consume QUIC FIN before forwarding the terminal chunk. Dropping
-            // an unread stream sends STOP_SENDING and invalidates the Agent's
-            // delivery acknowledgement even when every payload byte arrived.
-            tokio::time::timeout(Duration::from_secs(30), recv.read_to_end(0))
-                .await
-                .map_err(|_| Status::deadline_exceeded("artifact stream termination timed out"))?
-                .map_err(|_| Status::data_loss("artifact stream has invalid trailing data"))?;
-        }
-        sender
-            .send(Ok(chunk))
-            .await
-            .map_err(|_| Status::cancelled("artifact consumer disconnected"))?;
-        if eof {
-            return Ok(());
-        }
     }
 }
 
