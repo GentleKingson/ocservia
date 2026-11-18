@@ -1,0 +1,329 @@
+package certificates
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"time"
+
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/certificates/artifactstore"
+	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
+)
+
+func (s *Service) ArtifactResource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		workspaceID, nodeID, err = store.Resource(ctx, id)
+		return err
+	})
+	return
+}
+
+func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, subject uuid.UUID) (ArtifactDownload, error) {
+	if id == uuid.Nil || subject == uuid.Nil || len(token) != 43 || s.artifacts == nil || s.grantSigner == nil {
+		return ArtifactDownload{}, ErrArtifactDenied
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+	grantID := uuid.Must(uuid.NewV7())
+	var eligible artifactstore.Eligible
+	var grant *agentv1.ArtifactGrantV1
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		if err = store.LockCapacity(ctx); err != nil {
+			return err
+		}
+		active, err := store.Active(ctx)
+		if err != nil {
+			return err
+		}
+		if active >= 4 {
+			return ErrArtifactCapacity
+		}
+		eligible, err = store.Eligible(ctx, id, tokenHash[:])
+		if err != nil {
+			return ErrArtifactDenied
+		}
+		if eligible.RequesterID != subject {
+			return ErrArtifactDenied
+		}
+		issuedAt := s.now().UTC()
+		expires := issuedAt.Add(time.Minute)
+		for _, deadline := range []value.Timestamp{eligible.ArtifactExpires, eligible.CertificateExpires} {
+			if !deadline.Valid || deadline.Validate() != nil {
+				return ErrArtifactDenied
+			}
+			if deadline.Micros == value.PositiveInfinity {
+				continue
+			}
+			finite, timeErr := deadline.Time()
+			if timeErr != nil {
+				return ErrArtifactDenied
+			}
+			if finite.Before(expires) {
+				expires = finite
+			}
+		}
+		grant, err = s.grantSigner.IssueArtifactGrant(eligible.NodeID, id, eligible.CertificateID, eligible.CertificateVersion, eligible.OperationID, eligible.RequesterID.String(), uint64(eligible.Size), grantID, issuedAt, expires)
+		if err != nil {
+			return err
+		}
+		return store.Lease(ctx, id, grantID, subject, expires)
+	})
+	if err != nil {
+		return ArtifactDownload{}, err
+	}
+	var reader io.ReadCloser
+	if err := s.executeArtifactFenced(ctx, eligible.NodeID, id,
+		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			fetched, err := s.artifacts.FetchArtifact(ctx, grant, binding)
+			if err != nil {
+				return err
+			}
+			reader = fetched
+			return nil
+		}); err != nil {
+		_ = s.AbortArtifact(context.WithoutCancel(ctx), id, grantID)
+		return ArtifactDownload{}, err
+	}
+	return ArtifactDownload{Reader: reader, ExpectedSHA256: eligible.Digest, Size: eligible.Size, NodeID: eligible.NodeID, GrantID: grantID, Grant: grant}, nil
+}
+
+func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, actorID, sessionID uuid.UUID, requestID string) error {
+	if grant == nil || actorID == uuid.Nil || sessionID == uuid.Nil || requestID == "" || len(requestID) > 128 || grant.GetVersion() != agentv1.ArtifactGrantVersion_ARTIFACT_GRANT_VERSION_V1 || grant.GetPurpose() != "certificate_p12" || grant.GetCertificateVersion() == 0 || grant.GetAuthorizedSubject() != actorID.String() || !bytes.Equal(grant.GetArtifactId(), id[:]) || !bytes.Equal(grant.GetGrantId(), grantID[:]) || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
+		return ErrArtifactDenied
+	}
+	nodeID, nodeErr := uuid.FromBytes(grant.GetNodeId())
+	certificateID, certificateErr := uuid.FromBytes(grant.GetCertificateId())
+	operationID, operationErr := uuid.FromBytes(grant.GetOperationId())
+	if nodeErr != nil || certificateErr != nil || operationErr != nil || nodeID.Version() != 7 || certificateID.Version() != 7 || operationID.Version() != 7 {
+		return ErrArtifactDenied
+	}
+	grantBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(grant)
+	if err != nil || len(grantBytes) == 0 || len(grantBytes) > 4096 {
+		return ErrArtifactDenied
+	}
+	consumption := artifactstore.Consumption{ID: id, GrantID: grantID, ActorID: actorID, SessionID: sessionID, NodeID: nodeID, CertificateID: certificateID, OperationID: operationID, CertificateVersion: grant.GetCertificateVersion(), Grant: grantBytes, Digest: digest, Size: size, RequestID: requestID}
+	exactReplay := false
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		changed, err := store.StartConsumption(ctx, consumption)
+		if err != nil {
+			return err
+		}
+		if changed {
+			return nil
+		}
+		exactReplay, err = store.ExactReplay(ctx, consumption)
+		if err != nil {
+			return err
+		}
+		if !exactReplay {
+			return ErrArtifactDenied
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if exactReplay {
+		return nil
+	}
+	// Run the root consume inside the owner fencing interval: the binding is
+	// signed and the mutation RPC completes before the ownership guard is
+	// released. Recovery can later confirm this same root record without
+	// authorizing a new mutation after the grant expires.
+	if err := s.executeArtifactFenced(ctx, nodeID, grantID,
+		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			return s.artifacts.ConsumeArtifact(ctx, grant, digest, size, binding)
+		}); err != nil {
+		return err
+	}
+	result, err := s.finalizeArtifactConsumption(ctx, id, grantID)
+	if err != nil {
+		return err
+	}
+	switch result {
+	case artifactConsumptionFinalized, artifactConsumptionAlreadyFinalized:
+		return nil
+	default:
+		return ErrArtifactDenied
+	}
+}
+
+type artifactConsumptionFinalization uint8
+
+const (
+	artifactConsumptionFinalized artifactConsumptionFinalization = iota
+	artifactConsumptionAlreadyFinalized
+	artifactConsumptionRevoked
+	artifactConsumptionExpired
+)
+
+func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID uuid.UUID) (artifactConsumptionFinalization, error) {
+	result := artifactConsumptionFinalized
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		v, err := store.Finalize(ctx, id, grantID)
+		if errors.Is(err, database.ErrNotFound) {
+			state, err := store.State(ctx, id, grantID)
+			if err != nil {
+				return ErrArtifactDenied
+			}
+			switch state {
+			case "consumed":
+				result = artifactConsumptionAlreadyFinalized
+			case "revoked":
+				result = artifactConsumptionRevoked
+			case "expired":
+				result = artifactConsumptionExpired
+			default:
+				return ErrArtifactDenied
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err = audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: v.WorkspaceID, ActorType: "user", ActorID: v.ActorID.String(), SessionID: &v.SessionID, Action: "certificate.p12.download", ResourceType: "artifact", ResourceID: id, NodeID: &v.NodeID, RequestID: v.RequestID, Result: "succeeded", AfterSummary: json.RawMessage(fmt.Sprintf(`{"certificate_id":%q,"sha256":%q,"size":%d}`, v.CertificateID, hex.EncodeToString(v.Digest), v.Size)), At: s.now()}); err != nil {
+			return err
+		}
+		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+	})
+	return result, err
+}
+
+func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
+	var records []artifactstore.PendingConsumption
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		records, err = store.PendingConsumptions(ctx)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	values := make([]pendingArtifactConsumption, 0, 20)
+	for _, record := range records {
+		value := pendingArtifactConsumption{id: record.ID, grantID: record.GrantID, grant: &agentv1.ArtifactGrantV1{}, digest: record.Digest, size: record.Size, actorID: record.ActorID, expiresAt: record.ExpiresAt}
+		if err := proto.Unmarshal(record.Grant, value.grant); err != nil || !bytes.Equal(value.grant.GetArtifactId(), value.id[:]) || !bytes.Equal(value.grant.GetGrantId(), value.grantID[:]) || value.grant.GetAuthorizedSubject() != value.actorID.String() || value.grant.GetMaxBytes() != uint64(value.size) {
+			return ErrArtifactDenied
+		}
+		values = append(values, value)
+	}
+	for _, item := range values {
+		if err := s.reconcileArtifactConsumption(ctx, item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type pendingArtifactConsumption struct {
+	id, grantID uuid.UUID
+	grant       *agentv1.ArtifactGrantV1
+	digest      []byte
+	size        int64
+	actorID     uuid.UUID
+	expiresAt   value.Timestamp
+}
+
+func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pendingArtifactConsumption) error {
+	recoveryNode, nodeErr := uuid.FromBytes(item.grant.GetNodeId())
+	if nodeErr != nil {
+		return nil
+	}
+	var consumed bool
+	confirmErr := s.executeArtifactFenced(ctx, recoveryNode, item.grantID,
+		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			confirmed, err := s.artifacts.ConfirmArtifactConsumed(ctx, item.grant, item.digest, item.size, binding)
+			consumed = confirmed
+			return err
+		})
+	if confirmErr != nil {
+		// Reconciliation is item-scoped. A disconnected node or restarting
+		// Agent must not turn one durable artifact into a global scheduler
+		// failure; exact evidence remains in consuming for the next pass.
+		return nil
+	}
+	grantExpires := item.grant.GetExpiresAt()
+	if grantExpires == nil {
+		return ErrArtifactDenied
+	}
+	if !consumed && grantExpires.AsTime().After(s.now()) {
+		if err := s.executeArtifactFenced(ctx, recoveryNode, item.grantID,
+			func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+				return s.artifacts.ConsumeArtifact(ctx, item.grant, item.digest, item.size, binding)
+			}); err != nil {
+			return nil
+		}
+		consumed = true
+	}
+	if consumed {
+		// Revocation and expiry may win the terminal transition after root
+		// confirmation. They are benign for reconciliation, but the explicit
+		// result prevents an in-flight HTTP request from treating them as a
+		// successful delivery.
+		if _, err := s.finalizeArtifactConsumption(ctx, item.id, item.grantID); err != nil {
+			return err
+		}
+	} else {
+		now, err := value.FromTime(s.now())
+		if err != nil {
+			return err
+		}
+		if !item.expiresAt.Valid {
+			return ErrArtifactDenied
+		}
+		if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+			store, err := artifactstore.FromTransaction(tx)
+			if err != nil {
+				return err
+			}
+			if err := store.ResetConsumption(ctx, item.id, item.grantID, item.expiresAt.Micros <= now.Micros); err != nil {
+				return err
+			}
+			return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) AbortArtifact(ctx context.Context, id, grantID uuid.UUID) error {
+	// Preserve the durable lease until its bounded expiry. A transport failure
+	// must not make a second concurrently valid grant immediately issuable.
+	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		return store.Abort(ctx, id, grantID)
+	})
+}

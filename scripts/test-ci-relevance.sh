@@ -83,7 +83,7 @@ while read -r path selected; do
           expect "${out}" ci_suites cross-vm ;;
         scripts/real-e2e-*|scripts/test-real-e2e-*)
           expect "${out}" ci_suites 'cross-vm source-style' ;;
-        scripts/release-business-api.py) expect "${out}" ci_suites 'release cross-vm source-style' ;;
+        scripts/release-business-api.py|scripts/release_business_runtime.py|scripts/release_business_scenarios.py) expect "${out}" ci_suites 'release cross-vm source-style' ;;
         .github/actions/build-cache-credentials/index.js)
           expect "${out}" ci_suites release ;;
         scripts/buildx-cache.sh|scripts/test-bootstrap-installers.sh|scripts/resilience-capacity-lib.sh)
@@ -192,6 +192,8 @@ deploy/real-e2e/compose.yaml run_ci_tools
 scripts/real-e2e-controller.sh run_ci_tools
 scripts/test-real-e2e-hosted.py run_ci_tools
 scripts/release-business-api.py run_ci_tools run_installers
+scripts/release_business_runtime.py run_ci_tools run_installers
+scripts/release_business_scenarios.py run_ci_tools run_installers
 deploy/production/integrated/README.md run_docs
 deploy/production/relay-build.md run_docs
 scripts/upgrade-agent.sh run_ci_tools run_installers
