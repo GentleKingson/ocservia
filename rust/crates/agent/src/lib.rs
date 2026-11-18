@@ -24,7 +24,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     SemanticPayloadHashVersion, command_envelope,
 };
 use prost::Message;
-use rand::Rng;
+use rand::{Rng, RngExt};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 use tokio::net::UnixStream;

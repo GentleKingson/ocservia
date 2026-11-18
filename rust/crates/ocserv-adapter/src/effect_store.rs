@@ -2,7 +2,7 @@ use super::{
     AdapterError, ArtifactLeaseIdentity, AuthorizedEffectDecision, AuthorizedEffectIdentity,
     Connection, DesiredEffectObservation, DesiredEffectState, Digest, EFFECT_STORE_KEY_BYTES,
     EffectIdentity, FixedResources, MAX_ARTIFACT_BYTES, MAX_EFFECT_RECORDS, MAX_FRAME_BYTES,
-    OpenFlags, OpenOptionsExt, OptionalExtension, Path, PermissionsExt, RngCore, Sha256,
+    OpenFlags, OpenOptionsExt, OptionalExtension, Path, PermissionsExt, Rng, Sha256,
     StdOpenOptions, SystemTime, TransactionBehavior, UNIX_EPOCH, Uuid, Zeroizing, io, params,
     validate_name,
 };

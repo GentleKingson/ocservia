@@ -36,7 +36,7 @@ use ocservia_agent_protocol::{
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     SealedSecretPurpose, SealedSecretV1, SealedSecretVersion,
 };
-use rand::RngCore;
+use rand::Rng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
