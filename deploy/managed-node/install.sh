@@ -44,12 +44,9 @@ JOIN_TOKEN_FILE=""
 JOIN_STATE_DIR=""
 JOIN_ORIGIN=""
 
-# The installer's own absolute path (the --root-lifecycle re-exec target, so
-# the deliberate root lifecycle never depends on living inside a checkout)
-# and the repository root for the legacy Git-tag identity path.
+# Re-execute the same installer across the sudo boundary.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
-ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 OS_RELEASE_FILE="${OCSERV_MANAGED_NODE_OS_RELEASE:-/etc/os-release}"
 SYSROOT="${OCSERV_MANAGED_NODE_SYSROOT:-}"
@@ -73,9 +70,6 @@ PLACEHOLDER_RELAY_URL_A="https://relay-a.example.com"
 PLACEHOLDER_NODE_ID="00000000-0000-7000-8000-000000000000"
 SUPPORTED_HOSTS="Ubuntu 22.04/24.04/26.04 and Debian 12/13 (dpkg), Rocky Linux 9 (rpm), x86_64/aarch64, systemd"
 VERSION="${DEFAULT_VERSION}"
-RELEASE_TAG=""
-RELEASE_COMMIT=""
-RELEASE_VERSION=""
 ARCH_WORD=""
 RPM_ARCH=""
 PACKAGE_FAMILY=""
@@ -112,11 +106,7 @@ usage() {
   exit 2
 }
 
-# The formal mode pins the exact release on the command line: no Git
-# checkout, no repository siblings, and no trust in the invoking directory.
-# The version is public release identity, not secret material, so it may
-# appear on the command line. Initial downloads use HTTPS and are frozen in
-# root-owned staging before the native package manager runs.
+# Release assets embed their tag. Automation can supply an exact tag explicitly.
 version_seen=false
 while (($# > 0)); do
   case "$1" in
@@ -153,12 +143,10 @@ done
 if [[ -z "${JOIN_TOKEN_FILE}" ]]; then
   [[ -t 0 && -t 1 ]] || fail "installation token input requires a TTY; use --join-token-file or --resume-install"
 fi
-if [[ -n "${VERSION}" ]]; then
-  [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
-    fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
-  RELEASE_TAG="${VERSION}"
-  RELEASE_VERSION="${VERSION#v}"
-fi
+[[ -n "${VERSION}" ]] || fail "use the pinned Release installer or supply --version vX.Y.Z"
+[[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
+  fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
+RELEASE_VERSION="${VERSION#v}"
 
 USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-}"
 P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-}"
@@ -207,7 +195,7 @@ forward_root_lifecycle() {
   # The --version pin is operator-chosen public release identity, not node
   # configuration: it re-crosses the privilege boundary as the same explicit
   # command-line argument instead of an environment variable.
-  [[ -z "${RELEASE_TAG}" ]] || reexec_arguments+=(--version "${RELEASE_TAG}")
+  reexec_arguments+=(--version "${VERSION}")
   while IFS= read -r variable; do
     for allowed in "${ROOT_LIFECYCLE_ENV_NAMES[@]}"; do
       [[ "${variable}" == "${allowed}" ]] || continue
@@ -222,32 +210,6 @@ forward_root_lifecycle() {
   [[ "${NON_INTERACTIVE}" == false ]] || sudo_args+=(-n)
   exec sudo "${sudo_args[@]}" env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
     bash "${INSTALLER_PATH}" "${reexec_arguments[@]}"
-}
-
-resolve_release_identity() {
-  local tag matching=()
-  if [[ -n "${RELEASE_TAG}" ]]; then
-    # --version mode: the release identity came from the validated command
-    # line. No Git checkout is consulted and nothing about the invoking
-    # directory is trusted. The native package is downloaded over HTTPS
-    # and frozen before the package manager runs.
-    echo "release identity: ${RELEASE_TAG} (pinned by --version)"
-    return
-  fi
-  command -v git >/dev/null 2>&1 ||
-    fail "git is required to identify the release checkout"
-  RELEASE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)" ||
-    fail "${ROOT} is not a Git checkout; install from a clean checkout of an exact vX.Y.Z release tag"
-  while IFS= read -r tag; do
-    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] && matching+=("${tag}")
-  done < <(git -C "${ROOT}" tag --points-at HEAD)
-  ((${#matching[@]} == 1)) ||
-    fail "checkout HEAD must correspond to exactly one exact vX.Y.Z release tag (found ${#matching[@]}); check out the release tag to install, e.g. git clone --branch vX.Y.Z --depth 1 <repository>"
-  RELEASE_TAG="${matching[0]}"
-  RELEASE_VERSION="${RELEASE_TAG#v}"
-  [[ -z "$(git -C "${ROOT}" status --porcelain --untracked-files=all)" ]] ||
-    fail "the checkout at ${RELEASE_TAG} is dirty; install from a clean checkout"
-  echo "release identity: ${RELEASE_TAG} (${RELEASE_COMMIT})"
 }
 
 resolve_architecture() {
@@ -308,8 +270,6 @@ validate_sysroot() {
 
 require_commands() {
   local tool
-  # git is deliberately absent: it is needed only by the legacy
-  # checkout-identity path, which enforces its own git requirement.
   for tool in curl openssl sha256sum awk; do
     command -v "${tool}" >/dev/null 2>&1 ||
       fail "${tool} is required by the managed-node installer"
@@ -379,9 +339,9 @@ create_package_staging() {
 download_release_artifacts() {
   local name
   for name in "$@"; do
-    echo "downloading ${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
+    echo "downloading ${DOWNLOAD_BASE}/${VERSION}/${name}"
     curl -fsSL --proto '=https' --tlsv1.2 \
-      --output "${STAGING_DIR}/${name}" "${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
+      --output "${STAGING_DIR}/${name}" "${DOWNLOAD_BASE}/${VERSION}/${name}"
   done
 }
 
@@ -876,7 +836,7 @@ converge_enrollment() {
 ((EUID == 0)) || forward_root_lifecycle
 unset SUDO_USER
 validate_sysroot
-resolve_release_identity
+echo "release identity: ${VERSION}"
 resolve_architecture
 detect_platform
 require_commands
