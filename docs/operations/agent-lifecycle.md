@@ -96,14 +96,16 @@ The production drop-in executes the packaged fixed launcher `/usr/libexec/ocserv
 
 ### Unattended installation and recovery
 
-Use the same pinned release and a private token file:
+Use the installer from the same pinned Release and a private token file:
 
 ```bash
 bash install.sh --non-interactive --join-token-file /protected/install-token
 bash install.sh --non-interactive --resume-install
 ```
 
-Both use the same package, identity, enrollment and root-key registration flow
+The published installer embeds its tag. Automation invoking an unstamped script must pass the exact tag with `--version` for both installation and resume.
+
+Both commands use the same package, identity, enrollment and root-key registration flow
 as the hidden prompt. A retry preserves root bootstrap state and the existing
 keys. Only Controller-confirmed active trust, a registered privd key, an online
 session and fresh telemetry produce `ONLINE`.

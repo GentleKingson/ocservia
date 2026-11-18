@@ -19,7 +19,7 @@ stat -c '%u' . >/dev/null 2>&1 || {
   echo "Managed node install tests skipped: GNU stat is unavailable" >&2
   exit 0
 }
-for tool in git openssl sha256sum awk sed; do
+for tool in openssl sha256sum awk sed; do
   command -v "${tool}" >/dev/null 2>&1 || {
     echo "Managed node install tests skipped: ${tool} is unavailable" >&2
     exit 0
@@ -66,7 +66,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-repo="${fixture}/repo"
 sysroot="${fixture}/sysroot"
 serve="${fixture}/serve"
 bin="${fixture}/bin"
@@ -101,14 +100,11 @@ die() {
 
 RUN_STATUS=0
 RUN_OUTPUT=""
-# The installer under test: the fixture checkout by default, the standalone
-# single-file copy for the package-first --version scenarios.
-SCRIPT_UNDER_TEST="${repo}/deploy/managed-node/install.sh"
 EXTRA_ENV=()
 OS_RELEASE="${os}/ubuntu-24.04"
 
 mkdir -m 700 -- "${bin}" "${logs}" "${serve}" "${sysroot}"
-mkdir -p -- "${repo}/deploy/managed-node" "${repo}/deploy/lib" "${os}"
+mkdir -- "${os}"
 
 openssl genpkey -algorithm ed25519 -out "${fixture}/command-verification.key" 2>/dev/null
 openssl pkey -in "${fixture}/command-verification.key" -pubout -out "${fixture}/controller-command-verification-key.pem"
@@ -534,34 +530,15 @@ chmod 0755 -- "${bin}/agent-stub" "${bin}/native-install" "${bin}/sudo" \
 
 build_serve
 
-# The shared install.env loader ships beside the installer, and the
-# repository's real .gitignore is committed too: the installer must treat a
-# present /install.env as ignored, not as a dirty release checkout.
-cp -- "${INSTALL}" "${repo}/deploy/managed-node/install.sh"
-# Legacy checkout identity cases clear only the Release default marker. Keep
-# the downloaded installer's entire implementation under test; the flat copy
-# below retains its actual stamp and exercises the normal Release path.
-sed -i '/^readonly DEFAULT_VERSION=/c\readonly DEFAULT_VERSION=""' "${repo}/deploy/managed-node/install.sh"
-cp -- "${ROOT}/deploy/lib/node-bootstrap.sh" "${repo}/deploy/lib/node-bootstrap.sh"
-cp -- "${ROOT}/.gitignore" "${repo}/.gitignore"
-git -C "${repo}" init -q
-git -C "${repo}" config user.name test
-git -C "${repo}" config user.email test@example.invalid
-git -C "${repo}" add -A
-git -C "${repo}" commit -qm base
-git -C "${repo}" tag "v${VERSION}"
-
-# The versioned installer self-containment fixture: the installer alone in a plain
-# directory, with no repository siblings and no .git anywhere it could
-# consult. The package-first --version mode must run from exactly this.
 standalone="${fixture}/standalone"
 mkdir -m 700 -- "${standalone}"
 if [[ -n "${INSTALLER_UNDER_TEST:-}" ]]; then
   cp -- "${INSTALL}" "${standalone}/install.sh"
 else
-  "${ROOT}/scripts/prepare-bootstrap-release-assets.sh" "${standalone}"
+  "${ROOT}/scripts/prepare-bootstrap-release-assets.sh" "${standalone}" "v${VERSION}"
   mv "${standalone}/managed-node-bootstrap.sh" "${standalone}/install.sh"
 fi
+cd -- "${standalone}"
 
 # Root scenarios perform real privileged file operations; they need the
 # package's system group to exist exactly like a real host.
@@ -602,26 +579,11 @@ reset_state() {
   EXTRA_ENV=()
 }
 
-reset_checkout() {
-  # Root scenarios refresh the fixture checkout's git index as root; return
-  # ownership so the unprivileged scenarios can keep mutating the checkout.
-  if ((EUID != 0)) && can_root; then
-    as_root chown -R "$(id -u):$(id -g)" "${repo}" 2>/dev/null || true
-  fi
-  git -C "${repo}" checkout -q -- .
-  git -C "${repo}" clean -qfd
-  git -C "${repo}" reset -q --hard "v${VERSION}"
-  git -C "${repo}" tag -d v0.3.0-rc1 v0.2.2 v0.2.3 >/dev/null 2>&1 || true
-  # install.env is git-ignored, so git clean never removes it; the install.env
-  # scenarios must not leak into unrelated ones.
-  rm -f -- "${repo}/install.env"
-}
-
 capture() {
   build_env
   RUN_STATUS=0
   RUN_OUTPUT="$(env "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-    "${SCRIPT_UNDER_TEST}" --non-interactive "$@" 2>&1)" || RUN_STATUS=$?
+    "${standalone}/install.sh" --non-interactive "$@" 2>&1)" || RUN_STATUS=$?
 }
 
 capture_root() {
@@ -629,10 +591,10 @@ capture_root() {
   RUN_STATUS=0
   if ((EUID == 0)); then
     RUN_OUTPUT="$(env -u SUDO_USER "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-      "${SCRIPT_UNDER_TEST}" --non-interactive "$@" 2>&1)" || RUN_STATUS=$?
+      "${standalone}/install.sh" --non-interactive "$@" 2>&1)" || RUN_STATUS=$?
   else
     RUN_OUTPUT="$(sudo -n env -u SUDO_USER "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-      "${SCRIPT_UNDER_TEST}" --non-interactive "$@" 2>&1)" || RUN_STATUS=$?
+      "${standalone}/install.sh" --non-interactive "$@" 2>&1)" || RUN_STATUS=$?
   fi
 }
 
@@ -655,14 +617,15 @@ assert_log_empty() {
 scenario() {
   rm -f "${fixture}/preflight-failure" "${logs}/preflight.log"
   reset_state
-  reset_checkout
-  SCRIPT_UNDER_TEST="${repo}/deploy/managed-node/install.sh"
   rm -f -- "${standalone}/install.env"
 }
 
 # The old manual installation scenarios are retired with that entrypoint.
 # Exercise the complete token flow against bounded HTTP/package/process stubs.
 scenario
+capture --resume-install --version ""
+assert_status 1
+assert_output "use the pinned Release installer"
 capture --config missing.env
 assert_status 1
 assert_output "manual configuration installation is retired"
@@ -718,7 +681,7 @@ origin = base64.urlsafe_b64encode(b'https://controller.example.test').decode().r
     relay_access_token='test-relay-access-token', command_verification_key_hex='2' * 64)))
 CONFIG
 
-install_token() { capture_root --join-token-file "${fixture}/join-token" --version "v${VERSION}"; }
+install_token() { capture_root --join-token-file "${fixture}/join-token"; }
 resume_token() { capture_root --resume-install --version "v${VERSION}"; }
 identity_digest() {
   as_root sha256sum "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" \
@@ -730,7 +693,7 @@ identity_digest() {
 scenario
 # A stale install.env no longer chooses configuration or runs any shell code.
 # shellcheck disable=SC2016 # Deliberately inert legacy configuration.
-printf 'INVALID=$(touch should-not-exist)\n' >"${repo}/install.env"
+printf 'INVALID=$(touch should-not-exist)\n' >"${standalone}/install.env"
 EXTRA_ENV=(USER_PASSWORD_SEAL_KEY_ID=original-user-key P12_PASSWORD_SEAL_KEY_ID=original-p12-key)
 install_token
 assert_status 0
