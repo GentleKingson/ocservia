@@ -64,6 +64,7 @@ use iroh_dns::{
 };
 use n0_error::{AnyError, anyerr, e, stack_error};
 use n0_future::{
+    StreamExt,
     boxed::BoxStream,
     task::{self, AbortOnDropHandle},
     time::{self, Duration, Instant},
@@ -684,10 +685,21 @@ impl PkarrRelayClient {
             .into());
         }
 
-        let payload = response
-            .bytes()
-            .await
-            .map_err(|err| e!(PkarrError::HttpPayload, anyerr!(err)))?;
+        // Relay payloads omit the public key from the signed packet's wire format.
+        let max_payload_size = SignedPacket::MAX_BYTES - endpoint_id.as_bytes().len();
+        let mut payload = Vec::with_capacity(max_payload_size);
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|err| e!(PkarrError::HttpPayload, anyerr!(err)))?;
+            if chunk.len() > max_payload_size - payload.len() {
+                return Err(e!(
+                    PkarrError::HttpPayload,
+                    AnyError::from("PKARR relay payload too large")
+                )
+                .into());
+            }
+            payload.extend_from_slice(&chunk);
+        }
         let packet = SignedPacket::from_relay_payload(&endpoint_id, &payload)
             .map_err(|err| e!(PkarrError::Verify, err))?;
         Ok(packet)
@@ -722,16 +734,136 @@ impl PkarrRelayClient {
     }
 }
 
-#[cfg(all(test, not(wasm_browser)))]
+#[cfg(all(test, not(wasm_browser), with_crypto_provider))]
 mod tests {
     use std::net::Ipv4Addr;
 
+    use iroh_relay::tls::{CaTlsConfig, default_provider};
     use n0_error::{Result, StdResultExt};
     use n0_future::{StreamExt, task, time};
-    use tokio::{io::AsyncReadExt, sync::oneshot};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        sync::oneshot,
+    };
 
     use super::*;
     use crate::endpoint::presets;
+
+    async fn relay_response(
+        response: Vec<u8>,
+    ) -> Result<(PkarrRelayClient, AbortOnDropHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .anyerr()?;
+        let pkarr_relay_url = format!("http://{}", listener.local_addr().anyerr()?)
+            .parse()
+            .anyerr()?;
+        let server = task::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            stream.write_all(&response).await.unwrap();
+            // Keep incomplete responses open: rejection must not wait for EOF.
+            std::future::pending::<()>().await;
+        });
+        let client = PkarrRelayClient {
+            http_client: reqwest::Client::builder()
+                .tls_backend_preconfigured(
+                    CaTlsConfig::default()
+                        .client_config(default_provider())
+                        .anyerr()?,
+                )
+                .no_proxy()
+                .build()
+                .anyerr()?,
+            pkarr_relay_url,
+        };
+        Ok((client, AbortOnDropHandle::new(server)))
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_oversized_body_before_eof() -> Result {
+        let id = SecretKey::generate().public();
+        let max_payload = SignedPacket::MAX_BYTES - id.as_bytes().len();
+        for chunk_sizes in [vec![max_payload + 1], vec![max_payload, 1]] {
+            let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+            for size in chunk_sizes {
+                response.extend_from_slice(format!("{size:x}\r\n").as_bytes());
+                response.extend(vec![0u8; size]);
+                response.extend_from_slice(b"\r\n");
+            }
+            let (client, _server) = relay_response(response).await?;
+            let err = time::timeout(Duration::from_secs(2), client.resolve(id))
+                .await
+                .expect("oversized response must be rejected before EOF")
+                .expect_err("oversized response accepted");
+            assert!(format!("{err:#}").contains("PKARR relay payload too large"));
+        }
+        // An HTTP/1.0 response has neither a length nor chunked framing.
+        let mut response = b"HTTP/1.0 200 OK\r\n\r\n".to_vec();
+        response.extend(vec![0u8; max_payload + 1]);
+        let (client, _server) = relay_response(response).await?;
+        let err = time::timeout(Duration::from_secs(2), client.resolve(id))
+            .await
+            .expect("lengthless oversized response must be rejected before EOF")
+            .expect_err("oversized response accepted");
+        assert!(format!("{err:#}").contains("PKARR relay payload too large"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_preserves_signed_packets_at_size_limit() -> Result {
+        let key = SecretKey::generate();
+        let packet = (0..=255)
+            .filter_map(|len| {
+                SignedPacket::from_txt_strings(
+                    &key,
+                    "_iroh",
+                    [
+                        "x".repeat(255),
+                        "x".repeat(255),
+                        "x".repeat(255),
+                        "x".repeat(len),
+                    ],
+                    DEFAULT_PKARR_TTL,
+                )
+                .ok()
+            })
+            .find(|packet| packet.as_bytes().len() == SignedPacket::MAX_BYTES)
+            .expect("construct a maximum-size signed packet");
+        for chunked in [false, true] {
+            let payload = packet.to_relay_payload();
+            let mut response = if chunked {
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec()
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                    payload.len()
+                )
+                .into_bytes()
+            };
+            if chunked {
+                for chunk in payload.chunks(100) {
+                    response.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+                    response.extend_from_slice(chunk);
+                    response.extend_from_slice(b"\r\n");
+                }
+                response.extend_from_slice(b"0\r\n\r\n");
+            } else {
+                response.extend_from_slice(&payload);
+            }
+            let (client, _server) = relay_response(response).await?;
+            let resolved = time::timeout(Duration::from_secs(2), client.resolve(key.public()))
+                .await
+                .expect("valid response timed out")?;
+            assert_eq!(resolved, packet);
+        }
+        Ok(())
+    }
 
     /// Spawns a fake HTTP proxy which captures the request line of the first connection
     /// it receives and then hangs up.

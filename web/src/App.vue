@@ -7,11 +7,7 @@ import { Button } from "@/components/ui/button";
 import AppHeader from "./components/layout/AppHeader.vue";
 import AppSidebar from "./components/layout/AppSidebar.vue";
 import { consumeLoginReturnPath } from "./shared/session";
-import {
-  getWorkspace,
-  listAuthorizedWorkspaces,
-  selectWorkspace,
-} from "./api/workspace";
+import { getWorkspace } from "./api/workspace";
 import { useReadinessStore } from "./shared/readiness";
 import { useFleetStore } from "./shared/fleet";
 import { reloadableNavigation } from "./shared/routes";
@@ -21,8 +17,7 @@ import { createForegroundRefresh } from "./shared/foreground-refresh";
 const readiness = useReadinessStore();
 const router = useRouter();
 const isLogin = computed(() => router.currentRoute.value.name === "login");
-const workspaces = ref<Workspace[]>([]);
-const selectedWorkspaceId = ref("");
+const workspace = ref<Workspace>();
 // The shell stays hidden until the session is confirmed, so signed-out
 // visits go to the login page without rendering the console first.
 const authenticated = ref(false);
@@ -44,9 +39,8 @@ onMounted(async () => {
       }
       foregroundRefresh.start();
       try {
-        workspaces.value = await listAuthorizedWorkspaces();
+        workspace.value = await getWorkspace();
         authenticated.value = true;
-        selectedWorkspaceId.value = (await getWorkspace()).id;
         const returnTo = consumeLoginReturnPath();
         if (returnTo && returnTo !== router.currentRoute.value.fullPath) {
           await router.replace(returnTo);
@@ -65,10 +59,6 @@ onBeforeUnmount(() => {
   stopLoginWatch?.();
   foregroundRefresh.stop();
 });
-
-async function changeWorkspace(workspaceId: string): Promise<void> {
-  selectedWorkspaceId.value = (await selectWorkspace(workspaceId)).id;
-}
 
 // An explicit choice: loading from the server discards unsaved input.
 function reloadNavigation(): void {
@@ -121,10 +111,8 @@ function focusMainContent(): void {
       class="bg-card min-h-screen min-w-0 md:m-2 md:ml-0 md:min-h-[calc(100vh-1rem)] md:rounded-xl md:border md:border-border md:shadow-xs"
     >
       <AppHeader
-        :workspace-id="selectedWorkspaceId"
-        :workspaces="workspaces"
+        :workspace="workspace"
         :readiness="readiness.state"
-        @change-workspace="changeWorkspace"
         @navigated="focusMainContent"
       />
       <div

@@ -10,5 +10,5 @@ source "${ROOT}/scripts/env.sh"
 (cd "${ROOT}/web" && npm run format)
 (cd "${ROOT}" && web/node_modules/.bin/prettier --write \
   scripts/generate-controller-release-manifest.mjs scripts/redact-release-upgrade-log.mjs \
-  scripts/release-business-browser.mjs scripts/release-upgrade-oidc-fixture.mjs \
-  scripts/test-release-upgrade.mjs .github/actions/build-cache-credentials/index.js)
+  scripts/release-business-browser.mjs scripts/test-release-upgrade.mjs \
+  .github/actions/build-cache-credentials/index.js)

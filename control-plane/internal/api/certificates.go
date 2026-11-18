@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -24,21 +25,19 @@ type createCertificateRequest struct {
 }
 
 type issueCertificateRequest struct {
-	ApprovalID string `json:"approval_id"`
-	Reason     string `json:"reason"`
+	Reason string `json:"reason"`
 }
 
 type revokeCertificateRequest struct {
 	ExpectedVersion    int64  `json:"expected_version"`
 	CertificateVersion int64  `json:"certificate_version"`
-	ApprovalID         string `json:"approval_id"`
 	Reason             string `json:"reason"`
 }
 
 type createP12Request struct {
+	ArtifactRequestID  string `json:"artifact_request_id"`
 	ExpectedVersion    int64  `json:"expected_version"`
 	CertificateVersion int64  `json:"certificate_version"`
-	ApprovalID         string `json:"approval_id"`
 	Reason             string `json:"reason"`
 }
 
@@ -97,13 +96,8 @@ func (s *Server) issueCertificate(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
-	approvalID, err := parseUUIDv7(body.ApprovalID)
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "approval_id must be UUIDv7")
-		return
-	}
 	actor := principal(r)
-	value, err := s.certificates.Issue(r.Context(), certificates.IssueRequest{CertificateID: id, ApprovalID: approvalID, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, Reason: body.Reason, RequestID: requestID(r)})
+	value, err := s.certificates.Issue(r.Context(), certificates.IssueRequest{CertificateID: id, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, Reason: body.Reason, RequestID: requestID(r)})
 	if err != nil {
 		writeCertificateError(w, r, err)
 		return
@@ -126,12 +120,7 @@ func (s *Server) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := principal(r)
-	approvalID, parseErr := parseUUIDv7(body.ApprovalID)
-	if parseErr != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "approval_id must be UUIDv7")
-		return
-	}
-	value, replayed, err := s.certificates.Revoke(r.Context(), certificates.RevokeRequest{CertificateID: id, ApprovalID: approvalID, CertificateVersion: body.CertificateVersion, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, ExpectedVersion: body.ExpectedVersion, IdempotencyKey: key, Reason: body.Reason, RequestID: requestID(r), Traceparent: requestTraceparent(r)})
+	value, replayed, err := s.certificates.Revoke(r.Context(), certificates.RevokeRequest{CertificateID: id, CertificateVersion: body.CertificateVersion, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, ExpectedVersion: body.ExpectedVersion, IdempotencyKey: key, Reason: body.Reason, RequestID: requestID(r), Traceparent: requestTraceparent(r)})
 	if err != nil {
 		writeCertificateError(w, r, err)
 		return
@@ -157,12 +146,12 @@ func (s *Server) createCertificateP12(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := principal(r)
-	approvalID, parseErr := parseUUIDv7(body.ApprovalID)
-	if parseErr != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "approval_id must be UUIDv7")
+	artifactID, err := parseUUIDv7(body.ArtifactRequestID)
+	if err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "artifact_request_id must be UUIDv7")
 		return
 	}
-	value, replayed, err := s.certificates.CreateP12(r.Context(), certificates.P12Request{CertificateID: id, ApprovalID: approvalID, CertificateVersion: body.CertificateVersion, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, ExpectedVersion: body.ExpectedVersion, IdempotencyKey: key, Reason: body.Reason, RequestID: requestID(r), Traceparent: requestTraceparent(r)})
+	value, replayed, err := s.certificates.CreateP12(r.Context(), certificates.P12Request{CertificateID: id, ArtifactRequestID: artifactID, CertificateVersion: body.CertificateVersion, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, ExpectedVersion: body.ExpectedVersion, IdempotencyKey: key, Reason: body.Reason, RequestID: requestID(r), Traceparent: requestTraceparent(r)})
 	if err != nil {
 		writeCertificateError(w, r, err)
 		return
@@ -226,6 +215,8 @@ func (s *Server) getCertificate(w http.ResponseWriter, r *http.Request) {
 
 func writeCertificateError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, auth.ErrForbidden):
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, certificates.ErrInvalid), errors.Is(err, operations.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/certificate-invalid", "Certificate request is invalid", "certificate subject, lifetime, or key parameters are invalid")
 	case errors.Is(err, operations.ErrIdempotencyConflict):

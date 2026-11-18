@@ -18,7 +18,7 @@ const staticFingerprintSQL = `WITH objects AS (
  FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND NOT c.relispartition AND c.relkind IN ('r','p','v','m','f','S')
 ), columns AS (
- SELECT c.relname,a.attname,a.attnum,format_type(a.atttypid,a.atttypmod) AS type,
+ SELECT c.relname,a.attname,row_number() OVER (PARTITION BY c.oid ORDER BY a.attnum) AS attnum,format_type(a.atttypid,a.atttypmod) AS type,
  a.attnotnull,a.attidentity,a.attgenerated,co.collname,pg_get_expr(d.adbin,d.adrelid) AS default_value
  FROM objects c JOIN pg_attribute a ON a.attrelid=c.oid
  LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum

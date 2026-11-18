@@ -5,7 +5,7 @@
 # and the Compose v2 plugin from Docker's official apt repository when Docker
 # is absent, plus jq, flock, curl, openssl, and CA certificates) and the
 # non-secret lifecycle directories. The bootstrap never creates or rotates
-# business trust material (OIDC credentials, TLS keys, session/audit/signing
+# business trust material (TLS keys, session/audit/signing
 # keys, Iroh identities, relay tokens, database passwords), never changes the
 # Docker permission model or the firewall, never upgrades, reinstalls, or
 # removes an existing container runtime, and never uses the get.docker.com

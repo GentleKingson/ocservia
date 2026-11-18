@@ -1,8 +1,4 @@
-import {
-  clearOidcLoginAttempt,
-  hasOidcLoginAttempt,
-  safeLoginReturnPath,
-} from "./login";
+import { safeLoginReturnPath } from "./login";
 
 const loginReturnKey = "ocservia.login.return-to";
 let loginRedirecting = false;
@@ -31,9 +27,7 @@ export function redirectToLogin(): void {
         // Login proceeds without a return path.
       }
     }
-    window.location.assign(
-      hasOidcLoginAttempt() ? "/login?auth=failed" : "/login",
-    );
+    window.location.assign("/login");
   }
 }
 
@@ -44,6 +38,5 @@ export function consumeLoginReturnPath(): string | undefined {
   } catch {
     // Nothing more can be cleared without storage.
   }
-  clearOidcLoginAttempt();
   return safeLoginReturnPath(value);
 }

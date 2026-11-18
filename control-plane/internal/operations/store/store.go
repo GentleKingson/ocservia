@@ -78,7 +78,6 @@ type RolloutObservation struct {
 
 type PendingUpgrade struct {
 	ID, WorkspaceID, NodeID                  uuid.UUID
-	ApprovalID                               *uuid.UUID
 	TargetVersion, Architecture, FromVersion string
 	PackageSHA256                            []byte
 	CreatedAt                                value.Timestamp
@@ -106,7 +105,6 @@ type Store interface {
 	RolloutNodes(context.Context, uuid.UUID) ([]RolloutNode, error)
 	RolloutWorkspace(context.Context, uuid.UUID) (uuid.UUID, error)
 	FindRollout(context.Context, uuid.UUID, string) (uuid.UUID, []byte, error)
-	RolloutApproval(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []byte, value.Timestamp) (uuid.UUID, error)
 	InsertRollout(context.Context, PendingRollout) error
 	InsertRolloutNode(context.Context, uuid.UUID, RolloutNode, value.Timestamp) error
 	ResumeRollout(context.Context, uuid.UUID, int, value.Timestamp) (int64, error)
@@ -127,6 +125,7 @@ type Store interface {
 	HasSession(context.Context, uuid.UUID, string, string) (bool, error)
 	HasIPBan(context.Context, uuid.UUID, string) (bool, error)
 	LockRolloutClaim(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (RolloutClaim, error)
+	UpgradeNode(context.Context, uuid.UUID) (uuid.UUID, string, string, error)
 	LockAgentObservation(context.Context, uuid.UUID) (AgentObservation, error)
 	LockUpgradeCapability(context.Context, uuid.UUID) (bool, error)
 	HasActiveUpgrade(context.Context, uuid.UUID) (bool, error)

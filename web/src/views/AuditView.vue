@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import { ChevronRight, RefreshCw } from "@lucide/vue";
-import { ResponseError, type AuditEventPage } from "@ocservia/api-client";
-import { useEventListener } from "@vueuse/core";
+import {
+  ResponseError,
+  type AuditEventPage,
+  type AuditVerification,
+} from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { listAuditEvents } from "../api/events";
+import { listAuditEvents, verifyAuditChain } from "../api/events";
 import {
   getWorkspace,
-  workspaceChangedEvent,
   workspaceContext,
+  type WorkspaceContext,
 } from "../api/workspace";
+import { createReadRequest } from "../shared/read-request";
 import { formatTimestamp } from "../shared/timestamp";
 import DataState from "@/components/common/DataState.vue";
 import PageHeader from "@/components/common/PageHeader.vue";
@@ -34,49 +38,63 @@ const items = ref<AuditEventPage["items"]>([]);
 const loading = ref(false);
 const initialized = ref(false);
 const error = ref("");
-let controller: AbortController | undefined;
-let sequence = 0;
+const verifying = ref(false);
+const verification = ref<AuditVerification>();
+const verifyError = ref("");
+const reads = createReadRequest();
+const verificationReads = createReadRequest();
 
 async function refresh(): Promise<void> {
-  controller?.abort();
-  controller = new AbortController();
-  const signal = controller.signal;
-  const ticket = ++sequence;
+  const request = reads.begin();
+  let context: WorkspaceContext | undefined;
   loading.value = true;
   error.value = "";
   try {
     await getWorkspace();
-    if (ticket !== sequence) return;
-    const context = workspaceContext();
-    const page = await listAuditEvents(signal);
-    const current = workspaceContext();
-    if (
-      signal.aborted ||
-      ticket !== sequence ||
-      context.id !== current.id ||
-      context.generation !== current.generation
-    )
-      return;
+    if (!request.current()) return;
+    context = workspaceContext();
+    const page = await listAuditEvents(request.signal);
+    if (!request.current(context)) return;
     items.value = page.items;
     initialized.value = true;
   } catch (cause) {
-    if (signal.aborted || ticket !== sequence) return;
+    if (!request.current(context)) return;
     error.value = t(
       cause instanceof ResponseError && cause.response.status === 403
         ? "auditForbidden"
         : "auditUnavailable",
     );
   } finally {
-    if (ticket === sequence) loading.value = false;
+    if (request.finish()) loading.value = false;
   }
 }
 
-function workspaceChanged(): void {
-  items.value = [];
-  initialized.value = false;
-  expanded.value = [];
-  void refresh();
+async function verifyChain(): Promise<void> {
+  // Verification is a read expressed as POST. Cancellation never retries it.
+  const request = verificationReads.begin();
+  let context: WorkspaceContext | undefined;
+  verifying.value = true;
+  verifyError.value = "";
+  verification.value = undefined;
+  try {
+    await getWorkspace();
+    if (!request.current()) return;
+    context = workspaceContext();
+    const result = await verifyAuditChain(request.signal);
+    if (!request.current(context)) return;
+    verification.value = result;
+  } catch (cause) {
+    if (!request.current(context)) return;
+    verifyError.value = t(
+      cause instanceof ResponseError && cause.response.status === 403
+        ? "auditForbidden"
+        : "auditVerifyUnavailable",
+    );
+  } finally {
+    if (request.finish()) verifying.value = false;
+  }
 }
+
 function text(value: unknown): string {
   return typeof value === "string" && value ? value : "—";
 }
@@ -94,7 +112,7 @@ const rows = computed(() => {
   return items.value
     .map((item, index) => {
       // Server ids are primary keys, so expansion follows the event when newer
-      // records shift positions. The list contract leaves items untyped: a
+      // records shift positions. Historical records may omit fields: a
       // missing or repeated id keeps the row visible under a positional key.
       const id = typeof item.id === "string" ? item.id : "";
       const key = id && !seen.has(id) ? `id:${id}` : `row:${String(index)}`;
@@ -107,11 +125,10 @@ const rows = computed(() => {
         (!query ||
           [
             item.action,
-            item.actor_id,
-            item.resource_type,
-            item.resource_id,
-            item.request_id,
-            item.approval_id,
+            item.actorId,
+            item.resourceType,
+            item.resourceId,
+            item.requestId,
           ].some(
             (value) =>
               typeof value === "string" && value.toLowerCase().includes(query),
@@ -130,21 +147,20 @@ function resultLabel(item: AuditItem): string {
     : text(result);
 }
 const detailFields = [
-  ["auditActorType", "actor_type"],
-  ["auditTrace", "trace_id"],
-  ["auditCommand", "command_id"],
+  ["auditActorType", "actorType"],
+  ["auditTrace", "traceId"],
+  ["auditCommand", "commandId"],
   ["reason", "reason"],
-  ["auditErrorType", "error_type"],
-  ["auditEventHash", "event_hash"],
-  ["auditPreviousHash", "previous_event_hash"],
+  ["auditErrorType", "errorType"],
+  ["auditEventHash", "eventHash"],
+  ["auditPreviousHash", "previousEventHash"],
 ] as const;
-useEventListener(window, workspaceChangedEvent, workspaceChanged);
 onMounted(() => {
   void refresh();
 });
 onBeforeUnmount(() => {
-  sequence += 1;
-  controller?.abort();
+  reads.cancel();
+  verificationReads.cancel();
 });
 </script>
 
@@ -152,6 +168,15 @@ onBeforeUnmount(() => {
   <main>
     <PageHeader :eyebrow="$t('workspace')" :title="$t('audit')">
       <template #actions>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          :disabled="verifying || loading"
+          @click="verifyChain"
+        >
+          {{ $t(verifying ? "auditVerifying" : "auditVerify") }}
+        </Button>
         <Button
           type="button"
           variant="outline"
@@ -165,6 +190,37 @@ onBeforeUnmount(() => {
         </Button>
       </template>
     </PageHeader>
+    <div
+      v-if="verifyError"
+      class="border-destructive/40 text-destructive mb-4 flex flex-wrap items-center gap-3 rounded-md border px-4 py-3 text-sm"
+      role="alert"
+    >
+      {{ verifyError }}
+    </div>
+    <div
+      v-else-if="verification"
+      data-testid="audit-verification"
+      class="border-border mb-4 flex flex-wrap items-center gap-3 rounded-md border px-4 py-3 text-sm"
+      role="status"
+    >
+      <StatusBadge
+        :tone="
+          verification.valid && verification.checkpointValid
+            ? 'success'
+            : 'danger'
+        "
+        :label="
+          $t(
+            verification.valid && verification.checkpointValid
+              ? 'auditVerifyValid'
+              : 'auditVerifyFailed',
+          )
+        "
+      />
+      <span class="text-muted-foreground">
+        {{ $t("auditVerifySummary", { count: verification.events }) }}
+      </span>
+    </div>
     <div
       v-if="error"
       class="border-destructive/40 text-destructive mb-4 flex flex-wrap items-center gap-3 rounded-md border px-4 py-3 text-sm"
@@ -286,18 +342,18 @@ onBeforeUnmount(() => {
                     </Button>
                   </TableCell>
                   <TableCell class="text-muted-foreground">{{
-                    formatTimestamp(text(item.occurred_at))
+                    formatTimestamp(text(item.occurredAt))
                   }}</TableCell>
                   <TableCell>{{ text(item.action) }}</TableCell>
                   <TableCell class="whitespace-normal">
                     <code class="text-xs break-all">{{
-                      text(item.actor_id)
+                      text(item.actorId)
                     }}</code>
                   </TableCell>
                   <TableCell class="whitespace-normal">
-                    {{ text(item.resource_type) }}<br /><code
+                    {{ text(item.resourceType) }}<br /><code
                       class="text-xs break-all"
-                      >{{ text(item.resource_id) }}</code
+                      >{{ text(item.resourceId) }}</code
                     >
                   </TableCell>
                   <TableCell>
@@ -308,7 +364,7 @@ onBeforeUnmount(() => {
                   </TableCell>
                   <TableCell class="whitespace-normal">
                     <code class="text-xs break-all">{{
-                      text(item.request_id)
+                      text(item.requestId)
                     }}</code>
                   </TableCell>
                 </TableRow>
@@ -322,7 +378,7 @@ onBeforeUnmount(() => {
                     <dl
                       class="sticky left-2 m-0 grid w-[calc(100cqw-1rem)] gap-x-6 gap-y-1 text-sm sm:grid-cols-[max-content_1fr] sm:gap-y-2"
                     >
-                      <template v-if="typeof item.node_id === 'string'">
+                      <template v-if="typeof item.nodeId === 'string'">
                         <dt class="text-muted-foreground">
                           {{ $t("auditNode") }}
                         </dt>
@@ -330,25 +386,10 @@ onBeforeUnmount(() => {
                           <RouterLink
                             :to="{
                               name: 'node-detail',
-                              params: { nodeId: item.node_id },
+                              params: { nodeId: item.nodeId },
                             }"
                             class="text-primary font-mono underline-offset-4 hover:underline"
-                            >{{ item.node_id }}</RouterLink
-                          >
-                        </dd>
-                      </template>
-                      <template v-if="typeof item.approval_id === 'string'">
-                        <dt class="text-muted-foreground">
-                          {{ $t("approvalId") }}
-                        </dt>
-                        <dd class="m-0 mb-2 break-all sm:mb-0">
-                          <RouterLink
-                            :to="{
-                              name: 'approvals',
-                              params: { approvalId: item.approval_id },
-                            }"
-                            class="text-primary font-mono underline-offset-4 hover:underline"
-                            >{{ item.approval_id }}</RouterLink
+                            >{{ item.nodeId }}</RouterLink
                           >
                         </dd>
                       </template>

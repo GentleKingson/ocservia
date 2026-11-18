@@ -15,8 +15,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/databasetest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
@@ -26,13 +28,19 @@ import (
 	"github.com/google/uuid"
 )
 
-// Called inside the existing isolated Controller startup database, never the
-// PostgreSQL database used by later Bootstrap acceptance.
+// Called inside an isolated PostgreSQL Controller startup database.
+func TestControllerHTTPAssemblyBackendIntegration(t *testing.T) {
+	runtime, owner := databasetest.OpenIsolated(t, t, "http_assembly")
+	cfg := config.Config{Environment: "test", BodyLimit: 1 << 20, RequestTimeout: 10 * time.Second, ShutdownTimeout: 2 * time.Second}
+	testHTTPServerAssembly(t, cfg, &connection.Connection{Store: postgres.WrapPool(owner)}, &connection.Connection{Store: postgres.WrapPool(runtime)})
+}
+
 func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *connection.Connection) {
 	cfg.HTTPAddress, cfg.PublicOrigin = e2eAddress(t), "https://assembly.example.test"
 	cfg.LocalAuth, cfg.DevAuth = true, false
 	cfg.SessionKey, cfg.SessionTTL = make([]byte, 32), time.Hour
 	cfg.RecommendedAgentVersion = "2.0.0"
+	cfg.EventStreams = eventstream.DefaultConfig()
 	cfg.EventStreams.IdentityStreams, cfg.EventStreams.SessionStreams = 1, 1
 	cfg.EventStreams.RetryAfter, cfg.EventStreams.RevalidateInterval = 7*time.Second, 5*time.Second
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
@@ -46,32 +54,23 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspace, node, binding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	workspace, node := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	at, _ := value.FromTime(time.Now().UTC())
-	exec := func(pg, my string, args ...any) {
+	exec := func(query string, args ...any) {
 		t.Helper()
-		query := pg
-		if cfg.DatabaseBackend != "postgres" {
-			query = my
-			for i, arg := range args {
-				if id, ok := arg.(uuid.UUID); ok {
-					args[i] = mysql.UUIDBytes(id)
-				}
-			}
-		}
 		if _, err := owner.Store.Exec(ctx, query, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP assembly fixture',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'HTTP assembly fixture',?,?,?)`, workspace, workspace.String(), at, at)
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'HTTP assembly fixture','active',1,$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,'HTTP assembly fixture','active',1,?,?)`, node, workspace, at, at)
-	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'PlatformAdmin','workspace',?)`, binding, identity, workspace, at)
+	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP assembly fixture',$2,$3,$4)`, workspace, workspace.String(), at, at)
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'HTTP assembly fixture','active',1,$3,$4)`, node, workspace, at, at)
+	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, workspace, identity, at)
 	signer := commandauth.NewSignerFromSeed([32]byte{1})
 	ops := operations.NewBackend(runtime.Store, 3, signer)
 	users := userstate.NewWithSignerBackend(runtime.Store, signer)
-	services := httpServices{
-		modules:    api.Modules{Nodes: telemetry.NewWithRecommendedAgentVersionBackend(runtime.Store, cfg.RecommendedAgentVersion), ConfigPlans: configplan.NewBackend(runtime.Store, ops), UserOperations: useroperations.NewWithConcurrencyBackend(runtime.Store, users, 3)},
-		operations: ops, userState: users, transportEvents: transportevents.NewBackend(runtime.Store, signer),
+	modules := api.Modules{
+		Nodes: telemetry.NewWithRecommendedAgentVersionBackend(runtime.Store, cfg.RecommendedAgentVersion), ConfigPlans: configplan.NewBackend(runtime.Store, ops), UserOperations: useroperations.NewWithConcurrencyBackend(runtime.Store, users, 3),
+		Operations: ops, UserState: users, TransportEvents: transportevents.NewBackend(runtime.Store, signer),
 	}
 	life := newLifecycle(ctx, time.Second, quietLogger())
 	t.Cleanup(func() {
@@ -79,12 +78,12 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 			t.Error(err)
 		}
 	})
-	server, err := newHTTPServer(life, cfg, BuildInfo{Version: "test-http-assembly"}, runtime.Store, nil, quietLogger(), services)
+	server, err := newHTTPServer(life, cfg, BuildInfo{Version: "test-http-assembly"}, runtime.Store, nil, quietLogger(), modules)
 	if err != nil || life.http != server {
 		t.Fatal("production assembly ownership", err)
 	}
 	// Mutation of the assembly inputs cannot disable a returned Server.
-	services.modules = api.Modules{}
+	modules = api.Modules{}
 	cfg.EventStreams.IdentityStreams = 8
 	life.start("serve HTTP", func(context.Context) error { return server.ListenAndServe() })
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -130,7 +129,7 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 		}
 		return w
 	}
-	for _, path := range []string{"/api/v1/nodes/" + node.String(), "/api/v1/user-operations/metrics"} {
+	for _, path := range []string{"/api/v1/nodes/" + node.String(), "/api/v1/workspaces"} {
 		response := call("GET", path)
 		body, err := io.ReadAll(response.Body)
 		response.Body.Close()
@@ -160,11 +159,11 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	if rejected.StatusCode != 429 || rejected.Header.Get("Retry-After") != "7" || rejected.Header.Get("Content-Type") != "application/problem+json" {
 		t.Fatalf("final SSE configuration not used: %d %v", rejected.StatusCode, rejected.Header)
 	}
-	exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, binding)
+	exec(`DELETE FROM workspace_admins WHERE workspace_id=$1 AND identity_id=$2`, workspace, identity)
 	denied := call("GET", "/api/v1/nodes/"+node.String())
 	denied.Body.Close()
-	// Without any binding the workspace is invisible, so the node answers 404.
-	if denied.StatusCode != 404 {
+	// Without workspace admin access, the node answers 403 or 404.
+	if denied.StatusCode != 403 && denied.StatusCode != 404 {
 		t.Fatal("permissions were frozen at construction", denied.StatusCode)
 	}
 	// Wait for the bounded revalidation signal (EOF), not a fixed sleep.

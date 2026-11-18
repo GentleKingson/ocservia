@@ -17,24 +17,13 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var (
-	fixtureIdentityID = uuid.MustParse("00000000-0000-7000-8000-0000000000a1")
-	fixtureSessionID  = uuid.MustParse("00000000-0000-7000-8000-0000000000a2")
-)
-
 // InstallKey creates a deterministic test-only root trust anchor and approves
-// the capability. Production registration always goes through the one-time
-// root credential service instead.
+// the capability.
 func InstallKey(ctx context.Context, pool *pgxpool.Pool, nodeID uuid.UUID) (ed25519.PrivateKey, error) {
 	seed := sha256.Sum256(append([]byte("ocservia/test-only-privd-key/v1\x00"), nodeID[:]...))
 	privateKey := ed25519.NewKeyFromSeed(seed[:])
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 	keyID := privdattestation.PublicKeyID(publicKey)
-	credentialID := nodeID
-	credentialID[15] ^= 0x5a
-	secret := sha256.Sum256(append([]byte("ocservia/test-only-credential/v1\x00"), nodeID[:]...))
-	nonce := sha256.Sum256(append([]byte("ocservia/test-only-nonce/v1\x00"), nodeID[:]...))
-	credentialContext := sha256.Sum256(append([]byte("ocservia/test-only-context/v1\x00"), nodeID[:]...))
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -45,10 +34,7 @@ func InstallKey(ctx context.Context, pool *pgxpool.Pool, nodeID uuid.UUID) (ed25
 		query string
 		args  []any
 	}{
-		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test-fixture','privd-attestation',$2,$2) ON CONFLICT(id) DO NOTHING`, []any{fixtureIdentityID, now}},
-		{`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`, []any{fixtureSessionID, fixtureIdentityID, now.Add(24 * time.Hour), now.Add(-time.Minute)}},
-		{`INSERT INTO privd_attestation_enrollment_credentials(id,node_id,secret_sha256,controller_nonce,credential_context_sha256,expires_at,consumed_at,created_by_identity_id,created_by_session_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(id) DO NOTHING`, []any{credentialID, nodeID, secret[:], nonce[:], credentialContext[:], now.Add(time.Hour), now, fixtureIdentityID, fixtureSessionID, now.Add(-time.Minute)}},
-		{`INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,registration_credential_id) VALUES($1,$2,'ed25519',$3,'active',$4,$4,$4,$5) ON CONFLICT(node_id,key_id) DO NOTHING`, []any{nodeID, keyID, publicKey, now.Add(-time.Minute), credentialID}},
+		{`INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at) VALUES($1,$2,'ed25519',$3,'active',$4,$4,$4) ON CONFLICT(node_id,key_id) DO NOTHING`, []any{nodeID, keyID, publicKey, now.Add(-time.Minute)}},
 		{`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,true) ON CONFLICT(node_id,capability) DO UPDATE SET approved=true`, []any{nodeID, privdattestation.AttestationCapability}},
 	}
 	for _, statement := range statements {

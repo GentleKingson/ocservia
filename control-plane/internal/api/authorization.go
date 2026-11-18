@@ -10,9 +10,9 @@ import (
 	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 )
 
@@ -34,34 +34,13 @@ func (s *Server) authenticate(r *http.Request) (auth.Principal, error) {
 }
 
 func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (context.Context, error) {
-	return s.authorizeRouteAction(r, principal, "")
-}
-
-func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal, action string) (context.Context, error) {
 	if r.URL.Path == "/api/v1/auth/change-password" {
 		if s.auth == nil || principal.Issuer != auth.LocalIssuer || principal.BreakGlass || principal.IdentityID == uuid.Nil || principal.SessionID == uuid.Nil {
-			return nil, rbac.ErrForbidden
+			return nil, auth.ErrForbidden
 		}
 		return context.WithValue(r.Context(), principalKey{}, principal), nil
 	}
-	if r.URL.Path == "/api/v1/local-users" || strings.HasPrefix(r.URL.Path, "/api/v1/local-users/") {
-		if s.auth == nil || s.rbac == nil || principal.IdentityID == uuid.Nil {
-			return nil, rbac.ErrForbidden
-		}
-		workspaceID, err := s.auth.LocalManagementWorkspace(r.Context())
-		if err != nil {
-			return nil, rbac.ErrForbidden
-		}
-		if err := s.rbac.Authorize(r.Context(), principal.IdentityID, "local_user.manage", rbac.Resource{WorkspaceID: workspaceID, Type: "workspace"}, principal.BreakGlass); err != nil {
-			return nil, err
-		}
-		ctx := context.WithValue(r.Context(), principalKey{}, principal)
-		return context.WithValue(ctx, workspaceKey{}, workspaceID), nil
-	}
-	if r.URL.Path == "/api/v1/auth/logout" {
-		return context.WithValue(r.Context(), principalKey{}, principal), nil
-	}
-	if r.URL.Path == "/api/v1/workspaces" {
+	if r.URL.Path == "/api/v1/auth/logout" || r.URL.Path == "/api/v1/workspaces" {
 		return context.WithValue(r.Context(), principalKey{}, principal), nil
 	}
 	if principal.Issuer == "development" {
@@ -70,322 +49,108 @@ func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal,
 			return ctx, nil
 		}
 		workspaceID, parseErr := uuid.Parse(strings.TrimSpace(r.URL.Query().Get("workspace_id")))
-		if parseErr != nil || workspaceID.Version() != 7 || s.rbac == nil {
-			return nil, rbac.ErrForbidden
+		if parseErr != nil || workspaceID.Version() != 7 || s.auth == nil {
+			return nil, auth.ErrForbidden
 		}
-		resource, err := s.rbac.Workspace(r.Context(), workspaceID)
-		if err != nil {
+		if err := s.auth.WorkspaceExists(r.Context(), workspaceID); err != nil {
 			return nil, err
 		}
-		return context.WithValue(ctx, workspaceKey{}, resource.WorkspaceID), nil
-	}
-	if action == "" {
-		action = routeAction(r)
-	}
-	if action == "" {
-		return nil, rbac.ErrForbidden
-	}
-	if (r.Method == http.MethodPost && (r.URL.Path == "/api/v1/user-batches" || r.URL.Path == "/api/v1/approval-requests" || r.URL.Path == "/api/v1/agent-rollouts")) || (r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/api/v1/user-batches/") || r.URL.Path == "/api/v1/agent-rollouts" || r.URL.Path == "/api/v1/approval-requests")) {
-		workspaceID, err := s.selectWorkspace(r, principal, action)
-		if err != nil {
-			return nil, err
-		}
-		ctx := context.WithValue(r.Context(), principalKey{}, principal)
 		return context.WithValue(ctx, workspaceKey{}, workspaceID), nil
 	}
-	var resource rbac.Resource
+	if s.auth == nil {
+		return nil, auth.ErrForbidden
+	}
+
+	var workspaceID uuid.UUID
 	var err error
-	if nodeText := r.PathValue("node_id"); nodeText != "" {
-		nodeID, parseErr := uuid.Parse(nodeText)
-		if parseErr != nil || nodeID.Version() != 7 {
+	resourceScoped := true
+	switch {
+	case r.PathValue("node_id") != "":
+		nodeID, parseErr := parseUUIDv7(r.PathValue("node_id"))
+		if parseErr != nil {
 			return nil, database.ErrNotFound
 		}
-		resource, err = s.rbac.Node(r.Context(), nodeID)
-	} else if operationText := r.PathValue("operation_id"); operationText != "" {
-		operationID, parseErr := uuid.Parse(operationText)
-		if parseErr != nil || operationID.Version() != 7 {
+		workspaceID, err = s.auth.NodeWorkspace(r.Context(), nodeID)
+	case r.PathValue("operation_id") != "":
+		operationID, parseErr := parseUUIDv7(r.PathValue("operation_id"))
+		if parseErr != nil {
 			return nil, database.ErrNotFound
 		}
-		resource, err = s.rbac.Operation(r.Context(), operationID)
-	} else if rolloutText := r.PathValue("rollout_id"); rolloutText != "" {
-		rolloutID, parseErr := uuid.Parse(rolloutText)
-		if parseErr != nil || rolloutID.Version() != 7 || s.operations == nil {
+		workspaceID, err = s.auth.OperationWorkspace(r.Context(), operationID)
+	case r.PathValue("rollout_id") != "":
+		rolloutID, parseErr := parseUUIDv7(r.PathValue("rollout_id"))
+		if parseErr != nil || s.operations == nil {
 			return nil, database.ErrNotFound
 		}
-		rolloutWorkspace, rolloutErr := s.operations.RolloutWorkspace(r.Context(), rolloutID)
-		if rolloutErr != nil {
-			return nil, rolloutErr
-		}
-		resource, err = s.rbac.Workspace(r.Context(), rolloutWorkspace)
-	} else if approvalText := r.PathValue("approval_id"); approvalText != "" {
-		approvalID, parseErr := uuid.Parse(strings.TrimSuffix(approvalText, ":approve"))
-		if parseErr != nil || approvalID.Version() != 7 || s.approvals == nil {
+		workspaceID, err = s.operations.RolloutWorkspace(r.Context(), rolloutID)
+	case r.PathValue("plan_id") != "":
+		planID, parseErr := parseUUIDv7(r.PathValue("plan_id"))
+		if parseErr != nil || s.configPlans == nil {
 			return nil, database.ErrNotFound
 		}
-		approval, getErr := s.approvals.Get(r.Context(), approvalID)
-		if getErr != nil {
-			return nil, getErr
-		}
-		scopes, scopeErr := s.approvals.AuthorityResources(r.Context(), approvalID)
-		if scopeErr != nil {
-			return nil, scopeErr
-		}
-		if len(scopes) > 0 {
-			for _, scope := range scopes {
-				if scope.WorkspaceID != approval.WorkspaceID {
-					return nil, rbac.ErrForbidden
-				}
-				resource = rbac.Resource{WorkspaceID: scope.WorkspaceID, Type: scope.Type, ID: scope.ID}
-				if err := s.authorizeVisible(r.Context(), principal, action, resource); err != nil {
-					return nil, err
-				}
-			}
-			ctx := context.WithValue(r.Context(), principalKey{}, principal)
-			return context.WithValue(ctx, workspaceKey{}, approval.WorkspaceID), nil
-		}
-		if approval.ResourceType == "config_plan" {
-			if s.configPlanLookup == nil {
-				return nil, database.ErrNotFound
-			}
-			workspaceID, nodeID, resourceErr := s.configPlanLookup.Resource(r.Context(), approval.ResourceID)
-			if resourceErr != nil {
-				return nil, resourceErr
-			}
-			if workspaceID != approval.WorkspaceID {
-				return nil, rbac.ErrForbidden
-			}
-			resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
-		} else if approval.ResourceType == "certificate" {
-			if s.certificates == nil {
-				return nil, database.ErrNotFound
-			}
-			workspaceID, nodeID, resourceErr := s.certificates.Resource(r.Context(), approval.ResourceID)
-			if resourceErr != nil || workspaceID != approval.WorkspaceID {
-				return nil, rbac.ErrForbidden
-			}
-			resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
-		} else {
-			resource = rbac.Resource{WorkspaceID: approval.WorkspaceID, Type: approval.ResourceType, ID: approval.ResourceID}
-		}
-	} else if planText := r.PathValue("plan_id"); planText != "" {
-		planID, parseErr := uuid.Parse(planText)
-		if parseErr != nil || planID.Version() != 7 || s.configPlanLookup == nil {
+		workspaceID, _, err = s.configPlans.Resource(r.Context(), planID)
+	case cmp.Or(r.PathValue("certificate_id"), r.PathValue("certificate_action")) != "":
+		certText := cmp.Or(r.PathValue("certificate_id"), r.PathValue("certificate_action"))
+		certID, parseErr := parseUUIDv7(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(certText, ":revoke"), ":issue"), ":p12"))
+		if parseErr != nil || s.certificates == nil {
 			return nil, database.ErrNotFound
 		}
-		workspaceID, nodeID, resourceErr := s.configPlanLookup.Resource(r.Context(), planID)
-		if resourceErr != nil {
-			return nil, resourceErr
-		}
-		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
-	} else if certificateText := cmp.Or(r.PathValue("certificate_id"), r.PathValue("certificate_action")); certificateText != "" {
-		certificateID, parseErr := uuid.Parse(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(certificateText, ":revoke"), ":issue"), ":p12"))
-		if parseErr != nil || certificateID.Version() != 7 || s.certificates == nil {
+		workspaceID, _, err = s.certificates.Resource(r.Context(), certID)
+	case r.PathValue("artifact_id") != "":
+		artifactID, parseErr := parseUUIDv7(r.PathValue("artifact_id"))
+		if parseErr != nil || s.certificates == nil {
 			return nil, database.ErrNotFound
 		}
-		workspaceID, nodeID, resourceErr := s.certificates.Resource(r.Context(), certificateID)
-		if resourceErr != nil {
-			return nil, resourceErr
-		}
-		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
-	} else if artifactText := r.PathValue("artifact_id"); artifactText != "" {
-		artifactID, parseErr := uuid.Parse(artifactText)
-		if parseErr != nil || artifactID.Version() != 7 || s.certificates == nil {
+		workspaceID, _, err = s.certificates.ArtifactResource(r.Context(), artifactID)
+	case cmp.Or(r.PathValue("secret_ref_id"), r.PathValue("secret_ref_action")) != "":
+		secretText := cmp.Or(r.PathValue("secret_ref_id"), r.PathValue("secret_ref_action"))
+		secretID, parseErr := parseUUIDv7(strings.TrimSuffix(secretText, ":rotate"))
+		if parseErr != nil || s.certificates == nil {
 			return nil, database.ErrNotFound
 		}
-		workspaceID, nodeID, resourceErr := s.certificates.ArtifactResource(r.Context(), artifactID)
-		if resourceErr != nil {
-			return nil, resourceErr
-		}
-		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
-	} else if secretText := cmp.Or(r.PathValue("secret_ref_id"), r.PathValue("secret_ref_action")); secretText != "" {
-		secretID, parseErr := uuid.Parse(strings.TrimSuffix(secretText, ":rotate"))
-		if parseErr != nil || secretID.Version() != 7 || s.certificates == nil {
-			return nil, database.ErrNotFound
-		}
-		workspaceID, resourceErr := s.certificates.SecretRefResource(r.Context(), secretID)
-		if resourceErr != nil {
-			return nil, resourceErr
-		}
-		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "secret_ref", ID: secretID}
-	} else {
-		workspaceText := strings.TrimSpace(r.Header.Get("X-Workspace-ID"))
-		if workspaceText == "" && r.URL.Path == "/api/v1/events/stream" {
-			workspaceText = strings.TrimSpace(r.URL.Query().Get("workspace_id"))
-		}
-		if workspaceText == "" {
-			workspaceIDs, listErr := s.rbac.AuthorizedWorkspaces(r.Context(), principal.IdentityID, action, principal.BreakGlass)
-			if listErr != nil {
-				return nil, listErr
-			}
-			if len(workspaceIDs) != 1 {
-				return nil, rbac.ErrForbidden
-			}
-			workspaceText = workspaceIDs[0].String()
-		}
-		workspaceID, parseErr := uuid.Parse(workspaceText)
-		if parseErr != nil || workspaceID.Version() != 7 {
-			return nil, rbac.ErrForbidden
-		}
-		// Like selectWorkspace, an invisible workspace is refused before the
-		// existence lookup, so existing and missing ones answer alike.
-		visible, visibleErr := s.visibleWorkspace(r.Context(), principal, workspaceID)
-		if visibleErr != nil {
-			return nil, visibleErr
-		}
-		if !visible {
-			return nil, rbac.ErrForbidden
-		}
-		resource, err = s.rbac.Workspace(r.Context(), workspaceID)
+		workspaceID, err = s.certificates.SecretRefResource(r.Context(), secretID)
+	default:
+		resourceScoped = false
+		workspaceID, err = s.selectWorkspace(r, principal)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authorizeVisible(r.Context(), principal, action, resource); err != nil {
-		return nil, err
+	if resourceScoped {
+		if err := s.auth.AuthorizeWorkspace(r.Context(), principal, workspaceID); err != nil {
+			// Report a resource in an unauthorized workspace as 404 so a 403
+			// never confirms that an invisible resource exists.
+			if errors.Is(err, auth.ErrForbidden) {
+				return nil, database.ErrNotFound
+			}
+			return nil, err
+		}
 	}
 	ctx := context.WithValue(r.Context(), principalKey{}, principal)
-	ctx = context.WithValue(ctx, workspaceKey{}, resource.WorkspaceID)
+	ctx = context.WithValue(ctx, workspaceKey{}, workspaceID)
 	return ctx, nil
 }
 
-// authorizeVisible reports a resource in a workspace where the principal
-// holds no role binding as not found, so a 403 never confirms that an
-// invisible resource exists. Inside a visible workspace a missing action
-// keeps its 403.
-func (s *Server) authorizeVisible(ctx context.Context, principal auth.Principal, action string, resource rbac.Resource) error {
-	err := s.rbac.Authorize(ctx, principal.IdentityID, action, resource, principal.BreakGlass)
-	if !errors.Is(err, rbac.ErrForbidden) {
-		return err
-	}
-	visible, visibleErr := s.visibleWorkspace(ctx, principal, resource.WorkspaceID)
-	if visibleErr != nil {
-		return visibleErr
-	}
-	if !visible {
-		return database.ErrNotFound
-	}
-	return err
-}
-
-// visibleWorkspace reports whether the principal holds any role binding in
-// the workspace. Every role grants node.read, so that action's workspace
-// list is exactly the visible set.
-func (s *Server) visibleWorkspace(ctx context.Context, principal auth.Principal, workspaceID uuid.UUID) (bool, error) {
-	visible, err := s.rbac.AuthorizedWorkspaces(ctx, principal.IdentityID, "node.read", principal.BreakGlass)
-	if err != nil {
-		return false, err
-	}
-	return slices.Contains(visible, workspaceID), nil
-}
-
-func (s *Server) selectWorkspace(r *http.Request, principal auth.Principal, action string) (uuid.UUID, error) {
+func (s *Server) selectWorkspace(r *http.Request, principal auth.Principal) (uuid.UUID, error) {
 	workspaceText := strings.TrimSpace(r.Header.Get("X-Workspace-ID"))
-	workspaceIDs, err := s.rbac.AuthorizedWorkspaces(r.Context(), principal.IdentityID, action, principal.BreakGlass)
+	if workspaceText == "" && r.URL.Path == "/api/v1/events/stream" {
+		workspaceText = strings.TrimSpace(r.URL.Query().Get("workspace_id"))
+	}
+	workspaces, err := s.auth.AuthorizedWorkspaces(r.Context(), principal)
 	if err != nil {
 		return uuid.Nil, err
 	}
 	if workspaceText == "" {
-		if len(workspaceIDs) != 1 {
-			return uuid.Nil, rbac.ErrForbidden
+		if len(workspaces) != 1 {
+			return uuid.Nil, auth.ErrForbidden
 		}
-		workspaceText = workspaceIDs[0].String()
+		return workspaces[0].ID, nil
 	}
-	workspaceID, parseErr := uuid.Parse(workspaceText)
-	if parseErr != nil || workspaceID.Version() != 7 || !slices.Contains(workspaceIDs, workspaceID) {
-		return uuid.Nil, rbac.ErrForbidden
-	}
-	if _, err := s.rbac.Workspace(r.Context(), workspaceID); err != nil {
-		return uuid.Nil, err
+	workspaceID, parseErr := parseUUIDv7(workspaceText)
+	if parseErr != nil || !slices.ContainsFunc(workspaces, func(w authstore.Workspace) bool { return w.ID == workspaceID }) {
+		return uuid.Nil, auth.ErrForbidden
 	}
 	return workspaceID, nil
-}
-
-func routeAction(r *http.Request) string {
-	path := r.URL.Path
-	switch {
-	case path == "/api/v1/local-users" || strings.HasPrefix(path, "/api/v1/local-users/"):
-		return "local_user.manage"
-	case strings.HasSuffix(path, ":disconnect"):
-		return "session.disconnect"
-	case strings.HasSuffix(path, ":terminate"):
-		return "session.terminate"
-	case strings.Contains(path, "/ip-bans/") && strings.HasSuffix(path, ":remove"):
-		return "ip_ban.remove"
-	case strings.HasSuffix(path, "/service:reload"):
-		return "service.reload"
-	case r.Method == http.MethodPost && strings.HasSuffix(path, "/agent-upgrade"):
-		return "agent.upgrade"
-	case strings.HasSuffix(path, ":disable"), strings.HasSuffix(path, ":enable"), strings.HasSuffix(path, ":rotate-password"), strings.HasSuffix(path, "/users"), strings.HasSuffix(path, "/user-password-sealing-key"):
-		return "user.manage"
-	case path == "/api/v1/agent-rollouts":
-		if r.Method == http.MethodPost {
-			return "agent.upgrade"
-		}
-		return "operation.read"
-	case strings.HasPrefix(path, "/api/v1/agent-rollouts/"):
-		if r.Method == http.MethodPost && strings.HasSuffix(path, "/resume") {
-			return "agent.upgrade"
-		}
-		return "operation.read"
-	case r.Method == http.MethodPost && strings.HasSuffix(path, "/certificates"):
-		return "certificate.issue"
-	case r.Method == http.MethodGet && strings.HasSuffix(path, "/certificates"):
-		return "certificate.read"
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/certificates/"):
-		return "certificate.read"
-	case r.Method == http.MethodPost && strings.HasSuffix(path, ":issue") && strings.Contains(path, "/certificates/"):
-		return "certificate.issue"
-	case r.Method == http.MethodPost && strings.HasSuffix(path, ":revoke") && strings.Contains(path, "/certificates/"):
-		return "certificate.revoke"
-	case r.Method == http.MethodPost && strings.HasSuffix(path, ":p12") && strings.Contains(path, "/certificates/"):
-		return "certificate.private_key.export"
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/artifacts/"):
-		return "certificate.private_key.export"
-	case r.Method == http.MethodPost && path == "/api/v1/secret-provider-refs":
-		return "secret.manage"
-	case r.Method == http.MethodPost && strings.HasSuffix(path, ":rotate") && strings.Contains(path, "/secret-provider-refs/"):
-		return "secret.manage"
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/secret-provider-refs/"):
-		return "secret.read"
-	case strings.Contains(path, "/groups/"):
-		return "group.manage"
-	case strings.HasSuffix(path, "/approval"):
-		return "node.approve"
-	case strings.HasSuffix(path, "/revocation"):
-		return "node.revoke"
-	case strings.HasSuffix(path, "/privd-attestation-credentials"), strings.HasSuffix(path, "/privd-attestation-keys:revoke"):
-		return "privd.attestation.manage"
-	case strings.HasSuffix(path, ":approve") && strings.Contains(path, "/approval-requests/"):
-		return "approval.approve"
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/approval-requests/"):
-		return "approval.approve"
-	case path == "/api/v1/approval-requests":
-		if r.Method == http.MethodGet {
-			return "approval.approve"
-		}
-		return "approval.request"
-	case strings.HasPrefix(path, "/api/v1/audit"):
-		if strings.HasSuffix(path, ":verify") {
-			return "audit.verify"
-		}
-		return "audit.read"
-	case path == "/api/v1/role-bindings":
-		return "role_binding.manage"
-	case path == "/api/v1/enrollment-tokens":
-		return "enrollment_token.create"
-	case path == "/api/v1/node-bootstrap-tokens":
-		return "node_bootstrap_token.create"
-	case strings.HasPrefix(path, "/api/v1/operations"):
-		return "operation.read"
-	case strings.HasPrefix(path, "/api/v1/events"):
-		return "operation.read"
-	case r.Method == http.MethodPost && strings.HasSuffix(path, "/synthetic-commands"):
-		return "operation.create"
-	case strings.HasPrefix(path, "/api/v1/nodes"):
-		return "node.read"
-	default:
-		return ""
-	}
 }
 
 func principal(r *http.Request) auth.Principal {
@@ -403,23 +168,18 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, r *http.Request,
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}
-	if errors.Is(err, rbac.ErrForbidden) {
+	if errors.Is(err, auth.ErrForbidden) {
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the principal is not authorized for this resource and action")
 		return
 	}
-	// A failed role or resource lookup is not a denial.
+	// A failed workspace or resource lookup is not a denial.
 	writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Authorization unavailable", "authorization state is temporarily unavailable")
 }
 
 func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
-	return s.requireActionAuth("", next)
-}
-
-func (s *Server) requireActionAuth(action string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, err := s.authenticate(r)
 		if err != nil {
-			w.Header().Set("WWW-Authenticate", "OIDC")
 			writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "operation state requires an authenticated principal")
 			return
 		}
@@ -427,7 +187,7 @@ func (s *Server) requireActionAuth(action string, next http.HandlerFunc) http.Ha
 			writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/cross-origin-request", "Cross-origin request", err.Error())
 			return
 		}
-		ctx, err := s.authorizeRouteAction(r, principal, action)
+		ctx, err := s.authorizeRoute(r, principal)
 		if err != nil {
 			s.writeAuthorizationError(w, r, err)
 			return
@@ -439,7 +199,7 @@ func (s *Server) requireActionAuth(action string, next http.HandlerFunc) http.Ha
 var errCrossOrigin = errors.New("the request Origin does not match the trusted browser origin")
 
 // validateBrowserMutation enforces the browser trust boundary for state
-// changing requests: a session cookie established through Local, OIDC or break-glass
+// changing requests: a session cookie established through Local or break-glass
 // may only be spent by the exact public browser origin, so a sibling origin
 // on the same site, an unknown site, or a missing Origin cannot drive a
 // mutation. Development bearer principals are non-browser credentials and
@@ -485,16 +245,4 @@ func (s *Server) hasOperationCredential(r *http.Request) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(strings.TrimPrefix(authorization, prefix))), []byte(s.devAuthToken)) == 1
-}
-
-func (s *Server) nodeActionAllowed(r *http.Request, action string) (bool, error) {
-	actor := principal(r)
-	if s.rbac == nil && actor.Issuer != "development" {
-		return false, nil
-	}
-	_, err := s.authorizeRouteAction(r, actor, action)
-	if errors.Is(err, rbac.ErrForbidden) || errors.Is(err, database.ErrNotFound) {
-		return false, nil
-	}
-	return err == nil, err
 }

@@ -141,11 +141,7 @@ func TestRecoveryExecutionDeadlineAndLegacyAuthority(t *testing.T) {
 func recoveryTestDispatch(t *testing.T, now time.Time, ttl time.Duration) (Dispatch, []byte) {
 	t.Helper()
 	nodeID, operationID, commandID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	request := CreateRequest{
-		NodeID: nodeID, IdempotencyKey: "recovery-test", ExpectedVersion: 1,
-		Kind: SyntheticEcho, Message: "journaled", TTL: ttl, RequestID: "recovery-test",
-		Traceparent: testTraceparent,
-	}
+	request := CreateRequest{NodeID: nodeID, IdempotencyKey: "recovery-test", ExpectedVersion: 1, TTL: ttl, RequestID: "recovery-test", Traceparent: testTraceparent, Payload: SyntheticEchoPayload{Message: "journaled"}}
 	base, _, err := marshalEnvelope(request, operationID, commandID, 1, now, now.Add(ttl), testCommandSigner(t))
 	if err != nil {
 		t.Fatalf("marshal recovery fixture: %v", err)

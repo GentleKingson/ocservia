@@ -37,6 +37,7 @@ it("sends exactly one scoped POST with the generated JSON content type and body"
   expect(init.signal).toBe(controller.signal);
   expect(JSON.parse(init.body)).toEqual({
     workspace_id: "workspace-b",
+    installation: true,
     environment: "production",
     expected_node_name: "edge-1",
     ttl_seconds: 900,

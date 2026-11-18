@@ -36,15 +36,6 @@ func WrapPool(pool *pgxpool.Pool) *Backend { return &Backend{store{pool}, pool} 
 // accidentally commit separately.
 func WrapTx(tx pgx.Tx) database.Tx { return &transaction{store{tx}, tx} }
 
-func (b *Backend) Supports(c database.Capability) bool {
-	switch c {
-	case database.Transactions, database.RowLocks, database.AdvisoryTransactionLocks:
-		return true
-	default:
-		return false
-	}
-}
-
 func (b *Backend) Begin(ctx context.Context, isolation database.Isolation) (database.Tx, error) {
 	var level pgx.TxIsoLevel
 	switch isolation {

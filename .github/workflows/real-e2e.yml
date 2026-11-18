@@ -128,7 +128,7 @@ jobs:
           REAL_E2E_RELAY_TOKEN: ${{ secrets.CROSS_VM_RELAY_TOKEN }}
         run: bash scripts/real-e2e-relay-host.sh start
       - name: Publish Relay readiness
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-relay-ready-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/real-e2e-relay-${{ env.RUN_ID }}/ready
@@ -144,7 +144,7 @@ jobs:
       - name: Stop the sole Relay
         run: bash scripts/real-e2e-relay-host.sh stop
       - name: Publish stopped Relay
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-recovery-relay-stopped-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/real-e2e-relay-${{ env.RUN_ID }}/stopped
@@ -160,7 +160,7 @@ jobs:
       - name: Restore the same Relay
         run: bash scripts/real-e2e-relay-host.sh restore
       - name: Publish restored Relay
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-recovery-relay-restored-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/real-e2e-relay-${{ env.RUN_ID }}/restored
@@ -181,7 +181,7 @@ jobs:
         run: rm -rf -- "$RUNNER_TEMP/real-e2e-private-$RUN_ID-relay"
       - name: Preserve allowlisted evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: cross-vm-evidence-relay-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/real-e2e-evidence-relay
@@ -237,7 +237,7 @@ jobs:
       - name: start
         run: bash scripts/real-e2e-hosted.sh start
       - name: Publish controller-ready
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-controller-ready-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/controller-ready
@@ -253,7 +253,7 @@ jobs:
       - name: issue-token
         run: bash scripts/real-e2e-hosted.sh issue-token
       - name: Publish enrollment-token
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-enrollment-token-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/real-e2e-private-${{ env.RUN_ID }}-controller/encrypted-token
@@ -271,7 +271,7 @@ jobs:
       - name: Approve node and issue native authority
         run: bash scripts/real-e2e-hosted.sh authority
       - name: Publish encrypted business authority
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-business-authority-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/business-authority
@@ -287,7 +287,7 @@ jobs:
       - name: Register privd authority before Agent session
         run: bash scripts/real-e2e-hosted.sh register-privd
       - name: Publish authority registration confirmation
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-business-authority-registered-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/business-authority-registered
@@ -296,7 +296,7 @@ jobs:
       - name: Apply native business and create VPN user
         run: bash scripts/real-e2e-hosted.sh business
       - name: Publish encrypted VPN input and operation IDs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-business-controller-done-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/business-controller-done
@@ -314,7 +314,7 @@ jobs:
       - name: Create Relay recovery baseline
         run: bash scripts/real-e2e-hosted.sh recovery-controller-baseline
       - name: Publish Controller recovery baseline
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-recovery-controller-baseline-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/recovery-controller-baseline
@@ -330,7 +330,7 @@ jobs:
       - name: Queue reload during Relay outage
         run: bash scripts/real-e2e-hosted.sh recovery-controller-queued
       - name: Publish offline queued operation
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-recovery-controller-queued-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/recovery-controller-queued
@@ -346,7 +346,7 @@ jobs:
       - name: Verify fresh session and same recovered operation
         run: bash scripts/real-e2e-hosted.sh recovery-controller-done
       - name: Publish recovered operation
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-recovery-controller-done-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/recovery-controller-done
@@ -370,7 +370,7 @@ jobs:
         run: bash scripts/real-e2e-hosted.sh tailnet-cleanup
       - name: Preserve allowlisted evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: cross-vm-evidence-controller-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/real-e2e-evidence-controller
@@ -437,7 +437,7 @@ jobs:
       - name: prepare
         run: bash scripts/real-e2e-hosted.sh prepare
       - name: Publish agent-endpoint
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-agent-endpoint-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/agent-endpoint
@@ -453,7 +453,7 @@ jobs:
       - name: enroll
         run: bash scripts/real-e2e-hosted.sh enroll
       - name: Publish enrollment-result
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-enrollment-result-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/enrollment-result
@@ -469,7 +469,7 @@ jobs:
       - name: Prepare native authority and TLS
         run: bash scripts/real-e2e-hosted.sh activate
       - name: Publish native authority proof
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-business-node-ready-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/business-node-ready
@@ -494,7 +494,7 @@ jobs:
       - name: Check native effects and OpenConnect VPN
         run: bash scripts/real-e2e-hosted.sh native-result
       - name: Publish native business result
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-business-node-result-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/business-node-result
@@ -510,7 +510,7 @@ jobs:
       - name: Capture same native VPN and identity baseline
         run: bash scripts/real-e2e-hosted.sh recovery-node-baseline
       - name: Publish native recovery baseline
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-recovery-node-baseline-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/recovery-node-baseline
@@ -526,7 +526,7 @@ jobs:
       - name: Verify no offline native effect and live VPN
         run: bash scripts/real-e2e-hosted.sh recovery-node-queued
       - name: Publish offline native queue proof
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-recovery-node-queued-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/recovery-node-queued
@@ -542,7 +542,7 @@ jobs:
       - name: Verify exactly one reload and unchanged live VPN
         run: bash scripts/real-e2e-hosted.sh recovery-node-result
       - name: Publish native recovery result
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: real-e2e-recovery-node-result-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-node-${{ env.RUN_ID }}/outbox/recovery-node-result
@@ -557,7 +557,7 @@ jobs:
         run: bash scripts/real-e2e-hosted.sh tailnet-cleanup
       - name: Preserve allowlisted evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: cross-vm-evidence-node-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/real-e2e-evidence-node

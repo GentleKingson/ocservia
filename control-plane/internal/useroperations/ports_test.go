@@ -52,9 +52,6 @@ func TestUserMutatorValidationAndConcurrency(t *testing.T) {
 			if _, _, err := s.SetPolicy(t.Context(), PolicyRequest{}); !errors.Is(err, ErrInvalidRequest) {
 				t.Fatal("invalid policy", err)
 			}
-			if _, _, err := s.CreateBatch(t.Context(), BatchRequest{}); !errors.Is(err, ErrInvalidRequest) {
-				t.Fatal("invalid batch", err)
-			}
 			if n, err := s.resetMonthlyPolicies(t.Context(), 0); n != 0 || err != nil {
 				t.Fatal("zero reset budget", n, err)
 			}

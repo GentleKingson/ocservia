@@ -21,7 +21,7 @@ for flag in "${flags[@]}"; do printf -v "${flag}" false; done
 reason=recognized_paths
 changed=()
 ci_suites=()
-controller_images=(gateway control transport backup edge relay signer mysql_backup)
+controller_images=(gateway control transport backup edge relay signer)
 controller_cache_images=()
 
 tools_suite() {
@@ -80,31 +80,31 @@ classify_path() {
       tools_suite release ;;
     rust/*|scripts/rust-check.sh) run_rust=true ;;
     # Run only by Release Check; no installer contract executes it, while
-    # test-release-workflows.rb (release suite) asserts that Release Check calls it.
+    # test-release-workflows.py (release suite) asserts that Release Check calls it.
     scripts/release-quick-acceptance.sh) tools_suite release ;;
     # Offline Cross-VM contracts only; the credentialed three-VM run stays manual.
     .github/workflows/real-e2e.yml|deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*)
       tools_suite cross-vm ;;
     # Also imported by real-e2e-business.py.
-    scripts/release-business-api.py) tools_suite release; run_installers=true; tools_suite cross-vm ;;
+    scripts/release-business-api.py|scripts/release_business_runtime.py|scripts/release_business_scenarios.py) tools_suite release; run_installers=true; tools_suite cross-vm ;;
     # Documentation that no installer, image build or release asset reads.
     deploy/production/integrated/README.md|deploy/production/relay-build.md) run_docs=true ;;
     deploy/managed-node/install.sh|deploy/production/install.sh|deploy/production/controller-bootstrap.sh|\
-    deploy/lib/install-env.sh|deploy/lib/install-ui.sh|deploy/lib/controller-runtime.sh|deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
+    deploy/lib/install-env.sh|deploy/lib/install-ui.sh|deploy/lib/node-bootstrap.sh|deploy/lib/controller-runtime.sh|deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
     deploy/production/systemd/ocservia-agent-relays.conf|scripts/prepare-bootstrap-release-assets.sh|\
     scripts/release-agent-state-check.sh|scripts/package-agent.sh|scripts/verify-agent-package.sh|\
-    scripts/test-managed-node-install.sh|scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
-    scripts/test-relay-launchers.py|scripts/test-release-agent-state-check.sh|.gitignore)
+    scripts/test-managed-node-install.sh|scripts/test-node-bootstrap.py|scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
+    scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py|scripts/test-release-agent-state-check.sh|.gitignore)
       run_installers=true ;;
     .github/workflows/release*.yml|scripts/*release*|scripts/build-agent-binaries.sh|\
     scripts/*controller*|scripts/*agent-upgrade*|scripts/install-agent.sh|scripts/upgrade-agent.sh|\
     scripts/rollback-agent.sh|scripts/uninstall-agent.sh|deploy/package/*|deploy/systemd/*|\
     deploy/bootstrap/*|deploy/managed-node/*|deploy/production/*|deploy/prepare-transport-runtime.sh)
       tools_suite release; run_installers=true ;;
-    deploy/compose/*|deploy/database-e2e/*|scripts/*database*|scripts/*mysql*|scripts/*postgres*|\
+    deploy/compose/*|deploy/database-e2e/*|scripts/*database*|scripts/*postgres*|\
     scripts/*-backup-restore-smoke.sh)
       run_go=true; run_database=true ;;
-    # test-release-workflows.rb (release suite) reads the Release notes config.
+    # test-release-workflows.py (release suite) reads the Release notes config.
     .github/release.yml) tools_suite release ;;
     .github/release-notes/*.md) run_docs=true; tools_suite release ;;
     # Shared Claude Code settings never reach CI or images; docs-check enforces its audited keys.
@@ -137,8 +137,8 @@ classify_path() {
   esac
   case "${path}" in
     scripts/generate-controller-release-manifest.mjs|scripts/redact-release-upgrade-log.mjs|\
-    scripts/release-business-browser.mjs|scripts/release-upgrade-oidc-fixture.mjs|\
-    scripts/test-release-upgrade.mjs|.github/actions/build-cache-credentials/index.js)
+    scripts/release-business-browser.mjs|scripts/test-release-upgrade.mjs|\
+    .github/actions/build-cache-credentials/index.js)
       run_web=true ;;
   esac
   case "${path}" in
@@ -148,7 +148,7 @@ classify_path() {
   # (build context is the repository root) and the builder/cache machinery itself.
   case "${path}" in
     # Go builds exclude these files; current embeds name only SQL/password data.
-    # Keep their Go/DB checks above, but avoid refreshing eight production images
+    # Keep their Go/DB checks above, but avoid refreshing seven production images
     # on both architectures. A mixed production change still selects the cache.
     control-plane/*_test.go|signer/*_test.go) ;;
     # vite build starts at index.html and Tailwind scans only web/src, so these
@@ -161,11 +161,8 @@ classify_path() {
     rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/.cargo/*|rust/vendor/*|rust/crates/*|\
     rust/transportd.Dockerfile|deploy/production/transportd-relays.sh|deploy/prepare-transport-runtime.sh)
       select_controller_images transport ;;
-    deploy/production/backup.Dockerfile|scripts/postgres-backup.sh)
+    deploy/production/backup.Dockerfile|deploy/production/backup-entrypoint.sh|scripts/postgres-backup.sh)
       select_controller_images backup ;;
-    deploy/production/backup.mysql.Dockerfile|scripts/mysql-server-check.sh|scripts/mysql-backup.sh|scripts/mysql-restore-verify.sh)
-      select_controller_images mysql_backup ;;
-    deploy/production/backup-entrypoint.sh) select_controller_images backup mysql_backup ;;
     deploy/production/edge.Dockerfile) select_controller_images edge ;;
     deploy/production/integrated/*) select_controller_images gateway edge ;;
     deploy/production/relay.Dockerfile|scripts/build-relay.sh|\
@@ -181,7 +178,7 @@ classify_path() {
   case "${path}" in
     web/src/api/*|web/src/shared/*|web/src/App.vue|web/src/main.ts|web/src/main.css|web/index.html|\
     web/src/components/ui/*|web/src/components/layout/*|web/src/components/overview/*|web/src/features/operations/*|\
-    web/src/views/LoginView.vue|web/src/views/ApprovalsView.vue|web/src/views/AuditView.vue|web/src/views/SettingsView.vue|web/src/views/OverviewView.vue|web/src/views/OperationsView.vue|web/src/views/RolloutDetailView.vue|\
+    web/src/views/LoginView.vue|web/src/views/AuditView.vue|web/src/views/SettingsView.vue|web/src/views/OverviewView.vue|web/src/views/OperationsView.vue|web/src/views/RolloutDetailView.vue|\
     web/src/views/NodesView.vue|web/src/views/NodeDetailView.vue|web/src/components/common/*|\
     web/src/components/nodes/*|web/src/features/configuration/*|web/src/features/certificates/*|\
     web/src/features/node-workflow.ts|web/src/features/user-password.ts|web/src/adapters/user-policy.ts|\
@@ -229,11 +226,7 @@ else
   fi
 fi
 
-matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.11"}]}'
-if [[ "${database_scope}" == full ]]; then
-  # MySQL full acceptance is the critical path; its complementary shards run in parallel.
-  matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.11","shard":"mysql-cutover"},{"engine":"mysql","version":"8.4.11","shard":"mysql-core"},{"engine":"mysql","version":"8.4.11","shard":"services"}]}'
-fi
+matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"}]}'
 
 {
   printf 'database_matrix=%s\n' "${matrix}"

@@ -1,9 +1,6 @@
 # Exact names prevent a removed/renamed subtest from silently weakening the gate.
 ($manifest | split("\n") | map(select(length > 0 and (startswith("#") | not)) | split(" "))
- | map(select(length < 4 or .[3] == env.OCSERVIA_DATABASE_TEST_ENGINE)
-   | select(.[0] == $group or
-     ($group == "backend-mysql-full" and
-       (.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql" or .[0] == "mysql-snapshot")))
+ | map(select(.[0] == $group)
    | {package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), test: .[2]})
  | map(select(($ARGS.named.shard_mode // "") == "" or
      ((.test | split("/")[0] | test($ARGS.named.shard_pattern)) == ($ARGS.named.shard_mode == "run"))))) as $required

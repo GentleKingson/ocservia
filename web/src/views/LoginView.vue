@@ -1,63 +1,19 @@
 <script setup lang="ts">
 import { Activity, LogIn } from "@lucide/vue";
-import type { AuthMethods } from "@ocservia/api-client";
-import { onMounted, ref } from "vue";
+import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-import {
-  hasOidcLoginAttempt,
-  startOidcLoginAttempt,
-  retryAfterSeconds,
-} from "../shared/login";
+import { retryAfterSeconds } from "../shared/login";
 
 const { t } = useI18n();
-const methods = ref<AuthMethods>();
 const username = ref("");
 const password = ref("");
 const pending = ref(false);
-const loading = ref(true);
 const error = ref("");
-const ssoStopped = ref(
-  hasOidcLoginAttempt() ||
-    new URLSearchParams(window.location.search).get("auth") === "failed",
-);
-
-function signInSso(): void {
-  password.value = "";
-  startOidcLoginAttempt();
-  ssoStopped.value = false;
-  window.location.assign("/api/v1/auth/login");
-}
-
-async function loadMethods(): Promise<void> {
-  loading.value = true;
-  error.value = "";
-  try {
-    const response = await fetch("/api/v1/auth/methods", {
-      credentials: "same-origin",
-      cache: "no-store",
-    });
-    if (!response.ok) throw new Error("Authentication unavailable");
-    const data = (await response.json()) as AuthMethods;
-    if (
-      typeof data.local !== "boolean" ||
-      typeof data.oidc !== "boolean" ||
-      (!data.local && !data.oidc)
-    )
-      throw new Error("Authentication unavailable");
-    methods.value = data;
-    if (data.oidc && ssoStopped.value) error.value = t("loginSsoFailed");
-    if (!data.local && data.oidc && !ssoStopped.value) signInSso();
-  } catch {
-    error.value = t("loginUnavailable");
-  } finally {
-    loading.value = false;
-  }
-}
 
 async function signInLocal(): Promise<void> {
   if (pending.value) return;
@@ -99,8 +55,6 @@ async function signInLocal(): Promise<void> {
     pending.value = false;
   }
 }
-
-onMounted(loadMethods);
 </script>
 
 <template>
@@ -126,9 +80,6 @@ onMounted(loadMethods);
       >
         {{ t("loginTitle") }}
       </h1>
-      <p v-if="loading" class="text-muted-foreground text-sm" role="status">
-        {{ t("loading") }}
-      </p>
       <p
         v-if="error"
         class="border-destructive/30 bg-destructive/5 text-destructive mb-4 rounded-md border px-3 py-2 text-sm wrap-anywhere"
@@ -136,11 +87,7 @@ onMounted(loadMethods);
       >
         {{ error }}
       </p>
-      <form
-        v-if="methods?.local"
-        class="grid gap-3"
-        @submit.prevent="signInLocal"
-      >
+      <form class="grid gap-3" @submit.prevent="signInLocal">
         <Label for="login-username">{{ t("loginUsername") }}</Label>
         <Input
           id="login-username"
@@ -168,38 +115,6 @@ onMounted(loadMethods);
           }}
         </Button>
       </form>
-      <div
-        v-if="methods?.local && methods.oidc"
-        class="text-muted-foreground before:bg-border after:bg-border my-6 flex items-center gap-3.5 text-sm before:h-px before:flex-1 after:h-px after:flex-1"
-      >
-        {{ t("loginOr") }}
-      </div>
-      <Button
-        v-if="methods?.oidc && (methods.local || ssoStopped)"
-        class="h-10 w-full"
-        variant="outline"
-        type="button"
-        :disabled="pending"
-        @click="signInSso"
-      >
-        <LogIn aria-hidden="true" />{{ t("loginSso") }}
-      </Button>
-      <p
-        v-if="methods?.oidc && !methods.local && !ssoStopped"
-        class="text-muted-foreground text-sm"
-        role="status"
-      >
-        {{ t("loginRedirecting") }}
-      </p>
-      <Button
-        v-if="!loading && !methods"
-        class="h-10 w-full"
-        variant="outline"
-        type="button"
-        @click="loadMethods"
-      >
-        {{ t("loginRetry") }}
-      </Button>
     </section>
   </main>
 </template>

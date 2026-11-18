@@ -1,5 +1,5 @@
--- Test-only completion marker for startup, role and independent Controller
--- Rebind checks. Installed by the test owner after schema validation.
+-- Test-only completion marker for startup and scheduler checks.
+-- Installed by the test owner after schema validation.
 CREATE TABLE IF NOT EXISTS public.test_scheduler_maintenance_history (
     maintenance_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     instance_id uuid NOT NULL,

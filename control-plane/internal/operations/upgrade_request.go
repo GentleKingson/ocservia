@@ -2,13 +2,12 @@ package operations
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 )
@@ -27,49 +26,36 @@ type AgentUpgradeTarget struct {
 }
 
 // PrepareAgentUpgrade preserves single-node admission, not rollout eligibility.
-// Create still owns the locked revision/capability/approval checks and
-// idempotent intent transaction. In particular, do not replace ExpectedVersion
-// with a newly read node version here: that would change replay identity.
+// Create still owns the locked revision/capability checks and idempotent intent transaction.
 func (s *Service) PrepareAgentUpgrade(ctx context.Context, workspaceID, nodeID uuid.UUID, version string) (AgentUpgradeTarget, error) {
-	target, _, err := s.agentUpgradeTarget(ctx, workspaceID, nodeID, version)
-	return target, err
-}
-
-// AgentUpgradeApprovalBinding pins the same trusted target as preparation.
-// Approval historically allows an equal/older target or an unknown observed
-// version; it is not a promise that subsequent execution will be eligible.
-func (s *Service) AgentUpgradeApprovalBinding(ctx context.Context, workspaceID, nodeID uuid.UUID, version string) ([]byte, json.RawMessage, error) {
-	target, _, err := s.agentUpgradeTarget(ctx, workspaceID, nodeID, version)
-	if err != nil {
-		return nil, nil, err
-	}
-	hash, summary := approvals.AgentUpgradeBinding(nodeID, target.Version, target.PackageSHA256[:], target.Architecture)
-	return hash, summary, nil
-}
-
-func (s *Service) agentUpgradeTarget(ctx context.Context, workspaceID, nodeID uuid.UUID, version string) (AgentUpgradeTarget, string, error) {
 	version = strings.TrimSpace(version)
 	if !semanticpayload.ValidAgentUpgradeTargetVersion(version) {
-		return AgentUpgradeTarget{}, "", ErrInvalidRequest
+		return AgentUpgradeTarget{}, ErrInvalidRequest
 	}
-	store, err := rbacstore.From(s.backend)
-	if err != nil {
-		return AgentUpgradeTarget{}, "", fmt.Errorf("%w: %w", ErrNodeUnavailable, err)
+	if s.backend == nil {
+		return AgentUpgradeTarget{}, fmt.Errorf("%w: %w", ErrNodeUnavailable, database.ErrUnsupported)
 	}
 	var nodeWorkspace uuid.UUID
-	var architecture, observedVersion string
-	if err := store.UpgradeNode(ctx, nodeID).Scan(&nodeWorkspace, &architecture, &observedVersion); err != nil {
-		return AgentUpgradeTarget{}, "", fmt.Errorf("%w: %w", ErrNodeUnavailable, err)
+	var architecture string
+	if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := operationstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		nodeWorkspace, architecture, _, err = store.UpgradeNode(ctx, nodeID)
+		return err
+	}); err != nil {
+		return AgentUpgradeTarget{}, fmt.Errorf("%w: %w", ErrNodeUnavailable, err)
 	}
 	if nodeWorkspace != workspaceID {
-		return AgentUpgradeTarget{}, "", ErrNodeUnavailable
+		return AgentUpgradeTarget{}, ErrNodeUnavailable
 	}
 	if architecture == "" {
-		return AgentUpgradeTarget{}, "", ErrUpgradeArchitectureUnknown
+		return AgentUpgradeTarget{}, ErrUpgradeArchitectureUnknown
 	}
 	digest, trusted := s.releaseCatalog.Lookup(version, architecture)
 	if !trusted {
-		return AgentUpgradeTarget{}, "", ErrUpgradeReleaseNotTrusted
+		return AgentUpgradeTarget{}, ErrUpgradeReleaseNotTrusted
 	}
-	return AgentUpgradeTarget{Version: version, Architecture: architecture, PackageSHA256: digest}, observedVersion, nil
+	return AgentUpgradeTarget{Version: version, Architecture: architecture, PackageSHA256: digest}, nil
 }

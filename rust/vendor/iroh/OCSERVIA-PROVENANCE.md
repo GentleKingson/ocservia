@@ -24,6 +24,8 @@ normalized and original Cargo manifests and checked by the workspace's
 
 The repository-local patch changes only these upstream Rust sources:
 
+- `examples/transfer.rs`
+- `src/address_lookup/pkarr.rs`
 - `src/endpoint.rs`
 - `src/socket.rs`
 - `src/socket/mapped_addrs.rs`
@@ -104,7 +106,7 @@ clears the last-sender shortcut so an evicted live peer registers again on its
 next datagram. Both receive loops use the same handler.
 
 To replay provenance, download and verify the archive above, extract it, and
-overlay the nine listed Rust files from the chosen ocservia revision. Add this
+overlay the listed Rust files from the chosen ocservia revision. Add this
 provenance file and the two exact upstream license texts. All remaining files
 must compare byte-for-byte with the archive. The manifests and vendor lock stay
 upstream originals; `rust/Cargo.lock`, not this archive lock, owns production.
@@ -140,3 +142,24 @@ invoked by `scripts/rust-check.sh` or Quick CI; the Full profile of
 `.github/workflows/ci.yml` (also run by Release Check) runs all ten by exact
 name and fails unless all ten ran. Do not infer their execution from a green
 Quick Rust job.
+
+PKARR lookup also streams successful relay responses and rejects a payload
+before accumulating more than `SignedPacket::MAX_BYTES - 32` bytes (1072 for
+iroh-dns 1.4.0). Signature and DNS validation remain unchanged. The focused
+`address_lookup::pkarr::tests` suite includes unterminated oversized responses
+with chunked and lengthless framing, plus valid signed packets at the exact
+size limit with fixed-length and chunked framing. This bounds the client's
+accumulator, not the HTTP implementation's individual incoming chunk.
+
+The transfer example omits the relay authentication token from serialized
+endpoint arguments while retaining it for relay authentication. Its
+`endpoint_args_json_omits_relay_auth_token` regression exercises the timestamped
+JSON representation with and without a token and preserves ordinary output
+fields. Run it with the archive lock and the same features listed above, using
+`--example transfer endpoint_args_json_omits_relay_auth_token` instead of
+`--lib <test_name>`.
+
+Basic CI runs the three `address_lookup::pkarr::tests` tests and the transfer
+serialization test whenever Rust is selected, in both Quick and Full profiles.
+These security regressions use the archive lock; they are not production-graph
+evidence. The existing ten lifecycle regressions remain Full-only.

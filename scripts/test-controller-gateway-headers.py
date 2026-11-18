@@ -92,7 +92,7 @@ def main():
                     if time.monotonic() > deadline:
                         raise
                     time.sleep(0.5)
-            for path, status in (("/", 200), ("/nodes/deep-link", 200), ("/api/v1/auth/methods", 502),
+            for path, status in (("/", 200), ("/nodes/deep-link", 200), ("/api/v1/auth/session", 502),
                                  ("/readyz", 502)):
                 got, headers = fetch(address, path, context, proxy)
                 assert got == status, (mode, path, got)

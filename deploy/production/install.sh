@@ -43,57 +43,8 @@ RELEASE_COMMIT=""
 ARCH_WORD=""
 BUNDLE_DIR=""
 ROOT_LIFECYCLE=false
-
-# Only operator-supplied production configuration crosses the internal sudo
-# boundary. Release image variables are generated from the deployment configuration;
-# bootstrap and test seams are intentionally not forwarded.
-ROOT_LIFECYCLE_ENV_NAMES=(
-  OCSERV_AUDIT_EVENT_KEY_ID
-  OCSERV_BACKUP_DIR
-  OCSERV_BACKUP_INTERVAL_SECONDS
-  OCSERV_BACKUP_RETENTION_COUNT
-  OCSERV_DATABASE_BACKEND
-  OCSERV_DATABASE_DEPLOYMENT
-  OCSERV_DATABASE_BACKUP_HOST
-  OCSERV_DATABASE_BACKUP_PORT
-  OCSERV_DATABASE_BACKUP_NAME
-  OCSERV_DATABASE_BACKUP_USER
-  OCSERV_DATABASE_BACKUP_IMAGE
-  OCSERV_DEPLOYMENT_MODE
-  OCSERV_RELAY_PUBLIC_HOST
-  OCSERV_RELAY_SECRET_DIR
-  OCSERV_TLS_MODE
-  OCSERV_ACME_EMAIL
-  OCSERV_ACME_DIRECTORY_URL
-  OCSERV_ACME_CA_FILE
-  OCSERV_SIGNER_SECRET_DIR
-  OCSERV_SIGNER_STATE_DIR
-  OCSERV_EDGE_GATEWAY_IP
-  OCSERV_EDGE_GATEWAY_SUBNET
-  OCSERV_EDGE_GATEWAY_IP_RANGE
-  OCSERV_CERTIFICATE_SIGNER_URL
-  OCSERV_CONTROLLER_ENDPOINT_ID
-  OCSERV_CONTROLLER_PUBLIC_URL
-  OCSERV_CONTROLLER_STATE_DIR
-  OCSERV_CONTROLLER_STATE_ROOT
-  OCSERV_HTTPS_ADDRESS
-  OCSERV_AUTH_TRUSTED_PROXY_CIDRS
-  OCSERV_APPLICATION_SUBNET
-  OCSERV_APPLICATION_IP_RANGE
-  OCSERV_GATEWAY_APPLICATION_IP
-  OCSERV_LOCAL_AUTH_ENABLED
-  OCSERV_PUBLIC_ORIGIN
-  OCSERV_SESSION_TTL
-  OCSERV_RECOMMENDED_AGENT_VERSION
-  OCSERV_OIDC_REDIRECT_URL
-  OCSERV_OIDC_CLIENT_ID
-  OCSERV_OIDC_ISSUER
-  OCSERV_OTEL_BACKEND_ENDPOINT
-  OCSERV_PUBLIC_HOST
-  OCSERV_RELAY_URL_A
-  OCSERV_RELAY_URL_B
-  OCSERV_SECRET_DIR
-)
+# shellcheck source=deploy/lib/install-env.sh
+source "${ROOT}/deploy/lib/install-env.sh"
 
 fail() {
   echo "controller install: $1" >&2
@@ -124,58 +75,14 @@ sudo_args=()
 # across the sudo boundary, so root must not treat a possibly-replaced
 # $PWD/install.env as new authoritative input.
 if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
-  # shellcheck source=../lib/install-env.sh disable=SC1091
-  source "${ROOT}/deploy/lib/install-env.sh"
-  install_env_load "${CONFIG_FILE}" \
-    OCSERV_AUDIT_EVENT_KEY_ID \
-    OCSERV_BACKUP_DIR \
-    OCSERV_BACKUP_INTERVAL_SECONDS \
-    OCSERV_BACKUP_RETENTION_COUNT \
-    OCSERV_DATABASE_BACKEND \
-    OCSERV_DATABASE_DEPLOYMENT \
-    OCSERV_DATABASE_BACKUP_HOST \
-    OCSERV_DATABASE_BACKUP_PORT \
-    OCSERV_DATABASE_BACKUP_NAME \
-    OCSERV_DATABASE_BACKUP_USER \
-    OCSERV_DATABASE_BACKUP_IMAGE \
-    OCSERV_DEPLOYMENT_MODE \
-    OCSERV_RELAY_PUBLIC_HOST \
-    OCSERV_RELAY_SECRET_DIR \
-    OCSERV_TLS_MODE \
-    OCSERV_ACME_EMAIL \
-    OCSERV_ACME_DIRECTORY_URL \
-    OCSERV_ACME_CA_FILE \
-    OCSERV_SIGNER_SECRET_DIR \
-    OCSERV_SIGNER_STATE_DIR \
-    OCSERV_EDGE_GATEWAY_IP \
-    OCSERV_EDGE_GATEWAY_SUBNET \
-    OCSERV_EDGE_GATEWAY_IP_RANGE \
-    OCSERV_CERTIFICATE_SIGNER_URL \
-    OCSERV_CONTROLLER_ENDPOINT_ID \
-    OCSERV_CONTROLLER_PUBLIC_URL \
-    OCSERV_CONTROLLER_STATE_DIR \
-    OCSERV_CONTROLLER_STATE_ROOT \
-    OCSERV_HTTPS_ADDRESS \
-    OCSERV_AUTH_TRUSTED_PROXY_CIDRS \
-    OCSERV_APPLICATION_SUBNET \
-    OCSERV_APPLICATION_IP_RANGE \
-    OCSERV_GATEWAY_APPLICATION_IP \
-    OCSERV_LOCAL_AUTH_ENABLED \
-    OCSERV_PUBLIC_ORIGIN \
-    OCSERV_SESSION_TTL \
-    OCSERV_RECOMMENDED_AGENT_VERSION \
-    OCSERV_OIDC_REDIRECT_URL \
-    OCSERV_OIDC_CLIENT_ID \
-    OCSERV_OIDC_ISSUER \
-    OCSERV_OTEL_BACKEND_ENDPOINT \
-    OCSERV_PUBLIC_HOST \
-    OCSERV_RELAY_URL_A \
-    OCSERV_RELAY_URL_B \
-    OCSERV_SECRET_DIR
+  install_env_load "${CONFIG_FILE}" "${CONTROLLER_INSTALL_ENV_NAMES[@]}"
 fi
 # Every configuration-derived variable is computed only after the
 # configuration sources above are final.
-[[ -z "${OCSERV_RELAY_URL_B:-}" ]] || fail 'only one dedicated Relay is supported; leave OCSERV_RELAY_URL_B empty'
+case "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
+  postgres:bundled|postgres:external) ;;
+  *) fail 'unsupported database configuration; only OCSERV_DATABASE_BACKEND=postgres with OCSERV_DATABASE_DEPLOYMENT=bundled or external is supported' ;;
+esac
 STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
 if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated && "${ROOT_LIFECYCLE}" != true ]] && (( EUID != 0 )); then
   fail "Integrated requires --root-lifecycle for private Signer custody"
@@ -186,8 +93,11 @@ forward_root_lifecycle() {
   local -a reexec_args=()
   [[ "${NON_INTERACTIVE}" == false ]] || reexec_args+=(--non-interactive)
   local -a forwarded_environment=()
+  # Only operator-supplied production configuration crosses the internal sudo
+  # boundary. Release image variables are generated from the deployment configuration;
+  # bootstrap and test seams are intentionally not forwarded.
   while IFS= read -r variable; do
-    for allowed in "${ROOT_LIFECYCLE_ENV_NAMES[@]}"; do
+    for allowed in "${CONTROLLER_INSTALL_ENV_NAMES[@]}"; do
       [[ "${variable}" == "${allowed}" ]] || continue
       forwarded_environment+=("${variable}=${!variable}")
       break

@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from "../runtime";
+import type { AuditEvent } from "./AuditEvent";
+import {
+  AuditEventFromJSON,
+  AuditEventFromJSONTyped,
+  AuditEventToJSON,
+  AuditEventToJSONTyped,
+} from "./AuditEvent";
+
 /**
  *
  * @export
@@ -21,10 +29,10 @@ import { mapValues } from "../runtime";
 export interface AuditEventPage {
   /**
    *
-   * @type {Array<{ [key: string]: any; }>}
+   * @type {Array<AuditEvent>}
    * @memberof AuditEventPage
    */
-  items: Array<{ [key: string]: any }>;
+  items: Array<AuditEvent>;
 }
 
 /**
@@ -49,7 +57,7 @@ export function AuditEventPageFromJSONTyped(
     return json;
   }
   return {
-    items: json["items"],
+    items: (json["items"] as Array<any>).map(AuditEventFromJSON),
   };
 }
 
@@ -66,6 +74,6 @@ export function AuditEventPageToJSONTyped(
   }
 
   return {
-    items: value["items"],
+    items: (value["items"] as Array<any>).map(AuditEventToJSON),
   };
 }

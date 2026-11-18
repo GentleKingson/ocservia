@@ -33,5 +33,11 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.build)
+	// Keep the historical response field without making it a runtime setting.
+	writeJSON(w, http.StatusOK, struct {
+		Version                 string `json:"version"`
+		Commit                  string `json:"commit"`
+		Role                    string `json:"role"`
+		RecommendedAgentVersion string `json:"recommended_agent_version,omitempty"`
+	}{s.build.Version, s.build.Commit, "all", s.build.RecommendedAgentVersion})
 }

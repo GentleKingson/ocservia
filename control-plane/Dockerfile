@@ -24,4 +24,3 @@ COPY --from=build /out/ocserv-sealing-export /usr/local/bin/ocserv-sealing-expor
 COPY control-plane/internal/auth/password_blocklist/LICENSE.django /usr/share/doc/ocservia/LICENSE.django
 COPY THIRD_PARTY_NOTICES.md /usr/share/doc/ocservia/THIRD_PARTY_NOTICES.md
 ENTRYPOINT ["/usr/local/bin/ocserv-control"]
-CMD ["--role=all"]

@@ -48,8 +48,7 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 		}
 		var id uuid.UUID
 		var raw []byte
-		q, args := f.query(`SELECT id,envelope FROM commands WHERE operation_id=$1`, `SELECT id,envelope FROM commands WHERE operation_id=?`, []any{uuid.MustParse(op.ID)})
-		if err := f.owner.QueryRow(ctx, q, args...).Scan(&id, &raw); err != nil {
+		if err := f.owner.QueryRow(ctx, `SELECT id,envelope FROM commands WHERE operation_id=$1`, uuid.MustParse(op.ID)).Scan(&id, &raw); err != nil {
 			t.Fatal(err)
 		}
 		var envelope agentv1.CommandEnvelope
@@ -72,19 +71,18 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 		if i == 34 {
 			state = "running"
 		}
-		f.exec(t, `UPDATE commands SET state=$1,envelope=$2,created_at=$3,expires_at=$4,updated_at=$5 WHERE id=$6`, `UPDATE commands SET state=?,envelope=?,created_at=?,expires_at=?,updated_at=? WHERE id=?`, state, raw, created, expired, terminal, id)
-		f.exec(t, `UPDATE operations SET state=$1,created_at=$2,expires_at=$3,updated_at=$4,completed_at=$5 WHERE id=$6`, `UPDATE operations SET state=?,created_at=?,expires_at=?,updated_at=?,completed_at=? WHERE id=?`, state, created, expired, terminal, terminal, uuid.MustParse(op.ID))
-		f.exec(t, `UPDATE outbox_events SET payload=$1,published_at=$2 WHERE command_id=$3`, `UPDATE outbox_events SET payload=?,published_at=? WHERE command_id=?`, raw, terminal, id)
+		f.exec(t, `UPDATE commands SET state=$1,envelope=$2,created_at=$3,expires_at=$4,updated_at=$5 WHERE id=$6`, state, raw, created, expired, terminal, id)
+		f.exec(t, `UPDATE operations SET state=$1,created_at=$2,expires_at=$3,updated_at=$4,completed_at=$5 WHERE id=$6`, state, created, expired, terminal, terminal, uuid.MustParse(op.ID))
+		f.exec(t, `UPDATE outbox_events SET payload=$1,published_at=$2 WHERE command_id=$3`, raw, terminal, id)
 		if i == 35 {
 			var outbox uuid.UUID
-			q, args := f.query(`SELECT id FROM outbox_events WHERE command_id=$1`, `SELECT id FROM outbox_events WHERE command_id=?`, []any{id})
-			if err := f.owner.QueryRow(ctx, q, args...).Scan(&outbox); err != nil {
+			if err := f.owner.QueryRow(ctx, `SELECT id FROM outbox_events WHERE command_id=$1`, id).Scan(&outbox); err != nil {
 				t.Fatal(err)
 			}
-			f.exec(t, `INSERT INTO command_attempts(id,command_id,outbox_event_id,worker_id,attempt_number,state,started_at,finished_at)VALUES($1,$2,$3,$4,1,'unknown',$5,$6)`, `INSERT INTO command_attempts(id,command_id,outbox_event_id,worker_id,attempt_number,state,started_at,finished_at)VALUES(?,?,?,?,1,'unknown',?,?)`, uuid.New(), id, outbox, uuid.New(), created, terminal)
+			f.exec(t, `INSERT INTO command_attempts(id,command_id,outbox_event_id,worker_id,attempt_number,state,started_at,finished_at)VALUES($1,$2,$3,$4,1,'unknown',$5,$6)`, uuid.New(), id, outbox, uuid.New(), created, terminal)
 		}
 		if i == 36 {
-			f.exec(t, `INSERT INTO node_command_leases(node_id,command_id,lease_token,worker_id,leased_until,created_at)VALUES($1,$2,$3,$4,$5,$6)`, `INSERT INTO node_command_leases(node_id,command_id,lease_token,worker_id,leased_until,created_at)VALUES(?,?,?,?,?,?)`, node, id, uuid.New(), uuid.New(), expired, created)
+			f.exec(t, `INSERT INTO node_command_leases(node_id,command_id,lease_token,worker_id,leased_until,created_at)VALUES($1,$2,$3,$4,$5,$6)`, node, id, uuid.New(), uuid.New(), expired, created)
 		}
 
 	}
@@ -96,7 +94,7 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 		t.Fatal("fence", err)
 	}
 	count := func() int {
-		return f.count(t, `SELECT count(*) FROM commands WHERE details_compacted_at IS NOT NULL`, `SELECT count(*) FROM commands WHERE details_compacted_at IS NOT NULL`)
+		return f.count(t, `SELECT count(*) FROM commands WHERE details_compacted_at IS NOT NULL`)
 	}
 	if count() != 0 {
 		t.Fatal("lost fence committed compaction")
@@ -123,9 +121,8 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 	if err != nil || !replay || again.ID != firstID {
 		t.Fatal("idempotency identity lost", again, replay, err)
 	}
-	q, args := f.query(`SELECT envelope,envelope_sha256 FROM commands WHERE operation_id=$1`, `SELECT envelope,envelope_sha256 FROM commands WHERE operation_id=?`, []any{uuid.MustParse(firstID)})
 	var compact, digest []byte
-	if err := f.owner.QueryRow(ctx, q, args...).Scan(&compact, &digest); err != nil {
+	if err := f.owner.QueryRow(ctx, `SELECT envelope,envelope_sha256 FROM commands WHERE operation_id=$1`, uuid.MustParse(firstID)).Scan(&compact, &digest); err != nil {
 		t.Fatal(err)
 	}
 	var header agentv1.CommandEnvelope
@@ -138,23 +135,23 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 	// identity/revocation rows, and keep snapshots needed by unresolved work.
 	retiredNode, activeNode := f.node(t), f.node(t)
 	for _, id := range []uuid.UUID{retiredNode, node} {
-		f.exec(t, `UPDATE nodes SET status='revoked' WHERE id=$1`, `UPDATE nodes SET status='revoked' WHERE id=?`, id)
-		f.exec(t, `UPDATE node_endpoint_keys SET state='revoked',revoked_at=$1 WHERE node_id=$2`, `UPDATE node_endpoint_keys SET state='revoked',revoked_at=? WHERE node_id=?`, terminal, id)
+		f.exec(t, `UPDATE nodes SET status='revoked' WHERE id=$1`, id)
+		f.exec(t, `UPDATE node_endpoint_keys SET state='revoked',revoked_at=$1 WHERE node_id=$2`, terminal, id)
 	}
 	for _, id := range []uuid.UUID{retiredNode, activeNode, node} {
-		f.exec(t, `INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,'boot',$3,'test','test','test','{"detail":1}','{}','{}',$4)`, "INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,`system`,path,last_heartbeat_at) VALUES(?,?,'boot',?,'test','test','test','{\"detail\":1}','{}','{}',?)", id, terminal, uuid.New(), terminal)
+		f.exec(t, `INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,'boot',$3,'test','test','test','{"detail":1}','{}','{}',$4)`, id, terminal, uuid.New(), terminal)
 	}
 
 	if err := worker.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n := f.count(t, `SELECT count(*) FROM node_observed_snapshots WHERE node_id=$1 AND ocserv='{}'`, `SELECT count(*) FROM node_observed_snapshots WHERE node_id=? AND BINARY ocserv=BINARY '{}'`, retiredNode); n != 1 {
+	if n := f.count(t, `SELECT count(*) FROM node_observed_snapshots WHERE node_id=$1 AND ocserv='{}'`, retiredNode); n != 1 {
 		t.Fatal("retired snapshot not compacted")
 	}
-	if n := f.count(t, `SELECT count(*) FROM node_observed_snapshots WHERE ocserv<>'{}'`, `SELECT count(*) FROM node_observed_snapshots WHERE BINARY ocserv<>BINARY '{}'`); n != 2 {
+	if n := f.count(t, `SELECT count(*) FROM node_observed_snapshots WHERE ocserv<>'{}'`); n != 2 {
 		t.Fatal("active or unresolved snapshot lost", n)
 	}
-	if n := f.count(t, `SELECT count(*) FROM node_endpoint_keys WHERE state='revoked'`, `SELECT count(*) FROM node_endpoint_keys WHERE state='revoked'`); n != 2 {
+	if n := f.count(t, `SELECT count(*) FROM node_endpoint_keys WHERE state='revoked'`); n != 2 {
 		t.Fatal("revocation tombstone lost")
 	}
 

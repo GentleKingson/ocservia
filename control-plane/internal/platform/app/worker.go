@@ -20,14 +20,14 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 	var err error
 	var workerTransport *transportclient.Client
 	var ownerSessions *ownersession.Manager
-	if cfg.RunsWorker() && (cfg.LocalSimulator || cfg.ControllerEndpointID != "") {
+	if cfg.LocalSimulator || cfg.ControllerEndpointID != "" {
 		workerTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("configure transport client: %w", err)
 		}
 	}
-	if cfg.RunsWorker() && cfg.ControllerEndpointID != "" {
-		// The worker-role process is the per-node connection owner: it serves
+	if cfg.ControllerEndpointID != "" {
+		// The single-process Controller is the per-node connection owner: it serves
 		// session authorization and command dispatch, so its manager takes
 		// the leases, signs fences, and pushes them to transportd.
 		ownerSessions, err = ownersession.NewManagerBackend(backend, commandSigner, workerTransport, cfg.OwnerLeaseTTL, logger)
@@ -61,7 +61,7 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 	}
 	if workerTransport != nil {
 		transport := workerTransport
-		worker := transportevents.NewWorker(eventService, transport, logger)
+		worker := transportevents.NewWorker(eventService, transport, logger, cfg.LocalSimulator)
 		life.start("run transport event worker", worker.Run)
 		var operationWorker *operations.Worker
 		operationWorker, err = operations.NewFencedWorker(operationService, transport, fenceExecutor, logger)

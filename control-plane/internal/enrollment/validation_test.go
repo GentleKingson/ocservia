@@ -5,9 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -29,38 +27,9 @@ func TestValidShortRejectsWhitespaceOutsideContractLimit(t *testing.T) {
 	}
 }
 
-func TestValidateLockedTokenPreservesQueryErrors(t *testing.T) {
-	queryErr := errors.New("database unavailable")
-	err := validateLockedToken(queryErr, false, value.Timestamp{}, time.Now())
-	if !errors.Is(err, queryErr) || errors.Is(err, ErrInvalidToken) {
-		t.Fatalf("expected query error, got %v", err)
-	}
-}
-
-func TestConsumedAndExpiredTokensAreRejected(t *testing.T) {
-	future, err := value.FromTime(time.Now().Add(time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	past, err := value.FromTime(time.Now().Add(-time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateLockedToken(nil, true, future, time.Now()); !errors.Is(err, ErrInvalidToken) {
-		t.Fatalf("consumed token replay error = %v", err)
-	}
-	if err := validateLockedToken(nil, false, past, time.Now()); !errors.Is(err, ErrInvalidToken) {
-		t.Fatalf("unconsumed expired token error = %v", err)
-	}
-}
-
 func TestStoredValuesRejectSurroundingWhitespace(t *testing.T) {
 	service := &Service{}
 	nodeID := uuid.Must(uuid.NewV7())
-	approval := Approval{NodeID: nodeID, Labels: map[string]string{"region": "test "}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: "operator", Reason: "approve", RequestID: uuid.Must(uuid.NewV7()).String()}
-	if _, err := service.Approve(context.Background(), approval); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected an invalid label value, got %v", err)
-	}
 	revocation := Revocation{NodeID: nodeID, ActorID: "operator", Reason: "revoke ", RequestID: uuid.Must(uuid.NewV7()).String()}
 	if _, err := service.Revoke(context.Background(), revocation); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected an invalid revocation reason, got %v", err)

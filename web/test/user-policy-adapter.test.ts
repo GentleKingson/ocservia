@@ -13,9 +13,9 @@ import {
   formToRequest,
   loadUserPolicy,
   policyToForm,
-} from "../src/adapters/user-policy";
+} from "../src/features/user-policy";
 
-describe("upstream user policy adapter", () => {
+describe("user policy feature", () => {
   it.each([
     ["generated", new ResponseError(new Response(null, { status: 404 }))],
     ["native", new Response(null, { status: 404 })],

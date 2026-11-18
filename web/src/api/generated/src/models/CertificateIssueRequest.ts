@@ -24,12 +24,6 @@ export interface CertificateIssueRequest {
    * @type {string}
    * @memberof CertificateIssueRequest
    */
-  approvalId: string;
-  /**
-   *
-   * @type {string}
-   * @memberof CertificateIssueRequest
-   */
   reason: string;
 }
 
@@ -39,13 +33,6 @@ export interface CertificateIssueRequest {
 export function instanceOfCertificateIssueRequest(
   value: object,
 ): value is CertificateIssueRequest {
-  if (
-    (!("approvalId" in (value as Record<string, any>)) &&
-      !("approval_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["approvalId"] === undefined &&
-      (value as Record<string, any>)["approval_id"] === undefined)
-  )
-    return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
   return true;
 }
@@ -64,7 +51,6 @@ export function CertificateIssueRequestFromJSONTyped(
     return json;
   }
   return {
-    approvalId: json["approval_id"],
     reason: json["reason"],
   };
 }
@@ -84,7 +70,6 @@ export function CertificateIssueRequestToJSONTyped(
   }
 
   return {
-    approval_id: value["approvalId"],
     reason: value["reason"],
   };
 }

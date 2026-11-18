@@ -1,0 +1,51 @@
+name: Download exact release product
+description: Download one immutable artifact and verify its source, version, architecture and file digests.
+inputs:
+  artifact-id:
+    description: Exact upload-artifact ID from the producer
+    required: true
+  manifest-sha256:
+    description: Product identity manifest SHA-256 from the producer
+    required: true
+  kind:
+    description: agent or controller
+    required: true
+  version:
+    description: Expected release version
+    required: true
+  arch:
+    description: Expected native architecture
+    required: true
+  path:
+    description: Empty destination directory
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Require immutable product coordinates
+      shell: bash
+      env:
+        ARTIFACT_ID: ${{ inputs.artifact-id }}
+        MANIFEST_SHA256: ${{ inputs.manifest-sha256 }}
+        PRODUCT_PATH: ${{ inputs.path }}
+      run: |
+        [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+        test ! -e "$PRODUCT_PATH"
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
+      with:
+        artifact-ids: ${{ inputs.artifact-id }}
+        path: ${{ inputs.path }}
+        merge-multiple: true
+    - name: Verify exact product identity and bytes
+      shell: bash
+      env:
+        PRODUCT_PATH: ${{ inputs.path }}
+        PRODUCT_KIND: ${{ inputs.kind }}
+        PRODUCT_VERSION: ${{ inputs.version }}
+        PRODUCT_ARCH: ${{ inputs.arch }}
+        MANIFEST_SHA256: ${{ inputs.manifest-sha256 }}
+      run: |
+        [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+        python3 scripts/release-product-identity.py verify --kind "$PRODUCT_KIND" \
+          --directory "$PRODUCT_PATH" --source "$GITHUB_SHA" --version "$PRODUCT_VERSION" \
+          --arch "$PRODUCT_ARCH" --manifest-sha256 "$MANIFEST_SHA256"

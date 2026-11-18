@@ -107,8 +107,8 @@ def entry():
 
 def sse(api, seconds):
     api.api('events/stream', role='anonymous', status=401)
-    request = urllib.request.Request(api.ORIGIN + '/api/v1/events/stream', headers={
-        'Origin': api.ORIGIN, 'X-Workspace-ID': api.WORKSPACE, 'Accept': 'text/event-stream'})
+    request = urllib.request.Request(api.environment().origin + '/api/v1/events/stream', headers={
+        'Origin': api.environment().origin, 'X-Workspace-ID': api.environment().workspace, 'Accept': 'text/event-stream'})
     started = time.monotonic()
     connections, heartbeats = 0, 0
     lifetimes = []
@@ -268,7 +268,7 @@ def rollback_and_upgrade(api, identities, identity_files):
 
 
 def recovery():
-    api = module('release-business-api')
+    import release_business_scenarios as api
     identity_files = ['/var/lib/ocservia-agent/identity/endpoint.key',
                       '/var/lib/ocservia-agent/identity/controller.endpoint',
                       '/etc/ocservia-agent/user-password-seal-private.pem',
@@ -288,11 +288,9 @@ def recovery():
     node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     api.wait_for('established Agent reconnect after recreation',
                  lambda: api.api('nodes/' + node)['connection_state'] == 'online')
-    approval = api.approval('service.reload', 'node', node)
     operation = api.api('nodes/' + node + '/service:reload', {'reason': 'Integrated recreation acceptance', 'ttl_seconds': 300},
                         headers={'Idempotency-Key': secrets.token_hex(16),
-                                 'If-Match': f'"revision-{api.api("nodes/" + node)["version"]}"',
-                                 'X-Approval-ID': approval}, status=202)
+                                 'If-Match': f'"revision-{api.api("nodes/" + node)["version"]}"'}, status=202)
 
     def completed():
         result = api.api('operations/' + operation['id'])

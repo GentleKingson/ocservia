@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,7 +32,6 @@ type CreateRequest struct {
 	NodeID           uuid.UUID
 	ExpectedRevision int64
 	Template         Template
-	NodeVariables    map[string]string
 	TTL              time.Duration
 	IdempotencyKey   string
 	ActorID          string
@@ -58,15 +58,12 @@ type Plan struct {
 	CurrentUnchanged bool              `json:"current_unchanged"`
 	StagingCleaned   bool              `json:"staging_cleaned"`
 	CurrentHash      string            `json:"current_hash,omitempty"`
-	ApprovalID       *uuid.UUID        `json:"approval_id,omitempty"`
-	ApprovalStatus   string            `json:"approval_status,omitempty"`
 	ExpiresAt        value.Timestamp   `json:"expires_at"`
 	CreatedAt        value.Timestamp   `json:"created_at"`
 }
 
 type ApplyRequest struct {
 	PlanID          uuid.UUID
-	ApprovalID      uuid.UUID
 	IdempotencyKey  string
 	ActorID         string
 	ActorIdentityID uuid.UUID
@@ -98,7 +95,10 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 	}
 	var node configurationstore.Node
 	var capabilities []string
+	var hydrated Template
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		hydrated = request.Template
+		hydrated.Directives = slices.Clone(request.Template.Directives)
 		store, err := configurationstore.FromTransaction(tx)
 		if err != nil {
 			return err
@@ -113,15 +113,15 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 		}
 		hasPlan := false
 		for _, capability := range capabilities {
-			if capability == "ocserv.config.plan" || capability == configprofile.PlanCapability {
+			if capability == configprofile.PlanCapability {
 				hasPlan = true
 			}
 		}
 		if !hasPlan {
 			return ErrCapability
 		}
-		for index := range request.Template.Directives {
-			ref := request.Template.Directives[index].SecretRef
+		for index := range hydrated.Directives {
+			ref := hydrated.Directives[index].SecretRef
 			if ref == nil {
 				continue
 			}
@@ -142,32 +142,40 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 			if stored.WorkspaceID != node.WorkspaceID || stored.State != "active" {
 				return ErrInvalid
 			}
-			ref.Provider, ref.Key, ref.Version = stored.Provider, stored.KeyPath, stored.Version
+			resolved := *ref
+			resolved.Provider, resolved.Key, resolved.Version = stored.Provider, stored.KeyPath, stored.Version
+			hydrated.Directives[index].SecretRef = &resolved
 		}
 		return nil
 	})
 	if err != nil {
 		return Plan{}, false, err
 	}
-	renderInput := RenderInput{Template: request.Template, NodeVariables: request.NodeVariables, OcservVersion: node.OcservVersion, Capabilities: capabilities}
-	var rendered Rendered
-	if completeProfile(request.Template) {
-		rendered, err = renderComplete(renderInput, request.NodeID, uint64(request.ExpectedRevision))
-	} else {
-		rendered, err = Render(renderInput)
-	}
+	rendered, err := renderComplete(RenderInput{Template: hydrated, OcservVersion: node.OcservVersion, Capabilities: capabilities}, request.NodeID, uint64(request.ExpectedRevision))
 	if err != nil {
 		return Plan{}, false, err
 	}
 	op, replayed, err := s.operations.Create(ctx, operations.CreateRequest{
-		NodeID: request.NodeID, IdempotencyKey: request.IdempotencyKey, ExpectedVersion: node.Version,
-		Kind: operations.ConfigPlan, Candidate: rendered.Candidate, CandidateHash: rendered.Hash[:], PlanRevision: uint64(request.ExpectedRevision),
-		CompleteCandidate: rendered.CompleteCandidate,
-		TTL:               request.TTL, RequestID: request.RequestID, Traceparent: request.Traceparent,
-		ActorID: request.ActorID, ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID,
-		Action: "config.plan", Reason: request.Reason,
-		OcservVersion: node.OcservVersion, PlanCapabilities: rendered.RequiredCapabilities,
-		PlanMetadata: &operations.ConfigPlanMetadata{TemplateName: request.Template.Name, CandidateRedacted: rendered.Redacted, Warnings: rendered.Warnings, CreatedBy: request.ActorIdentityID},
+		NodeID:          request.NodeID,
+		IdempotencyKey:  request.IdempotencyKey,
+		ExpectedVersion: node.Version,
+		TTL:             request.TTL,
+		RequestID:       request.RequestID,
+		Traceparent:     request.Traceparent,
+		ActorID:         request.ActorID,
+		ActorIdentityID: request.ActorIdentityID,
+		ActorSessionID:  request.ActorSessionID,
+		Action:          "config.plan",
+		Reason:          request.Reason,
+		Payload: operations.ConfigPlanPayload{
+			Candidate:         rendered.Candidate,
+			CandidateHash:     rendered.Hash[:],
+			PlanRevision:      uint64(request.ExpectedRevision),
+			CompleteCandidate: rendered.CompleteCandidate,
+			OcservVersion:     node.OcservVersion,
+			PlanCapabilities:  rendered.RequiredCapabilities,
+			PlanMetadata:      &operations.ConfigPlanMetadata{TemplateName: request.Template.Name, CandidateRedacted: rendered.Redacted, Warnings: rendered.Warnings, CreatedBy: request.ActorIdentityID},
+		},
 	})
 	if err != nil {
 		return Plan{}, false, err
@@ -193,7 +201,7 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	plan := Plan{ID: stored.ID, WorkspaceID: stored.WorkspaceID, NodeID: stored.NodeID, OperationID: stored.OperationID, TemplateName: stored.TemplateName, ExpectedRevision: stored.ExpectedRevision, State: stored.State, CandidateHash: hex.EncodeToString(stored.CandidateHash), ExpiresAt: stored.ExpiresAt, CreatedAt: stored.CreatedAt, ApprovalID: stored.ApprovalID, ApprovalStatus: stored.ApprovalStatus}
+	plan := Plan{ID: stored.ID, WorkspaceID: stored.WorkspaceID, NodeID: stored.NodeID, OperationID: stored.OperationID, TemplateName: stored.TemplateName, ExpectedRevision: stored.ExpectedRevision, State: stored.State, CandidateHash: hex.EncodeToString(stored.CandidateHash), ExpiresAt: stored.ExpiresAt, CreatedAt: stored.CreatedAt}
 	if err := json.Unmarshal(stored.Warnings.Bytes(), &plan.Warnings); err != nil {
 		return Plan{}, err
 	}
@@ -238,9 +246,9 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Plan, error) {
 	return plan, nil
 }
 
-// Apply atomically consumes the independent approval and queues the exact validated candidate.
+// Apply queues the exact validated candidate under the caller's authority.
 func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.Operation, bool, error) {
-	if request.PlanID == uuid.Nil || request.ApprovalID == uuid.Nil || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 {
+	if request.PlanID == uuid.Nil || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 {
 		return operations.Operation{}, false, ErrInvalid
 	}
 	plan, err := s.Get(ctx, request.PlanID)
@@ -266,42 +274,53 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 		return operations.Operation{}, false, err
 	}
 	var envelope agentv1.CommandEnvelope
-	if proto.Unmarshal(input.Envelope, &envelope) != nil || (envelope.GetConfigPlan() == nil && envelope.GetCompleteConfigPlan() == nil) {
+	if proto.Unmarshal(input.Envelope, &envelope) != nil {
+		return operations.Operation{}, false, ErrInvalid
+	}
+	complete := envelope.GetCompleteConfigPlan()
+	if complete == nil {
+		return operations.Operation{}, false, ErrInvalid
+	}
+	candidate, err := configprofile.Canonical(complete.GetCandidate())
+	if err != nil {
+		return operations.Operation{}, false, ErrInvalid
+	}
+	materialized, err := hex.DecodeString(plan.MaterializedHash)
+	if err != nil || len(materialized) != 32 {
+		return operations.Operation{}, false, ErrInvalid
+	}
+	expires, err := plan.ExpiresAt.Time()
+	if err != nil {
 		return operations.Operation{}, false, ErrInvalid
 	}
 	previousHash, err := hex.DecodeString(plan.CurrentHash)
 	if err != nil || len(previousHash) != 32 {
 		return operations.Operation{}, false, ErrInvalid
 	}
-	operationRequest := operations.CreateRequest{
-		NodeID: plan.NodeID, IdempotencyKey: request.IdempotencyKey, ExpectedVersion: input.NodeVersion,
-		Kind: operations.ConfigApply, Candidate: envelope.GetConfigPlan().GetCandidate(), CandidateHash: envelope.GetConfigPlan().GetCandidateHash(),
-		ExpectedCurrentHash: previousHash, PlanRevision: uint64(plan.ExpectedRevision), DesiredRevision: uint64(input.DesiredRevision) + 1,
-		ApplyMetadata: &operations.ConfigApplyMetadata{PlanID: request.PlanID}, ApprovalID: request.ApprovalID,
-		TTL: 15 * time.Minute, RequestID: request.RequestID, Traceparent: request.Traceparent,
-		ActorID: request.ActorID, ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID,
-		Action: "config.apply", Reason: request.Reason,
-	}
-	if complete := envelope.GetCompleteConfigPlan(); complete != nil {
-		candidate, err := configprofile.Canonical(complete.GetCandidate())
-		if err != nil {
-			return operations.Operation{}, false, ErrInvalid
-		}
-		materialized, err := hex.DecodeString(plan.MaterializedHash)
-		if err != nil || len(materialized) != 32 {
-			return operations.Operation{}, false, ErrInvalid
-		}
-		expires, err := plan.ExpiresAt.Time()
-		if err != nil {
-			return operations.Operation{}, false, ErrInvalid
-		}
-		operationRequest.CompleteCandidate = complete.GetCandidate()
-		operationRequest.Candidate = candidate
-		operationRequest.CandidateHash = complete.GetCandidateHash()
-		operationRequest.MaterializedHash = materialized
-		operationRequest.PlanExpiresAt = timestamppb.New(expires)
-	}
-	return s.operations.Create(ctx, operationRequest)
+	return s.operations.Create(ctx, operations.CreateRequest{
+		NodeID:          plan.NodeID,
+		IdempotencyKey:  request.IdempotencyKey,
+		ExpectedVersion: input.NodeVersion,
+		TTL:             15 * time.Minute,
+		RequestID:       request.RequestID,
+		Traceparent:     request.Traceparent,
+		ActorID:         request.ActorID,
+		ActorIdentityID: request.ActorIdentityID,
+		ActorSessionID:  request.ActorSessionID,
+		Action:          "config.apply",
+		Reason:          request.Reason,
+		Payload: operations.ConfigApplyPayload{
+			CompleteCandidate:   complete.GetCandidate(),
+			Candidate:           candidate,
+			CandidateHash:       complete.GetCandidateHash(),
+			ExpectedCurrentHash: previousHash,
+			MaterializedHash:    materialized,
+			PlanRevision:        uint64(plan.ExpectedRevision),
+			DesiredRevision:     uint64(input.DesiredRevision) + 1,
+			PlanExpiresAt:       timestamppb.New(expires),
+			ApplyMetadata:       &operations.ConfigApplyMetadata{PlanID: request.PlanID},
+		},
+	})
 }
 
 func (s *Service) Resource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {

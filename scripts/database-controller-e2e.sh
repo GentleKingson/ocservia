@@ -2,16 +2,11 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENGINE="${1:-postgres}"
-case "${ENGINE}" in mysql|postgres) ;; *) echo 'expected postgres or mysql' >&2; exit 2 ;; esac
-ROLE_MODE="${2:-all}"
-case "${ROLE_MODE}" in all|split) ;; *) echo 'expected all or split role mode' >&2; exit 2 ;; esac
-if [[ -n "${OCSERV_REBIND_E2E:-}" ]]; then
-  [[ "${ROLE_MODE}" == all && ( "${OCSERV_REBIND_E2E}" == revoked || "${OCSERV_REBIND_E2E}" == unreachable ) ]] || {
-    echo 'Rebind E2E requires all role mode and revoked or unreachable disposition' >&2; exit 2;
-  }
-fi
-NAME="ocservia-database-controller-${ENGINE}-${ROLE_MODE}-$(date +%s)-$$"
+# Legacy positional arguments are checked only here.
+(($# <= 2)) || { echo 'usage: database-controller-e2e.sh [postgres [all]]' >&2; exit 2; }
+case "${1:-postgres}" in postgres) ;; *) echo 'expected postgres; MySQL is retired' >&2; exit 2 ;; esac
+case "${2:-all}" in all) ;; *) echo 'expected all role mode; split roles are retired' >&2; exit 2 ;; esac
+NAME="ocservia-database-controller-postgres-$(date +%s)-$$"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${ROOT}/artifacts/${NAME}}"
 mkdir -p "${ARTIFACT_DIR}" "${ROOT}/.cache/go-build" "${ROOT}/.cache/go-mod"
 ARTIFACT_DIR="$(cd "${ARTIFACT_DIR}" && pwd)"
@@ -41,7 +36,7 @@ trap 'exit 143' TERM
 WORKFLOW_IMAGE=ocservia-database-e2e-workflow:e2e
 if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
   : "${SINGLE_AGENT_ARCHIVE:?}" "${SINGLE_EXPECTED_AGENT_VERSION:?}"
-  [[ "${RELEASE_WORKFLOW_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ && "${ENGINE}" == postgres ]]
+  [[ "${RELEASE_WORKFLOW_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]
   WORKFLOW_IMAGE="${RELEASE_WORKFLOW_IMAGE}"
 else
 docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target agent-runtime -t ocservia-database-e2e-agent:e2e "${ROOT}" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
@@ -55,7 +50,7 @@ docker image inspect "${WORKFLOW_IMAGE}" >"${ARTIFACT_DIR}/workflow-image.json"
 # Nothing is published on the host, and runtime processes cannot use public
 # discovery as an accidental substitute for the one dedicated TLS Relay.
 docker network create --internal "${NAME}" >/dev/null
-ENVIRONMENT=(-e "OCSERV_REBIND_E2E=${OCSERV_REBIND_E2E:-}" -e OCSERVIA_DATABASE_TEST_CONTROLLER_E2E=1 -e "OCSERVIA_DATABASE_TEST_CONTROLLER_ROLE_MODE=${ROLE_MODE}" -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
+ENVIRONMENT=(-e OCSERVIA_DATABASE_TEST_CONTROLLER_E2E=1 -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
 MOUNTS=()
 COMMAND=(go test -buildvcs=false -count=1 -race -timeout=15m -v ./internal/platform/app -run '^TestControllerTransportBackendE2E$')
 POSTGRES_IMAGE=postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
@@ -77,37 +72,19 @@ if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
     exec "$@"
   ' -- "${COMMAND[@]}")
 fi
-if [[ "${ENGINE}" == postgres ]]; then
-  docker run -d --name "${NAME}" --network "${NAME}" \
-    -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only -e POSTGRES_DB=ocservia \
-    "${POSTGRES_IMAGE}" >/dev/null
-  for _ in {1..90}; do
-    if docker exec "${NAME}" pg_isready -h 127.0.0.1 -U ocservia_owner -d ocservia >/dev/null 2>&1; then break; fi
-    sleep 1
-  done
-  docker exec "${NAME}" pg_isready -h 127.0.0.1 -U ocservia_owner -d ocservia >/dev/null
-  docker exec "${NAME}" psql -U ocservia_owner -d ocservia -v ON_ERROR_STOP=1 -c "CREATE ROLE ocservia_app LOGIN PASSWORD 'test-runtime-only'" >/dev/null
-  if [[ -n "${OCSERV_REBIND_E2E:-}" ]]; then
-    docker exec "${NAME}" psql -U ocservia_owner -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ocservia_rebind_target' >/dev/null
-  fi
-  docker image inspect "${POSTGRES_IMAGE}" >"${ARTIFACT_DIR}/database-image.json"
-  docker exec "${NAME}" psql -U ocservia_owner -d ocservia -Atc 'SELECT version()' >"${ARTIFACT_DIR}/database-version.txt"
-  ENVIRONMENT+=(-e 'OCSERV_TEST_OWNER_DATABASE_URL=postgres://ocservia_owner:test-owner-only@127.0.0.1:5432/ocservia?sslmode=disable' \
-    -e 'OCSERV_TEST_DATABASE_URL=postgres://ocservia_app:test-runtime-only@127.0.0.1:5432/ocservia?sslmode=disable')
-else
-  IMAGE=mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d
-  CLIENT=mysql
-  docker run -d --name "${NAME}" --network "${NAME}" \
-    -e MYSQL_ROOT_PASSWORD=database-e2e-isolated-test-root -e MYSQL_DATABASE=ocservia \
-    "${IMAGE}" --log-bin-trust-function-creators=1 >/dev/null
-  for _ in {1..90}; do
-    if docker exec -e MYSQL_PWD=database-e2e-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null 2>&1; then break; fi
-    sleep 1
-  done
-  docker exec -e MYSQL_PWD=database-e2e-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null
-  docker exec -e MYSQL_PWD=database-e2e-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -e "CREATE USER 'ocservia_owner'@'%' IDENTIFIED BY 'database-e2e-owner-test-only'; CREATE USER 'ocservia_app'@'%' IDENTIFIED BY 'database-e2e-runtime-test-only'; CREATE USER 'ocservia_maintenance'@'%' IDENTIFIED BY 'database-e2e-maintenance-test-only';"
-  ENVIRONMENT+=(-e "OCSERVIA_DATABASE_TEST_ENGINE=${ENGINE}" -e 'OCSERVIA_DATABASE_TEST_DSN=root:database-e2e-isolated-test-root@tcp(127.0.0.1:3306)/ocservia?tls=false')
-fi
+docker run -d --name "${NAME}" --network "${NAME}" \
+  -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only -e POSTGRES_DB=ocservia \
+  "${POSTGRES_IMAGE}" >/dev/null
+for _ in {1..90}; do
+  if docker exec "${NAME}" pg_isready -h 127.0.0.1 -U ocservia_owner -d ocservia >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+docker exec "${NAME}" pg_isready -h 127.0.0.1 -U ocservia_owner -d ocservia >/dev/null
+docker exec "${NAME}" psql -U ocservia_owner -d ocservia -v ON_ERROR_STOP=1 -c "CREATE ROLE ocservia_app LOGIN PASSWORD 'test-runtime-only'" >/dev/null
+docker image inspect "${POSTGRES_IMAGE}" >"${ARTIFACT_DIR}/database-image.json"
+docker exec "${NAME}" psql -U ocservia_owner -d ocservia -Atc 'SELECT version()' >"${ARTIFACT_DIR}/database-version.txt"
+ENVIRONMENT+=(-e 'OCSERV_TEST_OWNER_DATABASE_URL=postgres://ocservia_owner:test-owner-only@127.0.0.1:5432/ocservia?sslmode=disable' \
+  -e 'OCSERV_TEST_DATABASE_URL=postgres://ocservia_app:test-runtime-only@127.0.0.1:5432/ocservia?sslmode=disable')
 
 docker run --rm --name "${NAME}-workflow" --network "container:${NAME}" \
   --cap-drop=ALL --cap-add=CHOWN --cap-add=FOWNER --cap-add=SETUID --cap-add=SETGID --cap-add=DAC_OVERRIDE --cap-add=KILL --cap-add=NET_ADMIN \
@@ -116,4 +93,4 @@ docker run --rm --name "${NAME}-workflow" --network "container:${NAME}" \
   "${MOUNTS[@]}" "${ENVIRONMENT[@]}" "${WORKFLOW_IMAGE}" "${COMMAND[@]}" \
   >"${ARTIFACT_DIR}/workflow.log" 2>&1
 grep -q '^--- PASS: TestControllerTransportBackendE2E ' "${ARTIFACT_DIR}/workflow.log"
-printf 'Controller %s E2E passed; evidence: %s\n' "${ENGINE}" "${ARTIFACT_DIR}"
+printf 'Controller PostgreSQL E2E passed; evidence: %s\n' "${ARTIFACT_DIR}"

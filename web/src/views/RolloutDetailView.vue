@@ -1,20 +1,18 @@
 <script setup lang="ts">
 import { ArrowLeft } from "@lucide/vue";
-import {
-  ResponseError,
-  type AgentRollout,
-  type AgentRolloutNode,
-} from "@ocservia/api-client";
-import { useEventListener } from "@vueuse/core";
+import { ResponseError, type AgentRolloutNode } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute } from "vue-router";
 
-import { getAgentRollout, resumeAgentRollout } from "../api/agents";
+import {
+  getAgentRollout,
+  resumeAgentRollout,
+  type RolloutDetail,
+} from "../api/agents";
 import {
   getWorkspace,
   sameWorkspaceContext,
-  workspaceChangedEvent,
   workspaceContext,
   type WorkspaceContext,
 } from "../api/workspace";
@@ -28,12 +26,13 @@ import {
   rolloutTone,
 } from "../features/operations/state-tone";
 
+import { createReadRequest } from "../shared/read-request";
 import { createForegroundRefresh } from "../shared/foreground-refresh";
 
 const route = useRoute();
 const { t } = useI18n();
 
-const rollout = ref<AgentRollout | undefined>(undefined);
+const rollout = ref<RolloutDetail | undefined>(undefined);
 const loading = ref(true);
 const unavailable = ref(false);
 const notFound = ref(false);
@@ -41,7 +40,7 @@ const resuming = ref(false);
 const resumeError = ref("");
 // Set after an unconfirmed resume until a fresh read shows the server state.
 const resumeBlocked = ref(false);
-let controller: AbortController | undefined;
+const reads = createReadRequest();
 let sequence = 0;
 let loadedContext: WorkspaceContext | undefined;
 
@@ -52,21 +51,7 @@ const foregroundRefresh = createForegroundRefresh(async () => {
   }
 }, 2000);
 
-const exclusions = computed(() =>
-  (rollout.value?.excluded ?? []).map((value: unknown) => {
-    if (
-      value !== null &&
-      typeof value === "object" &&
-      "node_id" in value &&
-      typeof value.node_id === "string" &&
-      "reason" in value &&
-      typeof value.reason === "string"
-    ) {
-      return { nodeId: value.node_id, reason: value.reason, raw: "" };
-    }
-    return { nodeId: "", reason: "", raw: JSON.stringify(value) };
-  }),
-);
+const exclusions = computed(() => rollout.value?.excluded ?? []);
 
 // Failed and unknown stay separate counts so a batch never reads as
 // successful while any node has no confirmed outcome.
@@ -111,8 +96,7 @@ const remaining = computed(
 // generation; a newer ticket makes all older results inert.
 function invalidate(): void {
   sequence += 1;
-  controller?.abort();
-  controller = undefined;
+  reads.cancel();
 }
 
 function current(context: WorkspaceContext, ticket: number): boolean {
@@ -146,16 +130,14 @@ async function refresh(): Promise<void> {
   if (resuming.value) return;
   const rolloutId = String(route.params.rolloutId ?? "");
   if (!rolloutId) return;
-  invalidate();
-  const ticket = sequence;
-  const request = new AbortController();
-  controller = request;
+  const request = reads.begin();
+  let context: WorkspaceContext | undefined;
   try {
     await getWorkspace();
-    if (ticket !== sequence) return;
-    const context = workspaceContext();
+    if (!request.current()) return;
+    context = workspaceContext();
     const value = await getAgentRollout(rolloutId, request.signal);
-    if (!current(context, ticket)) return;
+    if (!request.current(context)) return;
     if (value.id !== rolloutId || value.workspaceId !== context.id)
       throw new Error("rollout outside the requested workspace");
     loadedContext = context;
@@ -164,13 +146,12 @@ async function refresh(): Promise<void> {
     notFound.value = false;
     resumeBlocked.value = false;
   } catch (cause) {
-    if (ticket !== sequence || request.signal.aborted) return;
+    if (!request.current(context)) return;
     notFound.value =
       cause instanceof ResponseError && cause.response.status === 404;
     unavailable.value = !notFound.value;
   } finally {
-    if (ticket === sequence) {
-      controller = undefined;
+    if (request.finish()) {
       loading.value = false;
     }
   }
@@ -209,7 +190,6 @@ async function resume(): Promise<void> {
 }
 
 watch(() => route.params.rolloutId, reload);
-useEventListener(window, workspaceChangedEvent, reload);
 onMounted(() => {
   foregroundRefresh.start();
 });
@@ -281,16 +261,6 @@ onBeforeUnmount(() => {
           <div class="grid min-w-0 gap-1">
             <dt class="text-muted-foreground text-xs">{{ $t("reason") }}</dt>
             <dd class="m-0 break-words">{{ rollout.reason }}</dd>
-          </div>
-          <div class="grid min-w-0 gap-1">
-            <dt class="text-muted-foreground text-xs">
-              {{ $t("approvalId") }}
-            </dt>
-            <dd class="m-0">
-              <code :title="rollout.approvalId">{{
-                rollout.approvalId.slice(0, 8)
-              }}</code>
-            </dd>
           </div>
         </dl>
         <p
@@ -412,7 +382,9 @@ onBeforeUnmount(() => {
                 exclusion.nodeId.slice(0, 8)
               }}</code>
               <span class="text-muted-foreground">{{
-                $t(`exclusion_${exclusion.reason}`)
+                $te(`exclusion_${exclusion.reason}`)
+                  ? $t(`exclusion_${exclusion.reason}`)
+                  : exclusion.reason
               }}</span>
             </template>
             <code v-else class="break-all">{{ exclusion.raw }}</code>

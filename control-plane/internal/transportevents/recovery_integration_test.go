@@ -83,11 +83,7 @@ func TestCommandResultBeforeMarkSentIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = term.ReleaseBackend(context.Background(), postgres.WrapPool(pool)) })
 	authority := &recoveryTestAuthority{nodeID: nodeID, connectionID: term.ConnectionID(), epoch: term.Epoch()}
 	service := NewBackendWithCommandRecovery(postgres.WrapPool(pool), signer, operationService, authority)
-	held, replayed, err := operationService.Create(ctx, operations.CreateRequest{
-		NodeID: nodeID, IdempotencyKey: "unclaimed-result", ExpectedVersion: 1,
-		Kind: operations.SyntheticNoop, TTL: 10 * time.Minute,
-		RequestID: "unclaimed-result", Traceparent: reconnectRecoveryTraceparent,
-	})
+	held, replayed, err := operationService.Create(ctx, operations.CreateRequest{NodeID: nodeID, IdempotencyKey: "unclaimed-result", ExpectedVersion: 1, TTL: 10 * time.Minute, RequestID: "unclaimed-result", Traceparent: reconnectRecoveryTraceparent, Payload: operations.SyntheticNoopPayload{}})
 	if err != nil || replayed || held.CommandID == nil {
 		t.Fatalf("create held command = %+v, replayed=%v, err=%v", held, replayed, err)
 	}
@@ -117,11 +113,7 @@ func TestCommandResultBeforeMarkSentIntegration(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
 			t.Fatal(err)
 		}
-		operation, replayed, err := operationService.Create(ctx, operations.CreateRequest{
-			NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: nodeVersion,
-			Kind: operations.SyntheticNoop, TTL: 10 * time.Minute,
-			RequestID: key, Traceparent: reconnectRecoveryTraceparent,
-		})
+		operation, replayed, err := operationService.Create(ctx, operations.CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: nodeVersion, TTL: 10 * time.Minute, RequestID: key, Traceparent: reconnectRecoveryTraceparent, Payload: operations.SyntheticNoopPayload{}})
 		if err != nil || replayed || operation.CommandID == nil {
 			t.Fatalf("create synthetic command = %+v, replayed=%v, err=%v", operation, replayed, err)
 		}
@@ -292,11 +284,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 
 	signer := integrationCommandSigner()
 	operationService := operations.NewBackend(postgres.WrapPool(pool), 200, signer)
-	operation, replayed, err := operationService.Create(ctx, operations.CreateRequest{
-		NodeID: nodeID, IdempotencyKey: "lost-result", ExpectedVersion: 1,
-		Kind: operations.SyntheticNoop, TTL: 10 * time.Minute,
-		RequestID: "lost-result", Traceparent: reconnectRecoveryTraceparent,
-	})
+	operation, replayed, err := operationService.Create(ctx, operations.CreateRequest{NodeID: nodeID, IdempotencyKey: "lost-result", ExpectedVersion: 1, TTL: 10 * time.Minute, RequestID: "lost-result", Traceparent: reconnectRecoveryTraceparent, Payload: operations.SyntheticNoopPayload{}})
 	if err != nil || replayed || operation.CommandID == nil {
 		t.Fatalf("create synthetic command = %+v, replayed=%v, err=%v", operation, replayed, err)
 	}
@@ -492,11 +480,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
 		t.Fatal(err)
 	}
-	lateOperation, replayed, err := operationService.Create(ctx, operations.CreateRequest{
-		NodeID: nodeID, IdempotencyKey: "late-old-owner-send", ExpectedVersion: nodeVersion,
-		Kind: operations.SyntheticNoop, TTL: 10 * time.Minute,
-		RequestID: "late-old-owner-send", Traceparent: reconnectRecoveryTraceparent,
-	})
+	lateOperation, replayed, err := operationService.Create(ctx, operations.CreateRequest{NodeID: nodeID, IdempotencyKey: "late-old-owner-send", ExpectedVersion: nodeVersion, TTL: 10 * time.Minute, RequestID: "late-old-owner-send", Traceparent: reconnectRecoveryTraceparent, Payload: operations.SyntheticNoopPayload{}})
 	if err != nil || replayed || lateOperation.CommandID == nil {
 		t.Fatalf("create late old-owner command = %+v, replayed=%v, err=%v", lateOperation, replayed, err)
 	}
@@ -588,11 +572,7 @@ func TestCrashedClaimExpiryKeepsLaterCommandDispatchableIntegration(t *testing.T
 	authority := &recoveryTestAuthority{nodeID: nodeID, connectionID: crashTerm.ConnectionID(), epoch: crashTerm.Epoch()}
 	service := NewBackendWithCommandRecovery(postgres.WrapPool(pool), signer, operationService, authority)
 
-	crashOperation, replayed, err := operationService.Create(ctx, operations.CreateRequest{
-		NodeID: nodeID, IdempotencyKey: "crash-window-pre-send", ExpectedVersion: 1,
-		Kind: operations.SyntheticNoop, TTL: 10 * time.Minute,
-		RequestID: "crash-window-pre-send", Traceparent: reconnectRecoveryTraceparent,
-	})
+	crashOperation, replayed, err := operationService.Create(ctx, operations.CreateRequest{NodeID: nodeID, IdempotencyKey: "crash-window-pre-send", ExpectedVersion: 1, TTL: 10 * time.Minute, RequestID: "crash-window-pre-send", Traceparent: reconnectRecoveryTraceparent, Payload: operations.SyntheticNoopPayload{}})
 	if err != nil || replayed || crashOperation.CommandID == nil {
 		t.Fatalf("create crash-window command = %+v, replayed=%v, err=%v", crashOperation, replayed, err)
 	}
@@ -674,11 +654,7 @@ func TestCrashedClaimExpiryKeepsLaterCommandDispatchableIntegration(t *testing.T
 	if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
 		t.Fatal(err)
 	}
-	later, replayed, err := operationService.Create(ctx, operations.CreateRequest{
-		NodeID: nodeID, IdempotencyKey: "post-crash-real-command", ExpectedVersion: nodeVersion,
-		Kind: operations.SyntheticNoop, TTL: 10 * time.Minute,
-		RequestID: "post-crash-real-command", Traceparent: reconnectRecoveryTraceparent,
-	})
+	later, replayed, err := operationService.Create(ctx, operations.CreateRequest{NodeID: nodeID, IdempotencyKey: "post-crash-real-command", ExpectedVersion: nodeVersion, TTL: 10 * time.Minute, RequestID: "post-crash-real-command", Traceparent: reconnectRecoveryTraceparent, Payload: operations.SyntheticNoopPayload{}})
 	if err != nil || replayed || later.CommandID == nil {
 		t.Fatalf("create later command = %+v, replayed=%v, err=%v", later, replayed, err)
 	}

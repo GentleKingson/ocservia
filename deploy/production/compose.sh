@@ -2,10 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-if [[ -n "${OCSERV_RELAY_URL_B:-}" ]]; then
-  echo 'only one dedicated Relay is supported; leave OCSERV_RELAY_URL_B empty' >&2
-  exit 2
-fi
 
 unset COMPOSE_PROFILES COMPOSE_ENV_FILES
 export COMPOSE_DISABLE_ENV_FILE=1
@@ -35,7 +31,6 @@ case "${deployment_mode}" in
       done
     done
     if [[ "${OCSERV_PUBLIC_HOST}" == "${OCSERV_RELAY_PUBLIC_HOST}" \
-      || -n "${OCSERV_RELAY_URL_B:-}" \
       || "${OCSERV_RELAY_URL_A:-https://${OCSERV_RELAY_PUBLIC_HOST}}" != "https://${OCSERV_RELAY_PUBLIC_HOST}" \
       || "${OCSERV_CERTIFICATE_SIGNER_URL:-https://signer:9443/sign}" != https://signer:9443/sign \
       || "${OCSERV_PUBLIC_ORIGIN:-https://${OCSERV_PUBLIC_HOST}}" != "https://${OCSERV_PUBLIC_HOST}" \
@@ -78,12 +73,8 @@ case "${deployment_mode}:${tls_mode}" in
     ;;
   *) echo "OCSERV_TLS_MODE must be manual, or acme with Integrated" >&2; exit 2 ;;
 esac
-oidc_enabled=false
-if [[ -n "${OCSERV_OIDC_ISSUER:-}${OCSERV_OIDC_CLIENT_ID:-}${OCSERV_OIDC_REDIRECT_URL:-}" ]]; then
-  oidc_enabled=true
-fi
-if [[ "${oidc_enabled}" == false && "${OCSERV_LOCAL_AUTH_ENABLED:-false}" != true ]]; then
-  echo "enable Local authentication or configure OIDC for production" >&2
+if [[ "${OCSERV_LOCAL_AUTH_ENABLED:-true}" != true ]]; then
+  echo "enable Local authentication (OCSERV_LOCAL_AUTH_ENABLED=true) for production" >&2
   exit 2
 fi
 otel_enabled=false
@@ -96,13 +87,8 @@ database_deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
 case "${database_backend}:${database_deployment}" in
   postgres:bundled) database_overlay="compose.postgres.yaml" ;;
   postgres:external) database_overlay="compose.external-postgres.yaml" ;;
-  mysql:external) database_overlay="compose.external-mysql.yaml" ;;
-  mysql:bundled)
-    echo "bundled ${database_backend} is not implemented; use an externally managed database" >&2
-    exit 2
-    ;;
   *)
-    echo "OCSERV_DATABASE_BACKEND must be postgres or mysql and OCSERV_DATABASE_DEPLOYMENT must be bundled or external" >&2
+    echo "OCSERV_DATABASE_BACKEND must be postgres and OCSERV_DATABASE_DEPLOYMENT must be bundled or external" >&2
     exit 2
     ;;
 esac
@@ -119,12 +105,6 @@ for variable in "${image_variables[@]}"; do
     exit 2
   fi
 done
-if [[ "${database_backend}" == mysql ]]; then
-  if [[ ! "${OCSERV_DATABASE_BACKUP_IMAGE:-}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$ ]]; then
-    echo "OCSERV_DATABASE_BACKUP_IMAGE must contain a version-tagged or sha256 image reference" >&2
-    exit 2
-  fi
-fi
 
 secret_dir="${OCSERV_SECRET_DIR:-}"
 if [[ -z "${secret_dir}" || ! -d "${secret_dir}" || -L "${secret_dir}" \
@@ -151,15 +131,10 @@ general_secrets=(database-owner-url database-app-url session-key audit-checkpoin
 if [[ "${tls_mode}" == manual ]]; then
   general_secrets+=(tls.crt tls.key)
 fi
-if [[ "${database_backend}:${database_deployment}" == postgres:bundled ]]; then
+if [[ "${database_deployment}" == bundled ]]; then
   general_secrets+=(postgres-owner-password postgres-app-password postgres-backup-password postgres.pgpass)
-elif [[ "${database_backend}" == postgres ]]; then
-  general_secrets+=(postgres.pgpass database-ca.pem)
 else
-  general_secrets+=(database-backup.cnf database-ca.pem)
-fi
-if [[ "${oidc_enabled}" == true ]]; then
-  general_secrets+=(oidc-client-secret)
+  general_secrets+=(postgres.pgpass database-ca.pem)
 fi
 if [[ "${otel_enabled}" == true ]]; then
   general_secrets+=(otel-client.crt otel-client.key otel-ca.crt)
@@ -196,8 +171,10 @@ if [[ -e "${path}" || -L "${path}" ]]; then
 fi
 for secret in relay-access-token controller-iroh.key; do
   path="${secret_dir}/${secret}"
-  if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%g:%a' "${path}")" != "65532:65532:400" ]]; then
-    echo "${path} must be owned by uid:gid 65532:65532 with mode 0400" >&2
+  mode=400
+  [[ "${secret}" != relay-access-token ]] || mode=440
+  if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%g:%a:%h' "${path}")" != "65532:65532:${mode}:1" ]]; then
+    echo "${path} must be a one-link file owned by uid:gid 65532:65532 with mode 0${mode}" >&2
     exit 2
   fi
 done
@@ -300,9 +277,6 @@ done
 compose=(docker compose --env-file /dev/null -p ocservia-production
   -f "${ROOT}/deploy/production/compose.yaml"
   -f "${ROOT}/deploy/production/${database_overlay}")
-if [[ "${oidc_enabled}" == true ]]; then
-  compose+=(-f "${ROOT}/deploy/production/compose.oidc.yaml")
-fi
 if [[ "${relay_ca}" == true ]]; then
   compose+=(-f "${ROOT}/deploy/production/compose.relay-ca.yaml")
 fi

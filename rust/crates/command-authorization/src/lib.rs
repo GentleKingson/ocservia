@@ -2,8 +2,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod local_binding;
-
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
@@ -1531,8 +1529,10 @@ fn canonical_semantic_payload_hash(
                 || payload.plan_id.len() != 16
                 || !(-62_135_596_800..=253_402_300_799).contains(&expiry.seconds)
                 || !(0..1_000_000_000).contains(&expiry.nanos)
-                || envelope.approval_id.len() != 16
-                || envelope.approval_request_sha256.len() != 32
+                || !((envelope.approval_id.is_empty()
+                    && envelope.approval_request_sha256.is_empty())
+                    || (envelope.approval_id.len() == 16
+                        && envelope.approval_request_sha256.len() == 32))
             {
                 return Err(invalid_claim("complete_config_identity_invalid"));
             }
@@ -2131,6 +2131,30 @@ mod tests {
             value.version = "../escape".into();
         }
         assert!(ocservia_contracts::config_profile::canonical(&bad).is_err());
+    }
+    #[test]
+    fn complete_config_accepts_single_admin_and_preserves_legacy_binding() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../testdata/complete-config-v1.json"))
+                .unwrap();
+        let mut envelope = ocservia_contracts::decode_strict_command_envelope(
+            &hex::decode(fixture["apply_proto"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let legacy = semantic_payload_hash_v2(&envelope).unwrap();
+        envelope.approval_id.clear();
+        assert!(semantic_payload_hash_v2(&envelope).is_err());
+        envelope.approval_request_sha256.clear();
+        let direct = semantic_payload_hash_v2(&envelope).unwrap();
+        assert_ne!(direct, legacy);
+        envelope.approval_id = vec![0; 16];
+        assert!(semantic_payload_hash_v2(&envelope).is_err());
+        envelope.approval_id.clear();
+        if let Some(command_envelope::Payload::CompleteConfigApply(payload)) = &mut envelope.payload
+        {
+            payload.materialized_hash[0] ^= 1;
+        }
+        assert_ne!(semantic_payload_hash_v2(&envelope).unwrap(), direct);
     }
     use std::fs;
     use std::os::unix::fs::{PermissionsExt as _, symlink};

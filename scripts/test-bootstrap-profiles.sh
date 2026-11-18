@@ -7,7 +7,7 @@ WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 RELEASE_WORKFLOW="${ROOT}/.github/workflows/release.yml"
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
-require_test_commands ruby jq
+require_test_commands python3 jq
 bash "${ROOT}/scripts/test-bootstrap-platforms.sh"
 
 set +e
@@ -19,347 +19,423 @@ if [[ ${status} -ne 2 ]] || [[ "${output}" != *"bootstrap profile must be explic
   exit 1
 fi
 
-ruby -r yaml - "${ROOT}" "${WORKFLOW}" "${RELEASE_WORKFLOW}" <<'RUBY'
-root, workflow_path, release_workflow_path = ARGV
-workflow = YAML.safe_load(File.read(workflow_path), aliases: true)
-release_workflow = YAML.safe_load(File.read(release_workflow_path), aliases: true)
-jobs = workflow.fetch("jobs")
+python3 - "${ROOT}" "${WORKFLOW}" "${RELEASE_WORKFLOW}" <<'PY'
+import copy
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+import yaml
 
-def reject(message)
-  warn message
-  exit 1
-end
+root, workflow_path, release_workflow_path = (Path(p) for p in sys.argv[1:4])
+workflow = yaml.safe_load(workflow_path.read_text())
+release_workflow = yaml.safe_load(release_workflow_path.read_text())
+jobs = workflow["jobs"]
+
+
+def reject(message: str) -> None:
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
 
 worker_flags = {
-  "docs" => "run_docs", "go" => "run_go", "rust" => "run_rust",
-  "web" => "run_web", "web-browser" => "run_web_browser", "database-smoke" => "run_database"
+    "docs": "run_docs",
+    "go": "run_go",
+    "rust": "run_rust",
+    "web": "run_web",
+    "web-browser": "run_web_browser",
+    "database-smoke": "run_database",
 }
-reject("Basic CI triggers drifted") unless workflow.fetch(true).keys.sort == %w[pull_request push workflow_call workflow_dispatch]
-reject("reusable Basic CI must require an explicit profile") unless
-  workflow.fetch(true).dig("workflow_call", "inputs", "profile") == {"type" => "string", "required" => true}
-%w[workflow_call workflow_dispatch].each do |trigger|
-  input = workflow.fetch(true).dig(trigger, "inputs", "contract_base_ref")
-  reject("manual/reusable contracts need one explicit baseline") unless input && input["type"] == "string" && input["required"] == true
-end
-reject("Basic CI permissions must be read-only") unless workflow.fetch("permissions") == {"contents" => "read"}
-worker_flags.each do |id, flag|
-  condition = "needs.ci-relevance.outputs.#{flag} == 'true'"
-  condition += " || needs.ci-relevance.outputs.run_ci_tools == 'true'" if id == "go"
-  condition += " || needs.ci-relevance.outputs.run_installers == 'true'" if id == "rust"
-  reject("#{id} must follow routing") unless jobs.fetch(id).fetch("if") == condition
-end
-%w[go rust].each do |id|
-  steps = jobs.fetch(id).fetch("steps")
-  heavy = steps.select { |s| s.fetch("run", "").match?(/scripts\/(go-check|rust-check)\.sh|bootstrap.sh rust-basic/) }
-  reject("#{id} heavy steps must not run for tools/installers alone") unless
-    !heavy.empty? && heavy.all? { |s| s["if"] == "needs.ci-relevance.outputs.run_#{id} == 'true'" }
-end
-database = jobs.fetch("database-smoke")
-reject("matrix must use the router's Quick/Full selection") unless
-  database.fetch("strategy").fetch("matrix") == "${{ fromJSON(needs.ci-relevance.outputs.database_matrix) }}" &&
-  database.fetch("env").fetch("DATABASE_TEST_SCOPE") == "${{ needs.ci-relevance.outputs.database_scope }}"
-reject("Full retains recovery on both supported implementations") unless
-  jobs.fetch("database-recovery-full").fetch("strategy").fetch("matrix") == {"engine" => %w[postgres mysql]}
-reject("heavy history must not be a Basic CI job") if jobs.key?("database-history-full")
-reject("Quick and Full must have separate concurrency groups") unless
-  workflow.fetch("concurrency").fetch("group").include?("inputs.profile || 'quick'") &&
-  workflow.fetch("concurrency").fetch("group").include?("github.ref")
-guard = jobs.fetch("go").fetch("steps").find { |s| s["name"] == "CI guard and workflow contracts" }
-reject("CI self-tests must be path selected") unless guard.fetch("if") == "needs.ci-relevance.outputs.run_ci_tools == 'true'"
-jobs.each do |id, job|
-  timeout = job.fetch("timeout-minutes")
-  if id == "database-smoke"
-    reject("database runner must bound both full and smoke profiles") unless
-      timeout == "${{ needs.ci-relevance.outputs.database_scope == 'full' && 90 || 25 }}"
-  else
-    reject("#{id} needs a bounded runner") unless timeout.is_a?(Integer) && timeout > 0
-  end
-  reject("#{id} must propagate failures") if job["continue-on-error"]
-  Array(job["steps"]).each do |step|
-    reject("#{id} must propagate step failures") if step["continue-on-error"]
-    next unless step["uses"]
-    reject("#{id} has an unpinned action") unless step["uses"].match?(/@[0-9a-f]{40}\z/) ||
-      (id == 'controller-cache' && step['uses'] == './.github/actions/build-cache-credentials')
-  end
-end
-result = jobs.fetch("basic-ci-result")
-reject("required check identity or dependencies changed") unless
-  result.fetch("name") == "Basic CI Result" && result.fetch("if") == "always()" &&
-  result.fetch("needs").sort == (worker_flags.keys + %w[ci-relevance database-recovery-full]).sort
-require "json"
-require "open3"
-summary = result.fetch("steps").first.fetch("run")
-%w[quick full].each do |profile|
-  selections = profile == "full" ? [worker_flags.keys + ["ci_tools"]] : [%w[docs], %w[web], %w[rust], %w[go database-smoke], %w[ci_tools], %w[installers], %w[ci_tools installers], worker_flags.keys]
-  selections.each do |selected|
-    flags = worker_flags.to_h { |id, flag| [flag, selected.include?(id).to_s] }
-    flags["run_ci_tools"] = selected.include?("ci_tools").to_s
-    flags["ci_suites"] = profile == "full" ? "source-style contracts" : (selected.include?("ci_tools") ? "guards" : "")
-    flags["run_installers"] = selected.include?("installers").to_s
-    flags["run_controller_cache"] = (selected.include?("web") || selected.include?("installers")).to_s
-    selected = selected.dup
-    selected << "go" if flags["run_ci_tools"] == "true"
-    selected << "rust" if flags["run_installers"] == "true"
-    needs = {"ci-relevance" => {"result" => "success", "outputs" => flags.merge("profile" => profile)}}
-    worker_flags.each_key { |id| needs[id] = {"result" => selected.include?(id) ? "success" : "skipped"} }
-    needs["database-recovery-full"] = {"result" => profile == "full" ? "success" : "skipped"}
-    check = ->(data) { Open3.capture3({"RESULTS" => JSON.generate(data)}, "bash", "-eo", "pipefail", "-c", summary).last.success? }
-    reject("summary rejected valid #{profile} selection") unless check.call(needs)
-    needs.each_key do |id|
-      %w[failure cancelled skipped missing].each do |state|
-        next if state == needs[id]["result"]
-        broken = Marshal.load(Marshal.dump(needs))
-        if state == "missing" then broken.delete(id)
-        else broken[id]["result"] = state end
-        reject("summary accepted #{id}/#{state}") if check.call(broken)
-      end
-    end
-    if profile == "full"
-      %w[source-style contracts].each do |suite|
-        broken = Marshal.load(Marshal.dump(needs))
-        broken["ci-relevance"]["outputs"]["ci_suites"] = suite
-        reject("Full summary accepted an omitted style/contract suite") if check.call(broken)
-      end
-    end
-    needs["ci-relevance"]["outputs"].delete("run_database")
-    reject("summary accepted missing routing") if check.call(needs)
-    needs["ci-relevance"]["outputs"]["run_database"] = flags["run_database"]
-    needs["ci-relevance"]["outputs"].delete("run_controller_cache")
-    reject("summary accepted missing Controller cache routing") if check.call(needs)
-  end
-end
+if sorted(workflow[True].keys()) != ["pull_request", "push", "workflow_call", "workflow_dispatch"]:
+    reject("Basic CI triggers drifted")
+if workflow[True]["workflow_call"]["inputs"]["profile"] != {"type": "string", "required": True}:
+    reject("reusable Basic CI must require an explicit profile")
+for trigger in ("workflow_call", "workflow_dispatch"):
+    inp = workflow[True][trigger]["inputs"].get("contract_base_ref")
+    if not (inp and inp.get("type") == "string" and inp.get("required") is True):
+        reject("manual/reusable contracts need one explicit baseline")
+if workflow["permissions"] != {"contents": "read"}:
+    reject("Basic CI permissions must be read-only")
+for job_id, flag in worker_flags.items():
+    condition = f"needs.ci-relevance.outputs.{flag} == 'true'"
+    if job_id == "go":
+        condition += " || needs.ci-relevance.outputs.run_ci_tools == 'true'"
+    if job_id == "rust":
+        condition += " || needs.ci-relevance.outputs.run_installers == 'true'"
+    if jobs[job_id]["if"] != condition:
+        reject(f"{job_id} must follow routing")
+for job_id in ("go", "rust"):
+    steps = jobs[job_id]["steps"]
+    heavy = [s for s in steps if s.get("id") in ("go-check", "rust-tools", "rust-check")]
+    if not heavy or not all(s.get("if") == f"needs.ci-relevance.outputs.run_{job_id} == 'true'" for s in heavy):
+        reject(f"{job_id} heavy steps must not run for tools/installers alone")
+database = jobs["database-smoke"]
+if (
+    database["strategy"]["matrix"] != "${{ fromJSON(needs.ci-relevance.outputs.database_matrix) }}"
+    or database["env"]["DATABASE_TEST_SCOPE"] != "${{ needs.ci-relevance.outputs.database_scope }}"
+):
+    reject("matrix must use the router's Quick/Full selection")
+if jobs["database-recovery-full"]["strategy"]["matrix"] != {"engine": ["postgres"]}:
+    reject("Full retains recovery on PostgreSQL 18")
+if "database-history-full" in jobs:
+    reject("heavy history must not be a Basic CI job")
+if "inputs.profile || 'quick'" not in workflow["concurrency"]["group"] or "github.ref" not in workflow["concurrency"]["group"]:
+    reject("Quick and Full must have separate concurrency groups")
+guard = next(s for s in jobs["go"]["steps"] if s.get("id") == "ci-tools")
+if guard["if"] != "needs.ci-relevance.outputs.run_ci_tools == 'true'":
+    reject("CI self-tests must be path selected")
+for job_id, job in jobs.items():
+    timeout = job["timeout-minutes"]
+    if job_id == "database-smoke":
+        if timeout != "${{ needs.ci-relevance.outputs.database_scope == 'full' && 90 || 25 }}":
+            reject("database runner must bound both full and smoke profiles")
+    elif not (isinstance(timeout, int) and timeout > 0):
+        reject(f"{job_id} needs a bounded runner")
+    if job.get("continue-on-error"):
+        reject(f"{job_id} must propagate failures")
+    for step in job.get("steps") or []:
+        if step.get("continue-on-error"):
+            reject(f"{job_id} must propagate step failures")
+        uses = step.get("uses")
+        if not uses:
+            continue
+        if not (re.search(r"@[0-9a-f]{40}$", uses) or (job_id == "controller-cache" and uses == "./.github/actions/build-cache-credentials")):
+            reject(f"{job_id} has an unpinned action")
 
-# Exercise the selected entrypoints, with only unrelated tests and Go commands
-# replaced by recording stubs. The Release upgrade contract itself stays real.
-require "tmpdir"
-require "fileutils"
-standard = jobs.fetch("go").fetch("steps").find { |step| step["run"] == "scripts/go-check.sh standard" }
-reject("standard Go checks must follow run_go") unless standard && standard["if"] == "needs.ci-relevance.outputs.run_go == 'true'"
-reject("tool checks must receive the same Go selection") unless
-  guard.fetch("env").slice("CI_SUITES", "CI_RUN_GO") == {"CI_SUITES" => "${{ needs.ci-relevance.outputs.ci_suites }}", "CI_RUN_GO" => "${{ needs.ci-relevance.outputs.run_go }}"}
-reject("contract baseline must use event history or the manual input") unless
-  guard.fetch("env").fetch("CONTRACT_BASE_REF") == "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || inputs.contract_base_ref }}"
-reject("contract PR comparison must receive the actual head") unless
-  guard.fetch("env").fetch("CONTRACT_HEAD_SHA") == "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" &&
-  guard.fetch("env").fetch("CONTRACT_EVENT") == "${{ github.event_name }}"
-%w[source-style contracts].each do |suite|
-  step = jobs.fetch("go").fetch("steps").find { |item| item["run"] == "scripts/bootstrap.sh #{suite}" }
-  reject("#{suite} dependencies must follow their exact suite") unless step &&
-    step["if"] == "contains(needs.ci-relevance.outputs.ci_suites, '#{suite}')"
-end
-Dir.mktmpdir("ci-entrypoints-") do |tmp|
-  work = File.join(tmp, "work")
-  files = Dir.glob(File.join(root, "scripts", "*")).select { |path| File.file?(path) }
-  files += %w[.github/release.yml .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/release-upgrade.yml
-              .github/workflows/release-products.yml
-              .github/workflows/release-native-platform.yml
-              .github/workflows/release-business-diagnostic.yml .github/workflows/release-check.yml
-              rust/agent-build.Dockerfile Makefile].map { |path| File.join(root, path) }
-  files.each do |source|
-    target = File.join(work, source.delete_prefix(root + "/"))
-    FileUtils.mkdir_p(File.dirname(target))
-    FileUtils.cp(source, target)
-  end
-  Dir.glob(File.join(work, "scripts", "test-*.{sh,mjs,py}")).each do |path|
-    next if %w[test-release-upgrade.sh test-release-upgrade.mjs test-release-workflows.rb].include?(File.basename(path))
-    stub = if path.end_with?(".sh")
-      "#!/usr/bin/env bash\nprintf '%s\\n' \"${0##*/}\" >> \"${CI_TRACE}\"\n"
-    elsif path.end_with?(".py")
-      "import os, sys\nopen(os.environ['CI_TRACE'], 'a').write(os.path.basename(sys.argv[0]) + '\\n')\n"
-    else
-      "import fs from 'node:fs'; fs.appendFileSync(process.env.CI_TRACE, #{(File.basename(path) + "\n").to_json});\n"
-    end
-    File.write(path, stub)
-  end
-  # These fixture dispatches prove selection and order; each actual tool is
-  # checked by its owning suite, not downloaded into this offline fixture.
-  %w[lint.sh check-breaking.sh generated-clean.sh].each do |name|
-    File.write(File.join(work, "scripts", name), "#!/usr/bin/env bash\nprintf '%s|%s\\n' \"${0##*/}\" \"$*\" >> \"${CI_TRACE}\"\n")
-  end
-  %w[init config].each do |operation|
-    args = operation == "init" ? ["init", "-q"] : ["config", "user.name", "fixture"]
-    raise "fixture Git failed" unless system("git", "-C", work, *args)
-  end
-  raise "fixture identity failed" unless system("git", "-C", work, "config", "user.email", "fixture@invalid")
-  raise "fixture baseline failed" unless system("git", "-C", work, "commit", "--allow-empty", "-qm", "base")
-  work_base = Open3.capture2("git", "-C", work, "rev-parse", "HEAD").first.strip
-  raise "fixture candidate failed" unless system("git", "-C", work, "commit", "--allow-empty", "-qm", "candidate")
-  %w[bin control-plane signer].each { |path| FileUtils.mkdir_p(File.join(work, path)) }
-  %w[go gofmt].each do |name|
-    path = File.join(work, "bin", name)
-    File.write(path, "#!/usr/bin/env bash\nprintf '%s|%s|%s\\n' \"${0##*/}\" \"${PWD}\" \"$*\" >> \"${CI_TRACE}\"\n")
-    FileUtils.chmod(0755, path)
-  end
-  route = File.join(tmp, "route")
-  FileUtils.mkdir_p(route)
-  run = lambda do |env, *command, **options|
-    output, status = Open3.capture2e(env, *command, **options)
-    reject("#{command.join(' ')} failed: #{output}") unless status.success?
-    output
-  end
-  git = ->(*args) { run.call({}, "git", "-C", route, *args).strip }
-  git.call("init", "-q")
-  git.call("config", "user.name", "test")
-  git.call("config", "user.email", "test@example.invalid")
-  git.call("commit", "--allow-empty", "-qm", "base")
-  base = git.call("rev-parse", "HEAD")
-  shared_path = "scripts/buildx-cache.sh"
-  {
-    "Release-only" => [".github/workflows/release.yml"],
-    "shared tooling" => [shared_path],
-    "Controller+shared" => ["control-plane/internal/platform/app/run.go", shared_path],
-    "shared bootstrap" => ["scripts/bootstrap.sh"]
-  }.each do |name, paths|
-    git.call("checkout", "-q", "--detach", base)
-    paths.each do |path|
-      target = File.join(route, path)
-      FileUtils.mkdir_p(File.dirname(target))
-      File.write(target, "change\n")
-    end
-    git.call("add", ".")
-    git.call("commit", "-qm", name)
-    out = File.join(tmp, "routing")
-    File.write(out, "")
-    run.call({}, "bash", File.join(root, "scripts/ci-relevance.sh"), "pull_request", base, git.call("rev-parse", "HEAD"), out, chdir: route)
-    routing = File.readlines(out, chomp: true).to_h { |line| line.split("=", 2) }
-    reject("#{name} selected the wrong Go owner") unless
-      routing.fetch("run_go") == (!["Release-only", "shared tooling"].include?(name)).to_s
-    trace = File.join(tmp, "trace")
-    File.write(trace, "")
-    env = guard.fetch("env").slice("CI_SUITES", "CI_RUN_GO").transform_values do |value|
-      routing.fetch(value.delete_prefix("${{ needs.ci-relevance.outputs.").delete_suffix(" }}"))
-    end.merge("CI_TRACE" => trace, "PATH" => File.join(work, "bin") + ":" + ENV.fetch("PATH"),
-              "CONTRACT_BASE_REF" => work_base, "CONTRACT_EVENT" => "workflow_dispatch")
-    reject("#{name} omitted tool contracts") unless routing.fetch("run_ci_tools") == "true"
-    run.call(env, "bash", "-eo", "pipefail", "-c", guard.fetch("run"), chdir: work)
-    reject("#{name} tool suite duplicated standard Go checks") if
-      routing.fetch("run_go") == "true" && File.readlines(trace).any? { |line| line.match?(/^go(fmt)?\|/) }
-    run.call(env, "bash", "-eo", "pipefail", "-c", standard.fetch("run"), chdir: work) if routing.fetch("run_go") == "true"
-    calls = File.readlines(trace, chomp: true)
-    reject("#{name} skipped a Go workspace module") if routing.fetch("run_go") == "true" &&
-      !%w[control-plane signer].all? { |mod| calls.include?("go|#{File.join(work, mod)}|test -count=1 ./...") }
-    reject("#{name} retained retired G6 contract checks") unless calls.grep(/^test-g6-/).empty?
-    reject("#{name} lost shared tooling checks") unless
-      %w[test-build-cache-credentials.sh test-buildx-cache-fallback.sh test-secret-scan-config.sh].all? { |test| calls.count(test) == 1 }
-    reject("#{name} skipped offline Cross-VM contracts") if name == "shared bootstrap" &&
-      !%w[test-real-e2e-hosted.py test-real-e2e-business.py test-real-e2e-artifact.sh].all? { |test| calls.count(test) == 1 }
-    if name == "shared bootstrap"
-      expected = ["lint.sh|source-style", "lint.sh|contracts", "check-breaking.sh|#{work_base}", "generated-clean.sh|"]
-      reject("contract suite order or single execution drifted") unless calls.grep(/^(lint|check-breaking|generated-clean)\.sh\|/) == expected
-      # A diverged PR base must compare from the common ancestor, not the
-      # base branch tip or the synthetic candidate checkout.
-      head = run.call({}, "git", "-C", work, "rev-parse", "HEAD").strip
-      tree = run.call({}, "git", "-C", work, "rev-parse", "#{work_base}^{tree}").strip
-      diverged = run.call({}, "git", "-C", work, "commit-tree", tree, "-p", work_base, "-m", "base-branch-only").strip
-      File.write(trace, "")
-      pr_env = env.merge("CI_SUITES" => "contracts", "CONTRACT_EVENT" => "pull_request",
-                         "CONTRACT_BASE_REF" => diverged, "CONTRACT_HEAD_SHA" => head)
-      run.call(pr_env, "bash", "-eo", "pipefail", "-c", guard.fetch("run"), chdir: work)
-      reject("PR contract comparison did not use its merge base") unless
-        File.readlines(trace, chomp: true) == expected.drop(1)
-      _, missing_status = Open3.capture2e(env.merge("CI_SUITES" => "contracts", "CONTRACT_BASE_REF" => ""),
-                                         "bash", "-eo", "pipefail", "-c", guard.fetch("run"), chdir: work)
-      reject("manual contracts accepted an omitted baseline") if missing_status.success?
-    end
-    if name == "Release-only"
+result = jobs["basic-ci-result"]
+if (
+    result["name"] != "Basic CI Result"
+    or result["if"] != "always()"
+    or sorted(result["needs"]) != sorted([*worker_flags.keys(), "ci-relevance", "database-recovery-full"])
+):
+    reject("required check identity or dependencies changed")
 
-      reject("Release-only must not run unrelated guards") if calls.include?("test-bootstrap-profiles.sh")
-      path = File.join(work, ".github/workflows/release-check.yml")
-      original = File.read(path)
-      File.write(path, original.sub("uses: ./.github/workflows/security.yml", "uses: ./.github/workflows/ci.yml"))
-      _, status = Open3.capture2e(env, "bash", "-eo", "pipefail", "-c", guard.fetch("run"), chdir: work)
-      reject("Release-only accepted a substituted security entrypoint") if status.success?
-      File.write(path, original)
-    end
-    puts "#{name}: selected entrypoints and shared tooling counts passed"
-  end
-end
+summary = result["steps"][0]["run"]
+for profile in ("quick", "full"):
+    if profile == "full":
+        selections = [[*worker_flags.keys(), "ci_tools"]]
+    else:
+        selections = [
+            ["docs"], ["web"], ["rust"], ["go", "database-smoke"],
+            ["ci_tools"], ["installers"], ["ci_tools", "installers"],
+            list(worker_flags.keys()),
+        ]
+    for selected_in in selections:
+        flags = {flag: str(jid in selected_in).lower() for jid, flag in worker_flags.items()}
+        flags["run_ci_tools"] = str("ci_tools" in selected_in).lower()
+        flags["ci_suites"] = "source-style contracts" if profile == "full" else ("guards" if "ci_tools" in selected_in else "")
+        flags["run_installers"] = str("installers" in selected_in).lower()
+        flags["run_controller_cache"] = str("web" in selected_in or "installers" in selected_in).lower()
+        selected = list(selected_in)
+        if flags["run_ci_tools"] == "true":
+            selected.append("go")
+        if flags["run_installers"] == "true":
+            selected.append("rust")
+        needs = {"ci-relevance": {"result": "success", "outputs": {**flags, "profile": profile}}}
+        for job_id in worker_flags:
+            needs[job_id] = {"result": "success" if job_id in selected else "skipped"}
+        needs["database-recovery-full"] = {"result": "success" if profile == "full" else "skipped"}
 
-release_jobs = release_workflow.fetch("jobs")
-security = YAML.safe_load(File.read(File.join(root, ".github/workflows/security.yml")), aliases: true)
-reject("security checks must support scheduled, manual, and release runs") unless
-  security.fetch(true).keys.sort == %w[schedule workflow_call workflow_dispatch]
-reject("security scans must be read-only") unless security.fetch("permissions") == {"contents" => "read"}
-scan = security.fetch("jobs").fetch("scan")
-reject("security scans must not cancel siblings on failure") unless scan.fetch("strategy").fetch("fail-fast") == false
-checks = scan.fetch("strategy").fetch("matrix").fetch("include")
-reject("security scans must cover secrets and all three dependency ecosystems") unless
-  checks.map { |check| check.fetch("profile") }.sort == %w[go-security npm-security rust-security secret-scan]
-reject("secret scans need complete history") unless
-  scan.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == "${{ matrix.profile != 'secret-scan' && 1 || 0 }}" }
-bootstrap = File.read(File.join(root, "scripts/bootstrap.sh"))
-dispatch = 'case "${PROFILE}" in' + bootstrap.split('case "${PROFILE}" in').last
-stubs = bootstrap.scan(/^(install_\w+|verify_\w+)\(\)/).flatten.map do |name|
-  "#{name}() { echo #{name}; }"
-end.join("\n")
-{
-  "source-style" => %w[verify_host_command verify_host_command install_ruff],
-  "contracts" => %w[install_node install_npm install_contract_tools verify_java install_web_dependencies],
-  "go-security" => %w[install_go install_govulncheck],
-  "rust-security" => %w[install_rust install_cargo_audit install_cargo_deny],
-  "npm-security" => %w[install_node install_npm],
-  "package-tools" => %w[install_nfpm],
-  "image-security" => %w[install_syft install_grype verify_host_command]
-}.each do |profile, expected|
-  output, status = Open3.capture2e({"PROFILE" => profile}, "bash", "-eu", "-c", stubs + "\n" + dispatch)
-  reject("#{profile} installs unrelated tools/dependencies: #{output}") unless status.success? && output.split == expected
-end
-rust_scan = checks.find { |check| check["profile"] == "rust-security" }.fetch("command")
-reject("workspace and Relay advisory scans must remain fresh and fail closed") unless
-  rust_scan.lines.map(&:strip) == [
-    "cd rust",
-    "cargo audit",
-    "cargo audit --file ../deploy/production/relay.Cargo.lock",
-    "cargo deny --locked check advisories",
-  ]
-# test-release-upgrade.sh executes Release Check with failed security results
-# and checks that dispatch dry runs cannot publish.
-products = YAML.safe_load(File.read(File.join(root, ".github/workflows/release-products.yml")), aliases: true)
-build_steps = products.fetch("jobs").fetch("build-agent-packages").fetch("steps")
-restore = build_steps.find { |step| step["name"] == "Restore native-package tool cache" }
-save = build_steps.find { |step| step["name"] == "Save native-package tool cache" }
-release_build = build_steps.find { |step| step.fetch("run", "").include?("bash scripts/build-release-agent.sh") }
-reject("release tool cache restore must expose its primary key") unless
-  restore && restore["id"] == "native-package-tools-cache"
-reject("release tool cache save must reuse restore path and primary key") unless
-  save && save.fetch("with").fetch("path") == restore.fetch("with").fetch("path") &&
-    save.fetch("with").fetch("key") == "${{ steps.native-package-tools-cache.outputs.cache-primary-key }}"
-reject("release tool cache save must require a successful miss") unless
-  save.fetch("if").include?("success()") &&
-    save.fetch("if").include?("steps.native-package-tools-cache.outputs.cache-hit != 'true'")
-reject("release tool cache must not save before native build success") unless
-  release_build && build_steps.index(release_build) < build_steps.index(save)
-publish = release_jobs.fetch("publish")
-reject("release publishing environment must disable deployment records") unless publish.fetch("environment") == {"name" => "release-publishing", "deployment" => false}
-# The exact publishing permission set is pinned by
-# test-release-workflows.rb; here it must only stay job-local with
-# release-asset write access.
-reject("release publishing must retain contents write as a job-local permission") unless
-  publish.fetch("permissions").fetch("contents", nil) == "write"
-RUBY
+        def check_summary(data: dict) -> bool:
+            proc = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", summary],
+                env={**os.environ, "RESULTS": json.dumps(data)},
+                capture_output=True,
+                text=True,
+            )
+            return proc.returncode == 0
 
-for script in \
-  quota-expiry-check.sh \
-  config-plan-check.sh \
-  config-apply-check.sh \
-  certificate-secret-check.sh \
-  production-runtime-smoke.sh \
-  five-minute-offline-recovery.sh; do
-  if "${ROOT}/scripts/${script}" --unsupported >/dev/null 2>&1; then
-    echo "${script} accepted an unsupported execution mode" >&2
-    exit 1
-  fi
-done
+        if not check_summary(needs):
+            reject(f"summary rejected valid {profile} selection")
+        for job_id in list(needs.keys()):
+            for state in ("failure", "cancelled", "skipped", "missing"):
+                if state == needs[job_id]["result"]:
+                    continue
+                broken = copy.deepcopy(needs)
+                if state == "missing":
+                    del broken[job_id]
+                else:
+                    broken[job_id]["result"] = state
+                if check_summary(broken):
+                    reject(f"summary accepted {job_id}/{state}")
+        if profile == "full":
+            for suite in ("source-style", "contracts"):
+                broken = copy.deepcopy(needs)
+                broken["ci-relevance"]["outputs"]["ci_suites"] = suite
+                if check_summary(broken):
+                    reject("Full summary accepted an omitted style/contract suite")
+        del needs["ci-relevance"]["outputs"]["run_database"]
+        if check_summary(needs):
+            reject("summary accepted missing routing")
+        needs["ci-relevance"]["outputs"]["run_database"] = flags["run_database"]
+        del needs["ci-relevance"]["outputs"]["run_controller_cache"]
+        if check_summary(needs):
+            reject("summary accepted missing Controller cache routing")
+
+standard = next((s for s in jobs["go"]["steps"] if s.get("id") == "go-check"), None)
+if not (standard and standard.get("if") == "needs.ci-relevance.outputs.run_go == 'true'"):
+    reject("standard Go checks must follow run_go")
+if {k: guard["env"][k] for k in ("CI_SUITES", "CI_RUN_GO")} != {
+    "CI_SUITES": "${{ needs.ci-relevance.outputs.ci_suites }}",
+    "CI_RUN_GO": "${{ needs.ci-relevance.outputs.run_go }}",
+}:
+    reject("tool checks must receive the same Go selection")
+if guard["env"]["CONTRACT_BASE_REF"] != "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || inputs.contract_base_ref }}":
+    reject("contract baseline must use event history or the manual input")
+if (
+    guard["env"]["CONTRACT_HEAD_SHA"] != "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+    or guard["env"]["CONTRACT_EVENT"] != "${{ github.event_name }}"
+):
+    reject("contract PR comparison must receive the actual head")
+for suite in ("source-style", "contracts"):
+    step = next((item for item in jobs["go"]["steps"] if item.get("id") == f"{suite}-tools"), None)
+    if not (step and step.get("if") == f"contains(needs.ci-relevance.outputs.ci_suites, '{suite}')"):
+        reject(f"{suite} dependencies must follow their exact suite")
+
+with tempfile.TemporaryDirectory(prefix="ci-entrypoints-") as tmp_dir:
+    tmp = Path(tmp_dir)
+    work = tmp / "work"
+    files = [p for p in (root / "scripts").iterdir() if p.is_file()]
+    files.extend(
+        root / rel
+        for rel in (
+            ".github/release.yml",
+            ".github/workflows/ci.yml",
+            ".github/workflows/release.yml",
+            ".github/workflows/release-products.yml",
+            ".github/workflows/release-business-diagnostic.yml",
+            ".github/workflows/release-check.yml",
+            "rust/agent-build.Dockerfile",
+            "Makefile",
+        )
+    )
+    files.extend((root / ".github/actions/download-release-product").glob("*"))
+    for src in files:
+        dst = work / src.relative_to(root)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    for path in (work / "scripts").glob("test-*"):
+        if path.suffix not in (".sh", ".mjs", ".py"):
+            continue
+        if path.name in ("test-release-upgrade.sh", "test-release-upgrade.mjs", "test-release-workflows.py"):
+            continue
+        if path.suffix == ".sh":
+            stub = '#!/usr/bin/env bash\nprintf \'%s\\n\' "${0##*/}" >> "${CI_TRACE}"\n'
+        elif path.suffix == ".py":
+            stub = "import os, sys\nopen(os.environ['CI_TRACE'], 'a').write(os.path.basename(sys.argv[0]) + '\\n')\n"
+        else:
+            stub = f"import fs from 'node:fs'; fs.appendFileSync(process.env.CI_TRACE, {json.dumps(path.name + chr(10))});\n"
+        path.write_text(stub)
+    for name in ("lint.sh", "check-breaking.sh", "generated-clean.sh"):
+        (work / "scripts" / name).write_text('#!/usr/bin/env bash\nprintf \'%s|%s\\n\' "${0##*/}" "$*" >> "${CI_TRACE}"\n')
+    for cmd in (("init", "-q"), ("config", "user.name", "fixture"), ("config", "user.email", "fixture@invalid"), ("commit", "--allow-empty", "-qm", "base")):
+        subprocess.run(["git", "-C", str(work), *cmd], check=True)
+    work_base = subprocess.check_output(["git", "-C", str(work), "rev-parse", "HEAD"], text=True).strip()
+    subprocess.run(["git", "-C", str(work), "commit", "--allow-empty", "-qm", "candidate"], check=True)
+    for rel in ("bin", "control-plane", "signer"):
+        (work / rel).mkdir(parents=True, exist_ok=True)
+    for name in ("go", "gofmt"):
+        p = work / "bin" / name
+        p.write_text('#!/usr/bin/env bash\nprintf \'%s|%s|%s\\n\' "${0##*/}" "${PWD}" "$*" >> "${CI_TRACE}"\n')
+        p.chmod(0o755)
+    workspace = json.loads(subprocess.check_output(
+        ['bash', '-c', 'source "$1/scripts/env.sh"; go work edit -json "$1/go.work"', 'workspace', str(root)], text=True))
+    workspace_modules = [item['DiskPath'].removeprefix('./') for item in workspace['Use']]
+    for module in workspace_modules:
+        (work / module).mkdir(parents=True, exist_ok=True)
+    (work / 'bin/go').write_text('''#!/usr/bin/env bash
+case "$*" in 'env CGO_ENABLED') echo 1; exit ;; 'env CC') echo cc; exit ;; esac
+printf '%s|%s|%s\\n' "${0##*/}" "$PWD" "$*" >>"$CI_TRACE"
+''')
+    (work / 'scripts/bootstrap.sh').write_text('''#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"$CI_TRACE"
+exit "${BOOTSTRAP_EXIT:-0}"
+''')
+    for suite in ('source-style', 'contracts'):
+        step = next(item for item in jobs['go']['steps'] if item.get('id') == f'{suite}-tools')
+        trace = tmp / 'bootstrap-trace'
+        trace.write_text('')
+        env = {**os.environ, 'CI_TRACE': str(trace)}
+        proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', step['run']], env=env, cwd=work, capture_output=True)
+        assert proc.returncode == 0 and trace.read_text().splitlines() == [suite], suite
+        proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', step['run']],
+                              env={**env, 'BOOTSTRAP_EXIT': '19'}, cwd=work, capture_output=True)
+        assert proc.returncode == 19, f'{suite} bootstrap failure was swallowed'
+    for mode in ('standard', 'race', 'full'):
+        trace = tmp / 'go-trace'
+        trace.write_text('')
+        env = {**os.environ, 'CI_TRACE': str(trace), 'PATH': f'{work / "bin"}:{os.environ["PATH"]}'}
+        proc = subprocess.run(['bash', str(work / 'scripts/go-check.sh'), mode],
+                              env=env, cwd=work, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        expected = []
+        if mode != 'race':
+            expected.append(f'gofmt|{work}|-l ' + ' '.join(str(work / module) for module in workspace_modules))
+            for module in workspace_modules:
+                expected.extend(f'go|{work / module}|{args}' for args in ('vet ./...', 'test -count=1 ./...'))
+        if mode != 'standard':
+            expected.extend(f'go|{work / module}|test -race -count=1 ./...' for module in workspace_modules)
+        assert trace.read_text().splitlines() == expected, (mode, trace.read_text())
+    route = tmp / "route"
+    route.mkdir()
+
+    def run(env: dict[str, str], *command: str, cwd: Path | None = None) -> str:
+        proc = subprocess.run(command, env={**os.environ, **env}, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if proc.returncode != 0:
+            reject(f"{' '.join(command)} failed: {proc.stdout}")
+        return proc.stdout
+
+    def git(*args: str) -> str:
+        return run({}, "git", "-C", str(route), *args).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "test")
+    git("config", "user.email", "test@example.invalid")
+    git("commit", "--allow-empty", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    shared_path = "scripts/buildx-cache.sh"
+    scenarios = {
+        "Release-only": [".github/workflows/release.yml"],
+        "shared tooling": [shared_path],
+        "Controller+shared": ["control-plane/internal/platform/app/run.go", shared_path],
+        "shared bootstrap": ["scripts/bootstrap.sh"],
+    }
+    for name, paths in scenarios.items():
+        git("checkout", "-q", "--detach", base)
+        for p_rel in paths:
+            target = route / p_rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("change\n")
+        git("add", ".")
+        git("commit", "-qm", name)
+        out = tmp / "routing"
+        out.write_text("")
+        run({}, "bash", str(root / "scripts" / "ci-relevance.sh"), "pull_request", base, git("rev-parse", "HEAD"), str(out), cwd=route)
+        routing = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+        if routing["run_go"] != str(name not in ("Release-only", "shared tooling")).lower():
+            reject(f"{name} selected the wrong Go owner")
+        trace = tmp / "trace"
+        trace.write_text("")
+        env = {
+            k: routing[guard["env"][k].removeprefix("${{ needs.ci-relevance.outputs.").removesuffix(" }}")]
+            for k in ("CI_SUITES", "CI_RUN_GO")
+        }
+        env.update(
+            {
+                "CI_TRACE": str(trace),
+                "PATH": f"{work / 'bin'}:{os.environ['PATH']}",
+                "CONTRACT_BASE_REF": work_base,
+                "CONTRACT_EVENT": "workflow_dispatch",
+            }
+        )
+        if routing["run_ci_tools"] != "true":
+            reject(f"{name} omitted tool contracts")
+        run(env, "bash", "-eo", "pipefail", "-c", guard["run"], cwd=work)
+        trace_lines = trace.read_text().splitlines()
+        if routing["run_go"] == "true" and any(re.match(r"^go(fmt)?\|", line) for line in trace_lines):
+            reject(f"{name} tool suite duplicated standard Go checks")
+        if routing["run_go"] == "true":
+            run(env, "bash", "-eo", "pipefail", "-c", standard["run"], cwd=work)
+        calls = trace.read_text().splitlines()
+        if routing["run_go"] == "true" and not all(f"go|{work / mod}|test -count=1 ./..." in calls for mod in workspace_modules):
+            reject(f"{name} skipped a Go workspace module")
+        if any(line.startswith("test-g6-") for line in calls):
+            reject(f"{name} retained retired G6 contract checks")
+        if not all(calls.count(t) == 1 for t in ("test-build-cache-credentials.sh", "test-buildx-cache-fallback.sh", "test-secret-scan-config.sh")):
+            reject(f"{name} lost shared tooling checks")
+        if name == "shared bootstrap" and not all(calls.count(t) == 1 for t in ("test-real-e2e-hosted.py", "test-real-e2e-business.py", "test-real-e2e-artifact.sh")):
+            reject(f"{name} skipped offline Cross-VM contracts")
+        if name == "shared bootstrap":
+            expected = ["lint.sh|source-style", "lint.sh|contracts", f"check-breaking.sh|{work_base}", "generated-clean.sh|"]
+            if [c for c in calls if re.match(r"^(lint|check-breaking|generated-clean)\.sh\|", c)] != expected:
+                reject("contract suite order or single execution drifted")
+            head = run({}, "git", "-C", str(work), "rev-parse", "HEAD").strip()
+            tree = run({}, "git", "-C", str(work), "rev-parse", f"{work_base}^{{tree}}").strip()
+            diverged = run({}, "git", "-C", str(work), "commit-tree", tree, "-p", work_base, "-m", "base-branch-only").strip()
+            trace.write_text("")
+            pr_env = {**env, "CI_SUITES": "contracts", "CONTRACT_EVENT": "pull_request", "CONTRACT_BASE_REF": diverged, "CONTRACT_HEAD_SHA": head}
+            run(pr_env, "bash", "-eo", "pipefail", "-c", guard["run"], cwd=work)
+            if trace.read_text().splitlines() != expected[1:]:
+                reject("PR contract comparison did not use its merge base")
+            missing_proc = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", guard["run"]],
+                cwd=work,
+                env={**os.environ, **env, "CI_SUITES": "contracts", "CONTRACT_BASE_REF": ""},
+                capture_output=True,
+                text=True,
+            )
+            if missing_proc.returncode == 0:
+                reject("manual contracts accepted an omitted baseline")
+        if name == "Release-only":
+            if "test-bootstrap-profiles.sh" in calls:
+                reject("Release-only must not run unrelated guards")
+            rc_path = work / ".github/workflows/release-check.yml"
+            original = rc_path.read_text()
+            rc_path.write_text(original.replace("uses: ./.github/workflows/security.yml", "uses: ./.github/workflows/ci.yml", 1))
+            proc = subprocess.run(["bash", "-eo", "pipefail", "-c", guard["run"]], cwd=work, env={**os.environ, **env}, capture_output=True, text=True)
+            if proc.returncode == 0:
+                reject("Release-only accepted a substituted security entrypoint")
+            rc_path.write_text(original)
+        print(f"{name}: selected entrypoints and shared tooling counts passed")
+
+security = yaml.safe_load((root / ".github/workflows/security.yml").read_text())
+if sorted(security[True].keys()) != ["schedule", "workflow_call", "workflow_dispatch"]:
+    reject("security checks must support scheduled, manual, and release runs")
+if security["permissions"] != {"contents": "read"}:
+    reject("security scans must be read-only")
+scan = security["jobs"]["scan"]
+if scan["strategy"]["fail-fast"] is not False:
+    reject("security scans must not cancel siblings on failure")
+checks = scan["strategy"]["matrix"]["include"]
+if sorted(c["profile"] for c in checks) != ["go-security", "npm-security", "rust-security", "secret-scan"]:
+    reject("security scans must cover secrets and all three dependency ecosystems")
+if not any((s.get("with") or {}).get("fetch-depth") == "${{ matrix.profile != 'secret-scan' && 1 || 0 }}" for s in scan["steps"]):
+    reject("secret scans need complete history")
+rust_scan = next(c for c in checks if c["profile"] == "rust-security")["command"]
+with tempfile.TemporaryDirectory(prefix='security-dispatch-') as tmp_dir:
+    work = Path(tmp_dir)
+    (work / 'rust').mkdir()
+    log = work / 'calls'
+    cargo = work / 'cargo'
+    cargo.write_text('''#!/usr/bin/env bash
+printf '%s|%s\\n' "$PWD" "$*" >>"$SCAN_CALLS"
+[[ "${FAIL_COMMAND:-}" != "$*" ]] || exit 19
+''')
+    cargo.chmod(0o755)
+    expected = ['audit', 'audit --file ../deploy/production/relay.Cargo.lock', 'deny --locked check advisories']
+    for failure in (None, *expected):
+        log.write_text('')
+        env = {**os.environ, 'PATH': f'{work}:{os.environ["PATH"]}', 'SCAN_CALLS': str(log), 'FAIL_COMMAND': failure or ''}
+        proc = subprocess.run(['bash', '-euo', 'pipefail', '-c', rust_scan], env=env, cwd=work, capture_output=True)
+        count = expected.index(failure) + 1 if failure else len(expected)
+        assert log.read_text().splitlines() == [f'{work / "rust"}|{args}' for args in expected[:count]]
+        assert proc.returncode == (19 if failure else 0), 'advisory failure propagation changed'
+
+products = yaml.safe_load((root / ".github/workflows/release-products.yml").read_text())
+build_steps = products["jobs"]["build-agent-packages"]["steps"]
+restore = next((s for s in build_steps if s.get("id") == "native-package-tools-cache"), None)
+save = next((s for s in build_steps if s.get("uses", "").startswith("actions/cache/save@") and s.get("with", {}).get("key") == "${{ steps.native-package-tools-cache.outputs.cache-primary-key }}"), None)
+release_build = next((s for s in build_steps if s.get("id") == "build-packages"), None)
+if not (restore and restore.get("id") == "native-package-tools-cache"):
+    reject("release tool cache restore must expose its primary key")
+if not (save and save["with"]["path"] == restore["with"]["path"] and save["with"]["key"] == "${{ steps.native-package-tools-cache.outputs.cache-primary-key }}"):
+    reject("release tool cache save must reuse restore path and primary key")
+if not ("success()" in save["if"] and "steps.native-package-tools-cache.outputs.cache-hit != 'true'" in save["if"]):
+    reject("release tool cache save must require a successful miss")
+if not (release_build and build_steps.index(release_build) < build_steps.index(save)):
+    reject("release tool cache must not save before native build success")
+publish = release_workflow["jobs"]["publish"]
+if publish["environment"] != {"name": "release-publishing", "deployment": False}:
+    reject("release publishing environment must disable deployment records")
+if publish["permissions"].get("contents") != "write":
+    reject("release publishing must retain contents write as a job-local permission")
+PY
 
 if "${ROOT}/scripts/go-check.sh" unsupported >/dev/null 2>&1; then
   echo "go-check.sh accepted an unsupported execution mode" >&2
-  exit 1
-fi
-
-# Every go.work module must reach gofmt, vet and the unit/race tests in go-check.sh.
-workspace_modules="$(sed -n 's#^[[:space:]]*\./\([^[:space:]]*\)$#\1#p' "${ROOT}/go.work" | sort)"
-checked_modules="$(sed -n 's/^GO_MODULES=(\(.*\))$/\1/p' "${ROOT}/scripts/go-check.sh" | tr ' ' '\n' | sort)"
-if [[ -z "${workspace_modules}" || "${workspace_modules}" != "${checked_modules}" ]]; then
-  echo "go-check.sh GO_MODULES must match the go.work modules" >&2
   exit 1
 fi

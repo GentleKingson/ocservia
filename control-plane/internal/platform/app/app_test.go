@@ -17,16 +17,10 @@ func TestBootstrapPasswordPolicyBeforeStartup(t *testing.T) {
 			t.Fatalf("bootstrap reached startup before policy rejection: %v", err)
 		}
 	}
-	for _, complete := range []bool{false, true} {
-		err := Run(context.Background(), config.Config{
-			BootstrapLocalAdmin: !complete, CompleteLocalBootstrap: complete,
-			LocalBootstrapPassword:         "uncommon controller administrator setup secret",
-			LocalBootstrapApproverPassword: "x",
-		}, BuildInfo{}, nil)
-		if !errors.Is(err, auth.ErrPasswordPolicy) {
-			t.Fatalf("approver policy reached startup (complete=%v): %v", complete, err)
-		}
+	if err := validateBootstrapPasswords(config.Config{BootstrapLocalAdmin: true, LocalBootstrapPassword: "uncommon controller administrator setup secret"}); err != nil {
+		t.Fatalf("single administrator needs no approver password: %v", err)
 	}
+
 }
 
 func TestOperationAuthIsNotEnabledBySimulator(t *testing.T) {

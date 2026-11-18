@@ -36,7 +36,7 @@ export interface CertificateP12Request {
    * @type {string}
    * @memberof CertificateP12Request
    */
-  approvalId: string;
+  artifactRequestId: string;
   /**
    *
    * @type {string}
@@ -66,10 +66,10 @@ export function instanceOfCertificateP12Request(
   )
     return false;
   if (
-    (!("approvalId" in (value as Record<string, any>)) &&
-      !("approval_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["approvalId"] === undefined &&
-      (value as Record<string, any>)["approval_id"] === undefined)
+    (!("artifactRequestId" in (value as Record<string, any>)) &&
+      !("artifact_request_id" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["artifactRequestId"] === undefined &&
+      (value as Record<string, any>)["artifact_request_id"] === undefined)
   )
     return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
@@ -92,7 +92,7 @@ export function CertificateP12RequestFromJSONTyped(
   return {
     expectedVersion: json["expected_version"],
     certificateVersion: json["certificate_version"],
-    approvalId: json["approval_id"],
+    artifactRequestId: json["artifact_request_id"],
     reason: json["reason"],
   };
 }
@@ -112,7 +112,7 @@ export function CertificateP12RequestToJSONTyped(
   return {
     expected_version: value["expectedVersion"],
     certificate_version: value["certificateVersion"],
-    approval_id: value["approvalId"],
+    artifact_request_id: value["artifactRequestId"],
     reason: value["reason"],
   };
 }

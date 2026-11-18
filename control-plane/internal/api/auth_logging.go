@@ -21,21 +21,10 @@ const (
 	localCapacityLimited
 	localUnavailable
 	localSucceeded
-	oidcDisabled
-	oidcStartFailed
-	oidcStarted
-	oidcCallbackRejected
-	oidcStateRejected
-	oidcSucceeded
 	localSourceLimited
 	localGlobalLimited
 	localConcurrencyLimited
 	localSourceCapacityLimited
-	oidcSourceLimited
-	oidcGlobalLimited
-	oidcConcurrencyLimited
-	oidcSourceCapacityLimited
-	oidcSessionUnavailable
 	authLogKinds
 )
 
@@ -48,21 +37,10 @@ var authLogDefinitions = [authLogKinds]struct{ method, outcome, reason string }{
 	{"local", "unavailable", "account_capacity"},
 	{"local", "unavailable", "infrastructure_failure"},
 	{"local", "succeeded", "session_created"},
-	{"oidc", "rejected", "disabled"},
-	{"oidc", "unavailable", "start_failed"},
-	{"oidc", "started", "redirect_created"},
-	{"oidc", "rejected", "callback_rejected"},
-	{"oidc", "rejected", "state_rejected"},
-	{"oidc", "succeeded", "session_created"},
 	{"local", "rejected", "source_limited"},
 	{"local", "rejected", "global_limited"},
 	{"local", "rejected", "concurrency_limited"},
 	{"local", "rejected", "source_capacity"},
-	{"oidc", "rejected", "source_limited"},
-	{"oidc", "rejected", "global_limited"},
-	{"oidc", "rejected", "concurrency_limited"},
-	{"oidc", "rejected", "source_capacity"},
-	{"oidc", "unavailable", "infrastructure_failure"},
 }
 
 const authLogSamples = 10
@@ -111,22 +89,20 @@ func (s *Server) logAuth(r *http.Request, kind authLogKind, identity uuid.UUID, 
 		return
 	}
 	attrs := append(authLogAttrs(kind, "auth.result"), "request_id", boundedLogField(requestID(r), 128), "source_ip", boundedLogField(s.authSource(r).String(), 64))
-	if identity != uuid.Nil && (kind == localSucceeded || kind == oidcSucceeded) {
+	if identity != uuid.Nil && kind == localSucceeded {
 		attrs = append(attrs, "identity_id", identity.String())
 	}
 	if account != "" {
 		attrs = append(attrs, "account_ref", boundedLogField(account, 67))
 	}
 	level := slog.LevelWarn
-	if kind == localSucceeded || kind == oidcSucceeded || kind == oidcStarted {
+	if kind == localSucceeded {
 		level = slog.LevelInfo
 	}
 	s.writeAuthLog(r.Context(), level, attrs)
 }
 
 func (s *Server) writeAuthLog(ctx context.Context, level slog.Level, attrs []any) {
-	// Ordinary logging is best effort, unlike transactional business audit.
-	// slog already ignores handler errors; a faulty handler must not alter login.
 	defer func() { _ = recover() }()
 	if s.logger != nil {
 		s.logger.Log(ctx, level, "authentication security event", attrs...)
@@ -147,6 +123,5 @@ func boundedLogField(value string, limit int) string {
 }
 
 func authResultRoute(r *http.Request) bool {
-	return r.URL.Path == "/api/v1/auth/login" && (r.Method == http.MethodGet || r.Method == http.MethodPost || r.Method == http.MethodHead) ||
-		r.URL.Path == "/api/v1/auth/callback" && (r.Method == http.MethodGet || r.Method == http.MethodHead)
+	return r.URL.Path == "/api/v1/auth/login" && r.Method == http.MethodPost
 }

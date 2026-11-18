@@ -16,6 +16,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	"github.com/google/uuid"
@@ -149,7 +150,7 @@ func TestMatchingAttackerCSRWithoutPrivdReceiptCannotBecomeReady(t *testing.T) {
 }
 
 func TestOperationJSONOmitsAbsentIdentifiers(t *testing.T) {
-	payload, err := json.Marshal(Operation{ID: "019cf000-0000-7000-8000-000000000001", State: "draft"})
+	payload, err := json.Marshal(operations.Operation{ID: "019cf000-0000-7000-8000-000000000001", State: "draft"})
 	if err != nil {
 		t.Fatalf("marshal operation: %v", err)
 	}
@@ -268,9 +269,9 @@ func TestNormalizeConfigApplyResultSupportsIdempotentTerminalStates(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		state, _, err := normalizeConfigApplyResult(envelope, "succeeded", encoded)
-		if err != nil || state != test.want {
-			t.Fatalf("normalized state=%q want=%q err=%v", state, test.want, err)
+		outcome, err := normalizeCommandOutcome(envelope, "succeeded", encoded, false)
+		if err != nil || outcome.state != test.want || !proto.Equal(outcome.config, test.result) {
+			t.Fatalf("normalized outcome=%+v want=%q err=%v", outcome, test.want, err)
 		}
 	}
 }

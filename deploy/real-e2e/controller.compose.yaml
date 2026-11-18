@@ -134,13 +134,14 @@ services:
     build:
       context: ../..
       dockerfile: control-plane/Dockerfile
-    command: ["--role=all"]
     environment:
       OCSERV_ENVIRONMENT: development
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
       OCSERV_DEV_AUTH: "false"
       OCSERV_LOCAL_AUTH_ENABLED: "true"
-      OCSERV_PUBLIC_ORIGIN: https://localhost:8443
+      OCSERV_PUBLIC_ORIGIN: ${OCSERV_CONTROLLER_PUBLIC_URL:-https://localhost:8443}
+      OCSERV_RELAY_URL_A: ${REAL_E2E_RELAY_URL:?set REAL_E2E_RELAY_URL}
+      OCSERV_RELAY_ACCESS_TOKEN_FILE: /run/real-e2e-business/relay-token
       OCSERV_SESSION_KEY_FILE: /run/real-e2e-business/session-key
       OCSERV_AUDIT_CHECKPOINT_KEY_FILE: /run/real-e2e-business/audit-checkpoint-key
       OCSERV_COMMAND_SIGNING_KEY_FILE: /run/real-e2e-business/command.key.pem
@@ -160,7 +161,7 @@ services:
       - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}/session-key:/run/real-e2e-business/session-key:ro
       - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}/audit-checkpoint-key:/run/real-e2e-business/audit-checkpoint-key:ro
       - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}/requester-password:/run/real-e2e-business/requester-password:ro
-      - ${REAL_E2E_BUSINESS_DIR:?set REAL_E2E_BUSINESS_DIR}/approver-password:/run/real-e2e-business/approver-password:ro
+      - ${REAL_E2E_RELAY_DIR:?set REAL_E2E_RELAY_DIR}/token:/run/real-e2e-business/relay-token:ro
       - type: volume
         source: transport-runtime
         target: /run/ocserv-platform
@@ -182,7 +183,7 @@ services:
       context: ../..
       dockerfile: deploy/real-e2e/gateway.Dockerfile
     ports:
-      - 127.0.0.1:8443:8443/tcp
+      - ${REAL_E2E_CONTROLLER_BIND:-127.0.0.1}:8443:8443/tcp
     tmpfs:
       - /config:size=16m,mode=0700
       - /data:size=16m,mode=0700

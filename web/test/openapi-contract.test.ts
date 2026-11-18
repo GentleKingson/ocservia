@@ -22,7 +22,6 @@ interface OpenApiDocument {
   components?: {
     responses?: Record<string, { content?: Record<string, unknown> }>;
     securitySchemes?: {
-      oidc?: unknown;
       sessionCookie?: { type?: unknown; in?: unknown; name?: unknown };
       bearerAuth?: { type?: unknown; scheme?: unknown };
     };
@@ -39,12 +38,6 @@ interface OpenApiDocument {
             description?: unknown;
           };
         };
-      };
-      AuthMethods?: {
-        type?: unknown;
-        additionalProperties?: unknown;
-        required?: unknown;
-        properties?: Record<string, { type?: unknown }>;
       };
       UuidV7?: { pattern?: unknown };
       Problem?: { required?: unknown };
@@ -127,18 +120,23 @@ describe("OpenAPI invariants", () => {
     }
   });
 
-  it("publishes the shared Local and OIDC authentication contract", async () => {
+  it("publishes the Local authentication contract", async () => {
     const source = await readFile(
       resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
       "utf8",
     );
     const document = parse(source) as OpenApiDocument;
     expect(document.security).toContainEqual({ sessionCookie: [] });
-    expect(document.components?.securitySchemes?.oidc).toBeUndefined();
+    expect(
+      (
+        document.components?.securitySchemes as
+          Record<string, unknown> | undefined
+      )?.oidc,
+    ).toBeUndefined();
     expect(document.paths?.["/auth/local/login"]).toBeUndefined();
-    expect(document.paths?.["/auth/login"]?.get?.operationId).toBe(
-      "beginOIDCLogin",
-    );
+    expect(document.paths?.["/auth/login"]?.get).toBeUndefined();
+    expect(document.paths?.["/auth/methods"]).toBeUndefined();
+    expect(document.paths?.["/auth/callback"]).toBeUndefined();
     expect(document.paths?.["/auth/login"]?.post).toMatchObject({
       operationId: "loginLocal",
       security: [],
@@ -151,7 +149,6 @@ describe("OpenAPI invariants", () => {
         document.paths?.["/auth/login"]?.post?.responses?.[status],
       ).toBeDefined();
     }
-    expect(document.paths?.["/auth/methods"]?.get?.security).toEqual([]);
     expect(document.components?.schemas?.LocalLoginRequest).toMatchObject({
       additionalProperties: false,
       required: ["username", "password"],
@@ -164,12 +161,10 @@ describe("OpenAPI invariants", () => {
       document.components?.schemas?.LocalLoginRequest?.properties?.password;
     expect(password?.maxLength).toBeUndefined();
     expect(password?.description).toContain("1024 UTF-8 bytes");
-    expect(document.components?.schemas?.AuthMethods).toEqual({
-      type: "object",
-      additionalProperties: false,
-      required: ["local", "oidc"],
-      properties: { local: { type: "boolean" }, oidc: { type: "boolean" } },
-    });
+    expect(
+      (document.components?.schemas as Record<string, unknown> | undefined)
+        ?.AuthMethods,
+    ).toBeUndefined();
   });
 
   it("keeps self-service Local password changes separate from target-based reset", async () => {
@@ -206,71 +201,6 @@ describe("OpenAPI invariants", () => {
     ).toContain("Log in again");
   });
 
-  it("keeps Local lifecycle password limits byte-based and identity paths UUIDv7", async () => {
-    const source = await readFile(
-      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
-      "utf8",
-    );
-    const document = parse(source) as OpenApiDocument;
-    for (const path of [
-      "/local-users",
-      "/local-users/{identity_id}:reset-password",
-    ]) {
-      expect(document.paths?.[path]?.post).toMatchObject({
-        requestBody: {
-          content: {
-            "application/json": {
-              schema: {
-                properties: {
-                  password: {
-                    minLength: 1,
-                    writeOnly: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-      });
-      expect(document.paths?.[path]?.post).not.toHaveProperty([
-        "requestBody",
-        "content",
-        "application/json",
-        "schema",
-        "properties",
-        "password",
-        "maxLength",
-      ]);
-      expect(document.paths?.[path]?.post).toHaveProperty(
-        [
-          "requestBody",
-          "content",
-          "application/json",
-          "schema",
-          "properties",
-          "password",
-          "description",
-        ],
-        expect.stringContaining("1024 UTF-8 bytes"),
-      );
-    }
-    for (const action of ["disable", "reset-password"]) {
-      expect(
-        document.paths?.[`/local-users/{identity_id}:${action}`]?.post,
-      ).toHaveProperty(
-        "parameters",
-        expect.arrayContaining([
-          {
-            name: "identity_id",
-            in: "path",
-            required: true,
-            schema: { $ref: "#/components/schemas/UuidV7" },
-          },
-        ]),
-      );
-    }
-  });
-
   it("pins OpenAPI and the cross-language scalar conventions", async () => {
     const source = await readFile(
       resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
@@ -286,16 +216,10 @@ describe("OpenAPI invariants", () => {
       "status",
     ]);
     expect(
-      document.components?.schemas?.EnrollmentToken?.properties?.token,
-    ).toMatchObject({ readOnly: true });
-    expect(
-      document.components?.schemas?.EnrollmentToken?.properties?.token
-        ?.writeOnly,
-    ).toBeUndefined();
-    expect(
       document.components?.schemas?.NodeBootstrapToken?.properties?.token,
     ).toMatchObject({
-      pattern: "^obt1_[A-Za-z0-9_-]{43}$",
+      pattern:
+        "^(obt1_[A-Za-z0-9_-]{43}|oit1_[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]{43})$",
       readOnly: true,
     });
     expect(
@@ -344,7 +268,6 @@ describe("OpenAPI invariants", () => {
 
     expect(schemas?.AgentUpgradeRequest?.required).toEqual([
       "target_version",
-      "approval_id",
       "reason",
     ]);
     expect(
@@ -382,24 +305,6 @@ describe("OpenAPI invariants", () => {
     expect(
       schemas?.BuildInfo?.properties?.recommended_agent_version?.maxLength,
     ).toBe(128);
-  });
-
-  it("publishes the role binding identifier returned by the server", async () => {
-    const source = await readFile(
-      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
-      "utf8",
-    );
-    const document = parse(source) as OpenApiDocument;
-    const response = document.paths?.["/role-bindings"]?.post as
-      { responses?: Record<string, unknown> } | undefined;
-
-    expect(response?.responses?.["201"]).toMatchObject({
-      content: {
-        "application/json": {
-          schema: { $ref: "#/components/schemas/RoleBinding" },
-        },
-      },
-    });
   });
 
   it("keeps group mutations transport-safe and reads complete stored memberships", async () => {

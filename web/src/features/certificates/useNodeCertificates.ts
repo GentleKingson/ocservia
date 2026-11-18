@@ -8,6 +8,7 @@ import { onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   createCertificate,
   createCertificateP12,
+  newArtifactRequestId,
   downloadCertificateArtifact,
   getCertificate,
   issueCertificate,
@@ -48,11 +49,14 @@ export function useNodeCertificates({
   const certificateDialog = ref(false);
   const certificate = ref<Certificate>();
   const certificateGrant = ref<ArtifactGrant>();
+  const pendingExports = new Map<
+    string,
+    Parameters<typeof createCertificateP12>[1]
+  >();
   const certificateOperation = ref<Operation>();
   const certificateCommonName = ref("");
   const certificateDnsNames = ref("");
   const certificateReason = ref("");
-  const certificateApprovalId = ref("");
   const certificateError = ref("");
   const certificateLoading = ref(false);
   const certificateWorkflow = createNodeWorkflow(
@@ -96,7 +100,6 @@ export function useNodeCertificates({
     certificateCommonName.value = commonName;
     certificateDnsNames.value = "";
     certificateReason.value = "";
-    certificateApprovalId.value = "";
     certificateError.value = "";
     certificateLoading.value = true;
     try {
@@ -219,7 +222,6 @@ export function useNodeCertificates({
       !certificateWorkflow.isCurrent(context) ||
       certificateLoading.value ||
       !current ||
-      !certificateApprovalId.value.trim() ||
       !certificateReason.value.trim()
     )
       return;
@@ -229,7 +231,6 @@ export function useNodeCertificates({
     certificateError.value = "";
     try {
       const issued = await issueCertificate(current.id, {
-        approvalId: certificateApprovalId.value.trim(),
         reason: certificateReason.value.trim(),
       });
       rememberNodeWorkflowReference(ticket, {
@@ -258,8 +259,7 @@ export function useNodeCertificates({
       certificateLoading.value ||
       !current ||
       !node ||
-      !certificateReason.value.trim() ||
-      !certificateApprovalId.value.trim()
+      !certificateReason.value.trim()
     )
       return;
     if (readCertificateGrant(context, current.id)?.downloadToken) return;
@@ -268,12 +268,23 @@ export function useNodeCertificates({
     certificateLoading.value = true;
     certificateError.value = "";
     try {
-      const grant = await createCertificateP12(current.id, {
-        expectedVersion: node.version,
-        certificateVersion: current.version,
-        approvalId: certificateApprovalId.value.trim(),
-        reason: certificateReason.value.trim(),
-      });
+      const exportKey = JSON.stringify([
+        context.workspace.id,
+        context.nodeId,
+        current.id,
+      ]);
+      let request = pendingExports.get(exportKey);
+      if (!request) {
+        request = {
+          artifactRequestId: newArtifactRequestId(),
+          expectedVersion: node.version,
+          certificateVersion: current.version,
+          reason: certificateReason.value.trim(),
+        };
+        pendingExports.set(exportKey, request);
+      }
+      const grant = await createCertificateP12(current.id, request);
+      pendingExports.delete(exportKey);
       rememberCertificateGrant(context, current.id, grant);
       rememberNodeWorkflowReference(ticket, {
         resourceId: current.id,
@@ -282,6 +293,8 @@ export function useNodeCertificates({
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateGrant.value = readCertificateGrant(context, current.id);
       certificateOperation.value = grant.operation;
+      if (!grant.downloadToken)
+        certificateError.value = t("p12GrantUnavailable");
       await trackOperation(grant.operation.id);
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
@@ -347,8 +360,7 @@ export function useNodeCertificates({
       certificateLoading.value ||
       !current ||
       !node ||
-      !certificateReason.value.trim() ||
-      !certificateApprovalId.value.trim()
+      !certificateReason.value.trim()
     )
       return;
     const ticket = beginNodeMutation(context, "certificate");
@@ -359,7 +371,6 @@ export function useNodeCertificates({
       const operation = await revokeCertificate(current.id, {
         expectedVersion: node.version,
         certificateVersion: current.version,
-        approvalId: certificateApprovalId.value.trim(),
         reason: certificateReason.value.trim(),
       });
       rememberNodeWorkflowReference(ticket, {
@@ -390,7 +401,6 @@ export function useNodeCertificates({
     certificateCommonName,
     certificateDnsNames,
     certificateReason,
-    certificateApprovalId,
     certificateError,
     certificateLoading,
     openCertificate,

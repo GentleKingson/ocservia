@@ -3,18 +3,15 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"runtime"
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
-	"github.com/google/uuid"
 )
 
 // allowDevelopmentRequest admits development routes only for the development
@@ -24,7 +21,6 @@ import (
 // check keeps a DNS-rebound browser page from reaching these routes.
 func (s *Server) allowDevelopmentRequest(w http.ResponseWriter, r *http.Request) bool {
 	if !s.hasOperationCredential(r) {
-		w.Header().Set("WWW-Authenticate", "OIDC")
 		writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "development routes require the development principal")
 		return false
 	}
@@ -48,7 +44,7 @@ func developmentHost(hostport string) bool {
 }
 
 func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
-	service := s.transportEventService()
+	service := s.transportEvents
 	if service == nil || !s.localSimulator {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
@@ -79,98 +75,13 @@ func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, operation)
 }
 
-func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
-	if s.operations != nil {
-		id, err := uuid.Parse(r.PathValue("operation_id"))
-		if err != nil || id.Version() != 7 {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "operation_id must be a UUIDv7")
-			return
-		}
-		operation, err := s.operations.Get(r.Context(), id)
-		if err == nil {
-			w.Header().Set("ETag", fmt.Sprintf("\"revision-%d\"", operation.Version))
-			writeJSON(w, http.StatusOK, operation)
-			return
-		}
-		if !errors.Is(err, database.ErrNotFound) {
-			s.writeOperationError(w, r, err)
-			return
-		}
-	}
-	service := s.transportEventService()
-	if service == nil {
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
-		return
-	}
-	id, err := uuid.Parse(r.PathValue("operation_id"))
-	if err != nil || id.Version() != 7 {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "operation_id must be a UUIDv7")
-		return
-	}
-	operation, err := service.GetOperation(r.Context(), id)
-	if errors.Is(err, database.ErrNotFound) {
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested operation does not exist")
-		return
-	}
-	if err != nil {
-		s.logger.ErrorContext(r.Context(), "get operation", "error", err)
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "operation state is temporarily unavailable")
-		return
-	}
-	writeJSON(w, http.StatusOK, operation)
-}
-
-func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
-	service := s.transportEventService()
-	if service == nil {
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
-		return
-	}
-	after, ok := httpx.ParseOptionalUUIDv7(r.URL.Query().Get("cursor"))
-	if !ok {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "cursor must be a UUIDv7 operation ID")
-		return
-	}
-	limit, ok := httpx.PageSize(r, 50)
-	if !ok {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
-		return
-	}
-	operations, hasMore, err := service.ListOperationsInWorkspace(r.Context(), workspace(r), after, limit)
-	if err != nil {
-		s.logger.ErrorContext(r.Context(), "list operations", "error", err)
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "operations are temporarily unavailable")
-		return
-	}
-	page := map[string]any{"has_more": hasMore}
-	if hasMore && len(operations) > 0 {
-		page["next_cursor"] = operations[len(operations)-1].ID
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": operations, "page": page})
-}
-
-func (s *Server) operationSummary(w http.ResponseWriter, r *http.Request) {
-	service := s.transportEventService()
-	if service == nil {
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
-		return
-	}
-	summary, err := service.OperationSummaryInWorkspace(r.Context(), workspace(r))
-	if err != nil {
-		s.logger.ErrorContext(r.Context(), "operation summary", "error", err)
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "operations are temporarily unavailable")
-		return
-	}
-	writeJSON(w, http.StatusOK, summary)
-}
-
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
-	service := s.transportEventService()
+	service := s.transportEvents
 	if service == nil {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}
-	after, ok := httpx.ParseOptionalUUIDv7(r.URL.Query().Get("after"))
+	after, ok := parseOptionalUUIDv7(r.URL.Query().Get("after"))
 	if !ok {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "after must be a UUIDv7 event ID")
 		return
@@ -183,7 +94,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-order", "Order is invalid", "order must be either asc or desc")
 		return
 	}
-	limit, ok := httpx.PageSize(r, 50)
+	limit, ok := pageSize(r, 50)
 	if !ok {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
 		return
@@ -202,7 +113,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
-	service := s.transportEventService()
+	service := s.transportEvents
 	if service == nil {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return

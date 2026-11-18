@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/google/uuid"
 )
@@ -34,23 +32,11 @@ func (p *blockedUserOperations) GetPolicy(ctx context.Context, _ uuid.UUID, _ st
 func (p *blockedUserOperations) SetPolicy(ctx context.Context, _ useroperations.PolicyRequest) (useroperations.Policy, bool, error) {
 	return useroperations.Policy{}, false, p.wait(ctx)
 }
-func (p *blockedUserOperations) CreateBatch(ctx context.Context, _ useroperations.BatchRequest) (useroperations.Batch, bool, error) {
-	return useroperations.Batch{}, false, p.wait(ctx)
-}
-func (p *blockedUserOperations) GetBatch(ctx context.Context, _ uuid.UUID) (useroperations.Batch, error) {
-	return useroperations.Batch{}, p.wait(ctx)
-}
-func (p *blockedUserOperations) Metrics(ctx context.Context, _ uuid.UUID) (useroperations.Metrics, error) {
-	return useroperations.Metrics{}, p.wait(ctx)
-}
 
 func TestUserOperationsHTTPContextLifetime(t *testing.T) {
 	for _, route := range []struct{ method, path, body string }{
 		{"PUT", "/api/v1/nodes/" + baselineID + "/users/alice/policy", `{}`},
 		{"GET", "/api/v1/nodes/" + baselineID + "/users/alice/policy", ""},
-		{"POST", "/api/v1/user-batches", `{}`},
-		{"GET", "/api/v1/user-batches/" + baselineID, ""},
-		{"GET", "/api/v1/user-operations/metrics", ""},
 	} {
 		for _, cancelRequest := range []bool{false, true} {
 			name := "deadline"
@@ -67,7 +53,7 @@ func TestUserOperationsHTTPContextLifetime(t *testing.T) {
 				release := func() { once.Do(func() { close(plans.release) }) }
 				config := testHTTPConfig(true)
 				config.BodyLimit, config.RequestTimeout = 1024, timeout
-				s := newTestServer(t, config, nil, Modules{UserOperations: plans}, Authorization{RBAC: rbac.NewBackend(nil)})
+				s := newTestServer(t, config, nil, Modules{UserOperations: plans}, Authorization{})
 				t.Cleanup(release)
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
@@ -122,28 +108,6 @@ func TestUserOperationsHTTPContextLifetime(t *testing.T) {
 					t.Fatal(err)
 				}
 			})
-		}
-	}
-}
-
-func TestUserOperationsRequestInfo(t *testing.T) {
-	actor := auth.Principal{IdentityID: uuid.Must(uuid.NewV7()), SessionID: uuid.Must(uuid.NewV7()), Issuer: auth.LocalIssuer, BreakGlass: true}
-	workspaceID, approval := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	for _, header := range []string{"", "bad", uuid.NewString(), " " + approval.String() + " "} {
-		r := baselineRequest("POST", "/api/v1/user-batches", nil)
-		ctx := context.WithValue(r.Context(), principalKey{}, actor)
-		ctx = context.WithValue(ctx, workspaceKey{}, workspaceID)
-		ctx = context.WithValue(ctx, requestIDKey{}, "original-request")
-		r = r.WithContext(ctx)
-		r.Header.Set("X-Approval-ID", header)
-		r.Header.Set("X-Workspace-ID", uuid.NewString())
-		info := userOperationsRequestInfo(r)
-		wantApproval := uuid.Nil
-		if strings.TrimSpace(header) == approval.String() {
-			wantApproval = approval
-		}
-		if info.Principal != actor || info.WorkspaceID != workspaceID || info.ApprovalID != wantApproval || info.ActorID != actorID(r) || info.RequestID != "original-request" || info.Traceparent != requestTraceparent(r) {
-			t.Fatalf("request information: %+v", info)
 		}
 	}
 }

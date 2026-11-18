@@ -255,7 +255,9 @@ test("keeps inputs after a server error and submits once per attempt", async ({
   });
 });
 
-test("requires an approval ID before an approved reload", async ({ page }) => {
+test("submits an authorized reload directly and handles server denial", async ({
+  page,
+}) => {
   const writes = await openNode(page, {
     "service.reload": { allowed: true, reason: "available" },
   });
@@ -264,8 +266,8 @@ test("requires an approval ID before an approved reload", async ({ page }) => {
       status: 403,
       contentType: "application/problem+json",
       json: {
-        type: "https://ocservia.dev/problems/approval-required",
-        title: "Approval required",
+        type: "https://ocservia.dev/problems/forbidden",
+        title: "Access denied",
         status: 403,
       },
     }),
@@ -274,11 +276,8 @@ test("requires an approval ID before an approved reload", async ({ page }) => {
   const dialog = page.getByRole("dialog", { name: "Reload Ocserv" });
   const confirm = dialog.getByRole("button", { name: "Confirm" });
   await dialog.getByLabel("Reason").fill("apply config");
-  await expect(confirm).toBeDisabled();
-  await expect(
-    dialog.getByText("This action runs only with an approved request."),
-  ).toBeVisible();
-  await dialog.getByLabel("Approval ID").fill("approval-42");
+  await expect(confirm).toBeEnabled();
+  await expect(dialog.getByLabel("Approval ID")).toHaveCount(0);
   await confirm.click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByRole("alert")).toBeVisible();
@@ -286,7 +285,7 @@ test("requires an approval ID before an approved reload", async ({ page }) => {
   expect(writes).toHaveLength(1);
   const request = writes[0];
   expect(request?.url()).toContain(`/nodes/${nodeId}/service:reload`);
-  expect(request?.headers()["x-approval-id"]).toBe("approval-42");
+  expect(request?.headers()["x-approval-id"]).toBeUndefined();
   expect(request?.headers()["if-match"]).toBe('"revision-7"');
   expect(request?.postDataJSON()).toEqual({
     reason: "apply config",

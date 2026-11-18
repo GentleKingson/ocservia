@@ -10,7 +10,7 @@ git -C "${fixture}" config user.email test@example.invalid
 git -C "${fixture}" commit --allow-empty -qm base
 base="$(git -C "${fixture}" rev-parse HEAD)"
 flags=(run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache)
-all_images='gateway control transport backup edge relay signer mysql_backup'
+all_images='gateway control transport backup edge relay signer'
 expect() {
   local out=$1 key=$2 value=$3
   grep -Fxq "${key}=${value}" "${out}" || { cat "${out}" >&2; echo "expected ${key}=${value}" >&2; exit 1; }
@@ -35,14 +35,8 @@ expect_images() {
 check_matrix() {
   local out=$1 profile=$2
   sed -n 's/^database_matrix=//p' "${out}" | jq -e --arg profile "${profile}" '
-    if $profile == "full" then
-      .include == [{"engine":"postgres","postgres":"18","version":"18.6"},
-        {"engine":"mysql","version":"8.4.11","shard":"mysql-cutover"},
-        {"engine":"mysql","version":"8.4.11","shard":"mysql-core"},
-        {"engine":"mysql","version":"8.4.11","shard":"services"}]
-    else
-      .include == [{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.11"}]
-    end' >/dev/null
+    ($profile == "quick" or $profile == "full") and
+    .include == [{"engine":"postgres","postgres":"18","version":"18.6"}]' >/dev/null
 }
 while read -r path selected; do
   git -C "${fixture}" checkout -q --detach "${base}"
@@ -70,9 +64,7 @@ while read -r path selected; do
         control-plane/*|THIRD_PARTY_NOTICES.md) expected_images=control ;;
         rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/crates/*|rust/vendor/*|rust/.cargo/*|rust/transportd.Dockerfile|deploy/production/transportd-relays.sh|deploy/prepare-transport-runtime.sh)
           expected_images=transport ;;
-        deploy/production/backup-entrypoint.sh) expected_images='backup mysql_backup' ;;
-        deploy/production/backup.Dockerfile|scripts/postgres-backup.sh) expected_images=backup ;;
-        deploy/production/backup.mysql.Dockerfile|scripts/mysql-backup.sh) expected_images=mysql_backup ;;
+        deploy/production/backup-entrypoint.sh|deploy/production/backup.Dockerfile|scripts/postgres-backup.sh) expected_images=backup ;;
         deploy/production/edge.Dockerfile) expected_images=edge ;;
         deploy/production/integrated/*) expected_images='gateway edge' ;;
         deploy/production/relay.Dockerfile|deploy/production/relay.Cargo.lock|scripts/build-relay.sh)
@@ -91,7 +83,7 @@ while read -r path selected; do
           expect "${out}" ci_suites cross-vm ;;
         scripts/real-e2e-*|scripts/test-real-e2e-*)
           expect "${out}" ci_suites 'cross-vm source-style' ;;
-        scripts/release-business-api.py) expect "${out}" ci_suites 'release cross-vm source-style' ;;
+        scripts/release-business-api.py|scripts/release_business_runtime.py|scripts/release_business_scenarios.py) expect "${out}" ci_suites 'release cross-vm source-style' ;;
         .github/actions/build-cache-credentials/index.js)
           expect "${out}" ci_suites release ;;
         scripts/buildx-cache.sh|scripts/test-bootstrap-installers.sh|scripts/resilience-capacity-lib.sh)
@@ -137,7 +129,6 @@ web/src/components/nodes/NodeDetailHeader.vue run_web run_web_browser run_contro
 web/src/features/configuration/useNodeConfiguration.ts run_web run_web_browser run_controller_cache
 web/src/features/user-password.ts run_web run_web_browser run_controller_cache
 web/src/views/AuditView.vue run_web run_web_browser run_controller_cache
-web/src/views/ApprovalsView.vue run_web run_web_browser run_controller_cache
 web/src/views/SettingsView.vue run_web run_web_browser run_controller_cache
 web/e2e/login.spec.ts run_web run_web_browser
 web/playwright.config.ts run_web run_web_browser
@@ -149,14 +140,14 @@ rust/.cargo/config.toml run_rust run_controller_cache
 rust/Cargo.lock run_rust run_controller_cache
 proto/controller.proto run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 control-plane/internal/platform/app/run.go run_go run_database run_controller_cache
-control-plane/internal/database/mysql/backend.go run_go run_database run_controller_cache
+control-plane/internal/database/postgres/backend.go run_go run_database run_controller_cache
 control-plane/internal/api/routes.go run_go run_database run_controller_cache
 control-plane/internal/api/node_boundary_test.go run_go run_database
 control-plane/migrations/cutover_test.go run_go run_database
 control-plane/Dockerfile run_go run_controller_cache
 control-plane/internal/auth/password_blocklist/common-passwords.txt run_go run_database run_controller_cache
-control-plane/migrations/000036.up.sql run_go run_database run_controller_cache
-scripts/database-foundation-integration.sh run_go run_database run_ci_tools
+control-plane/migrations/schema.sql run_go run_database run_controller_cache
+scripts/database-postgres-smoke.sh run_go run_database run_ci_tools
 scripts/go-check.sh run_go run_ci_tools
 signer/http.go run_go run_controller_cache
 signer/store_test.go run_go
@@ -170,6 +161,7 @@ deploy/production/install.sh run_installers run_ci_tools
 deploy/production/controller-bootstrap.sh run_installers run_ci_tools
 deploy/lib/install-env.sh run_installers run_ci_tools
 deploy/lib/install-ui.sh run_installers run_ci_tools
+deploy/lib/node-bootstrap.sh run_installers run_ci_tools
 deploy/lib/controller-runtime.sh run_installers run_ci_tools
 deploy/production/transportd-relays.sh run_installers run_controller_cache run_ci_tools
 deploy/production/systemd/agent-relays.sh run_installers run_ci_tools
@@ -179,8 +171,10 @@ scripts/release-agent-state-check.sh run_installers run_ci_tools
 scripts/package-agent.sh run_installers run_ci_tools
 scripts/verify-agent-package.sh run_installers run_ci_tools
 scripts/test-managed-node-install.sh run_installers run_ci_tools
+scripts/test-node-bootstrap.py run_installers run_ci_tools
 scripts/test-controller-install.sh run_installers run_ci_tools
 scripts/test-controller-bootstrap.sh run_installers run_ci_tools
+scripts/test-production-auth-config.sh run_installers run_ci_tools
 scripts/test-relay-launchers.py run_installers run_ci_tools
 scripts/test-release-agent-state-check.sh run_installers run_ci_tools
 .gitignore run_installers
@@ -190,7 +184,6 @@ deploy/production/compose.yaml run_ci_tools run_installers
 deploy/production/backup-entrypoint.sh run_ci_tools run_installers run_controller_cache
 deploy/production/gateway.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/backup.Dockerfile run_ci_tools run_installers run_controller_cache
-deploy/production/backup.mysql.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/edge.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/signer.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/future.Dockerfile run_ci_tools run_installers run_controller_cache
@@ -199,6 +192,8 @@ deploy/real-e2e/compose.yaml run_ci_tools
 scripts/real-e2e-controller.sh run_ci_tools
 scripts/test-real-e2e-hosted.py run_ci_tools
 scripts/release-business-api.py run_ci_tools run_installers
+scripts/release_business_runtime.py run_ci_tools run_installers
+scripts/release_business_scenarios.py run_ci_tools run_installers
 deploy/production/integrated/README.md run_docs
 deploy/production/relay-build.md run_docs
 scripts/upgrade-agent.sh run_ci_tools run_installers
@@ -206,7 +201,7 @@ scripts/rollback-agent.sh run_ci_tools run_installers
 scripts/uninstall-agent.sh run_ci_tools run_installers
 .github/workflows/ci.yml run_ci_tools
 .github/workflows/release.yml run_ci_tools run_installers
-.github/workflows/release-upgrade.yml run_ci_tools run_installers
+.github/workflows/release-check.yml run_ci_tools run_installers
 .github/workflows/security.yml run_ci_tools
 scripts/ci-relevance.sh run_ci_tools
 scripts/ci-tools-check.sh run_ci_tools
@@ -223,7 +218,6 @@ THIRD_PARTY_NOTICES.md run_docs run_controller_cache
 deploy/production/relay.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/integrated/nginx.conf.template run_ci_tools run_installers run_controller_cache
 deploy/production/relay.Cargo.lock run_ci_tools run_installers run_controller_cache
-scripts/mysql-backup.sh run_go run_database run_controller_cache run_ci_tools
 scripts/postgres-backup.sh run_go run_database run_controller_cache run_ci_tools
 deploy/prepare-transport-runtime.sh run_ci_tools run_installers run_controller_cache
 scripts/build-relay.sh run_rust run_ci_tools run_controller_cache

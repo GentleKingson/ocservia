@@ -9,8 +9,8 @@ fail() {
 }
 
 usage() {
-  echo "No arguments: interactive wizard (TTY required). --non-interactive: unattended, no prompts." >&2
-  echo "Options: --config PATH (default ./install.env), --version vX.Y.Z (Release default embedded)." >&2
+  echo "No arguments: hidden installation-token prompt (TTY required). --non-interactive: unattended, no prompts." >&2
+  echo "Options: --join-token, --join-token-file PATH, --resume-install, --version vX.Y.Z (Release default embedded)." >&2
   echo "usage: install-node --version vX.Y.Z [--root-lifecycle]" >&2
   exit 2
 }
@@ -40,11 +40,15 @@ main() {
 
   while (($# > 0)); do
     case "$1" in
+      --join-token|--resume-install)
+        installer_args+=("$1"); shift ;;
+      --join-token-file)
+        [[ $# -ge 2 && -f "$2" ]] || fail "--join-token-file requires an existing protected file"
+        installer_args+=(--join-token-file "$2"); shift 2 ;;
       --non-interactive)
         installer_args+=(--non-interactive); shift ;;
       --config)
-        [[ $# -ge 2 && -f "$2" ]] || fail "--config requires an existing file"
-        installer_args+=(--config "$2"); shift 2 ;;
+        fail "manual configuration installation is retired; use an installation token or --resume-install" ;;
       --help|-h) usage ;;
       --version)
         [[ "${version_seen}" == false && $# -ge 2 ]] || usage

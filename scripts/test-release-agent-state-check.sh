@@ -26,7 +26,6 @@ mkdir -p "${work}/source/scripts" "${work}/source/rust/target/release" "${work}/
   /etc/ocservia-agent /var/lib/ocservia-agent/identity /var/lib/ocservia-upgrade/upgrade-backup
 cp -a "${ROOT}/deploy" "${work}/source/"
 cp "${ROOT}/scripts/"{package-agent,install-agent,upgrade-agent,rollback-agent,uninstall-agent,verify-agent-package}.sh "${work}/source/scripts/"
-cp "${ROOT}/scripts/"{rebind-agent,retain-agent}.py "${work}/source/scripts/"
 cat >"${work}/binary.c" <<'C'
 #include <stdio.h>
 #include <string.h>
@@ -51,7 +50,7 @@ for version in 0.6.0 0.6.1; do
   done
 done
 # shellcheck disable=SC2016 # Literal systemd service variables in the old fixture.
-printf '[Service]\nExecStart=/usr/libexec/ocservia/ocservia-agent --relay-url $RELAY_URL_A --relay-url $RELAY_URL_B\n' >"${work}/old/dropin"
+printf '[Service]\nExecStart=/usr/libexec/ocservia/ocservia-agent --relay-url $RELAY_URL_A\n' >"${work}/old/dropin"
 install -m 644 "${work}/old/dropin" "${dropin}"
 for unit in ocservia-agent.service ocservia-privd.service; do
   printf '[Service]\nExecStart=/usr/libexec/ocservia/%s\n' "${unit%.service}" >"${work}/old/${unit}"

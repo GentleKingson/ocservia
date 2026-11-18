@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -16,14 +18,6 @@ type breakGlassRequest struct {
 type localLoginRequest struct {
 	Username *string `json:"username"`
 	Password *string `json:"password"`
-}
-
-func (s *Server) authMethods(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, struct {
-		Local bool `json:"local"`
-		OIDC  bool `json:"oidc"`
-	}{s.auth != nil && s.auth.LocalEnabled(), s.auth != nil && s.auth.OIDCEnabled()})
 }
 
 func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
@@ -83,48 +77,6 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if s.auth == nil || !s.auth.OIDCEnabled() {
-		s.logAuth(r, oidcDisabled, uuid.Nil, "")
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "OIDC authentication is not configured")
-		return
-	}
-	location, cookie, err := s.auth.BeginLogin(r.Context())
-	if err != nil {
-		s.logAuth(r, oidcStartFailed, uuid.Nil, "")
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/identity-provider-unavailable", "Login unavailable", "OIDC login could not be started")
-		return
-	}
-	http.SetCookie(w, cookie)
-	s.logAuth(r, oidcStarted, uuid.Nil, "")
-	http.Redirect(w, r, location, http.StatusFound)
-}
-
-func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
-	if s.auth == nil || !s.auth.OIDCEnabled() {
-		s.logAuth(r, oidcDisabled, uuid.Nil, "")
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "OIDC authentication is not configured")
-		return
-	}
-	loginCookie, _ := r.Cookie(auth.LoginCookieName)
-	http.SetCookie(w, auth.ClearCookie(auth.LoginCookieName))
-	sessionCookie, actor, err := s.auth.CompleteLogin(r.Context(), r.URL.Query().Get("state"), r.URL.Query().Get("code"), loginCookie)
-	if err != nil {
-		kind := oidcCallbackRejected
-		if errors.Is(err, auth.ErrOIDCState) {
-			kind = oidcStateRejected
-		} else if errors.Is(err, auth.ErrOIDCSessionUnavailable) {
-			kind = oidcSessionUnavailable
-		}
-		s.logAuth(r, kind, uuid.Nil, "")
-		writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/oidc-callback-rejected", "Login rejected", "the OIDC response could not be validated")
-		return
-	}
-	http.SetCookie(w, sessionCookie)
-	s.logAuth(r, oidcSucceeded, actor.IdentityID, "")
-	http.Redirect(w, r, "/", http.StatusFound)
-}
-
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	value := principal(r)
 	if s.auth != nil && value.SessionID != [16]byte{} {
@@ -137,14 +89,38 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) changeLocalPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if !decodeStrictJSON(w, r, &body) {
+		return
+	}
+	err := s.auth.ChangeLocalPassword(r.Context(), principal(r), body.CurrentPassword, body.NewPassword, requestID(r))
+	if err != nil {
+		status, detail := http.StatusInternalServerError, "password change failed"
+		if errors.Is(err, auth.ErrPasswordPolicy) {
+			status, detail = http.StatusBadRequest, err.Error()
+		}
+		if errors.Is(err, auth.ErrUnauthenticated) {
+			status, detail = http.StatusUnauthorized, "current password or Local session is invalid, or attempts are temporarily blocked"
+		}
+		if errors.Is(err, auth.ErrLocalDisabled) {
+			status, detail = http.StatusForbidden, "Local authentication is disabled"
+		}
+		writeProblem(w, r, status, "https://ocservia.dev/problems/password-change", "Password change failed", detail)
+		return
+	}
+	http.SetCookie(w, auth.ClearCookie(auth.SessionCookieName))
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) breakGlass(w http.ResponseWriter, r *http.Request) {
 	if s.auth == nil {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "break-glass is not configured")
 		return
 	}
-	// Break-glass establishes a high-privilege session cookie, so it takes
-	// the same exact-origin boundary as the mutations that cookie authorizes;
-	// a cross-site page must not be able to drive an emergency login.
 	if err := s.validateBrowserMutation(r, auth.Principal{Issuer: "break-glass"}); err != nil {
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/cross-origin-request", "Cross-origin request", err.Error())
 		return
@@ -157,8 +133,6 @@ func (s *Server) breakGlass(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "token is required")
 		return
 	}
-	// Failed requests cannot lock out the holder of the emergency credential.
-	// Valid credentials still share a separate, bounded in-flight budget.
 	release := s.admitAuthentication(w, r, s.breakGlassBudget, s.auth.ValidBreakGlassToken(body.Token))
 	if release == nil {
 		return
@@ -178,4 +152,42 @@ func (s *Server) breakGlass(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, cookie)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
+	actor := principal(r)
+	var items []authstore.Workspace
+	if actor.Issuer == "development" {
+		if s.backend == nil {
+			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
+			return
+		}
+		err := database.Within(r.Context(), s.backend, database.ReadCommitted, func(tx database.Tx) error {
+			store, err := authstore.From(tx)
+			if err != nil {
+				return err
+			}
+			items, err = store.AuthorizedWorkspaces(r.Context(), uuid.Nil, true)
+			return err
+		})
+		if err != nil {
+			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
+			return
+		}
+	} else {
+		if s.auth == nil {
+			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
+			return
+		}
+		var err error
+		items, err = s.auth.AuthorizedWorkspaces(r.Context(), actor)
+		if err != nil {
+			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
+			return
+		}
+	}
+	if items == nil {
+		items = []authstore.Workspace{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }

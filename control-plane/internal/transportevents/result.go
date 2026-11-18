@@ -3,7 +3,6 @@ package transportevents
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
-	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -94,89 +92,13 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 	if err := proto.Unmarshal(envelopeBytes, &envelope); err != nil {
 		return invalidCommandResult("stored command envelope is invalid")
 	}
-	if !bytes.Equal(envelope.GetIdempotencyKey(), result.GetIdempotencyKey()) {
-		return invalidCommandResult("command result idempotency key mismatch")
-	}
-	storedHashVersion := envelope.GetSemanticPayloadHashVersion()
-	if err := semanticpayload.ValidateVersion(storedHashVersion); err != nil {
-		return invalidCommandResult("stored command semantic payload hash version is invalid")
-	}
-	resultHashVersion := result.GetSemanticPayloadHashVersion()
-	if err := semanticpayload.ValidateVersion(resultHashVersion); err != nil {
-		return invalidCommandResult("command result semantic payload hash version is invalid")
-	}
-	issuedAt := envelope.GetIssuedAt()
-	if issuedAt == nil || issuedAt.CheckValid() != nil {
-		return invalidCommandResult("stored command issued_at is invalid")
-	}
-	issuedTime := issuedAt.AsTime()
-	lowerBound := issuedTime
-	if !stored.CreatedAt.Valid || stored.CreatedAt.Micros == value.PositiveInfinity {
-		return invalidCommandResult("stored command creation is later than the result")
-	}
-	if stored.CreatedAt.Micros != value.NegativeInfinity {
-		commandCreatedAt, err := stored.CreatedAt.Time()
-		if err != nil {
-			return err
-		}
-		if commandCreatedAt.After(lowerBound) {
-			lowerBound = commandCreatedAt
-		}
-	}
-	if completedTime.Before(lowerBound.Add(-5 * time.Minute)) {
-		return invalidCommandResult("command result completed_at precedes issued_at")
-	}
-	acceptedAt := result.GetAcceptedAt()
-	if state == "rejected" {
-		if acceptedAt != nil || result.GetErrorCode() == "" || len(result.GetResult()) != 0 || (len(result.GetPayloadSha256()) != 0 && len(result.GetPayloadSha256()) != sha256.Size) {
-			return invalidCommandResult("rejected command result fields are invalid")
-		}
-	} else {
-		if acceptedAt == nil || acceptedAt.CheckValid() != nil || len(result.GetPayloadSha256()) != sha256.Size {
-			return invalidCommandResult("accepted command result fields are invalid")
-		}
-		if acceptedAt.AsTime().Before(lowerBound.Add(-5*time.Minute)) || acceptedAt.AsTime().After(completedTime) {
-			return invalidCommandResult("command result accepted_at is invalid")
-		}
-		if state == "succeeded" && result.GetErrorCode() != "" {
-			return invalidCommandResult("succeeded command result must not contain an error code")
-		}
-		if (state == "failed" || state == "unknown") && result.GetErrorCode() == "" {
-			return invalidCommandResult("non-success command result requires an error code")
-		}
-		if state == "unknown" && len(result.GetResult()) != 0 {
-			return invalidCommandResult("unknown command result must not contain result bytes")
-		}
-	}
-	if state == "rejected" && len(result.GetPayloadSha256()) == 0 {
-		if resultHashVersion != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED {
-			return invalidCommandResult("rejected command result must not declare a payload hash version")
-		}
-	} else if resultHashVersion != storedHashVersion {
-		return invalidCommandResult("command result semantic payload hash version mismatch")
-	}
-	if len(result.GetPayloadSha256()) == sha256.Size {
-		var expectedHash [sha256.Size]byte
-		var err error
-		switch resultHashVersion {
-		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1:
-			expectedHash, err = semanticpayload.HashV1(&envelope)
-		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2:
-			expectedHash, err = semanticpayload.HashV2(&envelope)
-		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED:
-			expectedHash, err = legacySyntheticPayloadHash(&envelope)
-		}
-		if err != nil {
-			return invalidCommandResult("stored command semantic payload cannot be hashed")
-		}
-		if !bytes.Equal(result.GetPayloadSha256(), expectedHash[:]) {
-			return invalidCommandResult("command result payload hash mismatch")
-		}
+	if err := validateDispatchedResult(&envelope, &result, stored, state, completedTime); err != nil {
+		return err
 	}
 	payloadHash := resultBytesOrNull(result.GetPayloadSha256())
 	hashVersion := int16(result.GetSemanticPayloadHashVersion())
 	var accepted value.Timestamp
-	if acceptedAt != nil {
+	if acceptedAt := result.GetAcceptedAt(); acceptedAt != nil {
 		accepted, err = value.FromTime(acceptedAt.AsTime())
 		if err != nil {
 			return err
@@ -188,44 +110,12 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 		resultBytes = []byte{}
 	}
 	verification := privdattestation.VerifyResultTransaction(ctx, tx, nodeID, &envelope, &result)
-	normalizationState := state
-	if verification.Status != "not_required" && !verification.Verified() {
-		normalizationState = "unknown"
-	}
-	effectiveState, applyResult, normalizationErr := normalizeConfigApplyResult(&envelope, normalizationState, resultBytes)
-	csrResult, csrErr := normalizeCertificateCSRResult(&envelope, normalizationState, resultBytes)
-	revokeResult, revokeErr := normalizeCertificateRevokeResult(&envelope, normalizationState, resultBytes)
-	artifactResult, artifactErr := normalizeCertificateArtifactResult(&envelope, normalizationState, resultBytes)
-	if normalizationErr == nil && csrErr != nil {
-		normalizationErr = csrErr
-	}
-	if normalizationErr == nil && revokeErr != nil {
-		normalizationErr = revokeErr
-	}
-	if normalizationErr == nil && artifactErr != nil {
-		normalizationErr = artifactErr
-	}
-	// An acknowledged agent upgrade is only scheduled: the expected restart
-	// and target-version verification follow, so the operation must not
-	// become terminal here. Any other state (explicit failure, rejection, or
-	// an unverified receipt) keeps the generic semantics.
-	upgradeScheduled := false
-	if envelope.GetAgentUpgrade() != nil && normalizationErr == nil && normalizationState == "succeeded" {
-		if err := validateAgentUpgradeScheduledResult(&envelope, resultBytes); err != nil {
-			normalizationErr = err
-		} else {
-			effectiveState = "accepted"
-			upgradeScheduled = true
-		}
-	}
+	receiptFailed := verification.Status != "not_required" && !verification.Verified()
+	outcome, normalizationErr := normalizeCommandOutcome(&envelope, state, resultBytes, receiptFailed)
+	effectiveState := outcome.state
 	recoveryReason := result.GetErrorCode()
-	if verification.Status != "not_required" && !verification.Verified() {
-		normalizationErr = errors.New("privileged result receipt verification failed")
-		recoveryReason = verification.FailureReason
-	}
 	if normalizationErr != nil {
 		effectiveState = "unknown"
-		applyResult = nil
 		recoveryReason = "outcome_requires_reconciliation"
 	}
 	terminalEvidenceOnly := false
@@ -266,7 +156,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 	}); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
 	}
-	if verification.Status != "not_required" && !verification.Verified() {
+	if receiptFailed {
 		alertWorkspaceID, err := store.Workspace(ctx, nodeID)
 		if err != nil {
 			return fmt.Errorf("load privd receipt alert workspace: %w", err)
@@ -321,99 +211,8 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 			return fmt.Errorf("close result-observed dispatch: %w", err)
 		}
 	}
-	if apply := configApplyBinding(&envelope); apply != nil {
-		applyState := operationState
-		failureCode := resultText("")
-		if result.GetErrorCode() != "" {
-			failureCode = resultText(result.GetErrorCode())
-		}
-		if applyResult != nil {
-			if applyResult.GetFailureCode() != "" {
-				failureCode = resultText(applyResult.GetFailureCode())
-			}
-			if applyResult.GetFailedCritical() {
-				applyState = "failed_critical"
-			} else if applyResult.GetRolledBack() {
-				applyState = "rolled_back"
-			}
-		}
-		matched, err := store.ConfigOutcome(ctx, resultstore.ConfigOutcome{
-			OperationID: operationID, NodeID: nodeID, WorkspaceID: workspaceID, AlertID: uuid.Must(uuid.NewV7()),
-			State: applyState, FailureCode: failureCode, Revision: apply.desiredRevision, CandidateHash: apply.candidateHash, At: at,
-		})
-		if err != nil {
-			return fmt.Errorf("update configuration apply outcome: %w", err)
-		}
-		if !matched {
-			return invalidCommandResult("configuration apply result has no immutable plan")
-		}
-	}
-	if csr := envelope.GetCertificateCsr(); csr != nil {
-		certificateID, parseErr := uuid.FromBytes(csr.GetCertificateId())
-		if parseErr != nil {
-			return invalidCommandResult("certificate command ID is invalid")
-		}
-		certificateState := "failed"
-		if effectiveState == "unknown" {
-			certificateState = "unknown"
-		} else if effectiveState == "succeeded" && csrResult != nil {
-			certificateState = "csr_ready"
-		}
-		outcome := resultstore.CSROutcome{CertificateID: certificateID, OperationID: operationID, State: certificateState, At: at}
-		if csrResult != nil {
-			outcome.DER, outcome.PublicHash = csrResult.GetCsrDer(), csrResult.GetPublicKeySha256()
-		}
-		if certificateState == "csr_ready" && verification.Verified() && verification.Certificate != nil {
-			outcome.VerifiedAt, outcome.ReceiptHash, outcome.KeyID = at, verification.ReceiptSHA256, resultText(verification.KeyID)
-			outcome.EffectRecordID, outcome.CSRHash, outcome.SubjectHash = verification.EffectRecordID, verification.Certificate.GetCsrDerSha256(), verification.Certificate.GetRequestedSubjectSha256()
-		}
-		if err := store.CSROutcome(ctx, outcome); err != nil {
-			return fmt.Errorf("update certificate CSR outcome: %w", err)
-		}
-	}
-	if revoke := envelope.GetCertificateRevoke(); revoke != nil {
-		certificateID, parseErr := uuid.FromBytes(revoke.GetCertificateId())
-		if parseErr != nil {
-			return invalidCommandResult("certificate revoke ID is invalid")
-		}
-		certificateState := "revoking"
-		var revokedAt value.Timestamp
-		if effectiveState == "unknown" {
-			certificateState = "unknown"
-		} else if effectiveState == "succeeded" && revokeResult != nil {
-			certificateState, revokedAt = "revoked", at
-		}
-		if err := store.RevokeOutcome(ctx, resultstore.RevokeOutcome{CertificateID: certificateID, NodeID: nodeID, State: certificateState, RevokedAt: revokedAt, Reason: revoke.GetReason(), At: at}); err != nil {
-			return fmt.Errorf("update certificate revocation outcome: %w", err)
-		}
-	}
-	if artifact := envelope.GetCertificateP12(); artifact != nil {
-		artifactID, parseErr := uuid.FromBytes(artifact.GetArtifactId())
-		if parseErr != nil {
-			return invalidCommandResult("certificate artifact ID is invalid")
-		}
-		artifactState := "failed"
-		var digest []byte
-		var size *int64
-		if effectiveState == "unknown" {
-			artifactState = "pending"
-		} else if effectiveState == "succeeded" && artifactResult != nil {
-			artifactState, digest = "ready", artifactResult.GetArtifactSha256()
-			bytes := int64(artifactResult.GetArtifactSize())
-			size = &bytes
-		}
-		if err := store.ArtifactOutcome(ctx, resultstore.ArtifactOutcome{ArtifactID: artifactID, OperationID: operationID, State: artifactState, Digest: digest, Size: size, At: at}); err != nil {
-			return fmt.Errorf("update certificate artifact outcome: %w", err)
-		}
-	}
-	if envelope.GetAgentUpgrade() != nil {
-		var scheduledAt value.Timestamp
-		if upgradeScheduled {
-			scheduledAt = at
-		}
-		if err := store.UpgradeOutcome(ctx, operationID, operationState, scheduledAt, at); err != nil {
-			return fmt.Errorf("update agent upgrade outcome: %w", err)
-		}
+	if err := outcome.apply(ctx, store, &envelope, &result, verification, operation, nodeID, operationState, at); err != nil {
+		return err
 	}
 	if err := store.AppendEvent(ctx, operationEventID, operationID, operationState, at); err != nil {
 		return fmt.Errorf("append Agent operation result event: %w", err)

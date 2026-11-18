@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Controller checks for the disposable cross-VM native business run."""
+import base64
 from datetime import datetime, timezone
-import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,14 +12,12 @@ import subprocess
 import sys
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
-WORK = Path(os.environ['OCSERVIA_BUSINESS_TEST_WORK_DIR'])
+import release_business_scenarios as business
+
+WORK = business.environment().work
 OUTBOX = WORK / 'outbox'
 STATE = WORK / 'state'
 PRIVATE = WORK / 'private'
-spec = importlib.util.spec_from_file_location('release_business', ROOT / 'scripts/release-business-api.py')
-business = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(business)
 
 
 def hex64(path):
@@ -48,7 +47,7 @@ def plan_result(plan_id):
     status = {key: value if value in states else 'unclassified' for key, value in (
         ('state', item['state']), ('validation', item['validation']), ('operation_state', operation['state']))}
     status.update({key: item.get(key) is True for key in ('current_unchanged', 'staging_cleaned')})
-    (business.EVIDENCE / 'config-plan-status.json').write_text(json.dumps(status) + '\n')
+    (business.environment().evidence / 'config-plan-status.json').write_text(json.dumps(status) + '\n')
     if item['state'] in ('failed', 'expired', 'cancelled'):
         raise RuntimeError('cross-VM configuration plan reached a terminal failure')
     return item if item['state'] == 'succeeded' else None
@@ -56,48 +55,38 @@ def plan_result(plan_id):
 
 def issue_token(endpoint):
     assert endpoint == hex64(STATE / 'agent-endpoint-id')
-    response = business.api('enrollment-tokens', {
-        'workspace_id': os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], 'environment': 'development',
+    response = business.api('node-bootstrap-tokens', {
+        'installation': True,
+        'workspace_id': business.environment().workspace, 'environment': 'development',
         'expected_node_name': 'github-hosted-node', 'expected_endpoint_id': endpoint,
         'ttl_seconds': 600, 'reason': 'cross-VM native business enrollment'}, status=201)
-    assert re.fullmatch(r'[A-Za-z0-9_-]{43}', response['token'])
+    root = response['token']
+    assert re.fullmatch(r'oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}', root)
+    child = 'obt2_' + base64.urlsafe_b64encode(
+        hashlib.sha256(b'ocservia/install-enrollment/v1\x00' + root.encode()).digest()).decode().rstrip('=')
+    digest = hashlib.sha256(child.encode()).hexdigest()
     token = OUTBOX / 'enrollment-token' / 'enrollment-token'
     token.parent.mkdir(parents=True, exist_ok=True)
-    token.write_text(response['token'] + '\n')
+    token.write_text(root + '\n')
     token.chmod(0o600)
+    (STATE / 'bootstrap-token-sha256').write_text(digest + '\n')
     (STATE / 'token-id').write_text(response['id'] + '\n')
 
 
 def authority(peer_dir):
     node = node_id()
-    assert business.sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'pending'
     observed = business.api('nodes/' + node)
-    assert observed['trust_status'] == 'pending'
-    caps = json.loads(business.sql(
-        f"SELECT json_agg(capability ORDER BY capability) FROM node_capabilities WHERE node_id='{node}';"))
-    binding = {'labels': {}, 'policy': 'standard', 'capabilities': caps}
-    business.api(f'nodes/{node}/approval', {**binding, 'reason': 'cross-VM approval'}, status=400)
-    decision = business.approval('node.approve', 'node', node, {'node_approval': binding})
-    (STATE / 'node-approval-id').write_text(decision + '\n')
-    business.api(f'nodes/{node}/approval', {**binding, 'reason': 'cross-VM approval'},
-                 headers={'X-Approval-ID': decision})
+    assert observed['trust_status'] == 'active'
+    assert business.sql(f"SELECT count(*) FROM node_privd_attestation_keys WHERE node_id='{node}' AND state='active';") == '1'
     assert business.sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'active'
-    credential = business.api(f'nodes/{node}/privd-attestation-credentials',
-                              {'ttl_seconds': 600, 'reason': 'cross-VM native receipt'}, status=201)
-    credential_file = PRIVATE / 'privd-credential'
-    credential_file.write_text(credential['credential'])
-    credential_file.chmod(0o600)
     key = f"{node}/{hex64(peer_dir / 'vpn-cert-sha256')}/{hex64(peer_dir / 'vpn-spki-sha256')}/none"
     reference = business.api('secret-provider-refs', {
         'provider': 'node-local-tls-v1', 'key_path': key, 'version': 'v1',
         'reason': 'cross-VM node-local TLS'}, status=201)
     target = OUTBOX / 'business-authority'
     target.mkdir(parents=True, exist_ok=True)
-    encrypt(credential_file, peer_dir / 'exchange.pub', target / 'credential.oaep')
     (target / 'authority.json').write_text(json.dumps({
         'node_id': node, 'agent_endpoint_id': hex64(STATE / 'agent-endpoint-id'),
-        'controller_nonce_hex': credential['controller_nonce_hex'],
-        'credential_context_sha256_hex': credential['credential_context_sha256_hex'],
         'secret_ref_id': reference['id'], 'secret_ref_key': key}) + '\n')
     (STATE / 'secret-ref-id').write_text(reference['id'] + '\n')
 
@@ -108,8 +97,9 @@ def register_authority(ready_dir):
     assert ready['node_id'] == node
     assert ready['agent_endpoint_id'] == hex64(STATE / 'agent-endpoint-id')
     proof = json.loads((ready_dir / 'proof.json').read_text())
-    proof['credential'] = (PRIVATE / 'privd-credential').read_text()
-    business.api(f'nodes/{node}/privd-attestation-keys:register', proof, role='anonymous', status=201)
+    key_id = proof['key_id']
+    assert re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', key_id)
+    assert business.sql(f"SELECT count(*) FROM node_privd_attestation_keys WHERE node_id='{node}' AND key_id='{key_id}' AND state='active';") == '1'
     target = OUTBOX / 'business-authority-registered'
     target.mkdir(parents=True, exist_ok=True)
     (target / 'ready.json').write_text(json.dumps({
@@ -159,9 +149,8 @@ def run_business(ready_dir, peer_dir):
         headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
     plan = business.wait_for('cross-VM configuration plan', lambda: plan_result(planned['id']))
     assert plan['validation'] == 'valid' and re.fullmatch(r'[0-9a-f]{64}', plan['materialized_hash'])
-    approval_id = business.approval('config.apply', 'config_plan', plan['id'])
     applied = business.api('config-plans/' + plan['id'] + '/apply', {
-        'approval_id': approval_id, 'reason': 'cross-VM native configuration'},
+        'reason': 'cross-VM native configuration'},
         headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
     applied = business.wait_for('cross-VM configuration apply', lambda: business.completed(applied))
     assert applied['config_apply_state'] == 'succeeded'
@@ -211,8 +200,7 @@ def verify_result(result_dir):
     evidence = Path(os.environ['ARTIFACT_DIR'])
     (evidence / 'business.json').write_text(json.dumps({
         'node_id': expected['node_id'], 'agent_endpoint_id': expected['agent_endpoint_id'],
-        'config_hash': expected['config_hash'], 'node_approval_id': (STATE / 'node-approval-id').read_text().strip(),
-        'independent_approval_negative_controls': ['self', 'request_hash', 'duplicate'],
+        'config_hash': expected['config_hash'], 'management_mode': 'single-admin',
         'native_services': result['native_services'], 'native_reload_events': result['native_reload_events'],
         'operations': checked, 'vpn_native_session': result['vpn']['native_session'],
         'vpn_icmp': result['vpn']['icmp']}, sort_keys=True) + '\n')
@@ -247,11 +235,10 @@ def recovery(phase, peer_dir):
         business.wait_for_relay_outage(node)
         business.wait_for('node offline during Relay outage',
                           lambda: business.api(prefix)['connection_state'] == 'offline')
-        approval_id = business.approval('service.reload', 'node', node)
         body = {'reason': 'cross-VM Relay recovery', 'ttl_seconds': 300}
         key = secrets.token_hex(16)
         for _ in range(3):
-            headers = {'Idempotency-Key': key, 'X-Approval-ID': approval_id,
+            headers = {'Idempotency-Key': key,
                        'If-Match': f'"revision-{business.api(prefix)["version"]}"'}
             operation = business.api(prefix + '/service:reload', body, headers=headers, status=(202, 409))
             if 'id' in operation:
@@ -277,7 +264,7 @@ def recovery(phase, peer_dir):
         request = json.loads((STATE / 'recovery-request.json').read_text())
         replay = business.api(prefix + '/service:reload', request['body'], headers=request['headers'], status=202)
         assert replay['id'] == operation['id'] and replay['command_id'] == operation['command_id']
-        assert business.api('approval-requests/' + request['headers']['X-Approval-ID'])['status'] == 'consumed'
+        assert business.sql(f"SELECT count(*) FROM audit_events WHERE command_id='{operation['command_id']}';") != '0'
         value = {**queued, 'owner': after, 'idempotent_replay': True}
     elif phase == 'verify':
         result = json.loads((peer_dir / 'result.json').read_text())

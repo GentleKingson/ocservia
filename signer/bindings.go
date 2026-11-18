@@ -45,8 +45,8 @@ func validLowerHex32Bytes(s string) bool {
 func validSealPurpose(s string) bool { return s == "user_password" || s == "certificate_p12_password" }
 
 func validateBinding(b binding) error {
-	if !validUUID(b.WorkspaceID) || !validUUID(b.NodeID) || !validUUID(b.ApprovalID) || !validLowerHex32Bytes(b.ApprovalHash) || !validLowerHex32Bytes(b.EndpointID) || b.ExportedAt.IsZero() || len(b.Keys) != 2 {
-		return errors.New("invalid approved binding")
+	if !validUUID(b.WorkspaceID) || !validUUID(b.NodeID) || !((b.ApprovalID == "" && b.ApprovalHash == "") || (validUUID(b.ApprovalID) && validLowerHex32Bytes(b.ApprovalHash))) || !validLowerHex32Bytes(b.EndpointID) || b.ExportedAt.IsZero() || len(b.Keys) != 2 {
+		return errors.New("invalid enrollment binding")
 	}
 	for _, k := range b.Keys {
 		if !validSealPurpose(k.Purpose) || k.Version != 1 || !validName(k.KeyID, 128) || !validLowerHex32Bytes(k.Digest) || digest(k.DER) != k.Digest {
@@ -108,7 +108,7 @@ func (s *service) importBinding(approved, exported binding) error {
 		if err := putRecord(tx, "bindings", key, data); err != nil {
 			return err
 		}
-		return audit(tx, "import:"+approved.ApprovalID, approved.NodeID)
+		return audit(tx, "import", approved.NodeID)
 	})
 }
 

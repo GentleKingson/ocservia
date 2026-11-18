@@ -30,12 +30,6 @@ export interface AgentUpgradeRequest {
    * @type {string}
    * @memberof AgentUpgradeRequest
    */
-  approvalId: string;
-  /**
-   *
-   * @type {string}
-   * @memberof AgentUpgradeRequest
-   */
   reason: string;
   /**
    *
@@ -64,13 +58,6 @@ export function instanceOfAgentUpgradeRequest(
       (value as Record<string, any>)["target_version"] === undefined)
   )
     return false;
-  if (
-    (!("approvalId" in (value as Record<string, any>)) &&
-      !("approval_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["approvalId"] === undefined &&
-      (value as Record<string, any>)["approval_id"] === undefined)
-  )
-    return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
   return true;
 }
@@ -88,7 +75,6 @@ export function AgentUpgradeRequestFromJSONTyped(
   }
   return {
     targetVersion: json["target_version"],
-    approvalId: json["approval_id"],
     reason: json["reason"],
     expectedVersion:
       json["expected_version"] == null ? undefined : json["expected_version"],
@@ -110,7 +96,6 @@ export function AgentUpgradeRequestToJSONTyped(
 
   return {
     target_version: value["targetVersion"],
-    approval_id: value["approvalId"],
     reason: value["reason"],
     expected_version: value["expectedVersion"],
     ttl_seconds: value["ttlSeconds"],

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Strict, non-executing install.env loader sourced by the production
-# Controller installer (deploy/production/install.sh). The managed-node
-# versioned Controller and managed-node bootstraps embed functionally identical
-# copies because they must stay single self-contained versioned installer files; any
-# contract change is made in all three places.
+# Strict, non-executing install.env loader and canonical installer allowlists
+# shared by the Controller and Managed Node installers. Sourced directly in
+# repository/runtime layouts and embedded into standalone Release bootstrap
+# scripts by scripts/prepare-bootstrap-release-assets.sh.
 # Sourced, never executed directly.
 #
 # Contract:
@@ -33,6 +32,53 @@
 #   printed.
 # - A missing file is a silent no-op: without install.env the installers
 #   behave exactly as before this loader existed.
+
+# Canonical operator-supplied configuration allowlists for the Controller and
+# Managed Node installers. Internal bootstrap and test fixture seams stay
+# outside these allowlists and must not gain an install.env entry.
+# shellcheck disable=SC2034 # Consumed by the Controller installer scripts.
+CONTROLLER_INSTALL_ENV_NAMES=(
+  OCSERV_AUDIT_EVENT_KEY_ID
+  OCSERV_BACKUP_DIR
+  OCSERV_BACKUP_INTERVAL_SECONDS
+  OCSERV_BACKUP_RETENTION_COUNT
+  OCSERV_DATABASE_BACKEND
+  OCSERV_DATABASE_DEPLOYMENT
+  OCSERV_DATABASE_BACKUP_HOST
+  OCSERV_DATABASE_BACKUP_PORT
+  OCSERV_DATABASE_BACKUP_NAME
+  OCSERV_DATABASE_BACKUP_USER
+  OCSERV_DEPLOYMENT_MODE
+  OCSERV_RELAY_PUBLIC_HOST
+  OCSERV_RELAY_SECRET_DIR
+  OCSERV_TLS_MODE
+  OCSERV_ACME_EMAIL
+  OCSERV_ACME_DIRECTORY_URL
+  OCSERV_ACME_CA_FILE
+  OCSERV_SIGNER_SECRET_DIR
+  OCSERV_SIGNER_STATE_DIR
+  OCSERV_EDGE_GATEWAY_IP
+  OCSERV_EDGE_GATEWAY_SUBNET
+  OCSERV_EDGE_GATEWAY_IP_RANGE
+  OCSERV_CERTIFICATE_SIGNER_URL
+  OCSERV_CONTROLLER_ENDPOINT_ID
+  OCSERV_CONTROLLER_PUBLIC_URL
+  OCSERV_CONTROLLER_STATE_DIR
+  OCSERV_CONTROLLER_STATE_ROOT
+  OCSERV_HTTPS_ADDRESS
+  OCSERV_AUTH_TRUSTED_PROXY_CIDRS
+  OCSERV_APPLICATION_SUBNET
+  OCSERV_APPLICATION_IP_RANGE
+  OCSERV_GATEWAY_APPLICATION_IP
+  OCSERV_LOCAL_AUTH_ENABLED
+  OCSERV_PUBLIC_ORIGIN
+  OCSERV_SESSION_TTL
+  OCSERV_RECOMMENDED_AGENT_VERSION
+  OCSERV_OTEL_BACKEND_ENDPOINT
+  OCSERV_PUBLIC_HOST
+  OCSERV_RELAY_URL_A
+  OCSERV_SECRET_DIR
+)
 
 install_env_die() {
   echo "install.env: $1" >&2
