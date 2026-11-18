@@ -9,41 +9,40 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/nodehttp"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryread"
+	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/google/uuid"
 )
 
 type observedNodeReader struct {
-	nodehttp.Reader
+	NodeReader
 	calls atomic.Int64
 }
 
 func (r *observedNodeReader) ListNodesInWorkspace(ctx context.Context, ws, after uuid.UUID, limit int) ([]telemetry.Node, bool, error) {
 	r.calls.Add(1)
-	return r.Reader.ListNodesInWorkspace(ctx, ws, after, limit)
+	return r.NodeReader.ListNodesInWorkspace(ctx, ws, after, limit)
 }
 func (r *observedNodeReader) GetNode(ctx context.Context, id uuid.UUID) (telemetry.Node, error) {
 	r.calls.Add(1)
-	return r.Reader.GetNode(ctx, id)
+	return r.NodeReader.GetNode(ctx, id)
 }
-func (r *observedNodeReader) ListSessions(ctx context.Context, id uuid.UUID, cursor string, limit int) ([]telemetryread.Session, bool, error) {
+func (r *observedNodeReader) ListSessions(ctx context.Context, id uuid.UUID, cursor string, limit int) ([]telemetrystore.ReadSession, bool, error) {
 	r.calls.Add(1)
-	return r.Reader.ListSessions(ctx, id, cursor, limit)
+	return r.NodeReader.ListSessions(ctx, id, cursor, limit)
 }
 func (r *observedNodeReader) ListIPBans(ctx context.Context, id uuid.UUID, limit int) ([]telemetry.IPBan, error) {
 	r.calls.Add(1)
-	return r.Reader.ListIPBans(ctx, id, limit)
+	return r.NodeReader.ListIPBans(ctx, id, limit)
 }
 func (r *observedNodeReader) HistoryFrom(ctx context.Context, id uuid.UUID, metric, resolution string, since value.Timestamp) ([]telemetry.HistoryPoint, error) {
 	r.calls.Add(1)
-	return r.Reader.HistoryFrom(ctx, id, metric, resolution, since)
+	return r.NodeReader.HistoryFrom(ctx, id, metric, resolution, since)
 }
 
 type blockedNodeReader struct {
-	nodehttp.Reader
+	NodeReader
 	started  chan context.Context
 	canceled chan error
 	release  chan struct{}

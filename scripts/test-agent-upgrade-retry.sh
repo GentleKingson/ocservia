@@ -9,28 +9,25 @@ umask 077
 mkdir -p "${work}/source/rust/target/release" "${work}/source/scripts" "${work}/products" "${work}/rootfs"
 cp -a "${ROOT}/deploy" "${work}/source/"
 cp "${ROOT}/scripts/"{package-agent,install-agent,upgrade-agent,rollback-agent,uninstall-agent,verify-agent-package}.sh "${work}/source/scripts/"
-cp "${ROOT}/scripts/"{rebind-agent,retain-agent}.py "${work}/source/scripts/"
 export DESTDIR="${work}/rootfs" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true
 export OUTPUT_DIR="${work}/products" SOURCE_DATE_EPOCH=1786147200
 case "$(uname -m)" in aarch64) export PACKAGE_ARCH=arm64 ;; x86_64) export PACKAGE_ARCH=amd64 ;; *) exit 2 ;; esac
 openssl genpkey -algorithm ED25519 -out "${work}/controller-command.key" >/dev/null 2>&1
 openssl pkey -in "${work}/controller-command.key" -pubout -out "${work}/public.pem" >/dev/null 2>&1
 lifecycle_files=(
-  'scripts/rebind-agent.py:usr/libexec/ocservia/ocservia-agent-rebind:755'
-  'scripts/retain-agent.py:usr/libexec/ocservia/ocservia-agent-retention:755'
-  'deploy/systemd/ocservia-agent-retention.service:usr/lib/systemd/system/ocservia-agent-retention.service:644'
-  'deploy/systemd/ocservia-agent-retention.timer:usr/lib/systemd/system/ocservia-agent-retention.timer:644'
+  'scripts/verify-agent-package.sh:usr/libexec/ocservia/ocservia-agent-verify:755'
+  'deploy/systemd/ocservia-upgrader@.service:usr/lib/systemd/system/ocservia-upgrader@.service:644'
 )
 package() {
-  local version="$1" binding_version="${2:-1}" binary archive entry source destination mode
+  local version="$1" binary archive entry source destination mode
   for entry in "${lifecycle_files[@]}"; do
     IFS=: read -r source destination mode <<<"${entry}"
     printf '\n# lifecycle fixture %s\n' "${version}" >>"${work}/source/${source}"
   done
   for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
     # shellcheck disable=SC2016 # Expanded by the installed fixture executable.
-    printf '#!/bin/sh\nif [ "${1:-}" = --binding-version ]; then echo %s; else echo "%s %s"; fi\n' \
-      "${binding_version}" "${binary}" "${version}" >"${work}/source/rust/target/release/${binary}"
+    printf '#!/bin/sh\necho "%s %s"\n' \
+      "${binary}" "${version}" >"${work}/source/rust/target/release/${binary}"
     chmod 755 "${work}/source/rust/target/release/${binary}"
   done
   VERSION="${version}" bash "${work}/source/scripts/package-agent.sh" >/dev/null
@@ -47,7 +44,6 @@ assert_lifecycle_matches() {
 }
 old="$(package 1.0.0)"
 new="$(package 1.0.1)"
-unbound="$(package 0.9.0 0)"
 "${old}/scripts/install-agent.sh"
 config="${DESTDIR}/etc/ocservia-agent"
 install -o root -g 61000 -m 640 "${work}/public.pem" "${config}/command.pem"
@@ -65,40 +61,8 @@ P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${p12_hash}
 EOF
 chown root:61000 "${config}/agent.env"
 chmod 640 "${config}/agent.env"
-printf 'ocservia-binding-v1\n018f0c2e-7b1a-7c3d-8e9f-0123456789ab\n%s\n%s\n%s\nclear\n' \
-  "$(printf '11%.0s' {1..32})" "$(printf '22%.0s' {1..32})" "$(printf '33%.0s' {1..32})" >"${work}/active-binding"
-# A rebind can publish the binding and release the lifecycle lock just before
-# an upgrade acquires it. This flock shim publishes at exactly that point; the
-# binding-support check must observe it and refuse before any modification.
-mkdir "${work}/race"
-cat >"${work}/race/flock" <<EOF
-#!/bin/bash
-[[ -e "${config}/active-binding" ]] || install -o root -g 61000 -m 640 "${work}/active-binding" "${config}/active-binding"
-exec $(command -v flock) "\$@"
-EOF
-chmod 755 "${work}/race/flock"
-record_unbound() {
-  # Taking the (empty) lifecycle lock is the only permitted trace.
-  local -a skip=(! -path "${config}/active-binding" ! -path "${DESTDIR}/var/lib/ocservia-upgrade/.binding-lifecycle.lock")
-  find "${DESTDIR}" "${skip[@]}" -printf '%y %p %u:%g:%m:%n %l\n' | sort
-  find "${DESTDIR}" -type f "${skip[@]}" -exec sha256sum {} + | sort
-}
-# Without a binding, binaries lacking binding support remain installable.
-"${unbound}/scripts/upgrade-agent.sh"
-cmp "${unbound}/rust/target/release/ocservia-agent" "${DESTDIR}/usr/libexec/ocservia/ocservia-agent"
-"${unbound}/scripts/rollback-agent.sh"
-cmp "${old}/rust/target/release/ocservia-agent" "${DESTDIR}/usr/libexec/ocservia/ocservia-agent"
-record_unbound >"${work}/before-race"
-if PATH="${work}/race:${PATH}" "${unbound}/scripts/upgrade-agent.sh" >"${work}/race.log" 2>&1; then
-  echo 'upgrade installed binaries that cannot enforce a binding published before its lock' >&2; exit 1
-fi
-grep -F 'target ocservia-agent does not support the committed Controller binding' "${work}/race.log"
-record_unbound >"${work}/after-race"
-cmp "${work}/before-race" "${work}/after-race"
-cmp "${work}/active-binding" "${config}/active-binding"
-echo 'Binding published before the lifecycle lock blocks an incompatible upgrade'
 printf 'identity and command evidence must survive\n' >"${DESTDIR}/var/lib/ocservia-agent/identity/evidence"
-sha256sum "${config}/active-binding" "${DESTDIR}/var/lib/ocservia-agent/identity/evidence" >"${work}/binding-evidence"
+sha256sum "${DESTDIR}/var/lib/ocservia-agent/identity/evidence" >"${work}/binding-evidence"
 # A different installed unit layout must not trigger re-enrollment or purge
 # pre-existing artifacts. This fixture still supplies the current trust keys.
 for service in agent privd; do
@@ -161,7 +125,7 @@ echo 'Identical-package retry preserves rollback; rollback/re-upgrade still work
 # The expected quartet is independent of the snapshot's manifest. Different
 # package comments above make an omitted restore observable even with stubs.
 assert_lifecycle_matches "${new}"
-test "$(wc -l <"${snapshot}/MANIFEST.sha256")" -eq 13
+test "$(wc -l <"${snapshot}/MANIFEST.sha256")" -eq 9
 cp -a "${snapshot}" "${work}/valid-snapshot"
 restore_snapshot() {
   rm -rf -- "${snapshot}"
@@ -229,63 +193,36 @@ done
 restore_snapshot
 sed -i '1s|  .*|  ../../outside|' "${snapshot}/MANIFEST.sha256"
 assert_rollback_rejected manifest-path 'manifest is malformed'
-for dependency in ocservia-agent-rebind ocservia-agent-retention ocservia-agent-retention.service; do
-  restore_snapshot
-  rm "${snapshot}/${dependency}.previous"
-  install -m 600 /dev/null "${snapshot}/${dependency}.absent"
-  fixture_manifest
-  assert_rollback_rejected "missing-${dependency}-dependency" 'requires'
-done
-for legacy_count in 9 8; do
-  restore_snapshot
-  for entry in "${lifecycle_files[@]}"; do
-    IFS=: read -r source destination mode <<<"${entry}"
-    rm "${snapshot}/$(basename "${destination}").previous"
-  done
-  if [[ "${legacy_count}" == 8 ]]; then
-    rm "${snapshot}/ocservia-agent-relays.previous"
-    printf '[Service]\nExecStart=\nExecStart=/usr/libexec/ocservia/ocservia-agent\n' \
-      >"${snapshot}/ocservia-agent-relays.conf.previous"
-  fi
-  fixture_manifest
-  test "$(wc -l <"${snapshot}/MANIFEST.sha256")" -eq "${legacy_count}"
-  "${new}/scripts/rollback-agent.sh" --verify-only
-  assert_rollback_rejected "legacy-${legacy_count}-unknown" 'does not record prior'
-done
+restore_snapshot
+rm "${snapshot}/ocservia-agent-relays.previous"
+printf '[Service]\nExecStart=\nExecStart=/usr/libexec/ocservia/ocservia-agent\n' \
+  >"${snapshot}/ocservia-agent-relays.conf.previous"
+fixture_manifest
+test "$(wc -l <"${snapshot}/MANIFEST.sha256")" -eq 8
+"${new}/scripts/rollback-agent.sh" --verify-only
+assert_rollback_rejected "legacy-8-unknown" 'does not record the required'
 restore_snapshot
 "${new}/scripts/rollback-agent.sh"
-# Rebind alone remains a valid old layout; only dependency edges are required.
-for layout in absent rebind-only; do
-  for entry in "${lifecycle_files[@]}"; do
-    IFS=: read -r source destination mode <<<"${entry}"
-    rm -f "${DESTDIR}/${destination}"
-  done
-  if [[ "${layout}" == rebind-only ]]; then
-    install -m 755 "${old}/scripts/rebind-agent.py" "${DESTDIR}/usr/libexec/ocservia/ocservia-agent-rebind"
-  fi
-  "${new}/scripts/upgrade-agent.sh"
-  sha256sum "${snapshot}/"* >"${work}/optional-snapshot"
-  "${new}/scripts/upgrade-agent.sh"
-  sha256sum -c "${work}/optional-snapshot"
-  if [[ "${layout}" == absent ]]; then
-    destination="${DESTDIR}/usr/libexec/ocservia/ocservia-agent-retention"
-    mv "${destination}" "${work}/removal-target"
-    ln -s "${work}/removal-target" "${destination}"
-    assert_rollback_rejected absent-destination-symlink 'not a regular file'
-    rm "${destination}"
-    mv "${work}/removal-target" "${destination}"
-  fi
-  driver_hash="$(sha256sum "${rollback}")"
-  "${rollback}"
-  test "$(sha256sum "${rollback}")" = "${driver_hash}"
-  for entry in "${lifecycle_files[@]}"; do
-    IFS=: read -r source destination mode <<<"${entry}"
-    if [[ "${layout}" == rebind-only && "${destination}" == */ocservia-agent-rebind ]]; then
-      cmp "${old}/${source}" "${DESTDIR}/${destination}"
-    else
-      test ! -e "${DESTDIR}/${destination}"
-    fi
-  done
+for entry in "${lifecycle_files[@]}"; do
+  IFS=: read -r source destination mode <<<"${entry}"
+  rm -f "${DESTDIR}/${destination}"
+done
+"${new}/scripts/upgrade-agent.sh"
+sha256sum "${snapshot}/"* >"${work}/optional-snapshot"
+"${new}/scripts/upgrade-agent.sh"
+sha256sum -c "${work}/optional-snapshot"
+destination="${DESTDIR}/usr/libexec/ocservia/ocservia-agent-verify"
+mv "${destination}" "${work}/removal-target"
+ln -s "${work}/removal-target" "${destination}"
+assert_rollback_rejected absent-destination-symlink 'not a regular file'
+rm "${destination}"
+mv "${work}/removal-target" "${destination}"
+driver_hash="$(sha256sum "${rollback}")"
+"${rollback}"
+test "$(sha256sum "${rollback}")" = "${driver_hash}"
+for entry in "${lifecycle_files[@]}"; do
+  IFS=: read -r source destination mode <<<"${entry}"
+  test ! -e "${DESTDIR}/${destination}"
 done
 
 # Fail inside real install-agent.sh after the new binaries were installed.
@@ -297,14 +234,14 @@ cat >"${work}/fail-install/install" <<'EOF'
 exec /usr/bin/install "$@"
 EOF
 chmod 755 "${work}/fail-install/install"
-for fail_target in ocservia-agent ocservia-agent-retention; do
+for fail_target in ocservia-agent ocservia-agent-verify; do
   "${old}/scripts/install-agent.sh"
   # Model an installed reader that cannot recover the new snapshot format.
   # The real candidate driver must be published before even the first binary.
   cat >"${rollback}" <<'EOF'
 #!/bin/bash
 case "$(wc -l <"${DESTDIR}/var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256")" in
-  8|9) exit 0 ;;
+  8) exit 0 ;;
   *) echo 'old snapshot reader cannot recover this format' >&2; exit 92 ;;
 esac
 EOF
@@ -346,7 +283,7 @@ echo 'Lifecycle quartet restore/remove, legacy unknown, unsafe snapshots and int
 rm "${DESTDIR}/usr/libexec/ocservia/ocservia-agent-relays"
 printf '[Service]\nExecStart=\nExecStart=/usr/libexec/ocservia/ocservia-agent\n' \
   >"${DESTDIR}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
-printf 'RELAY_URL_A=https://relay-a.example.test\nRELAY_URL_B=\n' >"${config}/relays.env"
+printf 'RELAY_URL_A=https://relay-a.example.test\n' >"${config}/relays.env"
 cp "${config}/relays.env" "${work}/single-relays.env"
 "${new}/scripts/upgrade-agent.sh"
 cmp "${config}/relays.env" "${work}/single-relays.env"

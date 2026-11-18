@@ -13,61 +13,36 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/identityprofile"
-	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
-	"golang.org/x/oauth2"
-	"golang.org/x/sync/singleflight"
 )
 
-const (
-	// Discovery is cached so login traffic does not refetch issuer metadata;
-	// the verifier's key set still refetches JWKS when an unknown key appears.
-	oidcDiscoveryTTL     = 15 * time.Minute
-	oidcDiscoveryTimeout = 10 * time.Second
-)
-
-const (
-	SessionCookieName = "__Host-ocservia_session"
-	LoginCookieName   = "__Host-ocservia_oidc"
-)
+const SessionCookieName = "__Host-ocservia_session"
 
 var (
-	ErrUnauthenticated        = errors.New("principal is not authenticated")
-	ErrOIDCState              = errors.New("OIDC state is invalid")
-	ErrOIDCSessionUnavailable = errors.New("OIDC session creation is unavailable")
-	ErrOIDCDisabled           = errors.New("OIDC is disabled")
-	ErrLocalDisabled          = errors.New("local authentication is disabled")
-	ErrBreakGlassDisabled     = errors.New("break-glass is disabled")
-	ErrBreakGlassRotationDue  = errors.New("break-glass credential rotation is required")
+	ErrUnauthenticated       = errors.New("principal is not authenticated")
+	ErrForbidden             = errors.New("authorization denied")
+	ErrLocalDisabled         = errors.New("local authentication is disabled")
+	ErrBreakGlassDisabled    = errors.New("break-glass is disabled")
+	ErrBreakGlassRotationDue = errors.New("break-glass credential rotation is required")
 )
 
 type Config struct {
-	LocalEnabled                                bool
-	Issuer, ClientID, ClientSecret, RedirectURL string
-	SessionKey                                  []byte
-	SessionTTL                                  time.Duration
-	BreakGlassEnabled                           bool
-	BreakGlassTokenHash                         []byte
+	LocalEnabled        bool
+	SessionKey          []byte
+	SessionTTL          time.Duration
+	BreakGlassEnabled   bool
+	BreakGlassTokenHash []byte
 }
 
 type Service struct {
 	backend             database.Backend
 	localEnabled        bool
-	oidcEnabled         bool
-	issuer              string
-	clientID            string
-	clientSecret        string
-	redirectURL         string
 	aead                cipher.AEAD
 	accountLogKey       []byte
 	sessionTTL          time.Duration
@@ -75,22 +50,6 @@ type Service struct {
 	breakGlassTokenHash []byte
 	now                 func() time.Time
 	random              io.Reader
-	discover            func(context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error)
-	discovery           *oidcDiscovery
-}
-
-type oidcDiscovery struct {
-	group  singleflight.Group
-	mu     sync.Mutex
-	cached *oidcProvider
-	// joined is a test hook run after a caller has joined the shared Discovery.
-	joined func()
-}
-
-type oidcProvider struct {
-	oauth     oauth2.Config
-	verifier  *oidc.IDTokenVerifier
-	expiresAt time.Time
 }
 
 type Principal struct {
@@ -102,39 +61,15 @@ type Principal struct {
 	ExpiresAt  time.Time
 }
 
-type loginState struct {
-	State, Nonce, Verifier string
-	ExpiresAt              time.Time
-}
-
 type sessionEnvelope struct {
 	SessionID, IdentityID string
 	ExpiresAt             time.Time
 }
 
-type claims struct {
-	Subject string `json:"sub"`
-	Email   string `json:"email"`
-	Name    string `json:"name"`
-	Nonce   string `json:"nonce"`
-}
-
-// NewBackend uses the same session and credential workflows with backend-owned
-// storage. Controller engine eligibility is enforced by application startup.
+// NewBackend constructs a Local authentication and single-admin workspace authorization service.
 func NewBackend(backend database.Backend, cfg Config) (*Service, error) {
 	if backend == nil || len(cfg.SessionKey) != 32 || cfg.SessionTTL < time.Minute || cfg.SessionTTL > 24*time.Hour {
 		return nil, errors.New("invalid authentication configuration")
-	}
-	oidcEnabled := cfg.Issuer != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.RedirectURL != ""
-	if oidcEnabled {
-		issuer, err := url.Parse(cfg.Issuer)
-		if err != nil || (issuer.Scheme != "https" && issuer.Scheme != "http") || issuer.Host == "" || cfg.ClientID == "" {
-			return nil, errors.New("OIDC requires an HTTP(S) issuer and client ID")
-		}
-		redirect, err := url.Parse(cfg.RedirectURL)
-		if err != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.Fragment != "" {
-			return nil, errors.New("OIDC redirect URL must be an absolute HTTPS URL")
-		}
 	}
 	block, err := aes.NewCipher(cfg.SessionKey)
 	if err != nil {
@@ -145,131 +80,19 @@ func NewBackend(backend database.Backend, cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("configure session encryption: %w", err)
 	}
 	return &Service{
-		localEnabled: cfg.LocalEnabled, oidcEnabled: oidcEnabled,
-		accountLogKey: deriveAccountLogKey(cfg.SessionKey),
-		backend:       backend, issuer: cfg.Issuer, clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, redirectURL: cfg.RedirectURL, aead: aead, sessionTTL: cfg.SessionTTL,
-		breakGlassEnabled: cfg.BreakGlassEnabled, breakGlassTokenHash: cfg.BreakGlassTokenHash,
-		now: func() time.Time { return time.Now().UTC() }, random: rand.Reader, discovery: &oidcDiscovery{},
+		localEnabled:        cfg.LocalEnabled,
+		accountLogKey:       deriveAccountLogKey(cfg.SessionKey),
+		backend:             backend,
+		aead:                aead,
+		sessionTTL:          cfg.SessionTTL,
+		breakGlassEnabled:   cfg.BreakGlassEnabled,
+		breakGlassTokenHash: cfg.BreakGlassTokenHash,
+		now:                 func() time.Time { return time.Now().UTC() },
+		random:              rand.Reader,
 	}, nil
 }
 
-func (s *Service) BeginLogin(ctx context.Context) (string, *http.Cookie, error) {
-	oauth, _, err := s.provider(ctx)
-	if err != nil {
-		return "", nil, err
-	}
-	state, err := randomURL(s.random, 32)
-	if err != nil {
-		return "", nil, err
-	}
-	nonce, err := randomURL(s.random, 32)
-	if err != nil {
-		return "", nil, err
-	}
-	verifier := oauth2.GenerateVerifier()
-	expires := s.now().Add(5 * time.Minute)
-	value, err := s.seal(loginState{State: state, Nonce: nonce, Verifier: verifier, ExpiresAt: expires})
-	if err != nil {
-		return "", nil, err
-	}
-	cookie := secureCookie(LoginCookieName, value, expires)
-	return oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce)), cookie, nil
-}
-
-func (s *Service) CompleteLogin(ctx context.Context, state, code string, cookie *http.Cookie) (*http.Cookie, Principal, error) {
-	var attempt loginState
-	if cookie == nil || s.open(cookie.Value, &attempt) != nil || s.now().After(attempt.ExpiresAt) ||
-		subtle.ConstantTimeCompare([]byte(state), []byte(attempt.State)) != 1 || strings.TrimSpace(code) == "" {
-		return nil, Principal{}, ErrOIDCState
-	}
-	oauth, verifier, err := s.provider(ctx)
-	if err != nil {
-		return nil, Principal{}, err
-	}
-	token, err := oauth.Exchange(ctx, code, oauth2.VerifierOption(attempt.Verifier))
-	if err != nil {
-		return nil, Principal{}, fmt.Errorf("exchange OIDC code: %w", err)
-	}
-	rawIDToken, ok := token.Extra("id_token").(string)
-	if !ok || rawIDToken == "" {
-		return nil, Principal{}, errors.New("OIDC response omitted id_token")
-	}
-	idToken, err := verifier.Verify(ctx, rawIDToken)
-	if err != nil {
-		return nil, Principal{}, fmt.Errorf("verify OIDC ID token: %w", err)
-	}
-	var identity claims
-	if err := idToken.Claims(&identity); err != nil {
-		return nil, Principal{}, fmt.Errorf("decode OIDC claims: %w", err)
-	}
-	if identity.Subject == "" || subtle.ConstantTimeCompare([]byte(identity.Nonce), []byte(attempt.Nonce)) != 1 {
-		return nil, Principal{}, errors.New("OIDC nonce or subject is invalid")
-	}
-	session, principal, err := s.createSession(ctx, s.issuer, identity.Subject, identity.Email, identity.Name, false, nil)
-	// Disabled identities remain authentication denials, not infrastructure failures.
-	if err != nil && !errors.Is(err, ErrUnauthenticated) {
-		return nil, Principal{}, fmt.Errorf("%w: %w", ErrOIDCSessionUnavailable, err)
-	}
-	return session, principal, err
-}
-
 func (s *Service) LocalEnabled() bool { return s.localEnabled }
-
-func (s *Service) OIDCEnabled() bool { return s.oidcEnabled }
-
-func (s *Service) provider(ctx context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
-	if !s.oidcEnabled {
-		return oauth2.Config{}, nil, ErrOIDCDisabled
-	}
-	s.discovery.mu.Lock()
-	cached := s.discovery.cached
-	s.discovery.mu.Unlock()
-	if cached != nil && s.now().Before(cached.expiresAt) {
-		return cached.oauth, cached.verifier, nil
-	}
-	// Concurrent callers share one Discovery request. It is detached from the
-	// first caller so its cancellation cannot fail the others; each caller
-	// still stops waiting when its own context ends.
-	result := s.discovery.group.DoChan("provider", func() (any, error) {
-		discoverCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), oidcDiscoveryTimeout)
-		defer cancel()
-		discover := s.discoverProvider
-		if s.discover != nil {
-			discover = s.discover
-		}
-		oauth, verifier, err := discover(discoverCtx)
-		if err != nil {
-			return nil, err
-		}
-		provider := &oidcProvider{oauth: oauth, verifier: verifier, expiresAt: s.now().Add(oidcDiscoveryTTL)}
-		s.discovery.mu.Lock()
-		s.discovery.cached = provider
-		s.discovery.mu.Unlock()
-		return provider, nil
-	})
-	if s.discovery.joined != nil {
-		s.discovery.joined()
-	}
-	select {
-	case <-ctx.Done():
-		return oauth2.Config{}, nil, fmt.Errorf("discover OIDC provider: %w", ctx.Err())
-	case outcome := <-result:
-		if outcome.Err != nil {
-			return oauth2.Config{}, nil, outcome.Err
-		}
-		provider := outcome.Val.(*oidcProvider)
-		return provider.oauth, provider.verifier, nil
-	}
-}
-
-func (s *Service) discoverProvider(ctx context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
-	provider, err := oidc.NewProvider(ctx, s.issuer)
-	if err != nil {
-		return oauth2.Config{}, nil, fmt.Errorf("discover OIDC provider: %w", err)
-	}
-	config := oauth2.Config{ClientID: s.clientID, ClientSecret: s.clientSecret, Endpoint: provider.Endpoint(), RedirectURL: s.redirectURL, Scopes: []string{oidc.ScopeOpenID, "profile", "email"}}
-	return config, provider.Verifier(&oidc.Config{ClientID: s.clientID}), nil
-}
 
 func (s *Service) Authenticate(ctx context.Context, cookie *http.Cookie) (Principal, error) {
 	var envelope sessionEnvelope
@@ -362,7 +185,6 @@ func (s *Service) BreakGlass(ctx context.Context, token string, requestID string
 		if err = store.RecordBreakGlass(ctx, fingerprint[:], identityID, sessionID, uuid.Must(uuid.NewV7()), now); err != nil {
 			return err
 		}
-		// Break-glass is platform-scoped and must be visible in every workspace chain.
 		workspaces, err := store.Workspaces(ctx)
 		if err != nil {
 			return err
@@ -384,41 +206,32 @@ func (s *Service) BreakGlass(ctx context.Context, token string, requestID string
 	return secureCookie(SessionCookieName, value, expires), Principal{IdentityID: identityID, SessionID: sessionID, Subject: "offline", Issuer: "break-glass", BreakGlass: true, ExpiresAt: expires}, nil
 }
 
-func (s *Service) createSession(ctx context.Context, issuer, subject, email, name string, breakGlass bool, local *localCredential) (*http.Cookie, Principal, error) {
-	identityID := uuid.Must(uuid.NewV7())
+func (s *Service) createSession(ctx context.Context, issuer, subject string, local *localCredential) (*http.Cookie, Principal, error) {
 	sessionID := uuid.Must(uuid.NewV7())
+	var identityID uuid.UUID
 	var expires time.Time
-	err := s.withAuthentication(ctx, func(tx database.Tx, store authstore.Store) error {
+	err := s.withAuthentication(ctx, func(_ database.Tx, store authstore.Store) error {
+		if local == nil {
+			return ErrUnauthenticated
+		}
 		now := s.now()
 		expires = now.Add(s.sessionTTL)
 		var err error
-		if local != nil {
-			// Recheck the verified credential under lock; never upsert a local identity.
-			identityID, err = store.LockCredential(ctx, local.identityID, issuer, subject, local.passwordHash)
-			if errors.Is(err, database.ErrNotFound) {
-				return ErrUnauthenticated
-			}
-			if err != nil {
-				return err
-			}
-			cleared, err := store.ClearAttempt(ctx, subject, local.attemptLease)
-			if err != nil {
-				return err
-			}
-			if !cleared {
-				return ErrUnauthenticated
-			}
-		} else {
-			// The conflict row stays locked through session insertion and commit.
-			identityID, err = identityprofile.Upsert(ctx, tx, identityID, issuer, subject, email, name, now)
-			if errors.Is(err, database.ErrNotFound) {
-				return ErrUnauthenticated
-			}
-			if err != nil {
-				return err
-			}
+		identityID, err = store.LockCredential(ctx, local.identityID, issuer, subject, local.passwordHash)
+		if errors.Is(err, database.ErrNotFound) {
+			return ErrUnauthenticated
 		}
-		return store.InsertSession(ctx, sessionID, identityID, expires, breakGlass, now)
+		if err != nil {
+			return err
+		}
+		cleared, err := store.ClearAttempt(ctx, subject, local.attemptLease)
+		if err != nil {
+			return err
+		}
+		if !cleared {
+			return ErrUnauthenticated
+		}
+		return store.InsertSession(ctx, sessionID, identityID, expires, false, now)
 	})
 	if err != nil {
 		return nil, Principal{}, err
@@ -427,7 +240,7 @@ func (s *Service) createSession(ctx context.Context, issuer, subject, email, nam
 	if err != nil {
 		return nil, Principal{}, err
 	}
-	return secureCookie(SessionCookieName, value, expires), Principal{IdentityID: identityID, SessionID: sessionID, Subject: subject, Issuer: issuer, BreakGlass: breakGlass, ExpiresAt: expires}, nil
+	return secureCookie(SessionCookieName, value, expires), Principal{IdentityID: identityID, SessionID: sessionID, Subject: subject, Issuer: issuer, BreakGlass: false, ExpiresAt: expires}, nil
 }
 
 func (s *Service) withAuthentication(ctx context.Context, change func(database.Tx, authstore.Store) error) error {
@@ -471,14 +284,6 @@ func secureCookie(name, value string, expires time.Time) *http.Cookie {
 
 func ClearCookie(name string) *http.Cookie {
 	return &http.Cookie{Name: name, Value: "", Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)}
-}
-
-func randomURL(reader io.Reader, size int) (string, error) {
-	data := make([]byte, size)
-	if _, err := io.ReadFull(reader, data); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(data), nil
 }
 
 func TokenHash(token string) []byte {

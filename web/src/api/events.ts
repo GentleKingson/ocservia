@@ -1,5 +1,8 @@
 import {
   EventsApi,
+  ResponseError,
+  AuditVerificationFromJSON,
+  type AuditVerification,
   type AuditEventPage,
   type PlatformEventPage,
 } from "@ocservia/api-client";
@@ -47,4 +50,44 @@ export async function listAuditEvents(
     { xWorkspaceID, pageSize: 50 },
     requestInit(signal),
   );
+}
+
+// 409 is a completed verification with negative evidence, not a Problem.
+// Other failures remain errors, and this POST is never automatically retried.
+export async function verifyAuditChain(
+  signal?: AbortSignal,
+): Promise<AuditVerification> {
+  const xWorkspaceID = await getWorkspaceId();
+  let value: unknown;
+  try {
+    value = await events.verifyAuditChain(
+      { xWorkspaceID },
+      requestInit(signal),
+    );
+  } catch (cause) {
+    if (!(cause instanceof ResponseError) || cause.response.status !== 409)
+      throw cause;
+    const wire: unknown = await cause.response.json();
+    if (!wire || typeof wire !== "object") throw cause;
+    value = AuditVerificationFromJSON(wire);
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !("workspaceId" in value) ||
+    value.workspaceId !== xWorkspaceID ||
+    !("events" in value) ||
+    !Number.isSafeInteger(value.events) ||
+    Number(value.events) < 0 ||
+    !("valid" in value) ||
+    typeof value.valid !== "boolean" ||
+    !("checkpointValid" in value) ||
+    typeof value.checkpointValid !== "boolean" ||
+    !("compactedEvents" in value) ||
+    !Number.isSafeInteger(value.compactedEvents) ||
+    Number(value.compactedEvents) < 0
+  ) {
+    throw new Error("Invalid audit verification response");
+  }
+  return value as AuditVerification;
 }

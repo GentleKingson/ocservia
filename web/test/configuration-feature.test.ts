@@ -101,7 +101,6 @@ describe("configuration feature without a page or store", () => {
         ttlSeconds: 900,
       }),
     );
-    feature.configApplyApprovalId.value = " approval ";
     feature.configApplyReason.value = " apply ";
     trackOperation.mockImplementation(() => {
       expect(feature.configDialog.value).toBe(false);
@@ -109,7 +108,6 @@ describe("configuration feature without a page or store", () => {
     });
     await feature.submitConfigApply();
     expect(api.applyConfigPlan).toHaveBeenCalledExactlyOnceWith("plan-a", {
-      approvalId: "approval",
       reason: "apply",
     });
     expect(trackOperation).toHaveBeenCalledExactlyOnceWith("apply-operation");

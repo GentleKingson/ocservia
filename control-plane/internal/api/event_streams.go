@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
@@ -90,7 +89,7 @@ func (s *Server) fetchPlatformEvents(ctx context.Context, scope string, after uu
 	if err != nil || workspaceID.Version() != 7 {
 		return nil, errors.New("event watcher workspace is invalid")
 	}
-	service := s.transportEventService()
+	service := s.transportEvents
 	if service == nil {
 		return nil, errors.New("platform event source is unavailable")
 	}
@@ -121,7 +120,7 @@ func (s *Server) resolvePlatformEventCursor(ctx context.Context, scope string, c
 	if err != nil || workspaceID.Version() != 7 {
 		return 0, eventstream.ErrInvalidCursor
 	}
-	service := s.transportEventService()
+	service := s.transportEvents
 	if service == nil {
 		return 0, errors.New("platform event source is unavailable")
 	}
@@ -288,7 +287,7 @@ func eventStreamCursor(r *http.Request) (uuid.UUID, bool) {
 	if cursor == "" {
 		cursor = strings.TrimSpace(r.URL.Query().Get("after"))
 	}
-	return httpx.ParseOptionalUUIDv7(cursor)
+	return parseOptionalUUIDv7(cursor)
 }
 
 func eventAdmissionKey(principal auth.Principal, workspaceID uuid.UUID, resource string) eventstream.AdmissionKey {

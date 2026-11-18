@@ -86,7 +86,7 @@ try:
     service["image"] = args.transport_image
     service["restart"] = "no"
     service["environment"] = {"OCSERV_RELAY_URL_A": f"https://relay.single.test:{port}",
-                              "OCSERV_RELAY_URL_B": "", "RUST_LOG": "info,iroh=debug"}
+                              "RUST_LOG": "info,iroh=debug"}
     service["extra_hosts"] = [f"relay.single.test:{gateway}"]
     # No Controller backend is started by this network-only probe. Keep the
     # default empty approved-identity policy, not an unauthenticated Agent.

@@ -32,7 +32,6 @@ const rollout = (state: string, nodes: Record<string, unknown>[]) => ({
   batch_size: 5,
   stop_on_failure: true,
   reason: "fleet rollout e2e",
-  approval_id: "019fc0a4-6d92-765c-a8a1-4af556614ee6",
   created_by: "019fc0a4-6d92-765c-a8a1-4af556614ee7",
   current_batch: nodes.some((node) => node.batch === 1) ? 1 : 0,
   pause_code: "",
@@ -128,8 +127,7 @@ async function fulfillRolloutCreate(route: Route): Promise<void> {
     body.target_version !== recommended ||
     !Array.isArray(nodeIds) ||
     nodeIds.length !== 3 ||
-    typeof body.approval_id !== "string" ||
-    body.approval_id.length === 0 ||
+    "approval_id" in body ||
     typeof body.reason !== "string" ||
     body.reason.length === 0 ||
     body.batch_size !== 5
@@ -200,9 +198,7 @@ test("runs the canary and batch rollout to completion", async ({ page }) => {
   await open.click();
   await expect(page.locator("#rollout-target")).toHaveText(recommended);
   await page.locator("#rollout-reason").fill("fleet rollout e2e");
-  await page
-    .locator("#rollout-approval")
-    .fill("019fc0a4-6d92-765c-a8a1-4af556614ee6");
+  await expect(page.locator("#rollout-approval")).toHaveCount(0);
   await page.getByRole("button", { name: "Start rollout" }).click();
 
   await expect(

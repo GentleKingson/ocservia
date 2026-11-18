@@ -93,6 +93,9 @@ cat >"${repo}/deploy/production/bootstrap-host.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 bootstrap_log="${INSTALL_TEST_BOOTSTRAP_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.bootstrap.log}"
+for name in OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL; do
+  printf '%s=%s\n' "${name}" "${!name-<unset>}" >>"${bootstrap_log}"
+done
 printf 'launcher:%s\n' "${SUDO_USER:-<unset>}" >>"${bootstrap_log}"
 printf '%s\n' "$*" >>"${bootstrap_log}"
 printf 'OCSERV_PUBLIC_HOST=%s\n' "${OCSERV_PUBLIC_HOST:-<unset>}" >>"${bootstrap_log}"
@@ -116,7 +119,10 @@ cat >"${repo}/deploy/production/controller.sh" <<'EOF'
 set -euo pipefail
 controller_log="${INSTALL_TEST_CONTROLLER_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.controller.log}"
 printf '%s\n' "$*" >>"${controller_log}"
-printf 'relay-a:%s\nrelay-b:%s\n' "${OCSERV_RELAY_URL_A-<unset>}" "${OCSERV_RELAY_URL_B-<unset>}" >>"${controller_log}"
+for name in OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL; do
+  printf '%s=%s\n' "${name}" "${!name-<unset>}" >>"${controller_log}"
+done
+printf 'relay-a:%s\n' "${OCSERV_RELAY_URL_A-<unset>}" >>"${controller_log}"
 exit "${MOCK_CONTROLLER_EXIT:-0}"
 EOF
 
@@ -558,13 +564,11 @@ if can_root; then
       export OCSERV_SECRET_DIR="${fixture}/secrets"
       export OCSERV_BACKUP_DIR="${fixture}/backup"
       export OCSERV_PUBLIC_HOST=controller.example.test
-      export OCSERV_OIDC_ISSUER=https://id.example.test
-      export OCSERV_OIDC_CLIENT_ID=ocservia
+      export OCSERV_LOCAL_AUTH_ENABLED=true
       export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test/v1
       export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1
       export OCSERV_CONTROLLER_ENDPOINT_ID=0000000000000000000000000000000000000000000000000000000000000000
       export OCSERV_RELAY_URL_A=https://relay-a.example.test
-      export OCSERV_RELAY_URL_B=
       export OCSERV_HTTPS_ADDRESS=127.0.0.1
       export OCSERV_APPLICATION_SUBNET=198.18.80.0/24
       export OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25
@@ -593,32 +597,22 @@ if can_root; then
     assert_log_contains "${root_controller_log}" "install --release-file ${state_root}/release-bundles/v0.1.2/controller-release-${native_arch}.json"
     as_root chown -R "$(id -u):$(id -g)" "${repo}"
     echo "the operator root-lifecycle command forwards only production configuration across sudo env_reset"
-    for single_b in unset empty override; do
-      reset_logs
-      reset_checkout
-      printf 'OCSERV_RELAY_URL_A=https://relay-file.example.test\n' >"${repo}/install.env"
-      if [[ "${single_b}" == empty ]]; then printf 'OCSERV_RELAY_URL_B=\n' >>"${repo}/install.env"; fi
-      if [[ "${single_b}" == override ]]; then printf 'OCSERV_RELAY_URL_B=https://relay-b.example.test\n' >>"${repo}/install.env"; fi
-      RUN_STATUS=0
-      # Each fixture intentionally isolates its PATH and exported settings.
-      # shellcheck disable=SC2030,SC2031
-      RUN_OUTPUT="$(
-        export PATH="${root_lifecycle_bin}"
-        export OCSERV_CONTROLLER_STATE_ROOT="${state_root}"
-        unset OCSERV_RELAY_URL_A OCSERV_RELAY_URL_B
-        if [[ "${single_b}" == override ]]; then export OCSERV_RELAY_URL_B=; fi
-        cd -- "${repo}"
-        "${repo}/deploy/production/install.sh" --root-lifecycle 2>&1
-      )" || RUN_STATUS=$?
-      assert_status 0
-      assert_log_contains "${root_controller_log}" 'relay-a:https://relay-file.example.test'
-      if [[ "${single_b}" == unset ]]; then
-        assert_log_contains "${root_controller_log}" 'relay-b:<unset>'
-      else
-        grep -qx 'relay-b:' "${root_controller_log}" || die 'sudo lost explicit empty Relay B'
-      fi
-      as_root chown -R "$(id -u):$(id -g)" "${repo}"
-    done
+    reset_logs
+    reset_checkout
+    printf 'OCSERV_RELAY_URL_A=https://relay-file.example.test\n' >"${repo}/install.env"
+    RUN_STATUS=0
+    # Each fixture intentionally isolates its PATH and exported settings.
+    # shellcheck disable=SC2030,SC2031
+    RUN_OUTPUT="$(
+      export PATH="${root_lifecycle_bin}"
+      export OCSERV_CONTROLLER_STATE_ROOT="${state_root}"
+      unset OCSERV_RELAY_URL_A
+      cd -- "${repo}"
+      "${repo}/deploy/production/install.sh" --root-lifecycle 2>&1
+    )" || RUN_STATUS=$?
+    assert_status 0
+    assert_log_contains "${root_controller_log}" 'relay-a:https://relay-file.example.test'
+    as_root chown -R "$(id -u):$(id -g)" "${repo}"
   fi
 
   # 6d. --root-lifecycle resolves install.env as the launcher user and
@@ -718,6 +712,49 @@ assert_log_contains "${bootstrap_log}" "otel:otel.example.test:4317"
 assert_log_contains "${bootstrap_log}" "recommended:0.2.0"
 echo "install.env values load without dirtying the release checkout"
 
+# Run the documented Local auth configuration through the real installer and, on the CI
+# launcher account, its real sudo env_reset transition. No source allowlist is read.
+awk -v dir="${fixture}" '
+  /^```dotenv$/ { block++; active=1; next }
+  /^```$/ { active=0 }
+  active { print > (dir "/auth-" block ".env") }
+' "${ROOT}/docs/operations/authentication.md"
+for lifecycle in launcher root; do
+  if [[ "${lifecycle}" == root ]] && ! can_root; then
+    die "auth forwarding requires passwordless sudo"
+  fi
+  reset_logs
+  reset_checkout
+  install_docker_client_stub
+  cp "${fixture}/auth-1.env" "${repo}/install.env"
+  RUN_STATUS=0
+  RUN_OUTPUT="$( (
+    unset OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL
+    unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL
+    if [[ "${lifecycle}" == root ]] && (( EUID != 0 )); then
+      cd "${repo}"
+      PATH="${root_lifecycle_bin}" OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
+        "${repo}/deploy/production/install.sh" --root-lifecycle
+    else
+      run_installer_from "${repo}"
+    fi
+  ) 2>&1)" || RUN_STATUS=$?
+  assert_status 0
+  expected="${fixture}/auth-1.env"
+  actual_bootstrap="${bootstrap_log}"
+  actual_controller="${controller_log}"
+  if [[ "${lifecycle}" == root ]] && (( EUID != 0 )); then
+    actual_bootstrap="${root_bootstrap_log}"
+    actual_controller="${root_controller_log}"
+    as_root chown -R "$(id -u):$(id -g)" "${repo}"
+  fi
+  while IFS= read -r setting; do
+    grep -Fxq "${setting}" "${actual_bootstrap}" || die "bootstrap lost Local auth configuration: ${setting}"
+    grep -Fxq "${setting}" "${actual_controller}" || die "activation lost Local auth configuration: ${setting}"
+  done <"${expected}"
+done
+echo "documented Local auth configuration reaches bootstrap and activation across the sudo boundary"
+
 # 8a. an explicit shell variable wins over install.env.
 reset_logs
 reset_checkout
@@ -733,7 +770,7 @@ assert_status 0 "an explicit shell variable must win over install.env"
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-env.example.test"
 assert_log_contains "${bootstrap_log}" "recommended:0.3.0"
 if grep -q "controller-file.example.test" "${bootstrap_log}"; then
-  die "the file value must not override the explicit shell variable: $(cat -- "${bootstrap_log}")"
+die "the file value must not override the explicit shell variable: $(cat -- "${bootstrap_log}")"
 fi
 echo "an explicit shell variable overrides install.env"
 
@@ -753,7 +790,7 @@ assert_status 0 "an explicitly empty shell variable must win over install.env"
 assert_log_contains "${bootstrap_log}" "recommended:"
 assert_log_contains "${bootstrap_log}" "install"
 if grep -q -- "--backup-dir" "${bootstrap_log}"; then
-  die "install.env must not fill the deliberately emptied OCSERV_BACKUP_DIR: $(cat -- "${bootstrap_log}")"
+die "install.env must not fill the deliberately emptied OCSERV_BACKUP_DIR: $(cat -- "${bootstrap_log}")"
 fi
 echo "an explicitly empty shell variable overrides install.env"
 
@@ -810,7 +847,7 @@ capture_from "${repo}"
 assert_status 1 "command substitution syntax must fail closed"
 assert_output "must be a literal value"
 [[ ! -e "${fixture}/pwned-marker" ]] ||
-  die "command substitution in install.env must never execute"
+die "command substitution in install.env must never execute"
 reset_logs
 reset_checkout
 # Literal shell syntax tests rejection; it must not expand here.
@@ -819,7 +856,7 @@ printf 'OCSERV_PUBLIC_HOST=`touch %s`\n' "${fixture}/pwned-marker" >"${repo}/ins
 capture_from "${repo}"
 assert_status 1 "backtick syntax must fail closed"
 [[ ! -e "${fixture}/pwned-marker" ]] ||
-  die "backticks in install.env must never execute"
+die "backticks in install.env must never execute"
 reset_logs
 reset_checkout
 printf 'source %s\n' "${fixture}/evil.sh" >"${repo}/install.env"
@@ -881,6 +918,20 @@ assert_status 0 "statically quoted install.env values must load"
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-quoted.example.test"
 echo "one static quote layer is stripped without expansion"
 
+# 8i. unsupported non-PostgreSQL backend configurations fail closed before host bootstrap or download.
+reset_logs
+reset_checkout
+install_docker_client_stub
+EXTRA_ENV=(OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external)
+capture
+EXTRA_ENV=()
+assert_status 1 "OCSERV_DATABASE_BACKEND=mysql must fail closed"
+assert_output "unsupported database configuration"
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+assert_log_empty "${controller_log}"
+echo "unsupported database configurations fail closed without host mutation"
+
 reset_logs
 reset_checkout
 install_docker_client_stub
@@ -917,4 +968,3 @@ assert_status 1 "runtime drift must fail before host bootstrap"
 assert_output 'runtime content changed'
 assert_log_empty "${bootstrap_log}"
 assert_log_empty "${curl_log}"
-echo "Controller install tests passed (including runtime identity without Git)"

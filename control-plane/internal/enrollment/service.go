@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,8 +16,8 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
@@ -48,17 +47,6 @@ var (
 	ErrInvalidRequest    = errors.New("enrollment request is invalid")
 )
 
-type TokenSpec struct {
-	WorkspaceID        uuid.UUID
-	Environment        string
-	ExpectedNodeName   string
-	ExpectedEndpointID []byte
-	TTL                time.Duration
-	ActorID            string
-	Reason             string
-	RequestID          string
-}
-
 type BootstrapTokenSpec struct {
 	ExpectedEndpointID []byte
 	WorkspaceID        uuid.UUID
@@ -76,23 +64,12 @@ type Token struct {
 	ExpiresAt time.Time
 }
 
-type Approval struct {
-	NodeID                            uuid.UUID
-	Labels                            map[string]string
-	Policy                            string
-	Capabilities                      []string
-	ActorID                           string
-	Reason                            string
-	RequestID                         string
-	ApprovalID, IdentityID, SessionID uuid.UUID
-}
-
 type Revocation struct {
-	NodeID                            uuid.UUID
-	ActorID                           string
-	Reason                            string
-	RequestID                         string
-	ApprovalID, IdentityID, SessionID uuid.UUID
+	NodeID                uuid.UUID
+	ActorID               string
+	Reason                string
+	RequestID             string
+	IdentityID, SessionID uuid.UUID
 }
 
 type NodeTrust struct {
@@ -102,6 +79,7 @@ type NodeTrust struct {
 }
 
 type Service struct {
+	installation         InstallationTrust
 	backend              database.Backend
 	now                  func() time.Time
 	random               io.Reader
@@ -122,64 +100,11 @@ func NewWithOwnerSessionsBackend(backend database.Backend, controllerEndpointID,
 	return service
 }
 
-func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error) {
-	if spec.WorkspaceID == uuid.Nil || !validShort(spec.Environment, 64) || !validOptional(spec.ExpectedNodeName, 128) ||
-		len(spec.ExpectedEndpointID) != 32 || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
-		return Token{}, ErrInvalidRequest
-	}
-	ttl := spec.TTL
-	if ttl == 0 {
-		ttl = DefaultTokenTTL
-	}
-	if ttl <= 0 || ttl > DefaultTokenTTL {
-		return Token{}, ErrInvalidRequest
-	}
-	raw := make([]byte, 32)
-	if _, err := io.ReadFull(s.random, raw); err != nil {
-		return Token{}, fmt.Errorf("generate enrollment token: %w", err)
-	}
-	encoded := base64.RawURLEncoding.EncodeToString(raw)
-	digest := sha256.Sum256(raw)
-	now := s.now().UTC()
-	token := Token{ID: uuid.Must(uuid.NewV7()), Value: encoded, ExpiresAt: now.Add(ttl)}
-	at, err := value.FromTime(now)
-	if err != nil {
-		return Token{}, err
-	}
-	expires, err := at.Add(ttl)
-	if err != nil {
-		return Token{}, err
-	}
-	var expectedName *string
-	if spec.ExpectedNodeName != "" {
-		expectedName = &spec.ExpectedNodeName
-	}
-	tx, store, err := s.begin(ctx, database.ReadCommitted)
-	if err != nil {
-		return Token{}, fmt.Errorf("begin token transaction: %w", err)
-	}
-	defer rollback(tx)
-	workspaceExists, err := store.WorkspaceExists(ctx, spec.WorkspaceID)
-	if err != nil {
-		return Token{}, fmt.Errorf("check token workspace: %w", err)
-	}
-	if !workspaceExists {
-		return Token{}, ErrNotFound
-	}
-	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, Endpoint: spec.ExpectedEndpointID, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: at}, false)
-	if err != nil {
-		return Token{}, fmt.Errorf("insert enrollment token: %w", err)
-	}
-	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: spec.WorkspaceID, ActorType: "user", ActorID: spec.ActorID, Action: "enrollment_token.create", ResourceType: "enrollment_token", ResourceID: token.ID, RequestID: spec.RequestID, Reason: spec.Reason, At: now}); err != nil {
-		return Token{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Token{}, fmt.Errorf("commit token transaction: %w", err)
-	}
-	return token, nil
+func (s *Service) CreateBootstrapToken(ctx context.Context, spec BootstrapTokenSpec) (Token, error) {
+	return s.createBootstrapToken(ctx, spec, "")
 }
 
-func (s *Service) CreateBootstrapToken(ctx context.Context, spec BootstrapTokenSpec) (Token, error) {
+func (s *Service) createBootstrapToken(ctx context.Context, spec BootstrapTokenSpec, encoded string) (Token, error) {
 	if (len(spec.ExpectedEndpointID) != 0 && len(spec.ExpectedEndpointID) != 32) || spec.WorkspaceID == uuid.Nil || !validShort(spec.Environment, 64) || !validOptional(spec.ExpectedNodeName, 128) || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
 		return Token{}, ErrInvalidRequest
 	}
@@ -190,11 +115,13 @@ func (s *Service) CreateBootstrapToken(ctx context.Context, spec BootstrapTokenS
 	if ttl <= 0 || ttl > DefaultTokenTTL {
 		return Token{}, ErrInvalidRequest
 	}
-	raw := make([]byte, 32)
-	if _, err := io.ReadFull(s.random, raw); err != nil {
-		return Token{}, fmt.Errorf("generate node bootstrap token: %w", err)
+	if encoded == "" {
+		raw := make([]byte, 32)
+		if _, err := io.ReadFull(s.random, raw); err != nil {
+			return Token{}, fmt.Errorf("generate node bootstrap token: %w", err)
+		}
+		encoded = BootstrapTokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
 	}
-	encoded := BootstrapTokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
 	digest := sha256.Sum256([]byte(encoded))
 	now := s.now().UTC()
 	token := Token{ID: uuid.Must(uuid.NewV7()), Value: encoded, ExpiresAt: now.Add(ttl)}
@@ -222,7 +149,7 @@ func (s *Service) CreateBootstrapToken(ctx context.Context, spec BootstrapTokenS
 	if !workspaceExists {
 		return Token{}, ErrNotFound
 	}
-	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, ExpectedEndpoint: spec.ExpectedEndpointID, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: at}, true)
+	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, ExpectedEndpoint: spec.ExpectedEndpointID, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: at})
 	if err != nil {
 		return Token{}, fmt.Errorf("insert node bootstrap token: %w", err)
 	}
@@ -237,7 +164,7 @@ func (s *Service) CreateBootstrapToken(ctx context.Context, spec BootstrapTokenS
 
 // ValidateEnrollment authenticates the first application message without
 // consuming its one-time authority. Enroll repeats these checks while holding
-// the token row lock and atomically consumes it with the pending-node write.
+// the token row lock and atomically consumes it with node activation.
 func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.EnrollRequest) error {
 	if err := validateEnrollment(request); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRequest, err)
@@ -245,27 +172,16 @@ func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.Enrol
 	if err := verifyEnrollmentProof(request); err != nil {
 		return err
 	}
-	bootstrap := strings.HasPrefix(request.GetToken(), BootstrapTokenPrefix)
-	var digest [sha256.Size]byte
-	if bootstrap {
-		var ok bool
-		digest, ok = bootstrapTokenDigest(request.GetToken())
-		if !ok {
-			return ErrInvalidToken
-		}
-	} else {
-		raw, err := base64.RawURLEncoding.DecodeString(request.GetToken())
-		if err != nil || len(raw) != 32 {
-			return ErrInvalidToken
-		}
-		digest = sha256.Sum256(raw)
+	digest, ok := bootstrapTokenDigest(request.GetToken())
+	if !ok {
+		return ErrInvalidToken
 	}
 	tx, store, err := s.begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return err
 	}
 	defer rollback(tx)
-	token, err := store.TokenByHash(ctx, digest[:], bootstrap, false)
+	token, err := store.TokenByHash(ctx, digest[:], false)
 	if errors.Is(err, database.ErrNotFound) {
 		return ErrInvalidToken
 	}
@@ -275,17 +191,17 @@ func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.Enrol
 	if token.Environment != request.GetEnvironment() || (len(token.ExpectedEndpoint) != 0 && !slices.Equal(token.ExpectedEndpoint, request.GetEndpointId())) {
 		return ErrInvalidToken
 	}
-	if bootstrap && token.ConsumedAt.Valid {
+	if token.ConsumedAt.Valid {
 		if token.ConsumedNode == nil || !slices.Equal(token.Endpoint, request.GetEndpointId()) {
 			return ErrInvalidToken
 		}
 		node, err := store.NodeByID(ctx, *token.ConsumedNode, enrollmentstore.ForShare)
-		if err != nil || node.WorkspaceID != token.WorkspaceID || node.Status != "pending" || node.EndpointState != "pending" || !slices.Equal(node.Endpoint, token.Endpoint) {
+		if err != nil || node.WorkspaceID != token.WorkspaceID || !bootstrapNodeState(request.GetToken(), node) || !slices.Equal(node.Endpoint, token.Endpoint) {
 			return ErrInvalidToken
 		}
 		return nil
 	}
-	if token.ConsumedAt.Valid || !tokenUnexpired(token.ExpiresAt, s.now()) || (!bootstrap && !slices.Equal(token.Endpoint, request.GetEndpointId())) {
+	if !tokenUnexpired(token.ExpiresAt, s.now()) {
 		return ErrInvalidToken
 	}
 	return nil
@@ -298,145 +214,12 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	if err := verifyEnrollmentProof(request); err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(request.GetToken(), BootstrapTokenPrefix) {
-		return s.enrollBootstrap(ctx, request)
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(request.GetToken())
-	if err != nil || len(raw) != 32 {
-		return nil, ErrInvalidToken
-	}
-	digest := sha256.Sum256(raw)
-	tx, store, err := s.begin(ctx, database.ReadCommitted)
-	if err != nil {
-		return nil, fmt.Errorf("begin enrollment transaction: %w", err)
-	}
-	defer rollback(tx)
-	token, err := store.TokenByHash(ctx, digest[:], false, true)
-	if err := validateLockedToken(err, token.ConsumedAt.Valid, token.ExpiresAt, s.now()); err != nil {
-		return nil, err
-	}
-	workspaceID, expectedName := token.WorkspaceID, token.ExpectedName
-	if token.Environment != request.GetEnvironment() {
-		return nil, ErrInvalidToken
-	}
-	if len(token.Endpoint) != 32 || subtle.ConstantTimeCompare(token.Endpoint, request.GetEndpointId()) != 1 {
-		return nil, ErrEndpointMismatch
-	}
-	if err := audit.LockChainTx(ctx, tx, workspaceID); err != nil {
-		return nil, err
-	}
-	now := s.now().UTC()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return nil, err
-	}
-	existing, existingErr := store.NodeByEndpoint(ctx, request.GetEndpointId(), workspaceID, enrollmentstore.ForUpdate)
-	if existingErr == nil {
-		existingNodeID, existingNodeName, existingNodeStatus, existingEndpointState := existing.ID, existing.Name, existing.Status, existing.EndpointState
-		storedKeys, err := store.SealingKeys(ctx, existingNodeID)
-		if err != nil {
-			return nil, fmt.Errorf("count existing password sealing keys: %w", err)
-		}
-		capabilitiesMatch, err := supportedCapabilitiesMatch(ctx, store, existingNodeID, request.GetCapabilities())
-		if err != nil {
-			return nil, fmt.Errorf("verify existing node capabilities: %w", err)
-		}
-		validState := (existingNodeStatus == "active" || existingNodeStatus == "offline") && existingEndpointState == "active" ||
-			existingNodeStatus == "pending" && existingEndpointState == "pending"
-		if len(storedKeys) != 0 || !capabilitiesMatch || !validState || expectedName != nil && *expectedName != existingNodeName {
-			return nil, ErrInvalidToken
-		}
-		sealingKeys := slices.Clone(request.GetSealingKeys())
-		slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
-		for _, key := range sealingKeys {
-			if err := store.InsertSealingKey(ctx, existingNodeID, sealingKey(key), at); err != nil {
-				return nil, fmt.Errorf("bind existing node password sealing key: %w", err)
-			}
-		}
-		consumed, err := s.consumeToken(ctx, store, token, existingNodeID, nil, false)
-		if err != nil {
-			return nil, fmt.Errorf("consume sealing key enrollment token: %w", err)
-		}
-		if !consumed {
-			return nil, ErrInvalidToken
-		}
-		if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.sealing_keys.bind", ResourceType: "node", ResourceID: existingNodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit existing node password sealing keys: %w", err)
-		}
-		result := agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
-		if existingNodeStatus == "active" || existingNodeStatus == "offline" {
-			result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
-		}
-		return &agentv1.EnrollResponse{Result: result, NodeId: existingNodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
-	}
-	if !errors.Is(existingErr, database.ErrNotFound) {
-		return nil, fmt.Errorf("lock existing endpoint binding: %w", existingErr)
-	}
-	name := "node-" + fmt.Sprintf("%x", request.GetEndpointId()[:6])
-	var nodeID uuid.UUID
-	claimedLegacyNode := false
-	if expectedName != nil {
-		name = *expectedName
-		var err error
-		nodeID, err = store.LegacyPendingNode(ctx, workspaceID, name)
-		if err == nil {
-			claimedLegacyNode = true
-		} else if !errors.Is(err, database.ErrNotFound) {
-			return nil, fmt.Errorf("lock legacy pending node: %w", err)
-		}
-	}
-	if !claimedLegacyNode {
-		pending, err := store.PendingCount(ctx, workspaceID)
-		if err != nil {
-			return nil, fmt.Errorf("count pending nodes: %w", err)
-		}
-		if pending >= MaxPendingNodes {
-			return nil, ErrPendingLimit
-		}
-		nodeID = uuid.Must(uuid.NewV7())
-		if err := store.InsertNode(ctx, nodeID, workspaceID, name, at); err != nil {
-			return nil, fmt.Errorf("insert pending node: %w", err)
-		}
-	} else if err := store.TouchNode(ctx, nodeID, at); err != nil {
-		return nil, fmt.Errorf("prepare legacy pending node: %w", err)
-	}
-	if err := store.InsertEndpoint(ctx, nodeID, request.GetEndpointId(), at); err != nil {
-		return nil, fmt.Errorf("bind pending endpoint: %w", err)
-	}
-	sealingKeys := slices.Clone(request.GetSealingKeys())
-	slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
-	for _, key := range sealingKeys {
-		if err := store.InsertSealingKey(ctx, nodeID, sealingKey(key), at); err != nil {
-			return nil, fmt.Errorf("record password sealing key: %w", err)
-		}
-	}
-	for _, capability := range normalizedCapabilities(request.GetCapabilities()) {
-		if err := store.PutCapability(ctx, nodeID, capability, false); err != nil {
-			return nil, fmt.Errorf("record requested capability: %w", err)
-		}
-	}
-	consumed, err := s.consumeToken(ctx, store, token, nodeID, nil, false)
-	if err != nil {
-		return nil, fmt.Errorf("consume enrollment token: %w", err)
-	}
-	if !consumed {
-		return nil, ErrInvalidToken
-	}
-	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.enroll", ResourceType: "node", ResourceID: nodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit enrollment: %w", err)
-	}
-	return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: nodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
+	return s.enrollBootstrap(ctx, request)
 }
 
 // Recheck expiry after all admission and node/key lock waits. Returning false
 // rolls back the node, key and capability writes in the caller's transaction.
-func (s *Service) consumeToken(ctx context.Context, store enrollmentstore.EnrollmentStore, token enrollmentstore.Token, node uuid.UUID, endpoint []byte, bootstrap bool) (bool, error) {
+func (s *Service) consumeToken(ctx context.Context, store enrollmentstore.EnrollmentStore, token enrollmentstore.Token, node uuid.UUID, endpoint []byte) (bool, error) {
 	now := s.now()
 	if !tokenUnexpired(token.ExpiresAt, now) {
 		return false, nil
@@ -445,19 +228,26 @@ func (s *Service) consumeToken(ctx context.Context, store enrollmentstore.Enroll
 	if err != nil {
 		return false, err
 	}
-	return store.ConsumeToken(ctx, token.ID, node, endpoint, at, bootstrap)
+	return store.ConsumeToken(ctx, token.ID, node, endpoint, at)
 }
 
 func bootstrapTokenDigest(value string) ([sha256.Size]byte, bool) {
-	var zero [sha256.Size]byte
-	if !strings.HasPrefix(value, BootstrapTokenPrefix) {
-		return zero, false
+	if !isBootstrapToken(value) {
+		return [sha256.Size]byte{}, false
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, BootstrapTokenPrefix))
-	if err != nil || len(raw) != 32 || value != BootstrapTokenPrefix+base64.RawURLEncoding.EncodeToString(raw) {
-		return zero, false
+	raw, err := base64.RawURLEncoding.DecodeString(value[5:])
+	if err != nil || len(raw) != 32 || value[5:] != base64.RawURLEncoding.EncodeToString(raw) {
+		return [sha256.Size]byte{}, false
 	}
 	return sha256.Sum256([]byte(value)), true
+}
+
+func isBootstrapToken(value string) bool {
+	return strings.HasPrefix(value, BootstrapTokenPrefix) || strings.HasPrefix(value, installEnrollmentPrefix)
+}
+
+func bootstrapNodeState(_ string, node enrollmentstore.Node) bool {
+	return (node.Status == "active" || node.Status == "offline") && node.EndpointState == "active"
 }
 
 func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRequest) (*agentv1.EnrollResponse, error) {
@@ -470,7 +260,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 		return nil, fmt.Errorf("begin node bootstrap enrollment: %w", err)
 	}
 	defer rollback(tx)
-	token, err := store.TokenByHash(ctx, digest[:], true, true)
+	token, err := store.TokenByHash(ctx, digest[:], true)
 	if errors.Is(err, database.ErrNotFound) {
 		return nil, ErrInvalidToken
 	}
@@ -486,10 +276,16 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 			return nil, ErrEndpointMismatch
 		}
 		node, err := store.NodeByID(ctx, *token.ConsumedNode, enrollmentstore.ForShare)
-		if err != nil || node.WorkspaceID != workspaceID || node.Status != "pending" || node.EndpointState != "pending" || subtle.ConstantTimeCompare(node.Endpoint, request.GetEndpointId()) != 1 {
+		if err != nil || node.WorkspaceID != workspaceID || !bootstrapNodeState(request.GetToken(), node) || subtle.ConstantTimeCompare(node.Endpoint, request.GetEndpointId()) != 1 {
 			return nil, ErrInvalidToken
 		}
-		return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: (*token.ConsumedNode)[:], ControllerEndpointId: s.controllerEndpointID}, nil
+		if match, err := sealingKeysMatch(ctx, store, node.ID, request.GetSealingKeys()); err != nil || !match {
+			return nil, ErrEndpointMismatch
+		}
+		if match, err := supportedCapabilitiesMatch(ctx, store, node.ID, request.GetCapabilities()); err != nil || !match {
+			return nil, ErrEndpointMismatch
+		}
+		return &agentv1.EnrollResponse{Result: bootstrapResult(request.GetToken()), NodeId: (*token.ConsumedNode)[:], ControllerEndpointId: s.controllerEndpointID}, nil
 	}
 	if !tokenUnexpired(token.ExpiresAt, s.now()) || len(token.Endpoint) != 0 || token.ConsumedNode != nil {
 		return nil, ErrInvalidToken
@@ -522,7 +318,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 		name = *expectedName
 	}
 	if err := store.InsertNode(ctx, nodeID, workspaceID, name, at); err != nil {
-		return nil, fmt.Errorf("insert bootstrap pending node: %w", err)
+		return nil, fmt.Errorf("insert bootstrap node: %w", err)
 	}
 	if err := store.InsertEndpoint(ctx, nodeID, request.GetEndpointId(), at); err != nil {
 		return nil, fmt.Errorf("bind bootstrap endpoint: %w", err)
@@ -539,12 +335,34 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 			return nil, fmt.Errorf("record bootstrap requested capability: %w", err)
 		}
 	}
-	consumed, err := s.consumeToken(ctx, store, token, nodeID, request.GetEndpointId(), true)
+	consumed, err := s.consumeToken(ctx, store, token, nodeID, request.GetEndpointId())
 	if err != nil {
 		return nil, fmt.Errorf("consume node bootstrap token: %w", err)
 	}
 	if !consumed {
 		return nil, ErrInvalidToken
+	}
+	revision, err := store.Activate(ctx, nodeID, "{}", "default", at)
+	if err != nil {
+		return nil, err
+	}
+	for _, capability := range normalizedCapabilities(request.GetCapabilities()) {
+		if capability == ownersession.FencingCapability || capability == "privd_result_attestation_v1" {
+			continue
+		}
+		if err := store.PutCapability(ctx, nodeID, capability, true); err != nil {
+			return nil, err
+		}
+	}
+	activationReason := "one-time bootstrap token"
+	if strings.HasPrefix(request.GetToken(), installEnrollmentPrefix) {
+		activationReason = "one-time installation token"
+	}
+	if err := enqueueTrustConvergence(ctx, tx, nodeID, request.GetEndpointId(), "active", revision, activationReason, now); err != nil {
+		return nil, err
+	}
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "bootstrap", ActorID: token.ID.String(), Action: "node.activate", ResourceType: "node", ResourceID: nodeID, RequestID: uuid.Must(uuid.NewV7()).String(), Reason: activationReason, At: now}); err != nil {
+		return nil, err
 	}
 	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.enroll", ResourceType: "node", ResourceID: nodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
 		return nil, err
@@ -552,162 +370,11 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit node bootstrap enrollment: %w", err)
 	}
-	return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: nodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
-}
-
-func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, error) {
-	if approval.NodeID == uuid.Nil || approval.ApprovalID == uuid.Nil || approval.IdentityID == uuid.Nil || approval.SessionID == uuid.Nil || !validActor(approval.ActorID, approval.RequestID, approval.Reason) || !validPolicy(approval.Policy) || len(approval.Labels) > 32 {
-		return NodeTrust{}, ErrInvalidRequest
-	}
-	if !validCapabilities(approval.Capabilities) {
-		return NodeTrust{}, ErrInvalidRequest
-	}
-	for key, value := range approval.Labels {
-		if !validShort(key, 64) || !validShort(value, 128) {
-			return NodeTrust{}, ErrInvalidRequest
-		}
-	}
-	capabilities := normalizedCapabilities(approval.Capabilities)
-	if len(capabilities) == 0 {
-		return NodeTrust{}, ErrInvalidRequest
-	}
-	tx, store, err := s.begin(ctx, database.ReadCommitted)
-	if err != nil {
-		return NodeTrust{}, fmt.Errorf("begin approval: %w", err)
-	}
-	defer rollback(tx)
-	node, err := store.NodeByID(ctx, approval.NodeID, enrollmentstore.ForUpdate)
-	if errors.Is(err, database.ErrNotFound) {
-		return NodeTrust{}, ErrInvalidTransition
-	}
-	if err != nil {
-		return NodeTrust{}, fmt.Errorf("lock pending node: %w", err)
-	}
-	workspaceID, endpointID, currentStatus, revision, nodeVersion := node.WorkspaceID, node.Endpoint, node.Status, node.AuthorizationRevision, node.Version
-	if currentStatus != "pending" && currentStatus != "active" && currentStatus != "offline" {
-		return NodeTrust{}, ErrInvalidTransition
-	}
-	if currentStatus == "active" || currentStatus == "offline" {
-		// Activation increments the node version once. Reconstruct the original
-		// approved content so an idempotent retry cannot substitute policy,
-		// labels, or capabilities after approval.
-		if nodeVersion < 2 {
-			return NodeTrust{}, ErrInvalidTransition
-		}
-		requestHash, _, bindingErr := nodeApprovalBinding(ctx, store, approval.NodeID, endpointID, nodeVersion-1, approval.Labels, approval.Policy, capabilities)
-		if bindingErr != nil {
-			return NodeTrust{}, bindingErr
-		}
-		if err := approvals.ValidateConsumedBoundTx(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
-			return NodeTrust{}, err
-		}
-		return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID, Revision: revision}, nil
-	}
-	requestHash, _, err := nodeApprovalBinding(ctx, store, approval.NodeID, endpointID, nodeVersion, approval.Labels, approval.Policy, capabilities)
-	if err != nil {
-		return NodeTrust{}, err
-	}
-	if err := approvals.ConsumeBoundTx(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
-		return NodeTrust{}, err
-	}
-	labels := mapToJSON(approval.Labels)
-	now := s.now().UTC()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return NodeTrust{}, err
-	}
-	revision, err = store.Activate(ctx, approval.NodeID, labels, approval.Policy, at)
-	if err != nil {
-		return NodeTrust{}, fmt.Errorf("activate node and endpoint: %w", err)
-	}
-	if err := enqueueTrustConvergence(ctx, tx, approval.NodeID, endpointID, "active", revision, approval.Reason, now); err != nil {
-		return NodeTrust{}, err
-	}
-	if err := store.ResetCapabilities(ctx, approval.NodeID); err != nil {
-		return NodeTrust{}, err
-	}
-	for _, capability := range capabilities {
-		// Protocol capabilities are negotiated, never business-approved: the
-		// fencing capability only records that the endpoint accepts fences,
-		// and an approval echoing every advertised capability must not turn
-		// it into an approved node capability.
-		if capability == ownersession.FencingCapability {
-			continue
-		}
-		if err := store.PutCapability(ctx, approval.NodeID, capability, true); err != nil {
-			return NodeTrust{}, fmt.Errorf("approve capability: %w", err)
-		}
-	}
-	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: approval.ActorID, SessionID: &approval.SessionID, ApprovalID: &approval.ApprovalID, NodeID: &approval.NodeID, Action: "node.approve", ResourceType: "node", ResourceID: approval.NodeID, RequestID: approval.RequestID, Reason: approval.Reason, At: now}); err != nil {
-		return NodeTrust{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return NodeTrust{}, fmt.Errorf("commit approval: %w", err)
-	}
-	return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID, Revision: revision}, nil
-}
-
-func (s *Service) ApprovalBinding(ctx context.Context, nodeID uuid.UUID, labels map[string]string, policy string, capabilities []string) (uuid.UUID, []byte, json.RawMessage, error) {
-	capabilities = normalizedCapabilities(capabilities)
-	if nodeID == uuid.Nil || !validPolicy(policy) || len(labels) > 32 || !validCapabilities(capabilities) || len(capabilities) == 0 {
-		return uuid.Nil, nil, nil, ErrInvalidRequest
-	}
-	for key, value := range labels {
-		if !validShort(key, 64) || !validShort(value, 128) {
-			return uuid.Nil, nil, nil, ErrInvalidRequest
-		}
-	}
-	tx, store, err := s.begin(ctx, database.ReadCommitted)
-	if err != nil {
-		return uuid.Nil, nil, nil, err
-	}
-	defer rollback(tx)
-	node, err := store.NodeByID(ctx, nodeID, enrollmentstore.Unlocked)
-	if err != nil {
-		return uuid.Nil, nil, nil, err
-	}
-	if node.Status != "pending" || node.EndpointState != "pending" {
-		return uuid.Nil, nil, nil, database.ErrNotFound
-	}
-	hash, summary, err := nodeApprovalBinding(ctx, store, nodeID, node.Endpoint, node.Version, labels, policy, capabilities)
-	return node.WorkspaceID, hash, summary, err
-}
-
-func nodeApprovalBinding(ctx context.Context, store enrollmentstore.EnrollmentStore, nodeID uuid.UUID, endpointID []byte, version int64, labels map[string]string, policy string, capabilities []string) ([]byte, json.RawMessage, error) {
-	supported, err := store.Capabilities(ctx, nodeID, false)
-	if err != nil {
-		return nil, nil, err
-	}
-	for _, capability := range capabilities {
-		if !slices.Contains(supported, capability) {
-			return nil, nil, ErrInvalidRequest
-		}
-	}
-	labelKeys := make([]string, 0, len(labels))
-	for key := range labels {
-		labelKeys = append(labelKeys, key)
-	}
-	slices.Sort(labelKeys)
-	orderedLabels := make([][2]string, 0, len(labelKeys))
-	for _, key := range labelKeys {
-		orderedLabels = append(orderedLabels, [2]string{key, labels[key]})
-	}
-	capabilities = append([]string(nil), capabilities...)
-	slices.Sort(capabilities)
-	summary, _ := json.Marshal(struct {
-		NodeID       uuid.UUID   `json:"node_id"`
-		EndpointID   string      `json:"endpoint_id"`
-		NodeVersion  int64       `json:"node_version"`
-		Policy       string      `json:"policy"`
-		Labels       [][2]string `json:"labels"`
-		Capabilities []string    `json:"capabilities"`
-	}{nodeID, fmt.Sprintf("%x", endpointID), version, policy, orderedLabels, capabilities})
-	digest := sha256.Sum256(append([]byte("ocservia/node-approval/v1\x00"), summary...))
-	return digest[:], summary, nil
+	return &agentv1.EnrollResponse{Result: bootstrapResult(request.GetToken()), NodeId: nodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
 }
 
 func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust, error) {
-	if revocation.NodeID == uuid.Nil || revocation.ApprovalID == uuid.Nil || revocation.IdentityID == uuid.Nil || revocation.SessionID == uuid.Nil || !validActor(revocation.ActorID, revocation.RequestID, revocation.Reason) {
+	if revocation.NodeID == uuid.Nil || revocation.IdentityID == uuid.Nil || revocation.SessionID == uuid.Nil || !validActor(revocation.ActorID, revocation.RequestID, revocation.Reason) {
 		return NodeTrust{}, ErrInvalidRequest
 	}
 	tx, store, err := s.begin(ctx, database.ReadCommitted)
@@ -723,15 +390,11 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 		return NodeTrust{}, fmt.Errorf("lock node for revocation: %w", err)
 	}
 	workspaceID, endpointID, currentStatus, revision := node.WorkspaceID, node.Endpoint, node.Status, node.AuthorizationRevision
-	revokeHash, _ := approvals.GenericBinding("node.revoke", "node", revocation.NodeID)
-	if currentStatus == "revoked" {
-		if err := approvals.ValidateConsumedBoundTx(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
-			return NodeTrust{}, err
-		}
-		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
-	}
-	if err := approvals.ConsumeBoundTx(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
+	if err := auth.AuthorizeMutationTx(ctx, tx, revocation.IdentityID, revocation.SessionID, workspaceID); err != nil {
 		return NodeTrust{}, err
+	}
+	if currentStatus == "revoked" {
+		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
 	now := s.now().UTC()
 	at, err := value.FromTime(now)
@@ -745,7 +408,7 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 	if err := enqueueTrustConvergence(ctx, tx, revocation.NodeID, endpointID, "revoked", revision, revocation.Reason, now); err != nil {
 		return NodeTrust{}, err
 	}
-	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: revocation.ActorID, SessionID: &revocation.SessionID, ApprovalID: &revocation.ApprovalID, NodeID: &revocation.NodeID, Action: "node.revoke", ResourceType: "node", ResourceID: revocation.NodeID, RequestID: revocation.RequestID, Reason: revocation.Reason, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: revocation.ActorID, SessionID: &revocation.SessionID, NodeID: &revocation.NodeID, Action: "node.revoke", ResourceType: "node", ResourceID: revocation.NodeID, RequestID: revocation.RequestID, Reason: revocation.Reason, At: now}); err != nil {
 		return NodeTrust{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1092,28 +755,8 @@ func validShort(value string, maximum int) bool {
 	return value == trimmed && length > 0 && length <= maximum
 }
 func validOptional(value string, maximum int) bool { return value == "" || validShort(value, maximum) }
-func validPolicy(value string) bool                { return validShort(value, 128) }
 func validActor(actor, request, reason string) bool {
 	return validShort(actor, 256) && validShort(request, 128) && validShort(reason, 1024)
-}
-func validateLockedToken(queryErr error, consumed bool, expiresAt value.Timestamp, now time.Time) error {
-	if errors.Is(queryErr, database.ErrNotFound) {
-		return ErrInvalidToken
-	}
-	if queryErr != nil {
-		return fmt.Errorf("lock enrollment token: %w", queryErr)
-	}
-	if consumed || !tokenUnexpired(expiresAt, now) {
-		return ErrInvalidToken
-	}
-	return nil
-}
-func mapToJSON(values map[string]string) string {
-	data, err := json.Marshal(values)
-	if err != nil {
-		return "{}"
-	}
-	return string(data)
 }
 func rollback(tx database.Tx) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

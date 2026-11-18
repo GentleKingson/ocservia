@@ -7,12 +7,29 @@ NODE="${ROOT}/deploy/bootstrap/install-node"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
 
-# Published versioned installer copies must be the actual executable sources.
+# Published versioned installer copies must be standalone executable sources
+# generated from the shared install-env/UI/runtime/bootstrap helpers.
 mkdir "$fixture/prepared"
 "$ROOT/scripts/prepare-bootstrap-release-assets.sh" "$fixture/prepared"
 bash -n "$fixture/prepared/controller-bootstrap.sh"
 bash -n "$fixture/prepared/managed-node-bootstrap.sh"
 [[ -x "$fixture/prepared/controller-bootstrap.sh" && -x "$fixture/prepared/managed-node-bootstrap.sh" ]]
+if grep -Eq 'release-embed|\$\{SCRIPT_LIB\}/' \
+  "$fixture/prepared/controller-bootstrap.sh" "$fixture/prepared/managed-node-bootstrap.sh"; then
+  exit 1
+fi
+grep -qxF 'install_env_load() {' "$fixture/prepared/controller-bootstrap.sh"
+grep -qxF 'CONTROLLER_INSTALL_ENV_NAMES=(' "$fixture/prepared/controller-bootstrap.sh"
+if grep -qF 'install_env_load() {' "$fixture/prepared/managed-node-bootstrap.sh"; then
+  echo 'node token installer must not embed the retired configuration flow' >&2
+  exit 1
+fi
+if grep -Eq '^install_env_load\(\)|^(CONTROLLER_|MANAGED_NODE_)?INSTALL_ENV_NAMES=\(' \
+  "$ROOT/deploy/production/controller-bootstrap.sh" \
+  "$ROOT/deploy/production/install.sh" \
+  "$ROOT/deploy/managed-node/install.sh"; then
+  exit 1
+fi
 
 fail() {
   echo "bootstrap installer test: $1" >&2
@@ -312,9 +329,16 @@ grep -q '/download/v4.5.6/' "${fixture}/downloads.log" || fail "Agent did not us
 # Check the arguments received by the downloaded installer, not just its URL.
 touch "${fixture}/custom config.env"
 for installer in install-controller install-node; do
+  if [[ "$installer" == install-node ]]; then
+    if run_installer "${fixture}/stamped/${installer}" --non-interactive --config "./custom config.env" >"${fixture}/output" 2>&1; then
+      fail 'node launcher accepted retired manual configuration'
+    fi
+    grep -q 'manual configuration installation is retired' "${fixture}/output"
+  else
   run_installer "${fixture}/stamped/${installer}" --non-interactive --config "./custom config.env" >"${fixture}/output" 2>&1
   [[ "$(<"${fixture}/args.log")" == $'--version\nv4.5.6\n--non-interactive\n--config\n./custom config.env' ]] ||
     fail "${installer} did not forward unattended mode and the exact configuration path"
+  fi
   if run_installer "${fixture}/stamped/${installer}" </dev/null >"${fixture}/output" 2>&1; then
     fail "${installer} accepted a no-argument invocation without a TTY"
   fi

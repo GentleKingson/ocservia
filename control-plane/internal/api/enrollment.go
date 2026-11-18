@@ -10,75 +10,24 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 )
 
-type tokenRequest struct {
-	WorkspaceID        string `json:"workspace_id"`
-	Environment        string `json:"environment"`
-	ExpectedNodeName   string `json:"expected_node_name"`
-	ExpectedEndpointID string `json:"expected_endpoint_id"`
-	TTLSeconds         int64  `json:"ttl_seconds"`
-	Reason             string `json:"reason"`
-}
-
 type bootstrapTokenRequest struct {
+	Installation       bool   `json:"installation"`
 	ExpectedEndpointID string `json:"expected_endpoint_id"`
 	WorkspaceID        string `json:"workspace_id"`
 	Environment        string `json:"environment"`
 	ExpectedNodeName   string `json:"expected_node_name"`
 	TTLSeconds         int64  `json:"ttl_seconds"`
 	Reason             string `json:"reason"`
-}
-
-type approvalRequest struct {
-	Labels       map[string]string `json:"labels"`
-	Policy       string            `json:"policy"`
-	Capabilities []string          `json:"capabilities"`
-	Reason       string            `json:"reason"`
 }
 
 type revocationRequest struct {
 	Reason string `json:"reason"`
-}
-
-func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
-	if s.enrollment == nil {
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "enrollment is not enabled")
-		return
-	}
-	var body tokenRequest
-	if !decodeStrictJSON(w, r, &body) {
-		return
-	}
-	workspaceID, err := parseUUIDv7(body.WorkspaceID)
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "workspace_id must be UUIDv7")
-		return
-	}
-	if !s.devAuth && workspaceID != workspace(r) {
-		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "workspace_id is outside the authorized scope")
-		return
-	}
-	endpoint, err := hex.DecodeString(body.ExpectedEndpointID)
-	if err != nil || len(endpoint) != 32 || strings.ToLower(body.ExpectedEndpointID) != body.ExpectedEndpointID {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "expected_endpoint_id must be 32-byte lowercase hex")
-		return
-	}
-	if !validEnrollmentTTLSeconds(body.TTLSeconds) {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "ttl_seconds must be between 1 and 900")
-		return
-	}
-	token, err := s.enrollment.CreateToken(r.Context(), enrollment.TokenSpec{WorkspaceID: workspaceID, Environment: body.Environment, ExpectedNodeName: body.ExpectedNodeName, ExpectedEndpointID: endpoint, TTL: time.Duration(body.TTLSeconds) * time.Second, ActorID: actorID(r), Reason: body.Reason, RequestID: requestID(r)})
-	if err != nil {
-		s.writeEnrollmentError(w, r, err)
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, map[string]any{"id": token.ID, "token": token.Value, "expires_at": token.ExpiresAt})
 }
 
 func (s *Server) createNodeBootstrapToken(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +44,7 @@ func (s *Server) createNodeBootstrapToken(w http.ResponseWriter, r *http.Request
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "workspace_id must be UUIDv7")
 		return
 	}
-	if !s.devAuth && workspaceID != workspace(r) {
+	if principal(r).Issuer != "development" && workspaceID != workspace(r) {
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "workspace_id is outside the authorized scope")
 		return
 	}
@@ -112,7 +61,15 @@ func (s *Server) createNodeBootstrapToken(w http.ResponseWriter, r *http.Request
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "ttl_seconds must be between 1 and 900")
 		return
 	}
-	token, err := s.enrollment.CreateBootstrapToken(r.Context(), enrollment.BootstrapTokenSpec{ExpectedEndpointID: endpoint, WorkspaceID: workspaceID, Environment: body.Environment, ExpectedNodeName: body.ExpectedNodeName, TTL: time.Duration(body.TTLSeconds) * time.Second, ActorID: actorID(r), Reason: body.Reason, RequestID: requestID(r)})
+	create := s.enrollment.CreateBootstrapToken
+	if body.Installation {
+		create = s.enrollment.CreateInstallationToken
+	}
+	token, err := create(r.Context(), enrollment.BootstrapTokenSpec{
+		ExpectedEndpointID: endpoint, WorkspaceID: workspaceID, Environment: body.Environment,
+		ExpectedNodeName: body.ExpectedNodeName, TTL: time.Duration(body.TTLSeconds) * time.Second,
+		ActorID: actorID(r), Reason: body.Reason, RequestID: requestID(r),
+	})
 	if err != nil {
 		s.writeEnrollmentError(w, r, err)
 		return
@@ -123,37 +80,6 @@ func (s *Server) createNodeBootstrapToken(w http.ResponseWriter, r *http.Request
 
 func validEnrollmentTTLSeconds(seconds int64) bool {
 	return seconds == 0 || seconds >= 1 && seconds <= int64(enrollment.DefaultTokenTTL/time.Second)
-}
-
-func (s *Server) approveNode(w http.ResponseWriter, r *http.Request) {
-	if s.enrollment == nil || s.transport == nil {
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "enrollment is not enabled")
-		return
-	}
-	nodeID, err := parseUUIDv7(r.PathValue("node_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "node_id must be UUIDv7")
-		return
-	}
-	var body approvalRequest
-	if !decodeStrictJSON(w, r, &body) {
-		return
-	}
-	actor := principal(r)
-	trust, err := s.enrollment.Approve(r.Context(), enrollment.Approval{NodeID: nodeID, Labels: body.Labels, Policy: body.Policy, Capabilities: body.Capabilities, ActorID: actorID(r), ApprovalID: approvalID(r), IdentityID: actor.IdentityID, SessionID: actor.SessionID, Reason: body.Reason, RequestID: requestID(r)})
-	if err != nil {
-		s.writeEnrollmentError(w, r, err)
-		return
-	}
-	operationID := ownersession.StateUpdateOperationID([16]byte(nodeID), trust.EndpointID, int32(transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE), trust.Revision, body.Reason)
-	if err := s.adminExecuteFenced(r.Context(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, operationID,
-		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-			return s.transport.UpdateNodeTrust(ctx, trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE, body.Reason, trust.Revision, operationID[:], binding)
-		}); err != nil {
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/transport-unavailable", "Trust update pending", "the database is authoritative but transport synchronization is pending")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": nodeID, "status": "active"})
 }
 
 func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +97,10 @@ func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := principal(r)
-	trust, err := s.enrollment.Revoke(r.Context(), enrollment.Revocation{NodeID: nodeID, ActorID: actorID(r), ApprovalID: approvalID(r), IdentityID: actor.IdentityID, SessionID: actor.SessionID, Reason: body.Reason, RequestID: requestID(r)})
+	trust, err := s.enrollment.Revoke(r.Context(), enrollment.Revocation{
+		NodeID: nodeID, ActorID: actorID(r), IdentityID: actor.IdentityID, SessionID: actor.SessionID,
+		Reason: body.Reason, RequestID: requestID(r),
+	})
 	if err != nil {
 		s.writeEnrollmentError(w, r, err)
 		return
@@ -206,8 +135,7 @@ func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 
 // adminExecuteFenced runs one administrative transport mutation inside the
 // connection owner's fencing interval. The binding capability is the fencing
-// capability itself; nodes without a registered fence keep the unfenced
-// path.
+// capability itself; nodes without a registered fence keep the unfenced path.
 func (s *Server) adminExecuteFenced(ctx context.Context, nodeID uuid.UUID, kind agentv1.FenceOperationKind, operationID [16]byte, action ownersession.FencedAction) error {
 	if s.fences == nil {
 		return action(ctx, nil, nil)
@@ -219,8 +147,8 @@ func (s *Server) adminExecuteFenced(ctx context.Context, nodeID uuid.UUID, kind 
 
 func (s *Server) writeEnrollmentError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, approvals.ErrNotReady):
-		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "a matching unexpired approval from a different principal is required")
+	case errors.Is(err, auth.ErrForbidden):
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Forbidden", "the current session is not authorized for this operation")
 	case errors.Is(err, enrollment.ErrInvalidTransition):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/invalid-node-state", "Invalid node state", "the requested node transition is not allowed")
 	case errors.Is(err, enrollment.ErrNotFound):

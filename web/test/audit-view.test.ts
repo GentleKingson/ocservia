@@ -3,13 +3,14 @@ import { ResponseError } from "@ocservia/api-client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   listAuditEvents: vi.fn(),
+  verifyAuditChain: vi.fn(),
   getWorkspace: vi.fn(),
   workspaceContext: vi.fn(),
 }));
 vi.mock("../src/api/events", () => mocks);
-vi.mock("../src/api/workspace", () => ({
+vi.mock("../src/api/workspace", async (original) => ({
+  ...(await original<typeof import("../src/api/workspace")>()),
   ...mocks,
-  workspaceChangedEvent: "workspace",
 }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 import AuditView from "../src/views/AuditView.vue";
@@ -29,7 +30,7 @@ let unmount: (() => void) | undefined;
 const record = {
   id: "audit-a",
   action: "node.approve",
-  occurred_at: "2026-09-30T00:00:00Z",
+  occurredAt: "2026-09-30T00:00:00Z",
 };
 interface View {
   items: object[];
@@ -41,7 +42,17 @@ interface View {
   error: string;
   initialized: boolean;
   loading: boolean;
+  verifying: boolean;
+  verification?: {
+    workspaceId: string;
+    events: number;
+    valid: boolean;
+    checkpointValid: boolean;
+    compactedEvents?: number;
+  };
+  verifyError: string;
   refresh(): Promise<void>;
+  verifyChain(): Promise<void>;
 }
 async function flush() {
   for (let i = 0; i < 8; i++) await nextTick();
@@ -104,31 +115,11 @@ it("keeps old records on a refresh failure", async () => {
   expect(view.items).toEqual([record]);
   expect(view.error).toBe("auditUnavailable");
 });
-it("clears old workspace data and rejects a late response", async () => {
-  const view = await mount();
-  let resolve!: (page: object) => void;
-  mocks.listAuditEvents.mockImplementationOnce(
-    () =>
-      new Promise((r) => {
-        resolve = r;
-      }),
-  );
-  const old = view.refresh();
-  await flush();
-  mocks.workspaceContext.mockReturnValue({ id: "workspace-b", generation: 2 });
-  window.dispatchEvent(new Event("workspace"));
-  expect(view.items).toEqual([]);
-  mocks.listAuditEvents.mockResolvedValue({ items: [] });
-  await flush();
-  resolve({ items: [record] });
-  await old;
-  expect(view.items).toEqual([]);
-});
-it("filters only the loaded slice and resets expansion on workspace change", async () => {
+it("filters only the loaded slice", async () => {
   const failed = {
     id: "audit-b",
     action: "user.disable",
-    actor_id: "admin",
+    actorId: "admin",
     result: "failed",
   };
   mocks.listAuditEvents.mockResolvedValue({
@@ -150,8 +141,41 @@ it("filters only the loaded slice and resets expansion on workspace change", asy
   view.toggle("id:audit-b");
   view.toggle("id:audit-a");
   expect(view.expanded).toEqual(["id:audit-b"]);
-  window.dispatchEvent(new Event("workspace"));
-  expect(view.expanded).toEqual([]);
+});
+it("renders valid and invalid audit evidence decoded by the API", async () => {
+  const validResult = {
+    workspaceId: "workspace-a",
+    events: 12,
+    valid: true,
+    checkpointValid: true,
+  };
+  mocks.verifyAuditChain.mockResolvedValueOnce(validResult);
+  const view = await mount();
+  await view.verifyChain();
+  expect(view.verification).toEqual(validResult);
+  expect(view.verifyError).toBe("");
+
+  mocks.verifyAuditChain.mockResolvedValueOnce({
+    workspaceId: "workspace-a",
+    events: 12,
+    valid: false,
+    checkpointValid: false,
+  });
+  await view.verifyChain();
+  expect(view.verification).toEqual({
+    workspaceId: "workspace-a",
+    events: 12,
+    valid: false,
+    checkpointValid: false,
+  });
+  expect(view.verifyError).toBe("");
+
+  mocks.verifyAuditChain.mockRejectedValueOnce(
+    new ResponseError(new Response(null, { status: 403 })),
+  );
+  await view.verifyChain();
+  expect(view.verification).toBeUndefined();
+  expect(view.verifyError).toBe("auditForbidden");
 });
 it("keeps expansion on the same event across refreshes and keeps unkeyed rows", async () => {
   const newer = { id: "audit-new", action: "node.update" };

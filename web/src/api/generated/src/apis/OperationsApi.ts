@@ -34,26 +34,6 @@ import {
   AgentUpgradeRequestToJSON,
 } from "../models/AgentUpgradeRequest";
 import {
-  type Approval,
-  ApprovalFromJSON,
-  ApprovalToJSON,
-} from "../models/Approval";
-import {
-  type ApprovalDecision,
-  ApprovalDecisionFromJSON,
-  ApprovalDecisionToJSON,
-} from "../models/ApprovalDecision";
-import {
-  type ApprovalPage,
-  ApprovalPageFromJSON,
-  ApprovalPageToJSON,
-} from "../models/ApprovalPage";
-import {
-  type ApprovalRequest,
-  ApprovalRequestFromJSON,
-  ApprovalRequestToJSON,
-} from "../models/ApprovalRequest";
-import {
   type ControlledOperationRequest,
   ControlledOperationRequestFromJSON,
   ControlledOperationRequestToJSON,
@@ -104,25 +84,10 @@ import {
   SyntheticCommandRequestToJSON,
 } from "../models/SyntheticCommandRequest";
 import {
-  type UserBatch,
-  UserBatchFromJSON,
-  UserBatchToJSON,
-} from "../models/UserBatch";
-import {
-  type UserBatchRequest,
-  UserBatchRequestFromJSON,
-  UserBatchRequestToJSON,
-} from "../models/UserBatchRequest";
-import {
   type UserCreateRequest,
   UserCreateRequestFromJSON,
   UserCreateRequestToJSON,
 } from "../models/UserCreateRequest";
-import {
-  type UserOperationMetrics,
-  UserOperationMetricsFromJSON,
-  UserOperationMetricsToJSON,
-} from "../models/UserOperationMetrics";
 import {
   type UserPolicy,
   UserPolicyFromJSON,
@@ -142,19 +107,9 @@ export interface ApplyNodeGroupRequest {
   ifMatch?: string;
 }
 
-export interface ApproveRequestRequest {
-  approvalId: string;
-  approvalDecision: ApprovalDecision;
-}
-
 export interface CreateAgentRolloutRequest {
   idempotencyKey: string;
   agentRolloutCreateRequest: AgentRolloutCreateRequest;
-  xWorkspaceID?: string;
-}
-
-export interface CreateApprovalRequestRequest {
-  approvalRequest: ApprovalRequest;
   xWorkspaceID?: string;
 }
 
@@ -170,13 +125,6 @@ export interface CreateSyntheticCommandRequest {
   idempotencyKey: string;
   syntheticCommandRequest: SyntheticCommandRequest;
   ifMatch?: string;
-}
-
-export interface CreateUserBatchRequest {
-  idempotencyKey: string;
-  userBatchRequest: UserBatchRequest;
-  xWorkspaceID?: string;
-  xApprovalID?: string;
 }
 
 export interface DisableNodeUserRequest {
@@ -208,24 +156,11 @@ export interface GetAgentRolloutRequest {
   xWorkspaceID?: string;
 }
 
-export interface GetApprovalRequestRequest {
-  approvalId: string;
-}
-
 export interface GetOperationRequest {
   operationId: string;
 }
 
 export interface GetOperationSummaryRequest {
-  xWorkspaceID?: string;
-}
-
-export interface GetUserBatchRequest {
-  batchId: string;
-  xWorkspaceID?: string;
-}
-
-export interface GetUserOperationMetricsRequest {
   xWorkspaceID?: string;
 }
 
@@ -240,17 +175,10 @@ export interface ListOperationsRequest {
   pageSize?: number;
 }
 
-export interface ListPendingApprovalsRequest {
-  xWorkspaceID?: string;
-  cursor?: string;
-  pageSize?: number;
-}
-
 export interface ReloadNodeServiceRequest {
   nodeId: string;
   idempotencyKey: string;
   controlledOperationRequest: ControlledOperationRequest;
-  xApprovalID?: string;
   ifMatch?: string;
 }
 
@@ -416,86 +344,6 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
-   * Creates request options for approveRequest without sending the request
-   */
-  async approveRequestRequestOpts(
-    requestParameters: ApproveRequestRequest,
-  ): Promise<runtime.RequestOpts> {
-    if (requestParameters["approvalId"] == null) {
-      throw new runtime.RequiredError(
-        "approvalId",
-        'Required parameter "approvalId" was null or undefined when calling approveRequest().',
-      );
-    }
-
-    if (requestParameters["approvalDecision"] == null) {
-      throw new runtime.RequiredError(
-        "approvalDecision",
-        'Required parameter "approvalDecision" was null or undefined when calling approveRequest().',
-      );
-    }
-
-    const queryParameters: any = {};
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    headerParameters["Content-Type"] = "application/json";
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/approval-requests/{approval_id}:approve`;
-    urlPath = urlPath.replace(
-      "{approval_id}",
-      encodeURIComponent(String(requestParameters["approvalId"])),
-    );
-
-    return {
-      path: urlPath,
-      method: "POST",
-      headers: headerParameters,
-      query: queryParameters,
-      body: ApprovalDecisionToJSON(requestParameters["approvalDecision"]),
-    };
-  }
-
-  /**
-   * Approve another principal\'s high-risk request
-   */
-  async approveRequestRaw(
-    requestParameters: ApproveRequestRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<Approval>> {
-    const requestOptions =
-      await this.approveRequestRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      ApprovalFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Approve another principal\'s high-risk request
-   */
-  async approveRequest(
-    requestParameters: ApproveRequestRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<Approval> {
-    const response = await this.approveRequestRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
-  /**
    * Creates request options for createAgentRollout without sending the request
    */
   async createAgentRolloutRequestOpts(
@@ -556,7 +404,7 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
-   * Creates a server-owned fleet rollout with a mandatory one-node canary and fixed-size batches. The server canonicalizes and sorts the node set, recomputes eligibility from durable evidence, resolves package digests from the trusted release catalog, and consumes one approval bound to the exact immutable rollout request. Every generated node upgrade reuses the reconciled single-node operation; the rollout survives browser closure and Controller restart.
+   * Creates a server-owned fleet rollout with a mandatory one-node canary and fixed-size batches. The server canonicalizes and sorts the node set, recomputes eligibility from durable evidence, resolves package digests from the trusted release catalog, and rechecks Admin authority in the mutation transaction. Every generated node upgrade reuses the reconciled single-node operation; the rollout survives browser closure and Controller restart.
    * Create a durable canary and rolling agent upgrade rollout
    */
   async createAgentRolloutRaw(
@@ -573,7 +421,7 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
-   * Creates a server-owned fleet rollout with a mandatory one-node canary and fixed-size batches. The server canonicalizes and sorts the node set, recomputes eligibility from durable evidence, resolves package digests from the trusted release catalog, and consumes one approval bound to the exact immutable rollout request. Every generated node upgrade reuses the reconciled single-node operation; the rollout survives browser closure and Controller restart.
+   * Creates a server-owned fleet rollout with a mandatory one-node canary and fixed-size batches. The server canonicalizes and sorts the node set, recomputes eligibility from durable evidence, resolves package digests from the trusted release catalog, and rechecks Admin authority in the mutation transaction. Every generated node upgrade reuses the reconciled single-node operation; the rollout survives browser closure and Controller restart.
    * Create a durable canary and rolling agent upgrade rollout
    */
   async createAgentRollout(
@@ -581,81 +429,6 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<AgentRollout> {
     const response = await this.createAgentRolloutRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
-  /**
-   * Creates request options for createApprovalRequest without sending the request
-   */
-  async createApprovalRequestRequestOpts(
-    requestParameters: CreateApprovalRequestRequest,
-  ): Promise<runtime.RequestOpts> {
-    if (requestParameters["approvalRequest"] == null) {
-      throw new runtime.RequiredError(
-        "approvalRequest",
-        'Required parameter "approvalRequest" was null or undefined when calling createApprovalRequest().',
-      );
-    }
-
-    const queryParameters: any = {};
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    headerParameters["Content-Type"] = "application/json";
-
-    if (requestParameters["xWorkspaceID"] != null) {
-      headerParameters["X-Workspace-ID"] = String(
-        requestParameters["xWorkspaceID"],
-      );
-    }
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/approval-requests`;
-
-    return {
-      path: urlPath,
-      method: "POST",
-      headers: headerParameters,
-      query: queryParameters,
-      body: ApprovalRequestToJSON(requestParameters["approvalRequest"]),
-    };
-  }
-
-  /**
-   * Request independent approval for a high-risk action
-   */
-  async createApprovalRequestRaw(
-    requestParameters: CreateApprovalRequestRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<Approval>> {
-    const requestOptions =
-      await this.createApprovalRequestRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      ApprovalFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Request independent approval for a high-risk action
-   */
-  async createApprovalRequest(
-    requestParameters: CreateApprovalRequestRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<Approval> {
-    const response = await this.createApprovalRequestRaw(
       requestParameters,
       initOverrides,
     );
@@ -852,100 +625,6 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Operation> {
     const response = await this.createSyntheticCommandRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
-  /**
-   * Creates request options for createUserBatch without sending the request
-   */
-  async createUserBatchRequestOpts(
-    requestParameters: CreateUserBatchRequest,
-  ): Promise<runtime.RequestOpts> {
-    if (requestParameters["idempotencyKey"] == null) {
-      throw new runtime.RequiredError(
-        "idempotencyKey",
-        'Required parameter "idempotencyKey" was null or undefined when calling createUserBatch().',
-      );
-    }
-
-    if (requestParameters["userBatchRequest"] == null) {
-      throw new runtime.RequiredError(
-        "userBatchRequest",
-        'Required parameter "userBatchRequest" was null or undefined when calling createUserBatch().',
-      );
-    }
-
-    const queryParameters: any = {};
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    headerParameters["Content-Type"] = "application/json";
-
-    if (requestParameters["xWorkspaceID"] != null) {
-      headerParameters["X-Workspace-ID"] = String(
-        requestParameters["xWorkspaceID"],
-      );
-    }
-
-    if (requestParameters["idempotencyKey"] != null) {
-      headerParameters["Idempotency-Key"] = String(
-        requestParameters["idempotencyKey"],
-      );
-    }
-
-    if (requestParameters["xApprovalID"] != null) {
-      headerParameters["X-Approval-ID"] = String(
-        requestParameters["xApprovalID"],
-      );
-    }
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/user-batches`;
-
-    return {
-      path: urlPath,
-      method: "POST",
-      headers: headerParameters,
-      query: queryParameters,
-      body: UserBatchRequestToJSON(requestParameters["userBatchRequest"]),
-    };
-  }
-
-  /**
-   * Create a parent batch whose items are authorized and executed independently
-   */
-  async createUserBatchRaw(
-    requestParameters: CreateUserBatchRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<UserBatch>> {
-    const requestOptions =
-      await this.createUserBatchRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      UserBatchFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Create a parent batch whose items are authorized and executed independently
-   */
-  async createUserBatch(
-    requestParameters: CreateUserBatchRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<UserBatch> {
-    const response = await this.createUserBatchRaw(
       requestParameters,
       initOverrides,
     );
@@ -1359,76 +1038,6 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
-   * Creates request options for getApprovalRequest without sending the request
-   */
-  async getApprovalRequestRequestOpts(
-    requestParameters: GetApprovalRequestRequest,
-  ): Promise<runtime.RequestOpts> {
-    if (requestParameters["approvalId"] == null) {
-      throw new runtime.RequiredError(
-        "approvalId",
-        'Required parameter "approvalId" was null or undefined when calling getApprovalRequest().',
-      );
-    }
-
-    const queryParameters: any = {};
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/approval-requests/{approval_id}`;
-    urlPath = urlPath.replace(
-      "{approval_id}",
-      encodeURIComponent(String(requestParameters["approvalId"])),
-    );
-
-    return {
-      path: urlPath,
-      method: "GET",
-      headers: headerParameters,
-      query: queryParameters,
-    };
-  }
-
-  /**
-   * Inspect immutable approval details before deciding
-   */
-  async getApprovalRequestRaw(
-    requestParameters: GetApprovalRequestRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<Approval>> {
-    const requestOptions =
-      await this.getApprovalRequestRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      ApprovalFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Inspect immutable approval details before deciding
-   */
-  async getApprovalRequest(
-    requestParameters: GetApprovalRequestRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<Approval> {
-    const response = await this.getApprovalRequestRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
-  /**
    * Creates request options for getOperation without sending the request
    */
   async getOperationRequestOpts(
@@ -1615,147 +1224,6 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
-   * Creates request options for getUserBatch without sending the request
-   */
-  async getUserBatchRequestOpts(
-    requestParameters: GetUserBatchRequest,
-  ): Promise<runtime.RequestOpts> {
-    if (requestParameters["batchId"] == null) {
-      throw new runtime.RequiredError(
-        "batchId",
-        'Required parameter "batchId" was null or undefined when calling getUserBatch().',
-      );
-    }
-
-    const queryParameters: any = {};
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    if (requestParameters["xWorkspaceID"] != null) {
-      headerParameters["X-Workspace-ID"] = String(
-        requestParameters["xWorkspaceID"],
-      );
-    }
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/user-batches/{batch_id}`;
-    urlPath = urlPath.replace(
-      "{batch_id}",
-      encodeURIComponent(String(requestParameters["batchId"])),
-    );
-
-    return {
-      path: urlPath,
-      method: "GET",
-      headers: headerParameters,
-      query: queryParameters,
-    };
-  }
-
-  /**
-   * Get parent and per-item authorization, command, and result state
-   */
-  async getUserBatchRaw(
-    requestParameters: GetUserBatchRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<UserBatch>> {
-    const requestOptions =
-      await this.getUserBatchRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      UserBatchFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Get parent and per-item authorization, command, and result state
-   */
-  async getUserBatch(
-    requestParameters: GetUserBatchRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<UserBatch> {
-    const response = await this.getUserBatchRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
-  /**
-   * Creates request options for getUserOperationMetrics without sending the request
-   */
-  async getUserOperationMetricsRequestOpts(
-    requestParameters: GetUserOperationMetricsRequest,
-  ): Promise<runtime.RequestOpts> {
-    const queryParameters: any = {};
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    if (requestParameters["xWorkspaceID"] != null) {
-      headerParameters["X-Workspace-ID"] = String(
-        requestParameters["xWorkspaceID"],
-      );
-    }
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/user-operations/metrics`;
-
-    return {
-      path: urlPath,
-      method: "GET",
-      headers: headerParameters,
-      query: queryParameters,
-    };
-  }
-
-  /**
-   * Get workspace quota, expiry, and batch scheduler health counters
-   */
-  async getUserOperationMetricsRaw(
-    requestParameters: GetUserOperationMetricsRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<UserOperationMetrics>> {
-    const requestOptions =
-      await this.getUserOperationMetricsRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      UserOperationMetricsFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Get workspace quota, expiry, and batch scheduler health counters
-   */
-  async getUserOperationMetrics(
-    requestParameters: GetUserOperationMetricsRequest = {},
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<UserOperationMetrics> {
-    const response = await this.getUserOperationMetricsRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
-  /**
    * Creates request options for listAgentRollouts without sending the request
    */
   async listAgentRolloutsRequestOpts(
@@ -1898,81 +1366,6 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
-   * Creates request options for listPendingApprovals without sending the request
-   */
-  async listPendingApprovalsRequestOpts(
-    requestParameters: ListPendingApprovalsRequest,
-  ): Promise<runtime.RequestOpts> {
-    const queryParameters: any = {};
-
-    if (requestParameters["cursor"] != null) {
-      queryParameters["cursor"] = requestParameters["cursor"];
-    }
-
-    if (requestParameters["pageSize"] != null) {
-      queryParameters["page_size"] = requestParameters["pageSize"];
-    }
-
-    const headerParameters: runtime.HTTPHeaders = {};
-
-    if (requestParameters["xWorkspaceID"] != null) {
-      headerParameters["X-Workspace-ID"] = String(
-        requestParameters["xWorkspaceID"],
-      );
-    }
-
-    if (this.configuration && this.configuration.accessToken) {
-      const token = this.configuration.accessToken;
-      const tokenString = await token("bearerAuth", []);
-
-      if (tokenString) {
-        headerParameters["Authorization"] = `Bearer ${tokenString}`;
-      }
-    }
-
-    let urlPath = `/approval-requests`;
-
-    return {
-      path: urlPath,
-      method: "GET",
-      headers: headerParameters,
-      query: queryParameters,
-    };
-  }
-
-  /**
-   * Filters the selected workspace and every resource under the original authority snapshot before pagination. Excludes the requester and expired, approved or consumed requests. Ordered by immutable approval ID ascending; cursors remain usable after decisions or expiry. New requests may appear on later pages; refresh starts from the beginning.
-   * List independent pending approvals actionable by the current principal
-   */
-  async listPendingApprovalsRaw(
-    requestParameters: ListPendingApprovalsRequest,
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<ApprovalPage>> {
-    const requestOptions =
-      await this.listPendingApprovalsRequestOpts(requestParameters);
-    const response = await this.request(requestOptions, initOverrides);
-
-    return new runtime.JSONApiResponse(response, (jsonValue) =>
-      ApprovalPageFromJSON(jsonValue),
-    );
-  }
-
-  /**
-   * Filters the selected workspace and every resource under the original authority snapshot before pagination. Excludes the requester and expired, approved or consumed requests. Ordered by immutable approval ID ascending; cursors remain usable after decisions or expiry. New requests may appear on later pages; refresh starts from the beginning.
-   * List independent pending approvals actionable by the current principal
-   */
-  async listPendingApprovals(
-    requestParameters: ListPendingApprovalsRequest = {},
-    initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<ApprovalPage> {
-    const response = await this.listPendingApprovalsRaw(
-      requestParameters,
-      initOverrides,
-    );
-    return await response.value();
-  }
-
-  /**
    * Creates request options for reloadNodeService without sending the request
    */
   async reloadNodeServiceRequestOpts(
@@ -2004,12 +1397,6 @@ export class OperationsApi extends runtime.BaseAPI {
     const headerParameters: runtime.HTTPHeaders = {};
 
     headerParameters["Content-Type"] = "application/json";
-
-    if (requestParameters["xApprovalID"] != null) {
-      headerParameters["X-Approval-ID"] = String(
-        requestParameters["xApprovalID"],
-      );
-    }
 
     if (requestParameters["idempotencyKey"] != null) {
       headerParameters["Idempotency-Key"] = String(

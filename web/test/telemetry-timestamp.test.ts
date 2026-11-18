@@ -2,11 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   AgentRolloutFromJSON,
-  ApprovalFromJSON,
   ArtifactGrantFromJSON,
   CertificateFromJSON,
   ConfigPlanFromJSON,
-  ConfigPlanApprovalSummaryFromJSON,
   NodeObservedStateFromJSON,
   NodeSessionFromJSON,
   OperationFromJSON,
@@ -19,13 +17,11 @@ import {
   UserGroupResourceStateToJSON,
   UserPolicyFromJSON,
   UserPolicyToJSON,
-  UserBatchFromJSON,
-  UserBatchToJSON,
 } from "@ocservia/api-client";
 import { formatTimestamp } from "../src/shared/timestamp";
 
 describe("telemetry timestamps", () => {
-  it("retains policy and batch clocks without finite Date coercion", () => {
+  it("retains policy clocks without finite Date coercion", () => {
     const policy = UserPolicyFromJSON({
       expires_at: "infinity",
       period_start: "1970-01-01T00:00:00Z",
@@ -35,15 +31,6 @@ describe("telemetry timestamps", () => {
       expires_at: "infinity",
       period_start: "1970-01-01T00:00:00Z",
       observed_at: "+294276-12-31T23:59:59.999999Z",
-    });
-    const batch = UserBatchFromJSON({
-      items: [],
-      created_at: "-infinity",
-      updated_at: "infinity",
-    });
-    expect(UserBatchToJSON(batch)).toMatchObject({
-      created_at: "-infinity",
-      updated_at: "infinity",
     });
   });
   it("retains resource array dimensions, NULL members and observation time", () => {
@@ -70,22 +57,14 @@ describe("telemetry timestamps", () => {
     expect(resource.observedAt).toBe("infinity");
     expect(UserGroupResourceStateToJSON(resource)).toEqual(wire);
   });
-  it("retains approval expiry and creation clocks", () => {
-    const approval = ApprovalFromJSON({
-      expires_at: "infinity",
-      created_at: "-infinity",
-    });
-    expect(approval.expiresAt).toBe("infinity");
-    expect(approval.createdAt).toBe("-infinity");
-  });
-  it("retains rollout clocks and complete stored exclusions", () => {
-    const excluded = [null, ["nested"], { node_id: "node", extra: true }];
+  it("retains rollout clocks and decodes current exclusions", () => {
+    const excluded = [{ node_id: "node", reason: "offline" }];
     const rollout = AgentRolloutFromJSON({
       excluded,
       created_at: "-infinity",
       updated_at: "infinity",
     });
-    expect(rollout.excluded).toEqual(excluded);
+    expect(rollout.excluded).toEqual([{ nodeId: "node", reason: "offline" }]);
     expect(rollout.createdAt).toBe("-infinity");
     expect(rollout.updatedAt).toBe("infinity");
   });
@@ -99,9 +78,6 @@ describe("telemetry timestamps", () => {
     expect(plan.warnings).toEqual(warnings);
     expect(plan.createdAt).toBe("-infinity");
     expect(plan.expiresAt).toBe("infinity");
-    expect(
-      ConfigPlanApprovalSummaryFromJSON({ expires_at: "infinity" }).expiresAt,
-    ).toBe("infinity");
   });
   it("retains certificate timestamps and the complete DNS JSON array", () => {
     const dnsNames = ["example.test", null, ["nested"], { extra: true }];

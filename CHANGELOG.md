@@ -34,13 +34,19 @@ compatibility-policy reset in v1.1.0 described below.
 
 ### Breaking changes and upgrade notes
 
-- Move database artifacts to epoch 2: PostgreSQL revision 0 and MySQL
-  revision 1. The sole previous checkpoint is
-  `v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 / revision 0.
-  Earlier databases must reach that checkpoint first; the new binary cannot
-  replay the removed migration history. Retain a verified backup and the
-  existing audit keys before upgrading. There is no reverse SQL migration or
-  general historical binary rollback guarantee. See the
+- Remove MySQL 8.4 LTS support across the Controller, SQL schema and migration
+  artifacts, installation and Compose descriptors, `mysql_backup` image and
+  backup/restore scripts, and CI gates. PostgreSQL 18.x (`bundled` or
+  `external`) is now the sole supported relational database. Existing MySQL
+  configurations and saved `deployment-profile.json` states fail closed before
+  host, container, or volume changes without silent backend switching or data
+  deletion, and unverified cross-engine automatic migration is unsupported.
+- Move PostgreSQL database artifacts to epoch 2, revision 2. The sole previous
+  checkpoint is `v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 /
+  revision 0. Earlier PostgreSQL databases must reach that checkpoint first;
+  the new binary cannot replay the removed migration history. Retain a verified
+  backup and the existing audit keys before upgrading. There is no reverse SQL
+  migration or general historical binary rollback guarantee. See the
   [database migration contract](docs/reference/stable-contracts.md#database).
 - Require `OCSERV_CONTROLLER_ENDPOINT_ID` for normal production Controller
   startup; database-only one-shot commands remain exempt.
@@ -52,8 +58,6 @@ compatibility-policy reset in v1.1.0 described below.
 
 ### Security
 
-- Update the MySQL backup image's pcre2 packages for Oracle Linux
-  ELSA-2026-81532 while retaining the pinned MySQL 8.4.11 base.
 - Update rustls to 0.23.46 in the Rust workspace and independent Relay build
   for RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and
   RUSTSEC-2026-0349.

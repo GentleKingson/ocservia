@@ -17,7 +17,10 @@ const api = vi.hoisted(() => ({
   listNodeCertificates: vi.fn(),
   revokeCertificate: vi.fn(),
 }));
-vi.mock("../src/api/certificates", () => api);
+vi.mock("../src/api/certificates", async (original) => ({
+  ...(await original<object>()),
+  ...api,
+}));
 vi.mock("../src/api/operations", () => ({ getOperation: vi.fn() }));
 
 const scopes: EffectScope[] = [];
@@ -82,6 +85,27 @@ afterEach(async () => {
 });
 
 describe("certificate feature without a page or store", () => {
+  it("retains an ambiguous export identity and reports lost one-time credentials", async () => {
+    const { feature, trackOperation } = setup();
+    await feature.openCertificate();
+    feature.certificateReason.value = "export certificate";
+    await feature.submitCertificateRequest();
+    api.createCertificateP12.mockRejectedValueOnce(new TypeError("network"));
+    await feature.createP12();
+    expect(api.createCertificateP12).toHaveBeenCalledTimes(1);
+    const original = api.createCertificateP12.mock.calls[0];
+    api.createCertificateP12.mockResolvedValueOnce({
+      artifactId: "artifact-a",
+      operation: { id: "export-operation", nodeId: "node-a", state: "queued" },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await feature.createP12();
+    expect(api.createCertificateP12.mock.calls[1]).toEqual(original);
+    expect(feature.certificateError.value).toBe("p12GrantUnavailable");
+    expect(feature.certificateGrant.value?.downloadToken).toBeUndefined();
+    expect(trackOperation).toHaveBeenCalledExactlyOnceWith("export-operation");
+  });
+
   it("keeps local forms and preserves CSR, issue and P12 inputs and tracking", async () => {
     const { feature, trackOperation } = setup();
     const other = setup().feature;
@@ -99,12 +123,10 @@ describe("certificate feature without a page or store", () => {
       keyBits: 3072,
       reason: "certificate",
     });
-    feature.certificateApprovalId.value = " approval ";
     await feature.submitCertificateIssue();
     expect(api.issueCertificate).toHaveBeenCalledExactlyOnceWith(
       "certificate-a",
       {
-        approvalId: "approval",
         reason: "certificate",
       },
     );
@@ -121,7 +143,9 @@ describe("certificate feature without a page or store", () => {
       {
         expectedVersion: 31,
         certificateVersion: 3,
-        approvalId: "approval",
+        artifactRequestId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        ) as string,
         reason: "certificate",
       },
     );

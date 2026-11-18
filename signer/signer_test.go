@@ -485,3 +485,23 @@ func TestImageBindingsFixture(t *testing.T) {
 		must(t, os.WriteFile(dir+"/"+name, []byte(value), 0600))
 	}
 }
+
+func TestSingleAdminEnrollmentBinding(t *testing.T) {
+	b, _ := approvedKeys(t)
+	b.ApprovalID, b.ApprovalHash = "", ""
+	if err := validateBinding(b); err != nil {
+		t.Fatalf("single administrator binding: %v", err)
+	}
+	s, _ := fixture(t)
+	must(t, s.importBinding(b, b))
+	must(t, s.importBinding(b, b))
+	b.ApprovalHash = strings.Repeat("b", 64)
+	if err := validateBinding(b); err == nil {
+		t.Fatal("orphaned legacy approval hash accepted")
+	}
+	b.ApprovalHash = ""
+	b.ApprovalID = uuid.NewString()
+	if err := validateBinding(b); err == nil {
+		t.Fatal("orphaned legacy approval id accepted")
+	}
+}

@@ -19,8 +19,8 @@ vi.mock("../src/api/workspace", async (original) => ({
   ...(await original<typeof import("../src/api/workspace")>()),
   workspaceContext: mocks.workspaceContext,
 }));
-vi.mock("../src/adapters/user-policy", async (original) => ({
-  ...(await original<typeof import("../src/adapters/user-policy")>()),
+vi.mock("../src/features/user-policy", async (original) => ({
+  ...(await original<typeof import("../src/features/user-policy")>()),
   loadUserPolicy: mocks.loadUserPolicy,
   saveUserPolicy: mocks.saveUserPolicy,
 }));

@@ -36,52 +36,49 @@ func socketDirectory(t *testing.T) string {
 	return dir
 }
 
-func TestWorkerRoleAssembly(t *testing.T) {
+func TestWorkerAssembly(t *testing.T) {
 	signer, err := commandauth.NewRandomSigner()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, role := range []config.Role{config.RoleAPI, config.RoleWorker, config.RoleScheduler, config.RoleAll} {
-		for _, mode := range []string{"bare", "simulator", "endpoint", "endpoint-and-simulator"} {
-			t.Run(string(role)+"/"+mode, func(t *testing.T) {
-				ctx, cancel := context.WithCancel(context.Background())
-				cancel()
-				life := newLifecycle(ctx, time.Second, quietLogger())
-				cfg := config.Config{Role: role, TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock")}
-				cfg.LocalSimulator = strings.Contains(mode, "simulator")
-				if strings.Contains(mode, "endpoint") {
-					cfg.ControllerEndpointID = strings.Repeat("ab", 32)
-				}
-				backend := stoppedBackend{}
-				service, fence, err := startWorker(life, cfg, BuildInfo{}, backend, signer, operations.NewBackend(backend, 50, signer), quietLogger())
-				if err != nil {
-					_ = life.close(err)
-					t.Fatal(err)
-				}
-				if service == nil {
-					t.Fatal("shared transport event service missing")
-				}
-				want := 0
-				workerRole := role == config.RoleWorker || role == config.RoleAll
-				if workerRole && mode != "bare" {
-					want = 3
-				}
-				owner := workerRole && strings.Contains(mode, "endpoint")
-				if owner {
-					want += 3
-				}
-				_, hasOwner := fence.(*ownersession.Manager)
-				if len(life.tasks) != want || hasOwner != owner || (life.trust != nil) != owner {
-					t.Fatalf("tasks=%d owner=%v trust=%v", len(life.tasks), hasOwner, life.trust != nil)
-				}
-				if err := life.close(ctx.Err()); !errors.Is(err, context.Canceled) {
-					t.Fatal(err)
-				}
-				if _, err := os.Stat(cfg.TrustSocket); !errors.Is(err, os.ErrNotExist) {
-					t.Fatal("Trust socket survived cleanup", err)
-				}
-			})
-		}
+	for _, mode := range []string{"bare", "simulator", "endpoint", "endpoint-and-simulator"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			life := newLifecycle(ctx, time.Second, quietLogger())
+			cfg := config.Config{TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock")}
+			cfg.LocalSimulator = strings.Contains(mode, "simulator")
+			if strings.Contains(mode, "endpoint") {
+				cfg.ControllerEndpointID = strings.Repeat("ab", 32)
+			}
+			backend := stoppedBackend{}
+			service, fence, err := startWorker(life, cfg, BuildInfo{}, backend, signer, operations.NewBackend(backend, 50, signer), quietLogger())
+			if err != nil {
+				_ = life.close(err)
+				t.Fatal(err)
+			}
+			if service == nil {
+				t.Fatal("shared transport event service missing")
+			}
+			want := 0
+			if mode != "bare" {
+				want = 3
+			}
+			owner := strings.Contains(mode, "endpoint")
+			if owner {
+				want += 3
+			}
+			_, hasOwner := fence.(*ownersession.Manager)
+			if len(life.tasks) != want || hasOwner != owner || (life.trust != nil) != owner {
+				t.Fatalf("tasks=%d owner=%v trust=%v", len(life.tasks), hasOwner, life.trust != nil)
+			}
+			if err := life.close(ctx.Err()); !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(cfg.TrustSocket); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("Trust socket survived cleanup", err)
+			}
+		})
 	}
 }
 
@@ -89,7 +86,7 @@ func TestWorkerPartialStartupClosesTrust(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	life := newLifecycle(ctx, time.Second, quietLogger())
-	cfg := config.Config{Role: config.RoleWorker, ControllerEndpointID: strings.Repeat("ab", 32), TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock"), TestResultCommitBarrier: "/missing/result-commit-barrier"}
+	cfg := config.Config{ControllerEndpointID: strings.Repeat("ab", 32), TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock"), TestResultCommitBarrier: "/missing/result-commit-barrier"}
 	signer, err := commandauth.NewRandomSigner()
 	if err != nil {
 		t.Fatal(err)

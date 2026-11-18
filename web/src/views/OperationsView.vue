@@ -1,16 +1,14 @@
 <script setup lang="ts">
 import { RefreshCw } from "@lucide/vue";
 import type { AgentRollout, Operation } from "@ocservia/api-client";
-import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { getOperation, listOperations } from "../api/operations";
 import {
   getWorkspace,
-  sameWorkspaceContext,
-  workspaceChangedEvent,
   workspaceContext,
+  type WorkspaceContext,
 } from "../api/workspace";
 import { listAgentRollouts } from "../api/agents";
 import { operationStatusKey } from "../shared/operation-status";
@@ -28,6 +26,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { createReadRequest } from "../shared/read-request";
 import { formatTimestamp } from "../shared/timestamp";
 
 const operations = ref<Operation[]>([]);
@@ -43,39 +42,24 @@ const unavailable = ref(false);
 const error = ref("");
 const hasMore = ref(false);
 const nextCursor = ref<string>();
-let requestController: AbortController | undefined;
-let detailController: AbortController | undefined;
-let rolloutController: AbortController | undefined;
-let requestSequence = 0;
-let detailSequence = 0;
-let rolloutSequence = 0;
+const operationReads = createReadRequest();
+const detailReads = createReadRequest();
+const rolloutReads = createReadRequest();
 
 function invalidateDetail(): void {
-  detailController?.abort();
-  detailController = undefined;
-  detailSequence += 1;
+  detailReads.cancel();
   detailLoading.value = false;
 }
 
-function invalidateRollouts(): void {
-  rolloutController?.abort();
-  rolloutController = undefined;
-  rolloutSequence += 1;
-}
-
 function cancelRequests(): void {
-  requestController?.abort();
-  requestController = undefined;
-  requestSequence += 1;
+  operationReads.cancel();
   invalidateDetail();
-  invalidateRollouts();
+  rolloutReads.cancel();
 }
 
 async function loadOperations(reset = true): Promise<void> {
-  requestController?.abort();
-  const controller = new AbortController();
-  requestController = controller;
-  const sequence = ++requestSequence;
+  const request = operationReads.begin();
+  let context: WorkspaceContext | undefined;
   if (reset) {
     operations.value = [];
     nextCursor.value = undefined;
@@ -85,17 +69,13 @@ async function loadOperations(reset = true): Promise<void> {
   error.value = "";
   try {
     await getWorkspace();
-    const context = workspaceContext();
+    if (!request.current()) return;
+    context = workspaceContext();
     const page = await listOperations(
       reset ? undefined : nextCursor.value,
-      controller.signal,
+      request.signal,
     );
-    if (
-      controller.signal.aborted ||
-      sequence !== requestSequence ||
-      !sameWorkspaceContext(workspaceContext(), context)
-    )
-      return;
+    if (!request.current(context)) return;
     operations.value = reset
       ? page.items
       : [...operations.value, ...page.items];
@@ -103,70 +83,56 @@ async function loadOperations(reset = true): Promise<void> {
     nextCursor.value = page.page.nextCursor;
     unavailable.value = false;
   } catch (cause) {
-    if (controller.signal.aborted || sequence !== requestSequence) return;
+    if (!request.current(context)) return;
     unavailable.value = true;
     error.value =
       cause instanceof Error ? cause.message : t("operationsUnavailable");
   } finally {
-    if (requestController === controller) {
-      requestController = undefined;
+    if (request.finish()) {
       loading.value = false;
     }
   }
 }
 
 async function inspectOperation(operationId: string): Promise<void> {
-  detailController?.abort();
-  const controller = new AbortController();
-  detailController = controller;
-  const sequence = ++detailSequence;
+  const request = detailReads.begin();
+  let context: WorkspaceContext | undefined;
   detailLoading.value = true;
   detailState.value = { error: "" };
   try {
     await getWorkspace();
-    const context = workspaceContext();
-    const operation = await getOperation(operationId, controller.signal);
-    if (
-      controller.signal.aborted ||
-      sequence !== detailSequence ||
-      !sameWorkspaceContext(workspaceContext(), context)
-    )
-      return;
+    if (!request.current()) return;
+    context = workspaceContext();
+    const operation = await getOperation(operationId, request.signal);
+    if (!request.current(context)) return;
     detailState.value = { selected: operation, error: "" };
   } catch {
-    if (controller.signal.aborted || sequence !== detailSequence) return;
+    if (!request.current(context)) return;
     detailState.value = { error: t("operationDetailsUnavailable") };
   } finally {
-    if (detailController === controller) {
-      detailController = undefined;
+    if (request.finish()) {
       detailLoading.value = false;
     }
   }
 }
 
 async function loadRollouts(): Promise<void> {
-  invalidateRollouts();
-  const controller = new AbortController();
-  rolloutController = controller;
-  const sequence = rolloutSequence;
+  const request = rolloutReads.begin();
+  let context: WorkspaceContext | undefined;
   try {
     await getWorkspace();
-    if (sequence !== rolloutSequence) return;
-    const context = workspaceContext();
-    const page = await listAgentRollouts(10, controller.signal);
-    if (
-      sequence !== rolloutSequence ||
-      !sameWorkspaceContext(workspaceContext(), context)
-    )
-      return;
+    if (!request.current()) return;
+    context = workspaceContext();
+    const page = await listAgentRollouts(10, request.signal);
+    if (!request.current(context)) return;
     rollouts.value = page.rollouts;
     rolloutsUnavailable.value = false;
   } catch {
-    if (controller.signal.aborted || sequence !== rolloutSequence) return;
+    if (!request.current(context)) return;
     rollouts.value = [];
     rolloutsUnavailable.value = true;
   } finally {
-    if (rolloutController === controller) rolloutController = undefined;
+    request.finish();
   }
 }
 
@@ -175,16 +141,6 @@ function refresh(): void {
   void loadRollouts();
 }
 
-// Rows and details from the previous workspace disappear before new reads.
-function refreshForWorkspace(): void {
-  invalidateDetail();
-  detailState.value = { error: "" };
-  rollouts.value = [];
-  rolloutsUnavailable.value = false;
-  refresh();
-}
-
-useEventListener(window, workspaceChangedEvent, refreshForWorkspace);
 onMounted(() => {
   refresh();
 });

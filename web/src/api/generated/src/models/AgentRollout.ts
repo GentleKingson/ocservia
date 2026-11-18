@@ -20,6 +20,13 @@ import {
   AgentRolloutNodeToJSON,
   AgentRolloutNodeToJSONTyped,
 } from "./AgentRolloutNode";
+import type { AgentRolloutExcludedInner } from "./AgentRolloutExcludedInner";
+import {
+  AgentRolloutExcludedInnerFromJSON,
+  AgentRolloutExcludedInnerFromJSONTyped,
+  AgentRolloutExcludedInnerToJSON,
+  AgentRolloutExcludedInnerToJSONTyped,
+} from "./AgentRolloutExcludedInner";
 
 /**
  * Durable server-side orchestration state; failed and unknown node outcomes always pause the rollout.
@@ -74,12 +81,6 @@ export interface AgentRollout {
    * @type {string}
    * @memberof AgentRollout
    */
-  approvalId: string;
-  /**
-   *
-   * @type {string}
-   * @memberof AgentRollout
-   */
   createdBy: string;
   /**
    *
@@ -112,11 +113,11 @@ export interface AgentRollout {
    */
   nodes?: Array<AgentRolloutNode>;
   /**
-   *
-   * @type {Array<any>}
+   * Current entries follow AgentRolloutExclusion. Historical stored JSON values remain readable unchanged.
+   * @type {Array<AgentRolloutExcludedInner>}
    * @memberof AgentRollout
    */
-  excluded?: Array<any>;
+  excluded?: Array<AgentRolloutExcludedInner>;
 }
 
 /**
@@ -169,13 +170,6 @@ export function instanceOfAgentRollout(value: object): value is AgentRollout {
     return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
   if (
-    (!("approvalId" in (value as Record<string, any>)) &&
-      !("approval_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["approvalId"] === undefined &&
-      (value as Record<string, any>)["approval_id"] === undefined)
-  )
-    return false;
-  if (
     (!("createdBy" in (value as Record<string, any>)) &&
       !("created_by" in (value as Record<string, any>))) ||
     ((value as Record<string, any>)["createdBy"] === undefined &&
@@ -225,7 +219,6 @@ export function AgentRolloutFromJSONTyped(
     batchSize: json["batch_size"],
     stopOnFailure: json["stop_on_failure"],
     reason: json["reason"],
-    approvalId: json["approval_id"],
     createdBy: json["created_by"],
     currentBatch: json["current_batch"],
     pauseCode: json["pause_code"] == null ? undefined : json["pause_code"],
@@ -235,7 +228,12 @@ export function AgentRolloutFromJSONTyped(
       json["nodes"] == null
         ? undefined
         : (json["nodes"] as Array<any>).map(AgentRolloutNodeFromJSON),
-    excluded: json["excluded"] == null ? undefined : json["excluded"],
+    excluded:
+      json["excluded"] == null
+        ? undefined
+        : (json["excluded"] as Array<any>).map(
+            AgentRolloutExcludedInnerFromJSON,
+          ),
   };
 }
 
@@ -259,7 +257,6 @@ export function AgentRolloutToJSONTyped(
     batch_size: value["batchSize"],
     stop_on_failure: value["stopOnFailure"],
     reason: value["reason"],
-    approval_id: value["approvalId"],
     created_by: value["createdBy"],
     current_batch: value["currentBatch"],
     pause_code: value["pauseCode"],
@@ -269,6 +266,11 @@ export function AgentRolloutToJSONTyped(
       value["nodes"] == null
         ? undefined
         : (value["nodes"] as Array<any>).map(AgentRolloutNodeToJSON),
-    excluded: value["excluded"],
+    excluded:
+      value["excluded"] == null
+        ? undefined
+        : (value["excluded"] as Array<any>).map(
+            AgentRolloutExcludedInnerToJSON,
+          ),
   };
 }

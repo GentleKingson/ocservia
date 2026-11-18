@@ -42,7 +42,7 @@ export interface AuditVerification {
    * @type {number}
    * @memberof AuditVerification
    */
-  compactedEvents?: number;
+  compactedEvents: number;
   /**
    *
    * @type {boolean}
@@ -66,6 +66,13 @@ export function instanceOfAuditVerification(
     return false;
   if (!("events" in value) || value["events"] === undefined) return false;
   if (!("valid" in value) || value["valid"] === undefined) return false;
+  if (
+    (!("compactedEvents" in (value as Record<string, any>)) &&
+      !("compacted_events" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["compactedEvents"] === undefined &&
+      (value as Record<string, any>)["compacted_events"] === undefined)
+  )
+    return false;
   if (
     (!("checkpointValid" in (value as Record<string, any>)) &&
       !("checkpoint_valid" in (value as Record<string, any>))) ||
@@ -91,8 +98,7 @@ export function AuditVerificationFromJSONTyped(
     workspaceId: json["workspace_id"],
     events: json["events"],
     valid: json["valid"],
-    compactedEvents:
-      json["compacted_events"] == null ? undefined : json["compacted_events"],
+    compactedEvents: json["compacted_events"],
     checkpointValid: json["checkpoint_valid"],
   };
 }

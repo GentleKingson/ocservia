@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Disposable hosted runner only: Quick install end to end with locally built
-# release images and a Pebble ACME directory. Run as root through sudo.
+# Disposable hosted runner only: Quick install end to end with shared
+# release image artifacts and a Pebble ACME directory. Run as root through sudo.
 #
-# Checks: two-account login, ACME certificates for both names, idempotent
+# Checks: initial-admin login, ACME certificates for both names, idempotent
 # reruns, resuming an unrecorded Local bootstrap, root CA custody, no
 # credentials in output, published ports, and upgrade/rollback/upgrade
 # keeping material and certificates.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-: "${VERSION:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}"
+: "${VERSION:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" "${IMAGES_DIR:?}"
 SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD)"
 CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
 export SOURCE_COMMIT CONTROLLER_ARCH
@@ -27,12 +27,12 @@ CREDENTIALS_DIR=/root/ocservia-initial-credentials
 # controller.sh refuses a release file under a group/world-writable ancestor
 # such as /tmp, so the work directory lives under root-only /root.
 work="$(mktemp -d /root/quick-acceptance.XXXXXX)"
-export BUILDX_BUILDER="quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" OUTPUT_DIR="${work}/products"
+export BUILDX_BUILDER="quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 registry="${BUILDX_BUILDER}-registry" pebble="${BUILDX_BUILDER}-pebble"
 gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
 controller="controller.${gateway}.sslip.io" relay="relay.${gateway}.sslip.io"
 host_trust=/usr/local/share/ca-certificates/ocservia-quick-acceptance-pebble.crt
-stage=build
+stage=preflight
 
 cleanup() {
   local code=$?
@@ -40,14 +40,12 @@ cleanup() {
   set +e
   if ((code)); then
     echo "Quick acceptance failed at stage ${stage}" >&2
-    [[ "${stage}" != build ]] || tail -n 100 "${work}/controller-build.log" >&2
     for log in "${work}"/run-*.log; do [[ ! -f "${log}" ]] || { echo "== ${log##*/}"; cat -- "${log}"; } >&2; done
     for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production) "${pebble}"; do
       docker inspect --format '== {{.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "${container}"
       docker logs --tail 80 "${container}" 2>&1
     done >&2
   fi
-  docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1
   rm -f -- "${host_trust}" && update-ca-certificates --fresh >/dev/null 2>&1
   rm -rf -- "${work}"
   exit "${code}"
@@ -59,14 +57,14 @@ pass() { echo "PASS: $1"; }
 absent() { if grep -qF -- "$@"; then echo "unexpected: $1" >&2; return 1; fi; }
 
 bash "${ROOT}/scripts/release-upgrade-native.sh" "${CONTROLLER_ARCH}"
-bash "${ROOT}/scripts/build-release-controller.sh" >"${work}/controller-build.log" 2>&1
+test -s "${IMAGES_DIR}/product-identity.json"
 
 stage=publish
 docker run -d --restart unless-stopped --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 manifest_args=(--image "postgres=${POSTGRES_IMAGE}" --image "otel=${OTEL_IMAGE}")
-roles=(gateway control transport backup edge relay signer mysql_backup)
+roles=(gateway control transport backup edge relay signer)
 for name in "${roles[@]}"; do
-  docker load -i "${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
+  docker load -i "${IMAGES_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
   [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}")" == "linux/${CONTROLLER_ARCH}" ]]
   docker tag "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}" "localhost:5000/${name}:v${VERSION}"
   docker push "localhost:5000/${name}:v${VERSION}"
@@ -167,12 +165,11 @@ login() {
 }
 accounts() {
   login admin
-  login approver
-  [[ "$(stat -c '%u:%a' "${CREDENTIALS_DIR}" "${CREDENTIALS_DIR}"/{admin,approver}.txt | sort -u | paste -sd' ')" == "0:400 0:700" ]]
+  [[ "$(stat -c '%u:%a' "${CREDENTIALS_DIR}" "${CREDENTIALS_DIR}/admin.txt" | sort -u | paste -sd' ')" == "0:400 0:700" ]]
   [[ -e "${CREDENTIALS_DIR}/complete" && ! -e /etc/ocservia/secrets/local-bootstrap-admin-password ]]
 }
 accounts
-pass "initial-admin and initial-approver log in"
+pass "initial-admin logs in"
 
 stage=custody
 # The root CA private key exists only, encrypted, in the export directory.
@@ -195,7 +192,7 @@ stage=rerun
 materials() { find /etc/ocservia "${CREDENTIALS_DIR}" -type f ! -name complete -print0 | sort -z | xargs -0 sha256sum; }
 before="$(materials)"
 "${quick[@]}" >"${work}/run-rerun.log" 2>&1
-grep -qF "initial Local administrators already exist" "${work}/run-rerun.log"
+grep -qF "initial Local administrator already exists" "${work}/run-rerun.log"
 [[ "$(materials)" == "${before}" && "$(served)" == "${certificates}" ]]
 accounts
 pass "a rerun keeps material and certificates"
@@ -235,14 +232,13 @@ lifecycle upgrade --release-file "${upgrade_manifest}"
 pass "upgrade after rollback keeps material, certificates and accounts"
 
 stage=output
-for account in admin approver; do
-  password="$(sed -n 's/^Password: //p' "${CREDENTIALS_DIR}/${account}.txt")"
-  [[ -n "${password}" ]]
-  absent "${password}" "${work}"/run-*.log
-  for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production); do
-    docker logs "${container}" >"${work}/container.log" 2>&1
-    absent "${password}" "${work}/container.log"
-  done
+password="$(sed -n 's/^Password: //p' "${CREDENTIALS_DIR}/admin.txt")"
+[[ -n "${password}" ]]
+absent "${password}" "${work}"/run-*.log
+for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production); do
+  docker logs "${container}" >"${work}/container.log" 2>&1
+  absent "${password}" "${work}/container.log"
 done
+
 pass "passwords appear in no installer output or container log"
 echo "Quick acceptance passed"

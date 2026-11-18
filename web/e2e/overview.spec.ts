@@ -1,10 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const alphaId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
-const betaId = "019fc0a4-6d92-765c-a8a1-4af556614cc2";
 const alphaNodeA = "019fc0a4-6d92-765c-a8a1-4af556614cc3";
 const alphaNodeB = "019fc0a4-6d92-765c-a8a1-4af556614cc4";
-const betaNodeA = "019fc0a4-6d92-765c-a8a1-4af556614cc5";
 
 interface SimulationResponse {
   id: string;
@@ -126,7 +124,7 @@ test("shows a live platform event without a page reload", async ({ page }) => {
     .toBeGreaterThan(0);
 });
 
-test("switching workspaces replaces every overview number and list", async ({
+test("renders workspace overview counts, lists, and stream", async ({
   page,
 }) => {
   await installEventSourceProbe(page);
@@ -136,18 +134,16 @@ test("switching workspaces replaces every overview number and list", async ({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        items: [
-          { id: alphaId, name: "Alpha", slug: "alpha", version: 1 },
-          { id: betaId, name: "Beta", slug: "beta", version: 1 },
-        ],
+        items: [{ id: alphaId, name: "Alpha", slug: "alpha", version: 1 }],
       }),
     }),
   );
-  await page.route("**/api/v1/nodes?**", (route) => {
-    const workspaceId = route.request().headers()["x-workspace-id"];
-    const isAlpha = workspaceId === alphaId;
-    const items = isAlpha
-      ? [
+  await page.route("**/api/v1/nodes?**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
           {
             id: alphaNodeA,
             name: "Alpha node A",
@@ -169,31 +165,17 @@ test("switching workspaces replaces every overview number and list", async ({
             dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
             session_count: 0,
           },
-        ]
-      : [
-          {
-            id: betaNodeA,
-            name: "Beta node A",
-            version: 1,
-            trust_status: "active",
-            connection_state: "online",
-            freshness: "fresh",
-            dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-            session_count: 5,
-            path: { mode: "relay", rtt_ms: 61 },
-          },
-        ];
-    return route.fulfill({
+        ],
+        page: { has_more: false },
+      }),
+    }),
+  );
+  await page.route("**/api/v1/operations?**", (route) =>
+    route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ items, page: { has_more: false } }),
-    });
-  });
-  await page.route("**/api/v1/operations?**", (route) => {
-    const workspaceId = route.request().headers()["x-workspace-id"];
-    const isAlpha = workspaceId === alphaId;
-    const items = isAlpha
-      ? [
+      body: JSON.stringify({
+        items: [
           {
             id: "019fc0a4-6d92-765c-a8a1-4af556614cd1",
             state: "queued",
@@ -210,40 +192,24 @@ test("switching workspaces replaces every overview number and list", async ({
             created_at: "2026-08-26T07:00:00Z",
             updated_at: "2026-08-26T07:00:00Z",
           },
-        ]
-      : [
-          {
-            id: "019fc0a4-6d92-765c-a8a1-4af556614cd3",
-            state: "unknown",
-            node_id: betaNodeA,
-            version: 1,
-            created_at: "2026-08-26T09:00:00Z",
-            updated_at: "2026-08-26T09:00:00Z",
-          },
-        ];
-    return route.fulfill({
+        ],
+        page: { has_more: false },
+      }),
+    }),
+  );
+  await page.route("**/api/v1/operations/summary", (route) =>
+    route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ items, page: { has_more: false } }),
-    });
-  });
-  await page.route("**/api/v1/operations/summary", (route) => {
-    const workspaceId = route.request().headers()["x-workspace-id"];
-    const summary =
-      workspaceId === alphaId
-        ? { active: 1, unknown: 0 }
-        : { active: 0, unknown: 1 };
-    return route.fulfill({
+      body: JSON.stringify({ active: 1, unknown: 0 }),
+    }),
+  );
+  await page.route("**/api/v1/events?**", (route) =>
+    route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(summary),
-    });
-  });
-  await page.route("**/api/v1/events?**", (route) => {
-    const workspaceId = route.request().headers()["x-workspace-id"];
-    const isAlpha = workspaceId === alphaId;
-    const items = isAlpha
-      ? [
+      body: JSON.stringify({
+        items: [
           {
             id: "019fc0a4-6d92-765c-a8a1-4af556614ce1",
             node_id: alphaNodeA,
@@ -251,22 +217,11 @@ test("switching workspaces replaces every overview number and list", async ({
             traceparent: "00-trace-span-01",
             occurred_at: "2026-08-26T08:00:00Z",
           },
-        ]
-      : [
-          {
-            id: "019fc0a4-6d92-765c-a8a1-4af556614ce2",
-            node_id: betaNodeA,
-            type: "path_changed",
-            traceparent: "00-trace-span-01",
-            occurred_at: "2026-08-26T09:00:00Z",
-          },
-        ];
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ items, page: { has_more: false } }),
-    });
-  });
+        ],
+        page: { has_more: false },
+      }),
+    }),
+  );
 
   await page.goto("/");
   await expect(page.getByTestId("overview-nodes")).toHaveText("2");
@@ -294,21 +249,6 @@ test("switching workspaces replaces every overview number and list", async ({
   await expect(
     page.getByTestId("overview-notable-nodes").getByText("Alpha node B"),
   ).toBeVisible();
-
-  await page.getByLabel("Workspace").selectOption(betaId);
-
-  await expect(page.getByTestId("overview-nodes")).toHaveText("1");
-  await expect(page.getByTestId("overview-sessions")).toHaveText("5");
-  await expect(page.getByTestId("overview-operations")).toHaveText("0");
-  await expect(page.getByTestId("overview-connectivity")).toHaveText("0");
-  await expect(page.getByTestId("overview-events")).toContainText(
-    "Connection path changed",
-  );
-  await expect(page.getByTestId("overview-events")).toContainText(
-    "Beta node A",
-  );
-  await expect(page.getByText("Alpha node A")).toHaveCount(0);
-  await expect(page.getByText("Alpha node B")).toHaveCount(0);
   await expect
     .poll(() =>
       page.evaluate(() => {

@@ -19,7 +19,6 @@ import {
   getWorkspace,
   sameWorkspaceContext,
   workspaceContext,
-  workspaceChangedEvent,
   type WorkspaceContext,
 } from "../api/workspace";
 import {
@@ -44,6 +43,7 @@ import {
   applyGroup,
 } from "../api/users";
 
+import { createReadRequest } from "./read-request";
 import { abortableDelay } from "./abortable-delay";
 import { createForegroundRefresh, isPageActive } from "./foreground-refresh";
 
@@ -100,14 +100,11 @@ export const useFleetStore = defineStore("fleet", () => {
   // every replayed page triggers another rebuild.
   let eventCursor: string | undefined;
   const streamConnected = ref(false);
-  let reading = false;
   let selectionTarget: string | undefined;
   let connectSequence = 0;
   const controllers = new Set<AbortController>();
-  let rebuildController: AbortController | undefined;
-  let rebuildSequence = 0;
-  let selectController: AbortController | undefined;
-  let selectSequence = 0;
+  const rebuildReads = createReadRequest();
+  const selectReads = createReadRequest();
   let operationController: AbortController | undefined;
   let operationSequence = 0;
 
@@ -130,13 +127,11 @@ export const useFleetStore = defineStore("fleet", () => {
   function abortRequests(): void {
     for (const controller of controllers) controller.abort();
     controllers.clear();
-    rebuildController = undefined;
-    selectController = undefined;
+    rebuildReads.cancel();
+    selectReads.cancel();
     operationController = undefined;
     selecting.value = false;
     operationTracking.value = false;
-    rebuildSequence += 1;
-    selectSequence += 1;
     operationSequence += 1;
   }
 
@@ -208,29 +203,21 @@ export const useFleetStore = defineStore("fleet", () => {
 
   async function rebuild(): Promise<void> {
     if (!isPageActive()) return;
-    cancelRequest(rebuildController);
-    const controller = trackRequest();
-    rebuildController = controller;
-    const sequence = ++rebuildSequence;
-    const selectSequenceAtStart = selectSequence;
+    const request = rebuildReads.begin();
+    const selectSequenceAtStart = selectReads.revision;
     let context: WorkspaceContext | undefined;
     loading.value = true;
     try {
       context = await currentContext();
       const isLatestRebuild = () =>
-        Boolean(
-          context &&
-          rebuildController === controller &&
-          sequence === rebuildSequence &&
-          isCurrent(context, controller),
-        );
+        Boolean(context && request.current(context));
       if (!isLatestRebuild()) return;
       // Read the cursor before the nodes so events racing the snapshot are
       // still delivered. An open stream keeps the cursor current itself.
       // A failed lookup falls back to a full replay rather than failing.
       const snapshotCursor = source
         ? undefined
-        : await listEvents(undefined, controller.signal, "desc").then(
+        : await listEvents(undefined, request.signal, "desc").then(
             (page) => page.items[0]?.id,
             () => undefined,
           );
@@ -238,7 +225,7 @@ export const useFleetStore = defineStore("fleet", () => {
       const rebuilt: NodeObservedState[] = [];
       let cursor: string | undefined;
       do {
-        const page = await listNodes(cursor, controller.signal);
+        const page = await listNodes(cursor, request.signal);
         if (!isLatestRebuild()) return;
         rebuilt.push(...page.items);
         cursor = page.page.hasMore ? page.page.nextCursor : undefined;
@@ -248,22 +235,17 @@ export const useFleetStore = defineStore("fleet", () => {
       if (!source) eventCursor = snapshotCursor;
       snapshotAt.value = new Date();
       initialized.value = true;
-      if (selectionTarget && selectSequence === selectSequenceAtStart)
+      if (selectionTarget && selectReads.revision === selectSequenceAtStart)
         await select(selectionTarget);
       if (!isLatestRebuild()) return;
       unavailable.value = false;
     } catch {
       if (!context) return;
-      const isLatestRebuild =
-        rebuildController === controller &&
-        sequence === rebuildSequence &&
-        isCurrent(context, controller);
+      const isLatestRebuild = request.current(context);
       if (!isLatestRebuild) return;
       unavailable.value = true;
     } finally {
-      releaseRequest(controller);
-      if (rebuildController === controller) {
-        rebuildController = undefined;
+      if (request.finish()) {
         loading.value = false;
       }
     }
@@ -281,38 +263,29 @@ export const useFleetStore = defineStore("fleet", () => {
       ipBans.value = [];
       userGroupState.value = [];
     }
-    cancelRequest(selectController);
-    const controller = trackRequest();
-    selectController = controller;
-    const sequence = ++selectSequence;
+    const request = selectReads.begin();
     let context: WorkspaceContext | undefined;
     selecting.value = true;
     selectionError.value = "";
     try {
       context = await currentContext();
-      const isLatestSelect = () =>
-        Boolean(
-          context &&
-          selectController === controller &&
-          sequence === selectSequence &&
-          isCurrent(context, controller),
-        );
+      const isLatestSelect = () => Boolean(context && request.current(context));
       if (!isLatestSelect()) return;
-      const node = await getNode(nodeId, controller.signal);
+      const node = await getNode(nodeId, request.signal);
       if (!isLatestSelect()) return;
       const rebuiltSessions: NodeSession[] = [];
       let cursor: string | undefined;
       do {
-        const page = await listNodeSessions(nodeId, cursor, controller.signal);
+        const page = await listNodeSessions(nodeId, cursor, request.signal);
         if (!isLatestSelect()) return;
         rebuiltSessions.push(...page.items);
         cursor = page.page.hasMore ? page.page.nextCursor : undefined;
       } while (cursor);
       if (!isLatestSelect()) return;
-      const rebuiltIpBans = (await listNodeIpBans(nodeId, controller.signal))
+      const rebuiltIpBans = (await listNodeIpBans(nodeId, request.signal))
         .items;
       const rebuiltUserGroupState = (
-        await listNodeUserGroupState(nodeId, controller.signal)
+        await listNodeUserGroupState(nodeId, request.signal)
       ).items;
       if (!isLatestSelect()) return;
       selected.value = node;
@@ -323,10 +296,7 @@ export const useFleetStore = defineStore("fleet", () => {
       unavailable.value = false;
     } catch (error) {
       if (!context) return;
-      const isLatestSelect =
-        selectController === controller &&
-        sequence === selectSequence &&
-        isCurrent(context, controller);
+      const isLatestSelect = request.current(context);
       if (!isLatestSelect) return;
       if (responseStatus(error) === 404) {
         selectionError.value = "notFound";
@@ -335,9 +305,7 @@ export const useFleetStore = defineStore("fleet", () => {
         selectionError.value = "unavailable";
       }
     } finally {
-      releaseRequest(controller);
-      if (selectController === controller) {
-        selectController = undefined;
+      if (request.finish()) {
         selecting.value = false;
         foregroundRefresh.reschedule();
       }
@@ -358,7 +326,7 @@ export const useFleetStore = defineStore("fleet", () => {
     operationController = controller;
     operationTracking.value = true;
     const sequence = ++operationSequence;
-    const selectSequenceAtStart = selectSequence;
+    const selectSequenceAtStart = selectReads.revision;
     const isLatestOperation = () =>
       operationController === controller &&
       sequence === operationSequence &&
@@ -389,7 +357,7 @@ export const useFleetStore = defineStore("fleet", () => {
       if (
         isLatestOperation() &&
         currentOperation.state === "succeeded" &&
-        selectSequence === selectSequenceAtStart &&
+        selectReads.revision === selectSequenceAtStart &&
         selected.value.id === node.id
       ) {
         await select(node.id);
@@ -434,20 +402,16 @@ export const useFleetStore = defineStore("fleet", () => {
     await runOperation((node, signal) => removeIpBan(node, ip, reason, signal));
   }
 
-  async function reload(reason: string, approvalId: string): Promise<void> {
-    await runOperation((node, signal) =>
-      reloadService(node, reason, approvalId, signal),
-    );
+  async function reload(reason: string): Promise<void> {
+    await runOperation((node, signal) => reloadService(node, reason, signal));
   }
 
   async function upgradeAgent(
     targetVersion: string,
     reason: string,
-    approvalId: string,
   ): Promise<void> {
     await runOperation(
-      (node, signal) =>
-        upgradeNodeAgent(node, targetVersion, reason, approvalId, signal),
+      (node, signal) => upgradeNodeAgent(node, targetVersion, reason, signal),
       upgradeTerminalStates,
     );
   }
@@ -529,14 +493,17 @@ export const useFleetStore = defineStore("fleet", () => {
     source = undefined;
     streamConnected.value = false;
     // Suspend snapshot reads only; accepted operations keep their own tracking.
-    cancelRequest(rebuildController);
-    cancelRequest(selectController);
+    rebuildReads.cancel();
+    selectReads.cancel();
+    // Cancellation fences old finalizers; the read owner settles its UI state.
+    loading.value = false;
+    selecting.value = false;
   }
 
   const foregroundRefresh = createForegroundRefresh(
     async () => {
       const sequence = connectSequence;
-      if (!loading.value || rebuildController?.signal.aborted) await rebuild();
+      if (!loading.value || !rebuildReads.pending) await rebuild();
       if (sequence === connectSequence && isPageActive() && !source)
         await connect();
     },
@@ -550,15 +517,13 @@ export const useFleetStore = defineStore("fleet", () => {
   );
 
   function start(): void {
-    reading = true;
     foregroundRefresh.start();
   }
 
   // Leaving a view stops its reads, but does not cancel accepted mutations.
   function stop(): void {
-    reading = false;
     foregroundRefresh.stop();
-    selectSequence += 1;
+    selectReads.cancel();
     selectionTarget = undefined;
     selected.value = undefined;
     sessions.value = [];
@@ -569,7 +534,6 @@ export const useFleetStore = defineStore("fleet", () => {
   }
 
   async function connect(): Promise<void> {
-    reading = true;
     foregroundRefresh.start(false);
     if (!isPageActive()) return;
     const sequence = ++connectSequence;
@@ -647,30 +611,6 @@ export const useFleetStore = defineStore("fleet", () => {
     eventCursor = undefined;
     streamConnected.value = false;
     abortRequests();
-  }
-  function resetWorkspace(): void {
-    const wasReading = reading;
-    disconnect();
-    nodes.value = [];
-    snapshotAt.value = undefined;
-    selected.value = undefined;
-    sessions.value = [];
-    ipBans.value = [];
-    userGroupState.value = [];
-    latestOperation.value = undefined;
-    operationTracking.value = false;
-    operationError.value = "";
-    loading.value = false;
-    initialized.value = false;
-    selecting.value = false;
-    selectionError.value = "";
-    if (wasReading) start();
-  }
-  if (typeof window !== "undefined") {
-    window.addEventListener(workspaceChangedEvent, resetWorkspace);
-    onScopeDispose(() => {
-      window.removeEventListener(workspaceChangedEvent, resetWorkspace);
-    });
   }
   onScopeDispose(disconnect);
   return {

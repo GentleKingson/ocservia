@@ -7,16 +7,12 @@ import (
 	"errors"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/observedstate"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
-	driver "github.com/go-sql-driver/mysql"
+	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -28,64 +24,9 @@ import (
 func telemetryBackend(t *testing.T) database.Backend {
 	t.Helper()
 	ctx := context.Background()
-	if dsn := os.Getenv("OCSERVIA_DATABASE_TEST_DSN"); dsn != "" {
-		options := mysql.Options{Engine: mysql.Engine(os.Getenv("OCSERVIA_DATABASE_TEST_ENGINE")), Environment: "test", DSN: dsn}
-		admin, err := mysql.Open(ctx, options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { admin.Close() })
-		name := "dbtest_ingest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-		if _, err = admin.Exec(ctx, "CREATE DATABASE `"+name+"`"); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if _, err := admin.Exec(ctx, "DROP DATABASE `"+name+"`"); err != nil {
-				t.Error(err)
-			}
-		})
-		if _, err = admin.Exec(ctx, "GRANT ALL ON `"+name+"`.* TO 'ocservia_owner'@'%' WITH GRANT OPTION"); err != nil {
-			t.Fatal(err)
-		}
-		config, err := driver.ParseDSN(dsn)
-		if err != nil {
-			t.Fatal("invalid test DSN")
-		}
-		config.DBName, config.User, config.Passwd = name, "ocservia_owner", "database-e2e-owner-test-only"
-		options.DSN = config.FormatDSN()
-		owner, err := mysql.Open(ctx, options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { owner.Close() })
-		if err = owner.Migrate(ctx, ""); err != nil {
-			t.Fatal(err)
-		}
-		if err = owner.MigrateTelemetryHistory(ctx); err != nil {
-			t.Fatal(err)
-		}
-		now := time.Now().UTC()
-		if err = owner.ProvisionTelemetryMonth(ctx, now); err != nil {
-			t.Fatal(err)
-		}
-		if err = owner.ProvisionTelemetryMonth(ctx, now.AddDate(0, 0, -14)); err != nil {
-			t.Fatal(err)
-		}
-		if err = owner.GrantTestPrivileges(ctx); err != nil {
-			t.Fatal(err)
-		}
-		config.User, config.Passwd = "ocservia_app", "database-e2e-runtime-test-only"
-		options.DSN = config.FormatDSN()
-		runtime, err := mysql.Open(ctx, options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { runtime.Close() })
-		return runtime
-	}
 	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("real PostgreSQL or configured database test backend required")
+		t.Skip("real PostgreSQL required")
 	}
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -102,27 +43,15 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	node, workspace := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	mysqlEngine := false
-	if _, ok := backend.(*mysql.Backend); ok {
-		mysqlEngine = true
-	}
-	exec := func(pg, my string, args ...any) {
+	exec := func(query string, args ...any) {
 		t.Helper()
-		if mysqlEngine {
-			pg = my
-			for i, v := range args {
-				if id, ok := v.(uuid.UUID); ok {
-					args[i] = mysql.UUIDBytes(id)
-				}
-			}
-		}
-		if _, err := backend.Exec(ctx, pg, args...); err != nil {
+		if _, err := backend.Exec(ctx, query, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Ingest',$2,now(),now())`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Ingest',?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, workspace, "ingest-"+workspace.String())
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','offline',now(),now())`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'node','offline',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, node, workspace)
-	exec(`UPDATE nodes SET updated_at=$1 WHERE id=$2`, `UPDATE nodes SET updated_at=? WHERE id=?`, value.Timestamp{Valid: true, Micros: value.PositiveInfinity}, node)
+	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Ingest',$2,now(),now())`, workspace, "ingest-"+workspace.String())
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','offline',now(),now())`, node, workspace)
+	exec(`UPDATE nodes SET updated_at=$1 WHERE id=$2`, value.Timestamp{Valid: true, Micros: value.PositiveInfinity}, node)
 	service := NewBackend(backend)
 	unobserved, err := service.GetNode(ctx, node)
 	if err != nil || unobserved.ObservedAt != nil || unobserved.Freshness != "never" {
@@ -131,12 +60,12 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if unobserved.EffectiveActions["user.manage"].Allowed {
 		t.Fatal("readonly node advertised user writes")
 	}
-	exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES(?,'ocserv.users.write',true)`, node)
+	exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, node)
 	writable, err := service.GetNode(ctx, node)
 	if err != nil || !writable.EffectiveActions["user.manage"].Allowed || writable.EffectiveActions["group.manage"].Allowed {
 		t.Fatalf("approved action read: %+v %v", writable.EffectiveActions, err)
 	}
-	exec(`UPDATE node_capabilities SET approved=false WHERE node_id=$1`, `UPDATE node_capabilities SET approved=false WHERE node_id=?`, node)
+	exec(`UPDATE node_capabilities SET approved=false WHERE node_id=$1`, node)
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	wireID, instance := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -174,15 +103,9 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if inserted, err := service.Ingest(ctx, batch); err != nil || inserted {
 		t.Fatalf("duplicate: %v %v", inserted, err)
 	}
-	snapshotQuery := `SELECT system,observed_at FROM node_observed_snapshots WHERE node_id=$1`
-	var snapshotNode any = node
-	if mysqlEngine {
-		snapshotQuery = "SELECT `system`,observed_at FROM node_observed_snapshots WHERE node_id=?"
-		snapshotNode = mysql.UUIDBytes(node)
-	}
 	var storedJSON value.JSONB
 	var storedTime value.Timestamp
-	if err := backend.QueryRow(ctx, snapshotQuery, snapshotNode).Scan(&storedJSON, &storedTime); err != nil {
+	if err := backend.QueryRow(ctx, `SELECT system,observed_at FROM node_observed_snapshots WHERE node_id=$1`, node).Scan(&storedJSON, &storedTime); err != nil {
 		t.Fatal(err)
 	}
 	expectedJSON, _ := value.ParseJSONB(batch.Snapshot.System)
@@ -224,7 +147,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		t.Fatalf("session cursor repeated IPv6 session: %+v %v %v", next, more, err)
 	}
 	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := observedstate.FromTransaction(tx)
+		store, err := telemetrystore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -243,15 +166,11 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		if !bytes.Equal(event.Detail.Bytes(), expected.Bytes()) {
 			t.Fatalf("security detail lost precision: %s", event.Detail.Bytes())
 		}
-		history, err := telemetryhistory.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
 		since, err := value.FromTime(now.Add(-time.Hour))
 		if err != nil {
 			return err
 		}
-		points, err := history.History(ctx, node, "connection_rtt_ms", "raw", since)
+		points, err := store.History(ctx, node, "connection_rtt_ms", "raw", since)
 		if err != nil {
 			return err
 		}
@@ -269,14 +188,8 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if ok, err := service.Ingest(ctx, stale); !ok || err != nil {
 		t.Fatalf("stale: %v %v", ok, err)
 	}
-	query := `SELECT count(*) FROM node_sessions WHERE node_id=$1`
-	var nodeArg any = node
-	if mysqlEngine {
-		query = `SELECT count(*) FROM node_sessions WHERE node_id=?`
-		nodeArg = mysql.UUIDBytes(node)
-	}
 	var count int
-	if err := backend.QueryRow(ctx, query, nodeArg).Scan(&count); err != nil || count != 1 {
+	if err := backend.QueryRow(ctx, `SELECT count(*) FROM node_sessions WHERE node_id=$1`, node).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("stale replaced sessions: %d %v", count, err)
 	}
 	// The session identity conflict occurs after the batch and snapshot writes.
@@ -325,28 +238,21 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	}
 	negative := value.Timestamp{Micros: value.NegativeInfinity, Valid: true}
 	positive := value.Timestamp{Micros: value.PositiveInfinity, Valid: true}
-	var historyOwner *postgres.Backend
-	if !mysqlEngine {
-		// Infinite historical timestamps belong to owner-seeded DEFAULT data,
-		// not the runtime ingestion window. Keep the service on its runtime account.
-		ownerDSN := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-		if ownerDSN == "" {
-			t.Fatal("owner connection required to seed historical telemetry")
-		}
-		ownerPool, err := pgxpool.New(ctx, ownerDSN)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(ownerPool.Close)
-		historyOwner = postgres.WrapPool(ownerPool)
+	// Infinite historical timestamps belong to owner-seeded DEFAULT data,
+	// not the runtime ingestion window. Keep the service on its runtime account.
+	ownerDSN := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerDSN == "" {
+		t.Fatal("owner connection required to seed historical telemetry")
 	}
+	ownerPool, err := pgxpool.New(ctx, ownerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ownerPool.Close)
+	historyOwner := postgres.WrapPool(ownerPool)
 	for _, at := range []value.Timestamp{negative, positive} {
-		if historyOwner != nil {
-			if _, err := historyOwner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'connection_rtt_ms',7)`, node, batch.ID, at); err != nil {
-				t.Fatal(err)
-			}
-		} else {
-			exec("", `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES(?,?,?,'connection_rtt_ms',7)`, node, batch.ID, at)
+		if _, err := historyOwner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'connection_rtt_ms',7)`, node, batch.ID, at); err != nil {
+			t.Fatal(err)
 		}
 	}
 	points, err := service.HistoryFrom(ctx, node, "connection_rtt_ms", "raw", negative)
@@ -361,17 +267,11 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if err := service.Maintain(fenced); !errors.Is(err, outerFailure) {
 		t.Fatalf("maintenance fence: %v", err)
 	}
-	statusQuery := `SELECT status,updated_at FROM nodes WHERE id=$1`
-	eventQuery := `SELECT count(*) FROM transport_events WHERE node_id=$1 AND event_type='disconnected'`
-	if mysqlEngine {
-		statusQuery = `SELECT status,updated_at FROM nodes WHERE id=?`
-		eventQuery = `SELECT count(*) FROM transport_events WHERE node_id=? AND event_type='disconnected'`
-	}
 	checkState := func(status string, events int) {
 		t.Helper()
 		var got string
 		var updated value.Timestamp
-		if err := backend.QueryRow(ctx, statusQuery, nodeArg).Scan(&got, &updated); err != nil || got != status {
+		if err := backend.QueryRow(ctx, `SELECT status,updated_at FROM nodes WHERE id=$1`, node).Scan(&got, &updated); err != nil || got != status {
 			t.Fatalf("maintenance state: %s %v", got, err)
 		}
 		want := positive
@@ -384,7 +284,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		if updated != want {
 			t.Fatal("activation/maintenance node clock", updated, want)
 		}
-		if err := backend.QueryRow(ctx, eventQuery, nodeArg).Scan(&count); err != nil || count != events {
+		if err := backend.QueryRow(ctx, `SELECT count(*) FROM transport_events WHERE node_id=$1 AND event_type='disconnected'`, node).Scan(&count); err != nil || count != events {
 			t.Fatalf("maintenance events: %d %v", count, err)
 		}
 	}
@@ -405,7 +305,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		}
 	}
 	for _, at := range []value.Timestamp{negative, positive} {
-		exec(`UPDATE node_observed_snapshots SET last_heartbeat_at=$1,observed_at=$2 WHERE node_id=$3`, `UPDATE node_observed_snapshots SET last_heartbeat_at=?,observed_at=? WHERE node_id=?`, at, at, node)
+		exec(`UPDATE node_observed_snapshots SET last_heartbeat_at=$1,observed_at=$2 WHERE node_id=$3`, at, at, node)
 		read, err := service.GetNode(ctx, node)
 		if err != nil {
 			t.Fatal(err)

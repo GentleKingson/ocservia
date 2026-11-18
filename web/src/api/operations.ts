@@ -1,17 +1,14 @@
 import {
   OperationsApi,
-  DevelopmentApi,
   type NodeObservedState,
   type Operation,
   type OperationPage,
   type OperationSummary,
-  type SimulationScenario,
 } from "@ocservia/api-client";
 import { configuration, newIdempotencyKey, requestInit } from "./transport";
 import { getWorkspaceId } from "./workspace";
 
 const operations = new OperationsApi(configuration);
-const development = new DevelopmentApi(configuration);
 
 function controlledRequest(node: NodeObservedState, reason: string) {
   return {
@@ -43,16 +40,6 @@ export async function operationSummary(
 ): Promise<OperationSummary> {
   const xWorkspaceID = await getWorkspaceId();
   return operations.getOperationSummary({ xWorkspaceID }, requestInit(signal));
-}
-
-export async function createLocalSimulation(
-  simulationScenario: SimulationScenario,
-  signal?: AbortSignal,
-): Promise<Operation> {
-  return development.createLocalSimulation(
-    { simulationScenario },
-    requestInit(signal),
-  );
 }
 
 export async function getOperation(
@@ -125,13 +112,11 @@ export async function removeIpBan(
 export async function reloadService(
   node: NodeObservedState,
   reason: string,
-  approvalId: string,
   signal?: AbortSignal,
 ): Promise<Operation> {
   return operations.reloadNodeService(
     {
       nodeId: node.id,
-      xApprovalID: approvalId,
       ...controlledRequest(node, reason),
     },
     requestInit(signal),

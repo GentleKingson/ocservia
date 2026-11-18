@@ -1,29 +1,8 @@
-import type { Page, Route } from "@playwright/test";
 import { expect, test } from "./csp";
-
-// WebKit cannot fulfill a 3xx in Playwright, so a simulated redirect is a
-// page that replaces itself with the next location.
-function redirect(route: Route, location: string): Promise<void> {
-  return route.fulfill({
-    contentType: "text/html",
-    body: `<script>location.replace(${JSON.stringify(location)})</script>`,
-  });
-}
-
-async function methods(
-  page: Page,
-  local: boolean,
-  oidc: boolean,
-): Promise<void> {
-  await page.route("**/api/v1/auth/methods", (route) =>
-    route.fulfill({ json: { local, oidc } }),
-  );
-}
 
 test("local-only login restores return path and initializes the shell without storing passwords", async ({
   page,
 }) => {
-  await methods(page, true, false);
   let authenticated = false;
   await page.route("**/api/v1/workspaces", (route) =>
     authenticated
@@ -69,6 +48,7 @@ test("local-only login restores return path and initializes the shell without st
   await expect(page).toHaveURL(/\/nodes\?filter=login#latest$/);
   await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
   await expect(page.getByTestId("workspace")).toContainText("Alpha");
+  await expect(page.locator("#workspace-select")).toHaveCount(0);
   await expect(page.getByTestId("readiness")).toHaveText("Ready");
   expect(
     await page.evaluate(() =>
@@ -84,24 +64,21 @@ test("local-only login restores return path and initializes the shell without st
   await expect(page).toHaveURL(/\/settings$/);
 });
 
-test("combined login shows generic credential and rate-limit errors, and SSO uses GET", async ({
+test("local login shows generic credential and rate-limit errors", async ({
   page,
 }) => {
-  await methods(page, true, true);
   let status = 401;
   await page.route("**/api/v1/auth/login", (route) =>
-    route.request().method() === "GET"
-      ? route.fulfill({ contentType: "text/html", body: "SSO provider" })
-      : route.fulfill({
-          status,
-          headers: { "Retry-After": "42" },
-          json: { detail: "User not found" },
-        }),
+    route.fulfill({
+      status,
+      headers: { "Retry-After": "42" },
+      json: { detail: "User not found" },
+    }),
   );
   await page.goto("/login");
   await expect(
     page.getByRole("button", { name: "Sign in with SSO" }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await page.getByLabel("Username", { exact: true }).fill("alice");
   await page.getByLabel("Password", { exact: true }).fill("test-only-password");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
@@ -116,176 +93,11 @@ test("combined login shows generic credential and rate-limit errors, and SSO use
   await expect(page.getByRole("alert")).toHaveText(
     "Too many attempts. Please try again in 42 seconds.",
   );
-  await page.getByRole("button", { name: "Sign in with SSO" }).click();
-  await expect(page).toHaveURL(/\/api\/v1\/auth\/login$/);
-});
-
-test("OIDC-only redirects without a click", async ({ page }) => {
-  await methods(page, false, true);
-  await page.route("**/api/v1/auth/login", (route) =>
-    route.fulfill({ contentType: "text/html", body: "SSO provider" }),
-  );
-  await page.goto("/login");
-  await expect(page).toHaveURL(/\/api\/v1\/auth\/login$/);
-});
-
-test("unavailable methods fail closed and can be retried", async ({ page }) => {
-  await methods(page, false, false);
-  await page.goto("/login");
-  await expect(page.getByRole("alert")).toBeVisible();
-  await expect(page.getByLabel("Password", { exact: true })).toHaveCount(0);
-  await methods(page, true, false);
-  await page.getByRole("button", { name: "Try again" }).click();
-  await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
-});
-
-test("OIDC return followed by 401 stops automatic login and permits manual retry", async ({
-  page,
-}) => {
-  await methods(page, false, true);
-  let starts = 0;
-  await page.route("**/api/v1/workspaces", (route) =>
-    route.fulfill({ status: 401, json: {} }),
-  );
-  await page.route("**/api/v1/auth/login", (route) => {
-    starts += 1;
-    return starts < 3
-      ? redirect(route, "/")
-      : route.fulfill({ contentType: "text/html", body: "Loop safety stop" });
-  });
-  await page.goto("/nodes?filter=login#latest");
-  await expect(
-    page.getByRole("button", { name: "Sign in with SSO" }),
-  ).toBeVisible();
-  expect(starts).toBe(1);
-  await page.reload();
-  await expect(
-    page.getByRole("button", { name: "Sign in with SSO" }),
-  ).toBeVisible();
-  expect(starts).toBe(1);
-  expect(
-    await page.evaluate(() =>
-      sessionStorage.getItem("ocservia.login.return-to"),
-    ),
-  ).toBe("/nodes?filter=login#latest");
-  await page.getByRole("button", { name: "Sign in with SSO" }).click();
-  await expect.poll(() => starts).toBe(2);
-  await expect(
-    page.getByRole("button", { name: "Sign in with SSO" }),
-  ).toBeVisible();
-});
-
-test("fixed failure marker prevents auto SSO without accepting external returnTo", async ({
-  page,
-}) => {
-  await methods(page, false, true);
-  let starts = 0;
-  await page.route("**/api/v1/auth/login", (route) => {
-    starts += 1;
-    return route.fulfill({ contentType: "text/html", body: "Manual SSO" });
-  });
-  await page.goto(
-    "/login?auth=failed&returnTo=https://evil.example&error=provider-secret",
-  );
-  await expect(page.getByRole("alert")).toHaveText(
-    "SSO did not complete. Sign in with SSO to try again.",
-  );
-  expect(starts).toBe(0);
-  await page.getByRole("button", { name: "Sign in with SSO" }).click();
-  await expect(page).toHaveURL(/\/api\/v1\/auth\/login$/);
-  expect(starts).toBe(1);
-});
-
-test("callback rejection is terminal and revisiting login offers manual retry", async ({
-  page,
-}) => {
-  await methods(page, false, true);
-  let starts = 0;
-  let callbacks = 0;
-  let authenticated = false;
-  await page.route("**/api/v1/workspaces", (route) =>
-    authenticated
-      ? route.fulfill({
-          json: {
-            items: [
-              { id: "workspace-a", name: "Alpha", slug: "alpha", version: 1 },
-            ],
-          },
-        })
-      : route.fulfill({ status: 401, json: {} }),
-  );
-  await page.route("**/api/v1/readyz", (route) => route.fulfill({ json: {} }));
-  await page.route("**/api/v1/operations/summary", (route) =>
-    route.fulfill({ json: { active: 0, unknown: 0 } }),
-  );
-  for (const resource of ["nodes", "operations", "events"]) {
-    await page.route(`**/api/v1/${resource}?**`, (route) =>
-      route.fulfill({ json: { items: [], page: { has_more: false } } }),
-    );
-  }
-  await page.route("**/api/v1/events/stream?**", (route) =>
-    route.fulfill({ contentType: "text/event-stream", body: "" }),
-  );
-  await page.route("**/api/v1/auth/login", (route) => {
-    starts += 1;
-    // A new navigation from the simulated IdP lets Playwright intercept the
-    // callback; it does not re-route requests within a fulfilled 302 chain.
-    return route.fulfill({
-      contentType: "text/html",
-      body: `<script>location.replace("/api/v1/auth/callback?state=test&code=test")</script>`,
-    });
-  });
-  await page.route("**/api/v1/auth/callback?**", (route) => {
-    callbacks += 1;
-    if (callbacks === 1) {
-      return route.fulfill({
-        status: 401,
-        json: {
-          type: "https://ocservia.dev/problems/oidc-callback-rejected",
-          title: "Login rejected",
-        },
-      });
-    }
-    authenticated = true;
-    return redirect(route, "/");
-  });
-  const rejected = page.waitForResponse("**/api/v1/auth/callback?**");
-  await page.goto("/nodes?filter=login#latest");
-  expect((await rejected).status()).toBe(401);
-  await expect(page).toHaveURL(/\/api\/v1\/auth\/callback\?/);
-  await expect(page.locator("body")).toContainText("Login rejected");
-  expect(callbacks).toBe(1);
-  expect(starts).toBe(1);
-  await page.goto("/login");
-  const retry = page.getByRole("button", { name: "Sign in with SSO" });
-  await expect(retry).toBeVisible();
-  await expect(page.getByRole("alert")).toHaveText(
-    "SSO did not complete. Sign in with SSO to try again.",
-  );
-  await page.reload();
-  await expect(retry).toBeVisible();
-  expect(starts).toBe(1);
-  expect(callbacks).toBe(1);
-
-  const accepted = page.waitForResponse("**/api/v1/auth/callback?**");
-  await retry.click();
-  expect((await accepted).status()).toBe(200);
-  await expect(page).toHaveURL(/\/nodes\?filter=login#latest$/);
-  await expect(page.getByTestId("workspace")).toContainText("Alpha");
-  expect(starts).toBe(2);
-  expect(callbacks).toBe(2);
-  expect(
-    await page.evaluate(() => [
-      sessionStorage.getItem("ocservia.login.oidc-attempt"),
-      sessionStorage.getItem("ocservia.login.return-to"),
-    ]),
-  ).toEqual([null, null]);
 });
 
 test("signed-out visits never render the console shell before login", async ({
   page,
 }) => {
-  await methods(page, true, false);
   await page.addInitScript(() => {
     new MutationObserver(() => {
       if (document.querySelector("#main-content, aside"))

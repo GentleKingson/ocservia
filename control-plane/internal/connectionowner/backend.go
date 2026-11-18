@@ -9,7 +9,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner/ownerstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/google/uuid"
 )
 
 func AcquireBackend(ctx context.Context, backend database.Backend, nodeID [16]byte, identity Identity, connectionID [16]byte, leaseTTL time.Duration) (*Term, error) {
@@ -114,41 +113,6 @@ func (t *Term) AssertTransaction(ctx context.Context, tx database.Tx) error {
 
 func (t *Term) AssertCurrentBackend(ctx context.Context, backend database.Backend) error {
 	return database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error { return t.AssertTransaction(ctx, tx) })
-}
-
-// GuardObservedTermBackend keeps the transaction open for the bounded external
-// mutation. Its release never depends on the request still being uncancelled.
-func GuardObservedTermBackend(ctx context.Context, backend database.Backend, nodeID [16]byte, instanceID uuid.UUID, incarnation int64, connectionID [16]byte, epoch int64) (release func() error, err error) {
-	tx, err := backend.Begin(ctx, database.ReadCommitted)
-	if err != nil {
-		return nil, err
-	}
-	cleanup := func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		err := tx.Rollback(ctx)
-		if errors.Is(err, database.ErrTxClosed) {
-			return nil
-		}
-		return err
-	}
-	defer func() {
-		if err != nil {
-			_ = cleanup()
-		}
-	}()
-	store, err := ownerstore.FromTransaction(tx)
-	if err != nil {
-		return nil, err
-	}
-	err = store.Assert(ctx, ownerstore.Term{Identity: Identity{InstanceID: instanceID, Incarnation: incarnation}, NodeID: nodeID, ConnectionID: connectionID, Epoch: epoch})
-	if errors.Is(err, database.ErrNotFound) {
-		return nil, ErrNotOwner
-	}
-	if err != nil {
-		return nil, err
-	}
-	return cleanup, nil
 }
 
 func ReadStateBackend(ctx context.Context, backend database.Backend, nodeID [16]byte) (state OwnerState, err error) {

@@ -24,12 +24,6 @@ export interface ConfigApplyRequest {
    * @type {string}
    * @memberof ConfigApplyRequest
    */
-  approvalId: string;
-  /**
-   *
-   * @type {string}
-   * @memberof ConfigApplyRequest
-   */
   reason: string;
 }
 
@@ -39,13 +33,6 @@ export interface ConfigApplyRequest {
 export function instanceOfConfigApplyRequest(
   value: object,
 ): value is ConfigApplyRequest {
-  if (
-    (!("approvalId" in (value as Record<string, any>)) &&
-      !("approval_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["approvalId"] === undefined &&
-      (value as Record<string, any>)["approval_id"] === undefined)
-  )
-    return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
   return true;
 }
@@ -62,7 +49,6 @@ export function ConfigApplyRequestFromJSONTyped(
     return json;
   }
   return {
-    approvalId: json["approval_id"],
     reason: json["reason"],
   };
 }
@@ -80,7 +66,6 @@ export function ConfigApplyRequestToJSONTyped(
   }
 
   return {
-    approval_id: value["approvalId"],
     reason: value["reason"],
   };
 }

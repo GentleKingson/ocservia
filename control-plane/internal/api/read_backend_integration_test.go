@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,11 +10,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
@@ -24,24 +19,15 @@ import (
 func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	backend := authenticationBackend(t)
 	ctx := context.Background()
-	_, mysqlEngine := backend.(*mysql.Backend)
-	exec := func(pg, my string, args ...any) {
+	exec := func(query string, args ...any) {
 		t.Helper()
-		if mysqlEngine {
-			pg = my
-			for i, arg := range args {
-				if id, ok := arg.(uuid.UUID); ok {
-					args[i] = mysql.UUIDBytes(id)
-				}
-			}
-		}
-		if _, err := backend.Exec(ctx, pg, args...); err != nil {
+		if _, err := backend.Exec(ctx, query, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
 	workspace, other := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	for _, id := range []uuid.UUID{workspace, other} {
-		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Read API',$2,now(),now())`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Read API',?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, id, "read-"+id.String())
+		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Read API',$2,now(),now())`, id, "read-"+id.String())
 	}
 	service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
@@ -53,17 +39,25 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	at, _ := value.FromTime(time.Now().UTC())
-	bindingID := uuid.Must(uuid.NewV7())
-	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'PlatformAdmin','workspace',?)`, bindingID, identity, workspace, at)
-	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(backend)})
-	server.EnableTransportEvents(transportevents.NewBackend(backend, nil))
-	server.devAuthToken = "read-backend-development-token-32-characters"
+	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, workspace, identity, at)
+	config := testHTTPConfig(false)
+	config.LocalSimulator, config.DevAuthToken = true, "read-backend-development-token-32-characters"
+	server := newTestServer(t, config, backend, Modules{TransportEvents: transportevents.NewBackend(backend, nil)}, Authorization{Authentication: service})
 	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
 	login := authHTTPRequest(server, "POST", "login", `{"username":"`+username+`","password":"`+password+`"}`, authTestOrigin)
 	if login.Code != http.StatusNoContent || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("reader login: %d %s", login.Code, login.Body)
 	}
 	cookie := login.Result().Cookies()[0]
+	nonAdminName, nonAdminPass := "read-nonadmin-"+uuid.NewString(), "a long Controller reader test password"
+	if _, err := service.CreateLocalCredential(ctx, nonAdminName, nonAdminPass); err != nil {
+		t.Fatal(err)
+	}
+	nonAdminLogin := authHTTPRequest(server, "POST", "login", `{"username":"`+nonAdminName+`","password":"`+nonAdminPass+`"}`, authTestOrigin)
+	if nonAdminLogin.Code != http.StatusNoContent || len(nonAdminLogin.Result().Cookies()) != 1 {
+		t.Fatalf("non-admin reader login: %d %s", nonAdminLogin.Code, nonAdminLogin.Body)
+	}
+	nonAdminCookie := nonAdminLogin.Result().Cookies()[0]
 	get := func(path string, scope uuid.UUID, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(http.MethodGet, path, nil)
@@ -102,9 +96,9 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	for _, stamp := range stamps {
 		id := uuid.Must(uuid.NewV7())
 		auditIDs = append(auditIDs, id)
-		exec(`INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES($1,$2,$3,'system','fixture','reader.fixture','workspace','read-api','succeeded',$4)`, `INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES(?,?,?,'system','fixture','reader.fixture','workspace','read-api','succeeded',?)`, id, workspace, stamp, make([]byte, 32))
+		exec(`INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES($1,$2,$3,'system','fixture','reader.fixture','workspace','read-api','succeeded',$4)`, id, workspace, stamp, make([]byte, 32))
 	}
-	exec(`INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES($1,$2,$3,'system','fixture','hidden.fixture','workspace','read-api','succeeded',$4)`, `INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES(?,?,?,'system','fixture','hidden.fixture','workspace','read-api','succeeded',?)`, uuid.Must(uuid.NewV7()), other, stamps[2], make([]byte, 32))
+	exec(`INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,request_id,result,event_hash) VALUES($1,$2,$3,'system','fixture','hidden.fixture','workspace','read-api','succeeded',$4)`, uuid.Must(uuid.NewV7()), other, stamps[2], make([]byte, 32))
 	var page struct {
 		Items []map[string]json.RawMessage `json:"items"`
 	}
@@ -121,7 +115,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 		if err := json.Unmarshal(item["occurred_at"], &stamp); err != nil || stamp != stamps[2-i] {
 			t.Fatalf("audit time: %s %v", item["occurred_at"], err)
 		}
-		for _, field := range []string{"resource_id", "node_id", "trace_id", "command_id", "approval_id", "reason", "error_type"} {
+		for _, field := range []string{"resource_id", "node_id", "trace_id", "command_id", "reason", "error_type"} {
 			if string(item[field]) != "null" {
 				t.Fatalf("nullable %s changed: %s", field, item[field])
 			}
@@ -133,25 +127,8 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	}
 
 	node := uuid.Must(uuid.NewV7())
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'read node','active',now(),now())`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'read node','active',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, node, workspace)
-	store, err := rbacstore.From(backend)
-	if err != nil {
-		t.Fatal(err)
-	}
-	readUpgradeNode := func(id uuid.UUID) (scope uuid.UUID, architecture, version string, err error) {
-		err = store.UpgradeNode(ctx, id).Scan(&scope, &architecture, &version)
-		return
-	}
-	if scope, architecture, version, err := readUpgradeNode(node); err != nil || scope != workspace || architecture != "" || version != "" {
-		t.Fatalf("unobserved upgrade target: %s %q %q %v", scope, architecture, version, err)
-	}
-	if _, _, _, err := readUpgradeNode(uuid.Must(uuid.NewV7())); !errors.Is(err, database.ErrNotFound) {
-		t.Fatalf("missing upgrade target: %v", err)
-	}
-	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$2,'read-api',$3,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$2)`, "INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,`system`,path,last_heartbeat_at) VALUES(?,? ,?,'read-api',?,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',?)", readSnapshotArgs(mysqlEngine, node, stamps[0])...)
-	if scope, architecture, version, err := readUpgradeNode(node); err != nil || scope != workspace || architecture != "amd64" || version != "1.0.0" {
-		t.Fatalf("observed upgrade target: %s %q %q %v", scope, architecture, version, err)
-	}
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'read node','active',now(),now())`, node, workspace)
+	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$2,'read-api',$3,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$2)`, node, stamps[0], uuid.Must(uuid.NewV7()))
 	if err := telemetry.NewBackend(backend).Maintain(ctx); err != nil {
 		t.Fatal("offline maintenance", err)
 	}
@@ -181,12 +158,11 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	}
 	get("/readyz", uuid.Nil, nil, http.StatusOK)
 	get("/readyz", uuid.Nil, nil, http.StatusOK)
-	exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, bindingID)
-	w = get("/api/v1/workspaces", uuid.Nil, cookie, http.StatusOK)
+	w = get("/api/v1/workspaces", uuid.Nil, nonAdminCookie, http.StatusOK)
 	if err := json.Unmarshal(w.Body.Bytes(), &workspaces); err != nil || len(workspaces.Items) != 0 {
 		t.Fatalf("empty authorized workspaces: %s %v", w.Body, err)
 	}
-	get("/api/v1/audit/events", workspace, cookie, http.StatusForbidden)
+	get("/api/v1/audit/events", workspace, nonAdminCookie, http.StatusForbidden)
 	server.devAuth = true
 	w = get("/api/v1/workspaces", uuid.Nil, nil, http.StatusOK)
 	if err := json.Unmarshal(w.Body.Bytes(), &workspaces); err != nil {
@@ -206,12 +182,4 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &metrics); err != nil || metrics.Available || len(metrics.Keys) != 3 {
 		t.Fatalf("unavailable metrics: %s %v", w.Body, err)
 	}
-}
-
-func readSnapshotArgs(mysqlEngine bool, node uuid.UUID, stamp value.Timestamp) []any {
-	instance := uuid.Must(uuid.NewV7())
-	if mysqlEngine {
-		return []any{node, stamp, stamp, instance, stamp}
-	}
-	return []any{node, stamp, instance}
 }

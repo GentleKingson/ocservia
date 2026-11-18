@@ -43,7 +43,7 @@ func TestSessionClockStartsAfterBegin(t *testing.T) {
 			}
 			var err error
 			if name == "session" {
-				_, _, err = s.createSession(context.Background(), "test-issuer", "subject", "", "", false, nil)
+				_, _, err = s.createSession(context.Background(), LocalIssuer, "subject", nil)
 			} else {
 				_, _, err = s.BreakGlass(context.Background(), token, "test-request")
 			}

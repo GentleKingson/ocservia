@@ -25,17 +25,33 @@ if [[ "${POSTGRES_SERVER_MAJOR}" != 18 ]]; then
 fi
 
 umask 077
-mkdir -p "${BACKUP_ROOT}/base" "${BACKUP_ROOT}/wal"
-for path in "${BACKUP_ROOT}" "${BACKUP_ROOT}/base" "${BACKUP_ROOT}/wal"; do
+validate_backup_dir() {
+  local path="$1" dir_uid dir_mode
   if [[ -L "${path}" || ! -d "${path}" ]]; then
     echo "backup path must be a real directory: ${path}" >&2
     exit 1
   fi
+  IFS=: read -r dir_uid dir_mode < <(stat -c '%u:%a' "${path}")
+  if [[ "${dir_uid}" != "$(id -u)" || "${dir_mode}" != 700 ]]; then
+    echo "backup path ${path} must be owned by the backup user with mode 0700" >&2
+    exit 1
+  fi
+}
+validate_backup_dir "${BACKUP_ROOT}"
+for subdir in "${BACKUP_ROOT}/base" "${BACKUP_ROOT}/wal"; do
+  if [[ ! -e "${subdir}" && ! -L "${subdir}" ]]; then
+    mkdir -m 0700 -- "${subdir}"
+  fi
+  validate_backup_dir "${subdir}"
 done
 
 run_backup() {
   local lock="${BACKUP_ROOT}/.backup.lock"
-  local timestamp staging final latest_tmp oldest_wal server_version
+  local timestamp staging final latest_tmp oldest_wal server_version staging_created=false
+  if [[ -L "${lock}" ]]; then
+    echo "backup lock must not be a symlink" >&2
+    return 1
+  fi
   if [[ -d "${lock}" ]] && ! rmdir "${lock}" 2>/dev/null; then
     echo "legacy backup lock directory is not empty" >&2
     return 1
@@ -50,12 +66,32 @@ run_backup() {
   final="${BACKUP_ROOT}/base/${timestamp}"
   latest_tmp="${BACKUP_ROOT}/.LATEST-${RUN_ID}.tmp"
   cleanup_backup() {
-    rm -rf -- "${staging}"
+    if [[ "${staging_created}" == true ]]; then
+      rm -rf -- "${staging}"
+    fi
     rm -f -- "${latest_tmp}"
     flock -u 9 || true
     exec 9>&-
   }
   trap cleanup_backup RETURN
+
+  if [[ -e "${staging}" || -L "${staging}" ]]; then
+    echo "backup staging path already exists: ${staging}" >&2
+    rm -f -- "${lock}"
+    return 1
+  fi
+  if [[ -e "${final}" || -L "${final}" ]]; then
+    echo "backup destination already exists: ${final}" >&2
+    return 1
+  fi
+  if [[ -L "${BACKUP_ROOT}/LATEST" || ( -e "${BACKUP_ROOT}/LATEST" && ! -f "${BACKUP_ROOT}/LATEST" ) ]]; then
+    echo "LATEST marker must be a regular file when present" >&2
+    return 1
+  fi
+  if [[ -e "${latest_tmp}" || -L "${latest_tmp}" ]]; then
+    echo "temporary LATEST path already exists: ${latest_tmp}" >&2
+    return 1
+  fi
 
   server_version="$(psql --no-password --tuples-only --no-align --command 'SHOW server_version_num')"
   if [[ ! "${server_version}" =~ ^[0-9]+$ ]] || (( server_version / 10000 != POSTGRES_SERVER_MAJOR )); then
@@ -63,10 +99,7 @@ run_backup() {
     return 1
   fi
 
-  if [[ -e "${final}" ]]; then
-    echo "backup destination already exists: ${final}" >&2
-    return 1
-  fi
+  staging_created=true
   pg_basebackup \
     --pgdata="${staging}" \
     --format=plain \
@@ -77,6 +110,7 @@ run_backup() {
   pg_verifybackup "${staging}"
   printf '%s\n' "${timestamp}" >"${staging}/OCSERVIA_BACKUP_ID"
   mv -- "${staging}" "${final}"
+  staging_created=false
   printf '%s\n' "${timestamp}" >"${latest_tmp}"
   mv -- "${latest_tmp}" "${BACKUP_ROOT}/LATEST"
 

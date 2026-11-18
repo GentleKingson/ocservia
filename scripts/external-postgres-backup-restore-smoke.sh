@@ -95,7 +95,7 @@ control_mounts=(
 run_migrate() {
   local database_url="$1"; shift
   docker run --rm --network "${egress_network}" "$@" \
-    -e OCSERV_ENVIRONMENT=production -e OCSERV_DATABASE_BACKEND=postgres \
+    -e OCSERV_ENVIRONMENT=production \
     -e OCSERV_DATABASE_URL="${database_url}" -e OCSERV_DATABASE_TLS_CA_FILE=/run/secrets/database_ca \
     -e OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app -e OCSERV_LOCAL_AUTH_ENABLED=true \
     -e OCSERV_PUBLIC_ORIGIN=https://controller.example.test \
