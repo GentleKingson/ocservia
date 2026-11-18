@@ -424,7 +424,7 @@ for role in ('relay', 'controller', 'node'):
     job = workflow['jobs'][role]
     assert job['permissions'] == {'contents': 'read', 'actions': 'read', 'id-token': 'write'}
     join = next(step for step in job['steps'] if step.get('id') == 'tailnet')
-    assert join['uses'] == 'tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf'
+    assert join['uses'] == 'tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c'
     assert not {'authkey', 'oauth-secret'} & join['with'].keys()
     assert join['with']['tags'] == 'tag:ocservia-ci-' + ('relay' if role == 'relay' else 'peer')
     assert job['needs'] == 'preflight'
