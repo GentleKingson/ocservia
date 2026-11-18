@@ -148,28 +148,22 @@ for kind in initial rotated disabled; do
 done
 unset password
 
-run_native_scenario() {
-  local scenario=$1
-  # Run a host-built native libtest ELF inside a same-architecture container,
-  # without installing a second Rust toolchain there. The ordinary Cargo path
-  # remains the default. Never accept a binary which silently runs zero tests.
-  if [[ -n "${OCSERVIA_NATIVE_OCSERV_TEST_BINARY:-}" ]]; then
-    OCSERVIA_NATIVE_OCSERV_ROOT="${NATIVE_ROOT}" OCSERVIA_NATIVE_OCSERV_SCENARIO="${scenario}" \
-      "${OCSERVIA_NATIVE_OCSERV_TEST_BINARY}" tests::native_ocserv_operations --ignored --exact
-    return
-  fi
-  OCSERVIA_NATIVE_OCSERV_ROOT="${NATIVE_ROOT}" OCSERVIA_NATIVE_OCSERV_SCENARIO="${scenario}" cargo test \
-    --locked \
-    --manifest-path "${ROOT}/rust/Cargo.toml" \
-    -p ocservia-ocserv-adapter tests::native_ocserv_operations \
-    -- --ignored --exact
-}
-
+# Both runners expose the same libtest interface. Require the ignored test
+# before any scenario so a stale exact selector cannot silently pass.
+native_test=tests::native_ocserv_operations
 if [[ -n "${OCSERVIA_NATIVE_OCSERV_TEST_BINARY:-}" ]]; then
   [[ "${OCSERVIA_NATIVE_OCSERV_TEST_BINARY}" == /* && -x "${OCSERVIA_NATIVE_OCSERV_TEST_BINARY}" ]]
-  [[ "$("${OCSERVIA_NATIVE_OCSERV_TEST_BINARY}" --list --ignored --exact tests::native_ocserv_operations)" == \
-    "$(printf 'tests::native_ocserv_operations: test\n\n1 test, 0 benchmarks')" ]]
+  native_runner=("${OCSERVIA_NATIVE_OCSERV_TEST_BINARY}")
+else
+  native_runner=(cargo test --locked --manifest-path "${ROOT}/rust/Cargo.toml" -p ocservia-ocserv-adapter --lib --)
 fi
+native_listing="$("${native_runner[@]}" --list --ignored --exact "${native_test}")"
+[[ "${native_listing}" == "$(printf '%s: test\n\n1 test, 0 benchmarks' "${native_test}")" ]]
+
+run_native_scenario() {
+  OCSERVIA_NATIVE_OCSERV_ROOT="${NATIVE_ROOT}" OCSERVIA_NATIVE_OCSERV_SCENARIO="$1" \
+    "${native_runner[@]}" --ignored --exact "${native_test}"
+}
 
 run_native_scenario create-user
 test "$(stat -c '%u:%g:%a:%h' -- "${NATIVE_ROOT}/ocpasswd")" = "0:0:600:1" \
