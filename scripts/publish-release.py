@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-ROLES = ('gateway', 'control', 'transport', 'backup', 'edge', 'relay', 'signer', 'mysql_backup')
+ROLES = ('gateway', 'control', 'transport', 'backup', 'edge', 'relay', 'signer')
 ARCHES = ('amd64', 'arm64')
 PREFIX = 'ghcr.io/gentlekingson/ocservia'
 ACCEPT = ', '.join(('application/vnd.oci.image.index.v1+json',
@@ -217,7 +217,7 @@ def finish(repo, version, sha, files, images):
     if prerelease:
         require(api(f'repos/{repo}/releases/latest')['tag_name'] != tag, 'RC must not become Latest')
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-        summary.write(f'Published immutable Release {tag} at {sha}: {len(files)} assets, 24 verified image tags.\n')
+        summary.write(f'Published immutable Release {tag} at {sha}: {len(files)} assets, {len(expected)} verified image tags.\n')
 
 
 def main():

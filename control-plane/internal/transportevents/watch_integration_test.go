@@ -302,20 +302,17 @@ func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) 
 	}
 }
 
-func TestRunWatchQuarantinesPermanentEventAndContinuesIntegration(t *testing.T) {
-	fixture := newCommandResultFixture(t)
-	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer testCancel()
-	if _, err := fixture.pool.Exec(testCtx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton`); err != nil {
+func prepareWatchNodes(t *testing.T, ctx context.Context, fixture commandResultFixture) (uuid.UUID, [32]byte) {
+	t.Helper()
+	if _, err := fixture.pool.Exec(ctx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton`); err != nil {
 		t.Fatal(err)
 	}
-
 	healthyNodeID := uuid.Must(uuid.NewV7())
 	healthyEndpoint := integrationEndpoint(healthyNodeID)
-	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',now(),now())`, healthyNodeID, fixture.workspaceID, "healthy-"+healthyNodeID.String()); err != nil {
+	if _, err := fixture.pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',now(),now())`, healthyNodeID, fixture.workspaceID, "healthy-"+healthyNodeID.String()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, healthyNodeID, healthyEndpoint[:]); err != nil {
+	if _, err := fixture.pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, healthyNodeID, healthyEndpoint[:]); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -324,6 +321,68 @@ func TestRunWatchQuarantinesPermanentEventAndContinuesIntegration(t *testing.T) 
 		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM node_endpoint_keys WHERE node_id=$1`, healthyNodeID)
 		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM nodes WHERE id=$1`, healthyNodeID)
 	})
+	return healthyNodeID, healthyEndpoint
+}
+
+func assertWatchResumes(t *testing.T, ctx context.Context, service *Service, events []*transportv1.TransportEvent, finalID uuid.UUID) {
+	t.Helper()
+	serverImpl := &retainedEventServer{
+		events:          events,
+		eventsDelivered: make(chan struct{}),
+		releaseStream:   make(chan struct{}),
+		finalCursorSeen: make(chan struct{}),
+	}
+	client := newRetainedEventClient(t, serverImpl)
+
+	firstCtx, firstCancel := context.WithCancel(ctx)
+	defer firstCancel()
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- client.RunWatch(firstCtx, service, service) }()
+	select {
+	case <-serverImpl.eventsDelivered:
+	case <-ctx.Done():
+		t.Fatal("transport stream did not deliver event sequence")
+	}
+	for {
+		cursor, err := service.LastEventID(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(cursor, finalID[:]) {
+			break
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-ctx.Done():
+			t.Fatal("watch did not persist the final event cursor")
+		}
+	}
+	firstCancel()
+	if err := <-firstResult; err != context.Canceled {
+		t.Fatalf("first RunWatch returned %v after cancellation", err)
+	}
+
+	secondCtx, secondCancel := context.WithCancel(ctx)
+	defer secondCancel()
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- client.RunWatch(secondCtx, service, service) }()
+	select {
+	case <-serverImpl.finalCursorSeen:
+	case <-ctx.Done():
+		t.Fatal("restarted watch did not resume after the final durable cursor")
+	}
+	secondCancel()
+	if err := <-secondResult; err != context.Canceled {
+		t.Fatalf("second RunWatch returned %v after cancellation", err)
+	}
+}
+
+func TestRunWatchQuarantinesPermanentEventAndContinuesIntegration(t *testing.T) {
+	fixture := newCommandResultFixture(t)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer testCancel()
+
+	healthyNodeID, healthyEndpoint := prepareWatchNodes(t, testCtx, fixture)
 
 	invalidBatchID := uuid.Must(uuid.NewV7())
 	invalidPayload, err := proto.Marshal(&agentv1.TelemetryBatch{
@@ -345,53 +404,7 @@ func TestRunWatchQuarantinesPermanentEventAndContinuesIntegration(t *testing.T) 
 		{EventId: heartbeatID[:], NodeId: healthyNodeID[:], EndpointId: healthyEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("healthy")},
 		{EventId: resultID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: validResultPayload},
 	}
-	serverImpl := &retainedEventServer{
-		events:          events,
-		eventsDelivered: make(chan struct{}),
-		releaseStream:   make(chan struct{}),
-		finalCursorSeen: make(chan struct{}),
-	}
-	client := newRetainedEventClient(t, serverImpl)
-
-	firstCtx, firstCancel := context.WithCancel(testCtx)
-	firstResult := make(chan error, 1)
-	go func() { firstResult <- client.RunWatch(firstCtx, fixture.service, fixture.service) }()
-	select {
-	case <-serverImpl.eventsDelivered:
-	case <-testCtx.Done():
-		t.Fatal("transport stream did not deliver poison/heartbeat/result sequence")
-	}
-	for {
-		cursor, err := fixture.service.LastEventID(testCtx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Equal(cursor, resultID[:]) {
-			break
-		}
-		select {
-		case <-time.After(10 * time.Millisecond):
-		case <-testCtx.Done():
-			t.Fatal("permanent event blocked the following heartbeat or command result")
-		}
-	}
-	firstCancel()
-	if err := <-firstResult; err != context.Canceled {
-		t.Fatalf("first RunWatch returned %v after cancellation", err)
-	}
-
-	secondCtx, secondCancel := context.WithCancel(testCtx)
-	secondResult := make(chan error, 1)
-	go func() { secondResult <- client.RunWatch(secondCtx, fixture.service, fixture.service) }()
-	select {
-	case <-serverImpl.finalCursorSeen:
-	case <-testCtx.Done():
-		t.Fatal("restarted watch did not resume after the final durable cursor")
-	}
-	secondCancel()
-	if err := <-secondResult; err != context.Canceled {
-		t.Fatalf("second RunWatch returned %v after cancellation", err)
-	}
+	assertWatchResumes(t, testCtx, fixture.service, events, resultID)
 
 	expectedPayloadHash := sha256.Sum256(invalidPayload)
 	var quarantineNode uuid.UUID
@@ -429,24 +442,8 @@ func TestRunWatchQuarantinesCommandResultNULAndContinuesIntegration(t *testing.T
 	fixture := newCommandResultFixture(t)
 	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer testCancel()
-	if _, err := fixture.pool.Exec(testCtx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton`); err != nil {
-		t.Fatal(err)
-	}
 
-	healthyNodeID := uuid.Must(uuid.NewV7())
-	healthyEndpoint := integrationEndpoint(healthyNodeID)
-	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',now(),now())`, healthyNodeID, fixture.workspaceID, "healthy-command-result-"+healthyNodeID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, healthyNodeID, healthyEndpoint[:]); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup := context.Background()
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM transport_events WHERE node_id=$1`, healthyNodeID)
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM node_endpoint_keys WHERE node_id=$1`, healthyNodeID)
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM nodes WHERE id=$1`, healthyNodeID)
-	})
+	healthyNodeID, healthyEndpoint := prepareWatchNodes(t, testCtx, fixture)
 
 	poisonResult := fixture.validResult()
 	poisonResult.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
@@ -466,53 +463,7 @@ func TestRunWatchQuarantinesCommandResultNULAndContinuesIntegration(t *testing.T
 		{EventId: heartbeatID[:], NodeId: healthyNodeID[:], EndpointId: healthyEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("healthy after command-result poison")},
 		{EventId: resultID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: validResultPayload},
 	}
-	serverImpl := &retainedEventServer{
-		events:          events,
-		eventsDelivered: make(chan struct{}),
-		releaseStream:   make(chan struct{}),
-		finalCursorSeen: make(chan struct{}),
-	}
-	client := newRetainedEventClient(t, serverImpl)
-
-	firstCtx, firstCancel := context.WithCancel(testCtx)
-	firstResult := make(chan error, 1)
-	go func() { firstResult <- client.RunWatch(firstCtx, fixture.service, fixture.service) }()
-	select {
-	case <-serverImpl.eventsDelivered:
-	case <-testCtx.Done():
-		t.Fatal("transport stream did not deliver poison/heartbeat/result sequence")
-	}
-	for {
-		cursor, err := fixture.service.LastEventID(testCtx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Equal(cursor, resultID[:]) {
-			break
-		}
-		select {
-		case <-time.After(10 * time.Millisecond):
-		case <-testCtx.Done():
-			t.Fatal("invalid command result blocked the following heartbeat or command result")
-		}
-	}
-	firstCancel()
-	if err := <-firstResult; err != context.Canceled {
-		t.Fatalf("first RunWatch returned %v after cancellation", err)
-	}
-
-	secondCtx, secondCancel := context.WithCancel(testCtx)
-	secondResult := make(chan error, 1)
-	go func() { secondResult <- client.RunWatch(secondCtx, fixture.service, fixture.service) }()
-	select {
-	case <-serverImpl.finalCursorSeen:
-	case <-testCtx.Done():
-		t.Fatal("restarted watch did not resume after the final durable cursor")
-	}
-	secondCancel()
-	if err := <-secondResult; err != context.Canceled {
-		t.Fatalf("second RunWatch returned %v after cancellation", err)
-	}
+	assertWatchResumes(t, testCtx, fixture.service, events, resultID)
 
 	expectedPayloadHash := sha256.Sum256(poisonPayload)
 	var quarantineNode uuid.UUID
@@ -639,24 +590,8 @@ func TestRunWatchQuarantinesTelemetryBigintOverflowAndContinuesIntegration(t *te
 	fixture := newCommandResultFixture(t)
 	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer testCancel()
-	if _, err := fixture.pool.Exec(testCtx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton`); err != nil {
-		t.Fatal(err)
-	}
 
-	healthyNodeID := uuid.Must(uuid.NewV7())
-	healthyEndpoint := integrationEndpoint(healthyNodeID)
-	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',now(),now())`, healthyNodeID, fixture.workspaceID, "bigint-healthy-"+healthyNodeID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, healthyNodeID, healthyEndpoint[:]); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup := context.Background()
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM transport_events WHERE node_id=$1`, healthyNodeID)
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM node_endpoint_keys WHERE node_id=$1`, healthyNodeID)
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM nodes WHERE id=$1`, healthyNodeID)
-	})
+	healthyNodeID, healthyEndpoint := prepareWatchNodes(t, testCtx, fixture)
 
 	now := time.Now().UTC()
 	agentInstanceID := uuid.Must(uuid.NewV7())
@@ -696,53 +631,7 @@ func TestRunWatchQuarantinesTelemetryBigintOverflowAndContinuesIntegration(t *te
 		{EventId: banID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: banPayload},
 		{EventId: resultID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: resultPayload},
 	}
-	serverImpl := &retainedEventServer{
-		events:          events,
-		eventsDelivered: make(chan struct{}),
-		releaseStream:   make(chan struct{}),
-		finalCursorSeen: make(chan struct{}),
-	}
-	client := newRetainedEventClient(t, serverImpl)
-
-	firstCtx, firstCancel := context.WithCancel(testCtx)
-	firstResult := make(chan error, 1)
-	go func() { firstResult <- client.RunWatch(firstCtx, fixture.service, fixture.service) }()
-	select {
-	case <-serverImpl.eventsDelivered:
-	case <-testCtx.Done():
-		t.Fatal("transport stream did not deliver bigint overflow sequence")
-	}
-	for {
-		cursor, err := fixture.service.LastEventID(testCtx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Equal(cursor, resultID[:]) {
-			break
-		}
-		select {
-		case <-time.After(10 * time.Millisecond):
-		case <-testCtx.Done():
-			t.Fatal("bigint overflow blocked the following heartbeat or command result")
-		}
-	}
-	firstCancel()
-	if err := <-firstResult; err != context.Canceled {
-		t.Fatalf("first RunWatch returned %v after cancellation", err)
-	}
-
-	secondCtx, secondCancel := context.WithCancel(testCtx)
-	secondResult := make(chan error, 1)
-	go func() { secondResult <- client.RunWatch(secondCtx, fixture.service, fixture.service) }()
-	select {
-	case <-serverImpl.finalCursorSeen:
-	case <-testCtx.Done():
-		t.Fatal("restarted watch did not resume after bigint overflow quarantine")
-	}
-	secondCancel()
-	if err := <-secondResult; err != context.Canceled {
-		t.Fatalf("second RunWatch returned %v after cancellation", err)
-	}
+	assertWatchResumes(t, testCtx, fixture.service, events, resultID)
 
 	var quarantineCount, invalidBusinessEvents, validBusinessEvents int
 	var snapshotCount, banCount, resultCount, alertCount int
@@ -766,27 +655,12 @@ func TestRunWatchQuarantinesDuplicateAndConflictingSessionsIntegration(t *testin
 	fixture := newCommandResultFixture(t)
 	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer testCancel()
-	if _, err := fixture.pool.Exec(testCtx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton`); err != nil {
-		t.Fatal(err)
-	}
+
 	t.Cleanup(func() {
 		_, _ = fixture.pool.Exec(context.Background(), `DELETE FROM telemetry_ingest_batches WHERE node_id=$1`, fixture.nodeID)
 	})
 
-	healthyNodeID := uuid.Must(uuid.NewV7())
-	healthyEndpoint := integrationEndpoint(healthyNodeID)
-	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',now(),now())`, healthyNodeID, fixture.workspaceID, "duplicate-healthy-"+healthyNodeID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, healthyNodeID, healthyEndpoint[:]); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup := context.Background()
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM transport_events WHERE node_id=$1`, healthyNodeID)
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM node_endpoint_keys WHERE node_id=$1`, healthyNodeID)
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM nodes WHERE id=$1`, healthyNodeID)
-	})
+	healthyNodeID, healthyEndpoint := prepareWatchNodes(t, testCtx, fixture)
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	connectedAt := now.Add(-time.Hour)
@@ -837,53 +711,7 @@ func TestRunWatchQuarantinesDuplicateAndConflictingSessionsIntegration(t *testin
 		{EventId: conflictID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now.Add(2 * time.Second)), Traceparent: fixture.traceparent, Payload: conflictPayload},
 		{EventId: resultID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: resultPayload},
 	}
-	serverImpl := &retainedEventServer{
-		events:          events,
-		eventsDelivered: make(chan struct{}),
-		releaseStream:   make(chan struct{}),
-		finalCursorSeen: make(chan struct{}),
-	}
-	client := newRetainedEventClient(t, serverImpl)
-
-	firstCtx, firstCancel := context.WithCancel(testCtx)
-	firstResult := make(chan error, 1)
-	go func() { firstResult <- client.RunWatch(firstCtx, fixture.service, fixture.service) }()
-	select {
-	case <-serverImpl.eventsDelivered:
-	case <-testCtx.Done():
-		t.Fatal("transport stream did not deliver duplicate/conflict sequence")
-	}
-	for {
-		cursor, err := fixture.service.LastEventID(testCtx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Equal(cursor, resultID[:]) {
-			break
-		}
-		select {
-		case <-time.After(10 * time.Millisecond):
-		case <-testCtx.Done():
-			t.Fatal("invalid session telemetry blocked following events")
-		}
-	}
-	firstCancel()
-	if err := <-firstResult; err != context.Canceled {
-		t.Fatalf("first RunWatch returned %v after cancellation", err)
-	}
-
-	secondCtx, secondCancel := context.WithCancel(testCtx)
-	secondResult := make(chan error, 1)
-	go func() { secondResult <- client.RunWatch(secondCtx, fixture.service, fixture.service) }()
-	select {
-	case <-serverImpl.finalCursorSeen:
-	case <-testCtx.Done():
-		t.Fatal("restarted watch did not resume after session telemetry quarantine")
-	}
-	secondCancel()
-	if err := <-secondResult; err != context.Canceled {
-		t.Fatalf("second RunWatch returned %v after cancellation", err)
-	}
+	assertWatchResumes(t, testCtx, fixture.service, events, resultID)
 
 	var quarantineCount, invalidBusinessEvents, validBusinessEvents int
 	var invalidBatches, validBatches, sessionCount, cursorCount, resultCount, alertCount int
@@ -917,27 +745,12 @@ func TestRunWatchQuarantinesPostgresUnsafeTelemetryIntegration(t *testing.T) {
 	fixture := newCommandResultFixture(t)
 	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer testCancel()
-	if _, err := fixture.pool.Exec(testCtx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton`); err != nil {
-		t.Fatal(err)
-	}
+
 	t.Cleanup(func() {
 		_, _ = fixture.pool.Exec(context.Background(), `DELETE FROM telemetry_ingest_batches WHERE node_id=$1`, fixture.nodeID)
 	})
 
-	healthyNodeID := uuid.Must(uuid.NewV7())
-	healthyEndpoint := integrationEndpoint(healthyNodeID)
-	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',now(),now())`, healthyNodeID, fixture.workspaceID, "postgres-safe-"+healthyNodeID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, healthyNodeID, healthyEndpoint[:]); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup := context.Background()
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM transport_events WHERE node_id=$1`, healthyNodeID)
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM node_endpoint_keys WHERE node_id=$1`, healthyNodeID)
-		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM nodes WHERE id=$1`, healthyNodeID)
-	})
+	healthyNodeID, healthyEndpoint := prepareWatchNodes(t, testCtx, fixture)
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	agentInstanceID := uuid.Must(uuid.NewV7())
@@ -988,53 +801,7 @@ func TestRunWatchQuarantinesPostgresUnsafeTelemetryIntegration(t *testing.T) {
 		{EventId: numericID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: numericPayload},
 		{EventId: resultID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: resultPayload},
 	}
-	serverImpl := &retainedEventServer{
-		events:          events,
-		eventsDelivered: make(chan struct{}),
-		releaseStream:   make(chan struct{}),
-		finalCursorSeen: make(chan struct{}),
-	}
-	client := newRetainedEventClient(t, serverImpl)
-
-	firstCtx, firstCancel := context.WithCancel(testCtx)
-	firstResult := make(chan error, 1)
-	go func() { firstResult <- client.RunWatch(firstCtx, fixture.service, fixture.service) }()
-	select {
-	case <-serverImpl.eventsDelivered:
-	case <-testCtx.Done():
-		t.Fatal("transport stream did not deliver PostgreSQL-unsafe telemetry sequence")
-	}
-	for {
-		cursor, err := fixture.service.LastEventID(testCtx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Equal(cursor, resultID[:]) {
-			break
-		}
-		select {
-		case <-time.After(10 * time.Millisecond):
-		case <-testCtx.Done():
-			t.Fatal("PostgreSQL-unsafe telemetry blocked following events")
-		}
-	}
-	firstCancel()
-	if err := <-firstResult; err != context.Canceled {
-		t.Fatalf("first RunWatch returned %v after cancellation", err)
-	}
-
-	secondCtx, secondCancel := context.WithCancel(testCtx)
-	secondResult := make(chan error, 1)
-	go func() { secondResult <- client.RunWatch(secondCtx, fixture.service, fixture.service) }()
-	select {
-	case <-serverImpl.finalCursorSeen:
-	case <-testCtx.Done():
-		t.Fatal("restarted watch did not resume after PostgreSQL-unsafe telemetry quarantine")
-	}
-	secondCancel()
-	if err := <-secondResult; err != context.Canceled {
-		t.Fatalf("second RunWatch returned %v after cancellation", err)
-	}
+	assertWatchResumes(t, testCtx, fixture.service, events, resultID)
 
 	var quarantineCount, invalidBusinessEvents, validBusinessEvents int
 	var invalidBatches, snapshotCount, securityCount, resultCount, alertCount int

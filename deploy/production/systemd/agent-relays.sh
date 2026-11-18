@@ -2,10 +2,6 @@
 set -eu
 
 : "${RELAY_URL_A:?set the dedicated HTTPS relay URL}"
-if [ -n "${RELAY_URL_B:-}" ]; then
-  echo 'only one dedicated Relay is supported; leave RELAY_URL_B empty' >&2
-  exit 2
-fi
 set -- --controller "${CONTROLLER_ENDPOINT_ID:?}" --node-id "${NODE_ID:?}" \
   --controller-command-key-file "${CONTROLLER_COMMAND_VERIFICATION_KEY_FILE:?}" \
   --user-password-seal-key-id "${USER_PASSWORD_SEAL_KEY_ID:?}" \

@@ -123,7 +123,7 @@ export class ConfigurationApi extends runtime.BaseAPI {
   }
 
   /**
-   * Queue atomic application of an unexpired independently approved plan
+   * Queue atomic application of an unexpired validated plan
    */
   async applyConfigPlanRaw(
     requestParameters: ApplyConfigPlanRequest,
@@ -139,7 +139,7 @@ export class ConfigurationApi extends runtime.BaseAPI {
   }
 
   /**
-   * Queue atomic application of an unexpired independently approved plan
+   * Queue atomic application of an unexpired validated plan
    */
   async applyConfigPlan(
     requestParameters: ApplyConfigPlanRequest,
@@ -286,7 +286,7 @@ export class ConfigurationApi extends runtime.BaseAPI {
   }
 
   /**
-   * Get validation, safe diff, warnings, and approval state for a configuration plan
+   * Get validation, safe diff and warnings for a configuration plan
    */
   async getConfigPlanRaw(
     requestParameters: GetConfigPlanRequest,
@@ -302,7 +302,7 @@ export class ConfigurationApi extends runtime.BaseAPI {
   }
 
   /**
-   * Get validation, safe diff, warnings, and approval state for a configuration plan
+   * Get validation, safe diff and warnings for a configuration plan
    */
   async getConfigPlan(
     requestParameters: GetConfigPlanRequest,

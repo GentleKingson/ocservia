@@ -17,15 +17,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/configplanhttp"
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/nodehttp"
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/useroperationshttp"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
+	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
 )
 
@@ -33,8 +38,10 @@ func testHTTPConfig(devAuth bool) HTTPConfig {
 	return HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, DevAuth: devAuth, BrowserOrigin: authTestOrigin, EventStreams: eventstream.DefaultConfig()}
 }
 
+type constructionFence struct{ ownersession.FencedExecutor }
+
 type constructionReader struct {
-	nodehttp.Reader
+	NodeReader
 	calls int
 }
 
@@ -53,23 +60,36 @@ func TestHTTPConstruction(t *testing.T) {
 	wantEvents := config.EventStreams
 	reader := &constructionReader{}
 	plans := configplan.NewBackend(nil, nil)
-	authz := rbac.NewBackend(nil)
-	modules, authorization := Modules{Nodes: reader, ConfigPlans: plans}, Authorization{RBAC: authz}
+	authz := &auth.Service{}
+	modules := Modules{Nodes: reader, ConfigPlans: plans,
+		Operations: operations.NewBackend(nil, 5, nil), TransportEvents: transportevents.NewBackend(nil, nil),
+		Certificates: &certificates.Service{}, ReleaseCatalog: &releasecatalog.Catalog{},
+		UserState:  userstate.NewWithSignerBackend(nil, nil),
+		Enrollment: enrollment.NewBackend(nil, "", "test", nil), Transport: &transportclient.Client{}, OwnerFencing: &constructionFence{},
+	}
+	wantModules := modules
+	authorization := Authorization{Authentication: authz}
 	s := newTestServer(t, config, nil, modules, authorization)
 	other := newTestServer(t, config, nil, modules, authorization)
 	config.AuthTrustedProxies[0] = netip.MustParsePrefix("10.0.0.3/32")
 	config.EventStreams = eventstream.Config{}
 	config.BrowserOrigin, config.DevAuth = "https://changed.example", false
-	modules.Nodes, modules.ConfigPlans, authorization.RBAC = nil, nil, nil
-	if s.authProxies[0] != proxy || s.browserOrigin != "https://admin.example.test" || !s.devAuth || s.rbac != authz || s.configPlanLookup != plans {
+	modules, authorization = Modules{}, Authorization{}
+	if s.authProxies[0] != proxy || s.browserOrigin != "https://admin.example.test" || !s.devAuth || s.auth != authz || s.configPlans != plans || s.nodes != reader {
 		t.Fatal("constructor retained mutable input or lost shared service")
+	}
+	if s.operations != wantModules.Operations || s.transportEvents != wantModules.TransportEvents ||
+		s.certificates != wantModules.Certificates || s.releaseCatalog != wantModules.ReleaseCatalog ||
+		s.userstate != wantModules.UserState ||
+		s.enrollment != wantModules.Enrollment || s.transport != wantModules.Transport || s.fences != wantModules.OwnerFencing {
+		t.Fatal("constructor lost a configured capability")
 	}
 	w := httptest.NewRecorder()
 	s.http.Handler.ServeHTTP(w, baselineRequest("GET", "/api/v1/nodes", nil))
 	if w.Code != 200 || reader.calls != 1 {
 		t.Fatalf("first read: %d calls=%d", w.Code, reader.calls)
 	}
-	if s.nodeHTTP == other.nodeHTTP || s.configPlanHTTP == other.configPlanHTTP || s.userOpsHTTP == other.userOpsHTTP || s.eventAdmission == other.eventAdmission || s.platformEvents == other.platformEvents || s.operationEvents == other.operationEvents || s.breakGlassBudget == other.breakGlassBudget || s.localLoginBudget == other.localLoginBudget {
+	if s.eventAdmission == other.eventAdmission || s.platformEvents == other.platformEvents || s.operationEvents == other.operationEvents || s.breakGlassBudget == other.breakGlassBudget || s.localLoginBudget == other.localLoginBudget {
 		t.Fatal("HTTP-owned state shared across Servers")
 	}
 	for i := 0; i < 3; i++ {
@@ -120,19 +140,63 @@ func TestHTTPConstructionTypedNil(t *testing.T) {
 	var nodes *telemetry.Service
 	var plans *configplan.Service
 	var operations *useroperations.Service
-	var roles *rbac.Service
-	s := newTestServer(t, testHTTPConfig(true), nil, Modules{Nodes: nodes, ConfigPlans: plans, UserOperations: operations}, Authorization{RBAC: roles})
-	if s.configPlanLookup != nil || s.rbac != nil {
+	s := newTestServer(t, testHTTPConfig(true), nil, Modules{Nodes: nodes, ConfigPlans: plans, UserOperations: operations}, Authorization{})
+	if s.nodes != nil || s.configPlans != nil || s.userOperations != nil {
 		t.Fatal("typed nil retained")
 	}
 	for _, route := range []struct{ method, path string }{
 		{"GET", "/api/v1/nodes"}, {"GET", "/api/v1/config-plans/" + baselineID},
-		{"POST", "/api/v1/nodes/" + baselineID + "/config-plans"}, {"GET", "/api/v1/user-operations/metrics"},
+		{"POST", "/api/v1/nodes/" + baselineID + "/config-plans"}, {"GET", "/api/v1/nodes/" + baselineID + "/users/alice/policy"},
 	} {
 		w := httptest.NewRecorder()
 		s.http.Handler.ServeHTTP(w, baselineRequest(route.method, route.path, nil))
 		if w.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s: %d %s", route.path, w.Code, w.Body)
+		}
+	}
+}
+
+func TestHTTPConstructionSimulatorIsExplicit(t *testing.T) {
+	for _, events := range []bool{false, true} {
+		for _, simulator := range []bool{false, true} {
+			for _, authenticated := range []bool{false, true} {
+				config := testHTTPConfig(authenticated)
+				config.LocalSimulator = simulator
+				modules := Modules{}
+				if events {
+					modules.TransportEvents = transportevents.NewBackend(nil, nil)
+				}
+				s := newTestServer(t, config, nil, modules, Authorization{})
+				// Final configuration is copied; an event source must not enable simulation.
+				config.LocalSimulator = !simulator
+				w := httptest.NewRecorder()
+				r := baselineRequest("POST", "/api/v1/development/simulations", strings.NewReader("null"))
+				r.Header.Set("Content-Type", "application/json")
+				s.http.Handler.ServeHTTP(w, r)
+				want := http.StatusNotFound
+				if events && simulator {
+					want = http.StatusUnauthorized
+					if authenticated {
+						want = http.StatusBadRequest
+					}
+				}
+				if w.Code != want {
+					t.Fatalf("events=%t simulator=%t authenticated=%t: %d want %d: %s", events, simulator, authenticated, w.Code, want, w.Body)
+				}
+				// Event routes remain registered and enforce authentication independently.
+				w = httptest.NewRecorder()
+				s.http.Handler.ServeHTTP(w, baselineRequest("GET", "/api/v1/events?after=invalid", nil))
+				want = http.StatusUnauthorized
+				if authenticated {
+					want = http.StatusNotFound
+					if events {
+						want = http.StatusBadRequest
+					}
+				}
+				if w.Code != want {
+					t.Fatalf("event route events=%t simulator=%t authenticated=%t: %d want %d: %s", events, simulator, authenticated, w.Code, want, w.Body)
+				}
+			}
 		}
 	}
 }
@@ -153,11 +217,6 @@ func TestHTTPConstructionRejectsInvalidSSE(t *testing.T) {
 }
 
 func TestHTTPAssemblyBoundary(t *testing.T) {
-	for _, handler := range []reflect.Type{reflect.TypeOf(&nodehttp.Handler{}), reflect.TypeOf(&configplanhttp.Handler{}), reflect.TypeOf(&useroperationshttp.Handler{})} {
-		if handler.NumMethod() != 1 || handler.Method(0).Name != "Register" {
-			t.Errorf("module exposes mutable capabilities: %s", handler)
-		}
-	}
 	server := reflect.TypeOf(Server{})
 	for i := 0; i < server.NumField(); i++ {
 		field := server.Field(i)
@@ -165,7 +224,7 @@ func TestHTTPAssemblyBoundary(t *testing.T) {
 			t.Errorf("Server stores assembly input: %s", field.Name)
 		}
 	}
-	for _, name := range []string{"EnableTelemetry", "EnableConfigPlans", "EnableUserOperations", "EnableAuthorization", "EnableCertificates", "ConfigureEventStreams"} {
+	for _, name := range []string{"EnableTelemetry", "EnableConfigPlans", "EnableUserOperations", "EnableAuthorization", "EnableCertificates", "ConfigureEventStreams", "EnableOperations", "EnableReleaseCatalog", "EnableUserState", "EnablePrivdAttestation", "EnableEnrollment", "EnableOwnerFencing", "EnableTransportEvents", "EnableBrowserOrigin", "ConfigureAuthProxies", "SetLocalSimulatorEnabled"} {
 		if _, ok := reflect.TypeOf(&Server{}).MethodByName(name); ok {
 			t.Errorf("mutable assembly remains: %s", name)
 		}
@@ -189,6 +248,9 @@ func TestHTTPAssemblyBoundary(t *testing.T) {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
+			}
+			if fn.Recv == nil && fn.Name.Name == "NewBackend" {
+				t.Error("compatibility constructor remains")
 			}
 			ast.Inspect(fn, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)

@@ -156,3 +156,35 @@ func TestFiniteProfileRejectsUnsafeOrIncompleteContent(t *testing.T) {
 		})
 	}
 }
+
+func TestCompleteApplyWithoutHumanApproval(t *testing.T) {
+	candidate := fixture()
+	digest, err := configprofile.Hash(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := uuid.Must(uuid.NewV7())
+	envelope := &agentv1.CommandEnvelope{NodeId: candidate.NodeId, ExpectedRevision: 42, SemanticPayloadHashVersion: 2,
+		Payload: &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{
+			Candidate: candidate, CandidateHash: digest[:], MaterializedHash: bytes.Repeat([]byte{1}, 32), ExpectedCurrentHash: bytes.Repeat([]byte{2}, 32),
+			DesiredRevision: 8, PlanId: plan[:], PlanExpiresAt: &timestamppb.Timestamp{Seconds: 1790000000},
+		}},
+	}
+	direct, err := semanticpayload.HashV2(envelope)
+	if err != nil {
+		t.Fatalf("single administrator apply: %v", err)
+	}
+	envelope.ApprovalId = plan[:]
+	if _, err := semanticpayload.HashV2(envelope); err == nil {
+		t.Fatal("orphaned legacy approval ID accepted")
+	}
+	envelope.ApprovalRequestSha256 = bytes.Repeat([]byte{3}, 32)
+	legacy, err := semanticpayload.HashV2(envelope)
+	if err != nil || legacy == direct {
+		t.Fatalf("legacy approval binding lost: %v", err)
+	}
+	envelope.ApprovalId = nil
+	if _, err := semanticpayload.HashV2(envelope); err == nil {
+		t.Fatal("orphaned legacy approval hash accepted")
+	}
+}

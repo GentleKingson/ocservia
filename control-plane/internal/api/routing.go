@@ -158,13 +158,6 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 // compatibilityRouteMethod retains value-dependent actions and the operation
 // detail path's exact prefix/no-slash contract, unlike parameter Trim/Split.
 func compatibilityRouteMethod(path string) (string, bool) {
-	if strings.HasPrefix(path, "/api/v1/local-users/") {
-		id, action, ok := strings.Cut(strings.TrimPrefix(path, "/api/v1/local-users/"), ":")
-		if ok && id != "" && !strings.Contains(id, "/") && (action == "disable" || action == "reset-password") {
-			return http.MethodPost, true
-		}
-		return "", false
-	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "certificates" && parts[3] != "" {
 		if strings.HasSuffix(parts[3], ":issue") || strings.HasSuffix(parts[3], ":revoke") || strings.HasSuffix(parts[3], ":p12") {
@@ -187,12 +180,7 @@ func compatibilityRouteMethod(path string) (string, bool) {
 	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "ip-bans" && strings.HasSuffix(parts[5], ":remove") {
 		return http.MethodPost, true
 	}
-	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "approval-requests" && strings.HasSuffix(parts[3], ":approve") {
-		return http.MethodPost, true
-	}
-	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "approval-requests" && parts[3] != "" {
-		return http.MethodGet, true
-	}
+
 	operationID := strings.TrimPrefix(path, "/api/v1/operations/")
 	if operationID != path && operationID != "" && !strings.Contains(operationID, "/") {
 		return http.MethodGet, true

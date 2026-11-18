@@ -11,7 +11,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
@@ -27,7 +26,6 @@ type cleanupFixture struct {
 	op        uuid.UUID
 	now       time.Time
 	at        value.Timestamp
-	my        bool
 }
 
 func newCleanupFixture(t *testing.T) *cleanupFixture {
@@ -38,16 +36,15 @@ func newCleanupFixture(t *testing.T) *cleanupFixture {
 
 func newCleanupFixtureWithBackend(t *testing.T, b, owner database.Backend) *cleanupFixture {
 	t.Helper()
-	_, my := b.(*mysql.Backend)
-	f := &cleanupFixture{b: b, owner: owner, workspace: uuid.New(), node: uuid.New(), op: uuid.New(), now: time.Now().UTC().Truncate(time.Second), my: my}
+	f := &cleanupFixture{b: b, owner: owner, workspace: uuid.New(), node: uuid.New(), op: uuid.New(), now: time.Now().UTC().Truncate(time.Second)}
 	f.at, _ = value.FromTime(f.now)
 	f.s = NewWithConcurrencyBackend(b, userstate.NewWithSignerBackend(b, commandauth.NewSignerFromSeed([32]byte{3})), 1)
 	f.s.now = func() time.Time { return f.now }
 	workspace := f.workspace
-	f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'cleanup',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES(?,'cleanup',?,?,?)`, workspace, workspace.String(), f.at, f.at)
-	f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'cleanup','active',$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES(?,?,'cleanup','active',?,?)`, f.node, workspace, f.at, f.at)
-	f.exec(t, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES(?,'ocserv.users.write',true)`, f.node)
-	f.exec(t, `INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at)VALUES($1,$2,$3,'succeeded',1,'prior','prior',$4,$5,$6)`, `INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at)VALUES(?,?,?,'succeeded',1,'prior','prior',?,?,?)`, f.op, workspace, f.node, make([]byte, 32), f.at, f.at)
+	f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'cleanup',$2,$3,$4)`, workspace, workspace.String(), f.at, f.at)
+	f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'cleanup','active',$3,$4)`, f.node, workspace, f.at, f.at)
+	f.exec(t, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, f.node)
+	f.exec(t, `INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at)VALUES($1,$2,$3,'succeeded',1,'prior','prior',$4,$5,$6)`, f.op, workspace, f.node, make([]byte, 32), f.at, f.at)
 	return f
 }
 
@@ -61,8 +58,7 @@ func (f *cleanupFixture) clear(t *testing.T) {
 		return
 	}
 	for _, table := range []string{"user_policy_enforcements", "desired_user_policies", "desired_users", "node_capabilities", "operations"} {
-		q, args := f.query("DELETE FROM "+table+" WHERE node_id=$1", "DELETE FROM "+table+" WHERE node_id=?", []any{f.node})
-		if _, err := f.owner.Exec(ctx, q, args...); err != nil {
+		if _, err := f.owner.Exec(ctx, "DELETE FROM "+table+" WHERE node_id=$1", f.node); err != nil {
 			t.Error("clear cleanup fixture", table, err)
 			return
 		}
@@ -71,37 +67,23 @@ func (f *cleanupFixture) clear(t *testing.T) {
 		table string
 		id    uuid.UUID
 	}{{"nodes", f.node}, {"workspaces", f.workspace}} {
-		q, args := f.query("DELETE FROM "+row.table+" WHERE id=$1", "DELETE FROM "+row.table+" WHERE id=?", []any{row.id})
-		if _, err := f.owner.Exec(ctx, q, args...); err != nil {
+		if _, err := f.owner.Exec(ctx, "DELETE FROM "+row.table+" WHERE id=$1", row.id); err != nil {
 			t.Error("clear cleanup fixture", row.table, err)
 			return
 		}
 	}
 }
 
-func (f *cleanupFixture) query(pg, my string, args []any) (string, []any) {
-	if f.my {
-		for i, arg := range args {
-			if id, ok := arg.(uuid.UUID); ok {
-				args[i] = mysql.UUIDBytes(id)
-			}
-		}
-		return my, args
-	}
-	return pg, args
-}
-
-func (f *cleanupFixture) exec(t *testing.T, pg, my string, args ...any) {
+func (f *cleanupFixture) exec(t *testing.T, query string, args ...any) {
 	t.Helper()
-	q, args := f.query(pg, my, args)
-	if _, err := f.owner.Exec(t.Context(), q, args...); err != nil {
+	if _, err := f.owner.Exec(t.Context(), query, args...); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func (f *cleanupFixture) seed(t *testing.T, name string, enabled, reset bool) userstore.Candidate {
 	t.Helper()
-	f.exec(t, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,$2,$3,2,2,$4,$5,$6)`, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES(?,?,?,2,2,?,?,?)`, f.node, name, enabled, make([]byte, 32), f.at, f.at)
+	f.exec(t, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,$2,$3,2,2,$4,$5,$6)`, f.node, name, enabled, make([]byte, 32), f.at, f.at)
 	period, _ := value.FromTime(time.Unix(0, 0))
 	policy := userstore.Policy{NodeID: f.node, Username: name, Version: 1, QuotaPeriod: "none", QuotaDirection: "rxtx", ExpiresAt: f.at, CreatedAt: f.at, UpdatedAt: f.at}
 	cause := "expiry"
@@ -135,9 +117,8 @@ func (f *cleanupFixture) seed(t *testing.T, name string, enabled, reset bool) us
 
 func (f *cleanupFixture) count(t *testing.T, item userstore.Candidate) int {
 	t.Helper()
-	q, args := f.query(`SELECT count(*) FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5`, `SELECT count(*) FROM user_policy_enforcements WHERE node_id=? AND BINARY username=? AND policy_version=? AND cause=? AND period_start=?`, []any{item.NodeID, item.Username, item.PolicyVersion, item.Cause, item.PeriodStart})
 	var n int
-	if err := f.b.QueryRow(t.Context(), q, args...).Scan(&n); err != nil {
+	if err := f.b.QueryRow(t.Context(), `SELECT count(*) FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5`, item.NodeID, item.Username, item.PolicyVersion, item.Cause, item.PeriodStart).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	return n
@@ -145,21 +126,12 @@ func (f *cleanupFixture) count(t *testing.T, item userstore.Candidate) int {
 
 func (f *cleanupFixture) revokeDelete(t *testing.T) func() {
 	t.Helper()
-	var account, schema string
-	var revoke, grant string
-	if f.my {
-		if err := f.b.QueryRow(t.Context(), `SELECT CURRENT_USER(),DATABASE()`).Scan(&account, &schema); err != nil || account != "ocservia_app@%" {
-			t.Fatal("expected restricted effective user@host", account, err)
-		}
-		revoke = "REVOKE DELETE ON `" + schema + "`.user_policy_enforcements FROM 'ocservia_app'@'%'"
-		grant = "GRANT DELETE ON `" + schema + "`.user_policy_enforcements TO 'ocservia_app'@'%'"
-	} else {
-		if err := f.b.QueryRow(t.Context(), `SELECT current_user`).Scan(&account); err != nil {
-			t.Fatal(err)
-		}
-		revoke = "REVOKE DELETE ON user_policy_enforcements FROM " + pgx.Identifier{account}.Sanitize()
-		grant = "GRANT DELETE ON user_policy_enforcements TO " + pgx.Identifier{account}.Sanitize()
+	var account string
+	if err := f.b.QueryRow(t.Context(), `SELECT current_user`).Scan(&account); err != nil {
+		t.Fatal(err)
 	}
+	revoke := "REVOKE DELETE ON user_policy_enforcements FROM " + pgx.Identifier{account}.Sanitize()
+	grant := "GRANT DELETE ON user_policy_enforcements TO " + pgx.Identifier{account}.Sanitize()
 	restore := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -241,9 +213,9 @@ func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 		variants[4].PeriodStart.Micros++
 		variants[5].PolicyVersion += 2
 		// Related fixture rows need their actual FK parents, but no policy.
-		f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) SELECT $1,workspace_id,'other','active',created_at,updated_at FROM nodes WHERE id=$2`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) SELECT ?,workspace_id,'other','active',created_at,updated_at FROM nodes WHERE id=?`, variants[0].NodeID, f.node)
+		f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) SELECT $1,workspace_id,'other','active',created_at,updated_at FROM nodes WHERE id=$2`, variants[0].NodeID, f.node)
 		for _, v := range []userstore.Candidate{variants[0], variants[1]} {
-			f.exec(t, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,$2,false,2,2,$3,$4,$5)`, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES(?,?,false,2,2,?,?,?)`, v.NodeID, v.Username, make([]byte, 32), f.at, f.at)
+			f.exec(t, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,$2,false,2,2,$3,$4,$5)`, v.NodeID, v.Username, make([]byte, 32), f.at, f.at)
 		}
 		for _, v := range variants {
 			if err := f.s.withStore(t.Context(), func(store userstore.Store) error { return store.EnsureEnforcement(t.Context(), v, f.at) }); err != nil {
@@ -264,7 +236,7 @@ func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		f.exec(t, `UPDATE scheduler_leadership SET epoch=epoch+1 WHERE id=1`, `UPDATE scheduler_leadership SET epoch=epoch+1 WHERE id=1`)
+		f.exec(t, `UPDATE scheduler_leadership SET epoch=epoch+1 WHERE id=1`)
 		if err := f.s.cleanupEnforcement(coordination.WithFence(t.Context(), leader), item, true); !errors.Is(err, coordination.ErrNotLeader) || f.count(t, item) != 1 {
 			t.Fatal("stale fencing delete committed", err)
 		}

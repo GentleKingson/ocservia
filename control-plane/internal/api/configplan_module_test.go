@@ -61,7 +61,7 @@ func TestConfigPlanHTTPContextLifetime(t *testing.T) {
 	for _, route := range []struct{ method, path, body string }{
 		{"POST", "/api/v1/nodes/" + baselineID + "/config-plans", `{}`},
 		{"GET", "/api/v1/config-plans/" + baselineID, ""},
-		{"POST", "/api/v1/config-plans/" + baselineID + "/apply", `{"approval_id":"` + baselineID + `"}`},
+		{"POST", "/api/v1/config-plans/" + baselineID + "/apply", `{"reason":"context test"}`},
 	} {
 		for _, cancelRequest := range []bool{false, true} {
 			name := "deadline"
@@ -148,8 +148,8 @@ func TestConfigPlanHTTPDisabledDevelopment(t *testing.T) {
 		{"GET", "/api/v1/config-plans/bad", "", "", 400, "invalid-id"},
 		{"GET", "/api/v1/config-plans/" + baselineID, "", "", 503, "service-unavailable"},
 		{"POST", "/api/v1/config-plans/" + baselineID + "/apply", "{", "", 400, "idempotency-key-required"},
-		{"POST", "/api/v1/config-plans/" + baselineID + "/apply", "{}", "key", 400, "invalid-id"},
-		{"POST", "/api/v1/config-plans/" + baselineID + "/apply", `{"approval_id":"` + baselineID + `","reason":"apply"}`, "key", 503, "service-unavailable"},
+		{"POST", "/api/v1/config-plans/" + baselineID + "/apply", "{}", "key", 503, "service-unavailable"},
+		{"POST", "/api/v1/config-plans/" + baselineID + "/apply", `{"reason":"apply"}`, "key", 503, "service-unavailable"},
 	} {
 		r := baselineRequest(route.method, route.path, strings.NewReader(route.body))
 		r.Header.Set("Content-Type", "application/json")

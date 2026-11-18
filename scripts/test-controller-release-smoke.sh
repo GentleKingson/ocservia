@@ -29,6 +29,13 @@ cat >"${bin}/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${SMOKE_TEST_CURL_LOG}"
+for argument in "$@"; do
+  case "${argument}" in
+    --insecure|--insecure=*|-[^-]*k*)
+      echo 'release smoke must not disable TLS verification' >&2
+      exit 90 ;;
+  esac
+done
 url="${*: -1}"
 case "${url}" in
   */api/v1/readyz)
@@ -68,10 +75,6 @@ PATH="${bin}:${PATH}" \
 test "$(cat "${fixture}/compose.log")" = "ps --format json postgres control-plane transportd backup"
 grep -Fq 'https://controller.example.test/api/v1/readyz' "${fixture}/curl.log"
 grep -Fq 'https://controller.example.test/api/v1/version' "${fixture}/curl.log"
-if grep -Fq -- '-k' "${ROOT}/deploy/production/controller-release-smoke.sh"; then
-  echo "release smoke must not disable TLS verification" >&2
-  exit 1
-fi
 
 # ACME can still be issuing the first certificate after Compose is healthy.
 # Replace only the delay so the real smoke control flow is tested without waits.

@@ -116,7 +116,7 @@ if [[ ! -e "${CONFIG}" ]]; then
   staged="$(mktemp "${CONFIG_DIR}/.install.env.XXXXXX")"
   {
     printf '%s\n' "${HEADER}"
-    printf '%s\n' OCSERV_DEPLOYMENT_MODE=integrated OCSERV_DATABASE_BACKEND=postgres \
+    printf '%s\n' OCSERV_DEPLOYMENT_MODE=integrated \
       OCSERV_DATABASE_DEPLOYMENT=bundled OCSERV_TLS_MODE=acme "OCSERV_ACME_EMAIL=${acme_email}"
     [[ -z "${acme_directory}" ]] || printf 'OCSERV_ACME_DIRECTORY_URL=%s\n' "${acme_directory}"
     [[ -z "${acme_ca}" ]] || printf 'OCSERV_ACME_CA_FILE=%s\n' "${acme_ca}"
@@ -151,7 +151,7 @@ done
 compose() { "${ROOT}/deploy/production/compose.sh" "$@"; }
 
 if [[ -e "${CREDENTIALS_DIR}/complete" ]]; then
-  note "initial Local administrators already exist"
+  note "initial Local administrator already exists"
 else
   workspace_id="$(compose run --rm --no-deps -T migrate --provision-management-workspace |
     jq -Rr 'fromjson? | select(.msg == "management workspace ready") | .workspace_id')"
@@ -159,28 +159,23 @@ else
 
   [[ -d "${CREDENTIALS_DIR}" ]] || install -d -o 0 -g 0 -m 0700 -- "${CREDENTIALS_DIR}"
   # Passwords are kept before bootstrap, so a retry reuses the same ones.
-  for account in admin approver; do
-    file="${CREDENTIALS_DIR}/${account}.txt"
-    if [[ ! -e "${file}" ]]; then
-      staged="$(mktemp "${CREDENTIALS_DIR}/.${account}.XXXXXX")"
-      printf 'URL: https://%s\nUsername: initial-%s\nPassword: %s\n' \
-        "${controller_domain}" "${account}" "$(openssl rand -hex 32)" >"${staged}"
-      chmod 0400 -- "${staged}"
-      mv -fT -- "${staged}" "${file}"
-    fi
-    sed -n 's/^Password: //p' "${file}" |
-      install -o 65534 -g 65532 -m 0400 /dev/stdin "${secret_dir}/local-bootstrap-${account}-password"
-  done
-  trap 'rm -f -- "${secret_dir}"/local-bootstrap-{admin,approver}-password' EXIT
+  file="${CREDENTIALS_DIR}/admin.txt"
+  if [[ ! -e "${file}" ]]; then
+    staged="$(mktemp "${CREDENTIALS_DIR}/.admin.XXXXXX")"
+    printf 'URL: https://%s\nUsername: initial-%s\nPassword: %s\n' \
+      "${controller_domain}" "admin" "$(openssl rand -hex 32)" >"${staged}"
+    chmod 0400 -- "${staged}"
+    mv -fT -- "${staged}" "${file}"
+  fi
+  sed -n 's/^Password: //p' "${file}" |
+    install -o 65534 -g 65532 -m 0400 /dev/stdin "${secret_dir}/local-bootstrap-admin-password"
+  trap 'rm -f -- "${secret_dir}"/local-bootstrap-admin-password' EXIT
   status=0
   output="$(compose run --rm --no-deps -T \
     -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=initial-admin \
     -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${workspace_id}" \
     -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/local-bootstrap-password \
-    -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=initial-approver \
-    -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/secrets/local-bootstrap-approver-password \
     -v "${secret_dir}/local-bootstrap-admin-password:/run/secrets/local-bootstrap-password:ro" \
-    -v "${secret_dir}/local-bootstrap-approver-password:/run/secrets/local-bootstrap-approver-password:ro" \
     control-plane --bootstrap-local-admin)" || status=$?
   printf '%s\n' "${output}"
   if ((status != 0)); then
@@ -196,9 +191,7 @@ fi
 
 cat <<EOF
 Quick install complete: https://${controller_domain}
-Initial Local administrators (passwords only in these root-only files):
+Initial Local administrator (password only in this root-only file):
   initial-admin     ${CREDENTIALS_DIR}/admin.txt
-  initial-approver  ${CREDENTIALS_DIR}/approver.txt
-Give the two accounts to different responsible people and change both
-passwords after the first login; nothing forces that change.
+Change the initial password after the first login.
 EOF

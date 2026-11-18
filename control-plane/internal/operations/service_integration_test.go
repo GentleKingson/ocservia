@@ -10,8 +10,8 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
@@ -48,7 +48,7 @@ func TestTransactionalCreateIdempotencyAndTypedPayloadIntegration(t *testing.T) 
 	}
 
 	conflict := request
-	conflict.Message = "different"
+	conflict.Payload = SyntheticEchoPayload{Message: "different"}
 	if _, _, err := service.Create(context.Background(), conflict); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("conflicting replay error = %v", err)
 	}
@@ -119,7 +119,7 @@ func TestIdempotencyKeyCannotReplayAcrossNodesIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := controlledTestRequest(nodeID, "cross-node-key", ServiceReload, "service.reload", "", "", "")
-	approveOperation(t, pool, workspaceID, &request)
+	authorizeOperation(t, pool, workspaceID, &request)
 	first, replayed, err := service.Create(ctx, request)
 	if err != nil || replayed || first.NodeID == nil || *first.NodeID != nodeID.String() {
 		t.Fatalf("first node operation = %+v, %v, %v", first, replayed, err)
@@ -164,7 +164,7 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 		"reload":     controlledTestRequest(nodeID, "reload", ServiceReload, "service.reload", "", "", ""),
 	}
 	reload := requests["reload"]
-	approveOperation(t, pool, workspaceID, &reload)
+	authorizeOperation(t, pool, workspaceID, &reload)
 	requests["reload"] = reload
 	for name, request := range requests {
 		t.Run(name, func(t *testing.T) {
@@ -187,13 +187,13 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 		t.Fatal(err)
 	}
 	denied := controlledTestRequest(nodeID, "denied", ServiceReload, "service.reload", "", "", "")
-	denied.ActorIdentityID, denied.ActorSessionID, denied.ApprovalID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	denied.ActorIdentityID, denied.ActorSessionID = reload.ActorIdentityID, reload.ActorSessionID
 	if _, _, err := service.Create(ctx, denied); !errors.Is(err, ErrCapabilityMissing) {
 		t.Fatalf("missing capability error = %v", err)
 	}
 }
 
-func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) {
+func TestAgentUpgradeIdempotencyBindsExactReleaseIdentityIntegration(t *testing.T) {
 	// The fixture stages an older observed agent version: the authoritative
 	// creation fence reads it, and its cleanup drops the upgrade family rows
 	// that restrict the shared operations cleanup.
@@ -202,8 +202,23 @@ func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) 
 	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
 		t.Fatal(err)
 	}
-	base := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-exact", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "1.2.3", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-upgrade", Traceparent: testTraceparent}
-	approveOperation(t, pool, workspaceID, &base)
+	base := CreateRequest{
+		NodeID:          nodeID,
+		IdempotencyKey:  "upgrade-exact",
+		ExpectedVersion: 1,
+		ActorID:         "operator",
+		Action:          "agent.upgrade",
+		Reason:          "integration test",
+		TTL:             time.Minute,
+		RequestID:       "request-upgrade",
+		Traceparent:     testTraceparent,
+		Payload: AgentUpgradePayload{
+			TargetVersion: "1.2.3",
+			PackageSHA256: bytes.Repeat([]byte{0x43}, 32),
+			Architecture:  "amd64",
+		},
+	}
+	authorizeOperation(t, pool, workspaceID, &base)
 	operation, replayed, err := service.Create(ctx, base)
 	if err != nil || replayed || operation.State != "queued" {
 		t.Fatalf("create approved upgrade = %+v, %v, %v", operation, replayed, err)
@@ -212,62 +227,41 @@ func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) 
 		t.Fatalf("replay approved upgrade = %v, %v", replayed, err)
 	}
 
-	// The approval was consumed for exactly this release identity, so a
-	// drifted version, digest, or architecture must fail closed.
+	// An existing idempotency key binds exactly one release identity.
 	for _, tc := range []struct {
 		name   string
-		mutate func(*CreateRequest)
+		mutate func(*AgentUpgradePayload)
 	}{
-		{"target version", func(r *CreateRequest) {
+		{"target version", func(r *AgentUpgradePayload) {
 			r.TargetVersion = "1.2.4"
-			r.IdempotencyKey = "upgrade-drift-version"
-			r.RequestID = "request-drift-version"
 		}},
-		{"package digest", func(r *CreateRequest) {
+		{"package digest", func(r *AgentUpgradePayload) {
 			r.PackageSHA256[0] ^= 0xff
-			r.IdempotencyKey = "upgrade-drift-digest"
-			r.RequestID = "request-drift-digest"
 		}},
-		{"architecture", func(r *CreateRequest) {
+		{"architecture", func(r *AgentUpgradePayload) {
 			r.Architecture = "arm64"
-			r.IdempotencyKey = "upgrade-drift-arch"
-			r.RequestID = "request-drift-arch"
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := base
-			request.PackageSHA256 = append([]byte(nil), base.PackageSHA256...)
-			tc.mutate(&request)
-			if _, _, err := service.Create(ctx, request); !errors.Is(err, approvals.ErrNotReady) {
+			payload := request.Payload.(AgentUpgradePayload)
+			payload.PackageSHA256 = append([]byte(nil), payload.PackageSHA256...)
+			tc.mutate(&payload)
+			request.Payload = payload
+			if _, _, err := service.Create(ctx, request); !errors.Is(err, ErrIdempotencyConflict) {
 				t.Fatalf("drifted %s error = %v", tc.name, err)
 			}
 		})
 	}
 
-	// An action-level approval never satisfies the release-identity binding.
-	generic := base
-	generic.IdempotencyKey, generic.RequestID = "upgrade-generic", "request-upgrade-generic"
-	generic.ActorIdentityID, generic.ActorSessionID, generic.ApprovalID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	approverID := uuid.Must(uuid.NewV7())
-	genericHash, genericSummary := approvals.GenericBinding("agent.upgrade", "node", nodeID)
-	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, generic.ActorIdentityID, "requester-"+generic.ActorIdentityID.String(), approverID, "approver-"+approverID.String()); err != nil {
+	// Revoking the original session blocks even an exact idempotent replay.
+	if _, err := pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at=now() WHERE id=$1`, base.ActorSessionID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, generic.ActorSessionID, generic.ActorIdentityID); err != nil {
-		t.Fatal(err)
+	if _, _, err := service.Create(ctx, base); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("revoked session replay: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.upgrade','node',$4,'integration test','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)`, generic.ApprovalID, workspaceID, generic.ActorIdentityID, nodeID, approverID, genericHash, genericSummary); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3)`, generic.ApprovalID, workspaceID, nodeID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := service.Create(ctx, generic); !errors.Is(err, approvals.ErrNotReady) {
-		t.Fatalf("action-level approval error = %v", err)
-	}
+
 }
 
 func TestAgentUpgradeWithoutVersionOrderIntegration(t *testing.T) {
@@ -281,8 +275,23 @@ func TestAgentUpgradeWithoutVersionOrderIntegration(t *testing.T) {
 			if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
 				t.Fatal(err)
 			}
-			request := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-explicit-target", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-explicit-target", Traceparent: testTraceparent}
-			approveOperation(t, pool, workspaceID, &request)
+			request := CreateRequest{
+				NodeID:          nodeID,
+				IdempotencyKey:  "upgrade-explicit-target",
+				ExpectedVersion: 1,
+				ActorID:         "operator",
+				Action:          "agent.upgrade",
+				Reason:          "integration test",
+				TTL:             time.Minute,
+				RequestID:       "request-explicit-target",
+				Traceparent:     testTraceparent,
+				Payload: AgentUpgradePayload{
+					TargetVersion: "2.0.0",
+					PackageSHA256: bytes.Repeat([]byte{0x43}, 32),
+					Architecture:  "amd64",
+				},
+			}
+			authorizeOperation(t, pool, workspaceID, &request)
 			operation, replayed, err := service.Create(ctx, request)
 			if err != nil || replayed || operation.AgentUpgradeState != "queued" {
 				t.Fatalf("explicit target: operation=%+v replayed=%v err=%v", operation, replayed, err)
@@ -800,31 +809,29 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 }
 
 func controlledTestRequest(nodeID uuid.UUID, key string, kind Kind, action, bootID, sessionID, ip string) CreateRequest {
-	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: kind, BootID: bootID, SessionID: sessionID, IP: ip, ActorID: "operator", Action: action, Reason: "integration test", TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
+	var payload Payload
+	switch kind {
+	case SessionDisconnect:
+		payload = SessionDisconnectPayload{SessionID: sessionID, BootID: bootID}
+	case SessionTerminate:
+		payload = SessionTerminatePayload{SessionID: sessionID, BootID: bootID}
+	case IPBanRemove:
+		payload = IPBanRemovePayload{IP: ip}
+	case ServiceReload:
+		payload = ServiceReloadPayload{}
+	}
+	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Payload: payload, ActorID: "operator", Action: action, Reason: "integration test", TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
 }
 
-func approveOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, request *CreateRequest) {
+func authorizeOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, request *CreateRequest) {
 	t.Helper()
-	request.ActorIdentityID, request.ActorSessionID, request.ApprovalID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	approverID := uuid.Must(uuid.NewV7())
-	_, err := pool.Exec(context.Background(), `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, request.ActorIdentityID, "requester-"+request.ActorIdentityID.String(), approverID, "approver-"+approverID.String())
+	request.ActorIdentityID, request.ActorSessionID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	_, err := pool.Exec(context.Background(), `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now())`, request.ActorIdentityID, "admin-"+request.ActorIdentityID.String())
 	if err == nil {
 		_, err = pool.Exec(context.Background(), `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, request.ActorSessionID, request.ActorIdentityID)
 	}
 	if err == nil {
-		var approvalHash, approvalSummary []byte
-		if request.Kind == AgentUpgrade {
-			approvalHash, approvalSummary = approvals.AgentUpgradeBinding(request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture)
-		} else {
-			approvalHash, approvalSummary = approvals.GenericBinding(request.Action, "node", request.NodeID)
-		}
-		_, err = pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,$4,'node',$5,'integration test','approved',$6,'independent approval',now()+interval '1 hour',now(),now(),$7,$8)`, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, request.NodeID, approverID, approvalHash, approvalSummary)
-	}
-	if err == nil {
-		_, err = pool.Exec(context.Background(), `INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3)`, request.ApprovalID, workspaceID, request.NodeID)
-	}
-	if err == nil {
-		_, err = pool.Exec(context.Background(), `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',NULL,$2,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID)
+		_, err = pool.Exec(context.Background(), `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,now())`, workspaceID, request.ActorIdentityID)
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -832,5 +839,16 @@ func approveOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, r
 }
 
 func testRequest(nodeID uuid.UUID, key string, kind Kind, message string) CreateRequest {
-	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: kind, Message: message, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
+	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Payload: syntheticTestPayload(kind, message), TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
+}
+
+func syntheticTestPayload(kind Kind, message string) Payload {
+	switch kind {
+	case SyntheticNoop:
+		return SyntheticNoopPayload{}
+	case SyntheticEcho:
+		return SyntheticEchoPayload{Message: message}
+	default:
+		panic("unexpected synthetic kind")
+	}
 }

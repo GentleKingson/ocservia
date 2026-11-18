@@ -15,6 +15,7 @@ export function createNodeBootstrapToken(
     {
       nodeBootstrapTokenRequest: {
         workspaceId,
+        installation: true,
         environment,
         expectedNodeName,
         ttlSeconds: 900,

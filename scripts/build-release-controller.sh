@@ -14,14 +14,14 @@ case "${1:-}" in
   *) exit 2 ;;
 esac
 [[ $# -le 1 ]] || exit 2
-cache_images=(gateway control transport backup edge relay signer mysql_backup)
+cache_images=(gateway control transport backup edge relay signer)
 if [[ "${export_cache}" == true && -n "${CONTROLLER_CACHE_IMAGES:-}" ]]; then
   [[ "${CONTROLLER_CACHE_IMAGES}" != *$'\n'* && "${CONTROLLER_CACHE_IMAGES}" != *$'\r'* ]] || exit 2
   read -r -a selected_images <<<"${CONTROLLER_CACHE_IMAGES}"
   if ((${#selected_images[@]})); then
     for image in "${selected_images[@]}"; do
       case "${image}" in
-        gateway|control|transport|backup|edge|relay|signer|mysql_backup) ;;
+        gateway|control|transport|backup|edge|relay|signer) ;;
         *) echo "unknown Controller cache image: ${image}" >&2; exit 2 ;;
       esac
     done
@@ -63,7 +63,7 @@ build_image() {
   case "${name}" in
     control|transport) args+=(--no-cache-filter runtime-base) ;;
     relay) args+=(--no-cache-filter relay-runtime) ;;
-    gateway|backup|edge|mysql_backup) args+=(--no-cache-filter runtime) ;;
+    gateway|backup|edge) args+=(--no-cache-filter runtime) ;;
   esac
   # Keep compiler/dependency layers only for the expensive native builds.
   case "${name}" in control|transport|relay|signer) cache_mode=max ;; esac
@@ -82,4 +82,3 @@ build_image backup deploy/production/backup.Dockerfile
 build_image edge deploy/production/edge.Dockerfile
 build_image relay deploy/production/relay.Dockerfile
 build_image signer deploy/production/signer.Dockerfile
-build_image mysql_backup deploy/production/backup.mysql.Dockerfile

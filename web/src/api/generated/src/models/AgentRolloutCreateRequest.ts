@@ -14,7 +14,7 @@
 
 import { mapValues } from "../runtime";
 /**
- * Approval is bound to the immutable rollout request hash (target version, sorted node set, batch size, stop-on-failure policy).
+ * The immutable rollout request hash binds target version, sorted node set, batch size and stop-on-failure policy.
  * @export
  * @interface AgentRolloutCreateRequest
  */
@@ -43,12 +43,6 @@ export interface AgentRolloutCreateRequest {
    * @memberof AgentRolloutCreateRequest
    */
   reason: string;
-  /**
-   *
-   * @type {string}
-   * @memberof AgentRolloutCreateRequest
-   */
-  approvalId: string;
 }
 
 /**
@@ -72,13 +66,6 @@ export function instanceOfAgentRolloutCreateRequest(
   )
     return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
-  if (
-    (!("approvalId" in (value as Record<string, any>)) &&
-      !("approval_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["approvalId"] === undefined &&
-      (value as Record<string, any>)["approval_id"] === undefined)
-  )
-    return false;
   return true;
 }
 
@@ -100,7 +87,6 @@ export function AgentRolloutCreateRequestFromJSONTyped(
     nodeIds: json["node_ids"],
     batchSize: json["batch_size"] == null ? undefined : json["batch_size"],
     reason: json["reason"],
-    approvalId: json["approval_id"],
   };
 }
 
@@ -123,6 +109,5 @@ export function AgentRolloutCreateRequestToJSONTyped(
     node_ids: value["nodeIds"],
     batch_size: value["batchSize"],
     reason: value["reason"],
-    approval_id: value["approvalId"],
   };
 }

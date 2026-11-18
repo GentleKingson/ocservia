@@ -80,7 +80,6 @@ export function useNodeConfiguration({
   const configCertificateSecretRefId = ref("");
   const configPrivateKeySecretRefId = ref("");
   const configReason = ref("");
-  const configApplyApprovalId = ref("");
   const configApplyReason = ref("");
   const configWorkflow = createNodeWorkflow(
     () => currentNode.value?.id,
@@ -127,7 +126,6 @@ export function useNodeConfiguration({
     configLoading.value = false;
     configError.value = "";
     configReason.value = "";
-    configApplyApprovalId.value = "";
     configApplyReason.value = "";
     try {
       const pending = waitForNodeMutation(context, "config");
@@ -278,7 +276,6 @@ export function useNodeConfiguration({
       configLoading.value ||
       !canSubmitConfigPlan.value ||
       !plan ||
-      !configApplyApprovalId.value.trim() ||
       !configApplyReason.value.trim()
     )
       return;
@@ -288,7 +285,6 @@ export function useNodeConfiguration({
     configError.value = "";
     try {
       const operation = await applyConfigPlan(plan.id, {
-        approvalId: configApplyApprovalId.value.trim(),
         reason: configApplyReason.value.trim(),
       });
       rememberNodeWorkflowReference(ticket, {
@@ -329,7 +325,6 @@ export function useNodeConfiguration({
     configCertificateSecretRefId,
     configPrivateKeySecretRefId,
     configReason,
-    configApplyApprovalId,
     configApplyReason,
     openConfigPlan,
     submitConfigPlan,

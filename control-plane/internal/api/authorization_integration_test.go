@@ -17,15 +17,13 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -76,7 +74,7 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enrollment.NewBackend(postgres.WrapPool(pool), "", "test", signer)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"bootstrap API test","expected_endpoint_id":"1111111111111111111111111111111111111111111111111111111111111111"}`, workspaceID.String())))
 	request.Header.Set("Content-Type", "application/json")
-	request = request.WithContext(context.WithValue(request.Context(), requestIDKey{}, uuid.Must(uuid.NewV7()).String()))
+	request = request.WithContext(context.WithValue(context.WithValue(request.Context(), requestIDKey{}, uuid.Must(uuid.NewV7()).String()), principalKey{}, auth.Principal{Subject: "developer", Issuer: "development", BreakGlass: true}))
 	response := httptest.NewRecorder()
 	server.createNodeBootstrapToken(response, request)
 	if response.Code != http.StatusCreated || response.Header().Get("Cache-Control") != "no-store" {
@@ -176,9 +174,8 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	workspaceID, managerID, securityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	nodeA, nodeB, operationID, certificateID, artifactID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	managerBinding, securityBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	workspaceID, managerID, outsiderID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	nodeA, nodeB, operationID, certificateID, artifactID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	// Only fixture batches use simple protocol; service queries retain the
 	// production pool's extended-protocol default.
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'certificate auth',$2,now(),now());
@@ -186,32 +183,36 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($7,$1,'cert-node-a','active',1,now(),now()),($8,$1,'cert-node-b','active',1,now(),now());
 		INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES($9,$1,$7,'succeeded',1,'certificate-auth','certificate-auth',decode(repeat('00',32),'hex'),now(),now());
 		INSERT INTO certificates(id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,created_at,updated_at) VALUES($10,$1,$7,$9,'node-a.example.test','[]',2048,'csr_pending',now(),now());
-		INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,consumed_at,created_at,authority_snapshot_at) VALUES($14,$1,$3,'certificate.private_key.export','certificate',$10,'fixture export','consumed',$5,'independent fixture review',now()+interval '10 minutes',now(),now(),now()-interval '1 minute',now()-interval '1 minute');
-		INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at,approval_id) VALUES($11,$1,$7,$10,1,$9,'certificate_p12','pending',decode(repeat('01',32),'hex'),decode(repeat('02',32),'hex'),now()+interval '10 minutes',now(),now(),$14);
-		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($12,$3,$1,'ConfigManager','node',$7,$3,now()),($13,$5,$1,'SecurityAdmin','node',$8,$5,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "certificate-auth-"+workspaceID.String(), managerID, managerID.String(), securityID, securityID.String(), nodeA, nodeB, operationID, certificateID, artifactID, managerBinding, securityBinding, approvalID); err != nil {
+		INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at) VALUES($11,$1,$7,$10,1,$9,'certificate_p12','pending',decode(repeat('01',32),'hex'),decode(repeat('02',32),'hex'),now()+interval '10 minutes',now(),now());
+		INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$3,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "certificate-auth-"+workspaceID.String(), managerID, managerID.String(), outsiderID, outsiderID.String(), nodeA, nodeB, operationID, certificateID, artifactID); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id IN($1,$2); DELETE FROM artifact_operations WHERE id=$3; DELETE FROM approval_requests WHERE id=$9; DELETE FROM certificates WHERE id=$4; DELETE FROM operations WHERE id=$5; DELETE FROM nodes WHERE workspace_id=$6; DELETE FROM identities WHERE id IN($7,$8); DELETE FROM workspaces WHERE id=$6`, pgx.QueryExecModeSimpleProtocol, managerBinding, securityBinding, artifactID, certificateID, operationID, workspaceID, managerID, securityID, approvalID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM workspace_admins WHERE workspace_id=$1; DELETE FROM artifact_operations WHERE id=$2; DELETE FROM certificates WHERE id=$3; DELETE FROM operations WHERE id=$4; DELETE FROM nodes WHERE workspace_id=$1; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$1`, pgx.QueryExecModeSimpleProtocol, workspaceID, artifactID, certificateID, operationID, managerID, outsiderID)
 	}()
 	artifactData := []byte("encrypted artifact response")
 	grantSigner := commandauth.NewSignerFromSeed([32]byte{7})
-	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), certificates: certificates.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData}, grantSigner)}
+	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{auth: authn, certificates: certificates.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData}, grantSigner)}
 	manager := auth.Principal{IdentityID: managerID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
-	security := auth.Principal{IdentityID: securityID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
+	outsider := auth.Principal{IdentityID: outsiderID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
 	tests := []struct {
 		name, method, path, pathKey, pathValue string
 		principal                              auth.Principal
 		allowed                                bool
 	}{
-		{"manager lists own node", http.MethodGet, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), manager, true},
-		{"manager cannot list other node", http.MethodGet, "/api/v1/nodes/" + nodeB.String() + "/certificates", "node_id", nodeB.String(), manager, false},
-		{"manager issues own node", http.MethodPost, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), manager, true},
-		{"manager cannot create p12", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":p12", "certificate_action", certificateID.String() + ":p12", manager, false},
-		{"manager cannot revoke", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_action", certificateID.String() + ":revoke", manager, false},
-		{"cross-node security cannot revoke", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_action", certificateID.String() + ":revoke", security, false},
-		{"manager cannot use read permission to export artifact", http.MethodGet, "/api/v1/artifacts/" + artifactID.String(), "artifact_id", artifactID.String(), manager, false},
-		{"cross-node security cannot read artifact", http.MethodGet, "/api/v1/artifacts/" + artifactID.String(), "artifact_id", artifactID.String(), security, false},
+		{"admin lists node A", http.MethodGet, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), manager, true},
+		{"admin lists node B", http.MethodGet, "/api/v1/nodes/" + nodeB.String() + "/certificates", "node_id", nodeB.String(), manager, true},
+		{"admin issues node A", http.MethodPost, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), manager, true},
+		{"admin creates p12", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":p12", "certificate_action", certificateID.String() + ":p12", manager, true},
+		{"admin revokes certificate", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_action", certificateID.String() + ":revoke", manager, true},
+		{"admin downloads artifact", http.MethodGet, "/api/v1/artifacts/" + artifactID.String(), "artifact_id", artifactID.String(), manager, true},
+		{"outsider cannot list node A", http.MethodGet, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), outsider, false},
+		{"outsider cannot revoke certificate", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_action", certificateID.String() + ":revoke", outsider, false},
+		{"outsider cannot read artifact", http.MethodGet, "/api/v1/artifacts/" + artifactID.String(), "artifact_id", artifactID.String(), outsider, false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -221,8 +222,8 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 			if test.allowed && err != nil {
 				t.Fatalf("expected authorization: %v", err)
 			}
-			if !test.allowed && !errors.Is(err, rbac.ErrForbidden) {
-				t.Fatalf("expected forbidden, got %v", err)
+			if !test.allowed && !errors.Is(err, database.ErrNotFound) {
+				t.Fatalf("expected not-found for unauthorized resource, got %v", err)
 			}
 		})
 	}
@@ -300,13 +301,13 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 	}
 	t.Cleanup(owner.Close)
 	workspaceID, identityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	nodeID, sessionID, bindingID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	nodeID, sessionID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'synthetic audit',$2,now(),now());
 		INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($3,'integration',$4,now(),now());
 		INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($5,$3,now()+interval '1 hour',now());
 		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($6,$1,'audit-node','active',1,now(),now());
-		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($7,$3,$1,'Operator','node',$6,$3,now())`,
-		pgx.QueryExecModeSimpleProtocol, workspaceID, "synthetic-audit-"+workspaceID.String(), identityID, identityID.String(), sessionID, nodeID, bindingID); err != nil {
+		INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$3,now())`,
+		pgx.QueryExecModeSimpleProtocol, workspaceID, "synthetic-audit-"+workspaceID.String(), identityID, identityID.String(), sessionID, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -317,19 +318,23 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 			DELETE FROM commands WHERE workspace_id=$1;
 			DELETE FROM operations WHERE workspace_id=$1;
 			DELETE FROM audit_events WHERE workspace_id=$1;
-			DELETE FROM role_bindings WHERE id=$2;
+			DELETE FROM workspace_admins WHERE workspace_id=$1;
 			DELETE FROM nodes WHERE workspace_id=$1;
-			DELETE FROM auth_sessions WHERE id=$3;
-			DELETE FROM identities WHERE id=$4;
+			DELETE FROM auth_sessions WHERE id=$2;
+			DELETE FROM identities WHERE id=$3;
 			DELETE FROM workspaces WHERE id=$1;
 			ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only;
-			COMMIT`, pgx.QueryExecModeSimpleProtocol, workspaceID, bindingID, sessionID, identityID)
+			COMMIT`, pgx.QueryExecModeSimpleProtocol, workspaceID, sessionID, identityID)
 		if err != nil {
 			t.Errorf("cleanup synthetic command audit fixture: %v", err)
 		}
 	})
 
-	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), operations: apiOperationService(pool)}
+	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{auth: authn, operations: apiOperationService(pool)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
 	request.SetPathValue("node_id", nodeID.String())
 	request.Header.Set("Content-Type", "application/json")
@@ -356,160 +361,6 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 	}
 }
 
-func TestConfigPlanApprovalResolvesNodeScopedApprover(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	workspaceID, nodeID, operationID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	requesterID, approverID, approvalID, bindingID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'config approval',$2,now(),now());
-		INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($3,'integration',$4,now(),now()),($5,'integration',$6,now(),now());
-		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($7,$1,'config-node','active',1,now(),now());
-		INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES($8,$1,$7,'succeeded',1,'config-approval','config-approval',decode(repeat('00',32),'hex'),now(),now());
-		INSERT INTO config_plans(id,workspace_id,node_id,operation_id,template_name,expected_revision,candidate_hash,candidate_redacted,warnings,expires_at,created_by,created_at) VALUES($8,$1,$7,$8,'approval',0,decode(repeat('01',32),'hex'),'tcp-port = 443','[]',now()+interval '1 hour',$3,now());
-		INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,expires_at,created_at,request_hash,request_summary) VALUES($9,$1,$3,'config.apply','config_plan',$8,'review','pending',now()+interval '1 hour',now(),decode(repeat('01',32),'hex'),'{}');
-		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($10,$5,$1,'SecurityAdmin','node',$7,$5,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "config-approval-"+workspaceID.String(), requesterID, requesterID.String(), approverID, approverID.String(), nodeID, operationID, approvalID, bindingID); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM approval_requests WHERE id=$2; DELETE FROM config_plans WHERE id=$3; DELETE FROM operations WHERE id=$3; DELETE FROM nodes WHERE id=$4; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$7`, pgx.QueryExecModeSimpleProtocol, bindingID, approvalID, operationID, nodeID, requesterID, approverID, workspaceID)
-	}()
-	operationService := apiOperationService(pool)
-	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), approvals: approvals.NewBackend(postgres.WrapPool(pool)), configPlanLookup: configplan.NewBackend(postgres.WrapPool(pool), operationService)}
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/approval-requests/"+approvalID.String(), nil)
-	request.SetPathValue("approval_id", approvalID.String())
-	if _, err := server.authorizeRoute(request, auth.Principal{IdentityID: approverID, Issuer: "integration"}); err != nil {
-		t.Fatalf("node-scoped config approver: %v", err)
-	}
-}
-
-func TestApprovalDetailRequiresEveryAuthorityScopeIntegration(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-
-	workspaceID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	nodeA, nodeB := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if nodeA.String() > nodeB.String() {
-		nodeA, nodeB = nodeB, nodeA
-	}
-	requesterID := uuid.Must(uuid.NewV7())
-	partialID := uuid.Must(uuid.NewV7())
-	completeID := uuid.Must(uuid.NewV7())
-	workspaceSecurityID := uuid.Must(uuid.NewV7())
-	workspacePlatformID := uuid.Must(uuid.NewV7())
-	identityIDs := []uuid.UUID{requesterID, partialID, completeID, workspaceSecurityID, workspacePlatformID}
-	bindingIDs := []uuid.UUID{
-		uuid.Must(uuid.NewV7()),
-		uuid.Must(uuid.NewV7()),
-		uuid.Must(uuid.NewV7()),
-		uuid.Must(uuid.NewV7()),
-		uuid.Must(uuid.NewV7()),
-	}
-	summary, err := json.Marshal([]map[string]any{
-		{"node_id": nodeA, "username": "node-a-user", "action": "disable", "expected_version": 1},
-		{"node_id": nodeB, "username": "node-b-user", "action": "disable", "expected_version": 1},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	requestHash := sha256.Sum256(summary)
-
-	statements := []struct {
-		query string
-		args  []any
-	}{
-		{`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'approval scope auth',$2,now(),now())`, []any{workspaceID, "approval-scope-auth-" + workspaceID.String()}},
-		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES
-			($1,'integration',$2,now(),now()),($3,'integration',$4,now(),now()),($5,'integration',$6,now(),now()),
-			($7,'integration',$8,now(),now()),($9,'integration',$10,now(),now())`, []any{requesterID, requesterID.String(), partialID, partialID.String(), completeID, completeID.String(), workspaceSecurityID, workspaceSecurityID.String(), workspacePlatformID, workspacePlatformID.String()}},
-		{`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$3,'approval-node-a','active',1,now(),now()),($2,$3,'approval-node-b','active',1,now(),now())`, []any{nodeA, nodeB, workspaceID}},
-		{`INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,expires_at,created_at,request_hash,request_summary,authority_snapshot_at)
-			VALUES($1,$2,$3,'user.batch.disable','batch_operation',$1,'review exact batch','pending',now()+interval '1 hour',now(),$4,$5,now())`, []any{approvalID, workspaceID, requesterID, requestHash[:], summary}},
-		{`INSERT INTO approval_authority_resources(approval_id,workspace_id,resource_type,resource_id) VALUES($1,$2,'node',$3),($1,$2,'node',$4)`, []any{approvalID, workspaceID, nodeA, nodeB}},
-		{`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES
-			($1,$6,$10,'SecurityAdmin','node',$11,NULL,now()),
-			($2,$7,$10,'SecurityAdmin','node',$11,NULL,now()),($3,$7,$10,'SecurityAdmin','node',$12,NULL,now()),
-			($4,$8,$10,'SecurityAdmin','workspace',NULL,NULL,now()),($5,$9,$10,'PlatformAdmin','workspace',NULL,NULL,now())`, []any{bindingIDs[0], bindingIDs[1], bindingIDs[2], bindingIDs[3], bindingIDs[4], partialID, completeID, workspaceSecurityID, workspacePlatformID, workspaceID, nodeA, nodeB}},
-	}
-	for _, statement := range statements {
-		if _, err := pool.Exec(ctx, statement.query, statement.args...); err != nil {
-			t.Fatal(err)
-		}
-	}
-	defer func() {
-		for _, statement := range []struct {
-			query string
-			args  []any
-		}{
-			{`DELETE FROM role_bindings WHERE id=ANY($1)`, []any{bindingIDs}},
-			{`DELETE FROM approval_requests WHERE id=$1`, []any{approvalID}},
-			{`DELETE FROM nodes WHERE workspace_id=$1`, []any{workspaceID}},
-			{`DELETE FROM identities WHERE id=ANY($1)`, []any{identityIDs}},
-			{`DELETE FROM workspaces WHERE id=$1`, []any{workspaceID}},
-		} {
-			_, _ = pool.Exec(context.Background(), statement.query, statement.args...)
-		}
-	}()
-
-	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), approvals: approvals.NewBackend(postgres.WrapPool(pool))}
-	readApproval := func(identityID uuid.UUID) *httptest.ResponseRecorder {
-		request := httptest.NewRequest(http.MethodGet, "/api/v1/approval-requests/"+approvalID.String(), nil)
-		request.SetPathValue("approval_id", approvalID.String())
-		response := httptest.NewRecorder()
-		authorized, err := server.authorizeRoute(request, auth.Principal{IdentityID: identityID, Issuer: "integration"})
-		if err != nil {
-			server.writeAuthorizationError(response, request, err)
-			return response
-		}
-		server.getApproval(response, request.WithContext(authorized))
-		return response
-	}
-
-	partial := readApproval(partialID)
-	if partial.Code != http.StatusForbidden || strings.Contains(partial.Body.String(), "node-b-user") {
-		t.Fatalf("partial reviewer status=%d body=%s", partial.Code, partial.Body.String())
-	}
-	for name, identityID := range map[string]uuid.UUID{
-		"all node scopes":         completeID,
-		"workspace SecurityAdmin": workspaceSecurityID,
-		"workspace PlatformAdmin": workspacePlatformID,
-	} {
-		t.Run(name, func(t *testing.T) {
-			response := readApproval(identityID)
-			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "node-a-user") || !strings.Contains(response.Body.String(), "node-b-user") {
-				t.Fatalf("authorized reviewer status=%d body=%s", response.Code, response.Body.String())
-			}
-		})
-	}
-}
-
-func apiOperationService(pool *pgxpool.Pool) *operations.Service {
-	var seed [32]byte
-	seed[0] = 7
-	return operations.NewBackend(postgres.WrapPool(pool), 50, commandauth.NewSignerFromSeed(seed))
-}
-
-// TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations drives the full
-// middleware chain with a real break-glass session cookie: a sibling-origin
-// mutation with a text/plain JSON body must die at the origin boundary, a
-// same-origin text/plain mutation must die at the media-type boundary, only
-// the legitimate same-origin application/json request may create an
-// operation, and the database must prove the blocked attempts never executed.
 func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -557,9 +408,9 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 
 	breakGlassToken := strings.Repeat("break-glass-boundary-token-", 2)
 	authService, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{
-		Issuer: "https://id.example.test", ClientID: "client", ClientSecret: "secret",
-		RedirectURL: "https://admin.example.test/api/v1/auth/callback",
-		SessionKey:  make([]byte, 32), SessionTTL: time.Hour,
+		LocalEnabled:      true,
+		SessionKey:        make([]byte, 32),
+		SessionTTL:        time.Hour,
 		BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(breakGlassToken),
 	})
 	if err != nil {
@@ -567,8 +418,7 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 	}
 	config := testHTTPConfig(false)
 	config.BodyLimit = 1024
-	server := newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: authService, RBAC: rbac.NewBackend(postgres.WrapPool(pool)), Approvals: approvals.NewBackend(postgres.WrapPool(pool))})
-	server.EnableOperations(apiOperationService(pool))
+	server := newTestServer(t, config, postgres.WrapPool(pool), Modules{Operations: apiOperationService(pool)}, Authorization{Authentication: authService})
 
 	do := func(method, path, origin, fetchSite, contentType, cookie, idempotencyKey, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -662,63 +512,8 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 	}
 }
 
-func TestBatchRouteAllowsNodeScopedPerItemAuthorization(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if ownerURL == "" {
-		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
-	}
-	owner, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(owner.Close)
-	workspaceID, identityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	nodeA, nodeB, bindingID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'batch auth',$2,now(),now());
-		INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($3,'integration',$4,now(),now());
-		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($5,$1,'node-a','active',1,now(),now()),($6,$1,'node-b','active',1,now(),now());
-		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($7,$3,$1,'UserManager','node',$5,$3,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "batch-auth-"+workspaceID.String(), identityID, identityID.String(), nodeA, nodeB, bindingID); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, err := owner.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM nodes WHERE workspace_id=$2; DELETE FROM identities WHERE id=$3; DELETE FROM workspaces WHERE id=$2`, pgx.QueryExecModeSimpleProtocol, bindingID, workspaceID, identityID)
-		if err != nil {
-			t.Errorf("cleanup batch authorization fixture: %v", err)
-		}
-	})
-
-	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool))}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.test/api/v1/user-batches", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("X-Workspace-ID", workspaceID.String())
-	// This low-level test covers workspace selection and per-node resources;
-	// the registered HTTP guard is covered by the multi-backend route regression.
-	authorized, err := server.authorizeRouteAction(request, auth.Principal{IdentityID: identityID, Issuer: "integration"}, "user.manage")
-	if err != nil {
-		t.Fatalf("node-scoped batch route: %v", err)
-	}
-	request = request.WithContext(authorized)
-	if workspace(request) != workspaceID {
-		t.Fatalf("node-scoped batch route workspace=%s", workspace(request))
-	}
-	resourceA, _ := server.rbac.Node(ctx, nodeA)
-	resourceB, _ := server.rbac.Node(ctx, nodeB)
-	if err := server.rbac.Authorize(ctx, identityID, "user.manage", resourceA, false); err != nil {
-		t.Fatalf("authorized item A: %v", err)
-	}
-	if err := server.rbac.Authorize(ctx, identityID, "user.manage", resourceB, false); err == nil {
-		t.Fatal("unauthorized item B unexpectedly passed")
-	}
+func apiOperationService(pool *pgxpool.Pool) *operations.Service {
+	var seed [32]byte
+	seed[0] = 7
+	return operations.NewBackend(postgres.WrapPool(pool), 50, commandauth.NewSignerFromSeed(seed))
 }

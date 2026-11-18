@@ -212,9 +212,8 @@ select_release_source() {
 }
 
 validate_manifest_file() {
-  local label="$1" path="$2" historical_inventory="${3:-false}" manifest_filter
-  # Saved manifests are immutable evidence. Retired assets may be read there,
-  # but may never be supplied in a newly selected install/upgrade/rollback target.
+  local label="$1" path="$2" manifest_filter
+  [[ -n "${path}" && -f "${path}" && ! -L "${path}" ]] || fail "${label} file missing: ${path:-<unset>}"
   # jq variables in this filter are intentionally not shell variables.
   # shellcheck disable=SC2016
   manifest_filter='
@@ -236,8 +235,7 @@ validate_manifest_file() {
       elif $manifest.manifest_version == 2 then
         ($manifest | keys == ["database_migration", "images", "manifest_version", "platform", "release_tag", "release_version", "signer_state_version", "source_commit"]) and
         ($manifest.signer_state_version == 1) and
-        ($manifest.images | (keys == ["backup", "control", "edge", "gateway", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"]) or
-          ($historical_inventory and keys == ["backup", "control", "edge", "gateway", "mariadb_backup", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"]))
+        ($manifest.images | keys == ["backup", "control", "edge", "gateway", "otel", "postgres", "relay", "signer", "transport"])
       else false end) and
       ($manifest.release_version | matches("^[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$")) and
       ($manifest.release_tag | matches("^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$") and . == ("v" + $manifest.release_version)) and
@@ -248,7 +246,7 @@ validate_manifest_file() {
         all(.[]; matches("^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$")))
     end
   '
-  jq -e -s --argjson historical_inventory "${historical_inventory}" "${manifest_filter}" "${path}" >/dev/null ||
+  jq -e -s "${manifest_filter}" "${path}" >/dev/null ||
     fail "${label} is invalid"
 
   CANONICAL_RELEASE="$(mktemp "${STATE_ROOT}/.canonical-release.json.XXXXXX")" ||
@@ -270,20 +268,27 @@ stage_and_validate_manifest() {
   validate_manifest_file "release manifest" "${STAGED_RELEASE}"
 }
 
+check_active_profile_supported() {
+  local profile="${STATE_ROOT}/deployment-profile.json"
+  [[ -e "${profile}" || -L "${profile}" ]] || return 0
+  command -v jq >/dev/null 2>&1 || fail "jq is required to validate deployment profile"
+  validate_state_file_path "deployment profile" "${profile}"
+  # tls_mode is recorded only for ACME, so releases without ACME refuse it.
+  jq -e '(keys == ["database_backend", "database_deployment", "deployment_mode"] or
+      (keys == ["database_backend", "database_deployment", "deployment_mode", "tls_mode"] and
+        .deployment_mode == "integrated" and .tls_mode == "acme")) and
+    (.deployment_mode | IN("standalone", "integrated")) and
+    ([.database_backend, .database_deployment] | IN(["postgres", "bundled"], ["postgres", "external"]))' \
+    "${profile}" >/dev/null || fail "invalid deployment profile"
+}
+
 map_manifest_images() {
   local manifest="$1"
   local mode="${OCSERV_DEPLOYMENT_MODE:-standalone}" profile="${STATE_ROOT}/deployment-profile.json"
   local backend="${OCSERV_DATABASE_BACKEND:-postgres}" deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
   local tls_mode="${OCSERV_TLS_MODE:-manual}"
   if [[ -e "${profile}" || -L "${profile}" ]]; then
-    validate_state_file_path "deployment profile" "${profile}"
-    # tls_mode is recorded only for ACME, so releases without ACME refuse it.
-    jq -e '(keys == ["database_backend", "database_deployment", "deployment_mode"] or
-        (keys == ["database_backend", "database_deployment", "deployment_mode", "tls_mode"] and
-          .deployment_mode == "integrated" and .tls_mode == "acme")) and
-      (.deployment_mode | IN("standalone", "integrated")) and
-      ([.database_backend, .database_deployment] | IN(["postgres", "bundled"], ["postgres", "external"], ["mysql", "external"]))' \
-      "${profile}" >/dev/null || fail "invalid deployment profile"
+    check_active_profile_supported
     mode="$(jq -r '.deployment_mode' "${profile}")"
     backend="$(jq -r '.database_backend' "${profile}")"
     deployment="$(jq -r '.database_deployment' "${profile}")"
@@ -298,6 +303,10 @@ map_manifest_images() {
     fail "existing standalone installation cannot be switched to Integrated"
   fi
   case "${mode}" in standalone|integrated) ;; *) fail "invalid deployment mode" ;; esac
+  case "${backend}:${deployment}" in
+    postgres:bundled|postgres:external) ;;
+    *) fail "invalid database deployment; expected postgres with bundled or external" ;;
+  esac
   export OCSERV_DEPLOYMENT_MODE="${mode}"
   export OCSERV_DATABASE_BACKEND="${backend}" OCSERV_DATABASE_DEPLOYMENT="${deployment}"
   export OCSERV_TLS_MODE="${tls_mode}"
@@ -314,12 +323,6 @@ map_manifest_images() {
     OCSERV_RELAY_IMAGE="$(jq -er '.images.relay' "${manifest}")"
     OCSERV_SIGNER_IMAGE="$(jq -er '.images.signer' "${manifest}")"
     export OCSERV_EDGE_IMAGE OCSERV_RELAY_IMAGE OCSERV_SIGNER_IMAGE
-    case "${OCSERV_DATABASE_BACKEND:-postgres}" in
-      mysql)
-        OCSERV_DATABASE_BACKUP_IMAGE="$(jq -er --arg role "${OCSERV_DATABASE_BACKEND}_backup" '.images[$role]' "${manifest}")"
-        export OCSERV_DATABASE_BACKUP_IMAGE
-        ;;
-    esac
   elif [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
     fail "Integrated deployment requires a v2 release manifest"
   fi
@@ -706,6 +709,7 @@ install_controller() {
   CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
   PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
   acquire_lock
+  check_active_profile_supported
   reconcile_completed_pending
 
   if [[ -L "${CURRENT_RELEASE}" ]]; then
@@ -763,6 +767,7 @@ upgrade_controller() {
   PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
   PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
   acquire_lock
+  check_active_profile_supported
   reconcile_completed_pending
 
   validate_current_release
@@ -813,6 +818,7 @@ rollback_controller() {
   PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
   PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
   acquire_lock
+  check_active_profile_supported
   reconcile_completed_pending
 
   validate_current_release
@@ -916,6 +922,7 @@ uninstall_controller() {
   PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
   PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
   acquire_lock
+  check_active_profile_supported
   reconcile_completed_pending
   validate_uninstall_state
   select_release_source "${CURRENT_RELEASE}"
@@ -952,6 +959,7 @@ start_controller() {
   PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
   PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
   acquire_lock
+  check_active_profile_supported
   reconcile_completed_pending
   validate_uninstall_state
   select_release_source "${CURRENT_RELEASE}"

@@ -38,9 +38,8 @@ func retryAttempt(ctx context.Context, backend Backend, isolation Isolation, cha
 		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		rollback := tx.Rollback(cleanup)
-		// Both supported engines abort a deadlock victim's entire transaction.
-		// Other serialization errors require an acknowledged rollback: MySQL's
-		// record-changed category alone does not prove a full server rollback.
+		// PostgreSQL aborts a deadlock victim's entire transaction; other
+		// serialization failures require an acknowledged rollback before retry.
 		retry = errors.Is(err, ErrDeadlock) || errors.Is(err, ErrSerialization) && rollback == nil
 		if committing && err != nil && !retry && !errors.Is(err, ErrTxAborted) {
 			err = errors.Join(ErrCommitUnknown, err)

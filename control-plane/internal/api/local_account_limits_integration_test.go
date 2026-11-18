@@ -32,7 +32,7 @@ func TestLocalAccountHTTPSharedLimitsIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer otherPool.Close()
-	servers := []*Server{newAuthHTTPServer(t, pool, true, ""), newAuthHTTPServer(t, otherPool, true, "")}
+	servers := []*Server{newAuthHTTPServer(t, pool, true), newAuthHTTPServer(t, otherPool, true)}
 	logs := []*bytes.Buffer{captureAuthLogs(servers[0]), captureAuthLogs(servers[1])}
 	name := "account-limit-http-" + uuid.NewString()
 	missing := "missing-" + name
@@ -84,14 +84,11 @@ func TestLocalAccountHTTPSharedLimitsIntegration(t *testing.T) {
 	if w := request(8, name, password); w.Code != 401 || w.Body.String() != body {
 		t.Fatal("correct password bypassed cooldown")
 	}
-	// Account saturation must not enter OIDC or the emergency credential path.
+	// Account saturation must not enter the emergency credential path.
 	token := uuid.NewString()
-	servers[0].auth, err = auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, Issuer: "https://idp.example.test", ClientID: "client", RedirectURL: authTestOrigin + "/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(token)})
+	servers[0].auth, err = auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(token)})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if w := authHTTPRequest(servers[0], "GET", "callback", "", ""); w.Code != 401 || !strings.Contains(w.Body.String(), "oidc-callback-rejected") {
-		t.Fatalf("OIDC was account-limited: %d %s", w.Code, w.Body)
 	}
 	if w := authHTTPRequest(servers[0], "POST", "break-glass", fmt.Sprintf(`{"token":%q}`, token), authTestOrigin); w.Code != 204 {
 		t.Fatalf("break-glass was account-limited: %d %s", w.Code, w.Body)

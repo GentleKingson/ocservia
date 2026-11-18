@@ -27,115 +27,6 @@ tags:
   - name: configuration
     description: Side-effect-free configuration rendering and remote validation.
 paths:
-  /local-users:
-    post:
-      operationId: createLocalUser
-      summary: Create a platform Local login identity without role bindings
-      tags: [platform]
-      description: Requires exact Origin and local_user.manage in the fixed bootstrap management workspace (existing PlatformAdmin). Never links OIDC identities or managed-node VPN users.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [username, password]
-              properties:
-                username:
-                  type: string
-                  maxLength: 128
-                  description: ASCII username, trimmed and lowercased; letters/digits followed by letters/digits/dots/underscores/hyphens.
-                password:
-                  type: string
-                  format: password
-                  writeOnly: true
-                  minLength: 1
-                  description: 1 to 1024 UTF-8 bytes, not normalized.
-      responses:
-        "201":
-          description: Created without permissions.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [identity_id]
-                properties:
-                  identity_id:
-                    type: string
-                    format: uuid
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
-        "4XX":
-          $ref: "#/components/responses/Problem"
-        "5XX":
-          $ref: "#/components/responses/Problem"
-  /local-users/{identity_id}:disable:
-    post:
-      operationId: disableLocalUser
-      summary: Disable a platform Local login identity and revoke all its sessions
-      tags: [platform]
-      description: Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes. Returns 409 when disabling an effective elevated Local identity would leave no active Local workspace PlatformAdmin or fewer than two distinct active Local workspace approvers. Disabled identities and bindings in other workspaces or narrower resource scopes do not count. Protection and disable are serialized in one transaction.
-      parameters:
-        - name: identity_id
-          in: path
-          required: true
-          schema: { $ref: "#/components/schemas/UuidV7" }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-      responses:
-        "204":
-          description: Disabled and all sessions revoked atomically with audit.
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
-        "4XX":
-          $ref: "#/components/responses/Problem"
-        "5XX":
-          $ref: "#/components/responses/Problem"
-  /local-users/{identity_id}:reset-password:
-    post:
-      operationId: resetLocalUserPassword
-      summary: Reset a platform Local password and revoke all its sessions
-      tags: [platform]
-      description: Requires exact Origin, local_user.manage in the fixed management workspace, and an independent one-use approval for action local_user.reset-password, resource_type local_user and this identity ID. Approval authorizes credential replacement without storing password content. Does not re-enable a disabled identity. OIDC identities return 404.
-      parameters:
-        - name: identity_id
-          in: path
-          required: true
-          schema: { $ref: "#/components/schemas/UuidV7" }
-        - name: X-Approval-ID
-          in: header
-          required: true
-          schema: {type: string, format: uuid}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [password]
-              properties:
-                password:
-                  type: string
-                  format: password
-                  writeOnly: true
-                  minLength: 1
-                  description: 1 to 1024 UTF-8 bytes, not normalized.
-      responses:
-        "204":
-          description: Password reset, approval consumed and all sessions revoked atomically with audit.
-        "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
-        "4XX":
-          $ref: "#/components/responses/Problem"
-        "5XX":
-          $ref: "#/components/responses/Problem"
   /livez:
     get:
       operationId: getLiveness
@@ -400,36 +291,6 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
-  /enrollment-tokens:
-    post:
-      operationId: createEnrollmentToken
-      summary: Create a one-time enrollment token
-      tags: [enrollment]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/EnrollmentTokenRequest"
-      responses:
-        "201":
-          description: The plaintext token is returned once and is not persisted.
-          headers:
-            Cache-Control:
-              schema:
-                type: string
-                const: no-store
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EnrollmentToken"
-        "400":
-          $ref: "#/components/responses/Problem"
-        "401":
-          $ref: "#/components/responses/Problem"
-        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
-        default:
-          $ref: "#/components/responses/Problem"
   /node-bootstrap-tokens:
     post:
       operationId: createNodeBootstrapToken
@@ -460,34 +321,91 @@ paths:
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
-  /nodes/{node_id}/approval:
+  /node-bootstrap/config:
     post:
-      operationId: approveNode
-      summary: Approve a pending node and bind its endpoint identity
-      tags: [nodes]
-      parameters:
-        - $ref: "#/components/parameters/NodeId"
-        - $ref: "#/components/parameters/ApprovalId"
+      operationId: getNodeBootstrapConfiguration
+      summary: Exchange the root installation token for node configuration
+      description: HTTPS only. Keep the installation token root-only; only enrollment_token may be passed to the Agent. Successful retries return the same derived credentials while the token is unexpired; a consumed token remains bound to its original node and endpoint. Responses must never be cached or logged.
+      tags: [enrollment]
+      security: []
       requestBody:
         required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/NodeApproval"
+        content: { application/json: { schema: { $ref: "#/components/schemas/NodeInstallationTokenRequest" } } }
       responses:
         "200":
-          description: The node is active.
+          description: Bootstrap configuration for the root installer.
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/NodeBootstrapConfiguration" } } }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        default: { $ref: "#/components/responses/Problem" }
+  /node-bootstrap/attestation:
+    post:
+      operationId: getNodeBootstrapAttestationChallenge
+      summary: Obtain a root-only privd registration challenge
+      tags: [enrollment]
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/NodeBootstrapAttestationRequest" } } }
+      responses:
+        "200":
+          description: Registration challenge bound to the enrolled node identity.
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/NodeBootstrapAttestationChallenge" } } }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        default: { $ref: "#/components/responses/Problem" }
+  /node-bootstrap/register:
+    post:
+      operationId: registerNodeBootstrapAttestation
+      summary: Register the root privd key and complete installation authorization
+      description: Atomically binds the verified root key and consumes installation authorization. Recovery may replay only the identical completed registration; it cannot substitute a node or key.
+      tags: [enrollment]
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/NodeBootstrapRegistrationRequest" } } }
+      responses:
+        "201":
+          description: The privd key is registered and active.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/NodeTrustState"
-        "409":
-          $ref: "#/components/responses/Problem"
-        "503":
-          $ref: "#/components/responses/Problem"
+                type: object
+                required: [key_id, state]
+                properties:
+                  key_id: { type: string }
+                  state: { type: string, const: active }
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
-        default:
-          $ref: "#/components/responses/Problem"
+        default: { $ref: "#/components/responses/Problem" }
+  /node-bootstrap/status:
+    post:
+      operationId: getNodeBootstrapStatus
+      summary: Verify that the installed node is active and online
+      description: Requires the root installation token and its enrolled identity binding. Returns Controller observations so local systemd state alone cannot complete installation.
+      tags: [enrollment]
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/NodeBootstrapAttestationRequest" } } }
+      responses:
+        "200":
+          description: Current Controller observations for this installation only.
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trust_status, connection_state, freshness, attestation_registered]
+                properties:
+                  trust_status: { type: string }
+                  connection_state: { type: string }
+                  freshness: { type: string }
+                  attestation_registered: { type: boolean }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/revocation:
     post:
       operationId: revokeNode
@@ -495,7 +413,6 @@ paths:
       tags: [nodes]
       parameters:
         - $ref: "#/components/parameters/NodeId"
-        - $ref: "#/components/parameters/ApprovalId"
       requestBody:
         required: true
         content:
@@ -516,79 +433,6 @@ paths:
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
-  /nodes/{node_id}/privd-attestation-credentials:
-    post:
-      operationId: createPrivdAttestationCredential
-      summary: Create a root-provisioning-only one-time privd key credential
-      tags: [nodes]
-      parameters:
-        - $ref: "#/components/parameters/NodeId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/PrivdAttestationCredentialRequest" }
-      responses:
-        "201":
-          description: One-time root provisioning material, returned once.
-          headers:
-            Cache-Control: { schema: { type: string, const: no-store } }
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/PrivdAttestationCredential" }
-        "400": { $ref: "#/components/responses/Problem" }
-        "404": { $ref: "#/components/responses/Problem" }
-        "503": { $ref: "#/components/responses/Problem" }
-        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
-        default: { $ref: "#/components/responses/Problem" }
-  /nodes/{node_id}/privd-attestation-keys:register:
-    post:
-      operationId: registerPrivdAttestationKey
-      summary: Atomically consume root provisioning proof and bind a privd key
-      tags: [nodes]
-      security: []
-      parameters:
-        - $ref: "#/components/parameters/NodeId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/PrivdAttestationRegistration" }
-      responses:
-        "201":
-          description: The root-authenticated key is active.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/PrivdAttestationKeyState" }
-        "400": { $ref: "#/components/responses/Problem" }
-        "401": { $ref: "#/components/responses/Problem" }
-        "409": { $ref: "#/components/responses/Problem" }
-        "503": { $ref: "#/components/responses/Problem" }
-        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
-        default: { $ref: "#/components/responses/Problem" }
-  /nodes/{node_id}/privd-attestation-keys:revoke:
-    post:
-      operationId: revokePrivdAttestationKey
-      summary: Revoke a node privd result attestation key
-      tags: [nodes]
-      parameters:
-        - $ref: "#/components/parameters/NodeId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/PrivdAttestationRevokeRequest" }
-      responses:
-        "200":
-          description: The key is revoked.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/PrivdAttestationKeyState" }
-        "400": { $ref: "#/components/responses/Problem" }
-        "404": { $ref: "#/components/responses/Problem" }
-        "503": { $ref: "#/components/responses/Problem" }
-        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
-        default: { $ref: "#/components/responses/Problem" }
   /nodes:
     get:
       operationId: listNodes
@@ -773,7 +617,6 @@ paths:
       tags: [operations]
       parameters:
         - $ref: "#/components/parameters/NodeId"
-        - $ref: "#/components/parameters/ApprovalId"
         - $ref: "#/components/parameters/IdempotencyKey"
         - $ref: "#/components/parameters/IfMatch"
       requestBody:
@@ -1031,53 +874,6 @@ paths:
         "409": { $ref: "#/components/responses/Problem" }
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
-  /user-batches:
-    post:
-      operationId: createUserBatch
-      summary: Create a parent batch whose items are authorized and executed independently
-      tags: [operations]
-      parameters:
-        - $ref: "#/components/parameters/WorkspaceId"
-        - $ref: "#/components/parameters/IdempotencyKey"
-        - $ref: "#/components/parameters/ApprovalId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/UserBatchRequest" }
-      responses:
-        "202":
-          description: Parent batch accepted; each authorized item receives its own operation and command.
-          headers:
-            Location:
-              schema: { type: string, format: uri-reference }
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/UserBatch" }
-        "400": { $ref: "#/components/responses/Problem" }
-        "403": { $ref: "#/components/responses/Problem" }
-        "409": { $ref: "#/components/responses/Problem" }
-        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
-        default: { $ref: "#/components/responses/Problem" }
-  /user-batches/{batch_id}:
-    get:
-      operationId: getUserBatch
-      summary: Get parent and per-item authorization, command, and result state
-      tags: [operations]
-      parameters:
-        - $ref: "#/components/parameters/WorkspaceId"
-        - name: batch_id
-          in: path
-          required: true
-          schema: { $ref: "#/components/schemas/UuidV7" }
-      responses:
-        "200":
-          description: Current parent and child states, including offline and partial failure.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/UserBatch" }
-        "404": { $ref: "#/components/responses/Problem" }
-        default: { $ref: "#/components/responses/Problem" }
   /agent-rollouts:
     post:
       operationId: createAgentRollout
@@ -1086,8 +882,8 @@ paths:
         Creates a server-owned fleet rollout with a mandatory one-node canary
         and fixed-size batches. The server canonicalizes and sorts the node
         set, recomputes eligibility from durable evidence, resolves package
-        digests from the trusted release catalog, and consumes one approval
-        bound to the exact immutable rollout request. Every generated node
+        digests from the trusted release catalog, and rechecks Admin authority
+        in the mutation transaction. Every generated node
         upgrade reuses the reconciled single-node operation; the rollout
         survives browser closure and Controller restart.
       tags: [operations]
@@ -1180,21 +976,6 @@ paths:
         "409": { $ref: "#/components/responses/Problem" }
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
-  /user-operations/metrics:
-    get:
-      operationId: getUserOperationMetrics
-      summary: Get workspace quota, expiry, and batch scheduler health counters
-      tags: [operations]
-      parameters:
-        - $ref: "#/components/parameters/WorkspaceId"
-      responses:
-        "200":
-          description: Current bounded scheduler health counters for alerting.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/UserOperationMetrics" }
-        "403": { $ref: "#/components/responses/Problem" }
-        default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/config-plans:
     post:
       operationId: createConfigPlan
@@ -1224,7 +1005,7 @@ paths:
   /config-plans/{plan_id}:
     get:
       operationId: getConfigPlan
-      summary: Get validation, safe diff, warnings, and approval state for a configuration plan
+      summary: Get validation, safe diff and warnings for a configuration plan
       tags: [configuration]
       parameters:
         - name: plan_id
@@ -1243,7 +1024,7 @@ paths:
   /config-plans/{plan_id}/apply:
     post:
       operationId: applyConfigPlan
-      summary: Queue atomic application of an unexpired independently approved plan
+      summary: Queue atomic application of an unexpired validated plan
       tags: [configuration]
       parameters:
         - name: plan_id
@@ -1602,46 +1383,6 @@ paths:
               schema: { type: integer, minimum: 1 }
           content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
         default: { $ref: "#/components/responses/Problem" }
-    get:
-      operationId: beginOIDCLogin
-      summary: Begin OIDC Authorization Code login with PKCE S256
-      tags: [platform]
-      security: []
-      responses:
-        "302": { description: Redirect to the configured OIDC provider. }
-        "404": { $ref: "#/components/responses/Problem" }
-        default: { $ref: "#/components/responses/Problem" }
-  /auth/methods:
-    get:
-      operationId: getAuthMethods
-      summary: Read enabled authentication methods
-      tags: [platform]
-      security: []
-      responses:
-        "200":
-          description: Public authentication capabilities only.
-          content: { application/json: { schema: { $ref: "#/components/schemas/AuthMethods" } } }
-        "405":
-          description: Unsupported HTTP method; this route accepts GET only.
-          headers:
-            Allow:
-              schema: { type: string, const: GET }
-          content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
-        default: { $ref: "#/components/responses/Problem" }
-  /auth/callback:
-    get:
-      operationId: completeOIDCLogin
-      summary: Validate OIDC state, nonce, code, and ID token
-      tags: [platform]
-      security: []
-      parameters:
-        - { name: state, in: query, required: true, schema: { type: string, minLength: 32, maxLength: 128 } }
-        - { name: code, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 4096 } }
-      responses:
-        "302": { description: Secure session established. }
-        "401": { $ref: "#/components/responses/Problem" }
-        "404": { $ref: "#/components/responses/Problem" }
-        default: { $ref: "#/components/responses/Problem" }
   /auth/change-password:
     post:
       operationId: changeLocalPassword
@@ -1649,7 +1390,7 @@ paths:
       tags: [platform]
       security:
         - sessionCookie: []
-      description: Requires exact Origin and a valid non-break-glass Local session. No target identity or workspace may be submitted. Verifies the current password under the shared Local account attempt protection and applies the new-password policy. Credential version, disabled state and session validity are rechecked in the transaction. Success atomically changes the password, revokes all sessions and appends audit; the caller must log in again. OIDC and Break-glass sessions cannot use this endpoint. Administrator reset-password remains independently approved.
+      description: Requires exact Origin and a valid non-break-glass Local session. No target identity or workspace may be submitted. Verifies the current password under the shared Local account attempt protection and applies the new-password policy. Credential version, disabled state and session validity are rechecked in the transaction. Success atomically changes the password, revokes all sessions and appends audit; the caller must log in again. Break-glass sessions cannot use this endpoint.
       requestBody:
         required: true
         content:
@@ -1716,99 +1457,6 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/WorkspacePage" } } }
         "401": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
-  /role-bindings:
-    post:
-      operationId: createRoleBinding
-      summary: Bind one baseline role to a workspace or resource scope
-      tags: [platform]
-      parameters: [{ $ref: "#/components/parameters/WorkspaceId" }]
-      requestBody:
-        required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/RoleBindingRequest" } } }
-      responses:
-        "201":
-          description: Role binding created.
-          content: { application/json: { schema: { $ref: "#/components/schemas/RoleBinding" } } }
-        "400":
-          description: The role, resource scope, or referenced identity is invalid.
-          content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
-        "403": { $ref: "#/components/responses/Problem" }
-        "409":
-          description: The identity already holds this binding (`role-binding-exists`), or an elevated role's approval is missing, expired, consumed, or does not match (`approval-not-ready`).
-          content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
-        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
-        "503":
-          description: Role binding state is temporarily unavailable.
-          content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
-        default: { $ref: "#/components/responses/Problem" }
-  /approval-requests:
-    get:
-      operationId: listPendingApprovals
-      summary: List independent pending approvals actionable by the current principal
-      description: Filters the selected workspace and every resource under the original authority snapshot before pagination. Excludes the requester and expired, approved or consumed requests. Ordered by immutable approval ID ascending; cursors remain usable after decisions or expiry. New requests may appear on later pages; refresh starts from the beginning.
-      tags: [operations]
-      parameters:
-        - $ref: "#/components/parameters/WorkspaceId"
-        - $ref: "#/components/parameters/Cursor"
-        - $ref: "#/components/parameters/PageSize"
-      responses:
-        "200":
-          description: A bounded page of actionable pending approval metadata; content and hash summaries are omitted and must be fetched from the detail endpoint.
-          content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalPage" } } }
-        "403": { $ref: "#/components/responses/Problem" }
-        default: { $ref: "#/components/responses/Problem" }
-    post:
-      operationId: createApprovalRequest
-      summary: Request independent approval for a high-risk action
-      tags: [operations]
-      parameters: [{ $ref: "#/components/parameters/WorkspaceId" }]
-      requestBody:
-        required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } }
-      responses:
-        "201":
-          description: Pending approval created.
-          content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } }
-        "403": { $ref: "#/components/responses/Problem" }
-        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
-        default: { $ref: "#/components/responses/Problem" }
-  /approval-requests/{approval_id}:
-    get:
-      operationId: getApprovalRequest
-      summary: Inspect immutable approval details before deciding
-      tags: [operations]
-      parameters:
-        - name: approval_id
-          in: path
-          required: true
-          schema: { $ref: "#/components/schemas/UuidV7" }
-      responses:
-        "200":
-          description: Approval details including any content-bound hash and item summary.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Approval" }
-        "403": { $ref: "#/components/responses/Problem" }
-        "404": { $ref: "#/components/responses/Problem" }
-        default: { $ref: "#/components/responses/Problem" }
-  /approval-requests/{approval_id}:approve:
-    post:
-      operationId: approveRequest
-      summary: Approve another principal's high-risk request
-      tags: [operations]
-      parameters:
-        - { name: approval_id, in: path, required: true, schema: { $ref: "#/components/schemas/UuidV7" } }
-      requestBody:
-        required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalDecision" } } }
-      responses:
-        "200":
-          description: Approval granted.
-          content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } }
-        "403": { $ref: "#/components/responses/Problem" }
-        "409": { $ref: "#/components/responses/Problem" }
-        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
-        default: { $ref: "#/components/responses/Problem" }
   /audit/events:
     get:
       operationId: listAuditEvents
@@ -1833,7 +1481,9 @@ paths:
         "200":
           description: Chain and checkpoint are valid.
           content: { application/json: { schema: { $ref: "#/components/schemas/AuditVerification" } } }
-        "409": { $ref: "#/components/responses/Problem" }
+        "409":
+          description: The chain or latest checkpoint failed verification.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AuditVerification" } } }
         default: { $ref: "#/components/responses/Problem" }
 components:
   securitySchemes:
@@ -1841,7 +1491,7 @@ components:
       type: apiKey
       in: cookie
       name: __Host-ocservia_session
-      description: Shared Secure, HttpOnly, SameSite server-side session established by Local, OIDC, or break-glass authentication.
+      description: Shared Secure, HttpOnly, SameSite server-side session established by Local or break-glass authentication.
     bearerAuth:
       type: http
       scheme: bearer
@@ -1922,12 +1572,6 @@ components:
       description: Required when the principal can access more than one workspace; otherwise the sole authorized workspace is inferred.
       required: false
       schema: { $ref: "#/components/schemas/UuidV7" }
-    ApprovalId:
-      name: X-Approval-ID
-      in: header
-      description: Required by high-risk actions; optional in the base contract so pre-approval clients receive a typed authorization error.
-      required: false
-      schema: { $ref: "#/components/schemas/UuidV7" }
   responses:
     Problem:
       description: Request failed.
@@ -1980,13 +1624,6 @@ components:
           writeOnly: true
           minLength: 1
           description: At most 1024 UTF-8 bytes. Never returned or logged.
-    AuthMethods:
-      type: object
-      additionalProperties: false
-      required: [local, oidc]
-      properties:
-        local: { type: boolean }
-        oidc: { type: boolean }
     Health:
       type: object
       additionalProperties: false
@@ -2150,15 +1787,13 @@ components:
     AgentUpgradeRequest:
       type: object
       additionalProperties: false
-      required: [target_version, approval_id, reason]
+      required: [target_version, reason]
       properties:
         target_version:
           type: string
           minLength: 5
           maxLength: 128
           description: Semantic version of the trusted release; the digest resolves server-side.
-        approval_id:
-          $ref: "#/components/schemas/UuidV7"
         reason: { type: string, minLength: 1, maxLength: 512 }
         expected_version: { type: integer, format: int64, minimum: 1 }
         ttl_seconds:
@@ -2325,10 +1960,6 @@ components:
       properties:
         expected_revision: { type: integer, format: int64, minimum: 0 }
         template: { $ref: "#/components/schemas/ConfigTemplate" }
-        node_variables:
-          type: object
-          maxProperties: 128
-          additionalProperties: { type: string, minLength: 1, maxLength: 4096 }
         ttl_seconds: { type: integer, format: int64, minimum: 60, maximum: 3600 }
         reason: { type: string, minLength: 1, maxLength: 512 }
     ConfigPlan:
@@ -2351,30 +1982,14 @@ components:
         current_unchanged: { type: boolean }
         staging_cleaned: { type: boolean }
         current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
-        approval_id: { $ref: "#/components/schemas/UuidV7" }
-        approval_status: { type: string, enum: [pending, approved, rejected, expired, consumed] }
         expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
         created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
     ConfigApplyRequest:
       type: object
       additionalProperties: false
-      required: [approval_id, reason]
+      required: [reason]
       properties:
-        approval_id: { $ref: "#/components/schemas/UuidV7" }
         reason: { type: string, minLength: 1, maxLength: 512 }
-    ConfigPlanApprovalSummary:
-      type: object
-      additionalProperties: false
-      required: [node_id, expected_revision, candidate_hash, current_hash, diff_redacted, expires_at]
-      properties:
-        plan_id: { $ref: "#/components/schemas/UuidV7" }
-        node_id: { $ref: "#/components/schemas/UuidV7" }
-        expected_revision: { type: integer, format: int64, minimum: 0 }
-        candidate_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
-        materialized_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
-        current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
-        diff_redacted: { type: string, maxLength: 262144, description: "Approver-visible secret-safe diff containing exact secret reference identifiers, providers, and versions without provider keys or values." }
-        expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
     CertificateRequest:
       type: object
       additionalProperties: false
@@ -2392,27 +2007,25 @@ components:
     CertificateIssueRequest:
       type: object
       additionalProperties: false
-      required: [approval_id, reason]
+      required: [reason]
       properties:
-        approval_id: { $ref: "#/components/schemas/UuidV7" }
         reason: { type: string, minLength: 1, maxLength: 512 }
     CertificateRevokeRequest:
       type: object
       additionalProperties: false
-      required: [expected_version, certificate_version, approval_id, reason]
+      required: [expected_version, certificate_version, reason]
       properties:
         expected_version: { type: integer, format: int64, minimum: 1 }
         certificate_version: { type: integer, format: int64, minimum: 1 }
-        approval_id: { $ref: "#/components/schemas/UuidV7" }
         reason: { type: string, minLength: 1, maxLength: 128 }
     CertificateP12Request:
       type: object
       additionalProperties: false
-      required: [expected_version, certificate_version, approval_id, reason]
+      required: [expected_version, certificate_version, artifact_request_id, reason]
       properties:
         expected_version: { type: integer, format: int64, minimum: 1 }
         certificate_version: { type: integer, format: int64, minimum: 1 }
-        approval_id: { $ref: "#/components/schemas/UuidV7" }
+        artifact_request_id: { $ref: "#/components/schemas/UuidV7" }
         reason: { type: string, minLength: 1, maxLength: 512 }
     ArtifactGrant:
       type: object
@@ -2454,33 +2067,6 @@ components:
         rotated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
         created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
         updated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-    CertificateApprovalSummary:
-      oneOf:
-        - $ref: "#/components/schemas/CertificateIssueApprovalSummary"
-        - $ref: "#/components/schemas/CertificateActionApprovalSummary"
-    CertificateIssueApprovalSummary:
-      type: object
-      additionalProperties: false
-      required: [certificate_id, node_id, common_name, dns_names, csr_sha256]
-      properties:
-        certificate_id: { $ref: "#/components/schemas/UuidV7" }
-        node_id: { $ref: "#/components/schemas/UuidV7" }
-        common_name: { type: string, minLength: 1, maxLength: 253 }
-        dns_names: { type: array, maxItems: 32, items: { type: string, maxLength: 253 } }
-        csr_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
-    CertificateActionApprovalSummary:
-      type: object
-      additionalProperties: false
-      required: [action, certificate_id, certificate_version, node_id]
-      properties:
-        action: { type: string, enum: [certificate.revoke, certificate.private_key.export] }
-        certificate_id: { $ref: "#/components/schemas/UuidV7" }
-        certificate_version: { type: integer, format: int64, minimum: 1 }
-        node_id: { $ref: "#/components/schemas/UuidV7" }
-        purpose: { type: string, maxLength: 512 }
-        artifact_request_id: { $ref: "#/components/schemas/UuidV7" }
-        serial_number: { type: string, maxLength: 128 }
-        certificate_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
     Certificate:
       type: object
       additionalProperties: false
@@ -2539,57 +2125,10 @@ components:
         exceeded: { type: boolean }
         expired: { type: boolean }
         convergence: { type: string, enum: [converged, pending, offline_pending, drifted] }
-    UserBatchItemRequest:
-      type: object
-      additionalProperties: false
-      required: [node_id, username, action, expected_version]
-      properties:
-        node_id: { $ref: "#/components/schemas/UuidV7" }
-        username: { $ref: "#/components/schemas/OcservName" }
-        action: { type: string, enum: [disable, enable] }
-        expected_version: { type: integer, format: int64, minimum: 1 }
-    UserBatchRequest:
-      type: object
-      additionalProperties: false
-      required: [reason, items]
-      properties:
-        reason: { type: string, minLength: 1, maxLength: 512 }
-        items:
-          type: array
-          minItems: 1
-          maxItems: 500
-          items: { $ref: "#/components/schemas/UserBatchItemRequest" }
-    UserBatchItem:
-      type: object
-      additionalProperties: false
-      required: [index, node_id, username, action, expected_version, state]
-      properties:
-        index: { type: integer, minimum: 0 }
-        node_id: { $ref: "#/components/schemas/UuidV7" }
-        username: { $ref: "#/components/schemas/OcservName" }
-        action: { type: string, enum: [disable, enable] }
-        expected_version: { type: integer, format: int64, minimum: 1 }
-        state: { type: string, enum: [queued, submitting, submitted, succeeded, failed, unknown, offline_pending, forbidden] }
-        child_operation_id: { $ref: "#/components/schemas/UuidV7" }
-        error_type: { type: string, maxLength: 128 }
-    UserBatch:
-      type: object
-      additionalProperties: false
-      required: [id, workspace_id, state, items, created_at, updated_at]
-      properties:
-        id: { $ref: "#/components/schemas/UuidV7" }
-        workspace_id: { $ref: "#/components/schemas/UuidV7" }
-        state: { type: string, enum: [queued, running, succeeded, partial_failed, failed] }
-        items:
-          type: array
-          maxItems: 500
-          items: { $ref: "#/components/schemas/UserBatchItem" }
-        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        updated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
     AgentRolloutCreateRequest:
       type: object
       additionalProperties: false
-      required: [target_version, node_ids, reason, approval_id]
+      required: [target_version, node_ids, reason]
       properties:
         target_version:
           type: string
@@ -2609,9 +2148,7 @@ components:
           default: 5
           description: Nodes per batch after the mandatory one-node canary.
         reason: { type: string, minLength: 1, maxLength: 512 }
-        approval_id:
-          $ref: "#/components/schemas/UuidV7"
-      description: Approval is bound to the immutable rollout request hash (target version, sorted node set, batch size, stop-on-failure policy).
+      description: The immutable rollout request hash binds target version, sorted node set, batch size and stop-on-failure policy.
     AgentRolloutNode:
       type: object
       additionalProperties: false
@@ -2631,10 +2168,19 @@ components:
         from_version: { type: string }
         failure_code: { type: string }
       description: One selected node in stable sorted order; operation_id links to the underlying single-node upgrade operation.
+    AgentRolloutExclusion:
+      type: object
+      additionalProperties: false
+      required: [node_id, reason]
+      properties:
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        reason:
+          type: string
+          description: Eligibility reason; readers retain unknown historical reason codes.
     AgentRollout:
       type: object
       additionalProperties: false
-      required: [id, workspace_id, target_version, state, batch_size, stop_on_failure, reason, approval_id, created_by, current_batch, created_at, updated_at]
+      required: [id, workspace_id, target_version, state, batch_size, stop_on_failure, reason, created_by, current_batch, created_at, updated_at]
       properties:
         id: { $ref: "#/components/schemas/UuidV7" }
         workspace_id: { $ref: "#/components/schemas/UuidV7" }
@@ -2643,7 +2189,6 @@ components:
         batch_size: { type: integer, minimum: 1, maximum: 20 }
         stop_on_failure: { type: boolean }
         reason: { type: string }
-        approval_id: { $ref: "#/components/schemas/UuidV7" }
         created_by: { $ref: "#/components/schemas/UuidV7" }
         current_batch: { type: integer, minimum: 0 }
         pause_code: { type: string }
@@ -2656,7 +2201,12 @@ components:
         excluded:
           type: array
           maxItems: 500
-          items: {}
+          items:
+            anyOf:
+              - { $ref: "#/components/schemas/AgentRolloutExclusion" }
+              - type: [object, array, string, number, boolean, "null"]
+                description: Unclassified historical stored JSON.
+          description: Current entries follow AgentRolloutExclusion. Historical stored JSON values remain readable unchanged.
       description: Durable server-side orchestration state; failed and unknown node outcomes always pause the rollout.
     AgentRolloutPage:
       type: object
@@ -2711,15 +2261,6 @@ components:
           format: int64
           minimum: 0
           description: Operations in the unknown recovery state.
-    UserOperationMetrics:
-      type: object
-      additionalProperties: false
-      required: [policy_pending_total, active_batch_item_total, stale_batch_claim_total, unknown_batch_item_total]
-      properties:
-        policy_pending_total: { type: integer, format: int64, minimum: 0 }
-        active_batch_item_total: { type: integer, format: int64, minimum: 0 }
-        stale_batch_claim_total: { type: integer, format: int64, minimum: 0 }
-        unknown_batch_item_total: { type: integer, format: int64, minimum: 0 }
     SimulationScenario:
       type: object
       additionalProperties: false
@@ -2796,97 +2337,72 @@ components:
       properties:
         state: { type: string, enum: [pending, active, revoked] }
         total: { type: integer, format: int64, minimum: 0 }
-    PrivdAttestationCredentialRequest:
+    NodeInstallationTokenRequest:
       type: object
       additionalProperties: false
-      required: [ttl_seconds, reason]
+      required: [token]
       properties:
-        ttl_seconds: { type: integer, format: int64, minimum: 300, maximum: 3600 }
-        reason: { type: string, minLength: 1, maxLength: 512 }
-    PrivdAttestationCredential:
+        token: { type: string, writeOnly: true }
+    NodeBootstrapConfiguration:
       type: object
       additionalProperties: false
-      required: [id, node_id, credential, controller_nonce_hex, credential_context_sha256_hex, expires_at]
+      required: [controller_endpoint_id, environment, enrollment_token, relay_url, relay_access_token, command_verification_key_hex, expires_at]
       properties:
-        id: { $ref: "#/components/schemas/UuidV7" }
+        controller_endpoint_id: { type: string, pattern: "^[0-9a-f]{64}$" }
+        environment: { type: string }
+        enrollment_token: { type: string }
+        relay_url: { type: string, format: uri }
+        relay_access_token: { type: string }
+        command_verification_key_hex: { type: string, pattern: "^[0-9a-f]{64}$" }
+        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
+    NodeBootstrapAttestationRequest:
+      type: object
+      additionalProperties: false
+      required: [token, node_id, endpoint_id]
+      properties:
+        token: { type: string, writeOnly: true }
         node_id: { $ref: "#/components/schemas/UuidV7" }
-        credential: { type: string, pattern: "^[A-Za-z0-9_-]{43}$", writeOnly: true }
+        endpoint_id: { type: string, pattern: "^[0-9a-f]{64}$" }
+    NodeBootstrapAttestationChallenge:
+      type: object
+      additionalProperties: false
+      required: [controller_nonce_hex, credential_context_sha256_hex, registered]
+      properties:
         controller_nonce_hex: { type: string, pattern: "^[0-9a-f]{64}$" }
         credential_context_sha256_hex: { type: string, pattern: "^[0-9a-f]{64}$" }
-        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
-    PrivdAttestationRegistration:
+        registered: { type: boolean }
+    NodeBootstrapRegistrationRequest:
       type: object
       additionalProperties: false
-      required: [credential, version, key_id, public_key, controller_nonce, credential_context_sha256, signature]
+      required: [token, node_id, endpoint_id, user_password_seal_key_id, user_password_seal_public_key_sha256, p12_password_seal_key_id, p12_password_seal_public_key_sha256, registration]
       properties:
-        credential: { type: string, pattern: "^[A-Za-z0-9_-]{43}$", writeOnly: true }
-        version: { type: integer, const: 1 }
-        key_id: { type: string, pattern: "^ed25519-sha256:[0-9a-f]{64}$" }
-        public_key: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
-        controller_nonce: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
-        credential_context_sha256: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
-        signature: { type: string, pattern: "^[A-Za-z0-9_-]{86}$" }
-    PrivdAttestationRevokeRequest:
-      type: object
-      additionalProperties: false
-      required: [key_id, reason]
-      properties:
-        key_id: { type: string, pattern: "^ed25519-sha256:[0-9a-f]{64}$" }
-        reason: { type: string, minLength: 1, maxLength: 512 }
-    PrivdAttestationKeyState:
-      type: object
-      additionalProperties: false
-      required: [key_id, state]
-      properties:
-        key_id: { type: string, pattern: "^ed25519-sha256:[0-9a-f]{64}$" }
-        state: { type: string, enum: [active, revoked] }
-    EnrollmentTokenRequest:
-      type: object
-      additionalProperties: false
-      required: [workspace_id, environment, expected_endpoint_id, reason]
-      properties:
-        workspace_id:
-          $ref: "#/components/schemas/UuidV7"
-        environment:
-          type: string
-          minLength: 1
-          maxLength: 64
-        expected_node_name:
-          type: string
-          minLength: 1
-          maxLength: 128
-        expected_endpoint_id:
-          type: string
-          pattern: "^[0-9a-f]{64}$"
-        ttl_seconds:
-          type: integer
-          format: int64
-          minimum: 1
-          maximum: 900
-          default: 900
-        reason:
-          type: string
-          minLength: 1
-          maxLength: 1024
-    EnrollmentToken:
-      type: object
-      additionalProperties: false
-      required: [id, token, expires_at]
-      properties:
-        id:
-          $ref: "#/components/schemas/UuidV7"
-        token:
-          type: string
-          minLength: 43
-          maxLength: 43
-          readOnly: true
-        expires_at:
-          $ref: "#/components/schemas/UtcDateTime"
+        token: { type: string, writeOnly: true }
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        endpoint_id: { type: string, pattern: "^[0-9a-f]{64}$" }
+        user_password_seal_key_id: { type: string, minLength: 1, maxLength: 128 }
+        user_password_seal_public_key_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        p12_password_seal_key_id: { type: string, minLength: 1, maxLength: 128 }
+        p12_password_seal_public_key_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        registration:
+          type: object
+          additionalProperties: false
+          required: [version, key_id, public_key, controller_nonce, credential_context_sha256, signature]
+          properties:
+            version: { type: integer, const: 1 }
+            key_id: { type: string }
+            public_key: { type: string }
+            controller_nonce: { type: string }
+            credential_context_sha256: { type: string }
+            signature: { type: string }
     NodeBootstrapTokenRequest:
       type: object
       additionalProperties: false
       required: [workspace_id, environment, reason]
       properties:
+        installation:
+          type: boolean
+          default: false
+          description: Return a root-only installation token and automatically provision the node. Omit expected_endpoint_id in this mode; the default uses manual endpoint-bound enrollment.
         workspace_id:
           $ref: "#/components/schemas/UuidV7"
         environment:
@@ -2900,7 +2416,7 @@ components:
         expected_endpoint_id:
           type: string
           pattern: "^[0-9a-f]{64}$"
-          description: Optional possession-bound Agent EndpointID; set this for Controller rebind.
+          description: Optional possession-bound Agent EndpointID.
         ttl_seconds:
           type: integer
           format: int64
@@ -2920,42 +2436,10 @@ components:
           $ref: "#/components/schemas/UuidV7"
         token:
           type: string
-          pattern: "^obt1_[A-Za-z0-9_-]{43}$"
+          pattern: "^(obt1_[A-Za-z0-9_-]{43}|oit1_[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]{43})$"
           readOnly: true
         expires_at:
           $ref: "#/components/schemas/UtcDateTime"
-    NodeApproval:
-      type: object
-      additionalProperties: false
-      required: [policy, capabilities, reason]
-      properties:
-        labels:
-          type: object
-          maxProperties: 32
-          propertyNames:
-            minLength: 1
-            maxLength: 64
-          additionalProperties:
-            type: string
-            minLength: 1
-            maxLength: 128
-        policy:
-          type: string
-          minLength: 1
-          maxLength: 128
-        capabilities:
-          type: array
-          minItems: 1
-          maxItems: 128
-          uniqueItems: true
-          items:
-            type: string
-            minLength: 1
-            maxLength: 128
-        reason:
-          type: string
-          minLength: 1
-          maxLength: 1024
     NodeRevocation:
       type: object
       additionalProperties: false
@@ -3007,7 +2491,7 @@ components:
             Advisory action availability on the authorized node detail read, derived
             from current approved capabilities, node trust and the caller's existing
             resource-scoped permissions. Absent means unknown. Availability does not
-            replace write-time checks, template-specific capabilities, approval,
+            replace write-time checks, template-specific capabilities, authorization,
             revision, sealing-key, secret-reference or operation constraints.
           additionalProperties:
             $ref: "#/components/schemas/NodeActionAvailability"
@@ -3215,140 +2699,29 @@ components:
       required: [items]
       properties:
         items: { type: array, maxItems: 1000, items: { $ref: "#/components/schemas/Workspace" } }
-    RoleBindingRequest:
+    AuditEvent:
       type: object
       additionalProperties: false
-      required: [identity_id, workspace_id, role, resource_type, reason]
+      required: [id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, node_id, request_id, trace_id, command_id, result, reason, error_type, previous_event_hash, event_hash]
       properties:
-        identity_id: { $ref: "#/components/schemas/UuidV7" }
-        workspace_id: { $ref: "#/components/schemas/UuidV7" }
-        role: { type: string, enum: [Viewer, Operator, UserManager, ConfigManager, Auditor, SecurityAdmin, PlatformAdmin] }
-        resource_type: { type: string, enum: [workspace, node, resource, secret_ref, certificate, config_plan, batch_operation, role_binding] }
-        resource_id: { $ref: "#/components/schemas/UuidV7" }
-        reason: { type: string, minLength: 1, maxLength: 512 }
-        approval_id:
-          allOf: [{ $ref: "#/components/schemas/UuidV7" }]
-          description: Required for SecurityAdmin and PlatformAdmin grants.
-    RoleBinding:
-      type: object
-      additionalProperties: false
-      required: [id]
-      properties:
-        id: { $ref: "#/components/schemas/UuidV7" }
-    ApprovalRequest:
-      type: object
-      additionalProperties: false
-      required: [action, resource_type, reason, ttl_seconds]
-      properties:
-        action: { type: string, minLength: 1, maxLength: 128 }
-        resource_type: { type: string, minLength: 1, maxLength: 64 }
-        resource_id: { $ref: "#/components/schemas/UuidV7" }
-        reason: { type: string, minLength: 1, maxLength: 512 }
-        ttl_seconds: { type: integer, format: int64, minimum: 60, maximum: 86400 }
-        batch_items:
-          type: array
-          minItems: 1
-          maxItems: 500
-          description: Required for user.batch.disable so the approver reviews the immutable batch contents.
-          items: { $ref: "#/components/schemas/UserBatchItemRequest" }
-        node_approval:
-          $ref: "#/components/schemas/NodeApproval"
-        certificate:
-          type: object
-          additionalProperties: false
-          required: [expected_version, reason]
-          properties:
-            expected_version: { type: integer, format: int64, minimum: 1 }
-            purpose: { type: string, enum: [certificate_p12] }
-            artifact_request_id: { $ref: "#/components/schemas/UuidV7" }
-            reason: { type: string, minLength: 1, maxLength: 512 }
-        role_binding:
-          type: object
-          additionalProperties: false
-          required: [identity_id, role, resource_type]
-          properties:
-            identity_id: { $ref: "#/components/schemas/UuidV7" }
-            role: { type: string, enum: [SecurityAdmin, PlatformAdmin] }
-            resource_type: { type: string, enum: [workspace, node, resource, secret_ref, certificate, config_plan, batch_operation, role_binding] }
-            resource_id: { $ref: "#/components/schemas/UuidV7" }
-        agent_upgrade:
-          type: object
-          additionalProperties: false
-          required: [target_version]
-          properties:
-            target_version:
-              type: string
-              minLength: 5
-              maxLength: 128
-              description: The approval binds this version plus the server-resolved package digest and architecture.
-        agent_rollout:
-          type: object
-          additionalProperties: false
-          required: [target_version, node_ids, batch_size, stop_on_failure]
-          properties:
-            target_version:
-              type: string
-              minLength: 5
-              maxLength: 128
-            node_ids:
-              type: array
-              minItems: 1
-              maxItems: 500
-              items: { $ref: "#/components/schemas/UuidV7" }
-            batch_size: { type: integer, minimum: 1, maximum: 20 }
-            stop_on_failure: { type: boolean }
-          description: Required for agent.rollout; the approval binds the immutable rollout request hash.
-    ApprovalDecision:
-      type: object
-      additionalProperties: false
-      required: [reason, expected_request_hash]
-      properties:
-        reason: { type: string, minLength: 1, maxLength: 512 }
-        expected_request_hash:
-          type: string
-          pattern: "^[0-9a-f]{64}$"
-          description: Required when approving a content-bound request; must match the details read before deciding.
-    ApprovalPage:
-      type: object
-      additionalProperties: false
-      required: [items, page]
-      properties:
-        items:
-          type: array
-          maxItems: 200
-          items: { $ref: "#/components/schemas/Approval" }
-        page: { $ref: "#/components/schemas/PageInfo" }
-    Approval:
-      type: object
-      additionalProperties: false
-      required: [id, workspace_id, requester_id, action, resource_type, resource_id, reason, status, expires_at, created_at]
-      properties:
-        id: { $ref: "#/components/schemas/UuidV7" }
-        workspace_id: { $ref: "#/components/schemas/UuidV7" }
-        requester_id: { $ref: "#/components/schemas/UuidV7" }
-        approver_id: { $ref: "#/components/schemas/UuidV7" }
+        id: { type: string, format: uuid }
+        occurred_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        actor_type: { type: string }
+        actor_id: { type: string }
         action: { type: string }
         resource_type: { type: string }
-        resource_id: { $ref: "#/components/schemas/UuidV7" }
-        reason: { type: string }
-        status: { type: string, enum: [pending, approved, rejected, expired, consumed] }
-        request_hash:
+        resource_id: { type: [string, "null"], format: uuid }
+        node_id: { type: [string, "null"], format: uuid }
+        request_id: { type: string }
+        trace_id: { type: [string, "null"] }
+        command_id: { type: [string, "null"], format: uuid }
+        result:
           type: string
-          pattern: "^[0-9a-f]{64}$"
-          description: Canonical SHA-256 of the immutable reviewed content when the approval is content-bound.
-        request_summary:
-          oneOf:
-            - type: array
-              maxItems: 500
-              items: { $ref: "#/components/schemas/UserBatchItemRequest" }
-            - type: object
-              additionalProperties: true
-        config_plan_summary:
-          $ref: "#/components/schemas/ConfigPlanApprovalSummary"
-        certificate_summary:
-          $ref: "#/components/schemas/CertificateApprovalSummary"
-        expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+          description: Historical result codes remain readable without a closed enum.
+        reason: { type: [string, "null"] }
+        error_type: { type: [string, "null"] }
+        previous_event_hash: { type: string }
+        event_hash: { type: string }
     AuditEventPage:
       type: object
       additionalProperties: false
@@ -3357,11 +2730,11 @@ components:
         items:
           type: array
           maxItems: 200
-          items: { type: object, additionalProperties: true }
+          items: { $ref: "#/components/schemas/AuditEvent" }
     AuditVerification:
       type: object
       additionalProperties: false
-      required: [workspace_id, events, valid, checkpoint_valid]
+      required: [workspace_id, events, compacted_events, valid, checkpoint_valid]
       properties:
         workspace_id: { $ref: "#/components/schemas/UuidV7" }
         events: { type: integer, format: int64, minimum: 0 }

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
     work = Path(directory)
     os.environ.update(OCSERVIA_BUSINESS_TEST_WORK_DIR=str(work), OCSERVIA_BUSINESS_TEST_WORKSPACE_ID='019d0000-0000-7000-8000-000000000001',
-                      ARTIFACT_DIR=str(work))
+                      ARTIFACT_DIR=str(work), NODE_INSTALL_E2E='false')
     subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
                     '-subj', '/CN=test-ca', '-keyout', str(work / 'ca.key'),
                     '-out', str(work / 'ca.crt')], capture_output=True, check=True)
@@ -29,7 +29,6 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
     done.mkdir(parents=True)
     (done / 'done.json').write_text(json.dumps(expected))
     (work / 'state').mkdir()
-    (work / 'state/node-approval-id').write_text('019d0000-0000-7000-8000-000000000005\n')
     result_dir = work / 'received'
     result_dir.mkdir()
     result = {**expected, 'native_services': ['ocserv', 'ocservia-agent', 'ocservia-privd'],
@@ -52,6 +51,7 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
     harness.business.sql = sql
     (result_dir / 'result.json').write_text(json.dumps(result))
     harness.verify_result(result_dir)
+    assert json.loads((work / 'business.json').read_text())['management_mode'] == 'single-admin'
     assert 'CROSS_VM_PRIVATE_BUSINESS=PASS' in (work / 'business.txt').read_text()
     assert json.loads((work / 'business.json').read_text())['operations'][0]['journal'] == '1|succeeded||1'
     for broken in ({**result, 'config_hash': 'c' * 64},
@@ -71,28 +71,25 @@ with tempfile.TemporaryDirectory(prefix='real-e2e-business-') as directory:
         assert not (work / 'business.json').exists()
     (work / 'state/node-id').write_text(node + '\n')
     (work / 'state/agent-endpoint-id').write_text('a' * 64 + '\n')
-    (work / 'private').mkdir()
-    (work / 'private/privd-credential').write_text('private-test-credential')
     (result_dir / 'ready.json').write_text(json.dumps({'node_id': node, 'agent_endpoint_id': 'a' * 64}))
-    (result_dir / 'proof.json').write_text(json.dumps({'signature': 'public-test-proof'}))
+    (result_dir / 'proof.json').write_text(json.dumps({'key_id': 'installed-root-key'}))
     confirmation = work / 'outbox/business-authority-registered/ready.json'
-    def register_api(path, proof, **kwargs):
-        assert path == f'nodes/{node}/privd-attestation-keys:register'
-        assert proof == {'signature': 'public-test-proof', 'credential': 'private-test-credential'}
-        assert kwargs == {'role': 'anonymous', 'status': 201}
-        raise RuntimeError('registration rejected')
-    harness.business.api = register_api
-    try:
-        harness.register_authority(result_dir)
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError('accepted failed root registration')
-    assert not confirmation.exists()
-    harness.business.api = lambda *args, **kwargs: None
+    def no_registration(*args, **kwargs):
+        raise AssertionError('installation attempted legacy manual registration')
+    harness.business.api = no_registration
+    harness.business.sql = lambda query: '1' if "key_id='installed-root-key'" in query else '0'
     harness.register_authority(result_dir)
     assert json.loads(confirmation.read_text()) == {'node_id': node, 'agent_endpoint_id': 'a' * 64}
-    assert 'private-test-credential' not in confirmation.read_text()
+    confirmation.unlink()
+    harness.business.sql = lambda query: '0'
+    try:
+        harness.register_authority(result_dir)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError('accepted an unregistered installation key')
+    assert not confirmation.exists()
+    harness.business.sql = sql
     for state in ('queued', 'unknown', 'succeeded', 'failed'):
         plan = {'operation_id': operation, 'state': state, 'validation': 'pending',
                 'current_unchanged': False, 'staging_cleaned': True}

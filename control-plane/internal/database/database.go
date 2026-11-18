@@ -16,14 +16,6 @@ const (
 	Serializable
 )
 
-type Capability string
-
-const (
-	Transactions             Capability = "transactions"
-	RowLocks                 Capability = "row_locks"
-	AdvisoryTransactionLocks Capability = "advisory_transaction_locks"
-)
-
 var (
 	ErrNotFound      = errors.New("database: not found")
 	ErrUnique        = errors.New("database: unique constraint")
@@ -85,16 +77,6 @@ type Tx interface {
 type Backend interface {
 	Store
 	Begin(context.Context, Isolation) (Tx, error)
-	Supports(Capability) bool
-}
-
-func Require(backend Backend, capabilities ...Capability) error {
-	for _, capability := range capabilities {
-		if !backend.Supports(capability) {
-			return ErrUnsupported
-		}
-	}
-	return nil
 }
 
 // Within never retries a business callback. Cleanup must work even after the

@@ -28,7 +28,7 @@
 ## 3. ocservia 关键事实与不变量
 
 - 模块化 Monorepo；Controller 是领域包主导的模块化单体，`control-plane/internal/platform/app` 负责装配，领域服务拥有业务不变量和事务。职责、例外和演进条件以 [Development architecture](docs/architecture.md#development-architecture) 为准，不按图形美观或包数量拆服务。
-- 支持范围以 [生产部署参考](docs/operations/production-deployment.md#support-scope) 为准：单 Controller 实例、一个关系数据库（PostgreSQL 18.x 或 MySQL 8.4 LTS）、只支持一个专用 Relay（非空第二 Relay 被拒绝），不提供 HA。角色、租约、开发夹具或测试集群的存在不增加生产承诺；手工安装与 Quick 预设的前提和能力不同，不互相推广。
+- 支持范围以 [生产部署参考](docs/operations/production-deployment.md#support-scope) 为准：单 Controller 实例、一个关系数据库（PostgreSQL 18.x，支持 bundled 或 external）、只支持一个专用 Relay（非空第二 Relay 被拒绝），不提供 HA。角色、租约、开发夹具或测试集群的存在不增加生产承诺；手工安装与 Quick 预设的前提和能力不同，不互相推广。
 - Controller、transportd、Agent、privd、upgrader 和 Signer 的隔离承担不同权限或生命周期责任。HTTP 验权、事务内复验和节点验签/所有权 fence 保护不同边界，不能因表面重复删除。命令被接受、派发、执行和取得结果证明是不同状态；unknown 结果先对账，不盲目重放。
 - 数据库结构以当前 SQL artifacts 和后端实现为准。新库初始化与已有库 forward-only 升级分开；保持 schema 来源与内容校验、迁移串行化、owner/runtime 权限分离和真实 receipts。移除软件版本准入不等于移除数据身份校验；不自动降级数据库、重置身份或改写执行历史。详见 [数据库契约](docs/reference/stable-contracts.md#database)。
 - Proto/OpenAPI 是协议字段来源，按 [契约与生成导航](docs/reference/stable-contracts.md#schema-sources-and-generation) 使用既有生成入口，不直接编辑生成物，不另建人工字段清单。命令签名和 semantic hash 遵守具体版本的 canonical 输入契约，不以 Protobuf 序列化字节替代。
@@ -47,9 +47,9 @@
 | --- | --- |
 | 项目入口与职责导航 | [文档导航](README.md#documentation)、[职责与任务导航](docs/architecture.md#ownership-and-task-navigation) |
 | Controller 服务、事务与 HTTP | [组件职责](docs/architecture.md#component-responsibilities)、[HTTP 契约](docs/reference/stable-contracts.md#http-contracts) |
-| Web API、认证协调与 Workspace | [Web 客户端](docs/architecture.md#web-client)、[身份、审批与审计](docs/reference/stable-contracts.md#identity-approval-and-audit)、[认证运维](docs/operations/authentication.md) |
+| Web API、认证协调与 Workspace | [Web 客户端](docs/architecture.md#web-client)、[身份、授权与审计](docs/reference/stable-contracts.md#identity-authorization-and-audit)、[认证运维](docs/operations/authentication.md) |
 | 配置、命令、Agent/privd 与传输 | [命令与恢复](docs/reference/stable-contracts.md#commands-and-recovery)、[配置与节点 TLS](docs/reference/stable-contracts.md#configuration-and-node-tls)、[Agent/privd](docs/architecture.md#agent-privd-and-upgrader)、[入网与传输](docs/reference/stable-contracts.md#enrollment-and-transport) |
-| 数据库、证书与重绑定 | [数据库](docs/reference/stable-contracts.md#database)、[Signer](docs/reference/stable-contracts.md#certificates-and-signer)、[Rebind](docs/reference/stable-contracts.md#controller-rebind) |
+| 数据库与证书 | [数据库](docs/reference/stable-contracts.md#database)、[Signer](docs/reference/stable-contracts.md#certificates-and-signer) |
 | 安装、运行与恢复 | [生产部署](docs/operations/production-deployment.md)、[节点生命周期](docs/operations/agent-lifecycle.md)、[故障恢复](docs/operations/incident-recovery.md) |
 | 验证、CI 与发布 | [验证与发布](docs/development/release-checks.md) |
 

@@ -16,24 +16,13 @@ import {
 import AppSidebar from "./AppSidebar.vue";
 import { isCurrentSection, navigationLinks } from "./navigation";
 
-const props = defineProps<{
-  workspaces: Workspace[];
-  workspaceId: string;
+defineProps<{
+  workspace?: Workspace | undefined;
   readiness: "loading" | "ready" | "unavailable";
 }>();
 const emit = defineEmits<{
-  changeWorkspace: [workspaceId: string];
   navigated: [];
 }>();
-
-// App owns the selection: the select keeps showing it until App confirms the
-// requested Workspace, so a rejected change leaves the current one displayed.
-function requestWorkspace(event: Event): void {
-  const select = event.target as HTMLSelectElement;
-  const workspaceId = select.value;
-  select.value = props.workspaceId;
-  emit("changeWorkspace", workspaceId);
-}
 
 const route = useRoute();
 const navigationOpen = ref(false);
@@ -98,40 +87,16 @@ function restoreFocus(event: Event): void {
       class="text-foreground min-w-0 shrink-0 truncate text-sm font-semibold"
       >{{ $t(sectionLabel) }}</span
     >
-    <!-- Contain native option overflow in WebKit; padding preserves the focus outline. -->
     <div
       data-testid="workspace"
       class="ml-auto flex min-w-0 items-center justify-end gap-2 overflow-hidden p-1 max-sm:order-last max-sm:ml-0 max-sm:w-full max-sm:justify-start"
     >
-      <template v-if="workspaces.length > 1">
-        <label
-          for="workspace-select"
-          class="text-xs font-medium max-sm:sr-only"
-        >
-          {{ $t("workspace") }}
-        </label>
-        <select
-          id="workspace-select"
-          :value="workspaceId"
-          class="border-input bg-card text-foreground focus-visible:outline-ring h-9 w-48 min-w-0 max-w-full truncate rounded-md border px-3 text-sm font-medium max-sm:flex-1 focus-visible:outline-2 focus-visible:outline-offset-1"
-          @change="requestWorkspace"
-        >
-          <option
-            v-for="workspace in workspaces"
-            :key="workspace.id"
-            :value="workspace.id"
-          >
-            {{ workspace.name }}
-          </option>
-        </select>
-      </template>
-      <!-- A single authorized Workspace has nothing to choose, so it reads as text. -->
-      <template v-else-if="workspaces.length === 1">
+      <template v-if="workspace">
         <span class="text-xs font-medium max-sm:sr-only">
           {{ $t("workspace") }}
         </span>
         <span class="text-foreground truncate font-semibold">
-          {{ workspaces[0]?.name }}
+          {{ workspace.name }}
         </span>
       </template>
     </div>

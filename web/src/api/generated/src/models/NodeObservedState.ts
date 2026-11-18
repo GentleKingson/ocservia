@@ -60,7 +60,7 @@ export interface NodeObservedState {
    */
   version: number;
   /**
-   * Advisory action availability on the authorized node detail read, derived from current approved capabilities, node trust and the caller's existing resource-scoped permissions. Absent means unknown. Availability does not replace write-time checks, template-specific capabilities, approval, revision, sealing-key, secret-reference or operation constraints.
+   * Advisory action availability on the authorized node detail read, derived from current approved capabilities, node trust and the caller's existing resource-scoped permissions. Absent means unknown. Availability does not replace write-time checks, template-specific capabilities, authorization, revision, sealing-key, secret-reference or operation constraints.
    * @type {{ [key: string]: NodeActionAvailability; }}
    * @memberof NodeObservedState
    */

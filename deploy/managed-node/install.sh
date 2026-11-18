@@ -1,92 +1,18 @@
 #!/usr/bin/env bash
-# Thin one-command orchestrator for a production managed node.
+# Install a pinned native package and enroll a managed node.
+# --join-token accepts the Controller's root-only installation token at a hidden
+# prompt. --join-token-file accepts a protected file for unattended installation.
+# The token authenticates HTTPS configuration retrieval, derives a separate
+# Agent-only enrollment token, and binds root privd registration to that node.
+# Services start automatically only after the exact privd key is registered;
+# success requires Controller-observed online state and fresh telemetry.
+# --resume-install reuses /var/lib/ocservia-bootstrap and the existing identity.
+# Failed or ambiguous responses never regenerate identities or rotate keys.
 #
-# Scope: install an exact vX.Y.Z release package-first. With --version the
-# release is pinned on the command line and this script is a self-contained
-# Versioned installer: one file, no Git checkout, and no repository sibling files.
-# Released copies embed their exact tag. Unstamped source copies retain
-# the explicit legacy CLI Git-tag compatibility path. Both paths run the
-# platform preflight, download the
-# matching native package over HTTPS and freezes it in root-owned staging
-# BEFORE any package manager runs as root, installs the native package with
-# the production relay request marker, prepares the production node state (sealing keys, relay
-# configuration, relay access token, Controller command verification key,
-# persistent identity), and either uses a protected bootstrap token source
-# immediately or stops at ENROLLMENT_READY.
-# When the operator provisions either token source,
-# rerunning this same entrypoint completes enrollment, atomically writes the
-# final /etc/ocservia-agent/agent.env, consumes the one-time token file, and
-# stops at ENROLLED_LOCAL.
-#
-# Reruns converge without repeating completed work: when the native package
-# of this exact release is already installed under the production relay
-# contract, the package download and staging are skipped (the package
-# manager invocation no longer happens), and an already-enrolled node is
-# never enrolled again. Once agent.env carries the final NODE_ID, the bootstrap enters a validation-only
-# mode for everything the running services load: the persistent identity
-# files must exist and pass the Agent's own identity validation (agent
-# ownership, owner-only permissions, the 32-byte endpoint key, and the
-# controller pin still matching the configured Controller), the EndpointID
-# the identity loader derives must equal the AGENT_ENDPOINT_ID enrollment
-# binding persisted in agent.env at enrollment (a substituted-but-valid
-# endpoint key cannot silently take the Controller enrollment binding), both
-# sealing private keys must re-derive exactly the fingerprints pinned in
-# agent.env,
-# and the relay configuration, relay access token, and Controller command
-# verification key must already exist and validate (the command key as an
-# Ed25519 anchor under root-controlled ancestry) — or the rerun fails closed.
-# It never regenerates identity or sealing keys and never installs or
-# replaces relay or command trust material; the Controller-side enrollment
-# binding and the command authorization anchor only change through
-# deliberate operations.
-# After the independent approval, activation stays a deliberate operator
-# action outside this bootstrap (systemctl enable --now
-# ocservia-privd.service ocservia-agent.service); a rerun then only observes
-# the enabled+active services and reports SERVICES_ACTIVE. There is no local
-# approval signal a bootstrap could act on without Controller credentials:
-# pending nodes are absent from relay admission, and the only in-protocol
-# confirmation of approval is the Agent's accepted session, which requires
-# the service the operator has not enabled yet.
-#
-# This script never reimplements the verified package lifecycle, the
-# enrollment protocol, or the approval boundary: the native package
-# scriptlets (postinst/preremove), the Agent CLI (--prepare-enrollment /
-# --enrollment-token-file), and the Controller's possession-proof enrollment
-# contract remain the authorities. It never approves a node, never creates or
-# auto-approves an approval request, never places Controller administrator
-# credentials on the node, and never initially enables or starts Agent/privd.
-# The package lifecycle enables/starts the retention timer and may restart
-# already-running Agent/privd during an upgrade.
-#
-# Native package first: the default install path is the release .deb on the
-# Debian family and the release .rpm on Rocky Linux 9. The archive
-# stays the payload inside the package and the durable upgrade and
-# manual recovery carrier; it is not the one-command install path.
-#
-# Usage model (package-first: the exact release is pinned on the command
-# line; obtain install.sh for that exact release tag and run the single
-# file from any directory holding the node configuration):
-#   export CONTROLLER_ENDPOINT_ID=<64-lowercase-hex>
-#   export RELAY_URL_A=https://relay-a.example.com
-#   export RELAY_URL_B=
-#   export RELAY_ACCESS_TOKEN_SOURCE=/protected/relay-access-token
-#   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=/protected/key.pem
-#   export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
-#   # (or keep the allowlisted node configuration in ./install.env, parsed by
-#   # the strict non-executing loader embedded below — the same contract as
-#   # deploy/lib/install-env.sh; explicit shell variables always win over the
-#   # file)
-#   deploy/managed-node/install.sh --version vX.Y.Z   # -> ENROLLED_LOCAL
-#   # Without BOOTSTRAP_TOKEN_SOURCE, this stops at ENROLLMENT_READY instead;
-#   # create an endpoint-bound token for the printed EndpointID, install it as
-#   # /etc/ocservia-agent/enrollment-token root:ocserv-agent 0640, and rerun.
-#   # approve the node (docs/operations/agent-lifecycle.md#approve-the-node), then:
-#   sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
-#   deploy/managed-node/install.sh --version vX.Y.Z   # -> SERVICES_ACTIVE (read-only verification)
-#
-# Compatibility path: inside a clean checkout of an exact vX.Y.Z release
-# tag the same commands run without --version and the release identity
-# comes from the Git tag instead of the command line.
+# Hidden input, --join-token-file and --resume-install differ only in the
+# credential source. Configuration and replay authority come from the Controller.
+# Native packages preserve identity and keys; local process state alone never
+# settles installation. Manual enrollment remains an Agent CLI recovery duty.
 #
 # Supported hosts, mirroring what this repository's installers and CI actually
 # exercise: x86_64 and aarch64; Ubuntu 22.04/24.04/26.04 and Debian 12/13
@@ -110,19 +36,17 @@ set -euo pipefail
 umask 077
 readonly DEFAULT_VERSION=""
 SCRIPT_LIB="$(dirname "${BASH_SOURCE[0]}")/../lib"
-# shellcheck source=deploy/lib/install-ui.sh
-source "${SCRIPT_LIB}/install-ui.sh" # release-embed
-INTERACTIVE=false
+# shellcheck source=deploy/lib/node-bootstrap.sh
+source "${SCRIPT_LIB}/node-bootstrap.sh" # release-embed
 NON_INTERACTIVE=false
-(($# != 0)) || INTERACTIVE=true
-CONFIG_FILE="${PWD}/install.env"
+TOKEN_SOURCE_SEEN=false
+JOIN_TOKEN_FILE=""
+JOIN_STATE_DIR=""
+JOIN_ORIGIN=""
 
-# The installer's own absolute path (the --root-lifecycle re-exec target, so
-# the deliberate root lifecycle never depends on living inside a checkout)
-# and the repository root for the legacy Git-tag identity path.
+# Re-execute the same installer across the sudo boundary.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
-ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 OS_RELEASE_FILE="${OCSERV_MANAGED_NODE_OS_RELEASE:-/etc/os-release}"
 SYSROOT="${OCSERV_MANAGED_NODE_SYSROOT:-}"
@@ -140,17 +64,12 @@ ENROLLMENT_TOKEN_FILE="${AGENT_CONF_DIR}/enrollment-token"
 USER_SEAL_KEY_FILE="${AGENT_CONF_DIR}/user-password-seal-private.pem"
 P12_SEAL_KEY_FILE="${AGENT_CONF_DIR}/p12-password-seal-private.pem"
 IDENTITY_DIR="${SYSROOT}/var/lib/ocservia-agent/identity"
-# The pristine placeholder relay URLs installed by the verified package from
+# The pristine placeholder relay URL installed by the verified package from
 # deploy/production/systemd/relays.env.example.
 PLACEHOLDER_RELAY_URL_A="https://relay-a.example.com"
-PLACEHOLDER_RELAY_URL_B=""
 PLACEHOLDER_NODE_ID="00000000-0000-7000-8000-000000000000"
 SUPPORTED_HOSTS="Ubuntu 22.04/24.04/26.04 and Debian 12/13 (dpkg), Rocky Linux 9 (rpm), x86_64/aarch64, systemd"
 VERSION="${DEFAULT_VERSION}"
-VERSION_PINNED=false
-RELEASE_TAG=""
-RELEASE_COMMIT=""
-RELEASE_VERSION=""
 ARCH_WORD=""
 RPM_ARCH=""
 PACKAGE_FAMILY=""
@@ -158,7 +77,7 @@ PACKAGE_MANAGER=""
 PACKAGE_FILE=""
 STAGING_DIR=""
 PACKAGE_STAGING_DIR=""
-ROOT_LIFECYCLE=false
+
 EXPECTED_PACKAGE_DIGEST=""
 AGENT_GID=""
 ENDPOINT_ID=""
@@ -166,23 +85,13 @@ ENROLLED_NODE_ID=""
 USER_SEAL_DESCRIPTOR=""
 P12_SEAL_DESCRIPTOR=""
 
-# Only managed-node configuration crosses the internal sudo boundary on the
-# deliberate --root-lifecycle path. Every value is a public descriptor or a
-# path to operator-provisioned protected material; the fixture seams cross
-# for the same reason as the Controller state root: an explicitly configured
-# root must stay identical on both sides of the boundary.
+# Only fixture path seams and public sealing key identifiers cross sudo.
+# Controller configuration and secret paths are obtained after elevation.
 ROOT_LIFECYCLE_ENV_NAMES=(
-  BOOTSTRAP_TOKEN_SOURCE
-  CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE
-  CONTROLLER_ENDPOINT_ID
-  ENROLLMENT_ENVIRONMENT
   OCSERV_MANAGED_NODE_OS_RELEASE
   OCSERV_MANAGED_NODE_SYSROOT
-  P12_PASSWORD_SEAL_KEY_ID
-  RELAY_ACCESS_TOKEN_SOURCE
-  RELAY_URL_A
-  RELAY_URL_B
   USER_PASSWORD_SEAL_KEY_ID
+  P12_PASSWORD_SEAL_KEY_ID
 )
 
 fail() {
@@ -191,26 +100,30 @@ fail() {
 }
 
 usage() {
-  echo "No arguments: interactive wizard (TTY required). --non-interactive: unattended, no prompts." >&2
-  echo "Options: --config PATH (default ./install.env), --version vX.Y.Z (Release default embedded)." >&2
-  echo "usage: deploy/managed-node/install.sh [--version vX.Y.Z] [--root-lifecycle] (the node configuration comes from the operator session or ./install.env)" >&2
+  echo "No arguments: hidden installation-token prompt (TTY required). --non-interactive: unattended, no prompts." >&2
+  echo "Options: --join-token (hidden prompt), --join-token-file PATH, --resume-install, --version vX.Y.Z." >&2
+  echo "usage: deploy/managed-node/install.sh [--version vX.Y.Z] [--root-lifecycle] [--join-token | --join-token-file PATH | --resume-install]" >&2
   exit 2
 }
 
-# The formal mode pins the exact release on the command line: no Git
-# checkout, no repository siblings, and no trust in the invoking directory.
-# The version is public release identity, not secret material, so it may
-# appear on the command line. Initial downloads use HTTPS and are frozen in
-# root-owned staging before the native package manager runs.
+# Release assets embed their tag. Automation can supply an exact tag explicitly.
 version_seen=false
 while (($# > 0)); do
   case "$1" in
-    --interactive) INTERACTIVE=true; shift ;;
+    --join-token|--interactive)
+      [[ "${TOKEN_SOURCE_SEEN}" == false ]] || fail "choose one installation token source"
+      TOKEN_SOURCE_SEEN=true; shift ;;
+    --join-token-file)
+      [[ "${TOKEN_SOURCE_SEEN}" == false ]] || fail "choose one installation token source"
+      (($# >= 2)) || fail "--join-token-file requires a protected file"
+      [[ -f "$2" && ! -L "$2" ]] || fail "--join-token-file requires a regular file, not a symlink"
+      TOKEN_SOURCE_SEEN=true; JOIN_TOKEN_FILE="$(realpath -- "$2")"; shift 2 ;;
+    --resume-install)
+      [[ "${TOKEN_SOURCE_SEEN}" == false ]] || fail "choose one installation token source"
+      TOKEN_SOURCE_SEEN=true; JOIN_TOKEN_FILE=resume; shift ;;
     --non-interactive) NON_INTERACTIVE=true; shift ;;
     --config)
-      (($# >= 2)) || fail "--config requires an existing file"
-      [[ -f "$2" && ! -L "$2" ]] || fail "--config requires a regular file, not a symlink"
-      CONFIG_FILE="$(realpath -- "$2")"; shift 2 ;;
+      fail "manual configuration installation is retired; use an installation token or --resume-install; manual recovery uses the Agent enrollment CLI" ;;
     --help|-h) usage ;;
     --version)
       [[ "${version_seen}" == false && $# -ge 2 ]] || usage
@@ -219,7 +132,6 @@ while (($# > 0)); do
       shift 2
       ;;
     --root-lifecycle)
-      ROOT_LIFECYCLE=true
       shift
       ;;
     *)
@@ -227,187 +139,17 @@ while (($# > 0)); do
       ;;
   esac
 done
-[[ "${NON_INTERACTIVE}" == false || "${INTERACTIVE}" == false ]] || fail "conflicting installation modes"
-[[ "${INTERACTIVE}" == false ]] || install_ui_require_tty
-if [[ -n "${VERSION}" ]]; then
-  [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
-    fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
-  RELEASE_TAG="${VERSION}"
-  RELEASE_VERSION="${VERSION#v}"
-  VERSION_PINNED=true
+[[ "${NON_INTERACTIVE}" == false || -n "${JOIN_TOKEN_FILE}" ]] || fail "unattended token install requires --join-token-file or --resume-install"
+if [[ -z "${JOIN_TOKEN_FILE}" ]]; then
+  [[ -t 0 && -t 1 ]] || fail "installation token input requires a TTY; use --join-token-file or --resume-install"
 fi
+[[ -n "${VERSION}" ]] || fail "use the pinned Release installer or supply --version vX.Y.Z"
+[[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
+  fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
+RELEASE_VERSION="${VERSION#v}"
 
-if ((EUID == 0)) && [[ "${ROOT_LIFECYCLE}" == false ]]; then
-  case "${SUDO_USER:-}" in
-    "" | root) ;;
-    *)
-      fail "run install.sh as the operator launcher user; the installer invokes sudo only for scoped privileged steps (whole-script sudo from '${SUDO_USER}' would hand the entire operator environment to root); for a deliberate root lifecycle run 'deploy/managed-node/install.sh --root-lifecycle'"
-      ;;
-  esac
-fi
-
-# Operator configuration comes from the invoking shell environment and, for
-# allowlisted variables not exported there, from $PWD/install.env. The
-# strict non-executing loader fail-closes on unknown keys, expansion
-# syntax, and unsafe file metadata, so a configuration error surfaces
-# before any host mutation below; an absent file is a no-op and explicit
-# shell variables always win. OCSERV_INSTALL_ENV_RESOLVED marks the
-# deliberate --root-lifecycle re-exec: the launcher user already resolved
-# install.env under its own privileges and forwarded the effective values
-# across the sudo boundary, so root must not treat a possibly-replaced
-# $PWD/install.env as new authoritative input. The fixture seams above stay
-# deliberately outside this allowlist: they are test seams, not operator
-# configuration, and must not gain an install.env entry.
-# Embedded install.env loader: the versioned installer contract copy of
-# deploy/lib/install-env.sh, kept functionally identical to it. This script
-# must stay a single self-contained file (it runs without a repository
-# checkout), so it cannot source the shared loader; any contract change is
-# made in the shared loader and both versioned installer copies. Contract:
-# - The caller names its own allowlist; any other key in the file fails
-#   closed, so a typo cannot silently drop a setting and internal test seams
-#   never gain a production configuration entry.
-# - Blank lines and lines whose first character is '#' are ignored; every
-#   other line must be strict KEY=VALUE with KEY matching ^[A-Z][A-Z0-9_]*$.
-# - Nothing in the file is ever executed, sourced, or expanded. Values
-#   containing '$' or '`' are rejected outright — no supported value
-#   (hostname, URL, path, fingerprint, environment tag) needs them, and the
-#   rejection guarantees command substitution can never reach a shell even
-#   if a future edit made this loader less careful.
-# - A value wrapped in one static outer layer of matching single or double
-#   quotes has exactly that layer removed: no expansion, no escape
-#   interpretation. Empty values are valid.
-# - Priority: explicit shell environment > install.env > installer
-#   defaults. Before the file is read, every allowlisted variable already
-#   set in the environment — including one explicitly set to an empty
-#   value — is recorded, and the loader only fills and exports variables
-#   that were not explicitly set.
-# - File safety: the file must be an existing regular file, must not be a
-#   symlink, and must not be group- or world-writable. Root ownership is
-#   deliberately not required: a launcher user must be able to maintain its
-#   own configuration in a normal working directory.
-# - Errors report the path, line, and reason only; file contents are never
-#   printed.
-# - A missing file is a silent no-op: without install.env the installer
-#   behaves exactly like an environment-only configuration.
-install_env_die() {
-  echo "install.env: $1" >&2
-  exit 1
-}
-
-# install_env_load <file> <allowlisted-key>...
-install_env_load() {
-  local file="$1"
-  shift
-  local -a allowlist=("$@")
-  local -a seen=()
-  local -a preset=()
-  local allowed key line value mode first last lineno=0 known
-
-  if [[ -L "${file}" ]]; then
-    install_env_die "refusing the configuration symlink ${file}; install.env must be a regular file"
-  fi
-  if [[ ! -e "${file}" ]]; then
-    return 0
-  fi
-  if [[ ! -f "${file}" ]]; then
-    install_env_die "${file} is not a regular file"
-  fi
-  if [[ ! -r "${file}" ]]; then
-    install_env_die "${file} is not readable by the invoking user"
-  fi
-  mode="$(stat -c '%a' -- "${file}")" ||
-    install_env_die "cannot inspect the permissions of ${file}"
-  if (( (8#${mode} & 8#022) != 0 )); then
-    install_env_die "refusing the group/world-writable configuration file ${file} (mode ${mode})"
-  fi
-
-  # A variable explicitly set in the shell — even to an empty value —
-  # always wins over the file; only unset variables are filled from it.
-  # (${!allowed+x} is the portable set-ness probe: it expands to "x" for a
-  # set-but-empty variable and to nothing for an unset one.)
-  for allowed in "${allowlist[@]}"; do
-    if [[ -n "${!allowed+x}" ]]; then
-      preset+=("${allowed}")
-    fi
-  done
-
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    lineno=$((lineno + 1))
-    if [[ -z "${line}" || "${line}" == \#* ]]; then
-      continue
-    fi
-    if [[ ! "${line}" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
-      install_env_die "${file}:${lineno}: expected KEY=VALUE, a # comment, or a blank line"
-    fi
-    key="${BASH_REMATCH[1]}"
-    value="${BASH_REMATCH[2]}"
-    case "${value}" in
-      *'$'* | *'`'*)
-        install_env_die "${file}:${lineno}: ${key} must be a literal value; shell expansion syntax is never evaluated"
-        ;;
-    esac
-    if [[ "${value}" =~ [[:cntrl:]] ]]; then
-      install_env_die "${file}:${lineno}: ${key} contains a control character"
-    fi
-    if (( ${#value} >= 2 )); then
-      first="${value:0:1}"
-      last="${value:${#value}-1:1}"
-      if [[ ( "${first}" == "'" && "${last}" == "'" ) || ( "${first}" == '"' && "${last}" == '"' ) ]]; then
-        value="${value:1:${#value}-2}"
-      fi
-    fi
-    known=false
-    for allowed in "${allowlist[@]}"; do
-      if [[ "${key}" == "${allowed}" ]]; then
-        known=true
-        break
-      fi
-    done
-    if [[ "${known}" != true ]]; then
-      install_env_die "${file}:${lineno}: unknown configuration variable ${key}"
-    fi
-    for allowed in ${seen[@]+"${seen[@]}"}; do
-      if [[ "${key}" == "${allowed}" ]]; then
-        install_env_die "${file}:${lineno}: duplicate configuration variable ${key}"
-      fi
-    done
-    seen+=("${key}")
-    for allowed in ${preset[@]+"${preset[@]}"}; do
-      if [[ "${key}" == "${allowed}" ]]; then
-        continue 2
-      fi
-    done
-    printf -v "${key}" '%s' "${value}"
-    # shellcheck disable=SC2163 # key is a validated allowlisted identifier
-    export "${key}"
-  done <"${file}"
-
-  if (( ${#seen[@]} > 0 )); then
-    echo "loaded configuration from ${file}"
-  fi
-}
-
-if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
-  install_env_load "${CONFIG_FILE}" \
-    BOOTSTRAP_TOKEN_SOURCE \
-    CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
-    CONTROLLER_ENDPOINT_ID \
-    ENROLLMENT_ENVIRONMENT \
-    P12_PASSWORD_SEAL_KEY_ID \
-    RELAY_ACCESS_TOKEN_SOURCE \
-    RELAY_URL_A \
-    RELAY_URL_B \
-    USER_PASSWORD_SEAL_KEY_ID
-fi
-
-# Configuration-derived defaults are applied only after the configuration
-# sources above are final, and only by normalizing unset to empty — a
-# variable explicitly set (even empty) must stay exactly as the operator
-# left it.
 USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-}"
 P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-}"
-ENROLLMENT_ENVIRONMENT="${ENROLLMENT_ENVIRONMENT:-}"
-BOOTSTRAP_TOKEN_SOURCE="${BOOTSTRAP_TOKEN_SOURCE:-}"
 
 # Privileged steps run one command at a time: directly when this process is
 # already the deliberate root lifecycle, otherwise through sudo with explicit
@@ -444,11 +186,16 @@ forward_root_lifecycle() {
   local variable allowed
   local -a forwarded_environment=()
   local -a reexec_arguments=(--root-lifecycle)
+  case "${JOIN_TOKEN_FILE}" in
+    resume) reexec_arguments+=(--resume-install) ;;
+    "") reexec_arguments+=(--join-token) ;;
+    *) reexec_arguments+=(--join-token-file "${JOIN_TOKEN_FILE}") ;;
+  esac
   [[ "${NON_INTERACTIVE}" == false ]] || reexec_arguments+=(--non-interactive)
   # The --version pin is operator-chosen public release identity, not node
   # configuration: it re-crosses the privilege boundary as the same explicit
   # command-line argument instead of an environment variable.
-  [[ -z "${RELEASE_TAG}" ]] || reexec_arguments+=(--version "${RELEASE_TAG}")
+  reexec_arguments+=(--version "${VERSION}")
   while IFS= read -r variable; do
     for allowed in "${ROOT_LIFECYCLE_ENV_NAMES[@]}"; do
       [[ "${variable}" == "${allowed}" ]] || continue
@@ -458,42 +205,11 @@ forward_root_lifecycle() {
   done < <(compgen -e)
   command -v sudo >/dev/null 2>&1 ||
     fail "sudo is required for --root-lifecycle when the installer is not already running as root"
-  # OCSERV_INSTALL_ENV_RESOLVED tells the root re-exec that install.env was
-  # already resolved by the launcher user: root must not re-read a file that
-  # may have been replaced across the privilege transition. The re-exec
-  # targets this script's own path via Bash, so a downloaded mode-0644 file
-  # works just like the documented 'bash install.sh' invocation.
+  # Re-execute this exact release asset without passing the operator environment.
   local -a sudo_args=()
   [[ "${NON_INTERACTIVE}" == false ]] || sudo_args+=(-n)
   exec sudo "${sudo_args[@]}" env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
-    OCSERV_INSTALL_ENV_RESOLVED=1 \
     bash "${INSTALLER_PATH}" "${reexec_arguments[@]}"
-}
-
-resolve_release_identity() {
-  local tag matching=()
-  if [[ -n "${RELEASE_TAG}" ]]; then
-    # --version mode: the release identity came from the validated command
-    # line. No Git checkout is consulted and nothing about the invoking
-    # directory is trusted. The native package is downloaded over HTTPS
-    # and frozen before the package manager runs.
-    echo "release identity: ${RELEASE_TAG} (pinned by --version)"
-    return
-  fi
-  command -v git >/dev/null 2>&1 ||
-    fail "git is required to identify the release checkout"
-  RELEASE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)" ||
-    fail "${ROOT} is not a Git checkout; install from a clean checkout of an exact vX.Y.Z release tag"
-  while IFS= read -r tag; do
-    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] && matching+=("${tag}")
-  done < <(git -C "${ROOT}" tag --points-at HEAD)
-  ((${#matching[@]} == 1)) ||
-    fail "checkout HEAD must correspond to exactly one exact vX.Y.Z release tag (found ${#matching[@]}); check out the release tag to install, e.g. git clone --branch vX.Y.Z --depth 1 <repository>"
-  RELEASE_TAG="${matching[0]}"
-  RELEASE_VERSION="${RELEASE_TAG#v}"
-  [[ -z "$(git -C "${ROOT}" status --porcelain --untracked-files=all)" ]] ||
-    fail "the checkout at ${RELEASE_TAG} is dirty; install from a clean checkout"
-  echo "release identity: ${RELEASE_TAG} (${RELEASE_COMMIT})"
 }
 
 resolve_architecture() {
@@ -554,8 +270,6 @@ validate_sysroot() {
 
 require_commands() {
   local tool
-  # git is deliberately absent: it is needed only by the legacy
-  # checkout-identity path, which enforces its own git requirement.
   for tool in curl openssl sha256sum awk; do
     command -v "${tool}" >/dev/null 2>&1 ||
       fail "${tool} is required by the managed-node installer"
@@ -564,8 +278,6 @@ require_commands() {
 
 validate_operator_inputs() {
   local variable
-  RELAY_URL_B="${RELAY_URL_B:-}"
-  [[ -z "$RELAY_URL_B" ]] || fail 'only one dedicated Relay is supported; leave RELAY_URL_B empty'
   for variable in CONTROLLER_ENDPOINT_ID RELAY_URL_A \
     RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE; do
     [[ -n "${!variable:-}" ]] ||
@@ -627,9 +339,9 @@ create_package_staging() {
 download_release_artifacts() {
   local name
   for name in "$@"; do
-    echo "downloading ${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
+    echo "downloading ${DOWNLOAD_BASE}/${VERSION}/${name}"
     curl -fsSL --proto '=https' --tlsv1.2 \
-      --output "${STAGING_DIR}/${name}" "${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
+      --output "${STAGING_DIR}/${name}" "${DOWNLOAD_BASE}/${VERSION}/${name}"
   done
 }
 
@@ -740,7 +452,7 @@ write_config_atomic() {
 }
 
 ensure_relays_env() {
-  local metadata existing_a existing_b staging
+  local metadata existing_a staging
   if path_exists "${RELAYS_ENV_FILE}"; then
     metadata="$(stat_string "${RELAYS_ENV_FILE}")"
     if ! priv test -f "${RELAYS_ENV_FILE}" || priv test -L "${RELAYS_ENV_FILE}"; then
@@ -749,18 +461,17 @@ ensure_relays_env() {
     [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
       fail "the existing ${RELAYS_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
     existing_a="$(priv sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
-    existing_b="$(priv sed -n 's/^RELAY_URL_B=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
-    if [[ "${existing_a}" == "${RELAY_URL_A}" && "${existing_b}" == "${RELAY_URL_B}" ]]; then
+    if [[ "${existing_a}" == "${RELAY_URL_A}" ]]; then
       echo "preserved existing relay configuration (${RELAYS_ENV_FILE})"
       return
     fi
-    [[ "${existing_a}" == "${PLACEHOLDER_RELAY_URL_A}" && "${existing_b}" == "${PLACEHOLDER_RELAY_URL_B}" ]] ||
-      fail "the existing ${RELAYS_ENV_FILE} requests ${existing_a} / ${existing_b}, not the configured dedicated relays; resolve the mismatch deliberately instead of overwriting node configuration"
+    [[ "${existing_a}" == "${PLACEHOLDER_RELAY_URL_A}" ]] ||
+      fail "the existing ${RELAYS_ENV_FILE} requests ${existing_a}, not the configured dedicated relay; resolve the mismatch deliberately instead of overwriting node configuration"
   fi
   staging="$(mktemp "${STAGING_DIR}/relays-env.XXXXXX")"
-  printf 'RELAY_URL_A=%s\nRELAY_URL_B=%s\n' "${RELAY_URL_A}" "${RELAY_URL_B}" >"${staging}"
+  printf 'RELAY_URL_A=%s\n' "${RELAY_URL_A}" >"${staging}"
   write_config_atomic "${staging}" "${RELAYS_ENV_FILE}" 0640
-  echo "wrote dedicated relay URLs to ${RELAYS_ENV_FILE}"
+  echo "wrote dedicated relay URL to ${RELAYS_ENV_FILE}"
 }
 
 ensure_protected_install() {
@@ -803,9 +514,6 @@ prepare_bootstrap_token() {
 }
 
 detect_enrolled_node() {
-  if priv test -e "${AGENT_CONF_DIR}/active-binding" || priv test -L "${AGENT_CONF_DIR}/active-binding"; then
-    fail "this node has an explicit Controller rebind; use ocservia-agent-rebind for binding recovery and the native package lifecycle for upgrades, not bootstrap enrollment"
-  fi
   # Establishes whether this node already completed enrollment, before any
   # step that could create node state. The enrolled state is a validation
   # boundary: from here on the bootstrap must not regenerate identity or
@@ -864,6 +572,15 @@ validate_enrolled_sealing_keys() {
     fail "the enrolled ${AGENT_ENV_FILE} has no valid P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256 fingerprint; resolve it deliberately"
   [[ "${P12_SEAL_DESCRIPTOR}" == "${expected}" ]] ||
     fail "the p12-password sealing key re-derives ${P12_SEAL_DESCRIPTOR} but the enrolled agent.env pins ${expected}; a regenerated or replaced key cannot silently take the enrolled binding — restore the enrolled key or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
+  # Replays use the identifiers bound with these keys, even when the launcher
+  # no longer exports the first attempt's optional public key names.
+  USER_PASSWORD_SEAL_KEY_ID="$(priv sed -n 's/^USER_PASSWORD_SEAL_KEY_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  P12_PASSWORD_SEAL_KEY_ID="$(priv sed -n 's/^P12_PASSWORD_SEAL_KEY_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  [[ "${USER_PASSWORD_SEAL_KEY_ID}" =~ ^[A-Za-z0-9._-]{1,128}$ &&
+     "${P12_PASSWORD_SEAL_KEY_ID}" =~ ^[A-Za-z0-9._-]{1,128}$ &&
+     "${USER_PASSWORD_SEAL_KEY_ID}" != "${P12_PASSWORD_SEAL_KEY_ID}" ]] ||
+    fail "the enrolled sealing key identifiers are missing or invalid; restore the original configuration"
+
 }
 
 validate_enrolled_identity() {
@@ -899,14 +616,15 @@ validate_enrolled_identity() {
     fail "the Agent did not print a valid EndpointID while validating the enrolled identity"
   [[ "${endpoint_id}" == "${enrolled_endpoint_id}" ]] ||
     fail "the enrolled identity now presents EndpointID ${endpoint_id} but the enrolled ${AGENT_ENV_FILE} pins ${enrolled_endpoint_id}; a replaced endpoint secret key cannot silently take the Controller enrollment binding — restore the identity material or re-enroll as a new node deliberately (docs/operations/agent-lifecycle.md#enroll-the-node)"
+  ENDPOINT_ID="${endpoint_id}"
   echo "enrolled persistent identity validated; EndpointID: ${endpoint_id}"
 }
 
 validate_enrolled_relays() {
   # On an enrolled node relays.env is the running relay configuration. It
-  # must already exist, be safe, and name exactly the configured dedicated
-  # relays; a validation-only rerun never writes it.
-  local metadata existing_a existing_b
+  # must already exist, be safe, and name the configured dedicated relay;
+  # a validation-only rerun never writes it.
+  local metadata existing_a
   if ! path_exists "${RELAYS_ENV_FILE}"; then
     fail "the enrolled node is missing its relay configuration ${RELAYS_ENV_FILE}; restoring it is a deliberate recovery operation, not a bootstrap rerun (docs/operations/agent-lifecycle.md#install-a-managed-node)"
   fi
@@ -917,9 +635,8 @@ validate_enrolled_relays() {
   [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
     fail "the enrolled relay configuration ${RELAYS_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
   existing_a="$(priv sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
-  existing_b="$(priv sed -n 's/^RELAY_URL_B=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
-  [[ "${existing_a}" == "${RELAY_URL_A}" && "${existing_b}" == "${RELAY_URL_B}" ]] ||
-    fail "the enrolled ${RELAYS_ENV_FILE} names ${existing_a:-<none>} / ${existing_b:-<none>}, not the configured dedicated relays; a rerun never rewrites the running relay configuration — resolve the mismatch deliberately"
+  [[ "${existing_a}" == "${RELAY_URL_A}" ]] ||
+    fail "the enrolled ${RELAYS_ENV_FILE} names ${existing_a:-<none>}, not the configured dedicated relay; a rerun never rewrites the running relay configuration — resolve the mismatch deliberately"
 }
 
 validate_enrolled_relay_token() {
@@ -1045,41 +762,6 @@ is_final_node_id() {
     [[ "$1" != "${PLACEHOLDER_NODE_ID}" ]]
 }
 
-services_enabled_and_active() {
-  # Read-only observation, the only post-activation signal available without
-  # Controller credentials: it proves the operator completed the deliberate
-  # enable step, not Controller-side approval or an accepted session. The
-  # queries never mutate anything; this observation never enables, starts,
-  # stops, or masks a service.
-  local unit
-  for unit in ocservia-privd.service ocservia-agent.service; do
-    [[ "$(systemctl is-enabled "${unit}" 2>/dev/null || true)" == "enabled" ]] || return 1
-    [[ "$(systemctl is-active "${unit}" 2>/dev/null || true)" == "active" ]] || return 1
-  done
-}
-
-print_controller_unobserved() {
-  echo "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
-  echo "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
-  echo "CONTROLLER_FRESHNESS: NOT_OBSERVED"
-  echo "next: use an administrator session on the Controller host to GET /api/v1/nodes/${1}; approval/activation responses use status, inventory uses trust_status, connection_state and freshness"
-}
-
-print_enrolled_local() {
-  echo "ENROLLED_LOCAL"
-  echo "NODE_ID: ${1}"
-  echo "SERVICES: ${2:-NOT_OBSERVED}"
-  print_controller_unobserved "${1}"
-  echo "next: verify approval in the Controller (docs/operations/agent-lifecycle.md#approve-the-node), then deliberately enable ocservia-privd.service and ocservia-agent.service; the bootstrap never initially starts or enables Agent/privd"
-}
-
-print_services_active() {
-  echo "SERVICES_ACTIVE"
-  echo "NODE_ID: ${1}"
-  print_controller_unobserved "${1}"
-  echo "both local services are enabled and active; this does not establish Controller activation, online state or fresh telemetry"
-}
-
 cleanup_enrollment_copy() {
   if ! path_exists "${ENROLLMENT_TOKEN_FILE}"; then return; fi
   if ! priv test -f "${ENROLLMENT_TOKEN_FILE}" || priv test -L "${ENROLLMENT_TOKEN_FILE}" \
@@ -1105,30 +787,14 @@ converge_enrollment() {
       fail "the Relay CA must contain a readable PEM certificate"
     relay_args+=(--relay-ca-file "${RELAY_CA_FILE}")
   fi
-  local node_id staging metadata rerun_instruction
-  # The single-file mode has no stable script path to print, and a rerun
-  # without the version pin would fall back to the legacy checkout identity
-  # and fail: the operator must rerun the same installer with the same
-  # --version argument.
-  if [[ "${VERSION_PINNED}" == true ]]; then
-    rerun_instruction="rerun this installer with the same --version ${RELEASE_TAG} argument"
-  else
-    rerun_instruction="rerun deploy/managed-node/install.sh"
-  fi
+  local node_id staging metadata
   if [[ -n "${ENROLLED_NODE_ID}" ]]; then
     cleanup_enrollment_copy
-    if services_enabled_and_active; then
-      print_services_active "${ENROLLED_NODE_ID}"
-    else
-      print_enrolled_local "${ENROLLED_NODE_ID}" NOT_ENABLED_AND_ACTIVE
-    fi
+    node_bootstrap_complete "${ENROLLED_NODE_ID}"
     return
   fi
-  if ! path_exists "${ENROLLMENT_TOKEN_FILE}"; then
-    echo "ENROLLMENT_READY"
-    echo "next: create a short-lived one-time enrollment token with expected_endpoint_id=${ENDPOINT_ID} (docs/operations/agent-lifecycle.md#enroll-the-node), install it as ${ENROLLMENT_TOKEN_FILE} (root:ocserv-agent 0640), and ${rerun_instruction}"
-    return
-  fi
+  path_exists "${ENROLLMENT_TOKEN_FILE}" ||
+    fail "derived enrollment credential is missing; preserve identity and rerun --resume-install"
   metadata="$(stat_string "${ENROLLMENT_TOKEN_FILE}")"
   if ! priv test -f "${ENROLLMENT_TOKEN_FILE}" || priv test -L "${ENROLLMENT_TOKEN_FILE}"; then
     fail "the enrollment token ${ENROLLMENT_TOKEN_FILE} is not a regular file"
@@ -1147,10 +813,7 @@ converge_enrollment() {
     "${relay_args[@]}" \
     --relay-token-file "${RELAY_TOKEN_FILE}")" ||
     {
-      if [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]]; then
-        fail "enrollment failed or its response is unknown; preserve the original EndpointID, identity and bootstrap binding; rerun with the same bootstrap source to recover the committed result. Do not request a new token before checking the Controller"
-      fi
-      fail "enrollment failed or its response is unknown; preserve the original EndpointID and token copy. Endpoint-bound tokens do not provide bootstrap replay recovery: first query the Controller by that EndpointID, then follow docs/operations/agent-lifecycle.md#recover-an-uncertain-enrollment-response before creating any new authorization"
+      fail "enrollment failed or its response is unknown; preserve the original EndpointID, identity and bootstrap binding; rerun --resume-install to recover the committed result before requesting new authority"
     }
   node_id="$(printf '%s\n' "${node_id}" | awk 'NF {last=$0} END {print last}')"
   is_final_node_id "${node_id}" ||
@@ -1166,54 +829,20 @@ converge_enrollment() {
     priv rm -f -- "${BOOTSTRAP_TOKEN_SOURCE}"
   fi
   echo "enrollment complete; final ${AGENT_ENV_FILE} written and the one-time token file consumed"
-  print_enrolled_local "${node_id}"
+  node_bootstrap_complete "${node_id}"
 }
 
-# Preserve CLI root-lifecycle validation of root-readable protected inputs.
-# A wizard crosses this boundary only after the operator's confirmation.
-if [[ "${ROOT_LIFECYCLE}" == true && "${INTERACTIVE}" == false ]]; then
-  ((EUID == 0)) || forward_root_lifecycle
-  unset SUDO_USER
-fi
+# Every source enters the same root lifecycle before reading token state.
+((EUID == 0)) || forward_root_lifecycle
+unset SUDO_USER
 validate_sysroot
-resolve_release_identity
+echo "release identity: ${VERSION}"
 resolve_architecture
 detect_platform
 require_commands
-if [[ "${INTERACTIVE}" == true ]]; then
-  echo 'Agent installation preserves existing identity; approval and initial service activation remain separate.'
-  install_ui_prompt CONTROLLER_ENDPOINT_ID 'Controller EndpointID (64 lowercase hex)'
-  install_ui_prompt RELAY_URL_A 'Dedicated Relay HTTPS URL'
-  install_ui_prompt RELAY_ACCESS_TOKEN_SOURCE 'Protected Relay access token file'
-  install_ui_prompt CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE 'Controller command verification public key file'
-  install_ui_prompt BOOTSTRAP_TOKEN_SOURCE 'Enrollment token file (empty: stop at ENROLLMENT_READY)'
-  install_ui_prompt ENROLLMENT_ENVIRONMENT 'Enrollment environment' production
-  install_ui_prompt USER_PASSWORD_SEAL_KEY_ID 'User password sealing key ID' user-password-v1
-  install_ui_prompt P12_PASSWORD_SEAL_KEY_ID 'PKCS#12 password sealing key ID' p12-password-v1
-fi
+node_bootstrap_prepare
 validate_operator_inputs
-if [[ "${INTERACTIVE}" == true ]]; then
-  echo "Release: ${RELEASE_TAG}; platform: ${PACKAGE_FAMILY}/${ARCH_WORD}; Relay: ${RELAY_URL_A}"
-  echo "Configuration will be saved to ${CONFIG_FILE} (protected file paths only)."
-  install_ui_confirm
-  install_ui_save "${CONFIG_FILE}" BOOTSTRAP_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
-    CONTROLLER_ENDPOINT_ID ENROLLMENT_ENVIRONMENT P12_PASSWORD_SEAL_KEY_ID RELAY_ACCESS_TOKEN_SOURCE \
-    RELAY_URL_A RELAY_URL_B USER_PASSWORD_SEAL_KEY_ID
-fi
-if [[ "${ROOT_LIFECYCLE}" == true && "${INTERACTIVE}" == true ]]; then
-  ((EUID == 0)) || forward_root_lifecycle
-  # sudo retains SUDO_USER through env; strip it so the deliberate root
-  # lifecycle is not misread as a whole-script sudo invocation below.
-  unset SUDO_USER
-fi
 
-if path_exists "${RELAYS_ENV_FILE}"; then
-  if ! priv test -f "${RELAYS_ENV_FILE}" || priv test -L "${RELAYS_ENV_FILE}"; then
-    fail "the existing relay configuration is not a regular file"
-  fi
-  existing_b="$(priv sed -n 's/^RELAY_URL_B=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
-  [[ -z "$existing_b" ]] || fail 'existing configuration has a second Relay; retain one Relay deliberately before rerunning'
-fi
 create_launcher_staging
 if native_package_satisfied; then
   echo "native package ocservia-agent $(expected_installed_version) already installed; skipping the release download and package installation"

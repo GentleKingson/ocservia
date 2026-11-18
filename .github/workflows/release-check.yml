@@ -25,18 +25,22 @@ jobs:
   security:
     needs: main
     uses: ./.github/workflows/security.yml
-  products:
+  products-amd64:
     needs: main
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
     uses: ./.github/workflows/release-products.yml
     with:
       version: '0.0.0'
-      arch: ${{ matrix.arch }}
-  business:
+      arch: amd64
+      acceptance_identity: true
+  products-arm64:
     needs: main
+    uses: ./.github/workflows/release-products.yml
+    with:
+      version: '0.0.0'
+      arch: arm64
+      acceptance_identity: true
+  business:
+    needs: [products-amd64, products-arm64]
     strategy:
       fail-fast: false
       matrix:
@@ -48,9 +52,14 @@ jobs:
       profile: smoke
       production_signer: true
       run-resilience: true
+      use_products: true
+      agent_packages_artifact_id: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.agent_packages_artifact_id || needs.products-amd64.outputs.agent_packages_artifact_id }}
+      controller_images_artifact_id: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.controller_images_artifact_id || needs.products-amd64.outputs.controller_images_artifact_id }}
+      agent_packages_manifest_sha256: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.agent_packages_manifest_sha256 || needs.products-amd64.outputs.agent_packages_manifest_sha256 }}
+      controller_images_manifest_sha256: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.controller_images_manifest_sha256 || needs.products-amd64.outputs.controller_images_manifest_sha256 }}
   quick:
     name: Quick Install (Pebble ACME, ${{ matrix.arch }})
-    needs: main
+    needs: [products-amd64, products-arm64]
     strategy:
       fail-fast: false
       matrix:
@@ -61,25 +70,32 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/build-cache-credentials
+      - uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.controller_images_artifact_id || needs.products-amd64.outputs.controller_images_artifact_id }}
+          manifest-sha256: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.controller_images_manifest_sha256 || needs.products-amd64.outputs.controller_images_manifest_sha256 }}
+          kind: controller
+          version: '0.0.0'
+          arch: ${{ matrix.arch }}
+          path: ${{ runner.temp }}/quick-controller-images
       - name: Quick install, rerun, upgrade and rollback against Pebble
         env:
           VERSION: '0.0.0'
+          IMAGES_DIR: ${{ runner.temp }}/quick-controller-images
           CONTROLLER_ARCH: ${{ matrix.arch }}
         run: |
-          sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT \
-            --preserve-env=BUILD_CACHE_AVAILABLE,ACTIONS_RUNTIME_TOKEN,ACTIONS_CACHE_URL,ACTIONS_RESULTS_URL \
+          sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,IMAGES_DIR \
             bash scripts/release-quick-acceptance.sh
   result:
     name: Release Check Result
-    needs: [main, full-ci, security, products, business, quick]
+    needs: [main, full-ci, security, products-amd64, products-arm64, business, quick]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          if jq -e 'keys == ["business","full-ci","main","products","quick","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
+          if jq -e 'keys == ["business","full-ci","main","products-amd64","products-arm64","quick","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
             echo PASS >>"$GITHUB_STEP_SUMMARY"
           else
             echo FAIL >>"$GITHUB_STEP_SUMMARY"

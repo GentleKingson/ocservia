@@ -1,18 +1,15 @@
 package operations
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/google/uuid"
 )
@@ -22,10 +19,21 @@ type upgradePreparationBackend struct {
 	store *upgradePreparationStore
 }
 
-func (b upgradePreparationBackend) RBACStore() rbacstore.Store { return b.store }
+func (b upgradePreparationBackend) Begin(context.Context, database.Isolation) (database.Tx, error) {
+	return upgradePreparationTx{store: b.store}, nil
+}
+
+type upgradePreparationTx struct {
+	database.Tx
+	store *upgradePreparationStore
+}
+
+func (t upgradePreparationTx) OperationStore() operationstore.Store { return t.store }
+func (upgradePreparationTx) Commit(context.Context) error           { return nil }
+func (upgradePreparationTx) Rollback(context.Context) error         { return nil }
 
 type upgradePreparationStore struct {
-	rbacstore.Store
+	operationstore.Store
 	workspace             uuid.UUID
 	architecture, version string
 	err                   error
@@ -34,21 +42,13 @@ type upgradePreparationStore struct {
 	reads                 int
 }
 
-func (s *upgradePreparationStore) UpgradeNode(ctx context.Context, node uuid.UUID) database.Row {
+func (s *upgradePreparationStore) UpgradeNode(ctx context.Context, node uuid.UUID) (uuid.UUID, string, string, error) {
 	s.ctx, s.node = ctx, node
 	s.reads++
-	return upgradePreparationRow{s}
-}
-
-type upgradePreparationRow struct{ store *upgradePreparationStore }
-
-func (r upgradePreparationRow) Scan(values ...any) error {
-	s := r.store
 	if s.err != nil {
-		return s.err
+		return uuid.Nil, "", "", s.err
 	}
-	*values[0].(*uuid.UUID), *values[1].(*string), *values[2].(*string) = s.workspace, s.architecture, s.version
-	return nil
+	return s.workspace, s.architecture, s.version, nil
 }
 
 func upgradePreparationCatalog(t *testing.T) *releasecatalog.Catalog {
@@ -70,19 +70,19 @@ func TestAgentUpgradePreparation(t *testing.T) {
 	for _, tc := range []struct {
 		name, target, architecture, observed string
 		foreign, noCatalog                   bool
-		readErr, prepareErr, approvalErr     error
+		readErr, prepareErr                  error
 	}{
 		{name: "amd64", target: "2.0.0", architecture: "amd64", observed: "1.2.0"},
 		{name: "arm64-and-trim", target: " 2.0.0 ", architecture: "arm64", observed: "1.2.0"},
-		{name: "invalid-before-read", target: "https://untrusted/release", readErr: database.ErrNotFound, prepareErr: ErrInvalidRequest, approvalErr: ErrInvalidRequest},
-		{name: "missing-node", target: "2.0.0", readErr: database.ErrNotFound, prepareErr: ErrNodeUnavailable, approvalErr: ErrNodeUnavailable},
-		{name: "read-failure", target: "2.0.0", readErr: database.ErrPermission, prepareErr: ErrNodeUnavailable, approvalErr: ErrNodeUnavailable},
-		{name: "canceled-read", target: "2.0.0", readErr: context.Canceled, prepareErr: ErrNodeUnavailable, approvalErr: ErrNodeUnavailable},
-		{name: "workspace-before-architecture", target: "2.0.0", foreign: true, prepareErr: ErrNodeUnavailable, approvalErr: ErrNodeUnavailable},
-		{name: "architecture-before-catalog", target: "3.0.0", observed: "unknown", prepareErr: ErrUpgradeArchitectureUnknown, approvalErr: ErrUpgradeArchitectureUnknown},
-		{name: "unsupported-architecture", target: "2.0.0", architecture: "riscv64", observed: "1.0.0", prepareErr: ErrUpgradeReleaseNotTrusted, approvalErr: ErrUpgradeReleaseNotTrusted},
-		{name: "catalog-before-version", target: "3.0.0", architecture: "amd64", prepareErr: ErrUpgradeReleaseNotTrusted, approvalErr: ErrUpgradeReleaseNotTrusted},
-		{name: "no-catalog", target: "2.0.0", architecture: "amd64", noCatalog: true, prepareErr: ErrUpgradeReleaseNotTrusted, approvalErr: ErrUpgradeReleaseNotTrusted},
+		{name: "invalid-before-read", target: "https://untrusted/release", readErr: database.ErrNotFound, prepareErr: ErrInvalidRequest},
+		{name: "missing-node", target: "2.0.0", readErr: database.ErrNotFound, prepareErr: ErrNodeUnavailable},
+		{name: "read-failure", target: "2.0.0", readErr: database.ErrPermission, prepareErr: ErrNodeUnavailable},
+		{name: "canceled-read", target: "2.0.0", readErr: context.Canceled, prepareErr: ErrNodeUnavailable},
+		{name: "workspace-before-architecture", target: "2.0.0", foreign: true, prepareErr: ErrNodeUnavailable},
+		{name: "architecture-before-catalog", target: "3.0.0", observed: "unknown", prepareErr: ErrUpgradeArchitectureUnknown},
+		{name: "unsupported-architecture", target: "2.0.0", architecture: "riscv64", observed: "1.0.0", prepareErr: ErrUpgradeReleaseNotTrusted},
+		{name: "catalog-before-version", target: "3.0.0", architecture: "amd64", prepareErr: ErrUpgradeReleaseNotTrusted},
+		{name: "no-catalog", target: "2.0.0", architecture: "amd64", noCatalog: true, prepareErr: ErrUpgradeReleaseNotTrusted},
 		{name: "unobserved-version", target: "2.0.0", architecture: "amd64"},
 		{name: "unknown-version", target: "2.0.0", architecture: "amd64", observed: "unknown"},
 		{name: "same-version", target: "2.0.0", architecture: "amd64", observed: "2.0.0"},
@@ -109,22 +109,10 @@ func TestAgentUpgradePreparation(t *testing.T) {
 			if tc.readErr != nil && tc.prepareErr != ErrInvalidRequest && !errors.Is(err, tc.readErr) {
 				t.Fatalf("lost read cause: %v", err)
 			}
-			hash, summary, err := service.AgentUpgradeApprovalBinding(ctx, workspace, node, tc.target)
-			if !errors.Is(err, tc.approvalErr) {
-				t.Fatalf("approval: %v want %v", err, tc.approvalErr)
-			}
-			if tc.approvalErr != nil && (hash != nil || summary != nil) {
-				t.Fatal("failed binding exposed approval material")
-			}
 			if tc.prepareErr == nil {
 				if target.Version != strings.TrimSpace(tc.target) || target.Architecture != tc.architecture {
 					t.Fatalf("target: %+v", target)
 				}
-				wantHash, wantSummary := approvals.AgentUpgradeBinding(node, target.Version, target.PackageSHA256[:], target.Architecture)
-				if !bytes.Equal(hash, wantHash) || !bytes.Equal(summary, wantSummary) {
-					t.Fatal("approval and command preparation resolved different identities")
-				}
-				// Mutating the returned digest cannot change the immutable catalog.
 				target.PackageSHA256[0] ^= 0xff
 				again, err := service.PrepareAgentUpgrade(ctx, workspace, node, tc.target)
 				if err != nil || target.PackageSHA256 == again.PackageSHA256 {
@@ -142,21 +130,8 @@ func TestAgentUpgradePreparation(t *testing.T) {
 	}
 	t.Run("unsupported-store", func(t *testing.T) {
 		_, err := NewBackend(nil, 50, nil).PrepareAgentUpgrade(t.Context(), workspace, node, "2.0.0")
-		if !errors.Is(err, ErrNodeUnavailable) || !errors.Is(err, database.ErrUnsupported) {
+		if !errors.Is(err, ErrNodeUnavailable) {
 			t.Fatal(err)
 		}
 	})
-}
-
-func TestAgentUpgradePreparationBindingGolden(t *testing.T) {
-	node := uuid.MustParse("019fde50-2222-7222-8222-222222222222")
-	workspace := uuid.Must(uuid.NewV7())
-	service := NewBackend(upgradePreparationBackend{store: &upgradePreparationStore{workspace: workspace, architecture: "amd64", version: "1.2.0"}}, 50, nil)
-	service.EnableReleaseCatalog(upgradePreparationCatalog(t))
-	hash, summary, err := service.AgentUpgradeApprovalBinding(t.Context(), workspace, node, " 2.0.0 ")
-	want := `{"action":"agent.upgrade","architecture":"amd64","node_id":"019fde50-2222-7222-8222-222222222222","package_sha256":"4343434343434343434343434343434343434343434343434343434343434343","target_version":"2.0.0"}`
-	wantHash := sha256.Sum256(append([]byte("ocservia/approval-request/agent-upgrade/v1\x00"), want...))
-	if err != nil || string(summary) != want || !bytes.Equal(hash, wantHash[:]) {
-		t.Fatalf("binding: %s %x %v", summary, hash, err)
-	}
 }

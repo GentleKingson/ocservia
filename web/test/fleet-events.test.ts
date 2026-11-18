@@ -9,7 +9,6 @@ import {
   listNodeUserGroupState,
   listNodes,
 } from "../src/api/nodes";
-import { workspaceChangedEvent } from "../src/api/workspace";
 import { useFleetStore } from "../src/shared/fleet";
 
 vi.mock("../src/api/platform", () => ({
@@ -25,7 +24,6 @@ vi.mock("../src/api/workspace", async (original) => ({
   ...(await original<typeof import("../src/api/workspace")>()),
   getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
-  workspaceChangedEvent: "ocservia:workspace-changed",
 }));
 vi.mock("../src/api/nodes", () => ({
   getNode: vi.fn(),
@@ -167,8 +165,23 @@ describe("fleet event stream", () => {
     );
     await vi.advanceTimersByTimeAsync(15_000);
     expect(store.loading).toBe(true);
+    vi.mocked(getNode).mockImplementationOnce(
+      (_nodeId, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        }),
+    );
+    const pendingSelection = store.select("node");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.selecting).toBe(true);
     focused = false;
     window.dispatchEvent(new Event("blur"));
+    await pendingSelection;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.loading).toBe(false);
+    expect(store.selecting).toBe(false);
     store.$dispose();
     focused = true;
     window.dispatchEvent(new Event("focus"));
@@ -224,7 +237,6 @@ describe("fleet event stream", () => {
     store.stop();
     expect(store.selected).toBeUndefined();
     stream?.dispatchEvent(new MessageEvent("platform"));
-    window.dispatchEvent(new Event(workspaceChangedEvent));
     await vi.advanceTimersByTimeAsync(120_000);
     expect(listNodes).toHaveBeenCalledTimes(1);
     expect(getNode).toHaveBeenCalledTimes(1);

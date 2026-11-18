@@ -98,6 +98,9 @@ for entry in install.sh quick-install.sh; do
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"${TEST_ROOT}/handoff"
 printf '%s\n' "${OCSERV_PUBLIC_HOST:-}" "${OCSERV_DATABASE_BACKEND:-}" >"${TEST_ROOT}/environment"
+for name in OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL; do
+  printf '%s=%s\n' "${name}" "${!name-<unset>}"
+done >"${TEST_ROOT}/auth-environment"
 MOCK
   chmod 755 "${fixture}/payload/deploy/production/${entry}"
 done
@@ -110,6 +113,20 @@ pack
 run --non-interactive
 [[ -f "${fixture}/releases/v4.5.6/RELEASE" && ! -e "${fixture}/releases/v4.5.6/.git" ]]
 grep -Fq -- '--non-interactive --config' "${fixture}/handoff"
+# The released bootstrap must load the documented Local auth configuration before handoff.
+awk -v dir="${fixture}" '
+  /^```dotenv$/ { block++; active=1; next }
+  /^```$/ { active=0 }
+  active { print > (dir "/auth-" block ".env") }
+' "${ROOT}/docs/operations/authentication.md"
+(
+  unset OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL
+  unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL
+  run --non-interactive --config "${fixture}/auth-1.env"
+)
+while IFS= read -r setting; do
+  grep -Fxq "${setting}" "${fixture}/auth-environment"
+done <"${fixture}/auth-1.env"
 # Reuse the validated runtime offline; changed contents never get overwritten.
 : >"${fixture}/downloads"
 run --version v4.5.6
@@ -136,43 +153,46 @@ grep -Fq 'has no IPv4' "${fixture}/output"
 if PORT_BUSY=true run "${quick[@]}" >"${fixture}/output" 2>&1; then exit 1; fi
 grep -Fq 'already in use' "${fixture}/output"
 [[ ! -e "${fixture}/quick-releases" ]]
+if OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external OCSERV_DATABASE_BACKUP_HOST=db.example.test \
+run --non-interactive >"${fixture}/output" 2>&1; then exit 1; fi
+grep -Fq 'unsupported database topology' "${fixture}/output"
+[[ ! -e "${fixture}/quick-releases" ]]
 # Actual pseudo-terminal: defaults, cancellation and equivalent Quick handoff.
 python3 - "${bootstrap}" "${bin}" "${fixture}" <<'PTY'
 import os, pty, select, subprocess, sys, time
 script, bindir, root = sys.argv[1:]
 def wizard(confirmation, preset="quick"):
-    master, slave = pty.openpty()
-    env = dict(os.environ, PATH=bindir, OCSERV_CONTROLLER_SOURCE_ROOT=root+'/wizard-releases')
-    child = subprocess.Popen(['bash', script], stdin=slave, stdout=slave, stderr=slave, cwd=root+'/config', env=env)
-    os.close(slave)
-    answers = ('\nvpn.example.test\nrelay.example.test\nops@example.test\n\n\n' if preset == 'quick' else 'manual\n'+'\n'*14)
-    os.write(master, (answers+confirmation+'\n').encode())
-    output = b''
-    deadline = time.monotonic()+20
-    try:
-        while time.monotonic() < deadline:
-            if select.select([master], [], [], .1)[0]:
-                try: output += os.read(master, 65536)
-                except OSError: break
-            if child.poll() is not None: break
-        assert child.wait(timeout=1) == (0 if confirmation == 'y' else 1), output.decode()
-    finally:
-        if child.poll() is None: child.kill(); child.wait()
-        os.close(master)
-    return output.decode()
+  master, slave = pty.openpty()
+  env = dict(os.environ, PATH=bindir, OCSERV_CONTROLLER_SOURCE_ROOT=root+'/wizard-releases')
+  child = subprocess.Popen(['bash', script], stdin=slave, stdout=slave, stderr=slave, cwd=root+'/config', env=env)
+  os.close(slave)
+  answers = ('\nvpn.example.test\nrelay.example.test\nops@example.test\n\n\n' if preset == 'quick' else 'manual\n'+'\n'*12)
+  os.write(master, (answers+confirmation+'\n').encode())
+  output = b''
+  deadline = time.monotonic()+20
+  try:
+      while time.monotonic() < deadline:
+          if select.select([master], [], [], .1)[0]:
+              try: output += os.read(master, 65536)
+              except OSError: break
+          if child.poll() is not None: break
+      assert child.wait(timeout=1) == (0 if confirmation == 'y' else 1), output.decode()
+  finally:
+      if child.poll() is None: child.kill(); child.wait()
+      os.close(master)
+  return output.decode()
 assert 'installation cancelled' in wizard('n')
 assert not os.path.exists(root+'/wizard-releases')
 assert 'Proceed with installation?' in wizard('y')
 with open(root+'/quick-handoff', 'w') as file:
-    file.write(open(root+'/handoff').read())
+  file.write(open(root+'/handoff').read())
 assert 'saved configuration:' in wizard('y', 'manual')
 assert os.stat(root+'/config/install.env').st_mode & 0o777 == 0o600
 with open(root+'/manual-environment', 'w') as file:
-    file.write(open(root+'/environment').read())
+  file.write(open(root+'/environment').read())
 PTY
 run --non-interactive --config "${fixture}/config/install.env"
 cmp "${fixture}/environment" "${fixture}/manual-environment"
 cp "${fixture}/quick-handoff" "${fixture}/interactive-handoff"
 run "${quick[@]}" --root-ca-export-dir /root/ocservia-root-ca
 cmp "${fixture}/handoff" "${fixture}/interactive-handoff"
-echo 'Controller Release bootstrap: no Git, CLI/wizard equivalence, cancellation, checksum, drift and preflight checks passed'

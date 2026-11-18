@@ -16,7 +16,7 @@ import {
   listNodes,
   listNodeSessions,
 } from "../src/api/nodes";
-import { workspaceContext, workspaceChangedEvent } from "../src/api/workspace";
+import { workspaceContext } from "../src/api/workspace";
 import { useFleetStore } from "../src/shared/fleet";
 
 vi.mock("../src/api/users", () => ({
@@ -37,7 +37,6 @@ vi.mock("../src/api/workspace", async (original) => ({
   ...(await original<typeof import("../src/api/workspace")>()),
   getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
-  workspaceChangedEvent: "ocservia:workspace-changed",
 }));
 vi.mock("../src/api/nodes", () => ({
   getNode: vi.fn(),
@@ -318,39 +317,6 @@ describe("controlled fleet operations", () => {
     store.$dispose();
   });
 
-  it("cancels unknown polling when the workspace changes", async () => {
-    let pollingSignal: AbortSignal | undefined;
-    vi.stubGlobal("window", new EventTarget());
-    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
-    vi.mocked(getOperation).mockImplementation((_operationId, signal) => {
-      pollingSignal = signal;
-      return new Promise((_resolve, reject) => {
-        signal?.addEventListener(
-          "abort",
-          () => {
-            reject(new DOMException("aborted", "AbortError"));
-          },
-          { once: true },
-        );
-      });
-    });
-    const store = useFleetStore();
-    await store.select(node.id);
-
-    const completion = store.disconnectSession(session.id, "support case");
-    await vi.advanceTimersByTimeAsync(750);
-    vi.mocked(workspaceContext).mockReturnValue({
-      id: "other-workspace",
-      generation: 2,
-    });
-    window.dispatchEvent(new Event(workspaceChangedEvent));
-    await completion;
-
-    expect(pollingSignal?.aborted).toBe(true);
-    expect(store.latestOperation).toBeUndefined();
-    store.$dispose();
-  });
-
   it("does not let an older rebuild overwrite a newer same-workspace snapshot", async () => {
     const first = deferred<ReturnType<typeof nodePage>>();
     const second = deferred<ReturnType<typeof nodePage>>();
@@ -452,14 +418,12 @@ describe("controlled fleet operations", () => {
     const completion = store.upgradeAgent(
       "2.0.0",
       "monthly maintained release",
-      "019fc0a4-6d92-765c-a8a1-4af556614c77",
     );
     await vi.advanceTimersByTimeAsync(0);
     expect(upgradeNodeAgent).toHaveBeenCalledWith(
       node,
       "2.0.0",
       "monthly maintained release",
-      "019fc0a4-6d92-765c-a8a1-4af556614c77",
       expect.any(AbortSignal),
     );
     expect(store.latestOperation?.state).toBe("accepted");
@@ -483,7 +447,6 @@ describe("controlled fleet operations", () => {
     const completion = store.upgradeAgent(
       "2.0.0",
       "monthly maintained release",
-      "019fc0a4-6d92-765c-a8a1-4af556614c77",
     );
     await vi.advanceTimersByTimeAsync(750);
     await completion;

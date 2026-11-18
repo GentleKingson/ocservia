@@ -52,11 +52,27 @@ func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	upgraded, fresh := snapshotDatabase(t), snapshotDatabase(t)
 	releasedCheckpoint(t, upgraded)
-	if err := GrantRuntimePrivileges(ctx, upgraded, "ocservia_app"); err != nil {
+	for _, stmt := range []string{
+		`GRANT USAGE ON SCHEMA public TO ocservia_app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON workspaces, nodes, operations TO ocservia_app`,
+		`GRANT SELECT ON roles TO ocservia_app`,
+		`GRANT SELECT, INSERT, DELETE ON role_bindings TO ocservia_app`,
+		`GRANT SELECT, INSERT ON audit_events TO ocservia_app`,
+		`GRANT UPDATE(event_hash) ON audit_events TO ocservia_app`,
+		`GRANT SELECT, INSERT, UPDATE ON telemetry_rollups_5m, telemetry_rollups_1h TO ocservia_app`,
+	} {
+		if _, err := upgraded.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Live checkpoint users' rows and PlatformAdmin workspace bindings survive the cutover.
+	if _, err := upgraded.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES('11111111-1111-1111-1111-111111111111','checkpoint preserved','checkpoint-preserved',now(),now())`); err != nil {
 		t.Fatal(err)
 	}
-	// Live checkpoint users' rows survive the cutover.
-	if _, err := upgraded.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES('11111111-1111-1111-1111-111111111111','checkpoint preserved','checkpoint-preserved',now(),now())`); err != nil {
+	if _, err := upgraded.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES('22222222-2222-2222-2222-222222222222','local','admin',now(),now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upgraded.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES('33333333-3333-3333-3333-333333333333','22222222-2222-2222-2222-222222222222','11111111-1111-1111-1111-111111111111','PlatformAdmin','workspace',now())`); err != nil {
 		t.Fatal(err)
 	}
 	for _, pool := range []*pgxpool.Pool{upgraded, fresh} {
@@ -72,18 +88,24 @@ func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		expected, _ := a.catalog(1)
+		expected, err := a.catalog(a.schema.Baseline.Number)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := validateStaticSchema(ctx, pool, expected); err != nil {
 			t.Fatal(err)
 		}
 		rows, err := readRevisionReceipts(ctx, pool)
 		// The cutover lands on the new baseline; later revisions then execute on
 		// top of it, while a fresh install records only the current checkpoint.
-		if pool == upgraded && (err != nil || len(rows) != 2 || rows[0].epoch != 2 || rows[0].revision != 0 || !matchesReceipt(rows[0], a.upgrade.Base.Checksum, a.upgrade.Base.Steps)) {
+		if pool == upgraded && (err != nil || len(rows) != len(a.upgrade.Revisions)+1 || rows[0].epoch != 2 || rows[0].revision != 0 || !matchesReceipt(rows[0], a.upgrade.Base.Checksum, a.upgrade.Base.Steps)) {
 			t.Fatal("new baseline differs from fresh", rows, err)
 		}
-		if err != nil || rows[len(rows)-1].epoch != 2 || rows[len(rows)-1].revision != 1 {
+		if err != nil || len(rows) == 0 || rows[len(rows)-1].epoch != 2 || rows[len(rows)-1].revision != a.schema.Baseline.Number {
 			t.Fatal("new baseline differs from fresh", rows, err)
+		}
+		if pool == fresh && len(rows) != 1 {
+			t.Fatal("fresh install fabricated execution history", rows)
 		}
 		var legacy bool
 		if err := pool.QueryRow(ctx, "SELECT to_regclass('public.schema_migrations') IS NOT NULL OR to_regclass('public.schema_snapshot_origin') IS NOT NULL").Scan(&legacy); err != nil || legacy {
@@ -94,13 +116,15 @@ func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
 	if err := upgraded.QueryRow(ctx, "SELECT name FROM workspaces WHERE slug='checkpoint-preserved'").Scan(&name); err != nil || name != "checkpoint preserved" {
 		t.Fatal("business data changed", name, err)
 	}
+	var migratedAdmin bool
+	if err := upgraded.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM workspace_admins WHERE workspace_id='11111111-1111-1111-1111-111111111111' AND identity_id='22222222-2222-2222-2222-222222222222')").Scan(&migratedAdmin); err != nil || !migratedAdmin {
+		t.Fatal("PlatformAdmin workspace binding was not backfilled into workspace_admins", migratedAdmin, err)
+	}
 	// Routine security and explicit grants/ACLs are independently compared.
 	for _, query := range []string{
 		"SELECT coalesce(jsonb_agg(jsonb_build_array(c.relname,c.relacl) ORDER BY c.relname),'[]')::text FROM pg_class c WHERE c.relnamespace='public'::regnamespace AND NOT c.relispartition",
 		"SELECT coalesce(jsonb_agg(jsonb_build_array(p.proname,pg_get_function_identity_arguments(p.oid),p.proacl) ORDER BY p.proname,pg_get_function_identity_arguments(p.oid)),'[]')::text FROM pg_proc p WHERE p.pronamespace='public'::regnamespace",
-		"SELECT jsonb_agg(to_jsonb(r) ORDER BY name)::text FROM roles r",
 		"SELECT jsonb_agg(to_jsonb(r) ORDER BY singleton)::text FROM controller_schema_compatibility r",
-		"SELECT jsonb_agg(to_jsonb(r) ORDER BY repository)::text FROM upstream_sync_records r",
 		"SELECT jsonb_agg(to_jsonb(r)-'updated_at' ORDER BY id)::text FROM scheduler_leadership r",
 	} {
 		var left, right *string

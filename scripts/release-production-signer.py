@@ -82,7 +82,7 @@ def prepare():
         return  # The single production lifecycle owns the first init and serve.
     admin('init')
     run('docker', 'run', '-d', '--name', CONTAINER, '--read-only', '--cap-drop=ALL',
-        '--security-opt=no-new-privileges:true', '--network', 'container:' + os.environ['OCSERVIA_BUSINESS_TEST_OIDC_CONTAINER'],
+        '--security-opt=no-new-privileges:true', '--network', 'container:' + os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_NET_CONTAINER'],
         '-v', f'{STATE}/secrets:/run/secrets:ro', '-v', f'{STATE}/data:/var/lib/ocservia-signer',
         IMAGE, 'serve', '--listen', ':19444')
     health()
@@ -97,8 +97,7 @@ def import_binding():
                        '--security-opt=no-new-privileges:true', '--network', 'ocservia-production_database',
                        '-v', f'{dsn}:/run/export-dsn:ro', '--entrypoint', '/usr/local/bin/ocserv-sealing-export',
                        os.environ['OCSERV_CONTROL_IMAGE'], '--database-url-file', '/run/export-dsn', '--bundled-postgres',
-                       '--workspace', os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], '--node', node, '--endpoint', endpoint,
-                       '--approval', (WORK / 'node-approval').read_text().strip())
+                       '--workspace', os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], '--node', node, '--endpoint', endpoint)
     finally:
         run('sudo', 'rm', '--', dsn)
     public = run('sudo', 'python3', ROOT / 'scripts/export-node-sealing-keys.py', '--node', node,

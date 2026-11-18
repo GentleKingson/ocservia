@@ -57,7 +57,7 @@ done
 expect_stat "${s}/audit-event-key" 65534:65532:400:1
 expect_stat "${s}/controller-command-signing-key.pem" 65534:65532:400:1
 expect_stat "${s}/controller-command-verification-key.pem" 0:65532:440:1
-expect_stat "${s}/relay-access-token" 65532:65532:400:1
+expect_stat "${s}/relay-access-token" 65532:65532:440:1
 expect_stat "${s}/controller-iroh.key" 65532:65532:400:1
 expect_stat "${g}" 65532:65532:700:2
 expect_stat "${case_dir}/signer-state" 65532:65532:700:2

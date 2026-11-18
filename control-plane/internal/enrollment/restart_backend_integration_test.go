@@ -82,7 +82,7 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 		}
 		return err
 	})
-	f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, `UPDATE node_trust_convergence SET locked_until=? WHERE node_id=?`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, node)
+	f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, node)
 	before := f.snapshot(t, node)
 	if err := os.WriteFile(filepath.Join(gate, "ready"), []byte("committed\n"), 0600); err != nil {
 		t.Fatal(err)

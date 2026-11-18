@@ -11,6 +11,8 @@ export SOURCE_COMMIT
 # shellcheck source=scripts/env.sh
 # shellcheck disable=SC1091
 source "$ROOT/scripts/env.sh"
+# shellcheck source=scripts/release-business-stages.sh
+source "$ROOT/scripts/release-business-stages.sh"
 : "${BUSINESS_TERMINAL:=revocation}"
 export BUSINESS_TERMINAL
 [[ "$BUSINESS_TERMINAL" == revocation || "$BUSINESS_TERMINAL" == uninstall ]]
@@ -47,14 +49,20 @@ stage_started="$(date +%s)"
 CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
 [[ "${CONTROLLER_ARCH}" == amd64 || "${CONTROLLER_ARCH}" == arm64 ]]
 export PACKAGE_ARCH="${CONTROLLER_ARCH}" CONTROLLER_ARCH
-export SOURCE_DATE_EPOCH OUTPUT_DIR="${work}/products"
+export SOURCE_DATE_EPOCH OUTPUT_DIR="${PRODUCTS_DIR:-${work}/products}"
+IMAGES_DIR="${IMAGES_DIR:-}"
+# Artifact mode is all-or-nothing; missing inputs never fall back to a build.
+if [[ -n "${PRODUCTS_DIR:-}${IMAGES_DIR}" ]]; then
+  [[ -n "${PRODUCTS_DIR:-}" && -n "$IMAGES_DIR" ]]
+  [[ -s "$PRODUCTS_DIR/product-identity.json" && -s "$IMAGES_DIR/product-identity.json" ]]
+fi
 export DEPLOYMENT_CONFIG_DIR="${work}/bundle"
 SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)"
 export BUILDX_BUILDER="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
 registry="${BUILDX_BUILDER}-registry"
 export OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER="${BUILDX_BUILDER}-relay"
-oidc_container="${BUILDX_BUILDER}-oidc"
-export OCSERVIA_BUSINESS_TEST_OIDC_CONTAINER="$oidc_container" OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER="${BUILDX_BUILDER}-signer"
+signer_net_container="${BUILDX_BUILDER}-signer-net"
+export OCSERVIA_BUSINESS_TEST_SIGNER_NET_CONTAINER="$signer_net_container" OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER="${BUILDX_BUILDER}-signer"
 signer_pid=
 export OCSERV_SECRET_DIR="${work}/secrets" OCSERV_BACKUP_DIR="${work}/backup"
 export OCSERV_CONTROLLER_STATE_ROOT="${work}/state"
@@ -73,12 +81,12 @@ if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   export OCSERV_DEPLOYMENT_MODE=integrated OCSERV_HTTPS_ADDRESS=0.0.0.0
   export OCSERV_PUBLIC_HOST="controller.${gateway}.sslip.io" OCSERV_RELAY_PUBLIC_HOST="relay.${gateway}.sslip.io"
   export OCSERV_CONTROLLER_PUBLIC_URL="https://${OCSERV_PUBLIC_HOST}" OCSERV_PUBLIC_ORIGIN="https://${OCSERV_PUBLIC_HOST}"
-  export OCSERV_RELAY_URL_A="https://${OCSERV_RELAY_PUBLIC_HOST}" OCSERV_RELAY_URL_B=
+  export OCSERV_RELAY_URL_A="https://${OCSERV_RELAY_PUBLIC_HOST}"
   export OCSERV_CERTIFICATE_SIGNER_URL=https://signer:9443/sign
   export OCSERV_RELAY_SECRET_DIR="${work}/relay-secrets"
   export OCSERV_SIGNER_SECRET_DIR="${work}/production-signer/secrets" OCSERV_SIGNER_STATE_DIR="${work}/production-signer/data"
 fi
-unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL OCSERV_OTEL_BACKEND_ENDPOINT
+unset OCSERV_OTEL_BACKEND_ENDPOINT
 unset OCSERV_CONTROLLER_COMPOSE_SH OCSERV_CONTROLLER_SMOKE_SH OCSERV_MANAGED_NODE_SYSROOT OCSERV_MANAGED_NODE_OS_RELEASE
 compose() { "${ROOT}/deploy/production/compose.sh" "$@"; }
 record() { printf '%s\n' "$1" >>"${ARTIFACT_DIR}/checkpoints.txt"; }
@@ -88,13 +96,6 @@ next_stage() {
   printf '%s\t%s\n' "${stage}" "$((now - stage_started))" >>"${ARTIFACT_DIR}/timings.tsv"
   stage="$1"
   stage_started="${now}"
-}
-configure_auth_peers() {
-  # --no-deps makes ordering our responsibility. The launcher stops both peers;
-  # wait for the trust backend before starting the unchanged transport container.
-  compose up -d --no-deps --wait control-plane
-  compose start transportd
-  python3 "${ROOT}/scripts/release-business-api.py" transport_ready
 }
 cleanup() {
   local code=$?
@@ -113,7 +114,6 @@ cleanup() {
           docker inspect --format '{{json .State}}' "${container}"
         fi
       done
-      docker logs "${oidc_container}"
       sudo journalctl --no-pager -o short-iso-precise -u ocservia-agent -u ocservia-privd -u ocserv
       if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
         docker logs "$OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER"
@@ -150,8 +150,8 @@ cleanup() {
       resilience_result:(if $code != 0 and $resilience == "PASS" then "FAIL" else $resilience end),
       resilience_scenarios:$resilience_scenarios,
       planned_topology:{hosts:1,architecture:$arch,native_systemd_node:true,relays:1,relay_redundancy:false},
-      operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
-      limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
+      operator_mode:"single_admin",
+      limitations:[],
       not_applicable:["cross-host resilience and performance assessment"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
   if [[ "$relay_ipv4_rule" == true ]]; then
@@ -167,7 +167,7 @@ cleanup() {
   sudo ip netns pids business-test-client 2>/dev/null | xargs -r sudo kill
   sudo ip netns del business-test-client >/dev/null 2>&1
   compose down --volumes --remove-orphans >/dev/null 2>&1
-  docker rm -f "${registry}" "${OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER}" "${oidc_container}" >/dev/null 2>&1
+  docker rm -f "${registry}" "${OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER}" "${signer_net_container}" >/dev/null 2>&1
   if [[ -n "${signer_pid}" ]]; then kill "${signer_pid}" 2>/dev/null; wait "${signer_pid}" 2>/dev/null; fi
   docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1
   # Host installation is confined to this ephemeral GitHub runner, destroyed
@@ -182,34 +182,20 @@ trap 'printf "probe failed at line %s, stage %s\n" "${LINENO}" "${stage}" >&2' E
 mkdir -m 700 "${work}/private" "${work}/secrets" "${work}/state" "${work}/backup" "${work}/bundle"
 bash "${ROOT}/scripts/release-upgrade-native.sh" "$CONTROLLER_ARCH" >"${ARTIFACT_DIR}/native.json"
 { uname -a; cat /etc/os-release; docker version; docker compose version; node --version; } >"${ARTIFACT_DIR}/environment.txt"
-next_stage dependency_setup
-bash "${ROOT}/scripts/bootstrap.sh" native-packages
-bash "${ROOT}/scripts/bootstrap.sh" npm-security
-# The native builder drops all capabilities. A root Business driver therefore
-# needs writable, root-owned task caches before entering that container.
-# The workflow returns these same build caches to the runner after the probe.
-if [[ "$EUID" == 0 ]]; then
-  mkdir -p "$ROOT/rust/target"
-  chown -R 0:0 "$ROOT/.cache" "$ROOT/.tools" "$ROOT/rust/target"
-fi
-next_stage agent_package_build
-env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
-next_stage controller_image_build
-bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
-for name in gateway control transport backup edge relay signer mysql_backup; do
-  docker load -i "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar"
+prepare_business_products
+for name in gateway control transport backup edge relay signer; do
+  docker load -i "$IMAGES_DIR/$name-linux-$CONTROLLER_ARCH.tar"
   # Unrelated binfmt handlers could otherwise run a foreign image emulated.
   [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "ghcr.io/gentlekingson/ocservia/$name:$VERSION-linux-$CONTROLLER_ARCH")" == "linux/$CONTROLLER_ARCH" ]]
 done
 export OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE="ghcr.io/gentlekingson/ocservia/signer:$VERSION-linux-$CONTROLLER_ARCH"
 docker tag "ghcr.io/gentlekingson/ocservia/relay:$VERSION-linux-$CONTROLLER_ARCH" "${BUILDX_BUILDER}-relay"
 docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay" --version >"${ARTIFACT_DIR}/relay-version.txt"
-record products_built
+record products_ready
 next_stage dependency_install
 sudo apt-get update -qq
 case "${OCSERV_PACKAGE:-distribution}" in
   distribution) ocserv_package=ocserv ;;
-  source-1.6.0) ocserv_package=ocserv ;;
   backport-1.5.0)
     # The pinned ocserv-backport release asset brings `occtl terminate` (>= 1.4.2).
     ocserv_version=1.5.0-1~ubuntu24.04.2
@@ -224,16 +210,10 @@ case "${OCSERV_PACKAGE:-distribution}" in
     [[ "$(dpkg-deb -f "${ocserv_package}" Package Version Architecture)" == \
       "$(printf 'Package: ocserv\nVersion: %s\nArchitecture: %s' "${ocserv_version}" "${CONTROLLER_ARCH}")" ]]
     ;;
-  *) echo 'OCSERV_PACKAGE must be distribution, backport-1.5.0 or source-1.6.0' >&2; exit 2 ;;
+  *) echo 'OCSERV_PACKAGE must be distribution or backport-1.5.0' >&2; exit 2 ;;
 esac
 sudo apt-get install -y --no-install-recommends "${ocserv_package}" openconnect vpnc-scripts sqlite3 iputils-ping
 sudo systemctl stop ocserv
-if [[ "${OCSERV_PACKAGE:-distribution}" == source-1.6.0 ]]; then
-  # Keep the distribution unit; this fixture certifies source binaries, not a 1.6.0 package.
-  sudo env OCSERVIA_COMPAT_DISPOSABLE=1 bash "$ROOT/scripts/build-ocserv160-compat.sh" \
-    >"${ARTIFACT_DIR}/ocserv160-build.log" 2>&1
-  record ocserv160_source_binaries
-fi
 if [[ "${OCSERV_PACKAGE:-distribution}" == backport-1.5.0 ]]; then
   [[ "$(dpkg-query -W -f='${Version}' ocserv)" == "${ocserv_version}" ]]
   [[ "$(ocserv --version 2>&1 | head -n1)" == 'OpenConnect VPN Server 1.5.0' ]]
@@ -256,10 +236,10 @@ openssl x509 -req -days 1 -in "${work}/tls.csr" -CA "${work}/ca.crt" -CAkey "${w
 cp "${work}/private/tls.key" "${OCSERV_SECRET_DIR}/tls.key"
 export CURL_CA_BUNDLE="${work}/ca.crt"
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
-  export OCSERV_RELAY_URL_A="https://${gateway}:3443" OCSERV_RELAY_URL_B=
+  export OCSERV_RELAY_URL_A="https://${gateway}:3443"
 fi
 for name in postgres-owner-password postgres-app-password postgres-backup-password session-key audit-checkpoint-key \
-  audit-event-key certificate-signer-token relay-access-token oidc-client-secret; do
+  audit-event-key certificate-signer-token relay-access-token; do
   openssl rand -hex 32 >"${work}/private/${name}"
   cp "${work}/private/${name}" "${OCSERV_SECRET_DIR}/${name}"
 done
@@ -279,7 +259,8 @@ chmod 444 "${OCSERV_SECRET_DIR}/"*
 sudo chown 65534:65532 "${OCSERV_SECRET_DIR}/audit-event-key" "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem"
 sudo chown 65532:65532 "${OCSERV_SECRET_DIR}/controller-iroh.key" "${OCSERV_SECRET_DIR}/relay-access-token"
 sudo chmod 400 "${OCSERV_SECRET_DIR}/audit-event-key" "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem" \
-  "${OCSERV_SECRET_DIR}/controller-iroh.key" "${OCSERV_SECRET_DIR}/relay-access-token"
+  "${OCSERV_SECRET_DIR}/controller-iroh.key"
+sudo chmod 440 "${OCSERV_SECRET_DIR}/relay-access-token"
 sudo install -o root -g 65532 -m 440 "${work}/command.pub.pem" "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 sudo install -o root -g root -m 444 "${work}/ca.crt" "${OCSERV_SECRET_DIR}/relay-ca.pem"
 sudo chown 999:999 "${work}/backup"
@@ -307,7 +288,7 @@ args=()
 roles=(gateway control transport backup)
 manifest_options=()
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-  roles+=(edge relay signer mysql_backup)
+  roles+=(edge relay signer)
   manifest_options+=(--manifest-version 2)
 fi
 for name in "${roles[@]}"; do
@@ -361,62 +342,36 @@ INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES
  ('${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}','Business Test','business-test',now(),now()),
  ('00000000-0000-7000-8000-000000000072','Other','business-test-other',now(),now());
 SQL
-for role in requester approver; do
-  openssl rand -hex 32 >"${work}/private/${role}-password"
-  sudo install -o 65534 -g 65532 -m 400 "${work}/private/${role}-password" "${OCSERV_SECRET_DIR}/${role}-password"
-done
+openssl rand -hex 32 >"${work}/private/requester-password"
+sudo install -o 65534 -g 65532 -m 400 "${work}/private/requester-password" "${OCSERV_SECRET_DIR}/requester-password"
 compose run --rm --no-deps -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=business-test-requester \
   -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}" \
   -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/requester-password \
-  -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=business-test-approver \
-  -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/secrets/approver-password \
   -v "${OCSERV_SECRET_DIR}/requester-password:/run/secrets/requester-password:ro" \
-  -v "${OCSERV_SECRET_DIR}/approver-password:/run/secrets/approver-password:ro" \
   control-plane --bootstrap-local-admin
 next_stage local_auth
 python3 "${ROOT}/scripts/release-business-api.py" local
 record real_local_auth
 if [[ "${BUSINESS_PROFILE}" == extended ]]; then
-next_stage external_auth
-# This contains only public fault names; the capability-free fixture must read it.
-mkdir -m 755 "${work}/oidc-fault"
-printf '\n' >"${work}/oidc-fault/mode"
-chmod 644 "${work}/oidc-fault/mode"
-export OCSERV_OIDC_ISSUER=https://172.30.240.3:19443 OCSERV_OIDC_CLIENT_ID=upgrade
-export OCSERV_OIDC_REDIRECT_URL="$OCSERV_CONTROLLER_PUBLIC_URL/api/v1/auth/callback"
-signer_address=172.30.240.3
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
-  export OCSERV_CERTIFICATE_SIGNER_URL="https://${signer_address}:19444/sign"
-fi
-docker run -d --name "${oidc_container}" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-  --network ocservia-production_application --ip 172.30.240.3 \
-  -v "${ROOT}/scripts/release-upgrade-oidc-fixture.mjs:/fixture.mjs:ro" \
-  -v "${OCSERV_SECRET_DIR}/tls.key:/fixture/tls.key:ro" \
-  -v "${OCSERV_SECRET_DIR}/tls.crt:/fixture/tls.crt:ro" \
-  -v "${OCSERV_SECRET_DIR}/oidc-client-secret:/fixture/oidc-client-secret:ro" \
-  -v "${work}/oidc-fault:/fault:ro" \
-  node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 \
-  node /fixture.mjs /fixture "${OCSERV_OIDC_ISSUER}" /fault/mode "$OCSERV_OIDC_REDIRECT_URL"
-# The internal application network deliberately has no host gateway. Join only
-# the task provider's network namespace, then run the signer as the runner UID.
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
-provider_pid="$(docker inspect --format '{{.State.Pid}}' "${oidc_container}")"
-sudo nsenter --target "${provider_pid}" --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups \
-  python3 "${ROOT}/scripts/release-business-signer.py" "${work}" "${signer_address}" &
-signer_pid=$!
-fi
-configure_auth_peers
-python3 "${ROOT}/scripts/release-business-api.py" trust_controller
-python3 "${ROOT}/scripts/release-business-api.py" oidc
-export OCSERV_LOCAL_AUTH_ENABLED=false
-configure_auth_peers
-python3 "${ROOT}/scripts/release-business-api.py" trust_controller
-python3 "${ROOT}/scripts/release-business-api.py" oidc
-export OCSERV_LOCAL_AUTH_ENABLED=true
-configure_auth_peers
-python3 "${ROOT}/scripts/release-business-api.py" trust_controller
-compose exec -T postgres psql -XAt -U ocservia_owner -d ocservia -c 'SHOW server_version' >>"${ARTIFACT_DIR}/environment.txt"
-record real_external_oidc
+  if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
+    signer_address=172.30.240.3
+    export OCSERV_CERTIFICATE_SIGNER_URL="https://${signer_address}:19444/sign"
+    docker run -d --name "${signer_net_container}" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+      --network ocservia-production_application --ip "${signer_address}" \
+      node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 \
+      sleep infinity
+    # The internal application network has no host gateway; run the mock signer
+    # inside its dedicated network container when testing without production Signer.
+    provider_pid="$(docker inspect --format '{{.State.Pid}}' "${signer_net_container}")"
+    sudo nsenter --target "${provider_pid}" --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups \
+      python3 "${ROOT}/scripts/release-business-signer.py" "${work}" "${signer_address}" &
+    signer_pid=$!
+    configure_auth_peers
+    python3 "${ROOT}/scripts/release-business-api.py" trust_controller
+  else
+    python3 "${ROOT}/scripts/release-business-api.py" transport_ready
+  fi
+  compose exec -T postgres psql -XAt -U ocservia_owner -d ocservia -c 'SHOW server_version' >>"${ARTIFACT_DIR}/environment.txt"
 else
   python3 "${ROOT}/scripts/release-business-api.py" transport_ready
 fi
@@ -428,12 +383,11 @@ sudo install -d -m 755 /etc/ocservia
 sudo touch /etc/ocservia/agent-install-production-relays
 sudo dpkg -i "${deb}"
 sudo install -o root -g root -m 444 "${work}/ca.crt" /etc/ocservia-agent/relay-ca.pem
-export CONTROLLER_ENDPOINT_ID="${OCSERV_CONTROLLER_ENDPOINT_ID}" RELAY_URL_A="${OCSERV_RELAY_URL_A}" RELAY_URL_B=
+export CONTROLLER_ENDPOINT_ID="${OCSERV_CONTROLLER_ENDPOINT_ID}" RELAY_URL_A="${OCSERV_RELAY_URL_A}"
 export RELAY_ACCESS_TOKEN_SOURCE="${OCSERV_SECRET_DIR}/relay-access-token"
 export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${work}/command.pub.pem"
 export USER_PASSWORD_SEAL_KEY_ID=business-test-user-seal P12_PASSWORD_SEAL_KEY_ID=business-test-p12-seal ENROLLMENT_ENVIRONMENT=production
-managed_options=(--version "v${VERSION}")
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then managed_options+=(--root-lifecycle); fi
+configure_managed_options
 # The managed installer preflight reads the real native ocserv resources.
 # Prepare and start this task-owned VPN fixture before enrollment, then bind
 # its TLS material to the enrolled node through the existing ConfigPlan path.
@@ -484,20 +438,24 @@ docker run -d --name "${OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER}" --read-only --c
   -v "${ROOT}/deploy/test-fixtures/relay.toml:/etc/iroh-relay/relay.toml:ro" \
   "${OCSERVIA_BUSINESS_TEST_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}" --config-path /etc/iroh-relay/relay.toml
 fi
-if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
-  # Standard path: an EndpointID-unbound bootstrap token from the protected
-  # source completes registration in the first installer run.
-  python3 "${ROOT}/scripts/release-business-api.py" bootstrap_token
-  BOOTSTRAP_TOKEN_SOURCE="${work}/bootstrap/node-bootstrap-token" \
-    bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-enrollment.log"
-  grep -Fxq 'protected node bootstrap token staged for enrollment' "${ARTIFACT_DIR}/managed-enrollment.log"
-  if grep -q ENROLLMENT_READY "${ARTIFACT_DIR}/managed-enrollment.log"; then exit 1; fi
-  [[ ! -e "${work}/bootstrap/node-bootstrap-token" ]]
-else
-  # Extended keeps the legacy endpoint-bound two-phase registration.
-  bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-prepare.log"
-  grep -q ENROLLMENT_READY "${ARTIFACT_DIR}/managed-prepare.log"
-fi
+sudo install -m 644 "${work}/ca.crt" /usr/local/share/ca-certificates/ocservia-business-test-ca.crt
+sudo update-ca-certificates
+# Token-only installation requires the Relay to be reachable for enrollment and initial session establishment.
+python3 "${ROOT}/scripts/release-business-api.py" bootstrap_token
+sudo env USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID}" P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID}" \
+  bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive \
+  --join-token-file "${work}/bootstrap/join-token" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-enrollment.log"
+rm -f -- "${work}/bootstrap/join-token"
+grep -Fxq ONLINE "${ARTIFACT_DIR}/managed-enrollment.log"
+export OCSERVIA_BUSINESS_TEST_NODE_ID
+OCSERVIA_BUSINESS_TEST_NODE_ID="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${ARTIFACT_DIR}/managed-enrollment.log")"
+[[ "${OCSERVIA_BUSINESS_TEST_NODE_ID}" =~ ^[0-9a-f-]{36}$ ]]
+sudo test ! -e /etc/ocservia-agent/enrollment-token
+export OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID
+OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --controller "${CONTROLLER_ENDPOINT_ID}" --prepare-enrollment)"
+printf '%s\n' "${OCSERVIA_BUSINESS_TEST_NODE_ID}" >"${work}/signer-node"
+printf '%s\n' "${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}" >"${work}/signer-workspace"
+printf '%s\n' "${OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID}" >"${work}/signer-endpoint"
 record signed_native_package_and_managed_prepare
 export OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER
 OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER="$(compose ps -q transportd)"
@@ -523,25 +481,7 @@ docker exec "${OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER}" sh -c '
 grep -Fx /run/secrets/relay_ca "${ARTIFACT_DIR}/transport-argv.txt"
 printf 'Additional public Relay CA: one-link root:root 0444 on Controller and node; official transport launcher flag present\n' >"${ARTIFACT_DIR}/relay-ca-boundary.txt"
 sudo openssl pkey -in /etc/ocservia-agent/user-password-seal-private.pem -pubout >"${work}/user.pub.pem"
-export OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID
-OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --controller "${CONTROLLER_ENDPOINT_ID}" --prepare-enrollment)"
-if [[ "${BUSINESS_PROFILE}" == extended ]]; then
-  python3 "${ROOT}/scripts/release-business-api.py" token
-  sudo install -o root -g ocserv-agent -m 640 "${work}/private/enrollment-token" /etc/ocservia-agent/enrollment-token
-  bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-enrollment.log"
-fi
-# Bootstrap reports only local enrollment; approve() below independently
-# checks the Controller's pending state before the authorized transition.
-grep -q '^ENROLLED_LOCAL$' "${ARTIFACT_DIR}/managed-enrollment.log"
-grep -q '^SERVICES: NOT_OBSERVED$' "${ARTIFACT_DIR}/managed-enrollment.log"
-export OCSERVIA_BUSINESS_TEST_NODE_ID
-OCSERVIA_BUSINESS_TEST_NODE_ID="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${ARTIFACT_DIR}/managed-enrollment.log")"
-[[ "${OCSERVIA_BUSINESS_TEST_NODE_ID}" =~ ^[0-9a-f-]{36}$ ]]
-printf '%s\n' "${OCSERVIA_BUSINESS_TEST_NODE_ID}" >"${work}/signer-node"
-printf '%s\n' "${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}" >"${work}/signer-workspace"
-printf '%s\n' "${OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID}" >"${work}/signer-endpoint"
 sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-private.pem -pubout >"${work}/p12.pub.pem"
-sudo test ! -e /etc/ocservia-agent/enrollment-token
 cmp "${ROOT}/deploy/production/systemd/agent-relays.sh" /usr/libexec/ocservia/ocservia-agent-relays
 # Reject the forbidden legacy fixture override; it must never return.
 [[ ! -e /etc/systemd/system/ocservia-agent.service.d/99-t07-ca.conf ]]
@@ -551,12 +491,12 @@ identity_digest() {
 enrolled_identity="$(identity_digest)"
 if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
   python3 "${ROOT}/scripts/release-business-api.py" bootstrap_verify
-  # A pending rerun validates, never re-enrolls or regenerates identity.
-  bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-pending-rerun.log"
-  grep -Fxq ENROLLED_LOCAL "${ARTIFACT_DIR}/managed-pending-rerun.log"
-  grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-pending-rerun.log"
+  # A rerun validates identity and active services without re-enrolling.
+  bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --resume-install "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-rerun.log"
+  grep -Fxq ONLINE "${ARTIFACT_DIR}/managed-rerun.log"
+  grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-rerun.log"
   [[ "$(identity_digest)" == "${enrolled_identity}" ]]
-  record bootstrap_token_enrollment_pending_and_rerun_identity
+  record bootstrap_token_enrollment_and_rerun_identity
 fi
 record official_managed_enrollment_and_unchanged_launchers
 # Prevent direct UDP connectivity from masking the single-Relay outage.
@@ -572,42 +512,16 @@ config_ref="$(jq -r .id "${work}/config-reference.json")"
 write_node_config "/etc/ocservia-agent/config-tls/${config_ref}/v1/server-cert.pem" "/etc/ocservia-agent/config-tls/${config_ref}/v1/server-key.pem"
 sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
 sudo systemctl restart ocserv
-sudo systemctl start ocservia-privd
-next_stage node_approval
-python3 "${ROOT}/scripts/release-business-api.py" approve
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   python3 "$ROOT/scripts/release-production-signer.py" import
-  record production_signer_approved_binding
+  record production_signer_active_binding
 fi
-sudo systemctl enable --now ocservia-privd ocservia-agent
-bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"
-grep -q SERVICES_ACTIVE "${ARTIFACT_DIR}/managed-active.log"
+bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --resume-install "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"
+grep -Fxq ONLINE "${ARTIFACT_DIR}/managed-active.log"
 grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-active.log"
 [[ "$(identity_digest)" == "${enrolled_identity}" ]]
 record native_node_services
-if [[ "${BUSINESS_PROFILE}" == extended ]]; then
-next_stage certificate
-python3 "${ROOT}/scripts/release-business-api.py" certificate
-record real_certificate_lifecycle
-fi
-next_stage browser
-npm --prefix "${ROOT}/web" ci --ignore-scripts
-(cd "${ROOT}/web" && npx playwright install --with-deps chromium)
-sudo apt-get install -y --no-install-recommends libnss3-tools
-sudo install -m 644 "${work}/ca.crt" /usr/local/share/ca-certificates/ocservia-business-test-ca.crt
-sudo update-ca-certificates
-mkdir -p "${HOME}/.pki/nssdb"
-if [[ ! -f "${HOME}/.pki/nssdb/cert9.db" ]]; then certutil -N --empty-password -d "sql:${HOME}/.pki/nssdb"; fi
-certutil -A -d "sql:${HOME}/.pki/nssdb" -n ocservia-business-test-ca -t C,, -i "${work}/ca.crt"
-python3 "${ROOT}/scripts/release-business-api.py" browser_prepare
-NODE_EXTRA_CA_CERTS="${work}/ca.crt" node "${ROOT}/scripts/release-business-browser.mjs"
-python3 "${ROOT}/scripts/release-business-api.py" browser_verify
-record real_browser_subset
-if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
-  next_stage signer_vpn_user
-  python3 "${ROOT}/scripts/release-business-api.py" smoke_user
-  record approved_config_apply_and_vpn_user
-fi
+run_business_browser "${work}"
 next_stage vpn_client_setup
 sudo ip netns add business-test-client
 sudo ip link add biztest-host type veth peer name biztest-peer
@@ -626,46 +540,5 @@ if [ "$reason" = connect ]; then
 fi
 EOF
 chmod 700 "${work}/vpn-script"
-next_stage business_vpn
-python3 "${ROOT}/scripts/release-business-api.py" vpn_after_config_apply
-record real_vpn_after_config_apply
-if [[ "${BUSINESS_PROFILE}" == extended || "${OCSERV_PACKAGE:-distribution}" == source-1.6.0 ]]; then
-  next_stage configuration_rollback
-  python3 "${ROOT}/scripts/release-business-api.py" configuration
-  record config_plan_automatic_rollback
-  next_stage vpn_after_rollback
-  python3 "${ROOT}/scripts/release-business-api.py" vpn_after_rollback
-  record real_vpn_after_rollback
-fi
-if [[ "${BUSINESS_PROFILE}" == extended ]]; then
-  next_stage supplemental_business
-  python3 "${ROOT}/scripts/release-business-api.py" business
-  record real_vpn_business_and_recovery
-fi
-if [[ "$BUSINESS_RUN_RESILIENCE" == true ]]; then
-  next_stage single_instance_recovery
-  python3 "${ROOT}/scripts/release-business-api.py" resilience
-  resilience_result=PASS
-  record single_instance_recovery
-fi
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true && "$BUSINESS_PROFILE" == extended ]]; then
-  next_stage integrated_recovery
-  python3 "$ROOT/scripts/release-integrated-acceptance.py" recovery
-  record integrated_recreation_and_authorized_sse
-fi
-if [[ "$BUSINESS_PROFILE" == extended ]]; then
-  # Last version-dependent stage: the rollout replaces the Agent, so no later check may assume VERSION.
-  next_stage agent_rollout
-  bash "${ROOT}/scripts/release-business-rollout.sh"
-  record real_browser_agent_rollout
-fi
-# Default release acceptance retains terminal revocation; manual diagnostics
-# may instead prove package removal without changing the node's trust.
-next_stage "node_${BUSINESS_TERMINAL}"
-python3 "${ROOT}/scripts/release-business-api.py" "$BUSINESS_TERMINAL"
-if [[ "$BUSINESS_TERMINAL" == uninstall ]]; then
-  record real_node_uninstall_and_offline
-else
-  record real_node_revocation_and_disconnect
-fi
-next_stage complete
+run_business_vpn
+run_business_completion

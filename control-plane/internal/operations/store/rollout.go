@@ -8,13 +8,13 @@ import (
 )
 
 type Rollout struct {
-	ID, WorkspaceID, ApprovalID, CreatedBy, ActorSession uuid.UUID
-	TargetVersion, State, Reason, PauseCode              string
-	BatchSize, CurrentBatch                              int
-	StopOnFailure                                        bool
-	RequestHash                                          []byte
-	Excluded                                             []json.RawMessage
-	CreatedAt, UpdatedAt                                 value.Timestamp
+	ID, WorkspaceID, CreatedBy, ActorSession uuid.UUID
+	TargetVersion, State, Reason, PauseCode  string
+	BatchSize, CurrentBatch                  int
+	StopOnFailure                            bool
+	RequestHash                              []byte
+	Excluded                                 []json.RawMessage
+	CreatedAt, UpdatedAt                     value.Timestamp
 }
 
 type RolloutNode struct {
