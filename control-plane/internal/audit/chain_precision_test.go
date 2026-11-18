@@ -11,6 +11,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
 
@@ -24,16 +25,12 @@ func TestAppendHashesPersistedJSON(t *testing.T) {
 	store := &precisionStore{at: time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)}
 	record := numericFixture(" \n null \t")
 	record.BeforeSummary = json.RawMessage(`{ "n":1.2300, "dup":0, "dup":2 }`)
-	if err := AppendChainTx(context.Background(), precisionTx{store: store}, record); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, AppendChainTx(context.Background(), precisionTx{store: store}, record))
 	record.At = store.at
 	record.BeforeSummary = store.args[16].(value.JSONB).Bytes()
 	record.AfterSummary = store.args[17].(value.JSONB).Bytes()
 	payload, err := encodeChainPayload(nil, record)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	hash := sha256.Sum256(payload)
 	if !bytes.Equal(hash[:], store.args[20].([]byte)) || !bytes.Equal(signEvent(currentEventAuthenticator().key, hash[:]), store.args[23].([]byte)) {
 		t.Fatal("persisted JSON cannot reproduce hash/MAC")
@@ -61,18 +58,14 @@ func TestAppendHashesPersistedTime(t *testing.T) {
 	for _, year := range []int{1960, 2026} {
 		store := &precisionStore{at: time.Date(year, 9, 10, 12, 0, 0, 123456789, time.FixedZone("offset", 8*60*60))}
 		record := ChainRecord{EventID: uuid.New(), WorkspaceID: uuid.New(), ActorType: "controller", ActorID: "precision", Action: "audit.precision", ResourceType: "workspace", RequestID: "precision", Result: "succeeded"}
-		if err := AppendChainTx(context.Background(), precisionTx{store: store}, record); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, AppendChainTx(context.Background(), precisionTx{store: store}, record))
 		var err error
 		record.At, err = store.args[2].(value.Timestamp).Time()
 		if err != nil || !record.At.Equal(store.at.Truncate(time.Microsecond)) {
 			t.Fatalf("persisted time: %v %v", record.At, err)
 		}
 		payload, err := encodeChainPayload(nil, record)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		hash := sha256.Sum256(payload)
 		if !bytes.Equal(hash[:], store.args[20].([]byte)) || !bytes.Equal(signEvent(currentEventAuthenticator().key, hash[:]), store.args[23].([]byte)) {
 			t.Fatal("persisted timestamp cannot reproduce hash/MAC")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"log/slog"
 	"net/http"
@@ -39,16 +40,12 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	ownerPool := pool
 	if ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"); ownerURL != "" && ownerURL != databaseURL {
 		ownerPool, err = pgxpool.New(ctx, ownerURL)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		defer ownerPool.Close()
 	}
 	workspaceID, operatorID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -155,13 +152,9 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog, err := releasecatalog.Load(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	server := &Server{backend: postgres.WrapPool(pool), auth: authn, operations: apiOperationService(pool), releaseCatalog: catalog, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	server.operations.EnableReleaseCatalog(catalog)
 

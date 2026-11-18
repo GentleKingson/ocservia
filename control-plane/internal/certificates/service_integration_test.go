@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"math/big"
 	"os"
@@ -43,18 +44,12 @@ type fixturePKI struct {
 func newFixturePKI(t *testing.T) *fixturePKI {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Certificate Test CA"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	certificate, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return &fixturePKI{key: key, certificate: certificate}
 }
 func (f *fixturePKI) Sign(_ context.Context, request SignRequest) (SignResult, error) {
@@ -148,16 +143,12 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	owner := pool
 	if ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"); ownerURL != "" {
 		owner, err = pgxpool.New(ctx, ownerURL)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		defer owner.Close()
 	}
 	workspaceID, nodeID, requesterID, requesterSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -178,9 +169,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		}
 	}
 	attestationKey, err := attestationtest.InstallKey(ctx, pool, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	endpointID := sha256.Sum256(append([]byte("ocservia/certificate-integration/"), nodeID[:]...))
 	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpointID[:]); err != nil {
 		t.Fatal(err)
@@ -206,13 +195,9 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatalf("replay certificate=%s want=%s replay=%v err=%v", replayedCertificate.ID, certificate.ID, replayed, err)
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "node.example.test"}, DNSNames: []string{"node.example.test"}}, key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	publicDER, _ := x509.MarshalPKIXPublicKey(&key.PublicKey)
 	publicHash := sha256.Sum256(publicDER)
 	var csrEnvelopeBytes []byte
@@ -224,9 +209,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	csrResultBytes, err := proto.Marshal(&agentv1.CertificateCsrResult{CertificateId: certificate.ID[:], CsrDer: csrDER, PublicKeySha256: publicHash[:]})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	completed := time.Now().UTC().Truncate(time.Microsecond)
 	csrResult := &agentv1.CommandResult{
 		CommandId: csrEnvelope.GetCommandId(), IdempotencyKey: csrEnvelope.GetIdempotencyKey(),
@@ -238,9 +221,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	encodedCSRResult, err := proto.Marshal(csrResult)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := pool.Exec(ctx, `UPDATE commands SET state='dispatched' WHERE id=$1`, uuid.Must(uuid.FromBytes(csrEnvelope.GetCommandId()))); err != nil {
 		t.Fatal(err)
 	}
@@ -325,9 +306,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 					want.Micros = value.NegativeInfinity
 				default:
 					want, err = value.FromTime(tc.deadline.Time)
-					if err != nil {
-						t.Fatal(err)
-					}
+					testutil.NoError(t, err)
 				}
 				if got.NotAfter == nil || *got.NotAfter != want {
 					t.Fatal("certificate deadline changed", got.NotAfter, want)
@@ -347,9 +326,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 				}
 				return
 			}
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			download.Reader.Close()
 			var lease, granted pgtype.Timestamptz
 			if err := pool.QueryRow(ctx, `SELECT lease_until,active_grant_expires_at FROM artifact_operations WHERE id=$1`, grant.ArtifactID).Scan(&lease, &granted); err != nil {
@@ -376,9 +353,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatalf("another identity used the requester's artifact token: %v", err)
 	}
 	download, err := service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	received, err := io.ReadAll(download.Reader)
 	download.Reader.Close()
 	if err != nil || !bytes.Equal(received, artifactBytes) {
@@ -435,9 +410,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	staleArtifactID := uuid.Must(uuid.NewV7())
 	staleGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ArtifactRequestID: staleArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "p12-stale", Reason: "test revision fence", RequestID: "p12-stale", Traceparent: "00-5123456789abcdef0123456789abcdef-0123456789abcdef-01"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, staleGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
@@ -451,21 +424,15 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	issued, err = service.Get(ctx, certificate.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	consumeFailureArtifactID := uuid.Must(uuid.NewV7())
 	consumeFailureGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ArtifactRequestID: consumeFailureArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12-consume-recovery", Reason: "test finalize recovery", RequestID: "p12-consume-recovery", Traceparent: "00-2123456789abcdef0123456789abcdef-1123456789abcdef-01"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, consumeFailureGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
 	consumeFailureDownload, err := service.OpenArtifact(ctx, consumeFailureGrant.ArtifactID, consumeFailureGrant.DownloadToken, requesterID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	_, _ = io.Copy(io.Discard, consumeFailureDownload.Reader)
 	_ = consumeFailureDownload.Reader.Close()
 	artifactTransport.consumeErr = errors.New("finalize unavailable")
@@ -496,27 +463,19 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatalf("recovered consumption state=%q err=%v", consumeFailureState, err)
 	}
 	certificateAfterMaintenance, err := service.Get(ctx, certificate.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	releasedArtifactID := uuid.Must(uuid.NewV7())
 	releasedGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ArtifactRequestID: releasedArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12-released-lease", Reason: "test released lease recovery", RequestID: "p12-released-lease", Traceparent: "00-2923456789abcdef0123456789abcdef-1123456789abcdef-01"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, releasedGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
 	releasedDownload, err := service.OpenArtifact(ctx, releasedGrant.ArtifactID, releasedGrant.DownloadToken, requesterID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	_, _ = io.Copy(io.Discard, releasedDownload.Reader)
 	_ = releasedDownload.Reader.Close()
 	releasedGrantBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(releasedDownload.Grant)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$3,consume_sha256=$4,consume_size=$5,consume_actor_id=$6,consume_session_id=$7,consume_request_id='artifact-released-window' WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, releasedGrant.ArtifactID, releasedDownload.GrantID, releasedGrantBytes, digest[:], len(artifactBytes), requesterID, requesterSession); err != nil {
 		t.Fatal(err)
 	}
@@ -540,22 +499,16 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	revokeRaceArtifactID := uuid.Must(uuid.NewV7())
 	revokeRaceGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ArtifactRequestID: revokeRaceArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "race", Reason: "test revoke finalization race", RequestID: "p12-revoke-race", Traceparent: "00-3023456789abcdef0123456789abcdef-1123456789abcdef-01"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, revokeRaceGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
 	revokeRaceDownload, err := service.OpenArtifact(ctx, revokeRaceGrant.ArtifactID, revokeRaceGrant.DownloadToken, requesterID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	_, _ = io.Copy(io.Discard, revokeRaceDownload.Reader)
 	_ = revokeRaceDownload.Reader.Close()
 	revokeRaceGrantBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(revokeRaceDownload.Grant)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$3,consume_sha256=$4,consume_size=$5,consume_actor_id=$6,consume_session_id=$7,consume_request_id='artifact-revoke-race' WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, revokeRaceGrant.ArtifactID, revokeRaceDownload.GrantID, revokeRaceGrantBytes, digest[:], len(artifactBytes), requesterID, requesterSession); err != nil {
 		t.Fatal(err)
 	}
@@ -588,22 +541,16 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	crashArtifactID := uuid.Must(uuid.NewV7())
 	crashGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ArtifactRequestID: crashArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12-crash-recovery", Reason: "test crash recovery", RequestID: "p12-crash-recovery", Traceparent: "00-3123456789abcdef0123456789abcdef-1123456789abcdef-01"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, crashGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
 	crashDownload, err := service.OpenArtifact(ctx, crashGrant.ArtifactID, crashGrant.DownloadToken, requesterID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	_, _ = io.Copy(io.Discard, crashDownload.Reader)
 	_ = crashDownload.Reader.Close()
 	crashGrantBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(crashDownload.Grant)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$3,consume_sha256=$4,consume_size=$5,consume_actor_id=$6,consume_session_id=$7,consume_request_id='artifact-crash-window' WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, crashGrant.ArtifactID, crashDownload.GrantID, crashGrantBytes, digest[:], len(artifactBytes), requesterID, requesterSession); err != nil {
 		t.Fatal(err)
 	}
@@ -624,9 +571,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal("recovery re-consumed an already deleted root artifact")
 	}
 	issued, err = service.Get(ctx, certificate.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	expiredArtifactID := uuid.Must(uuid.NewV7())
 	expiredGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ArtifactRequestID: expiredArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12-expired", Reason: "expired export", RequestID: "p12-expired-request", Traceparent: "00-3123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed {
@@ -655,9 +600,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	download, err = service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken, requesterID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	_, _ = io.Copy(io.Discard, download.Reader)
 	_ = download.Reader.Close()
 	if err := service.CompleteArtifact(ctx, hashGrant.ArtifactID, download.GrantID, download.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-hash-mismatch"); !errors.Is(err, ErrArtifactDenied) {

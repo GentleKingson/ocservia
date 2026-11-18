@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"reflect"
 	"strings"
@@ -36,9 +37,7 @@ func userStateBackend(t *testing.T) database.Backend {
 		t.Skip("real PostgreSQL required")
 	}
 	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(pool.Close)
 	// PostgreSQL packages share a database. Preserve the fencing epoch, but
 	// leave the singleton expired both before and after this fixture.
@@ -112,13 +111,9 @@ func TestUserStateBackendIntegration(t *testing.T) {
 			got = p.UserPasswordRotate.DesiredRevision
 		}
 		claims, err := commandauth.ClaimsFromEnvelopeV1(&envelope)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		canonical, err := commandauth.CanonicalV1(claims)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		if !ed25519.Verify(signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) || stored != expected || got != uint64(desired) || envelope.ExpectedRevision != 1 {
 			t.Fatal("signed revision", stored, got, envelope.ExpectedRevision)
 		}
@@ -175,9 +170,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	}
 	// A locked outbox must not be coalesced. The next command follows it.
 	states, err = s.List(ctx, node)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	currentCommand := uuid.Nil
 	if err := row(`SELECT command_id FROM operations WHERE id=$1`, uuid.MustParse(*states[0].OperationID)).Scan(&currentCommand); err != nil {
 		t.Fatal(err)
@@ -203,13 +196,9 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	assertEnvelope(recovered, 0, 1)
 	// Failed fencing rolls back desired rows, supersession, outbox and audit.
 	identity, err := coordination.NewIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	leader, err := coordination.AcquireBackend(ctx, b, identity, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	fenced := coordination.WithFence(ctx, leader)
 	fencedRequest := request(GroupApply, "fenced", 0)
 	if _, _, err := s.Mutate(fenced, fencedRequest); err != nil {
@@ -253,14 +242,10 @@ func TestUserStateBackendIntegration(t *testing.T) {
 		}
 		return store.WriteDesired(ctx, v)
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	exec(`INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at)VALUES($1,'logical',$2,3,$3,$4)`, node, members, bytes.Repeat([]byte{2}, 32), infinity)
 	object, err := value.ParseJSONB([]byte(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at)VALUES($1,$2,$2,'desired',$3,'test','test','test',$4,$4,$4,$2)`, node, infinity, uuid.New(), object)
 	exec(`INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at)VALUES($1,'remote',$2,0,$3,$4)`, node, value.TextList([]string{"Bob", "bob", "bob "}), bytes.Repeat([]byte{2}, 32), infinity)
 	exec(`INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at)VALUES($1,'remote',true,0,$2,$3)`, node, bytes.Repeat([]byte{2}, 32), infinity)
@@ -299,9 +284,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	exec(`UPDATE node_observed_snapshots SET last_heartbeat_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, node)
 	assertCounts(1, 3, 4)
 	states, err = s.List(ctx, node)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	found := false
 	for _, item := range states {
 		if item.Name != "logical" {

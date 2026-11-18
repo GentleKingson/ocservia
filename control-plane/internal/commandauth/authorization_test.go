@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 )
 
 type goldenDocument struct {
@@ -104,9 +106,7 @@ func TestCanonicalV1AndGoSignaturesMatchSharedGoldenVectors(t *testing.T) {
 		t.Run(vector.Name, func(t *testing.T) {
 			claims := claimsFromGolden(t, document.KeyID, vector)
 			canonical, err := CanonicalV1(claims)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			signature := ed25519.Sign(signer.privateKey, canonical)
 			if vector.CanonicalPreimageHex == "" || vector.SignatureHex == "" {
 				t.Fatalf("populate fixture: canonical=%s signature=%s", hex.EncodeToString(canonical), hex.EncodeToString(signature))
@@ -123,13 +123,9 @@ func TestCanonicalV1AndGoSignaturesMatchSharedGoldenVectors(t *testing.T) {
 
 func TestSessionGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "session-grant-v1.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	var vector sessionGrantGolden
-	if err := json.Unmarshal(raw, &vector); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(raw, &vector))
 	seed := testFixed32(t, vector.TestSeedHex)
 	signer := NewSignerFromSeed(seed)
 	claims := SessionGrantClaimsV1{
@@ -142,9 +138,7 @@ func TestSessionGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 		ExpiresAtSeconds: vector.ExpiresAtSeconds, ExpiresAtNanos: vector.ExpiresAtNanos,
 	}
 	canonical, err := CanonicalSessionGrantV1(claims)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	signature := ed25519.Sign(signer.privateKey, canonical)
 	if vector.CanonicalPreimageHex == "" || vector.SignatureHex == "" {
 		t.Fatalf("populate fixture: canonical=%s signature=%s", hex.EncodeToString(canonical), hex.EncodeToString(signature))
@@ -159,13 +153,9 @@ func TestSessionGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 
 func TestArtifactGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "artifact-grant-v1.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	var vector artifactGrantGolden
-	if err := json.Unmarshal(raw, &vector); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(raw, &vector))
 	seed := testFixed32(t, vector.TestSeedHex)
 	signer := NewSignerFromSeed(seed)
 	if hex.EncodeToString(signer.PublicKey()) != vector.PublicKeyHex || signer.KeyID() != vector.KeyID {
@@ -182,9 +172,7 @@ func TestArtifactGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 		GrantID: testFixed16(t, vector.GrantIDHex),
 	}
 	canonical, err := CanonicalArtifactGrantV1(claims)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	signature := ed25519.Sign(signer.privateKey, canonical)
 	if vector.CanonicalPreimageHex == "" || vector.SignatureHex == "" {
 		t.Fatalf("populate fixture: canonical=%s signature=%s", hex.EncodeToString(canonical), hex.EncodeToString(signature))
@@ -199,29 +187,19 @@ func TestArtifactGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 
 func TestLoadSignerRejectsUnsafeKeyPaths(t *testing.T) {
 	directory, err := os.MkdirTemp(".", ".command-key-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	directory, err = filepath.Abs(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
-	if err := os.Chmod(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Chmod(directory, 0o700))
 	var seed [32]byte
 	seed[0] = 7
 	privateKey := ed25519.NewKeyFromSeed(seed[:])
 	der, err := x509.MarshalPKCS8PrivateKey(privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	raw := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
 	keyPath := filepath.Join(directory, "controller.pem")
-	if err := os.WriteFile(keyPath, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.WriteFile(keyPath, raw, 0o600))
 	loaded, err := LoadSigner(keyPath)
 	if err != nil {
 		t.Fatalf("safe key was rejected: %v", err)
@@ -230,25 +208,17 @@ func TestLoadSignerRejectsUnsafeKeyPaths(t *testing.T) {
 		t.Fatal("loaded public key does not match")
 	}
 
-	if err := os.Chmod(keyPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Chmod(keyPath, 0o644))
 	if _, err := LoadSigner(keyPath); err == nil {
 		t.Fatal("world-readable private key was accepted")
 	}
-	if err := os.Chmod(keyPath, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Chmod(keyPath, 0o600))
 	linkPath := filepath.Join(directory, "controller-link.pem")
-	if err := os.Symlink(keyPath, linkPath); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Symlink(keyPath, linkPath))
 	if _, err := LoadSigner(linkPath); err == nil {
 		t.Fatal("symlinked private key was accepted")
 	}
-	if err := os.Chmod(directory, 0o770); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Chmod(directory, 0o770))
 	if _, err := LoadSigner(keyPath); err == nil {
 		t.Fatal("key under group-writable ancestry was accepted")
 	}

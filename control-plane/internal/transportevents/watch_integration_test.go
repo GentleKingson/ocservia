@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"math"
 	"net"
 	"os"
@@ -122,19 +123,13 @@ func (s *retainedEventServer) WatchEvents(request *transportv1.WatchEventsReques
 func newRetainedEventClient(t *testing.T, serverImpl *retainedEventServer) *transportclient.Client {
 	t.Helper()
 	socketRoot, err := os.MkdirTemp(filepath.Join("..", "..", ".."), ".watch-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(socketRoot) })
 	socketRoot, err = filepath.Abs(socketRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	socketPath := filepath.Join(socketRoot, "transportd.sock")
 	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := os.Chmod(socketPath, 0o660); err != nil {
 		_ = listener.Close()
 		t.Fatal(err)
@@ -151,9 +146,7 @@ func newRetainedEventClient(t *testing.T, serverImpl *retainedEventServer) *tran
 	})
 
 	client, err := transportclient.New(socketPath, 2*time.Second, 8, uint32(os.Geteuid()), uint32(os.Getegid()))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return client
 }
 
@@ -165,9 +158,7 @@ func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) 
 	testCtx, testCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer testCancel()
 	pool, err := pgxpool.New(testCtx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := pool.Exec(testCtx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton`); err != nil {
 		t.Fatal(err)
 	}
@@ -201,9 +192,7 @@ func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) 
 		pool.Close()
 	})
 	tx, err := pool.Begin(testCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := tx.Exec(testCtx, `UPDATE nodes SET status='revoked',updated_at=now() WHERE id=$1`, revokedNodeID); err != nil {
 		_ = tx.Rollback(testCtx)
 		t.Fatal(err)
@@ -239,9 +228,7 @@ func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) 
 	}
 	for {
 		cursor, err := service.LastEventID(testCtx)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		if bytes.Equal(cursor, heartbeatID[:]) {
 			break
 		}
@@ -263,9 +250,7 @@ func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) 
 	}
 
 	cursor, err := service.LastEventID(testCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if !bytes.Equal(cursor, heartbeatID[:]) {
 		t.Fatalf("last cursor = %x, want %x", cursor, heartbeatID[:])
 	}
@@ -345,9 +330,7 @@ func assertWatchResumes(t *testing.T, ctx context.Context, service *Service, eve
 	}
 	for {
 		cursor, err := service.LastEventID(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		if bytes.Equal(cursor, finalID[:]) {
 			break
 		}
@@ -390,13 +373,9 @@ func TestRunWatchQuarantinesPermanentEventAndContinuesIntegration(t *testing.T) 
 		Priority: agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH,
 		// A missing snapshot is structurally valid protobuf but permanently invalid telemetry.
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	validResultPayload, err := proto.Marshal(fixture.validResult())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	invalidID, heartbeatID, resultID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	now := time.Now().UTC()
 	events := []*transportv1.TransportEvent{
@@ -449,13 +428,9 @@ func TestRunWatchQuarantinesCommandResultNULAndContinuesIntegration(t *testing.T
 	poisonResult.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
 	poisonResult.ErrorCode = "poison\x00code"
 	poisonPayload, err := proto.Marshal(poisonResult)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	validResultPayload, err := proto.Marshal(fixture.validResult())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	poisonID, heartbeatID, resultID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	now := time.Now().UTC()
 	events := []*transportv1.TransportEvent{
@@ -512,9 +487,7 @@ func TestLegacyCursorRollbackRequiresAcceptedTailIntegration(t *testing.T) {
 		BatchId: invalidBatchID[:], NodeId: fixture.nodeID[:], Sequence: 1,
 		Priority: agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	now := time.Now().UTC()
 	acceptedBeforeID, quarantinedID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	acceptedAfterID, followingID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -533,9 +506,7 @@ func TestLegacyCursorRollbackRequiresAcceptedTailIntegration(t *testing.T) {
 
 	legacyCursor := legacyTransportCursor{pool: fixture.pool}
 	legacyID, err := legacyCursor.LastEventID(testCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if !bytes.Equal(legacyID, acceptedBeforeID[:]) {
 		t.Fatalf("legacy cursor=%x, want accepted event %x", legacyID, acceptedBeforeID[:])
 	}
@@ -559,13 +530,9 @@ func TestLegacyCursorRollbackRequiresAcceptedTailIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	durableID, err := fixture.service.LastEventID(testCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	legacyID, err = legacyCursor.LastEventID(testCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if !bytes.Equal(durableID, acceptedAfterID[:]) || !bytes.Equal(legacyID, acceptedAfterID[:]) {
 		t.Fatalf("rollback cursor compatibility durable=%x legacy=%x want=%x", durableID, legacyID, acceptedAfterID[:])
 	}
@@ -612,17 +579,11 @@ func TestRunWatchQuarantinesTelemetryBigintOverflowAndContinuesIntegration(t *te
 	banBatch := buildTelemetry(uuid.Must(uuid.NewV7()))
 	banBatch.IpBans = []*agentv1.IpBanObservation{{Ip: "192.0.2.9", SecondsRemaining: &remaining}}
 	dropPayload, err := proto.Marshal(dropBatch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	banPayload, err := proto.Marshal(banBatch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	resultPayload, err := proto.Marshal(fixture.validResult())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	dropID, heartbeatID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	banID, resultID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	events := []*transportv1.TransportEvent{
@@ -687,21 +648,13 @@ func TestRunWatchQuarantinesDuplicateAndConflictingSessionsIntegration(t *testin
 	validBatch := buildTelemetry(validBatchID, 2, validObservedAt, "alice")
 	conflictBatch := buildTelemetry(conflictBatchID, 3, now.Add(2*time.Second), "bob")
 	duplicatePayload, err := proto.Marshal(duplicateBatch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	validPayload, err := proto.Marshal(validBatch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	conflictPayload, err := proto.Marshal(conflictBatch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	resultPayload, err := proto.Marshal(fixture.validResult())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	duplicateID, heartbeatID, validID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	conflictID, resultID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	events := []*transportv1.TransportEvent{
@@ -777,21 +730,13 @@ func TestRunWatchQuarantinesPostgresUnsafeTelemetryIntegration(t *testing.T) {
 		DetailJson: []byte(`{"outside_postgres_numeric":1e131072}`),
 	}}
 	bootPayload, err := proto.Marshal(bootBatch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	documentPayload, err := proto.Marshal(documentBatch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	numericPayload, err := proto.Marshal(numericBatch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	resultPayload, err := proto.Marshal(fixture.validResult())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	bootID, heartbeatID, documentID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	numericID, resultID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	events := []*transportv1.TransportEvent{
@@ -837,18 +782,14 @@ func TestTransientDatabaseFailureDoesNotAdvanceTransportCursorIntegration(t *tes
 	baseline := &transportv1.TransportEvent{EventId: baselineID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("baseline")}
 	retry := &transportv1.TransportEvent{EventId: retryID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("retry")}
 	resultPayload, err := proto.Marshal(fixture.validResult())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	result := &transportv1.TransportEvent{EventId: resultID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: resultPayload}
 	if err := fixture.service.Ingest(testCtx, baseline); err != nil {
 		t.Fatal(err)
 	}
 
 	lockTx, err := fixture.pool.Begin(testCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := lockTx.Exec(testCtx, `SELECT event_id FROM transport_event_cursor WHERE singleton FOR UPDATE`); err != nil {
 		_ = lockTx.Rollback(testCtx)
 		t.Fatal(err)
@@ -865,9 +806,7 @@ func TestTransientDatabaseFailureDoesNotAdvanceTransportCursorIntegration(t *tes
 	}
 
 	cursor, err := fixture.service.LastEventID(testCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	var retryBusinessEvents, retryQuarantineEvents int
 	if err := fixture.pool.QueryRow(testCtx, `SELECT
 		(SELECT count(*) FROM transport_events WHERE event_id=$1),
@@ -885,9 +824,7 @@ func TestTransientDatabaseFailureDoesNotAdvanceTransportCursorIntegration(t *tes
 		t.Fatalf("ingest following command result: %v", err)
 	}
 	cursor, err = fixture.service.LastEventID(testCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	var acceptedCount int
 	if err := fixture.pool.QueryRow(testCtx, `SELECT count(*) FROM transport_events WHERE event_id IN($1,$2,$3)`, baselineID, retryID, resultID).Scan(&acceptedCount); err != nil {
 		t.Fatal(err)

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"log/slog"
 	"os"
@@ -35,9 +36,7 @@ func TestCreateTokenUnknownWorkspaceIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	service := newTestService(t, pool, "", "test")
 	_, err = service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: uuid.Must(uuid.NewV7()), Environment: "test", ExpectedEndpointID: endpointFixture(1), ActorID: "integration", Reason: "unknown workspace", RequestID: uuid.Must(uuid.NewV7()).String()})
@@ -53,23 +52,17 @@ func TestConcurrentAuditChainIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	_, err = pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Audit concurrency',$2,now(),now())`, workspaceID, "audit-"+workspaceID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
 	service := newTestService(t, pool, "", "test")
 	endpoint := endpointFixture(2)
 	enrollmentToken, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "concurrent enrollment", RequestID: "audit-enrollment-token"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	errors := make(chan error, 8)
 	var wait sync.WaitGroup
 	for index := range 8 {
@@ -88,15 +81,11 @@ func TestConcurrentAuditChainIntegration(t *testing.T) {
 	wait.Wait()
 	close(errors)
 	for err := range errors {
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 	}
 
 	rows, err := pool.Query(ctx, `SELECT previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspaceID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer rows.Close()
 	var previous []byte
 	count := 0
@@ -126,9 +115,7 @@ func TestNodeBootstrapEnrollmentIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap integration',$2,now(),now())`, workspaceID, "bootstrap-"+workspaceID.String()); err != nil {
@@ -138,9 +125,7 @@ func TestNodeBootstrapEnrollmentIntegration(t *testing.T) {
 
 	service := newTestService(t, pool, string(make([]byte, 64)), "test")
 	token, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: "bootstrap-node", ActorID: "integration", Reason: "bootstrap enrollment", RequestID: uuid.Must(uuid.NewV7()).String()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if !strings.HasPrefix(token.Value, BootstrapTokenPrefix) {
 		t.Fatalf("bootstrap token = %q", token.Value)
 	}
@@ -208,9 +193,7 @@ func TestNodeBootstrapEnrollmentIntegration(t *testing.T) {
 	}
 
 	expired, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ActorID: "integration", Reason: "expired bootstrap", RequestID: uuid.Must(uuid.NewV7()).String()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := pool.Exec(ctx, `UPDATE node_bootstrap_tokens SET created_at=now()-interval '2 seconds',expires_at=now()-interval '1 second' WHERE id=$1`, expired.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -219,9 +202,7 @@ func TestNodeBootstrapEnrollmentIntegration(t *testing.T) {
 	}
 
 	rollbackToken, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: "bootstrap-node", ActorID: "integration", Reason: "rollback bootstrap", RequestID: uuid.Must(uuid.NewV7()).String()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := service.Enroll(ctx, enrollmentRequest(rollbackToken.Value, endpointFixture(46))); err == nil {
 		t.Fatal("duplicate node name unexpectedly enrolled")
 	}
@@ -236,9 +217,7 @@ func TestNodeBootstrapEnrollmentIntegration(t *testing.T) {
 		}
 	}
 	capacityToken, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ActorID: "integration", Reason: "capacity bootstrap", RequestID: uuid.Must(uuid.NewV7()).String()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := service.Enroll(ctx, enrollmentRequest(capacityToken.Value, endpointFixture(47))); !errors.Is(err, ErrPendingLimit) {
 		t.Fatalf("bootstrap pending limit error = %v", err)
 	}
@@ -251,9 +230,7 @@ func TestNodeBootstrapConcurrentBindingIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap race',$2,now(),now())`, workspaceID, "bootstrap-race-"+workspaceID.String()); err != nil {
@@ -262,9 +239,7 @@ func TestNodeBootstrapConcurrentBindingIntegration(t *testing.T) {
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 	service := newTestService(t, pool, "", "test")
 	token, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ActorID: "integration", Reason: "bootstrap race", RequestID: uuid.Must(uuid.NewV7()).String()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	requests := []*agentv1.EnrollRequest{enrollmentRequest(token.Value, endpointFixture(43)), enrollmentRequest(token.Value, endpointFixture(44))}
 	results := make(chan error, len(requests))
 	var wait sync.WaitGroup
@@ -298,15 +273,11 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	_, err = pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Enrollment integration',$2,now(),now())`, workspaceID, "enrollment-"+workspaceID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
 	service := newTestService(t, pool, string(make([]byte, 64)), "test")
@@ -473,9 +444,7 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	}
 	transport := &failingTrustTransport{updateFailures: 1, closeFailures: 1}
 	worker, err := NewTrustConvergenceWorkerBackend(postgres.WrapPool(pool), transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if worked, runErr := worker.RunOnce(ctx); !worked || runErr == nil {
 		t.Fatalf("failed transport update was not retained for retry: worked=%v err=%v", worked, runErr)
 	}
@@ -530,15 +499,11 @@ func TestExpiredAndSubstitutedEnrollmentTokensIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	_, err = pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Token rejection',$2,now(),now())`, workspaceID, "reject-"+workspaceID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 	service := newTestService(t, pool, "", "test")
 	endpoint := endpointFixture(9)
@@ -562,9 +527,7 @@ func TestDirectTrustCallerCannotForgeEndpointProofIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Direct trust proof',$2,now(),now())`, workspaceID, "direct-trust-"+workspaceID.String()); err != nil {
@@ -578,9 +541,7 @@ func TestDirectTrustCallerCannotForgeEndpointProofIntegration(t *testing.T) {
 	token := createToken(t, service, workspaceID, expectedEndpoint)
 	forged := enrollmentRequest(token.Value, expectedEndpoint)
 	canonical, err := EnrollmentCanonicalV1(forged)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	forgerKey, ok := endpointPrivateKeys.Load(string(forgerEndpoint))
 	if !ok {
 		t.Fatal("missing forger key fixture")
@@ -598,18 +559,14 @@ func TestDirectTrustCallerCannotForgeEndpointProofIntegration(t *testing.T) {
 func createToken(t *testing.T, service *Service, workspaceID uuid.UUID, endpoint []byte) Token {
 	t.Helper()
 	token, err := service.CreateBootstrapToken(context.Background(), BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "test enrollment", RequestID: uuid.Must(uuid.NewV7()).String()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return token
 }
 
 func newTestService(t *testing.T, pool *pgxpool.Pool, controllerEndpointID, controllerVersion string) *Service {
 	t.Helper()
 	signer, err := commandauth.NewRandomSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return NewBackend(postgres.WrapPool(pool), controllerEndpointID, controllerVersion, signer)
 }
 
@@ -721,9 +678,7 @@ func TestAuthorizeSessionDeduplicatesFencingCapabilityIntegration(t *testing.T) 
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Fencing dedup',$2,now(),now())`, workspaceID, "fencing-dedup-"+workspaceID.String()); err != nil {
@@ -783,9 +738,7 @@ func TestAuthorizeSessionOwnerContentionForcesRetryIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at)
@@ -814,17 +767,13 @@ func TestAuthorizeSessionOwnerContentionForcesRetryIntegration(t *testing.T) {
 	copy(fixedEndpoint[:], endpoint)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	oldOwner, err := ownersession.NewManagerBackend(postgres.WrapPool(pool), service.signer, &recordingRegistrar{}, 2*time.Second, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	oldFence, err := oldOwner.OpenSession(ctx, fixedNode, fixedEndpoint, authorizationRevision, []string{"ocserv.fencing.v2", "ocserv.status.read"})
 	if err != nil {
 		t.Fatalf("open old owner session: %v", err)
 	}
 	successor, err := ownersession.NewManagerBackend(postgres.WrapPool(pool), service.signer, &recordingRegistrar{}, 30*time.Second, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	service.ownerSessions = successor
 	handshake := &agentv1.SessionHandshake{ProtocolMajor: 1, ProtocolMinor: ProtocolMinor, AgentVersion: "test", NodeId: nodeID[:], EndpointId: endpoint, Capabilities: []string{"ocserv.fencing.v2", "ocserv.status.read"}, OsRelease: "test", BootId: "boot", AgentInstanceId: uuidBytes(), MaxMessageSize: 1024, Time: timestamppb.Now(), Nonce: make([]byte, 16), SealingKeys: enrollmentSealingKeys()}
 	response, err := service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
@@ -857,9 +806,7 @@ func TestAuthorizeSessionOwnerContentionForcesRetryIntegration(t *testing.T) {
 		t.Fatalf("old owner after takeover = %v, want ErrNotOwner", err)
 	}
 	successorConnection, err := fixed16(response.GetConnectionFence().GetConnectionId())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(func() {
 		_ = successor.CloseSession(context.Background(), fixedNode, successorConnection, int64(response.GetConnectionFence().GetOwnerEpoch()))
 	})
@@ -892,9 +839,7 @@ func TestAuthorizeSessionCommitFailureClosesOpenedSessionIntegration(t *testing.
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Commit cleanup',$2,now(),now())`, workspaceID, "commit-cleanup-"+workspaceID.String()); err != nil {
@@ -903,9 +848,7 @@ func TestAuthorizeSessionCommitFailureClosesOpenedSessionIntegration(t *testing.
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
 	signer, err := commandauth.NewRandomSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	requestCtx, cancelRequest := context.WithCancel(ctx)
 	registrar := &cancellingRegistrar{cancelled: cancelRequest}
 	manager, err := ownersession.NewManagerBackend(postgres.WrapPool(pool), signer, registrar, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))

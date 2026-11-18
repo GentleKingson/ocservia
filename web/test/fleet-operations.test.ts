@@ -83,17 +83,6 @@ const operation = (state: Operation["state"]): Operation => ({
   updatedAt: new Date(0).toISOString(),
 });
 
-function deferred<T>(): {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-} {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
-}
-
 const nodeB: NodeObservedState = {
   ...node,
   id: "019fc0a4-6d92-765c-a8a1-4af556614cc6",
@@ -318,8 +307,8 @@ describe("controlled fleet operations", () => {
   });
 
   it("does not let an older rebuild overwrite a newer same-workspace snapshot", async () => {
-    const first = deferred<ReturnType<typeof nodePage>>();
-    const second = deferred<ReturnType<typeof nodePage>>();
+    const first = Promise.withResolvers<ReturnType<typeof nodePage>>();
+    const second = Promise.withResolvers<ReturnType<typeof nodePage>>();
     vi.mocked(listNodes)
       .mockImplementationOnce(() => first.promise)
       .mockImplementationOnce(() => second.promise);
@@ -344,8 +333,8 @@ describe("controlled fleet operations", () => {
   });
 
   it("keeps the latest node selection when an earlier detail request returns last", async () => {
-    const first = deferred<NodeObservedState>();
-    const second = deferred<NodeObservedState>();
+    const first = Promise.withResolvers<NodeObservedState>();
+    const second = Promise.withResolvers<NodeObservedState>();
     vi.mocked(getNode).mockImplementation((nodeId) =>
       nodeId === "node-a" ? first.promise : second.promise,
     );
@@ -381,8 +370,8 @@ describe("controlled fleet operations", () => {
   });
 
   it("does not refresh the operated node over a selection that is still loading", async () => {
-    const nodeBDetails = deferred<NodeObservedState>();
-    const operationResult = deferred<Operation>();
+    const nodeBDetails = Promise.withResolvers<NodeObservedState>();
+    const operationResult = Promise.withResolvers<Operation>();
     vi.mocked(getNode).mockImplementation((nodeId) =>
       nodeId === nodeB.id ? nodeBDetails.promise : Promise.resolve(node),
     );

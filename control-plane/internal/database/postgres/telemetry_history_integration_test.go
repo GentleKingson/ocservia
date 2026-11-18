@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"testing"
 	"time"
@@ -27,21 +28,15 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	config, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	// A fractional-hour offset exposes accidental session-local rollup origins.
 	config.ConnConfig.RuntimeParams["timezone"] = "Asia/Kathmandu"
 	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	b := WrapPool(pool)
 	ownerPool, err := pgxpool.New(ctx, ownerDSN)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer ownerPool.Close()
 	owner := WrapPool(ownerPool)
 	if err := b.ValidateTelemetryRuntime(ctx); err != nil {

@@ -1,4 +1,5 @@
-import { createRenderer, nextTick, ssrContextKey } from "vue";
+import { renderer } from "./renderer";
+import { nextTick, ssrContextKey } from "vue";
 import { ResponseError } from "@ocservia/api-client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
@@ -14,18 +15,6 @@ vi.mock("../src/api/workspace", async (original) => ({
 }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 import AuditView from "../src/views/AuditView.vue";
-const renderer = createRenderer<object, object>({
-  createElement: () => ({}),
-  createText: () => ({}),
-  createComment: () => ({}),
-  insert: () => {},
-  remove: () => {},
-  setText: () => {},
-  setElementText: () => {},
-  parentNode: () => null,
-  nextSibling: () => null,
-  patchProp: () => {},
-});
 let unmount: (() => void) | undefined;
 const record = {
   id: "audit-a",

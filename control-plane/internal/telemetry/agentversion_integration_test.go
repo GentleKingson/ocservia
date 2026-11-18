@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -19,9 +20,7 @@ func TestAgentVersionStateListGetConsistencyIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	nodeID := uuid.Must(uuid.NewV7())
@@ -46,13 +45,9 @@ func TestAgentVersionStateListGetConsistencyIntegration(t *testing.T) {
 		t.Fatalf("ingest: inserted=%v err=%v", inserted, err)
 	}
 	node, err := service.GetNode(ctx, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	nodes, _, err := service.ListNodesInWorkspace(ctx, workspaceID, uuid.Nil, 200)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if len(nodes) != 1 || nodes[0].ID != nodeID.String() {
 		t.Fatalf("unexpected node page: %#v", nodes)
 	}
@@ -67,18 +62,14 @@ func TestAgentVersionStateListGetConsistencyIntegration(t *testing.T) {
 		AgentVersionState       string `json:"agent_version_state"`
 		RecommendedAgentVersion string `json:"recommended_agent_version"`
 	}
-	if err := json.Unmarshal(mustJSON(t, node), &encoded); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(mustJSON(t, node), &encoded))
 	if encoded.AgentVersionState != AgentVersionStateUpgradeAvailable || encoded.RecommendedAgentVersion != "0.2.0" {
 		t.Fatalf("unexpected wire fields: %#v", encoded)
 	}
 	unconfigured := NewBackend(postgres.WrapPool(pool))
 	unconfigured.now = func() time.Time { return now }
 	node, err = unconfigured.GetNode(ctx, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if node.AgentVersionState != AgentVersionStateUnknown || node.RecommendedAgentVersion != "" {
 		t.Fatalf("missing recommendation must classify unknown: %#v", node)
 	}
@@ -87,8 +78,6 @@ func TestAgentVersionStateListGetConsistencyIntegration(t *testing.T) {
 func mustJSON(t *testing.T, value any) []byte {
 	t.Helper()
 	encoded, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return encoded
 }

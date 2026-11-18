@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -38,13 +39,9 @@ func newOutboxFixture(t *testing.T) *outboxFixture {
 	f.owner, f.backend = postgres.WrapPool(owner), postgres.WrapPool(runtime)
 	var err error
 	f.signer, err = commandauth.NewRandomSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	at, err := value.FromTime(time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox transaction test',$2,$3,$4)`, f.workspace, f.workspace.String(), at, at)
 	return f
 }
@@ -69,9 +66,7 @@ func (f *outboxFixture) node(t *testing.T) uuid.UUID {
 	t.Helper()
 	node := uuid.Must(uuid.NewV7())
 	at, err := value.FromTime(time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',$4,$5)`, node, f.workspace, node.String(), at, at)
 	endpoint := sha256.Sum256(node[:])
 	f.exec(t, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, node, endpoint[:], at)

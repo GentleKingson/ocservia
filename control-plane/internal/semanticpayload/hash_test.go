@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 )
 
 func TestHashV2MatchesSharedConfigPlanVector(t *testing.T) {
@@ -23,20 +25,12 @@ func TestHashV2MatchesSharedConfigPlanVector(t *testing.T) {
 		Vector vector `json:"vector"`
 	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "semantic-payload-hash-v2.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
+	testutil.NoError(t, json.Unmarshal(raw, &fixture))
 	nodeID, err := hex.DecodeString(fixture.Vector.NodeIDHex)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	candidateHash, err := hex.DecodeString(fixture.Vector.CandidateHashHex)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	envelope := &agentv1.CommandEnvelope{
 		NodeId:           nodeID,
 		ExpectedRevision: fixture.Vector.AuthorizationRevision,
@@ -46,9 +40,7 @@ func TestHashV2MatchesSharedConfigPlanVector(t *testing.T) {
 		}},
 	}
 	digest, err := HashV2(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if hex.EncodeToString(digest[:]) != fixture.Vector.ExpectedSHA256 {
 		t.Fatalf("v2 digest=%x want=%s", digest, fixture.Vector.ExpectedSHA256)
 	}
@@ -75,32 +67,22 @@ func TestHashV2MatchesSharedAgentUpgradeVector(t *testing.T) {
 		Vector vector `json:"vector"`
 	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "semantic-payload-hash-v2-agent-upgrade.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
+	testutil.NoError(t, json.Unmarshal(raw, &fixture))
 	if fixture.Vector.PayloadKind != 128 {
 		t.Fatalf("fixture payload kind = %d", fixture.Vector.PayloadKind)
 	}
 	nodeID, err := hex.DecodeString(fixture.Vector.NodeIDHex)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	packageSHA256, err := hex.DecodeString(fixture.Vector.PackageSHA256Hex)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	envelope := &agentv1.CommandEnvelope{
 		NodeId:           nodeID,
 		ExpectedRevision: fixture.Vector.AuthorizationRevision,
 		Payload:          &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: &agentv1.AgentUpgrade{TargetVersion: fixture.Vector.TargetVersion, PackageSha256: packageSHA256, Architecture: fixture.Vector.Architecture}},
 	}
 	digest, err := HashV2(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if hex.EncodeToString(digest[:]) != fixture.Vector.ExpectedSHA256 {
 		t.Fatalf("v2 agent upgrade digest=%x want=%s", digest, fixture.Vector.ExpectedSHA256)
 	}

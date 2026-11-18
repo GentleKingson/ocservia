@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +29,7 @@ func authSafetyWorkspace(t *testing.T, owner database.Backend) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	now, err := value.FromTime(time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	authSafetyExec(t, owner, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Authentication safety test',$2,$3,$4)`, id, "auth-safety-"+id.String(), now, now)
 	return id
 }
@@ -100,9 +99,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	})
 
 	s, err := auth.NewBackend(b, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	wid := authSafetyWorkspace(t, owner)
 	other := authSafetyWorkspace(t, owner)
 	name := "auth-safety-" + uuid.NewString()
@@ -124,14 +121,10 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	}
 	t.Run("absent-singleton-lock", func(t *testing.T) {
 		holder, err := b.Begin(ctx, database.ReadCommitted)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		defer holder.Rollback(ctx)
 		store, err := authstore.From(holder)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		if err := store.LockManagement(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -170,9 +163,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 		t.Fatalf("bootstrap audit rollback: %+v %v", verified, err)
 	}
 	_, admin, err := s.AuthenticateLocal(ctx, name, password)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := s.AuthorizeWorkspace(ctx, admin, other); !errors.Is(err, auth.ErrForbidden) {
 		t.Fatalf("cross-workspace authorization: %v", err)
 	}

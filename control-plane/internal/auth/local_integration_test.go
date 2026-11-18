@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http"
 	"os"
 	"strings"
@@ -21,14 +22,10 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	s, err := NewBackend(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	username := "alice-" + uuid.NewString()
 	if _, err := s.CreateLocalCredential(ctx, username, "x"); !errors.Is(err, ErrPasswordPolicy) {
 		t.Fatalf("weak provisioning: %v", err)
@@ -39,9 +36,7 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 	}
 	password := "a local test password"
 	id, err := s.CreateLocalCredential(ctx, " "+strings.ToUpper(username)+" ", password)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	credential, err := s.localCredential(ctx, username)
 	if err != nil || credential.identityID != id || credential.disabled || credential.passwordHash == password {
 		t.Fatalf("read credential: %+v, %v", credential, err)
@@ -97,9 +92,7 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 		t.Fatalf("logged-out session accepted: %v", err)
 	}
 	cookie, _, err = s.AuthenticateLocal(ctx, username, password)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := pool.Exec(ctx, `UPDATE identities SET disabled_at=now() WHERE id=$1`, id); err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"testing"
 	"time"
 
@@ -13,9 +14,7 @@ import (
 func TestOptionalLocalAuthenticationAndValidation(t *testing.T) {
 	ctx := context.Background()
 	s, err := NewBackend(postgres.WrapPool(&pgxpool.Pool{}), Config{LocalEnabled: false, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, _, err := s.AuthenticateLocal(ctx, "alice", "password"); !errors.Is(err, ErrLocalDisabled) {
 		t.Fatalf("disabled local login: %v", err)
 	}

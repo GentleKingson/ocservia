@@ -12,7 +12,9 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -28,9 +30,7 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err = pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Upgrade eligibility',$2,now(),now())`, workspaceID, "upgrade-eligibility-"+workspaceID.String()); err != nil {
@@ -61,13 +61,9 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 		}
 	}()
 	manifest := filepath.Join(t.TempDir(), "agent-releases.json")
-	if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"`+hex.EncodeToString(make([]byte, 32))+`"}]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"`+hex.EncodeToString(make([]byte, 32))+`"}]}`), 0o600))
 	catalog, err := releasecatalog.Load(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	now := time.Now().UTC().Truncate(time.Second)
 	batch := testBatch(nodeID, 1, now)
 	batch.Snapshot.AgentVersion = "0.1.1"
@@ -80,9 +76,7 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	}
 
 	node, err := service.GetNode(ctx, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if node.AgentVersionState != AgentVersionStateUpgradeAvailable || node.ConnectionState != "online" || node.Freshness != "fresh" {
 		t.Fatalf("eligibility preconditions not exercised: %#v", node)
 	}
@@ -90,21 +84,15 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 		t.Fatal("node is eligible without the approved upgrade capability")
 	}
 
-	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true)`, nodeID); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true)`, nodeID)
 	node, err = service.GetNode(ctx, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if !node.AgentUpgradeEligible {
 		t.Fatalf("fully eligible node reports ineligible: %#v", node)
 	}
 	// The fleet list is what the rolling-upgrade selection reads.
 	listed, _, err := service.ListNodesInWorkspace(ctx, workspaceID, uuid.Nil, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if len(listed) != 1 || !listed[0].AgentUpgradeEligible {
 		t.Fatalf("fully eligible node is not eligible in the node list: %#v", listed)
 	}
@@ -120,9 +108,7 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 			t.Fatalf("display version state %q blocked target eligibility", state)
 		}
 	}
-	if err := json.Unmarshal(mustJSON(t, node), &encoded); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(mustJSON(t, node), &encoded))
 	if !encoded.AgentUpgradeEligible {
 		t.Fatal("eligibility is not part of the node wire payload")
 	}
@@ -130,12 +116,8 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	// A scheduled upgrade removes eligibility until it reaches a terminal
 	// outcome.
 	operationID := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,trace_id,created_at,updated_at) VALUES($1,$2,$3,'queued',1,'upgrade-eligibility','0123456789abcdef0123456789abcdef',now(),now())`, operationID, workspaceID, nodeID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO agent_upgrade_operations(operation_id,workspace_id,node_id,target_version,package_sha256,architecture,from_version,state,created_at,updated_at) VALUES($1,$2,$3,'2.0.0',$4,'amd64','0.1.1','queued',now(),now())`, operationID, workspaceID, nodeID, make([]byte, 32)); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,trace_id,created_at,updated_at) VALUES($1,$2,$3,'queued',1,'upgrade-eligibility','0123456789abcdef0123456789abcdef',now(),now())`, operationID, workspaceID, nodeID)
+	testutil.Exec(t, ctx, pool, `INSERT INTO agent_upgrade_operations(operation_id,workspace_id,node_id,target_version,package_sha256,architecture,from_version,state,created_at,updated_at) VALUES($1,$2,$3,'2.0.0',$4,'amd64','0.1.1','queued',now(),now())`, operationID, workspaceID, nodeID, make([]byte, 32))
 	forged := testBatch(nodeID, 2, now)
 	forged.Snapshot.AgentVersion = "2.0.0"
 	forged.Snapshot.Architecture = "amd64"
@@ -145,24 +127,16 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	}
 	var projectionState string
 	var durableResults int
-	if err := pool.QueryRow(ctx, `SELECT u.state,(SELECT count(*) FROM node_agent_upgrade_results WHERE operation_id=$1) FROM agent_upgrade_operations u WHERE u.operation_id=$1`, operationID).Scan(&projectionState, &durableResults); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT u.state,(SELECT count(*) FROM node_agent_upgrade_results WHERE operation_id=$1) FROM agent_upgrade_operations u WHERE u.operation_id=$1`, operationID).Scan(&projectionState, &durableResults))
 	if projectionState != "queued" || durableResults != 0 {
 		t.Fatalf("forged upgrade telemetry changed durable state: projection=%q results=%d", projectionState, durableResults)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_upgrade_operations SET state='accepted',updated_at=now() WHERE operation_id=$1`, operationID); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `UPDATE agent_upgrade_operations SET state='accepted',updated_at=now() WHERE operation_id=$1`, operationID)
 	privateKey, err := attestationtest.InstallKey(ctx, pool, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	resultDigest := sha256.Sum256([]byte("root durable result"))
 	proof, err := attestationtest.UpgradeResultProof(nodeID, operationID, "2.0.0", make([]byte, 32), resultDigest[:], "succeeded", now, privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	reported := testBatch(nodeID, 3, now)
 	reported.Snapshot.AgentVersion = "2.0.0"
 	reported.Snapshot.Architecture = "amd64"
@@ -170,26 +144,18 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	if inserted, err := service.Ingest(ctx, reported); err != nil || !inserted {
 		t.Fatalf("valid root-attested upgrade telemetry: inserted=%v err=%v", inserted, err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM node_agent_upgrade_results WHERE operation_id=$1`, operationID).Scan(&durableResults); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM node_agent_upgrade_results WHERE operation_id=$1`, operationID).Scan(&durableResults))
 	if durableResults != 1 {
 		t.Fatalf("valid root-attested result count = %d, want 1", durableResults)
 	}
 	node, err = service.GetNode(ctx, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if node.AgentUpgradeEligible {
 		t.Fatal("node with a scheduled upgrade still reports eligible")
 	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_upgrade_operations SET state='unknown',completed_at=now(),updated_at=now() WHERE operation_id=$1`, operationID); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `UPDATE agent_upgrade_operations SET state='unknown',completed_at=now(),updated_at=now() WHERE operation_id=$1`, operationID)
 	node, err = service.GetNode(ctx, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if !node.AgentUpgradeEligible {
 		t.Fatal("terminal unknown upgrade still blocks eligibility")
 	}
@@ -198,9 +164,7 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	uncataloged := NewWithRecommendedAgentVersionBackend(postgres.WrapPool(pool), "2.0.0")
 	uncataloged.now = func() time.Time { return now }
 	node, err = uncataloged.GetNode(ctx, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if node.AgentUpgradeEligible {
 		t.Fatal("eligibility derived without a trusted release catalog")
 	}
@@ -217,9 +181,7 @@ func TestAgentUpgradeResultSurvivesKeyRotationIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	defer func() {
@@ -240,38 +202,24 @@ func TestAgentUpgradeResultSurvivesKeyRotationIntegration(t *testing.T) {
 			_, _ = pool.Exec(context.Background(), statement.query, statement.args...)
 		}
 	}()
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Upgrade rotation',$2,now(),now())`, workspaceID, "upgrade-rotation-"+workspaceID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','active',now(),now())`, nodeID, workspaceID); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Upgrade rotation',$2,now(),now())`, workspaceID, "upgrade-rotation-"+workspaceID.String())
+	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','active',now(),now())`, nodeID, workspaceID)
 	service := NewWithRecommendedAgentVersionBackend(postgres.WrapPool(pool), "2.0.0")
 
 	// The upgrade effect completed an hour ago; the successor key activates
 	// half an hour later and attests the durable record right now.
 	completedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
 	operationID := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,trace_id,created_at,updated_at) VALUES($1,$2,$3,'accepted',1,'upgrade-rotation','0123456789abcdef0123456789abcdef',now(),now())`, operationID, workspaceID, nodeID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO agent_upgrade_operations(operation_id,workspace_id,node_id,target_version,package_sha256,architecture,from_version,state,created_at,updated_at) VALUES($1,$2,$3,'2.0.0',$4,'amd64','0.1.1','accepted',now(),now())`, operationID, workspaceID, nodeID, make([]byte, 32)); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,trace_id,created_at,updated_at) VALUES($1,$2,$3,'accepted',1,'upgrade-rotation','0123456789abcdef0123456789abcdef',now(),now())`, operationID, workspaceID, nodeID)
+	testutil.Exec(t, ctx, pool, `INSERT INTO agent_upgrade_operations(operation_id,workspace_id,node_id,target_version,package_sha256,architecture,from_version,state,created_at,updated_at) VALUES($1,$2,$3,'2.0.0',$4,'amd64','0.1.1','accepted',now(),now())`, operationID, workspaceID, nodeID, make([]byte, 32))
 	privateKey, err := attestationtest.InstallKey(ctx, pool, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	// Rotate the activation time forward: the key now postdates the durable
 	// completion, which completion-time validity would wrongly reject.
-	if _, err := pool.Exec(ctx, `UPDATE node_privd_attestation_keys SET activated_at=now()-interval '30 minutes' WHERE node_id=$1`, nodeID); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `UPDATE node_privd_attestation_keys SET activated_at=now()-interval '30 minutes' WHERE node_id=$1`, nodeID)
 	resultDigest := sha256.Sum256([]byte("rotated successor key result"))
 	proof, err := attestationtest.UpgradeResultProofAttestingAt(nodeID, operationID, "2.0.0", make([]byte, 32), resultDigest[:], "succeeded", completedAt, time.Now().UTC(), privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	batch := testBatch(nodeID, 1, time.Now().UTC())
 	batch.Snapshot.AgentVersion = "2.0.0"
 	batch.Snapshot.Architecture = "amd64"
@@ -280,9 +228,7 @@ func TestAgentUpgradeResultSurvivesKeyRotationIntegration(t *testing.T) {
 		t.Fatalf("post-rotation attestation rejected: inserted=%v err=%v", inserted, err)
 	}
 	var durableResults int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM node_agent_upgrade_results WHERE operation_id=$1`, operationID).Scan(&durableResults); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM node_agent_upgrade_results WHERE operation_id=$1`, operationID).Scan(&durableResults))
 	if durableResults != 1 {
 		t.Fatalf("post-rotation durable result count = %d, want 1", durableResults)
 	}

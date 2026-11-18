@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -109,9 +110,7 @@ func TestHTTPConstruction(t *testing.T) {
 	}
 	key := eventstream.AdmissionKey{Identity: "same", Session: "same", Workspace: "same", Resource: "same"}
 	lease, err := s.eventAdmission.Acquire(key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer lease.Release()
 	if _, err := s.eventAdmission.Acquire(key); !errors.Is(err, eventstream.ErrIdentityLimit) {
 		t.Fatal("final limit not applied", err)
@@ -233,17 +232,13 @@ func TestHTTPAssemblyBoundary(t *testing.T) {
 	// watcher counts alone cannot prove that a discarded default set never existed.
 	counts := map[string]int{}
 	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
@@ -285,9 +280,7 @@ func TestHTTPAssemblyBoundary(t *testing.T) {
 func newTestServer(t *testing.T, config HTTPConfig, backend database.Backend, modules Modules, authorization Authorization) *Server {
 	t.Helper()
 	s, err := NewServer(config, backend, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), modules, authorization)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

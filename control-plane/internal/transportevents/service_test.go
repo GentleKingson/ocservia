@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,16 +28,12 @@ import (
 func TestResultCommitBarrierSignalsBeforeRelease(t *testing.T) {
 	directory := t.TempDir()
 	commandID, err := uuid.NewV7()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := os.WriteFile(filepath.Join(directory, "arm"), []byte(commandID.String()+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	payload, err := proto.Marshal(&agentv1.CommandResult{CommandId: commandID[:]})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	service := &Service{resultCommitBarrierDir: directory}
 	done := make(chan error, 1)
 	go func() {
@@ -68,9 +65,7 @@ func TestResultCommitBarrierSignalsBeforeRelease(t *testing.T) {
 	}
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 	case <-time.After(time.Second):
 		t.Fatal("result barrier did not release")
 	}
@@ -78,24 +73,16 @@ func TestResultCommitBarrierSignalsBeforeRelease(t *testing.T) {
 
 func TestCertificateCSRResultRejectsSubjectSubstitution(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "attacker.example.test"}, DNSNames: []string{"attacker.example.test"}}, key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	digest := sha256.Sum256(publicDER)
 	id := []byte("0123456789abcdef")
 	envelope := &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: id, CommonName: "node.example.test", DnsNames: []string{"node.example.test"}, KeyBits: 2048}}}
 	encoded, err := proto.Marshal(&agentv1.CertificateCsrResult{CertificateId: id, CsrDer: csrDER, PublicKeySha256: digest[:]})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := normalizeCertificateCSRResult(envelope, "succeeded", encoded); err == nil {
 		t.Fatal("substituted CSR subject was accepted")
 	}
@@ -103,19 +90,13 @@ func TestCertificateCSRResultRejectsSubjectSubstitution(t *testing.T) {
 
 func TestMatchingAttackerCSRWithoutPrivdReceiptCannotBecomeReady(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	certificateID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	commandID, operationID, idempotencyID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "node.example.test"}, DNSNames: []string{"node.example.test"}}, key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	publicDigest := sha256.Sum256(publicDER)
 	semantic := bytesOf(0x51)
 	envelope := &agentv1.CommandEnvelope{
@@ -127,9 +108,7 @@ func TestMatchingAttackerCSRWithoutPrivdReceiptCannotBecomeReady(t *testing.T) {
 		}},
 	}
 	encoded, err := proto.Marshal(&agentv1.CertificateCsrResult{CertificateId: certificateID[:], CsrDer: csrDER, PublicKeySha256: publicDigest[:]})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := normalizeCertificateCSRResult(envelope, "succeeded", encoded); err != nil {
 		t.Fatalf("matching attacker CSR should pass only the structural check: %v", err)
 	}
@@ -222,9 +201,7 @@ func TestNormalizeConfigApplyResultRejectsUnprovedOutcomes(t *testing.T) {
 	}}}
 	valid := &agentv1.ConfigApplyResult{CandidateHash: candidate, PreviousHash: previous, ObservedHash: candidate, AppliedRevision: 7, Healthy: true}
 	validBytes, err := proto.Marshal(valid)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if state, _, err := normalizeConfigApplyResult(envelope, "succeeded", validBytes); err != nil || state != "succeeded" {
 		t.Fatalf("valid success state=%q err=%v", state, err)
 	}
@@ -266,9 +243,7 @@ func TestNormalizeConfigApplyResultSupportsIdempotentTerminalStates(t *testing.T
 	}
 	for _, test := range cases {
 		encoded, err := proto.Marshal(test.result)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		outcome, err := normalizeCommandOutcome(envelope, "succeeded", encoded, false)
 		if err != nil || outcome.state != test.want || !proto.Equal(outcome.config, test.result) {
 			t.Fatalf("normalized outcome=%+v want=%q err=%v", outcome, test.want, err)

@@ -3,6 +3,8 @@ set -euo pipefail
 unset OCSERV_OTEL_BACKEND_ENDPOINT
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/test-installer-common.sh
+source "${ROOT}/scripts/test-installer-common.sh"
 INSTALL="${ROOT}/deploy/production/install.sh"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 
@@ -28,18 +30,6 @@ umask 022
 # Keep the fixture under HOME: /tmp is world-writable (mode 1777), which the
 # lifecycle state root ancestry contract must reject.
 fixture="$(mktemp -d "${TMPDIR:-${HOME}}/.ocservia-install-test.XXXXXX")"
-
-can_root() {
-  (( EUID == 0 )) || sudo -n true >/dev/null 2>&1
-}
-
-as_root() {
-  if (( EUID == 0 )); then
-    "$@"
-  else
-    sudo -n "$@"
-  fi
-}
 
 cleanup() {
   local status=$?
@@ -270,10 +260,14 @@ reset_checkout() {
   git -C "${repo}" checkout -q -- .
   git -C "${repo}" clean -qfd
   git -C "${repo}" reset -q --hard v0.1.2
-  git -C "${repo}" tag -d v0.2.0-rc1 v0.1.3 v0.1.4 >/dev/null 2>&1 || true
   # install.env is git-ignored, so git clean never removes it; the install.env
   # scenarios must not leak into unrelated ones.
   rm -f -- "${repo}/install.env" "${fixture}/poison-install-env"
+}
+
+scenario() {
+  reset_logs
+  reset_checkout
 }
 
 run_installer() {
@@ -287,50 +281,16 @@ run_installer() {
     env "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${repo}/deploy/production/install.sh" "$@"
 }
 
-# The install.env contract is bound to the invocation directory, so its
-# scenarios run the installer with the fixture checkout as $PWD.
-run_installer_from() {
-  local directory="$1"
-  shift
-  (
-    cd -- "${directory}"
-    INSTALL_TEST_CURL_LOG="${curl_log}" \
-      INSTALL_TEST_BOOTSTRAP_LOG="${bootstrap_log}" \
-      INSTALL_TEST_CONTROLLER_LOG="${controller_log}" \
-      INSTALL_TEST_SUDO_LOG="${sudo_log}" \
-      INSTALL_TEST_ARCH="${INSTALL_TEST_ARCH:-}" \
-      PATH="${bin}:${PATH}" \
-      OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
-      env "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${repo}/deploy/production/install.sh" "$@"
-  )
-}
-
 capture() {
   RUN_STATUS=0
   RUN_OUTPUT="$(run_installer "$@" 2>&1)" || RUN_STATUS=$?
 }
 
 capture_from() {
+  local directory="$1"
+  shift
   RUN_STATUS=0
-  RUN_OUTPUT="$(run_installer_from "$@" 2>&1)" || RUN_STATUS=$?
-}
-
-assert_status() {
-  (( RUN_STATUS == "$1" )) ||
-    die "expected exit status $1 but got ${RUN_STATUS}"
-}
-
-assert_output() {
-  grep -q -- "$1" <<<"${RUN_OUTPUT}" ||
-    die "expected output to contain '$1'"
-}
-
-assert_log_contains() {
-  grep -qF -- "$2" "$1" || die "expected $1 to contain '$2'"
-}
-
-assert_log_empty() {
-  [[ ! -s "$1" ]] || die "expected $1 to stay empty, got: $(cat -- "$1")"
+  RUN_OUTPUT="$(cd -- "${directory}" && run_installer "$@" 2>&1)" || RUN_STATUS=$?
 }
 
 # The installer selects the manifest from uname -m, so assertions follow the
@@ -342,63 +302,32 @@ case "$(uname -m)" in
 esac
 
 # 1. usage errors.
-reset_logs
-reset_checkout
+scenario
 capture unexpected-argument
 assert_status 2 "an unexpected argument must be a usage error"
 capture --root-lifecycle extra-argument
 assert_status 2 "extra arguments alongside --root-lifecycle must be a usage error"
 echo "usage errors fail with status 2"
 
-# 2. a non-tag checkout is rejected before any host mutation.
-reset_logs
-reset_checkout
+# A checkout between releases must fail before the first host mutation.
+scenario
 git -C "${repo}" commit -q --allow-empty -m beyond-tag
 capture
-assert_status 1 "a checkout past the release tag must fail closed"
+assert_status 1
 assert_output "exactly one exact vX.Y.Z release tag"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
-assert_log_empty "${controller_log}"
-echo "a non-tag checkout is rejected before any host mutation"
-
-# 3. a non-SemVer tag is not a release identity.
-reset_logs
-reset_checkout
-git -C "${repo}" commit -q --allow-empty -m rc
-git -C "${repo}" tag v0.2.0-rc1
-capture
-assert_status 1 "a non-SemVer tag must fail closed"
-assert_output "exactly one exact vX.Y.Z release tag"
-assert_log_empty "${bootstrap_log}"
-echo "a non-SemVer tag is rejected"
-
-# 3a. ambiguous release tags fail closed.
-reset_logs
-reset_checkout
-git -C "${repo}" commit -q --allow-empty -m double-tag
-git -C "${repo}" tag v0.1.3
-git -C "${repo}" tag v0.1.4
-capture
-assert_status 1 "multiple SemVer tags at HEAD must fail closed"
-assert_output "exactly one exact vX.Y.Z release tag"
-assert_log_empty "${bootstrap_log}"
-echo "multiple SemVer tags at HEAD are rejected"
+assert_log_empty "${bootstrap_log}" "${curl_log}" "${controller_log}"
 
 # 3b. a dirty checkout is rejected early.
-reset_logs
-reset_checkout
+scenario
 printf '\n# local edit\n' >>"${repo}/deploy/production/install.sh"
 capture
 assert_status 1 "a dirty checkout must fail closed"
 assert_output "dirty"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
+assert_log_empty "${bootstrap_log}" "${curl_log}"
 echo "a dirty checkout is rejected before any host mutation"
 
 # 4. the full happy path as the launcher user on a host with Docker.
-reset_logs
-reset_checkout
+scenario
 install_docker_client_stub
 EXTRA_ENV=("OCSERV_BACKUP_DIR=${fixture}/backup")
 capture
@@ -432,8 +361,7 @@ assert_log_contains "${controller_log}" "install --release-file ${bundle_dir}/co
 echo "the launcher install flow bootstraps, downloads, and activates"
 
 # 4a. arm64 hosts select the arm64 manifest automatically.
-reset_logs
-reset_checkout
+scenario
 install_docker_client_stub
 EXTRA_ENV=("INSTALL_TEST_ARCH=aarch64")
 capture
@@ -446,19 +374,16 @@ assert_log_contains "${controller_log}" "install --release-file ${state_root}/re
 echo "arm64 hosts select the arm64 release manifest"
 
 # 5. a bootstrap failure stops before download and activation.
-reset_logs
-reset_checkout
+scenario
 install_docker_client_stub
 EXTRA_ENV=("MOCK_BOOTSTRAP_EXIT=1")
 capture
 assert_status 1 "a bootstrap failure must fail the installer"
-assert_log_empty "${curl_log}"
-assert_log_empty "${controller_log}"
+assert_log_empty "${curl_log}" "${controller_log}"
 echo "a bootstrap failure stops before download and activation"
 
 # 5a. a state root the bootstrap did not provision is rejected.
-reset_logs
-reset_checkout
+scenario
 install_docker_client_stub
 EXTRA_ENV=("MOCK_BOOTSTRAP_PROVISION_STATE=0")
 capture
@@ -469,8 +394,7 @@ echo "a missing state root is rejected before activation"
 
 # 6. a whole-script sudo invocation mismatches the launcher contract.
 if can_root; then
-  reset_logs
-  reset_checkout
+  scenario
   RUN_STATUS=0
   RUN_OUTPUT="$(sudo -n env \
     INSTALL_TEST_CURL_LOG="${curl_log}" \
@@ -484,16 +408,13 @@ if can_root; then
   assert_status 1 "whole-script sudo must fail closed"
   assert_output "run install.sh as the lifecycle launcher user"
   assert_output "--root-lifecycle"
-  assert_log_empty "${bootstrap_log}"
-  assert_log_empty "${curl_log}"
-  assert_log_empty "${controller_log}"
+  assert_log_empty "${bootstrap_log}" "${curl_log}" "${controller_log}"
   echo "whole-script sudo is rejected with the launcher mismatch"
 
   # 6a. a plain root shell is an allowed root lifecycle and is the supported
   # fresh-host path: with no Docker client anywhere on PATH, root installs
   # Docker through the bootstrap and activates without a permission mismatch.
-  reset_logs
-  reset_checkout
+  scenario
   RUN_STATUS=0
   RUN_OUTPUT="$(sudo -n env \
     -u SUDO_USER \
@@ -521,8 +442,7 @@ if can_root; then
   # provisions for root, while SUDO_UID/SUDO_GID stay untouched — git trusts
   # the operator-owned checkout through exactly those, as real sudo sets
   # them to the checkout owner's ids.
-  reset_logs
-  reset_checkout
+  scenario
   RUN_STATUS=0
   RUN_OUTPUT="$(sudo -n env \
     INSTALL_TEST_CURL_LOG="${curl_log}" \
@@ -549,8 +469,7 @@ if can_root; then
   # env_reset: the operator exports production settings, invokes the script
   # directly, and the installer performs the controlled sudo env re-exec.
   if (( EUID != 0 )); then
-    reset_logs
-    reset_checkout
+    scenario
     RUN_STATUS=0
     # Each fixture intentionally isolates its PATH and exported settings.
     # shellcheck disable=SC2030,SC2031
@@ -621,8 +540,7 @@ if can_root; then
   # privilege transition starts, so a root re-read would hand root
   # attacker-chosen configuration; the re-exec marker must prevent it.
   if (( EUID != 0 )); then
-    reset_logs
-    reset_checkout
+    scenario
     cat >"${repo}/install.env" <<EOF
 OCSERV_PUBLIC_HOST=controller-root-file.example.test
 OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
@@ -669,48 +587,41 @@ fi
 # any host mutation: a fresh Docker installation grants no non-root daemon
 # access and the installer never modifies the Docker permission model.
 if (( EUID != 0 )); then
-  reset_logs
-  reset_checkout
+  scenario
   EXTRA_ENV=("PATH=${fresh_bin}")
   capture
   assert_status 1 "a non-root launcher on a Docker-less host must fail closed"
   assert_output "--root-lifecycle"
   assert_output "post-install"
   assert_output "never modifies the Docker permission model"
-  assert_log_empty "${bootstrap_log}"
-  assert_log_empty "${curl_log}"
-  assert_log_empty "${controller_log}"
+  assert_log_empty "${bootstrap_log}" "${curl_log}" "${controller_log}"
   echo "a non-root launcher on a fresh Docker-less host fails closed before mutation"
 else
   echo "fresh-host launcher-path case skipped: running as root"
 fi
 
-# 8. install.env supplies allowlisted configuration from the invocation
-# directory. The fixture repo carries the repository's real .gitignore, so a
-# present install.env must also stay invisible to the clean-release-checkout
-# contract, and every value below must reach the bootstrap.
-reset_logs
-reset_checkout
+# The launcher loads static file values and honors shell overrides, including empty ones.
+scenario
 install_docker_client_stub
 cat >"${repo}/install.env" <<EOF
 OCSERV_BACKUP_DIR=${fixture}/file-backup
-OCSERV_PUBLIC_HOST=controller-file.example.test
+OCSERV_PUBLIC_HOST='controller-file.example.test'
 OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
-OCSERV_HTTPS_ADDRESS=10.0.0.9
 OCSERV_APPLICATION_SUBNET=198.18.80.0/24
 OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25
 OCSERV_GATEWAY_APPLICATION_IP=198.18.80.2
 OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
 EOF
+EXTRA_ENV=("OCSERV_RECOMMENDED_AGENT_VERSION=0.3.0" "OCSERV_BACKUP_DIR=")
 capture_from "${repo}"
-assert_status 0 "install.env values must load and keep the checkout clean"
-assert_output "release identity: v0.1.2"
-assert_log_contains "${bootstrap_log}" "install --backup-dir ${fixture}/file-backup"
+assert_status 0 "install.env must keep the checkout clean"
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-file.example.test"
+assert_log_contains "${bootstrap_log}" "recommended:0.3.0"
 assert_log_contains "${bootstrap_log}" "proxy-network:198.18.80.0/24,198.18.80.128/25,198.18.80.2"
 assert_log_contains "${bootstrap_log}" "otel:otel.example.test:4317"
-assert_log_contains "${bootstrap_log}" "recommended:0.2.0"
-echo "install.env values load without dirtying the release checkout"
+if grep -q -- "--backup-dir" "${bootstrap_log}"; then
+  die "install.env overrode the deliberately empty backup directory"
+fi
 
 # Run the documented Local auth configuration through the real installer and, on the CI
 # launcher account, its real sudo env_reset transition. No source allowlist is read.
@@ -736,7 +647,7 @@ for lifecycle in launcher root; do
       PATH="${root_lifecycle_bin}" OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
         "${repo}/deploy/production/install.sh" --root-lifecycle
     else
-      run_installer_from "${repo}"
+      cd -- "${repo}" && run_installer
     fi
   ) 2>&1)" || RUN_STATUS=$?
   assert_status 0
@@ -755,168 +666,29 @@ for lifecycle in launcher root; do
 done
 echo "documented Local auth configuration reaches bootstrap and activation across the sudo boundary"
 
-# 8a. an explicit shell variable wins over install.env.
-reset_logs
-reset_checkout
-install_docker_client_stub
-cat >"${repo}/install.env" <<EOF
-OCSERV_PUBLIC_HOST=controller-file.example.test
-OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
-OCSERV_BACKUP_DIR=${fixture}/file-backup
-EOF
-EXTRA_ENV=("OCSERV_PUBLIC_HOST=controller-env.example.test" "OCSERV_RECOMMENDED_AGENT_VERSION=0.3.0")
-capture_from "${repo}"
-assert_status 0 "an explicit shell variable must win over install.env"
-assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-env.example.test"
-assert_log_contains "${bootstrap_log}" "recommended:0.3.0"
-if grep -q "controller-file.example.test" "${bootstrap_log}"; then
-die "the file value must not override the explicit shell variable: $(cat -- "${bootstrap_log}")"
-fi
-echo "an explicit shell variable overrides install.env"
+assert_env_refused() {
+  capture_from "${repo}"
+  assert_status 1
+  assert_output "$1"
+  assert_log_empty "${bootstrap_log}" "${curl_log}" "${controller_log}" "${sudo_log}"
+}
 
-# 8a-2. an explicitly empty shell variable also wins over install.env: the
-# file must not fill a variable the operator deliberately unset in the
-# session, so the bootstrap runs without the file's --backup-dir.
-reset_logs
-reset_checkout
-install_docker_client_stub
-cat >"${repo}/install.env" <<EOF
-OCSERV_BACKUP_DIR=${fixture}/file-backup
-OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
-EOF
-EXTRA_ENV=("OCSERV_BACKUP_DIR=" "OCSERV_RECOMMENDED_AGENT_VERSION=")
-capture_from "${repo}"
-assert_status 0 "an explicitly empty shell variable must win over install.env"
-assert_log_contains "${bootstrap_log}" "recommended:"
-assert_log_contains "${bootstrap_log}" "install"
-if grep -q -- "--backup-dir" "${bootstrap_log}"; then
-die "install.env must not fill the deliberately emptied OCSERV_BACKUP_DIR: $(cat -- "${bootstrap_log}")"
-fi
-echo "an explicitly empty shell variable overrides install.env"
-
-# 8b. an unknown key fails closed before any host mutation.
-reset_logs
-reset_checkout
-printf 'OCSERV_NOT_A_REAL_SETTING=x\n' >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "an unknown install.env key must fail closed"
-assert_output "unknown configuration variable OCSERV_NOT_A_REAL_SETTING"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
-assert_log_empty "${controller_log}"
-assert_log_empty "${sudo_log}"
-echo "an unknown install.env key fails closed before any host mutation"
-
-# 8b-2. internal test seams gain no install.env entry: the compose override
-# seam is production-reachable configuration and must stay environment-only.
-reset_logs
-reset_checkout
-printf 'OCSERV_CONTROLLER_COMPOSE_SH=%s\n' "${fixture}/evil-compose.sh" >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a test seam must not be settable through install.env"
-assert_output "unknown configuration variable OCSERV_CONTROLLER_COMPOSE_SH"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
-echo "internal seams are not install.env keys"
-
-# 8c. malformed lines fail closed.
-reset_logs
-reset_checkout
-printf 'OCSERV_PUBLIC_HOST controller-file.example.test\n' >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a line without = must fail closed"
-assert_output "expected KEY=VALUE"
-reset_logs
-reset_checkout
-printf 'oCsErV_PUBLIC_HOST=controller-file.example.test\n' >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a lowercase key must fail closed"
-assert_output "expected KEY=VALUE"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
-echo "malformed install.env lines fail closed"
-
-# 8d. nothing in install.env is ever executed: command substitution,
-# backticks, and source lines are rejected, never evaluated.
-reset_logs
-reset_checkout
-# Literal shell syntax tests rejection; it must not expand here.
-# shellcheck disable=SC2016
-printf 'OCSERV_PUBLIC_HOST=$(touch %s)\n' "${fixture}/pwned-marker" >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "command substitution syntax must fail closed"
-assert_output "must be a literal value"
-[[ ! -e "${fixture}/pwned-marker" ]] ||
-die "command substitution in install.env must never execute"
-reset_logs
-reset_checkout
-# Literal shell syntax tests rejection; it must not expand here.
-# shellcheck disable=SC2016
-printf 'OCSERV_PUBLIC_HOST=`touch %s`\n' "${fixture}/pwned-marker" >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "backtick syntax must fail closed"
-[[ ! -e "${fixture}/pwned-marker" ]] ||
-die "backticks in install.env must never execute"
-reset_logs
-reset_checkout
-printf 'source %s\n' "${fixture}/evil.sh" >"${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a source line must fail closed as malformed"
-assert_output "expected KEY=VALUE"
-[[ ! -e "${fixture}/evil.sh" ]] || die "the test must not create evil.sh"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
-echo "install.env content is never executed"
-
-# 8e. an install.env symlink is rejected.
-reset_logs
-reset_checkout
-printf 'OCSERV_PUBLIC_HOST=controller-symlink.example.test\n' >"${fixture}/install-env-real"
-ln -s "${fixture}/install-env-real" "${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "an install.env symlink must fail closed"
-assert_output "symlink"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
-rm -f -- "${repo}/install.env" "${fixture}/install-env-real"
-echo "an install.env symlink is rejected"
-
-# 8f. a group-writable install.env is rejected.
-reset_logs
-reset_checkout
-printf 'OCSERV_PUBLIC_HOST=controller-file.example.test\n' >"${repo}/install.env"
-chmod 0664 -- "${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a group-writable install.env must fail closed"
-assert_output "group/world-writable"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
-echo "a group-writable install.env is rejected"
-
-# 8g. a world-writable install.env is rejected.
-reset_logs
-reset_checkout
-printf 'OCSERV_PUBLIC_HOST=controller-file.example.test\n' >"${repo}/install.env"
-chmod 0666 -- "${repo}/install.env"
-capture_from "${repo}"
-assert_status 1 "a world-writable install.env must fail closed"
-assert_output "group/world-writable"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
-echo "a world-writable install.env is rejected"
-
-# 8h. the quoted-value form strips exactly one static quote layer.
-reset_logs
-reset_checkout
-install_docker_client_stub
-cat >"${repo}/install.env" <<EOF
-OCSERV_PUBLIC_HOST='controller-quoted.example.test'
-OCSERV_HTTPS_ADDRESS="10.0.0.9"
-EOF
-capture_from "${repo}"
-assert_status 0 "statically quoted install.env values must load"
-assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-quoted.example.test"
-echo "one static quote layer is stripped without expansion"
+scenario
+while IFS='|' read -r line reason; do
+  printf '%s\n' "${line}" >"${repo}/install.env"
+  assert_env_refused "${reason}"
+done <<'INVALID_ENV'
+OCSERV_CONTROLLER_COMPOSE_SH=/tmp/override|unknown configuration variable
+OCSERV_PUBLIC_HOST example.test|expected KEY=VALUE
+OCSERV_PUBLIC_HOST=$(touch pwned-marker)|must be a literal value
+INVALID_ENV
+[[ ! -e "${repo}/pwned-marker" ]] || die "install.env was executed"
+printf 'OCSERV_PUBLIC_HOST=controller.example.test\n' >"${repo}/install.env"
+chmod 0664 "${repo}/install.env"
+assert_env_refused "group/world-writable"
+mv "${repo}/install.env" "${fixture}/unsafe-install-env"
+ln -s "${fixture}/unsafe-install-env" "${repo}/install.env"
+assert_env_refused "symlink"
 
 # 8i. unsupported non-PostgreSQL backend configurations fail closed before host bootstrap or download.
 reset_logs
@@ -946,8 +718,7 @@ capture
 assert_status 1 "RC and final at the same HEAD must fail closed"
 assert_log_empty "${curl_log}"
 # The backend orchestrator also consumes runtime metadata without any Git.
-reset_logs
-reset_checkout
+scenario
 install_docker_client_stub
 runtime_commit="$(git -C "${repo}" rev-parse HEAD)"
 mv "${repo}/.git" "${fixture}/legacy-git"

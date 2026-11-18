@@ -12,6 +12,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -35,9 +36,7 @@ func TestCanonicalReceiptV1MatchesRustGoldenVector(t *testing.T) {
 		Certificate: &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: id, CsrDerSha256: makeRepeated(0x33, 32), PublicKeySha256: makeRepeated(0x44, 32), RequestedSubjectSha256: makeRepeated(0x55, 32), RootEffectRecordId: effect},
 	}
 	canonical, err := CanonicalReceiptV1(receipt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if hex.EncodeToString(canonical) != canonicalReceiptGoldenV1 {
 		t.Fatal("Go canonical transcript differs from the shared Rust golden vector")
 	}
@@ -112,9 +111,7 @@ func TestPrivilegedReceiptVerificationRejectsTamperingAndUntrustedKeys(t *testin
 	attackerResult := proto.Clone(result).(*agentv1.CommandResult)
 	attackerResult.PrivilegedResultProof.ReceiptV1.PrivdAttestationKeyId = PublicKeyID(attackerPublic)
 	canonical, err := CanonicalReceiptV1(attackerResult.GetPrivilegedResultProof().GetReceiptV1())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	attackerResult.PrivilegedResultProof.Signature = ed25519.Sign(attackerPrivate, canonical)
 	verification := verifyResult(context.Background(), func(context.Context, uuid.UUID, string) (attestationKeyRecord, error) {
 		return attestationKeyRecord{}, database.ErrNotFound
@@ -127,15 +124,11 @@ func TestPrivilegedReceiptVerificationRejectsTamperingAndUntrustedKeys(t *testin
 func TestReceiptUnknownProtobufFieldsDoNotChangeSignatureSemantics(t *testing.T) {
 	nodeID, envelope, result, key := receiptVerificationFixture(t)
 	proofBytes, err := proto.Marshal(result.GetPrivilegedResultProof())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	proofBytes = protowire.AppendTag(proofBytes, 1000, protowire.BytesType)
 	proofBytes = protowire.AppendBytes(proofBytes, []byte("ignored by canonical v1"))
 	var decoded agentv1.PrivilegedResultProof
-	if err := proto.Unmarshal(proofBytes, &decoded); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, proto.Unmarshal(proofBytes, &decoded))
 	result.PrivilegedResultProof = &decoded
 	verification := verifyResult(context.Background(), lookupFor(key.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil), nodeID, envelope, result)
 	if !verification.Verified() {
@@ -212,9 +205,7 @@ func TestCertificateP12AndRevokeRequireBoundReceipts(t *testing.T) {
 			receipt.CommandKind, receipt.ResultKind = test.commandKind, test.resultKind
 			receipt.Certificate = &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: bytes.Clone(certificateID[:]), RootEffectRecordId: bytes.Clone(receipt.GetEffectRecordId())}
 			canonical, err := CanonicalReceiptV1(receipt)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			result.PrivilegedResultProof.Signature = ed25519.Sign(key, canonical)
 			lookup := lookupFor(key.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil)
 			if verification := verifyResult(context.Background(), lookup, nodeID, envelope, result); !verification.Verified() {
@@ -263,9 +254,7 @@ func receiptVerificationFixture(t *testing.T) (uuid.UUID, *agentv1.CommandEnvelo
 		EffectRecordId: makeRepeated(0x22, 32), EffectSequence: 1, AcceptedAt: timestamppb.New(accepted), CompletedAt: timestamppb.New(completed),
 	}
 	canonical, err := CanonicalReceiptV1(receipt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	result.PrivilegedResultProof = &agentv1.PrivilegedResultProof{Version: agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1, ReceiptV1: receipt, Signature: ed25519.Sign(privateKey, canonical)}
 	return nodeID, envelope, result, privateKey
 }
@@ -284,9 +273,7 @@ func timePointer(value time.Time) *time.Time { return &value }
 func mustHex(t *testing.T, value string) []byte {
 	t.Helper()
 	decoded, err := hex.DecodeString(value)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return decoded
 }
 

@@ -2,6 +2,7 @@ package useroperations
 
 import (
 	"context"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"testing"
 	"time"
@@ -21,18 +22,14 @@ func TestQuotaExpirySchedulerAndUsageIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
 	if ownerURL == "" {
 		t.Fatal("separate owner fixture required; runtime must not act as owner")
 	}
 	ownerPool, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer ownerPool.Close()
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'User operation test',$2,now(),now())`, workspaceID, "user-operation-"+workspaceID.String()); err != nil {
@@ -77,9 +74,7 @@ func TestQuotaExpirySchedulerAndUsageIntegration(t *testing.T) {
 	connected := now.Add(-time.Hour)
 	backend := postgres.WrapPool(pool)
 	tx, err := backend.Begin(ctx, database.ReadCommitted)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := RecordUsageTx(ctx, tx, nodeID, []UsageSample{{SessionID: "session-a", Username: "alice", Connected: connected, RXBytes: 100, TXBytes: 200, ObservedAt: now}}); err != nil {
 		t.Fatal(err)
 	}

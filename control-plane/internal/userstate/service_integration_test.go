@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"math"
 	"os"
 	"slices"
@@ -238,9 +239,7 @@ func TestUserMutationIntentAndTerminalAuditIdentityMatchIntegration(t *testing.T
 			t.Run(test.action+"/"+terminal, func(t *testing.T) {
 				service, pool, workspaceID, nodeID := integrationService(t, "active")
 				attestationKey, err := attestationtest.InstallKey(context.Background(), pool, nodeID)
-				if err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, err)
 				ingest := transportevents.NewBackend(postgres.WrapPool(pool), integrationCommandSigner())
 				if test.kind != UserCreate && test.kind != GroupApply {
 					enabled := test.kind != UserEnable
@@ -288,9 +287,7 @@ func TestUserMutationIntentAndTerminalAuditIdentityMatchIntegration(t *testing.T
 					t.Fatal(err)
 				}
 				payload, err := proto.Marshal(&result)
-				if err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, err)
 				eventID := uuid.Must(uuid.NewV7())
 				if err := ingest.Ingest(context.Background(), &transportv1.TransportEvent{
 					EventId: eventID[:], NodeId: nodeID[:], EndpointId: integrationEndpoint(nodeID),
@@ -301,9 +298,7 @@ func TestUserMutationIntentAndTerminalAuditIdentityMatchIntegration(t *testing.T
 				}
 
 				rows, err := pool.Query(context.Background(), `SELECT action,resource_type,resource_id,node_id,command_id,request_id,COALESCE(trace_id,''),reason,result FROM audit_events WHERE command_id=$1 ORDER BY occurred_at,id`, commandID)
-				if err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, err)
 				defer rows.Close()
 				var results []string
 				for rows.Next() {
@@ -459,9 +454,7 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 	t.Run("failed create", func(t *testing.T) {
 		service, pool, _, nodeID := integrationService(t, "active")
 		first, _, err := service.Mutate(context.Background(), mutation(nodeID, "failed-create", UserCreate, "alice", 0))
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		markTerminal(t, pool, first, "failed")
 		assertRecovery(t, service, nodeID, UserCreate, 1)
 		recovery, _, err := service.Mutate(context.Background(), mutation(nodeID, "create-recovery", UserCreate, "alice", 1))
@@ -478,9 +471,7 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 			t.Fatal(err)
 		}
 		rotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "failed-rotate", UserPasswordRotate, "alice", 1))
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		markTerminal(t, pool, rotate, "failed")
 		assertRecovery(t, service, nodeID, UserPasswordRotate, 2)
 		if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "disable-after-failed-password", UserDisable, "alice", 2)); !errors.Is(err, ErrRevisionRecovery) {
@@ -496,9 +487,7 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 	t.Run("expired group", func(t *testing.T) {
 		service, pool, _, nodeID := integrationService(t, "offline")
 		first, _, err := service.Mutate(context.Background(), mutation(nodeID, "expired-group", GroupApply, "staff", 0))
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		markTerminal(t, pool, first, "expired")
 		assertRecovery(t, service, nodeID, GroupApply, 1)
 		recovery, _, err := service.Mutate(context.Background(), mutation(nodeID, "group-recovery", GroupApply, "staff", 1))
@@ -527,9 +516,7 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 				t.Fatal(err)
 			}
 			first, _, err := service.Mutate(context.Background(), mutation(nodeID, test.name, test.kind, "alice", 1))
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			markTerminal(t, pool, first, "failed")
 			assertRecovery(t, service, nodeID, test.kind, 2)
 
@@ -568,9 +555,7 @@ func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
 	}
 
 	firstRotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "coalesce-rotate-one", UserPasswordRotate, "alice", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	secondRotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "coalesce-rotate-two", UserPasswordRotate, "alice", 2))
 	if err != nil || secondRotate.CommandID == nil {
 		t.Fatalf("replacement rotate=%+v err=%v", secondRotate, err)
@@ -610,13 +595,9 @@ func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
 	}
 
 	firstGroup, _, err := service.Mutate(context.Background(), mutation(nodeID, "coalesce-group-one", GroupApply, "staff", 0))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	secondGroup, _, err := service.Mutate(context.Background(), mutation(nodeID, "coalesce-group-two", GroupApply, "staff", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	assertCoalesced(firstGroup, secondGroup, func(envelope *agentv1.CommandEnvelope) (uint64, uint64) {
 		return envelope.GetExpectedRevision(), envelope.GetGroupApply().GetDesiredRevision()
 	}, 0, 1, 1)
@@ -632,9 +613,7 @@ func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
 	claimed := map[uuid.UUID]bool{}
 	for range 2 {
 		dispatches, err := dispatcher.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		for _, dispatch := range dispatches {
 			if dispatch.NodeID != nodeID {
 				continue
@@ -676,9 +655,7 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 			result.AcceptedAt = timestamppb.New(completed)
 		}
 		payload, err := proto.Marshal(&result)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		eventID := uuid.Must(uuid.NewV7())
 		if err := transportevents.NewBackend(postgres.WrapPool(pool), integrationCommandSigner()).Ingest(context.Background(), &transportv1.TransportEvent{
 			EventId: eventID[:], NodeId: nodeID[:], EndpointId: integrationEndpoint(nodeID), Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
@@ -699,9 +676,7 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 		service, pool, _, nodeID := integrationService(t, "active")
 		seed(t, pool, nodeID)
 		rotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "rejected-rotate", UserPasswordRotate, "alice", 1))
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		ingestResult(t, pool, nodeID, rotate, agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED, "command_expired")
 		// A root command's Rejected has no trusted proof, so it cannot show that no
 		// effect was accepted: the command stays Unknown and the slot is not reused.
@@ -723,9 +698,7 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 		service, pool, _, nodeID := integrationService(t, "active")
 		seed(t, pool, nodeID)
 		rotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "unknown-rotate", UserPasswordRotate, "alice", 1))
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		ingestResult(t, pool, nodeID, rotate, agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN, "privd_outcome_unknown")
 		ingestResult(t, pool, nodeID, rotate, agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED, "command_expired")
 		states, err := service.List(context.Background(), nodeID)
@@ -819,9 +792,7 @@ func TestOfflineQueueDoesNotConsumeGlobalDispatchCapacityIntegration(t *testing.
 	}
 	baseline := activeCommands(t, pool)
 	dispatches, err := operations.NewBackend(postgres.WrapPool(pool), baseline+1, nil).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if len(dispatches) != 1 || dispatches[0].NodeID != activeNodeID {
 		t.Fatalf("offline backlog consumed dispatch capacity: %+v", dispatches)
 	}
@@ -865,9 +836,7 @@ func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
 func TestUnknownReconciliationConsumesDispatchSlotIntegration(t *testing.T) {
 	_, pool, _, nodeID := integrationService(t, "active")
 	op, _, err := operations.NewBackend(postgres.WrapPool(pool), 1, integrationCommandSigner()).Create(context.Background(), operations.CreateRequest{NodeID: nodeID, IdempotencyKey: "unknown-reconcile", ExpectedVersion: 1, TTL: time.Minute, RequestID: "request-unknown-reconcile", Traceparent: testTraceparent, Payload: operations.SyntheticNoopPayload{}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	operationID := uuid.MustParse(op.ID)
 	if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='unknown' WHERE id=$1`, operationID); err != nil {
 		t.Fatal(err)
@@ -921,15 +890,11 @@ func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
 	for index := range 20 {
 		key := fmt.Sprintf("busy-%02d", index)
 		operation, _, err := service.Create(context.Background(), operations.CreateRequest{NodeID: busyNodeID, IdempotencyKey: key, ExpectedVersion: 1, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent, Payload: operations.SyntheticNoopPayload{}})
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		operationIDs = append(operationIDs, uuid.MustParse(operation.ID))
 	}
 	otherOperation, _, err := service.Create(context.Background(), operations.CreateRequest{NodeID: otherNodeID, IdempotencyKey: "other-node", ExpectedVersion: 1, TTL: time.Minute, RequestID: "request-other-node", Traceparent: testTraceparent, Payload: operations.SyntheticNoopPayload{}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	operationIDs = append(operationIDs, uuid.MustParse(otherOperation.ID))
 	for index, operationID := range operationIDs {
 		if _, err := pool.Exec(context.Background(), `WITH updated_operation AS (
@@ -942,9 +907,7 @@ func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
 		}
 	}
 	dispatches, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 2, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	seen := map[uuid.UUID]bool{}
 	for _, dispatch := range dispatches {
 		seen[dispatch.NodeID] = true
@@ -1057,9 +1020,7 @@ func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, u
 		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
 	}
 	pool, err := pgxpool.New(context.Background(), url)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	_, err = pool.Exec(context.Background(), `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'User state test',$2,now(),now())`, workspaceID, "user-state-"+workspaceID.String())
 	if err == nil {
@@ -1101,14 +1062,10 @@ func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, u
 func activeCommands(t *testing.T, pool *pgxpool.Pool) int {
 	t.Helper()
 	tx, err := postgres.WrapPool(pool).Begin(context.Background(), database.ReadCommitted)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer tx.Rollback(context.Background())
 	active, err := tx.(commandlimit.Provider).CommandLimitStore().Active(context.Background(), math.MaxInt32)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return active
 }
 

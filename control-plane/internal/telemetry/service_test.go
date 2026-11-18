@@ -13,6 +13,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -218,9 +219,7 @@ func TestMaximumUserGroupSnapshotFitsWireAndValidation(t *testing.T) {
 		wire.Groups = append(wire.Groups, &agentv1.GroupObservation{GroupName: maximumName("g", index), Revision: 1, FingerprintSha256: make([]byte, sha256.Size)})
 	}
 	payload, err := proto.Marshal(wire)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if len(payload) > MaxBatchBytes {
 		t.Fatalf("maximum supported telemetry is %d bytes", len(payload))
 	}
@@ -248,16 +247,12 @@ func TestIngestOrderingRollupOfflineAndRecoveryIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	nodeID := uuid.Must(uuid.NewV7())
 	_, err = pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Telemetry',$2,now(),now())`, workspaceID, "telemetry-"+workspaceID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','active',now(),now())`, nodeID, workspaceID); err != nil {
 		t.Fatal(err)
 	}
@@ -298,9 +293,7 @@ func TestIngestOrderingRollupOfflineAndRecoveryIntegration(t *testing.T) {
 		t.Fatalf("delayed ingest: %v %v", inserted, err)
 	}
 	node, err := service.GetNode(ctx, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if node.OcservVersion != "1.3.0" || node.SessionCount != 1 || node.Freshness != "fresh" {
 		t.Fatalf("unexpected current node: %#v", node)
 	}
@@ -308,17 +301,13 @@ func TestIngestOrderingRollupOfflineAndRecoveryIntegration(t *testing.T) {
 	if err != nil || len(bans) != 1 || bans[0].IP != "192.0.2.9" {
 		t.Fatalf("unexpected current IP bans: %#v %v", bans, err)
 	}
-	if err := service.Maintain(ctx); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, service.Maintain(ctx))
 	history, err := service.History(ctx, nodeID, "connection_rtt_ms", "5m", now.Add(-time.Hour))
 	if err != nil || len(history) == 0 {
 		t.Fatalf("rollup missing: %v %v", history, err)
 	}
 	service.now = func() time.Time { return now.Add(5*time.Minute - time.Second) }
-	if err := service.Maintain(ctx); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, service.Maintain(ctx))
 	node, err = service.GetNode(ctx, nodeID)
 	if err != nil || node.ConnectionState != "offline" || node.Freshness != "stale" {
 		t.Fatalf("offline state: %#v %v", node, err)

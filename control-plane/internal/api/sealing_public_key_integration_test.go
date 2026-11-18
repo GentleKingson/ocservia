@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"testing"
 	"time"
 
@@ -31,13 +32,9 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 	plan := f.plan(true)
 	node := plan.NodeID
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	digest := sha256.Sum256(der)
 	endpoint := sha256.Sum256(node[:])
 	at, _ := value.FromTime(time.Now())
@@ -89,9 +86,7 @@ func TestUserPasswordSealingKeyIntegration(t *testing.T) {
 	// and rotation. Owner fixture completion models an already applied command.
 	for index, password := range []string{"test browser account 密码 one", "test browser account 密码 two"} {
 		sealed, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, &key.PublicKey, []byte(password), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		body, _ := json.Marshal(map[string]any{"name": "browser-fixture", "expected_version": index, "reason": "browser sealed account fixture", "sealed_password": map[string]any{"version": 1, "purpose": "user_password", "key_id": binding.KeyID, "ciphertext": sealed}})
 		writePath := "/api/v1/nodes/" + node.String() + "/users"
 		if index == 1 {

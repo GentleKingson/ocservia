@@ -10,6 +10,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -40,9 +41,7 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 			next.IdempotencyKey = uuid.NewString()
 		}
 		op, _, err := service.Create(ctx, next)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		if i == 0 {
 			firstID = op.ID
 		}
@@ -61,9 +60,7 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		raw, err = proto.Marshal(&envelope)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		state := "succeeded"
 		if i == 33 {
 			state = "unknown"
@@ -87,9 +84,7 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 
 	}
 	worker, err := historyretention.New(f.backend, historyretention.DefaultPolicy())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := worker.RunOnce(coordination.WithFence(ctx, lostRetentionFence{})); !errors.Is(err, coordination.ErrLeadershipLost) {
 		t.Fatal("fence", err)
 	}

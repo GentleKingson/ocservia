@@ -19,6 +19,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation/attestationstore"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
 
@@ -55,28 +56,20 @@ func (tx installationRollbackTx) PrivdAttestationStore() attestationstore.Store 
 func TestInstallationBackendIntegration(t *testing.T) {
 	f, ctx := newLifecycleFixture(t), context.Background()
 	signer, err := commandauth.NewRandomSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	s := NewBackend(f.b, strings.Repeat("a", 64), "test", signer)
-	if err := s.ConfigureInstallation(InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, s.ConfigureInstallation(InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}))
 	now := time.Now().UTC()
 	s.now = func() time.Time { return now }
 	makeToken := func() Token {
 		t.Helper()
 		token, err := s.CreateInstallationToken(ctx, BootstrapTokenSpec{WorkspaceID: f.workspace, Environment: "test", TTL: time.Minute, ActorID: "admin", Reason: "install", RequestID: uuid.NewString()})
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		return token
 	}
 	token := makeToken()
 	config, err := s.InstallationConfig(ctx, token.Value)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if config.RelayAccessToken != strings.Repeat("r", 32) || config.CommandVerificationKeyHex != hex.EncodeToString(signer.PublicKey()) {
 		t.Fatal("wrong installation trust")
 	}
@@ -86,16 +79,12 @@ func TestInstallationBackendIntegration(t *testing.T) {
 	endpoint := endpointFixture(109)
 	request := enrollmentRequestCapabilities(config.EnrollmentToken, endpoint, []string{"ocserv.status.read", "ocserv.user.manage", privdattestation.AttestationCapability, ownersession.FencingCapability})
 	response, err := s.Enroll(ctx, request)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if response.Result != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
 		t.Fatal("installation was not automatically activated")
 	}
 	node, err := uuid.FromBytes(response.NodeId)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	binding := InstallationBinding{Token: token.Value, NodeID: node, EndpointID: hex.EncodeToString(endpoint)}
 	keyBinding := InstallationKeyBinding{InstallationBinding: binding, UserPasswordSealKeyID: request.SealingKeys[0].KeyId, UserPasswordSealPublicKeySHA256: hex.EncodeToString(request.SealingKeys[0].PublicKeySha256), P12PasswordSealKeyID: request.SealingKeys[1].KeyId, P12PasswordSealPublicKeySHA256: hex.EncodeToString(request.SealingKeys[1].PublicKeySha256)}
 	challenge, err := s.InstallationChallenge(ctx, binding)
@@ -121,16 +110,12 @@ func TestInstallationBackendIntegration(t *testing.T) {
 	makeRegistration := func() *agentv1.PrivdAttestationRegistrationV1 {
 		t.Helper()
 		public, key, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		nonce, _ := hex.DecodeString(challenge.NonceHex)
 		digest, _ := hex.DecodeString(challenge.ContextHex)
 		r := &agentv1.PrivdAttestationRegistrationV1{Version: agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1, NodeId: node[:], PrivdAttestationKeyId: privdattestation.PublicKeyID(public), PublicKey: public, ControllerNonce: nonce, CredentialContextSha256: digest}
 		canonical, err := privdattestation.CanonicalRegistrationV1(r)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		r.Signature = ed25519.Sign(key, canonical)
 		return r
 	}
@@ -172,9 +157,7 @@ func TestInstallationBackendIntegration(t *testing.T) {
 	wg.Wait()
 	close(results)
 	for err := range results {
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 	}
 	if _, err := s.RegisterInstallationKey(ctx, keyBinding, makeRegistration(), uuid.NewString()); !errors.Is(err, ErrInvalidToken) {
 		t.Fatal("bootstrap token authorized key replacement", err)
@@ -211,14 +194,10 @@ func TestInstallationBackendIntegration(t *testing.T) {
 	now = now.Add(-2 * time.Minute)
 	unregistered := makeToken()
 	cfg, err := s.InstallationConfig(ctx, unregistered.Value)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	unregisteredEndpoint := endpointFixture(111)
 	r, err := s.Enroll(ctx, enrollmentRequestCapabilities(cfg.EnrollmentToken, unregisteredEndpoint, request.Capabilities))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	id, _ := uuid.FromBytes(r.NodeId)
 	now = now.Add(2 * time.Minute)
 	if _, err := s.InstallationChallenge(ctx, InstallationBinding{Token: unregistered.Value, NodeID: id, EndpointID: hex.EncodeToString(unregisteredEndpoint)}); !errors.Is(err, ErrInvalidToken) {

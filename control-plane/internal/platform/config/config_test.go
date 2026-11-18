@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 )
 
 func TestAuthTrustedProxyCIDRs(t *testing.T) {
@@ -33,15 +35,9 @@ func TestSensitiveConfigurationFiles(t *testing.T) {
 	database := filepath.Join(directory, "database-url")
 	session := filepath.Join(directory, "session-key")
 	eventKey := filepath.Join(directory, "audit-event-key")
-	if err := os.WriteFile(database, []byte("postgres://app:secret@postgres/ocservia\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(session, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(eventKey, []byte(strings.Repeat("b", 64)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.WriteFile(database, []byte("postgres://app:secret@postgres/ocservia\n"), 0o600))
+	testutil.NoError(t, os.WriteFile(session, []byte(strings.Repeat("a", 64)+"\n"), 0o600))
+	testutil.NoError(t, os.WriteFile(eventKey, []byte(strings.Repeat("b", 64)+"\n"), 0o600))
 	values := map[string]string{
 		"OCSERV_DATABASE_URL_FILE":         database,
 		"OCSERV_AUDIT_CHECKPOINT_KEY_FILE": session,
@@ -62,9 +58,7 @@ func TestSensitiveConfigurationFiles(t *testing.T) {
 	}
 	delete(values, "OCSERV_DATABASE_URL")
 	symlink := filepath.Join(directory, "database-link")
-	if err := os.Symlink(database, symlink); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Symlink(database, symlink))
 	values["OCSERV_DATABASE_URL_FILE"] = symlink
 	if _, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
 		t.Fatal("Load() accepted a symlinked secret file")
@@ -74,49 +68,31 @@ func TestSensitiveConfigurationFiles(t *testing.T) {
 func TestAuditEventKeyFileSecurity(t *testing.T) {
 	directory := secureKeyTestDirectory(t)
 	keyPath := filepath.Join(directory, "audit-event-key")
-	if err := os.WriteFile(keyPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.WriteFile(keyPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600))
 	if key, err := readStrictHexKeyFile(keyPath, uint32(os.Geteuid())); err != nil || len(key) != 32 {
 		t.Fatalf("secure audit event key rejected: key=%d err=%v", len(key), err)
 	}
-	if err := os.Chmod(keyPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Chmod(keyPath, 0o644))
 	if _, err := readStrictHexKeyFile(keyPath, uint32(os.Geteuid())); err == nil {
 		t.Fatal("world-readable audit event key accepted")
 	}
-	if err := os.Chmod(keyPath, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Chmod(keyPath, 0o600))
 	linkPath := filepath.Join(directory, "audit-event-key-link")
-	if err := os.Symlink(keyPath, linkPath); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Symlink(keyPath, linkPath))
 	if _, err := readStrictHexKeyFile(linkPath, uint32(os.Geteuid())); err == nil {
 		t.Fatal("symlinked audit event key accepted")
 	}
 	hardlinkPath := filepath.Join(directory, "audit-event-key-hardlink")
-	if err := os.Link(keyPath, hardlinkPath); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Link(keyPath, hardlinkPath))
 	if _, err := readStrictHexKeyFile(keyPath, uint32(os.Geteuid())); err == nil {
 		t.Fatal("hard-linked audit event key accepted")
 	}
-	if err := os.Remove(hardlinkPath); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Remove(hardlinkPath))
 	unsafeDirectory := filepath.Join(directory, "unsafe")
-	if err := os.Mkdir(unsafeDirectory, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.Mkdir(unsafeDirectory, 0o700))
 	unsafeKey := filepath.Join(unsafeDirectory, "key")
-	if err := os.WriteFile(unsafeKey, []byte(strings.Repeat("b", 64)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(unsafeDirectory, 0o770); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.WriteFile(unsafeKey, []byte(strings.Repeat("b", 64)), 0o600))
+	testutil.NoError(t, os.Chmod(unsafeDirectory, 0o770))
 	if _, err := readStrictHexKeyFile(unsafeKey, uint32(os.Geteuid())); err == nil {
 		t.Fatal("audit event key under writable ancestry accepted")
 	}
@@ -125,18 +101,12 @@ func TestAuditEventKeyFileSecurity(t *testing.T) {
 func secureKeyTestDirectory(t *testing.T) string {
 	t.Helper()
 	directory, err := os.MkdirTemp(".", ".audit-key-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	absolute, err := filepath.Abs(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	resolved, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return resolved
 }
 
@@ -467,9 +437,7 @@ func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
 		}
 		return "", false
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	cfg.Environment = "production"
 	cfg.DatabaseURL = "postgres://127.0.0.1/test"
 	cfg.LocalAuth = true
@@ -510,9 +478,7 @@ func TestProductionRequiresDistinctTransportIdentity(t *testing.T) {
 		"OCSERV_TRANSPORT_GID": "12346",
 	}
 	cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if !cfg.TransportIdentitySet || cfg.TransportUID != 12345 || cfg.TransportGID != 12346 {
 		t.Fatalf("unexpected transport identity: %+v", cfg)
 	}
@@ -572,9 +538,7 @@ func TestSSECapacityConfiguration(t *testing.T) {
 		"OCSERV_SSE_REVALIDATE_INTERVAL": "15s",
 	}
 	cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if cfg.EventStreams.GlobalStreams != 64 || cfg.EventStreams.SessionStreams != 3 || cfg.EventStreams.MaxLifetime != 20*time.Minute {
 		t.Fatalf("unexpected SSE config: %+v", cfg.EventStreams)
 	}
@@ -622,9 +586,7 @@ func TestCertificateSignerCAConfiguration(t *testing.T) {
 	values["OCSERV_CERTIFICATE_SIGNER_URL"] = "https://signer:9443/sign"
 	values["OCSERV_CERTIFICATE_SIGNER_TOKEN"] = "fixture-token"
 	cfg, err := Load(nil, lookup)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if cfg.CertificateSignerCAFile != values["OCSERV_CERTIFICATE_SIGNER_CA_FILE"] {
 		t.Fatal("CA setting not loaded")
 	}

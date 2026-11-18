@@ -16,6 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
 
@@ -28,21 +29,15 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 	}
 	f, ctx := newLifecycleFixture(t), context.Background()
 	signer, err := commandauth.NewRandomSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	s := NewBackend(f.b, "", "test", signer)
 	endpoint := endpointFixture(216)
 	token := createToken(t, s, f.workspace, endpoint)
 	request := enrollmentRequest(token.Value, endpoint)
 	response, err := s.Enroll(ctx, request)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	node, err := uuid.FromBytes(response.NodeId)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	var keys []enrollmentstore.SealingKey
 	f.within(t, func(tx database.Tx) error {
 		enroll, err := enrollmentstore.Enrollment(tx)
@@ -84,9 +79,7 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 	})
 	f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, node)
 	before := f.snapshot(t, node)
-	if err := os.WriteFile(filepath.Join(gate, "ready"), []byte("committed\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.WriteFile(filepath.Join(gate, "ready"), []byte("committed\n"), 0600))
 	deadline := time.Now().Add(90 * time.Second)
 	for {
 		if _, err := os.Stat(filepath.Join(gate, "restarted")); err == nil {
@@ -153,9 +146,7 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 	})
 	transport := &leasedTransport{update: func(context.Context) error { return errors.New("replayed completed trust update") }}
 	worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if worked, err := worker.RunOnce(ctx); !worked || err != nil {
 		t.Fatal(worked, err)
 	}

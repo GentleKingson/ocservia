@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"log/slog"
 	"reflect"
@@ -163,27 +164,19 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 	})
 	t.Run("expiry-during-lock-wait", func(t *testing.T) {
 		lock, err := f.b.Begin(ctx, database.ReadCommitted)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		defer rollback(lock)
 		at, err := database.WallTime(ctx, lock)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		until, _ := at.Add(300 * time.Millisecond)
 		if _, err := lock.Exec(ctx, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, until, v.NodeID); err != nil {
 			t.Fatal(err)
 		}
 		waiting, err := f.b.Begin(ctx, database.ReadCommitted)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		defer rollback(waiting)
 		s, err := enrollmentstore.Trust(waiting)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		done := make(chan error, 1)
 		go func() {
 			changed, err := s.Renew(ctx, v, worker)
@@ -316,9 +309,7 @@ func TestTrustUncertainRPCBackendIntegration(t *testing.T) {
 						transport.close = inject
 					}
 					worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
-					if err != nil {
-						t.Fatal(err)
-					}
+					testutil.NoError(t, err)
 					worked, err := worker.RunOnce(ctx)
 					if !worked || status.Code(err) != code {
 						t.Fatal(worked, err)
@@ -362,19 +353,13 @@ func TestTrustOwnerEndedBackendIntegration(t *testing.T) {
 			f, ctx := newLifecycleFixture(t), context.Background()
 			v := f.job(t)
 			signer, err := commandauth.NewRandomSigner()
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			manager, err := ownersession.NewManagerBackend(f.b, signer, &recordingRegistrar{}, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			var endpoint [32]byte
 			copy(endpoint[:], v.EndpointID)
 			fence, err := manager.OpenSession(ctx, [16]byte(v.NodeID), endpoint, 1, []string{ownersession.FencingCapability})
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			calls := 0
 			action := func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error { calls++; return nil }
 			if err := manager.ExecuteFenced(ctx, [16]byte(v.NodeID), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(v.NodeID), ownersession.FencingCapability, action); err != nil || calls != 1 {
@@ -392,9 +377,7 @@ func TestTrustOwnerEndedBackendIntegration(t *testing.T) {
 				time.Sleep(time.Until(fence.LeaseUntil.AsTime()) + 50*time.Millisecond)
 				if ending == "replaced" {
 					successor, err := ownersession.NewManagerBackend(f.b, signer, &recordingRegistrar{}, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
-					if err != nil {
-						t.Fatal(err)
-					}
+					testutil.NoError(t, err)
 					next, err := successor.OpenSession(ctx, [16]byte(v.NodeID), endpoint, 1, []string{ownersession.FencingCapability})
 					if err != nil || next.GetOwnerEpoch() <= fence.OwnerEpoch {
 						t.Fatal(next, err)
@@ -431,9 +414,7 @@ func TestTrustSynchronousWorkerRaceBackendIntegration(t *testing.T) {
 				return nil
 			}}
 			worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			done := make(chan error, 1)
 			go func() { _, err := worker.RunOnce(ctx); done <- err }()
 			<-entered
@@ -470,9 +451,7 @@ func TestTrustSupersededResultBackendIntegration(t *testing.T) {
 		return nil
 	}}
 	worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if worked, err := worker.RunOnce(ctx); !worked || err == nil {
 		t.Fatal(worked, err)
 	}
@@ -501,9 +480,7 @@ func TestTrustWorkerRenewalBackendIntegration(t *testing.T) {
 	v := f.job(t)
 	transport := &leasedTransport{}
 	worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	transport.update = func(ctx context.Context) error {
 		before := f.snapshot(t, v.NodeID)
 		timer := time.NewTimer(enrollmentstore.TrustLeaseTTL + time.Second)
@@ -571,9 +548,7 @@ func TestTrustSynchronousRevocationBackendIntegration(t *testing.T) {
 	service := NewBackend(f.b, "", "", nil)
 	transport := &ownerLostTransport{}
 	worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	v := f.job(t)
 	if worked, err := worker.RunOnce(ctx); !worked || !errors.Is(err, ownersession.ErrNotOwner) {
 		t.Fatal(worked, err)
@@ -645,9 +620,7 @@ func TestTrustSynchronousRevocationBackendIntegration(t *testing.T) {
 func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 	f, ctx := newLifecycleFixture(t), context.Background()
 	signer, err := commandauth.NewRandomSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	s := NewBackend(f.b, "", "test", signer)
 	t.Run("expiry-before-consumption-rolls-back", func(t *testing.T) {
 		for i, bootstrap := range []bool{false, true} {
@@ -655,9 +628,7 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 			var token Token
 			if bootstrap {
 				token, err = s.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: f.workspace, Environment: "test", ActorID: "operator", Reason: "expiry", RequestID: uuid.NewString()})
-				if err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, err)
 			} else {
 				token = createToken(t, s, f.workspace, endpoint)
 			}
@@ -691,9 +662,7 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 	})
 	t.Run("bootstrap-concurrent-endpoint-and-revoked-replay", func(t *testing.T) {
 		token, err := s.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: f.workspace, Environment: "test", ActorID: "operator", Reason: "binding", RequestID: uuid.NewString()})
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		requests := []*agentv1.EnrollRequest{enrollmentRequest(token.Value, endpointFixture(213)), enrollmentRequest(token.Value, endpointFixture(214))}
 		var wg sync.WaitGroup
 		responses := make(chan *agentv1.EnrollResponse, 2)

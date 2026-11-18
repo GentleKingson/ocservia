@@ -11,7 +11,9 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -31,30 +33,18 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	cleanupPool, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer cleanupPool.Close()
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'privileged trust',$2,now(),now())`, workspaceID, "privileged-trust-"+workspaceID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'privileged-node','active',1,now(),now())`, nodeID, workspaceID); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'privileged trust',$2,now(),now())`, workspaceID, "privileged-trust-"+workspaceID.String())
+	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'privileged-node','active',1,now(),now())`, nodeID, workspaceID)
 	attestationKey, err := attestationtest.InstallKey(ctx, pool, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	endpoint := integrationEndpoint(nodeID)
-	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:]); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:])
 	defer func() {
 		for _, statement := range []string{
 			`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
@@ -80,78 +70,50 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 		operationID, commandID, messageID, idempotencyKey := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 		now := time.Now().UTC()
 		envelope := agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: idempotencyKey[:], NodeId: nodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Hour)), ExpectedRevision: 1, Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", ActorId: "operator", Reason: "privileged result trust", OperationId: operationID[:], Action: "service.reload", RequiredCapability: "ocserv.service.reload", DeliveryMode: mode, Payload: &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}}
-		if err := semanticpayload.PopulateV1(&envelope); err != nil {
-			t.Fatal(err)
-		}
-		if err := signer.Authorize(&envelope); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, semanticpayload.PopulateV1(&envelope))
+		testutil.NoError(t, signer.Authorize(&envelope))
 		encoded, err := proto.Marshal(&envelope)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		key := operationID.String()
-		if _, err := pool.Exec(ctx, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,request_id,trace_id,created_at,updated_at,idempotency_key,request_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6,'0123456789abcdef0123456789abcdef',now(),now(),$6,$7,$8)`, operationID, workspaceID, nodeID, commandID, state, key, make([]byte, 32), now.Add(time.Hour)); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,sequence,traceparent,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'service_reload',$6,$7,1,1,$8,$9,$10,$10)`, commandID, operationID, workspaceID, nodeID, state, encoded, key, envelope.GetTraceparent(), now.Add(time.Hour), now); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Exec(t, ctx, pool, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,request_id,trace_id,created_at,updated_at,idempotency_key,request_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6,'0123456789abcdef0123456789abcdef',now(),now(),$6,$7,$8)`, operationID, workspaceID, nodeID, commandID, state, key, make([]byte, 32), now.Add(time.Hour))
+		testutil.Exec(t, ctx, pool, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,sequence,traceparent,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'service_reload',$6,$7,1,1,$8,$9,$10,$10)`, commandID, operationID, workspaceID, nodeID, state, encoded, key, envelope.GetTraceparent(), now.Add(time.Hour), now)
 		outboxID := uuid.Must(uuid.NewV7())
-		if _, err := pool.Exec(ctx, `INSERT INTO outbox_events(id,command_id,event_type,payload,available_at,published_at,created_at) VALUES($1,$2,'command.dispatch',$3,$4,$4,$4)`, outboxID, commandID, encoded, now); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Exec(t, ctx, pool, `INSERT INTO outbox_events(id,command_id,event_type,payload,available_at,published_at,created_at) VALUES($1,$2,'command.dispatch',$3,$4,$4,$4)`, outboxID, commandID, encoded, now)
 		return operationID, commandID, outboxID
 	}
 	storedEnvelope := func(commandID uuid.UUID) *agentv1.CommandEnvelope {
 		t.Helper()
 		var encoded []byte
-		if err := pool.QueryRow(ctx, `SELECT envelope FROM commands WHERE id=$1`, commandID).Scan(&encoded); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, pool.QueryRow(ctx, `SELECT envelope FROM commands WHERE id=$1`, commandID).Scan(&encoded))
 		var envelope agentv1.CommandEnvelope
-		if err := proto.Unmarshal(encoded, &envelope); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, proto.Unmarshal(encoded, &envelope))
 		return &envelope
 	}
 	ingest := func(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
 		t.Helper()
 		payload, err := proto.Marshal(result)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		eventID := uuid.Must(uuid.NewV7())
-		if err := service.Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: payload}); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, service.Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: payload}))
 	}
 	outbox := func(outboxID uuid.UUID) (bool, agentv1.CommandDeliveryMode) {
 		t.Helper()
 		var payload []byte
 		var unpublished bool
-		if err := pool.QueryRow(ctx, `SELECT payload,published_at IS NULL FROM outbox_events WHERE id=$1`, outboxID).Scan(&payload, &unpublished); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, pool.QueryRow(ctx, `SELECT payload,published_at IS NULL FROM outbox_events WHERE id=$1`, outboxID).Scan(&payload, &unpublished))
 		var envelope agentv1.CommandEnvelope
-		if err := proto.Unmarshal(payload, &envelope); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, proto.Unmarshal(payload, &envelope))
 		return unpublished, envelope.GetDeliveryMode()
 	}
 	states := func(operationID uuid.UUID) (string, string) {
 		t.Helper()
 		var operation, command string
-		if err := pool.QueryRow(ctx, `SELECT o.state,c.state FROM operations o JOIN commands c ON c.id=o.command_id WHERE o.id=$1`, operationID).Scan(&operation, &command); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, pool.QueryRow(ctx, `SELECT o.state,c.state FROM operations o JOIN commands c ON c.id=o.command_id WHERE o.id=$1`, operationID).Scan(&operation, &command))
 		return operation, command
 	}
 	base := func(envelope *agentv1.CommandEnvelope, state agentv1.CommandResultState) *agentv1.CommandResult {
 		hash, err := semanticpayload.HashV1(envelope)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		now := timestamppb.Now()
 		return &agentv1.CommandResult{CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(), PayloadSha256: hash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1, State: state, AcceptedAt: now, CompletedAt: now}
 	}
@@ -183,9 +145,7 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 			// Genuine signed completion still settles the command and its outbox.
 			envelope = storedEnvelope(commandID)
 			success := base(envelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)
-			if err := attestationtest.AttachProof(envelope, success, attestationKey, 1); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, attestationtest.AttachProof(envelope, success, attestationKey, 1))
 			ingest(envelope, success)
 			if operation, command := states(operationID); operation != "succeeded" || command != "succeeded" {
 				t.Fatalf("signed result did not settle the command: operation=%s command=%s", operation, command)
@@ -213,9 +173,7 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 		}
 		// The signed completion from the original execution still recovers it.
 		success := base(envelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)
-		if err := attestationtest.AttachProof(envelope, success, attestationKey, 2); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, attestationtest.AttachProof(envelope, success, attestationKey, 2))
 		ingest(envelope, success)
 		if operation, command := states(operationID); operation != "succeeded" || command != "succeeded" {
 			t.Fatalf("signed recovery did not settle the command: operation=%s command=%s", operation, command)

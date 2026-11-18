@@ -18,6 +18,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
@@ -99,9 +100,7 @@ func TestUserStateCapacityErrorUsesConflictProblem(t *testing.T) {
 	var problem struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(response.Body.Bytes(), &problem))
 	if problem.Type != "https://ocservia.dev/problems/capacity-exceeded" {
 		t.Fatalf("problem type = %q", problem.Type)
 	}
@@ -118,9 +117,7 @@ func TestOperationBacklogErrorUsesServiceUnavailableProblem(t *testing.T) {
 	var problem struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(response.Body.Bytes(), &problem))
 	if problem.Type != "https://ocservia.dev/problems/command-backlog-exceeded" {
 		t.Fatalf("problem type = %q", problem.Type)
 	}
@@ -144,9 +141,7 @@ func TestUserStateRevisionSlotErrorsUseConflictProblems(t *testing.T) {
 		var problem struct {
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, json.Unmarshal(response.Body.Bytes(), &problem))
 		if problem.Type != test.problemType {
 			t.Fatalf("problem type = %q want %q", problem.Type, test.problemType)
 		}
@@ -306,9 +301,7 @@ func TestDevelopmentRuntimeIsHiddenWhenSimulatorIsDisabled(t *testing.T) {
 
 func TestDevelopmentRuntimeKeepsProcessMetricsWhenDatabaseIsUnavailable(t *testing.T) {
 	pool, err := pgxpool.New(context.Background(), "postgres://unused@localhost/unused?host=/tmp/ocservia-missing-postgres")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	server, err := NewServer(HTTPConfig{LocalSimulator: true, Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "local-development-token-32-characters", EventStreams: eventstream.DefaultConfig()}, postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
 	if err != nil {
@@ -330,9 +323,7 @@ func TestDevelopmentRuntimeKeepsProcessMetricsWhenDatabaseIsUnavailable(t *testi
 			State string `json:"state"`
 		} `json:"privd_attestation_key_states"`
 	}
-	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
 	if body.KeyStatesAvailable || len(body.KeyStates) != 3 {
 		t.Fatalf("unexpected key state fallback: %+v", body)
 	}

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"testing"
 	"time"
@@ -19,9 +20,7 @@ func TestBreakGlassAlertsAuditsAndRequiresRotationIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'break glass',$2,now(),now())`, workspaceID, "break-glass-"+workspaceID.String()); err != nil {
@@ -29,13 +28,9 @@ func TestBreakGlassAlertsAuditsAndRequiresRotationIntegration(t *testing.T) {
 	}
 	token := "offline-emergency-credential-with-high-entropy"
 	service, err := NewBackend(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: TokenHash(token)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	cookie, principal, err := service.BreakGlass(ctx, token, "break-glass-request")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if !principal.BreakGlass || !cookie.Secure || !cookie.HttpOnly {
 		t.Fatal("break-glass session is not hardened")
 	}

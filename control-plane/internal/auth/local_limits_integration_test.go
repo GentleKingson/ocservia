@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"strings"
 	"sync"
@@ -28,14 +29,10 @@ func localLimitService(t *testing.T) *localLimitFixture {
 		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
 	}
 	pool, err := pgxpool.New(context.Background(), url)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(pool.Close)
 	s, err := NewBackend(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return &localLimitFixture{Service: s, pool: pool}
 }
 
@@ -111,9 +108,7 @@ func TestLocalAccountBackoffIntegration(t *testing.T) {
 			}
 			localLimitExec(t, s, `UPDATE local_auth_attempts SET window_until=clock_timestamp()-interval '1 second',blocked_until=clock_timestamp()-interval '1 second',expires_at=clock_timestamp()+interval '1 minute' WHERE username=$1`, name)
 			renewed, err := s.reserveLocalAttempt(ctx, name)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			var fullWindow bool
 			if err := s.pool.QueryRow(ctx, `SELECT failures=0 AND expires_at>clock_timestamp()+interval '14 minutes' FROM local_auth_attempts WHERE username=$1`, name).Scan(&fullWindow); err != nil || !fullWindow {
 				t.Fatalf("window renewal: %t %v", fullWindow, err)
@@ -123,9 +118,7 @@ func TestLocalAccountBackoffIntegration(t *testing.T) {
 			}
 			localLimitExec(t, s, `UPDATE local_auth_attempts SET expires_at=clock_timestamp()-interval '1 second' WHERE username=$1`, name)
 			lease, err := s.reserveLocalAttempt(ctx, name)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			if failures, active := localLimitState(t, s, name); failures != 0 || !active {
 				t.Fatalf("expiry did not reset: %d %t", failures, active)
 			}
@@ -184,17 +177,13 @@ func TestLocalAccountConcurrentLeaseAndFencingIntegration(t *testing.T) {
 	}
 	old := <-leases
 	credential, err := s.localCredential(ctx, name)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	credential.attemptLease = old
 	// Simulate a process that exits without completion; only the lease, not a
 	// password-failure counter, remains. Expiry allows a new fenced attempt.
 	localLimitExec(t, s, `UPDATE local_auth_attempts SET lease_until=clock_timestamp()-interval '1 second' WHERE username=$1`, name)
 	next, err := other.reserveLocalAttempt(ctx, name)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, _, err := s.createSession(ctx, LocalIssuer, name, &credential); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("stale success: %v", err)
 	}
@@ -213,9 +202,7 @@ func TestLocalAccountConcurrentLeaseAndFencingIntegration(t *testing.T) {
 	// A new state after a reset/disable deletion must also reject old success.
 	localLimitExec(t, s, `DELETE FROM local_auth_attempts WHERE username=$1`, name)
 	next, err = other.reserveLocalAttempt(ctx, name)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := other.finishLocalAttempt(name, next, true); err != nil {
 		t.Fatal(err)
 	}
@@ -261,14 +248,10 @@ func TestLocalAccountCancellationAndErrorsIntegration(t *testing.T) {
 	for _, after := range []bool{false, true} {
 		requestCtx, cancel := context.WithCancel(ctx)
 		cfg, err := pgxpool.ParseConfig(os.Getenv("OCSERV_TEST_DATABASE_URL"))
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		cfg.ConnConfig.Tracer = localCancelRead{cancel: cancel, after: after}
 		pool, err := pgxpool.NewWithConfig(ctx, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		other := *s.Service
 		other.backend = postgres.WrapPool(pool)
 		_, _, err = other.AuthenticateLocal(requestCtx, name, "wrong")
@@ -294,9 +277,7 @@ func TestLocalAccountCancellationAndErrorsIntegration(t *testing.T) {
 	}
 	// A denied cleanup must abort admission, not bypass account protection.
 	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `UPDATE local_auth_attempts SET expires_at=clock_timestamp()-interval '1 second' WHERE username=$1`, name); err != nil {
 		t.Fatal(err)
@@ -377,9 +358,7 @@ func TestLocalAccountDatabasePermissionsFailClosedIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	owner, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer owner.Close()
 	var role, ownerRole string
 	if err := s.pool.QueryRow(ctx, `SELECT current_user`).Scan(&role); err != nil {

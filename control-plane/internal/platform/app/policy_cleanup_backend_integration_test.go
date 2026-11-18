@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"log/slog"
 	"reflect"
 	"testing"
@@ -116,9 +117,7 @@ func (s *policyCleanupState) grants(t *testing.T, ctx context.Context) []string 
 	t.Helper()
 	query := `SELECT table_name,privilege_type,is_grantable FROM information_schema.table_privileges WHERE grantee=current_user AND table_schema='public' ORDER BY table_name,privilege_type`
 	rows, err := s.runtime.Store.Query(ctx, query)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer rows.Close()
 	var grants []string
 	for rows.Next() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"testing"
 	"time"
 
@@ -46,9 +47,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	stamp := func(v time.Time) value.Timestamp {
 		t.Helper()
 		at, err := value.FromTime(v)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		return at
 	}
 	workspace, node, requester, session := uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -227,13 +226,9 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	expiryKey := operationIdempotencyKey("policy", node.String(), "expired", "1", "expiry", "1970-01-01T00:00:00Z")
 	mutator.assertLast(t, ctx, 1, userstate.MutationRequest{NodeID: node, Kind: userstate.UserDisable, Name: "expired", ExpectedVersion: 1, IdempotencyKey: expiryKey, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: expiryKey, Traceparent: stableTraceparent(expiryKey)})
 	identity, err := coordination.NewIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	leader, err := coordination.AcquireBackend(ctx, b, identity, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	fenced := coordination.WithFence(ctx, leader)
 	if err := s.RunOnce(fenced); err != nil {
 		t.Fatal("fenced scheduler", err)

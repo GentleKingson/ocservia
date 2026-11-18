@@ -1,4 +1,5 @@
-import { createRenderer, nextTick, ssrContextKey } from "vue";
+import { renderer } from "./renderer";
+import { nextTick, ssrContextKey } from "vue";
 import { ResponseError } from "@ocservia/api-client";
 import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -41,19 +42,6 @@ vi.mock("vue-i18n", () => ({
   useI18n: () => ({ t: (key: string) => key, locale: { value: "en" } }),
 }));
 import NodesView from "../src/views/NodesView.vue";
-
-const renderer = createRenderer<object, object>({
-  createElement: () => ({}),
-  createText: () => ({}),
-  createComment: () => ({}),
-  insert: () => {},
-  remove: () => {},
-  setText: () => {},
-  setElementText: () => {},
-  parentNode: () => null,
-  nextSibling: () => null,
-  patchProp: () => {},
-});
 
 interface View {
   selected: string[];
