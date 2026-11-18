@@ -269,9 +269,9 @@ func TestNormalizeConfigApplyResultSupportsIdempotentTerminalStates(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		state, _, err := normalizeConfigApplyResult(envelope, "succeeded", encoded)
-		if err != nil || state != test.want {
-			t.Fatalf("normalized state=%q want=%q err=%v", state, test.want, err)
+		outcome, err := normalizeCommandOutcome(envelope, "succeeded", encoded, false)
+		if err != nil || outcome.state != test.want || !proto.Equal(outcome.config, test.result) {
+			t.Fatalf("normalized outcome=%+v want=%q err=%v", outcome, test.want, err)
 		}
 	}
 }
