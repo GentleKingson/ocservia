@@ -270,3 +270,125 @@ func TestReconnectCursorValidationAndLiveHandoff(t *testing.T) {
 		t.Fatal("missed next live event after reconnect")
 	}
 }
+
+func TestLaggingReconnectDoesNotRewindOrStallLiveSubscribers(t *testing.T) {
+	config := DefaultConfig()
+	config.PollInterval = 100 * time.Millisecond
+	config.SubscriberQueue = 64
+
+	var mu sync.Mutex
+	var events []Event
+	var fetchAfter []uuid.UUID
+	appendEvents := func(count int) {
+		mu.Lock()
+		defer mu.Unlock()
+		for range count {
+			seq := uint64(len(events) + 1)
+			events = append(events, Event{
+				ID:       uuid.Must(uuid.NewV7()),
+				Sequence: seq,
+				Name:     "platform",
+				Data:     []byte(fmt.Sprintf(`{"seq":%d}`, seq)),
+			})
+		}
+	}
+	appendEvents(5)
+
+	fetch := func(_ context.Context, _ string, after uuid.UUID, limit int) ([]Event, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		fetchAfter = append(fetchAfter, after)
+		var out []Event
+		seen := after == uuid.Nil
+		for _, ev := range events {
+			if seen {
+				out = append(out, ev)
+				if len(out) >= limit {
+					break
+				}
+			}
+			if ev.ID == after {
+				seen = true
+			}
+		}
+		return out, nil
+	}
+	resolve := func(_ context.Context, _ string, cursor uuid.UUID) (uint64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, ev := range events {
+			if ev.ID == cursor {
+				return ev.Sequence, nil
+			}
+		}
+		return 0, ErrInvalidCursor
+	}
+
+	hub, err := NewHub(config, fetch, resolve)
+	testutil.NoError(t, err)
+	defer hub.Close()
+
+	live, err := hub.Subscribe(context.Background(), "workspace-live", uuid.Nil)
+	testutil.NoError(t, err)
+	defer live.Close()
+
+	for wantSeq := uint64(1); wantSeq <= 5; wantSeq++ {
+		select {
+		case ev := <-live.Events:
+			if ev.Sequence != wantSeq {
+				t.Fatalf("live initial seq = %d, want %d", ev.Sequence, wantSeq)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for live seq %d", wantSeq)
+		}
+	}
+
+	mu.Lock()
+	firstEventID := events[0].ID
+	fifthEventID := events[4].ID
+	mu.Unlock()
+
+	// Reconnect a lagging subscriber at event 1 while new live events 6..10 arrive.
+	lagging, err := hub.Subscribe(context.Background(), "workspace-live", firstEventID)
+	testutil.NoError(t, err)
+	defer lagging.Close()
+	appendEvents(5)
+
+	// Live subscriber must receive strictly 6..10 with no rewind or duplicates.
+	for wantSeq := uint64(6); wantSeq <= 10; wantSeq++ {
+		select {
+		case ev := <-live.Events:
+			if ev.Sequence != wantSeq {
+				t.Fatalf("live post-reconnect seq = %d, want %d", ev.Sequence, wantSeq)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("live subscriber stalled waiting for seq %d", wantSeq)
+		}
+	}
+
+	// Lagging subscriber must catch up through 2..5 and hand off cleanly to 6..10.
+	for wantSeq := uint64(2); wantSeq <= 10; wantSeq++ {
+		select {
+		case ev := <-lagging.Events:
+			if ev.Sequence != wantSeq {
+				t.Fatalf("lagging seq = %d, want %d", ev.Sequence, wantSeq)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("lagging subscriber stalled waiting for seq %d", wantSeq)
+		}
+	}
+
+	// Confirm the shared live poll continued forward from event 5 (not rewound to 1).
+	mu.Lock()
+	sawLiveContinueFromFive := false
+	for _, cursor := range fetchAfter {
+		if cursor == fifthEventID {
+			sawLiveContinueFromFive = true
+			break
+		}
+	}
+	mu.Unlock()
+	if !sawLiveContinueFromFive {
+		t.Fatal("shared live watcher did not continue advancing from seq 5 after lagging reconnect")
+	}
+}

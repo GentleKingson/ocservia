@@ -16,8 +16,11 @@ type Store interface {
 	Previous(context.Context, uuid.UUID) ([]byte, error)
 	Append(context.Context, []any) error
 	Events(context.Context, uuid.UUID) (database.Rows, error)
+	EventsAfter(context.Context, uuid.UUID, value.Timestamp, uuid.UUID) (database.Rows, error)
+	LatestEvent(context.Context, uuid.UUID) (uuid.UUID, []byte, error)
 	RecentEvents(context.Context, uuid.UUID, int) (database.Rows, error)
 	Checkpoints(context.Context, uuid.UUID) (database.Rows, error)
+	LatestCheckpoint(context.Context, uuid.UUID) (uuid.UUID, []byte, []byte, value.Timestamp, int16, error)
 	AddCheckpoint(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []byte, []byte) error
 	Workspaces(context.Context) (database.Rows, error)
 	CheckpointHash(context.Context, uuid.UUID, uuid.UUID) ([]byte, error)

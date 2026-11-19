@@ -102,10 +102,11 @@ func (s *Service) MarkSent(ctx context.Context, dispatch Dispatch) error {
 // MarkSentWithEnvelope persists the exact frame accepted by transport, including
 // the owner proofs added after Claim. Reconnect recovery needs that precise term.
 func (s *Service) MarkSentWithEnvelope(ctx context.Context, dispatch Dispatch, sentEnvelope []byte) error {
-	if err := validateSentEnvelope(dispatch, sentEnvelope); err != nil {
+	envelope, err := validateAndDecodeSentEnvelope(dispatch, sentEnvelope)
+	if err != nil {
 		return err
 	}
-	return s.finishDispatch(ctx, dispatch, true, "", sentEnvelope)
+	return s.finishDispatch(ctx, dispatch, true, "", sentEnvelope, envelope)
 }
 
 func (s *Service) MarkFailed(ctx context.Context, dispatch Dispatch, cause error) error {
@@ -116,15 +117,16 @@ func (s *Service) MarkFailed(ctx context.Context, dispatch Dispatch, cause error
 	if len(message) > 512 {
 		message = message[:512]
 	}
-	return s.finishDispatch(ctx, dispatch, false, message, nil)
+	return s.finishDispatch(ctx, dispatch, false, message, nil, nil)
 }
 
-func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, message string, sentEnvelope []byte) error {
-	var envelope agentv1.CommandEnvelope
-	if sent {
-		if err := proto.Unmarshal(sentEnvelope, &envelope); err != nil {
+func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, message string, sentEnvelope []byte, envelope *agentv1.CommandEnvelope) error {
+	if sent && envelope == nil {
+		var decoded agentv1.CommandEnvelope
+		if err := proto.Unmarshal(sentEnvelope, &decoded); err != nil {
 			return fmt.Errorf("decode sent command delivery mode: %w", err)
 		}
+		envelope = &decoded
 	}
 	err := database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		if err := commandlimit.Lock(ctx, tx); err != nil {
@@ -152,7 +154,7 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 			return store.FailDispatch(ctx, d, message, at)
 		}
 		// Hold the exact owner term through commit, before locking any outbox.
-		if err := guardDispatchAuthority(ctx, store, d, &envelope); err != nil {
+		if err := guardDispatchAuthority(ctx, store, d, envelope); err != nil {
 			return err
 		}
 		// Take this lock in its own statement, so the following read observes a

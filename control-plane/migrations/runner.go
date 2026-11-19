@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,13 +22,30 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	}
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		var version int
-		if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&version); err != nil {
-			return fmt.Errorf("inspect PostgreSQL server version: %w", err)
+		if raw := conn.PgConn().ParameterStatus("server_version_num"); raw != "" {
+			if parsed, parseErr := strconv.Atoi(raw); parseErr == nil && parsed > 0 {
+				version = parsed
+			}
+		}
+		if version == 0 {
+			if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&version); err != nil {
+				return fmt.Errorf("inspect PostgreSQL server version: %w", err)
+			}
 		}
 		return validatePostgreSQLRelease(version, conn.PgConn().ParameterStatus("server_version"))
 	}
-	cfg.MaxConns = 20
-	cfg.MinConns = 1
+	hasPoolMax, hasPoolMin := false, false
+	if parsed, parseErr := url.Parse(databaseURL); parseErr == nil {
+		q := parsed.Query()
+		hasPoolMax = q.Has("pool_max_conns")
+		hasPoolMin = q.Has("pool_min_conns")
+	}
+	if !hasPoolMax {
+		cfg.MaxConns = 32
+	}
+	if !hasPoolMin {
+		cfg.MinConns = 2
+	}
 	cfg.MaxConnLifetime = time.Hour
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.HealthCheckPeriod = 30 * time.Second

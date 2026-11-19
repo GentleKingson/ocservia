@@ -50,6 +50,7 @@ type Service struct {
 	commandRecovery        CommandRecoverer
 	recoveryAuthority      RecoveryAuthority
 	resultCommitBarrierDir string
+	localSimulator         bool
 }
 
 // CommandRecoverer is the narrow business-layer hook used after transportd
@@ -87,13 +88,20 @@ func invalidEvent(reasonCode, detail string) error {
 }
 
 func NewBackend(backend database.Backend, signer *commandauth.Signer) *Service {
-	return &Service{backend: backend, signer: signer, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{backend: backend, signer: signer, localSimulator: true, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func NewBackendWithCommandRecovery(backend database.Backend, signer *commandauth.Signer, recovery CommandRecoverer, authority RecoveryAuthority) *Service {
 	service := NewBackend(backend, signer)
 	service.commandRecovery, service.recoveryAuthority = recovery, authority
 	return service
+}
+
+// SetLocalSimulator configures whether transport event ingestion projects
+// outcomes onto local_slice_jobs. Production disables the simulator path so
+// routine heartbeats do not run simulation updates.
+func (s *Service) SetLocalSimulator(enabled bool) {
+	s.localSimulator = enabled
 }
 
 // EnableResultCommitBarrier configures the development-harness barrier used

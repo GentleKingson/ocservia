@@ -95,10 +95,11 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 		}
 	}
 	operationService.EnableReleaseCatalog(releaseCatalog)
-	eventService, fenceExecutor, err := startWorker(life, cfg, build, backend, commandSigner, operationService, logger)
+	eventService, fenceExecutor, closeWorkerTransport, err := startWorker(life, cfg, build, backend, commandSigner, operationService, logger)
 	if err != nil {
 		return err
 	}
+	defer closeWorkerTransport()
 	telemetryService := telemetry.NewWithRecommendedAgentVersionBackend(backend, cfg.RecommendedAgentVersion)
 	telemetryService.EnableAgentUpgradeEligibility(releaseCatalog)
 	userStateService := userstate.NewWithSignerBackend(backend, commandSigner)
@@ -109,6 +110,7 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 		if err != nil {
 			return fmt.Errorf("configure API transport: %w", err)
 		}
+		defer func() { _ = controlTransport.Close() }()
 	}
 	var certificateService *certificates.Service
 	var publicKeySigner *certificates.HTTPSigner

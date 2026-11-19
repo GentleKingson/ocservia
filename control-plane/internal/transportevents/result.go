@@ -191,7 +191,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 	if effectiveState == "rejected" {
 		operationState = "failed"
 	}
-	operation, err := store.UpdateOperation(ctx, commandID, operationState, terminal, at)
+	operation, err := store.UpdateOperation(ctx, stored.OperationID, commandID, operationState, terminal, at)
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return fmt.Errorf("apply Agent operation result: %w", err)
 	}

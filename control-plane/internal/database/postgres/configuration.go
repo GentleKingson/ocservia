@@ -61,7 +61,10 @@ func (s configurationStore) Resource(ctx context.Context, id uuid.UUID) (workspa
 }
 
 func (s configurationStore) State(ctx context.Context, node uuid.UUID) (v configurationstore.State, err error) {
-	err = s.QueryRow(ctx, `SELECT COALESCE((SELECT revision FROM node_config_state WHERE node_id=$1),0),COALESCE((SELECT desired_revision FROM node_config_state WHERE node_id=$1),0),COALESCE((SELECT automation_locked FROM node_config_state WHERE node_id=$1),false),COALESCE((SELECT ocserv_version FROM node_observed_snapshots WHERE node_id=$1),'')`, node).Scan(&v.Revision, &v.DesiredRevision, &v.Locked, &v.OcservVersion)
+	err = s.QueryRow(ctx, `SELECT COALESCE(c.revision,0),COALESCE(c.desired_revision,0),COALESCE(c.automation_locked,false),COALESCE(o.ocserv_version,'')
+		FROM (VALUES ($1::uuid)) AS target(node_id)
+		LEFT JOIN node_config_state c ON c.node_id=target.node_id
+		LEFT JOIN node_observed_snapshots o ON o.node_id=target.node_id`, node).Scan(&v.Revision, &v.DesiredRevision, &v.Locked, &v.OcservVersion)
 	return
 }
 

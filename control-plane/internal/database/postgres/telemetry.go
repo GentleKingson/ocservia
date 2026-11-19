@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -29,14 +30,20 @@ func scanTelemetryNode(row database.Row) (telemetrystore.Node, error) {
 }
 
 func (s telemetryStore) Nodes(ctx context.Context, workspace, after uuid.UUID, limit int) ([]telemetrystore.Node, error) {
-	var scope, cursor any
-	if workspace != uuid.Nil {
-		scope = workspace
+	var (
+		rows database.Rows
+		err  error
+	)
+	switch {
+	case workspace == uuid.Nil && after == uuid.Nil:
+		rows, err = s.tx.Query(ctx, telemetryNodeSelect+` ORDER BY n.id LIMIT $1`, limit)
+	case workspace == uuid.Nil:
+		rows, err = s.tx.Query(ctx, telemetryNodeSelect+` WHERE n.id>$1 ORDER BY n.id LIMIT $2`, after, limit)
+	case after == uuid.Nil:
+		rows, err = s.tx.Query(ctx, telemetryNodeSelect+` WHERE n.workspace_id=$1 ORDER BY n.id LIMIT $2`, workspace, limit)
+	default:
+		rows, err = s.tx.Query(ctx, telemetryNodeSelect+` WHERE n.workspace_id=$1 AND n.id>$2 ORDER BY n.id LIMIT $3`, workspace, after, limit)
 	}
-	if after != uuid.Nil {
-		cursor = after
-	}
-	rows, err := s.tx.Query(ctx, telemetryNodeSelect+` WHERE ($1::uuid IS NULL OR n.id>$1) AND ($2::uuid IS NULL OR n.workspace_id=$2) ORDER BY n.id LIMIT $3`, cursor, scope, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +98,7 @@ func (s telemetryStore) IPBans(ctx context.Context, id uuid.UUID, limit int) ([]
 }
 
 func (s telemetryStore) LockNode(ctx context.Context, node uuid.UUID) error {
-	return s.tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR UPDATE`, node).Scan(&node)
+	return s.tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR NO KEY UPDATE`, node).Scan(&node)
 }
 
 func (s telemetryStore) ValidateJSON(ctx context.Context, documents []json.RawMessage) error {
@@ -147,36 +154,81 @@ func (s telemetryStore) ReplaceSessions(ctx context.Context, node uuid.UUID, obs
 	if _, err := s.tx.Exec(ctx, `DELETE FROM node_sessions WHERE node_id=$1`, node); err != nil {
 		return err
 	}
-	for _, session := range sessions {
-		if _, err := s.tx.Exec(ctx, `INSERT INTO node_sessions (node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, node, session.ID, session.Username, session.ClientIP, session.ConnectedAt, session.BytesIn, session.BytesOut, observed); err != nil {
-			return err
-		}
+	if len(sessions) == 0 {
+		return nil
 	}
-	return nil
+	ids := make([]string, len(sessions))
+	usernames := make([]string, len(sessions))
+	ips := make([]string, len(sessions))
+	connectedAt := make([]time.Time, len(sessions))
+	bytesIn := make([]int64, len(sessions))
+	bytesOut := make([]int64, len(sessions))
+	for i, session := range sessions {
+		ids[i] = session.ID
+		usernames[i] = session.Username
+		ips[i] = session.ClientIP
+		connectedAt[i] = session.ConnectedAt
+		bytesIn[i] = session.BytesIn
+		bytesOut[i] = session.BytesOut
+	}
+	_, err := s.tx.Exec(ctx, `INSERT INTO node_sessions (node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at)
+		SELECT $1,u.session_id,u.username,u.client_ip::inet,u.connected_at,u.bytes_in,u.bytes_out,$8
+		FROM unnest($2::text[],$3::text[],$4::text[],$5::timestamptz[],$6::bigint[],$7::bigint[]) AS u(session_id,username,client_ip,connected_at,bytes_in,bytes_out)`,
+		node, ids, usernames, ips, connectedAt, bytesIn, bytesOut, observed)
+	return err
 }
 
 func (s telemetryStore) ReplaceIPBans(ctx context.Context, node uuid.UUID, observed time.Time, bans []telemetrystore.IPBan) error {
 	if _, err := s.tx.Exec(ctx, `DELETE FROM node_ip_bans WHERE node_id=$1`, node); err != nil {
 		return err
 	}
-	for _, ban := range bans {
-		if _, err := s.tx.Exec(ctx, `INSERT INTO node_ip_bans (node_id,ip,seconds_remaining,observed_at) VALUES ($1,$2,$3,$4)`, node, ban.IP, ban.SecondsRemaining, observed); err != nil {
-			return err
+	if len(bans) == 0 {
+		return nil
+	}
+	ips := make([]string, len(bans))
+	seconds := make([]*int64, len(bans))
+	for i, ban := range bans {
+		ips[i] = ban.IP
+		if ban.SecondsRemaining != nil {
+			if *ban.SecondsRemaining > math.MaxInt64 {
+				return database.ErrConstraint
+			}
+			v := int64(*ban.SecondsRemaining)
+			seconds[i] = &v
 		}
 	}
-	return nil
+	_, err := s.tx.Exec(ctx, `INSERT INTO node_ip_bans (node_id,ip,seconds_remaining,observed_at)
+		SELECT $1,u.ip::inet,u.seconds_remaining,$4
+		FROM unnest($2::text[],$3::bigint[]) AS u(ip,seconds_remaining)`,
+		node, ips, seconds, observed)
+	return err
 }
 
 func (s telemetryStore) ReplaceUsers(ctx context.Context, node uuid.UUID, observed time.Time, users []telemetrystore.User) error {
 	if _, err := s.tx.Exec(ctx, `DELETE FROM observed_users WHERE node_id=$1`, node); err != nil {
 		return err
 	}
-	for _, user := range users {
-		if _, err := s.tx.Exec(ctx, `INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at) VALUES($1,$2,$3,$4,$5,$6)`, node, user.Username, user.Enabled, user.Revision, user.Fingerprint, observed); err != nil {
-			return err
-		}
+	if len(users) == 0 {
+		return nil
 	}
-	return nil
+	usernames := make([]string, len(users))
+	enabled := make([]bool, len(users))
+	revisions := make([]int64, len(users))
+	fingerprints := make([][]byte, len(users))
+	for i, user := range users {
+		if user.Revision > math.MaxInt64 {
+			return database.ErrConstraint
+		}
+		usernames[i] = user.Username
+		enabled[i] = user.Enabled
+		revisions[i] = int64(user.Revision)
+		fingerprints[i] = user.Fingerprint
+	}
+	_, err := s.tx.Exec(ctx, `INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at)
+		SELECT $1,u.username,u.enabled,u.revision,u.fingerprint,$6
+		FROM unnest($2::text[],$3::boolean[],$4::bigint[],$5::bytea[]) AS u(username,enabled,revision,fingerprint)`,
+		node, usernames, enabled, revisions, fingerprints, observed)
+	return err
 }
 
 func (s telemetryStore) Activate(ctx context.Context, node uuid.UUID, observed time.Time) error {
@@ -208,8 +260,23 @@ func (s telemetryStore) ReplaceGroups(ctx context.Context, node uuid.UUID, group
 	if _, err := s.tx.Exec(ctx, `DELETE FROM observed_groups WHERE node_id=$1`, node); err != nil {
 		return err
 	}
-	for _, g := range groups {
-		if _, err := s.tx.Exec(ctx, `INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at) VALUES($1,$2,$3,$4,$5,$6)`, node, g.Name, g.Members, g.Revision, g.Fingerprint, g.ObservedAt); err != nil {
+	const chunkSize = 100
+	for start := 0; start < len(groups); start += chunkSize {
+		chunk := groups[start:min(start+chunkSize, len(groups))]
+		var query strings.Builder
+		query.Grow(84 + len(chunk)*28)
+		query.WriteString(`INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at) VALUES `)
+		args := make([]any, 1, 1+len(chunk)*5)
+		args[0] = node
+		for i, g := range chunk {
+			if i > 0 {
+				query.WriteByte(',')
+			}
+			base := 2 + i*5
+			fmt.Fprintf(&query, "($1,$%d,$%d,$%d,$%d,$%d)", base, base+1, base+2, base+3, base+4)
+			args = append(args, g.Name, g.Members, g.Revision, g.Fingerprint, g.ObservedAt)
+		}
+		if _, err := s.tx.Exec(ctx, query.String(), args...); err != nil {
 			return err
 		}
 	}
@@ -245,10 +312,22 @@ func (s telemetryStore) SecurityEvent(ctx context.Context, id uuid.UUID) (teleme
 }
 
 func (s telemetryStore) InsertHistory(ctx context.Context, nodeID, batchID uuid.UUID, samples []telemetrystore.Sample) error {
-	for _, sample := range samples {
-		if _, err := s.tx.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, nodeID, batchID, sample.SampledAt, sample.Metric, sample.Value); err != nil {
-			return fmt.Errorf("insert telemetry sample: %w", err)
-		}
+	if len(samples) == 0 {
+		return nil
+	}
+	sampledAt := make([]time.Time, len(samples))
+	metrics := make([]string, len(samples))
+	values := make([]float64, len(samples))
+	for i, sample := range samples {
+		sampledAt[i] = sample.SampledAt
+		metrics[i] = sample.Metric
+		values[i] = sample.Value
+	}
+	if _, err := s.tx.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value)
+		SELECT $1,$2,u.sampled_at,u.metric,u.value
+		FROM unnest($3::timestamptz[],$4::text[],$5::double precision[]) AS u(sampled_at,metric,value)
+		ON CONFLICT DO NOTHING`, nodeID, batchID, sampledAt, metrics, values); err != nil {
+		return fmt.Errorf("insert telemetry sample: %w", err)
 	}
 	return nil
 }
@@ -339,7 +418,7 @@ func (t *transaction) UsageStore() userstore.UsageStore { return NewUsageStore(t
 
 func (s *UsageStore) LockNode(ctx context.Context, nodeID uuid.UUID) error {
 	var id uuid.UUID
-	return s.tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR UPDATE`, nodeID).Scan(&id)
+	return s.tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR NO KEY UPDATE`, nodeID).Scan(&id)
 }
 
 func (s *UsageStore) LockCursor(ctx context.Context, nodeID uuid.UUID, sample userstore.UsageCursor) (userstore.UsageCursor, error) {

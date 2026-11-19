@@ -189,16 +189,16 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx database.Tx, ev
 			return workspaceID, false, fmt.Errorf("update node from transport event: %w", err)
 		}
 	}
-	operationState := "running"
-	switch eventType {
-	case "simulation_result":
-		operationState = "succeeded"
-	case "error":
-		operationState = "failed"
-	case "disconnected":
-		operationState = "unknown"
-	}
-	if eventType == "disconnected" || (eventType != "telemetry" && eventType != "path_changed" && !structuredCommandResult) {
+	if s.localSimulator && (eventType == "disconnected" || (eventType != "telemetry" && eventType != "path_changed" && !structuredCommandResult)) {
+		operationState := "running"
+		switch eventType {
+		case "simulation_result":
+			operationState = "succeeded"
+		case "error":
+			operationState = "failed"
+		case "disconnected":
+			operationState = "unknown"
+		}
 		if err := store.SimulationOutcome(ctx, nodeID, operationState, event.GetTraceparent(), eventType == "disconnected", at); err != nil {
 			return workspaceID, false, fmt.Errorf("update operation from transport event: %w", err)
 		}

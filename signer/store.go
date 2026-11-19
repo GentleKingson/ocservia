@@ -176,12 +176,18 @@ func (s *service) check() error {
 				return err
 			}
 		}
+		// Loop above verified every record in buckets[1:] matches its meta sha256 entry;
+		// verify no orphaned or non-data sha256 entries exist in meta without re-hashing.
 		if err := m.ForEach(func(k, v []byte) error {
 			if !strings.HasPrefix(string(k), "sha256:") {
 				return nil
 			}
 			parts := strings.SplitN(string(k), ":", 3)
-			if len(parts) != 3 || tx.Bucket([]byte(parts[1])) == nil || string(v) != digest(tx.Bucket([]byte(parts[1])).Get([]byte(parts[2]))) {
+			if len(parts) != 3 || parts[1] == "meta" {
+				return invalidState
+			}
+			b := tx.Bucket([]byte(parts[1]))
+			if b == nil || b.Get([]byte(parts[2])) == nil {
 				return invalidState
 			}
 			return nil
@@ -247,22 +253,46 @@ func putRecord(tx *bolt.Tx, bucket string, key, data []byte) error {
 }
 
 func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
+	idStr := id.String()
+	key := []byte(idStr)
+	csrDigest := digest(der)
+
 	var result issuance
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	var found bool
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		if old := tx.Bucket([]byte("issued")).Get(key); old != nil {
+			if json.Unmarshal(old, &result) != nil {
+				return invalidState
+			}
+			if result.Digest != csrDigest {
+				return statusError(409)
+			}
+			found = true
+		}
+		return nil
+	}); err != nil {
+		return issuance{}, err
+	}
+	if found {
+		s.mark("reply")
+		return result, nil
+	}
+
+	csr, err := parseCSR(der)
+	if err != nil {
+		return issuance{}, statusError(422)
+	}
+
+	err = s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("issued"))
-		key := []byte(id.String())
 		if old := b.Get(key); old != nil {
 			if json.Unmarshal(old, &result) != nil {
 				return invalidState
 			}
-			if result.Digest != digest(der) {
+			if result.Digest != csrDigest {
 				return statusError(409)
 			}
 			return nil
-		}
-		csr, err := parseCSR(der)
-		if err != nil {
-			return statusError(422)
 		}
 		s.mark("prepare")
 		serial := new(big.Int).SetBytes(id[:])
@@ -271,7 +301,7 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 			return err
 		}
 		s.mark("signed")
-		result = issuance{CSR: der, Digest: digest(der), Chain: string(chain), Serial: serial.String()}
+		result = issuance{CSR: der, Digest: csrDigest, Chain: string(chain), Serial: serial.String()}
 		data, err := json.Marshal(result)
 		if err != nil {
 			return err
@@ -279,7 +309,7 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 		if err := putRecord(tx, "issued", key, data); err != nil {
 			return err
 		}
-		if err := audit(tx, "issue", id.String()); err != nil {
+		if err := audit(tx, "issue", idStr); err != nil {
 			return err
 		}
 		s.mark("commit")

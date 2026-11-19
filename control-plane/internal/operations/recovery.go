@@ -16,6 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -196,26 +197,188 @@ func prepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.Com
 	return payload, expiresAt, nil
 }
 
+const (
+	envelopeCommandIDField          protowire.Number = 3
+	envelopeNodeIDField             protowire.Number = 5
+	envelopeDeliveryModeField       protowire.Number = 109
+	envelopeOperationIDField        protowire.Number = 120
+	envelopeRequiredCapabilityField protowire.Number = 122
+	envelopeConnectionFenceField    protowire.Number = 126
+	envelopeFenceBindingField       protowire.Number = 127
+)
+
 func validateSentEnvelope(dispatch Dispatch, encoded []byte) error {
+	_, err := validateAndDecodeSentEnvelope(dispatch, encoded)
+	return err
+}
+
+func validateAndDecodeSentEnvelope(dispatch Dispatch, encoded []byte) (*agentv1.CommandEnvelope, error) {
 	if len(encoded) == 0 || len(encoded) > 1<<20 {
-		return errors.New("operations: sent command envelope size is invalid")
+		return nil, errors.New("operations: sent command envelope size is invalid")
 	}
-	var claimed, sent agentv1.CommandEnvelope
-	if err := proto.Unmarshal(dispatch.Envelope, &claimed); err != nil {
-		return fmt.Errorf("decode claimed command envelope: %w", err)
+	if env, fastOK, err := validateSentEnvelopeFast(dispatch, encoded); err != nil {
+		return nil, err
+	} else if fastOK {
+		return env, nil
 	}
+	var sent agentv1.CommandEnvelope
 	if err := proto.Unmarshal(encoded, &sent); err != nil {
-		return fmt.Errorf("decode sent command envelope: %w", err)
+		return nil, fmt.Errorf("decode sent command envelope: %w", err)
 	}
 	if !bytes.Equal(sent.GetCommandId(), dispatch.CommandID[:]) || !bytes.Equal(sent.GetOperationId(), dispatch.OperationID[:]) || !bytes.Equal(sent.GetNodeId(), dispatch.NodeID[:]) {
-		return errors.New("operations: sent command envelope identity is inconsistent")
+		return nil, errors.New("operations: sent command envelope identity is inconsistent")
+	}
+	var claimed agentv1.CommandEnvelope
+	if err := proto.Unmarshal(dispatch.Envelope, &claimed); err != nil {
+		return nil, fmt.Errorf("decode claimed command envelope: %w", err)
 	}
 	claimed.ConnectionFence, claimed.FenceBinding = nil, nil
-	sentFence, sentBinding := sent.GetConnectionFence(), sent.GetFenceBinding()
+	sentFence, sentBinding := sent.ConnectionFence, sent.FenceBinding
 	sent.ConnectionFence, sent.FenceBinding = nil, nil
-	if !proto.Equal(&claimed, &sent) {
-		return errors.New("operations: sent command changed fields outside owner proofs")
+	same := proto.Equal(&claimed, &sent)
+	sent.ConnectionFence, sent.FenceBinding = sentFence, sentBinding
+	if !same {
+		return nil, errors.New("operations: sent command changed fields outside owner proofs")
 	}
+	if err := validateSentOwnerProofs(dispatch, sentFence, sentBinding); err != nil {
+		return nil, err
+	}
+	return &sent, nil
+}
+
+// validateSentEnvelopeFast walks sent and dispatch.Envelope in lockstep on
+// top-level protobuf fields, skipping ConnectionFence (126) and FenceBinding
+// (127) in sent. When every non-proof wire span matches byte-for-byte in order,
+// it verifies identities and only unmarshals the two small owner-proof
+// submessages instead of unmarshaling and deep-comparing the full payload.
+// Any unexpected wire order, duplicate proof field, or malformed tag falls back
+// to the full proto.Unmarshal + proto.Equal path.
+func validateSentEnvelopeFast(dispatch Dispatch, sent []byte) (*agentv1.CommandEnvelope, bool, error) {
+	remSent := sent
+	remClaimed := dispatch.Envelope
+	var (
+		commandID    []byte
+		operationID  []byte
+		nodeID       []byte
+		deliveryMode agentv1.CommandDeliveryMode
+		fenceWire    []byte
+		bindingWire  []byte
+		hasFence     bool
+		hasBinding   bool
+	)
+	for len(remSent) > 0 {
+		num, typ, tagLen := protowire.ConsumeTag(remSent)
+		if tagLen < 0 {
+			return nil, false, nil
+		}
+		valStart := remSent[tagLen:]
+		valLen := protowire.ConsumeFieldValue(num, typ, valStart)
+		if valLen < 0 {
+			return nil, false, nil
+		}
+		fieldSpan := remSent[:tagLen+valLen]
+		remSent = remSent[tagLen+valLen:]
+
+		if num == envelopeConnectionFenceField {
+			if typ != protowire.BytesType || hasFence {
+				return nil, false, nil
+			}
+			raw, n := protowire.ConsumeBytes(valStart)
+			if n < 0 {
+				return nil, false, nil
+			}
+			fenceWire = raw
+			hasFence = true
+			continue
+		}
+		if num == envelopeFenceBindingField {
+			if typ != protowire.BytesType || hasBinding {
+				return nil, false, nil
+			}
+			raw, n := protowire.ConsumeBytes(valStart)
+			if n < 0 {
+				return nil, false, nil
+			}
+			bindingWire = raw
+			hasBinding = true
+			continue
+		}
+		if !bytes.HasPrefix(remClaimed, fieldSpan) {
+			return nil, false, nil
+		}
+		remClaimed = remClaimed[len(fieldSpan):]
+		switch num {
+		case envelopeCommandIDField:
+			if typ != protowire.BytesType {
+				return nil, false, nil
+			}
+			v, n := protowire.ConsumeBytes(valStart)
+			if n < 0 {
+				return nil, false, nil
+			}
+			commandID = v
+		case envelopeNodeIDField:
+			if typ != protowire.BytesType {
+				return nil, false, nil
+			}
+			v, n := protowire.ConsumeBytes(valStart)
+			if n < 0 {
+				return nil, false, nil
+			}
+			nodeID = v
+		case envelopeOperationIDField:
+			if typ != protowire.BytesType {
+				return nil, false, nil
+			}
+			v, n := protowire.ConsumeBytes(valStart)
+			if n < 0 {
+				return nil, false, nil
+			}
+			operationID = v
+		case envelopeDeliveryModeField:
+			if typ != protowire.VarintType {
+				return nil, false, nil
+			}
+			v, n := protowire.ConsumeVarint(valStart)
+			if n < 0 {
+				return nil, false, nil
+			}
+			deliveryMode = agentv1.CommandDeliveryMode(int32(v))
+		}
+	}
+	if len(remClaimed) != 0 {
+		return nil, false, nil
+	}
+	if !bytes.Equal(commandID, dispatch.CommandID[:]) || !bytes.Equal(operationID, dispatch.OperationID[:]) || !bytes.Equal(nodeID, dispatch.NodeID[:]) {
+		return nil, false, errors.New("operations: sent command envelope identity is inconsistent")
+	}
+	env := &agentv1.CommandEnvelope{
+		CommandId:    commandID,
+		OperationId:  operationID,
+		NodeId:       nodeID,
+		DeliveryMode: deliveryMode,
+	}
+	if hasFence {
+		var fence agentv1.ConnectionFenceV2
+		if err := proto.Unmarshal(fenceWire, &fence); err != nil {
+			return nil, false, fmt.Errorf("decode sent command envelope: %w", err)
+		}
+		env.ConnectionFence = &fence
+	}
+	if hasBinding {
+		var binding agentv1.FenceBindingV2
+		if err := proto.Unmarshal(bindingWire, &binding); err != nil {
+			return nil, false, fmt.Errorf("decode sent command envelope: %w", err)
+		}
+		env.FenceBinding = &binding
+	}
+	if err := validateSentOwnerProofs(dispatch, env.ConnectionFence, env.FenceBinding); err != nil {
+		return nil, false, err
+	}
+	return env, true, nil
+}
+
+func validateSentOwnerProofs(dispatch Dispatch, sentFence *agentv1.ConnectionFenceV2, sentBinding *agentv1.FenceBindingV2) error {
 	if sentFence == nil && sentBinding == nil {
 		return nil
 	}
@@ -229,6 +392,38 @@ func validateSentEnvelope(dispatch Dispatch, encoded []byte) error {
 		return errors.New("operations: sent command owner proofs are inconsistent")
 	}
 	return nil
+}
+
+// scanEnvelopeForFencing reads required_capability (field 122) in a single
+// zero-alloc pass and reports whether the wire bytes are free of pre-existing
+// owner proof fields (126/127) so owner proofs can be appended directly.
+func scanEnvelopeForFencing(raw []byte) (requiredCapability string, clean bool) {
+	b := raw
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return "", false
+		}
+		if num == envelopeConnectionFenceField || num == envelopeFenceBindingField {
+			return "", false
+		}
+		b = b[n:]
+		if num == envelopeRequiredCapabilityField && typ == protowire.BytesType {
+			val, m := protowire.ConsumeString(b)
+			if m < 0 {
+				return "", false
+			}
+			requiredCapability = val
+			b = b[m:]
+			continue
+		}
+		m := protowire.ConsumeFieldValue(num, typ, b)
+		if m < 0 {
+			return "", false
+		}
+		b = b[m:]
+	}
+	return requiredCapability, true
 }
 
 func dispatchedOnAuthority(envelope *agentv1.CommandEnvelope, commandID, nodeID uuid.UUID, authority recoveryAuthority) bool {

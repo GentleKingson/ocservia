@@ -247,8 +247,8 @@ func (s userStateStore) List(ctx context.Context, node uuid.UUID) ([]userstatest
  LEFT JOIN observed_users ou ON r.kind='user' AND ou.node_id=r.node_id AND ou.username=r.name
  LEFT JOIN desired_groups dg ON r.kind='group' AND dg.node_id=r.node_id AND dg.group_name=r.name
  LEFT JOIN observed_groups og ON r.kind='group' AND og.node_id=r.node_id AND og.group_name=r.name
- LEFT JOIN commands c ON c.id=(SELECT latest.id FROM commands latest JOIN operations operation ON operation.command_id=latest.id WHERE latest.node_id=r.node_id AND latest.resource_type=r.kind AND latest.resource_key=r.name ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)
- LEFT JOIN operations op ON op.command_id=c.id ORDER BY r.kind,r.name`, node)
+ LEFT JOIN commands c ON c.id=(SELECT latest.id FROM commands latest JOIN operations operation ON operation.id=latest.operation_id WHERE latest.node_id=r.node_id AND latest.resource_type=r.kind AND latest.resource_key=r.name ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)
+ LEFT JOIN operations op ON op.id=c.operation_id ORDER BY r.kind,r.name`, node)
 	if err != nil {
 		return nil, err
 	}

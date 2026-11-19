@@ -139,7 +139,7 @@ func (s *Server) fetchOperationEvents(ctx context.Context, scope string, after u
 	if err != nil || operationID.Version() != 7 || s.operations == nil {
 		return nil, errors.New("operation event source is unavailable")
 	}
-	events, err := s.operations.ListEvents(ctx, operationID, after, limit)
+	events, state, err := s.operations.ListEventsWithState(ctx, operationID, after, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -160,14 +160,8 @@ func (s *Server) fetchOperationEvents(ctx context.Context, scope string, after u
 		}
 		result = append(result, eventstream.Event{ID: id, Sequence: uint64(event.Sequence), Name: "operation", Data: data, Terminal: terminal})
 	}
-	if len(result) == 0 {
-		operation, err := s.operations.Get(ctx, operationID)
-		if err != nil {
-			return nil, err
-		}
-		if operationStateTerminal(operation.State) {
-			result = append(result, eventstream.Event{Terminal: true})
-		}
+	if len(result) == 0 && operationStateTerminal(state) {
+		result = append(result, eventstream.Event{Terminal: true})
 	}
 	return result, nil
 }

@@ -6,19 +6,14 @@
 package ownersession
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"sync"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -41,6 +36,10 @@ const DefaultLeaseTTL = 30 * time.Second
 // transport client's three-second recovery deadline without an unbounded dial
 // burst against the local Unix socket.
 const gapReconciliationConcurrency = 32
+
+// maxMaintainConcurrency bounds parallel per-node lease renewals and fence
+// heartbeats so one slow node never delays renewal of the remaining fleet.
+const maxMaintainConcurrency = 16
 
 // stateUpdateOperationDomain prefixes the canonical operation identity of one
 // node trust update. transportd derives the identity from the same encoding,
@@ -130,6 +129,11 @@ type nodeSession struct {
 	lost                  bool
 }
 
+type nodeLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
 // endedReason records why a node has no live session although it is not on
 // the never-fenced compatibility path. Ended nodes fail closed instead of
 // degrading to unfenced carriers.
@@ -170,7 +174,7 @@ type Manager struct {
 	mu        sync.Mutex
 	sessions  map[[16]byte]*nodeSession
 	ended     map[[16]byte]endedReason
-	nodeLocks map[[16]byte]*sync.Mutex
+	nodeLocks map[[16]byte]*nodeLock
 }
 
 func NewManagerBackend(backend database.Backend, signer *commandauth.Signer, registrar FenceRegistrar, leaseTTL time.Duration, logger *slog.Logger) (*Manager, error) {
@@ -204,22 +208,35 @@ func NewManagerBackend(backend database.Backend, signer *commandauth.Signer, reg
 		logger:           logger,
 		sessions:         make(map[[16]byte]*nodeSession),
 		ended:            make(map[[16]byte]endedReason),
-		nodeLocks:        make(map[[16]byte]*sync.Mutex),
+		nodeLocks:        make(map[[16]byte]*nodeLock),
 	}, nil
 }
 
 // lockNode returns a release function for the per-node mutex. Every action
-// that takes or mutates a node's session runs under it.
+// that takes or mutates a node's session runs under it. Entries for nodes
+// without a live session are reclaimed once the last waiter unlocks so churned
+// or revoked nodes do not retain mutex entries indefinitely.
 func (m *Manager) lockNode(nodeID [16]byte) func() {
 	m.mu.Lock()
-	lock, ok := m.nodeLocks[nodeID]
+	entry, ok := m.nodeLocks[nodeID]
 	if !ok {
-		lock = &sync.Mutex{}
-		m.nodeLocks[nodeID] = lock
+		entry = &nodeLock{}
+		m.nodeLocks[nodeID] = entry
 	}
+	entry.refs++
 	m.mu.Unlock()
-	lock.Lock()
-	return lock.Unlock
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		m.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			if _, active := m.sessions[nodeID]; !active {
+				delete(m.nodeLocks, nodeID)
+			}
+		}
+		m.mu.Unlock()
+	}
 }
 
 // Run renews unexpired sessions, retries fence registrations, and ends terms
@@ -237,18 +254,6 @@ func (m *Manager) Run(ctx context.Context) error {
 			m.maintain(ctx)
 		}
 	}
-}
-
-// WatchTransport consumes the transport event stream so the disconnect,
-// replacement, or revoke-driven close of the exact connection behind a term
-// ends that term immediately instead of renewing a session whose connection
-// is gone.
-func (m *Manager) WatchTransport(ctx context.Context, events EventStream) error {
-	if events == nil {
-		return errors.New("ownersession: transport event stream is required")
-	}
-	cursor := &memoryCursor{}
-	return events.RunWatch(ctx, cursor, transportEventHandler{manager: m, cursor: cursor})
 }
 
 // CloseSession ends the session of exactly one owner term. The connection
@@ -287,173 +292,6 @@ func (m *Manager) OwnsTerm(nodeID, connectionID [16]byte, epoch int64) bool {
 	session, ok := m.sessions[nodeID]
 	m.mu.Unlock()
 	return ok && !session.lost && session.term.ConnectionID() == connectionID && session.term.Epoch() == epoch
-}
-
-// handleTransportEvent ends the owner term named by a disconnect event.
-// Events for unfenced connections carry no term identity and match no
-// session.
-func (m *Manager) handleTransportEvent(ctx context.Context, event *transportv1.TransportEvent) error {
-	if event.GetType() != transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED {
-		return nil
-	}
-	nodeID, err := fixed16(event.GetNodeId())
-	if err != nil {
-		return nil
-	}
-	connectionID, err := fixed16(event.GetConnectionId())
-	if err != nil {
-		return nil
-	}
-	return m.CloseSession(ctx, nodeID, connectionID, int64(event.GetOwnerEpoch()))
-}
-
-type transportEventHandler struct {
-	manager *Manager
-	cursor  *memoryCursor
-}
-
-var _ transportclient.OwnerGapReconciler = transportEventHandler{}
-
-func (h transportEventHandler) Ingest(ctx context.Context, event *transportv1.TransportEvent) error {
-	if err := h.manager.handleTransportEvent(ctx, event); err != nil {
-		return err
-	}
-	h.cursor.set(event.GetEventId())
-	return nil
-}
-
-// ReconcileOwnerEventGap compares every exact local owner term with
-// transportd's current connection inventory. The snapshot is immutable and
-// CloseSession exact-matches it, so a concurrent replacement cannot be closed
-// by a stale reconciliation decision. The old cursor is cleared only after the
-// complete inventory pass succeeds.
-func (h transportEventHandler) ReconcileOwnerEventGap(ctx context.Context, readConnection transportclient.NodeConnectionReader) error {
-	if readConnection == nil {
-		return errors.New("ownersession: node connection reader is required")
-	}
-	snapshots := h.manager.snapshotSessionTerms()
-	reconciliationTime := h.manager.now()
-	publicationPending := false
-	for _, result := range readSessionInventory(ctx, snapshots, readConnection) {
-		if result.err != nil {
-			return fmt.Errorf("ownersession: inspect node %x after transport event gap: %w", result.snapshot.nodeID, result.err)
-		}
-		if sessionInventoryMatches(result.snapshot, result.connection) {
-			continue
-		}
-		// OpenSession records the term after registering its fence, then returns
-		// the handshake response that lets transportd publish NodeConnection.
-		// A gap recovery racing that bounded publication window must retry rather
-		// than misclassify the new authoritative term as disconnected.
-		if reconciliationTime.Before(result.snapshot.openedAt.Add(h.manager.publicationGrace)) {
-			publicationPending = true
-			continue
-		}
-		if err := h.manager.CloseSession(ctx, result.snapshot.nodeID, result.snapshot.connectionID, result.snapshot.ownerEpoch); err != nil {
-			return fmt.Errorf("ownersession: close disconnected node %x after transport event gap: %w", result.snapshot.nodeID, err)
-		}
-	}
-	if publicationPending {
-		return errConnectionPublicationPending
-	}
-	h.cursor.set(nil)
-	return nil
-}
-
-type sessionTermSnapshot struct {
-	nodeID       [16]byte
-	endpointID   [32]byte
-	connectionID [16]byte
-	ownerEpoch   int64
-	openedAt     time.Time
-}
-
-type sessionInventoryResult struct {
-	snapshot   sessionTermSnapshot
-	connection *transportv1.NodeConnection
-	err        error
-}
-
-func readSessionInventory(ctx context.Context, snapshots []sessionTermSnapshot, readConnection transportclient.NodeConnectionReader) []sessionInventoryResult {
-	results := make([]sessionInventoryResult, len(snapshots))
-	if len(snapshots) == 0 {
-		return results
-	}
-	workerCount := min(gapReconciliationConcurrency, len(snapshots))
-	jobs := make(chan int)
-	var workers sync.WaitGroup
-	workers.Add(workerCount)
-	for range workerCount {
-		go func() {
-			defer workers.Done()
-			for index := range jobs {
-				results[index].snapshot = snapshots[index]
-				if err := ctx.Err(); err != nil {
-					results[index].err = err
-					continue
-				}
-				nodeID := snapshots[index].nodeID
-				results[index].connection, results[index].err = readConnection(ctx, nodeID[:])
-			}
-		}()
-	}
-	for index := range snapshots {
-		jobs <- index
-	}
-	close(jobs)
-	workers.Wait()
-	return results
-}
-
-func sessionInventoryMatches(snapshot sessionTermSnapshot, connection *transportv1.NodeConnection) bool {
-	return connection != nil &&
-		snapshot.ownerEpoch > 0 &&
-		connection.GetOwnerEpoch() == uint64(snapshot.ownerEpoch) &&
-		bytes.Equal(connection.GetNodeId(), snapshot.nodeID[:]) &&
-		bytes.Equal(connection.GetEndpointId(), snapshot.endpointID[:])
-}
-
-// snapshotSessionTerms copies each immutable PostgreSQL term and its fixed
-// publication start while holding only the map mutex. Callers may perform
-// transport and database I/O after the mutex is released without reversing
-// the node-lock -> map-lock order used by the rest of Manager.
-func (m *Manager) snapshotSessionTerms() []sessionTermSnapshot {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	terms := make([]sessionTermSnapshot, 0, len(m.sessions))
-	for _, session := range m.sessions {
-		terms = append(terms, sessionTermSnapshot{
-			nodeID:       session.term.NodeID(),
-			endpointID:   session.endpointID,
-			connectionID: session.term.ConnectionID(),
-			ownerEpoch:   session.term.Epoch(),
-			openedAt:     session.openedAt,
-		})
-	}
-	slices.SortFunc(terms, func(left, right sessionTermSnapshot) int {
-		return bytes.Compare(left.nodeID[:], right.nodeID[:])
-	})
-	return terms
-}
-
-// memoryCursor resumes the watch after the last ingested event. Owner-term
-// closing is exact-term matched and therefore idempotent, so a replayed
-// window after a restart is harmless.
-type memoryCursor struct {
-	mu   sync.Mutex
-	last []byte
-}
-
-func (c *memoryCursor) LastEventID(context.Context) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return bytes.Clone(c.last), nil
-}
-
-func (c *memoryCursor) set(eventID []byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.last = bytes.Clone(eventID)
 }
 
 // OpenSession takes the ownership lease for a newly accepted mutation-capable
@@ -628,7 +466,7 @@ func (m *Manager) termForBinding(ctx context.Context, nodeID [16]byte) (*binding
 }
 
 // maintain renews sessions approaching their deadline and retries pending
-// fence registrations, one node at a time.
+// fence registrations with bounded parallelism across nodes.
 func (m *Manager) maintain(ctx context.Context) {
 	m.mu.Lock()
 	nodes := make([][16]byte, 0, len(m.sessions))
@@ -636,7 +474,10 @@ func (m *Manager) maintain(ctx context.Context) {
 		nodes = append(nodes, nodeID)
 	}
 	m.mu.Unlock()
-	for _, nodeID := range nodes {
+	if len(nodes) == 0 {
+		return
+	}
+	runOne := func(nodeID [16]byte) {
 		unlock := m.lockNode(nodeID)
 		m.mu.Lock()
 		session, ok := m.sessions[nodeID]
@@ -646,6 +487,30 @@ func (m *Manager) maintain(ctx context.Context) {
 		}
 		unlock()
 	}
+	if len(nodes) == 1 {
+		runOne(nodes[0])
+		return
+	}
+	workerCount := min(maxMaintainConcurrency, len(nodes))
+	queue := make(chan [16]byte, len(nodes))
+	for _, nodeID := range nodes {
+		queue <- nodeID
+	}
+	close(queue)
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer wg.Done()
+			for nodeID := range queue {
+				if ctx.Err() != nil {
+					return
+				}
+				runOne(nodeID)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func (m *Manager) maintainNode(ctx context.Context, nodeID [16]byte, session *nodeSession) {
@@ -733,117 +598,4 @@ func (m *Manager) refresh(ctx context.Context, session *nodeSession) error {
 	session.fence = fence
 	session.registrationPending = true
 	return nil
-}
-
-// bindingTerm is an immutable snapshot of the session's current term. It is
-// copied under the node mutex and signed outside it, so renewal can never
-// race a concurrent binding issuance on the same fields.
-type bindingTerm struct {
-	fence                 *agentv1.ConnectionFenceV2
-	fenceID               [16]byte
-	nodeID                [16]byte
-	endpointID            [32]byte
-	identity              connectionowner.Identity
-	epoch                 int64
-	connectionID          [16]byte
-	authorizationRevision uint64
-	capabilities          []string
-}
-
-// issueBinding signs one binding for the term's current fence. The fence
-// travels with the binding so enforcing peers never need to guess the term.
-func (m *Manager) issueBinding(term *bindingTerm, kind agentv1.FenceOperationKind, operationID [16]byte, capability string) (*agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2, error) {
-	if !slices.Contains(term.capabilities, capability) {
-		return nil, nil, ErrCapabilityNotFenced
-	}
-	now := m.now().UTC()
-	binding, err := m.signer.IssueFenceBindingV2(kind, operationID, term.fenceID, term.nodeID, term.endpointID,
-		term.identity.InstanceID, uint64(term.identity.Incarnation), uint64(term.epoch),
-		term.connectionID, term.authorizationRevision, capability, now, now.Add(m.bindingTTL))
-	if err != nil {
-		return nil, nil, fmt.Errorf("ownersession: sign fence binding: %w", err)
-	}
-	return term.fence, binding, nil
-}
-
-// signFence signs the session term with its exact PostgreSQL lease deadline.
-// The fence expiry deliberately outlives the lease: the lease authorizes
-// current mutations while the proof remains verifiable for audit and late
-// result matching.
-func (m *Manager) signFence(session *nodeSession) (*agentv1.ConnectionFenceV2, error) {
-	issued := m.now().UTC()
-	if !session.leaseUntil.After(issued) {
-		return nil, errors.New("ownersession: lease deadline is not in the future")
-	}
-	fence, err := m.signer.IssueConnectionFenceV2(session.fenceID, session.nodeID, session.endpointID,
-		session.term.Identity().InstanceID, uint64(session.term.Identity().Incarnation), uint64(session.term.Epoch()),
-		session.term.ConnectionID(), session.authorizationRevision, session.capabilities,
-		session.leaseUntil, issued, session.leaseUntil.Add(m.fenceGrace))
-	if err != nil {
-		return nil, fmt.Errorf("ownersession: sign connection fence: %w", err)
-	}
-	return fence, nil
-}
-
-// StateUpdateOperationID derives the canonical operation identity of one node
-// trust update from its exact carrier: node, endpoint, state, revision, and
-// reason. The Controller signs fence bindings over this identity and
-// transportd derives it again independently, so one binding cannot authorize
-// a different update.
-func StateUpdateOperationID(nodeID [16]byte, endpointID []byte, state int32, revision uint64, reason string) [16]byte {
-	digest := sha256.New()
-	digest.Write(stateUpdateOperationDomain)
-	digest.Write(nodeID[:])
-	digest.Write(endpointID)
-	var stateBytes [4]byte
-	binary.BigEndian.PutUint32(stateBytes[:], uint32(state))
-	digest.Write(stateBytes[:])
-	var revisionBytes [8]byte
-	binary.BigEndian.PutUint64(revisionBytes[:], revision)
-	digest.Write(revisionBytes[:])
-	reasonBytes := []byte(reason)
-	var lengthBytes [4]byte
-	binary.BigEndian.PutUint32(lengthBytes[:], uint32(len(reasonBytes)))
-	digest.Write(lengthBytes[:])
-	digest.Write(reasonBytes)
-	var operationID [16]byte
-	copy(operationID[:], digest.Sum(nil)[:16])
-	return operationID
-}
-
-// fenceCapabilities normalizes a negotiated capability set into the frozen
-// fence encoding: sorted, unique, and bounded.
-func fenceCapabilities(capabilities []string) []string {
-	normalized := make([]string, 0, len(capabilities))
-	seen := make(map[string]struct{}, len(capabilities))
-	for _, capability := range capabilities {
-		if capability == "" || len(capability) > 128 {
-			continue
-		}
-		if _, duplicate := seen[capability]; duplicate {
-			continue
-		}
-		seen[capability] = struct{}{}
-		normalized = append(normalized, capability)
-	}
-	slices.Sort(normalized)
-	return normalized
-}
-
-func fixed16(value []byte) ([16]byte, error) {
-	if len(value) != 16 {
-		return [16]byte{}, errors.New("ownersession: value must be 16 bytes")
-	}
-	var fixed [16]byte
-	copy(fixed[:], value)
-	return fixed, nil
-}
-
-func fixed32(value []byte) ([32]byte, error) {
-	if len(value) != 32 {
-		return [32]byte{}, errors.New("ownersession: value must be 32 bytes")
-	}
-	var fixed [32]byte
-	copy(fixed[:], value)
-	return fixed, nil
 }

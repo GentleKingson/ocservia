@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
@@ -66,6 +67,9 @@ type Client struct {
 	queueCapacity int
 	expectedUID   uint32
 	expectedGID   uint32
+
+	connMu sync.Mutex
+	conn   *grpc.ClientConn
 }
 
 func New(path string, deadline time.Duration, queueCapacity int, expectedUID, expectedGID uint32) (*Client, error) {
@@ -78,17 +82,48 @@ func New(path string, deadline time.Duration, queueCapacity int, expectedUID, ex
 	return &Client{path: filepath.Clean(path), deadline: deadline, queueCapacity: queueCapacity, expectedUID: expectedUID, expectedGID: expectedGID}, nil
 }
 
+// Close closes the cached UDS gRPC connection if one was established.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.connMu.Lock()
+	conn := c.conn
+	c.conn = nil
+	c.connMu.Unlock()
+	if conn != nil {
+		return conn.Close()
+	}
+	return nil
+}
+
+func (c *Client) getConn() (*grpc.ClientConn, error) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	if c.conn != nil {
+		if c.conn.GetState() == connectivity.TransientFailure {
+			c.conn.ResetConnectBackoff()
+		}
+		return c.conn, nil
+	}
+	conn, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+	c.conn = conn
+	return conn, nil
+}
+
 func (c *Client) SendCommand(ctx context.Context, nodeID, envelope []byte) error {
 	ctx, span := otel.Tracer("ocservia.transportclient").Start(ctx, "transport.uds.send", trace.WithSpanKind(trace.SpanKindClient))
 	defer span.End()
 	if len(envelope) == 0 || len(envelope) > maxPayloadBytes {
 		return errors.New("command envelope size is invalid")
 	}
-	connection, err := c.dial()
+	connection, err := c.getConn()
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	response, err := transportv1.NewTransportServiceClient(connection).SendCommand(rpcCtx, &transportv1.SendCommandRequest{NodeId: nodeID, CommandEnvelope: envelope})
@@ -114,13 +149,12 @@ func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrant
 		return nil, errors.New("artifact ID is invalid")
 	}
 	maxBytes := int64(grant.GetMaxBytes())
-	connection, err := c.dial()
+	connection, err := c.getConn()
 	if err != nil {
 		return nil, err
 	}
 	stream, err := transportv1.NewTransportServiceClient(connection).FetchArtifact(ctx, &transportv1.FetchArtifactRequest{NodeId: nodeID[:], ArtifactId: artifactID[:], Purpose: "certificate_p12", MaxBytes: uint64(maxBytes), Grant: grant, FenceBinding: fenceBinding})
 	if err != nil {
-		connection.Close()
 		return nil, fmt.Errorf("fetch artifact: %w", err)
 	}
 	// transportd accepts a fetch only after its handler verified the fence
@@ -132,7 +166,6 @@ func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrant
 	reader, writer := io.Pipe()
 	accepted := make(chan error, 1)
 	go func() {
-		defer connection.Close()
 		hash := sha256.New()
 		var offset int64
 		reportAcceptance := func(err error) {
@@ -207,11 +240,10 @@ func (c *Client) consumeArtifact(ctx context.Context, grant *agentv1.ArtifactGra
 	if grant == nil || len(grant.GetNodeId()) != 16 || len(grant.GetArtifactId()) != 16 || len(grant.GetGrantId()) != 16 || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
 		return false, errors.New("artifact consumption request is invalid")
 	}
-	connection, err := c.dial()
+	connection, err := c.getConn()
 	if err != nil {
 		return false, err
 	}
-	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	response, err := transportv1.NewTransportServiceClient(connection).ConsumeArtifact(rpcCtx, &transportv1.ConsumeArtifactRequest{
@@ -411,11 +443,10 @@ func (c *Client) NodeConnection(ctx context.Context, nodeID []byte) (*transportv
 	if len(nodeID) != 16 {
 		return nil, errors.New("transport node is invalid")
 	}
-	connection, err := c.dial()
+	connection, err := c.getConn()
 	if err != nil {
 		return nil, err
 	}
-	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	metadata, err := transportv1.NewTransportServiceClient(connection).GetNodeConnection(rpcCtx, &transportv1.GetNodeConnectionRequest{NodeId: nodeID})
@@ -438,11 +469,10 @@ func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte,
 	if len(operationID) != 0 && len(operationID) != 16 {
 		return errors.New("trust update operation identity is invalid")
 	}
-	connection, err := c.dial()
+	connection, err := c.getConn()
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	response, err := transportv1.NewTransportServiceClient(connection).UpdateNodeTrust(rpcCtx, &transportv1.UpdateNodeTrustRequest{NodeId: nodeID, EndpointId: endpointID, State: state, Reason: reason, Revision: revision, OperationId: operationID, FenceBinding: fenceBinding})
@@ -456,11 +486,10 @@ func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte,
 }
 
 func (c *Client) CloseNode(ctx context.Context, nodeID []byte, reason string, fenceBinding *agentv1.FenceBindingV2) error {
-	connection, err := c.dial()
+	connection, err := c.getConn()
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	_, err = transportv1.NewTransportServiceClient(connection).CloseNode(rpcCtx, &transportv1.CloseNodeRequest{NodeId: nodeID, Reason: reason, FenceBinding: fenceBinding})
@@ -480,11 +509,10 @@ func (c *Client) RegisterOwnerFence(ctx context.Context, fence *agentv1.Connecti
 	if fence == nil || len(fence.GetNodeId()) != 16 || len(fence.GetFenceId()) != 16 || fence.GetOwnerEpoch() == 0 {
 		return errors.New("owner fence is invalid")
 	}
-	connection, err := c.dial()
+	connection, err := c.getConn()
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	response, err := transportv1.NewTransportServiceClient(connection).RegisterOwnerFence(rpcCtx, &transportv1.RegisterOwnerFenceRequest{Fence: fence})
@@ -505,11 +533,10 @@ func (c *Client) GetOwnerFence(ctx context.Context, nodeID []byte) (*agentv1.Con
 	if len(nodeID) != 16 {
 		return nil, errors.New("owner fence node is invalid")
 	}
-	connection, err := c.dial()
+	connection, err := c.getConn()
 	if err != nil {
 		return nil, err
 	}
-	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	response, err := transportv1.NewTransportServiceClient(connection).GetOwnerFence(rpcCtx, &transportv1.GetOwnerFenceRequest{NodeId: nodeID})
