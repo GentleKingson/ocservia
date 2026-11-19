@@ -65,7 +65,7 @@ func validateStaticSchema(ctx context.Context, db queryer, expected string) erro
 	}
 	sum := sha256.Sum256([]byte(catalog))
 	if hex.EncodeToString(sum[:]) != expected {
-		return errors.New("PostgreSQL schema differs from checkpoint artifact")
+		return fmt.Errorf("PostgreSQL schema differs from checkpoint artifact (got %x, want %s)", sum, expected)
 	}
 	return nil
 }

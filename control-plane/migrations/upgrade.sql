@@ -81,3 +81,12 @@ DROP TABLE public.privd_attestation_enrollment_credentials;
 DROP TABLE public.upstream_sync_records;
 -- ocservia:end-step
 -- ocservia:end-revision
+-- ocservia:revision=4
+-- ocservia:checkpoint={"checksum":"08b51e19e4507fbbca8489a75a595688822ba969fec9b2636d55bf3a19d7566a","steps":1}
+-- ocservia:step=001:backlog_and_expiry_partial_indexes
+-- ocservia:metadata={"catalog_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}
+CREATE INDEX commands_queued_expiry_idx ON public.commands USING btree (expires_at) WHERE (state = 'queued'::text);
+CREATE INDEX operations_node_backlog_idx ON public.operations USING btree (node_id) WHERE (state = ANY (ARRAY['queued'::text, 'offline_pending'::text, 'dispatched'::text, 'accepted'::text, 'running'::text, 'unknown'::text]));
+CREATE INDEX operations_workspace_backlog_idx ON public.operations USING btree (workspace_id) WHERE (state = ANY (ARRAY['queued'::text, 'offline_pending'::text, 'dispatched'::text, 'accepted'::text, 'running'::text, 'unknown'::text]));
+-- ocservia:end-step
+-- ocservia:end-revision
