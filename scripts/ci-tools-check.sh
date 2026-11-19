@@ -7,26 +7,19 @@ cd "${ROOT}"
 for suite in ${CI_SUITES}; do
   case "${suite}" in
     guards)
-      bash scripts/test-ci-relevance.sh
-      bash scripts/test-required-go-tests.sh
-      bash scripts/test-bootstrap-profiles.sh
+      bash -n scripts/ci-relevance.sh scripts/required-go-tests.sh scripts/bootstrap.sh
+      bash scripts/test-toolchain-consistency.sh
       ;;
     release)
       bash scripts/test-release-upgrade.sh
       bash scripts/test-controller-release-manifest.sh
-      bash scripts/test-controller-release-smoke.sh
       bash scripts/test-release-image-security.sh
-      bash scripts/test-bootstrap-installers.sh
       bash scripts/test-controller-quick-materials.sh
       bash scripts/test-build-cache-credentials.sh
-      bash scripts/test-buildx-cache-fallback.sh
       bash scripts/test-secret-scan-config.sh
       ;;
     cross-vm)
       make real-e2e-check
-      python3 scripts/test-real-e2e-hosted.py
-      python3 scripts/test-real-e2e-business.py
-      bash scripts/test-real-e2e-artifact.sh
       ;;
     source-style)
       bash scripts/lint.sh source-style

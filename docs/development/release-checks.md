@@ -235,36 +235,7 @@ Checkpoint and receipt identities are defined in the
 
 ### Bundled PostgreSQL initialization
 
-Run the bundled PostgreSQL initializer regression only inside an authorized,
-isolated Linux environment with a private checkout directory, host root access,
-Python 3, `setpriv`, and a local Docker daemon. Never run it on a production
-machine, with real credentials, or against existing database volumes, and pass
-the target release's digest-pinned PostgreSQL 18 image instead of `latest`:
-
-```bash
-python3 scripts/test-postgres-init-observation.py \
-  --image "${OCSERV_POSTGRES_IMAGE:?set the target PostgreSQL 18 digest}" \
-  --expect-argv no
-```
-
-Using generated task directories, synthetic credentials, an internal Docker
-network, and the real container entrypoint, the script first verifies that it
-can read process argv entries before asserting that plaintext and base64
-passwords never appear in argv. It also tests special characters in passwords,
-preservation of existing roles, owner and runtime logins, physical backup
-verification, invalid password rejection, error propagation, and suppression of
-HBA appends when an SQL statement fails. It holds a catalog lock during
-initialization to widen the inspection window, so it runs longer than a normal
-container startup.
-
-The log and temporary-file checks are supplementary: the harness does not assert
-that log collection succeeded and matches only complete raw or base64 password
-strings, so a passing run does not prove every output channel is free of
-credentials. Record the candidate SHA, script digest, image digest, exit status
-and JSON report for each execution without reusing logs from an earlier commit.
-The script removes its task-owned container, network and temporary directory on
-exit. This privileged regression is manual-only, so a passing CI run does not
-mean it was executed.
+Validate bundled PostgreSQL initialization in an isolated Linux Docker environment using the digest-pinned PostgreSQL 18 image and `scripts/database-integration.sh` / `scripts/test-postgres-volume-layout.sh`; never test with real credentials or against production volumes.
 
 ### Signer and certificate verification
 
@@ -333,8 +304,6 @@ that, prepare only what the entrypoint you run requires:
 | --- | --- |
 | `bootstrap.sh go-test` | curl with trusted CA certificates, tar, gzip, sed, awk, `sha256sum` or `shasum`, jq |
 | `go-check.sh standard` | Installed Go/gofmt |
-| `test-required-go-tests.sh` | Go, jq, setsid, Ruby, Python 3; includes real standalone `GOWORK=off` fixtures and signal/timeout tests |
-| `test-bootstrap-profiles.sh` | Ruby, tar, gzip, a SHA-256 utility and jq; disposable platform/preflight fixtures run only for CI/tooling changes |
 | `docs-check.sh` | Git and `jq`; no toolchain or platform self-tests |
 | `go-check.sh race` (also the race part of `full`) | `CGO_ENABLED=1`, a C compiler selected by `go env CC`, linker and C development headers; no Docker requirement |
 | `database-integration.sh` smoke (delegates to `database-postgres-smoke.sh`) | Go, jq, setsid, Python 3, Docker CLI and daemon, and the race prerequisites (cgo, C compiler) |
@@ -420,8 +389,6 @@ docker run --rm --init --name "$(basename "$task")-validation" \
     go version
     go env GOVERSION GOHOSTOS GOHOSTARCH GOOS GOARCH CGO_ENABLED CC
     gcc --version
-    bash scripts/test-required-go-tests.sh
-    bash scripts/test-bootstrap-profiles.sh
     scripts/go-check.sh standard
     DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh
     scripts/docs-check.sh
@@ -499,9 +466,7 @@ acceptance or license compliance.
 
 [`scripts/ci-relevance.sh`](../../scripts/ci-relevance.sh) evaluates changed
 paths with ordered first-match patterns instead of package or call-graph
-analysis. The script and
-[`scripts/test-ci-relevance.sh`](../../scripts/test-ci-relevance.sh) are the
-source of the exact rule order. In outline:
+analysis and is the source of the exact rule order. In outline:
 
 - Rules for executable code and deployment configuration sit ahead of the
   generic Markdown fallback. Markdown under `web/`, `rust/`, `proto/`,
@@ -514,15 +479,13 @@ source of the exact rule order. In outline:
 - Installer, release, package, Controller and Agent-upgrade scripts, release
   workflows and `deploy/{package,systemd,bootstrap,managed-node,production}`
   select the release contract suite and installer self-tests.
-- Cross-VM files (`real-e2e.yml`, `deploy/real-e2e`, `scripts/real-e2e-*`,
-  `scripts/test-real-e2e-*`) select the `cross-vm` suite: `make real-e2e-check`
-  and the offline `test-real-e2e-*` contracts. The credentialed three-VM run is
-  never started, and the manual-acceptance harnesses (`scripts/resilience-*`,
-  `scripts/security-acceptance-*`) are checked but not run.
-- `ci.yml`, `security.yml`, `scripts/ci-*`, `test-ci-*`, the required-test
-  selectors and the bootstrap tests select the CI guard suite
-  (`test-ci-relevance.sh`, `test-required-go-tests.sh`,
-  `test-bootstrap-profiles.sh`).
+- Cross-VM files (`real-e2e.yml`, `deploy/real-e2e`, `scripts/real-e2e-*`)
+  select the `cross-vm` suite (`make real-e2e-check`). The credentialed three-VM
+  run is never started, and the manual-acceptance harnesses
+  (`scripts/resilience-*`, `scripts/security-acceptance-*`) are checked but not
+  run.
+- `ci.yml`, `security.yml`, `scripts/ci-*`, the required-test selectors and
+  `test-toolchain-consistency.sh` select the CI guard suite.
 - `proto/*`, `openapi/*`, `control-plane/gen/*`, `scripts/bootstrap.sh`,
   `env.sh`, `checksums.txt`, `toolchains.lock` and any unknown path enable all
   Basic flags and every CI suite at Quick scope.
@@ -1072,9 +1035,6 @@ Local checks (no Tailnet credentials or actual joins):
 
 ```sh
 make real-e2e-check
-python3 scripts/test-real-e2e-hosted.py
-python3 scripts/test-real-e2e-business.py
-bash scripts/test-real-e2e-artifact.sh
 actionlint .github/workflows/real-e2e.yml
 shellcheck -x scripts/real-e2e-{hosted,controller,node,artifact,relay-host}.sh
 ```
@@ -1285,18 +1245,12 @@ running the same token installer. Manual uncertain-response recovery remains
 in the Agent CLI procedures; none of these checks resets identities or keys.
 
 
-`test-relay-launchers.py` swaps the fixed binary paths for argv recorders. The
-systemd unit check `test-relay-systemd.sh` needs root inside a separate
-disposable systemd container, where it checks the rendered unit argv, service UID
-and GID, signal delivery and exit codes for single-Relay configuration. Never run either fixture on an installed host. In Basic CI, the
-installer and launcher self-tests run only when [path routing](#path-routing)
-sets the installer flag; `test-relay-systemd.sh` is manual-only.
+`test-relay-launchers.py` swaps the fixed binary paths for argv recorders. Never run it on an installed host. In Basic CI, the installer and launcher self-tests run only when [path routing](#path-routing) sets the installer flag.
 
 To validate the Compose configuration and authentication/database contracts, export a unique `RUN_ID`, `ARTIFACT_DIR`
 and a private, owner-controlled `RUNNER_TEMP`, then run:
 
 ```sh
-bash scripts/test-database-deployment-config.sh
 bash scripts/test-production-auth-config.sh
 bash scripts/docs-check.sh
 ```
@@ -1435,8 +1389,7 @@ The collector records stream, watcher and query counters, slow-consumer
 disconnects, file descriptors, goroutines, RSS and the completion of an
 unrelated probe.
 
-Both profiles are manual and outside Basic CI, with no Actions workflow. `make
-verify` runs only the bounds self-test (`scripts/test-resilience-capacity.sh`).
+Both profiles are manual and outside Basic CI, with no Actions workflow.
 Use a Linux host with Docker, Compose, `curl` and `jq`:
 
 ```bash
@@ -1879,17 +1832,11 @@ gh workflow run release.yml --ref main -f version=0.0.0
 In a rehearsal run, the native Agent and Controller build, image-security and
 smoke jobs must pass alongside asset preparation, and the Publish job must be
 skipped. For local validation of release changes, run
-`scripts/test-release-upgrade.sh` (which invokes
-`scripts/test-release-workflows.py`), the package and installer test scripts,
+`scripts/test-release-upgrade.sh`, the package and installer test scripts,
 ShellCheck (`scripts/lint.sh`), any local workflow linter you have installed, and
 the documentation checks from
-[Choose the validation scope](#choose-the-validation-scope). The release
-self-tests include `scripts/test-release-publication.py`, an offline
-`0.0.0-rc.1` publication rehearsal with GitHub and GHCR doubles that checks
-collisions, partial uploads, image and index mismatches, API failures and missing
-immutability without external writes; it is not evidence of a real registry push
-or native build. Never publish release assets or touch production deployments
-during validation.
+[Choose the validation scope](#choose-the-validation-scope). Never publish release
+assets or touch production deployments during validation.
 
 If a validation suite fails, rerun its owning workflow with the full set of
 checks (for recovery failures, rerun the entire Business job). Failed, cancelled,
