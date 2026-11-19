@@ -4,7 +4,7 @@ import type {
   PlatformEvent,
 } from "@ocservia/api-client";
 import { defineStore } from "pinia";
-import { computed, onScopeDispose, ref, watch } from "vue";
+import { computed, onScopeDispose, ref, shallowRef, watch } from "vue";
 import { createReadRequest } from "./read-request";
 import { createForegroundRefresh } from "./foreground-refresh";
 
@@ -24,8 +24,8 @@ const platformRefreshDelay = 500;
 
 export const useOverviewStore = defineStore("overview", () => {
   const fleet = useFleetStore();
-  const operations = ref<Operation[]>([]);
-  const events = ref<PlatformEvent[]>([]);
+  const operations = shallowRef<Operation[]>([]);
+  const events = shallowRef<PlatformEvent[]>([]);
   const summary = ref<OperationSummary>({ active: 0, unknown: 0 });
   const operationsLoaded = ref(false);
   const eventsLoaded = ref(false);
@@ -189,17 +189,20 @@ export const useOverviewStore = defineStore("overview", () => {
   // whole workspace, not just the newest operations page.
   const activeOperations = computed(() => summary.value.active);
   const unknownOperations = computed(() => summary.value.unknown);
-  const recentFailedOperations = computed(
-    () =>
-      operations.value
-        .slice(0, recentOperationWindow)
-        .filter((operation) => operation.state === "failed").length,
-  );
+  const recentFailedOperations = computed(() => {
+    const list = operations.value;
+    const limit = Math.min(list.length, recentOperationWindow);
+    let failed = 0;
+    for (let index = 0; index < limit; index += 1) {
+      if (list[index]?.state === "failed") failed += 1;
+    }
+    return failed;
+  });
   const recentOperations = computed(() =>
     operations.value.slice(0, recentEventLimit),
   );
   const recentEvents = computed(() =>
-    [...events.value].reverse().slice(0, recentEventLimit),
+    events.value.slice(-recentEventLimit).reverse(),
   );
 
   return {

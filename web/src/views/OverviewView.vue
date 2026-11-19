@@ -41,34 +41,44 @@ const eventsState = computed(() =>
 const fleetShown = computed(
   () => fleetState.value === "ready" || fleetState.value === "stale",
 );
-const staleNodes = computed(
-  () => fleet.nodes.filter((node) => node.freshness === "stale").length,
-);
-const notableNodes = computed(() =>
-  fleet.nodes
-    .filter(
-      (node) => node.connectionState !== "online" || node.freshness === "stale",
-    )
-    .slice(0, 5),
+const fleetHighlights = computed(() => {
+  let stale = 0;
+  const notable: typeof fleet.nodes = [];
+  for (const node of fleet.nodes) {
+    if (node.freshness === "stale") stale += 1;
+    if (
+      notable.length < 5 &&
+      (node.connectionState !== "online" || node.freshness === "stale")
+    ) {
+      notable.push(node);
+    }
+  }
+  return { stale, notable };
+});
+const staleNodes = computed(() => fleetHighlights.value.stale);
+const notableNodes = computed(() => fleetHighlights.value.notable);
+const nodeById = computed(
+  () => new Map(fleet.nodes.map((node) => [node.id, node])),
 );
 
 function nodeReference(nodeId: string): string {
-  const node = fleet.nodes.find((candidate) => candidate.id === nodeId);
+  const node = nodeById.value.get(nodeId);
   return node ? node.name : nodeId.slice(0, 8);
 }
 
+const eventLabels: Record<string, string> = {
+  connected: "eventConnected",
+  disconnected: "eventDisconnected",
+  command_result: "eventCommandResult",
+  simulation_result: "eventCommandResult",
+  heartbeat: "eventHeartbeat",
+  telemetry: "eventTelemetry",
+  path_changed: "eventPathChanged",
+  error: "eventError",
+};
+
 function eventLabel(type: string): string {
-  const labels: Record<string, string> = {
-    connected: "eventConnected",
-    disconnected: "eventDisconnected",
-    command_result: "eventCommandResult",
-    simulation_result: "eventCommandResult",
-    heartbeat: "eventHeartbeat",
-    telemetry: "eventTelemetry",
-    path_changed: "eventPathChanged",
-    error: "eventError",
-  };
-  return labels[type] ?? type;
+  return eventLabels[type] ?? type;
 }
 
 function timeLabel(value: Date | string): string {

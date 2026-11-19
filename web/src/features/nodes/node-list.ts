@@ -28,6 +28,10 @@ export interface NodeListState {
   columns: OptionalNodeColumn[];
 }
 
+const agentFilterValues = new Set<string>(nodeFilterGroups.agent);
+const extendedYearPrefix = /^\+?\d{5,}-/;
+const isoYearPrefix = /^\d{4}-/;
+
 export function nodeFilterValue(
   node: NodeObservedState,
   group: NodeFilterGroup,
@@ -44,9 +48,7 @@ export function nodeFilterValue(
         ? node.path.mode
         : "unknown";
     case "agent":
-      return (nodeFilterGroups.agent as readonly string[]).includes(
-        node.agentVersionState ?? "",
-      )
+      return agentFilterValues.has(node.agentVersionState ?? "")
         ? (node.agentVersionState as string)
         : "unknown";
   }
@@ -58,18 +60,31 @@ export function filterNodes(
   state: Pick<NodeListState, "search" | "filters">,
 ): NodeObservedState[] {
   const search = state.search.trim().toLowerCase();
-  return nodes.filter(
-    (node) =>
-      (!search ||
-        node.name.toLowerCase().includes(search) ||
-        node.id.toLowerCase().includes(search)) &&
-      nodeFilterGroupNames.every((group) => {
-        const values = state.filters[group];
-        return (
-          values.length === 0 || values.includes(nodeFilterValue(node, group))
-        );
-      }),
-  );
+  const activeFilters: [NodeFilterGroup, Set<string>][] = [];
+  for (const group of nodeFilterGroupNames) {
+    const values = state.filters[group];
+    if (values.length > 0) activeFilters.push([group, new Set(values)]);
+  }
+  if (!search && activeFilters.length === 0) return [...nodes];
+  const matched: NodeObservedState[] = [];
+  for (const node of nodes) {
+    if (
+      search &&
+      !node.name.toLowerCase().includes(search) &&
+      !node.id.toLowerCase().includes(search)
+    ) {
+      continue;
+    }
+    let ok = true;
+    for (const [group, allowed] of activeFilters) {
+      if (!allowed.has(nodeFilterValue(node, group))) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) matched.push(node);
+  }
+  return matched;
 }
 
 export function countFilterValues(
@@ -93,8 +108,8 @@ export function heartbeatOrder(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;
   if (value === "infinity") return Number.POSITIVE_INFINITY;
   if (value === "-infinity") return Number.NEGATIVE_INFINITY;
-  if (/^\+?\d{5,}-/.test(value)) return Number.MAX_VALUE;
-  if (!/^\d{4}-/.test(value)) return undefined;
+  if (extendedYearPrefix.test(value)) return Number.MAX_VALUE;
+  if (!isoYearPrefix.test(value)) return undefined;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? undefined : parsed;
 }
@@ -110,24 +125,29 @@ export function sortNodes(
   nodes: readonly NodeObservedState[],
   sort: NodeSort,
 ): NodeObservedState[] {
-  const byId = (a: NodeObservedState, b: NodeObservedState) =>
-    a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-  return [...nodes].sort((a, b) => {
-    if (sort === "heartbeat") {
-      const left = heartbeatOrder(a.lastHeartbeatAt);
-      const right = heartbeatOrder(b.lastHeartbeatAt);
-      if (left !== right) {
-        if (left === undefined) return 1;
-        if (right === undefined) return -1;
-        return left > right ? -1 : 1;
+  if (sort === "heartbeat") {
+    const decorated = nodes.map((node) => ({
+      node,
+      order: heartbeatOrder(node.lastHeartbeatAt),
+    }));
+    decorated.sort((a, b) => {
+      if (a.order !== b.order) {
+        if (a.order === undefined) return 1;
+        if (b.order === undefined) return -1;
+        return a.order > b.order ? -1 : 1;
       }
-    } else if (a.name !== b.name) {
+      return a.node.id < b.node.id ? -1 : a.node.id > b.node.id ? 1 : 0;
+    });
+    return decorated.map((entry) => entry.node);
+  }
+  return [...nodes].sort((a, b) => {
+    if (a.name !== b.name) {
       if (!a.name) return 1;
       if (!b.name) return -1;
       const order = nameCollator.compare(a.name, b.name);
       if (order !== 0) return order;
     }
-    return byId(a, b);
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
 }
 

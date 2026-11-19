@@ -193,4 +193,33 @@ describe("relativeTimestamp", () => {
       relativeTimestamp("+275760-09-13T00:00:00Z", now, "en"),
     ).toBeUndefined();
   });
+
+  it("formats consistently across repeated calls and locale cache eviction", () => {
+    const locales = [
+      "en",
+      "en-US",
+      "en-GB",
+      "en-AU",
+      "en-CA",
+      "zh",
+      "zh-CN",
+      "zh-TW",
+      "ja",
+      "ko",
+      "fr",
+      "de",
+      "es",
+      "it",
+      "pt",
+      "nl",
+      "sv",
+      "pl",
+    ];
+    for (const loc of locales) {
+      expect(relativeTimestamp("2026-03-01T11:55:00Z", now, loc)).toBeDefined();
+    }
+    expect(relativeTimestamp("2026-03-01T11:55:00Z", now, "en")).toBe(
+      "5 minutes ago",
+    );
+  });
 });
