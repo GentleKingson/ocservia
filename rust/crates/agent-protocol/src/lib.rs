@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "identity")]
+pub mod identity;
+
 use std::io;
 
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{

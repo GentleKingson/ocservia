@@ -860,7 +860,7 @@ fn policy_enrollment_and_rate_unit_invariants() {
         proof: None,
         sealing_keys: sealing_keys(),
     };
-    ocservia_agent_identity::authorize_enrollment(&mut req, &key).expect("sign");
+    ocservia_agent_protocol::identity::authorize_enrollment(&mut req, &key).expect("sign");
     assert!(validate_enrollment(&req, key.public()).is_ok());
     for (tok, ok) in [
         (format!("obt1_{}", req.token), false),
@@ -871,7 +871,7 @@ fn policy_enrollment_and_rate_unit_invariants() {
         let mut r = req.clone();
         r.token = tok;
         if ok || r.token.starts_with("obt1_") {
-            ocservia_agent_identity::authorize_enrollment(&mut r, &key).expect("sign");
+            ocservia_agent_protocol::identity::authorize_enrollment(&mut r, &key).expect("sign");
         }
         assert_eq!(validate_enrollment(&r, key.public()).is_ok(), ok);
     }

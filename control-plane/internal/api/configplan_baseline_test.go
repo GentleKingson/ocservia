@@ -13,12 +13,12 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
@@ -48,7 +48,7 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 	} {
 		testutil.Exec(t, ctx, pool, fixture.sql, fixture.args...)
 	}
-	if _, err := attestationtest.InstallKey(ctx, pool, node); err != nil {
+	if _, err := testfixture.InstallKey(ctx, pool, node); err != nil {
 		t.Fatal(err)
 	}
 	ops := apiOperationService(pool)

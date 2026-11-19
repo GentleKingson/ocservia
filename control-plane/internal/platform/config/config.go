@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
@@ -803,7 +802,7 @@ func (c Config) BrowserOrigin() string {
 	if strings.ContainsAny(c.PublicOrigin, "?#") {
 		return ""
 	}
-	canonical, ok := browserorigin.Normalize(c.PublicOrigin)
+	canonical, ok := NormalizeBrowserOrigin(c.PublicOrigin)
 	if !ok {
 		return ""
 	}

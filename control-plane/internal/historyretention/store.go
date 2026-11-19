@@ -1,5 +1,4 @@
-// Package store is the storage boundary for independent history retention.
-package store
+package historyretention
 
 import (
 	"context"

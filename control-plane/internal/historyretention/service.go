@@ -12,7 +12,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	retentionstore "github.com/GentleKingson/ocservia/control-plane/internal/historyretention/store"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -27,9 +26,6 @@ func (p Policy) Validate() error {
 	}
 	return nil
 }
-
-type Command = retentionstore.Command
-type Provider = retentionstore.Provider
 
 type Service struct {
 	backend database.Backend

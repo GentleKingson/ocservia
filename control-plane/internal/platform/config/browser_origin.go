@@ -1,5 +1,4 @@
-// Package browserorigin canonicalizes HTTP origins for browser trust checks.
-package browserorigin
+package config
 
 import (
 	"net"
@@ -8,9 +7,9 @@ import (
 	"strings"
 )
 
-// Normalize returns the canonical serialization of an HTTP(S) origin. It
+// NormalizeBrowserOrigin returns the canonical serialization of an HTTP(S) origin. It
 // rejects values that contain URL components which are not part of an origin.
-func Normalize(value string) (string, bool) {
+func NormalizeBrowserOrigin(value string) (string, bool) {
 	parsed, err := url.Parse(strings.TrimSpace(value))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
 		return "", false

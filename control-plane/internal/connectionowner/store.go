@@ -1,4 +1,4 @@
-package ownerstore
+package connectionowner
 
 import (
 	"context"
@@ -14,7 +14,7 @@ type Identity struct {
 	Incarnation int64
 }
 
-type Term struct {
+type StoreTerm struct {
 	Identity             Identity
 	NodeID, ConnectionID [16]byte
 	Epoch                int64
@@ -25,7 +25,7 @@ type Lease struct {
 	Until value.Timestamp
 }
 
-type State struct {
+type OwnerState struct {
 	InstanceID      uuid.UUID
 	Incarnation     int64
 	ConnectionID    [16]byte
@@ -35,14 +35,14 @@ type State struct {
 }
 
 type Store interface {
-	Acquire(context.Context, Term, time.Duration) (Lease, error)
-	Renew(context.Context, Term, time.Duration) (value.Timestamp, error)
-	Release(context.Context, Term) error
-	Assert(context.Context, Term) error
-	Read(context.Context, [16]byte) (State, error)
+	Acquire(context.Context, StoreTerm, time.Duration) (Lease, error)
+	Renew(context.Context, StoreTerm, time.Duration) (value.Timestamp, error)
+	Release(context.Context, StoreTerm) error
+	Assert(context.Context, StoreTerm) error
+	Read(context.Context, [16]byte) (OwnerState, error)
 }
 
-func FromTransaction(tx database.Tx) (Store, error) {
+func StoreFromTransaction(tx database.Tx) (Store, error) {
 	p, ok := tx.(interface{ ConnectionOwnerStore() Store })
 	if !ok {
 		return nil, database.ErrUnsupported

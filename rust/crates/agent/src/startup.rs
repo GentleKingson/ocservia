@@ -84,7 +84,8 @@ pub(super) fn prepare_enrollment(config: &Config) -> Result<String, io::Error> {
     let controller = config
         .controller
         .ok_or_else(|| invalid("--controller is required for enrollment preparation"))?;
-    let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
+    let identity =
+        ocservia_agent_protocol::identity::Identity::provision(&config.identity_dir, controller)?;
     Ok(hex::encode(identity.endpoint_id().as_bytes()))
 }
 
@@ -100,7 +101,8 @@ async fn enroll_agent(
         .as_deref()
         .ok_or_else(|| invalid("--enrollment-environment is required"))?;
     let token = read_enrollment_token(token_file)?;
-    let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
+    let identity =
+        ocservia_agent_protocol::identity::Identity::provision(&config.identity_dir, controller)?;
     let endpoint = with_relay_tls_roots(
         Endpoint::builder(presets::N0),
         load_relay_tls_roots(config)?,

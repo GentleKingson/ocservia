@@ -1,6 +1,6 @@
-// Package attestationstore owns the storage contract shared by the privd
+// Store contract shared by the storage contract shared by the privd
 // attestation enrollment, registration and revocation transactions.
-package attestationstore
+package privdattestation
 
 import (
 	"context"
@@ -44,7 +44,7 @@ type Store interface {
 
 type Provider interface{ PrivdAttestationStore() Store }
 
-func From(tx database.Tx) (Store, error) {
+func StoreFrom(tx database.Tx) (Store, error) {
 	p, ok := tx.(Provider)
 	if !ok {
 		return nil, database.ErrUnsupported

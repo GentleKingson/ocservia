@@ -1,7 +1,5 @@
 //! Durable Agent endpoint identity and controller identity pinning.
 
-#![forbid(unsafe_code)]
-
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};

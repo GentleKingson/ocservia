@@ -2371,7 +2371,6 @@ dependencies = [
  "hex",
  "iroh",
  "iroh-relay",
- "ocservia-agent-identity",
  "ocservia-agent-protocol",
  "ocservia-command-authorization",
  "ocservia-command-journal",
@@ -2396,26 +2395,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "ocservia-agent-identity"
+name = "ocservia-agent-protocol"
 version = "0.1.0"
 dependencies = [
  "hex",
  "iroh",
  "ocservia-contracts",
+ "prost",
  "prost-types",
  "rustix",
  "sha2 0.10.9",
- "zeroize",
-]
-
-[[package]]
-name = "ocservia-agent-protocol"
-version = "0.1.0"
-dependencies = [
- "ocservia-contracts",
- "prost",
- "prost-types",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -2552,7 +2543,7 @@ dependencies = [
  "hyper-util",
  "iroh",
  "iroh-relay",
- "ocservia-agent-identity",
+ "ocservia-agent-protocol",
  "ocservia-command-authorization",
  "ocservia-contracts",
  "ocservia-observability",

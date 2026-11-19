@@ -68,7 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let node_id = config
         .node_id
         .ok_or_else(|| invalid("--node-id is required"))?;
-    let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
+    let identity =
+        ocservia_agent_protocol::identity::Identity::provision(&config.identity_dir, controller)?;
     let transport = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(u32::try_from(MAX_WRITE_QUEUE)?))
         .build();

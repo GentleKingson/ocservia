@@ -1,6 +1,4 @@
-// Package attestationtest builds root-attestation fixtures for database tests.
-// It is not linked by the Controller binary.
-package attestationtest
+package testfixture
 
 import (
 	"context"

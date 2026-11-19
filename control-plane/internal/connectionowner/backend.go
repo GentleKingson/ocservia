@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner/ownerstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 )
@@ -15,17 +14,17 @@ func AcquireBackend(ctx context.Context, backend database.Backend, nodeID [16]by
 	if leaseTTL <= 0 {
 		return nil, errors.New("connectionowner: lease TTL must be positive")
 	}
-	var lease ownerstore.Lease
+	var lease Lease
 	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := ownerstore.FromTransaction(tx)
+		store, err := StoreFromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		lease, err = store.Acquire(ctx, ownerstore.Term{Identity: identity, NodeID: nodeID, ConnectionID: connectionID}, leaseTTL)
+		lease, err = store.Acquire(ctx, StoreTerm{Identity: identity, NodeID: nodeID, ConnectionID: connectionID}, leaseTTL)
 		return err
 	})
 	if errors.Is(err, database.ErrCommitUnknown) {
-		term := ownerstore.Term{Identity: identity, NodeID: nodeID, ConnectionID: connectionID, Epoch: lease.Epoch}
+		term := StoreTerm{Identity: identity, NodeID: nodeID, ConnectionID: connectionID, Epoch: lease.Epoch}
 		if confirmTerm(ctx, backend, term, lease.Until, true) == nil {
 			err = nil
 		}
@@ -43,14 +42,14 @@ func AcquireBackend(ctx context.Context, backend database.Backend, nodeID [16]by
 	return &Term{identity: identity, nodeID: nodeID, connectionID: connectionID, epoch: lease.Epoch, leaseTTL: leaseTTL, leaseUntil: until}, nil
 }
 
-func (t *Term) storedTerm() ownerstore.Term {
-	return ownerstore.Term{Identity: t.identity, NodeID: t.nodeID, ConnectionID: t.connectionID, Epoch: t.epoch}
+func (t *Term) storedTerm() StoreTerm {
+	return StoreTerm{Identity: t.identity, NodeID: t.nodeID, ConnectionID: t.connectionID, Epoch: t.epoch}
 }
 
 func (t *Term) RenewBackend(ctx context.Context, backend database.Backend) (time.Time, error) {
 	var until value.Timestamp
 	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := ownerstore.FromTransaction(tx)
+		store, err := StoreFromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -71,7 +70,7 @@ func (t *Term) RenewBackend(ctx context.Context, backend database.Backend) (time
 
 func (t *Term) ReleaseBackend(ctx context.Context, backend database.Backend) error {
 	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := ownerstore.FromTransaction(tx)
+		store, err := StoreFromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -86,7 +85,7 @@ func (t *Term) ReleaseBackend(ctx context.Context, backend database.Backend) err
 	return err
 }
 
-func confirmTerm(ctx context.Context, backend database.Backend, term ownerstore.Term, until value.Timestamp, live bool) error {
+func confirmTerm(ctx context.Context, backend database.Backend, term StoreTerm, until value.Timestamp, live bool) error {
 	check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	state, err := ReadStateBackend(check, backend, term.NodeID)
@@ -100,7 +99,7 @@ func confirmTerm(ctx context.Context, backend database.Backend, term ownerstore.
 }
 
 func (t *Term) AssertTransaction(ctx context.Context, tx database.Tx) error {
-	store, err := ownerstore.FromTransaction(tx)
+	store, err := StoreFromTransaction(tx)
 	if err != nil {
 		return err
 	}
@@ -117,7 +116,7 @@ func (t *Term) AssertCurrentBackend(ctx context.Context, backend database.Backen
 
 func ReadStateBackend(ctx context.Context, backend database.Backend, nodeID [16]byte) (state OwnerState, err error) {
 	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := ownerstore.FromTransaction(tx)
+		store, err := StoreFromTransaction(tx)
 		if err != nil {
 			return err
 		}

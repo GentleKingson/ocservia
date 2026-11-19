@@ -1,7 +1,6 @@
 [workspace]
 members = [
   "crates/agent",
-  "crates/agent-identity",
   "crates/agent-protocol",
   "crates/command-journal",
   "crates/command-authorization",

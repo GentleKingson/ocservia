@@ -23,16 +23,16 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/databasetest"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func enrollmentBackend(t *testing.T) database.Backend {
 	t.Helper()
-	runtime, _ := databasetest.OpenIsolated(t, t, "enrollment")
+	runtime, _ := testfixture.OpenIsolated(t, t, "enrollment")
 	return postgres.WrapPool(runtime)
 }
 

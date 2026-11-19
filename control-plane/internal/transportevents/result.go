@@ -13,7 +13,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
@@ -44,7 +43,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 		return invalidCommandResult("command result completed_at exceeds clock skew bound")
 	}
 	errorCodeValue := result.GetErrorCode()
-	if len(result.GetResult()) > 1<<20 || (errorCodeValue != "" && !postgresinput.ValidText(errorCodeValue, 128)) {
+	if len(result.GetResult()) > 1<<20 || (errorCodeValue != "" && !value.ValidText(errorCodeValue, 128)) {
 		return invalidCommandResult("command result field is invalid")
 	}
 	state := ""

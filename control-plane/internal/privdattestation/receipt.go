@@ -16,7 +16,6 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation/attestationstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -58,7 +57,7 @@ type UpgradeResultVerification struct {
 
 func (v UpgradeResultVerification) Verified() bool { return v.Status == "verified" }
 
-type attestationKeyRecord = attestationstore.VerificationKey
+type attestationKeyRecord = VerificationKey
 
 type keyLookup func(context.Context, uuid.UUID, string) (attestationKeyRecord, error)
 
@@ -115,7 +114,7 @@ func VerifyResultTransaction(ctx context.Context, tx database.Tx, nodeID uuid.UU
 
 func transactionKeyLookup(tx database.Tx) keyLookup {
 	return func(ctx context.Context, node uuid.UUID, key string) (attestationKeyRecord, error) {
-		store, err := attestationstore.From(tx)
+		store, err := StoreFrom(tx)
 		if err != nil {
 			return attestationKeyRecord{}, err
 		}
