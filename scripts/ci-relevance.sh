@@ -64,7 +64,7 @@ classify_path() {
       tools_suite guards; tools_suite release; tools_suite cross-vm; tools_suite source-style; tools_suite contracts ;;
     scripts/build-relay.sh)
       run_rust=true; tools_suite release ;;
-    scripts/buildx-cache.sh|scripts/test-buildx-cache-fallback.sh|.github/actions/build-cache-credentials/*)
+    scripts/buildx-cache.sh|.github/actions/build-cache-credentials/*)
       tools_suite release ;;
     scripts/test-build-cache-credentials.sh|scripts/secret-scan.toml|scripts/test-secret-scan-config*.sh)
       tools_suite release ;;
@@ -79,11 +79,10 @@ classify_path() {
     rust/agent-build.Dockerfile|rust/transportd.Dockerfile)
       tools_suite release ;;
     rust/*|scripts/rust-check.sh) run_rust=true ;;
-    # Run only by Release Check; no installer contract executes it, while
-    # test-release-workflows.py (release suite) asserts that Release Check calls it.
+    # Run only by Release Check; checked for syntax by test-release-upgrade.sh.
     scripts/release-quick-acceptance.sh) tools_suite release ;;
-    # Offline Cross-VM contracts only; the credentialed three-VM run stays manual.
-    .github/workflows/real-e2e.yml|deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*)
+    # Offline Cross-VM syntax check only; the credentialed three-VM run stays manual.
+    .github/workflows/real-e2e.yml|deploy/real-e2e/*|scripts/real-e2e-*)
       tools_suite cross-vm ;;
     # Also imported by real-e2e-business.py.
     scripts/release-business-api.py|scripts/release_business_runtime.py|scripts/release_business_scenarios.py) tools_suite release; run_installers=true; tools_suite cross-vm ;;
@@ -104,7 +103,6 @@ classify_path() {
     deploy/compose/*|deploy/database-e2e/*|scripts/*database*|scripts/*postgres*|\
     scripts/*-backup-restore-smoke.sh)
       run_go=true; run_database=true ;;
-    # test-release-workflows.py (release suite) reads the Release notes config.
     .github/release.yml) tools_suite release ;;
     .github/release-notes/*.md) run_docs=true; tools_suite release ;;
     # Shared Claude Code settings never reach CI or images; docs-check enforces its audited keys.
@@ -120,12 +118,11 @@ classify_path() {
     .github/workflows/ci.yml)
       tools_suite guards ;;
     .github/workflows/security.yml) tools_suite guards ;;
-    scripts/test-bootstrap-installers.sh) tools_suite release ;;
-    scripts/ci-*|scripts/test-ci-*|scripts/*required-go-tests*|scripts/test-bootstrap-*|scripts/go-test-environment.sh)
+    scripts/ci-*|scripts/*required-go-tests*|scripts/go-test-environment.sh|scripts/test-toolchain-consistency.sh)
       tools_suite guards ;;
     scripts/bootstrap.sh|scripts/env.sh|scripts/checksums.txt|toolchains.lock)
       fail_closed shared_toolchain_changed ;;
-    scripts/resilience-capacity.sh|scripts/test-resilience-capacity.sh|scripts/resilience-capacity-lib.sh|scripts/security-acceptance-*)
+    scripts/resilience-capacity.sh|scripts/resilience-capacity-lib.sh|scripts/security-acceptance-*)
       tools_suite release ;;
     *) fail_closed "unknown_path:${path}" ;;
   esac
