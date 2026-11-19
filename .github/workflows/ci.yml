@@ -30,8 +30,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.profile || 'quick' }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs.profile == 'quick' }}
+  group: ${{ github.workflow }}-${{ inputs.profile || 'quick' }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'quick') }}
 
 jobs:
   ci-relevance:
@@ -450,7 +450,7 @@ jobs:
 
   basic-ci-result:
     name: Basic CI Result
-    if: always()
+    if: ${{ always() && !cancelled() }}
     needs: [ci-relevance, docs, ci-tools, go, rust, installers, web, web-browser, database-smoke, database-recovery-full]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
