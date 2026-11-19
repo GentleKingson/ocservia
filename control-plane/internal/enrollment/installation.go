@@ -19,7 +19,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
-	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation/attestationstore"
 	"github.com/google/uuid"
 )
 
@@ -204,7 +203,7 @@ func (s *Service) InstallationChallenge(ctx context.Context, request Installatio
 	if err != nil {
 		return InstallationChallenge{}, err
 	}
-	keys, err := attestationstore.From(tx)
+	keys, err := privdattestation.StoreFrom(tx)
 	if err != nil {
 		return InstallationChallenge{}, err
 	}
@@ -255,7 +254,7 @@ func (s *Service) RegisterInstallationKey(ctx context.Context, request Installat
 	if !match {
 		return "", ErrEndpointMismatch
 	}
-	keys, err := attestationstore.From(tx)
+	keys, err := privdattestation.StoreFrom(tx)
 	if err != nil {
 		return "", err
 	}
@@ -273,7 +272,7 @@ func (s *Service) RegisterInstallationKey(ctx context.Context, request Installat
 		return "", ErrInvalidToken
 	}
 	now := s.now().UTC()
-	if err := keys.InsertKey(ctx, attestationstore.Key{NodeID: request.NodeID, KeyID: registration.PrivdAttestationKeyId, PublicKey: registration.PublicKey, CreatedAt: now, ApprovedAt: now, ActivatedAt: now}); err != nil {
+	if err := keys.InsertKey(ctx, privdattestation.Key{NodeID: request.NodeID, KeyID: registration.PrivdAttestationKeyId, PublicKey: registration.PublicKey, CreatedAt: now, ApprovedAt: now, ActivatedAt: now}); err != nil {
 		return "", err
 	}
 	if err := keys.ApproveCapability(ctx, request.NodeID, privdattestation.AttestationCapability); err != nil {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
+	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/google/uuid"
 )
 

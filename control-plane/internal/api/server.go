@@ -12,7 +12,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -20,6 +19,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
+	platformconfig "github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
@@ -137,7 +137,7 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 		authProxies: append([]netip.Prefix(nil), config.AuthTrustedProxies...),
 	}
 	if config.BrowserOrigin != "" {
-		normalized, ok := browserorigin.Normalize(config.BrowserOrigin)
+		normalized, ok := platformconfig.NormalizeBrowserOrigin(config.BrowserOrigin)
 		if ok {
 			s.browserOrigin = normalized
 		} else {

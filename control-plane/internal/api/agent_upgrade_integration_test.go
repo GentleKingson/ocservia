@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -114,7 +114,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		}
 	}
 	for _, nodeID := range []uuid.UUID{canaryID, batchID, otherID} {
-		if _, err := attestationtest.InstallKey(ctx, pool, nodeID); err != nil {
+		if _, err := testfixture.InstallKey(ctx, pool, nodeID); err != nil {
 			t.Fatal(err)
 		}
 	}

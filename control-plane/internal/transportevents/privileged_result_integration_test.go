@@ -8,9 +8,9 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
@@ -41,7 +41,7 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'privileged trust',$2,now(),now())`, workspaceID, "privileged-trust-"+workspaceID.String())
 	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'privileged-node','active',1,now(),now())`, nodeID, workspaceID)
-	attestationKey, err := attestationtest.InstallKey(ctx, pool, nodeID)
+	attestationKey, err := testfixture.InstallKey(ctx, pool, nodeID)
 	testutil.NoError(t, err)
 	endpoint := integrationEndpoint(nodeID)
 	testutil.Exec(t, ctx, pool, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:])
@@ -145,7 +145,7 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 			// Genuine signed completion still settles the command and its outbox.
 			envelope = storedEnvelope(commandID)
 			success := base(envelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)
-			testutil.NoError(t, attestationtest.AttachProof(envelope, success, attestationKey, 1))
+			testutil.NoError(t, testfixture.AttachProof(envelope, success, attestationKey, 1))
 			ingest(envelope, success)
 			if operation, command := states(operationID); operation != "succeeded" || command != "succeeded" {
 				t.Fatalf("signed result did not settle the command: operation=%s command=%s", operation, command)
@@ -173,7 +173,7 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 		}
 		// The signed completion from the original execution still recovers it.
 		success := base(envelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)
-		testutil.NoError(t, attestationtest.AttachProof(envelope, success, attestationKey, 2))
+		testutil.NoError(t, testfixture.AttachProof(envelope, success, attestationKey, 2))
 		ingest(envelope, success)
 		if operation, command := states(operationID); operation != "succeeded" || command != "succeeded" {
 			t.Fatalf("signed recovery did not settle the command: operation=%s command=%s", operation, command)

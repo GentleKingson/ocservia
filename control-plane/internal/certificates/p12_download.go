@@ -13,7 +13,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
-	"github.com/GentleKingson/ocservia/control-plane/internal/certificates/artifactstore"
+	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
@@ -23,7 +23,7 @@ import (
 
 func (s *Service) ArtifactResource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := artifactstore.FromTransaction(tx)
+		store, err := certificatestore.ArtifactFromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -39,10 +39,10 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 	grantID := uuid.Must(uuid.NewV7())
-	var eligible artifactstore.Eligible
+	var eligible certificatestore.Eligible
 	var grant *agentv1.ArtifactGrantV1
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := artifactstore.FromTransaction(tx)
+		store, err := certificatestore.ArtifactFromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -119,10 +119,10 @@ func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, g
 	if err != nil || len(grantBytes) == 0 || len(grantBytes) > 4096 {
 		return ErrArtifactDenied
 	}
-	consumption := artifactstore.Consumption{ID: id, GrantID: grantID, ActorID: actorID, SessionID: sessionID, NodeID: nodeID, CertificateID: certificateID, OperationID: operationID, CertificateVersion: grant.GetCertificateVersion(), Grant: grantBytes, Digest: digest, Size: size, RequestID: requestID}
+	consumption := certificatestore.Consumption{ID: id, GrantID: grantID, ActorID: actorID, SessionID: sessionID, NodeID: nodeID, CertificateID: certificateID, OperationID: operationID, CertificateVersion: grant.GetCertificateVersion(), Grant: grantBytes, Digest: digest, Size: size, RequestID: requestID}
 	exactReplay := false
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := artifactstore.FromTransaction(tx)
+		store, err := certificatestore.ArtifactFromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -182,7 +182,7 @@ const (
 func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID uuid.UUID) (artifactConsumptionFinalization, error) {
 	result := artifactConsumptionFinalized
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := artifactstore.FromTransaction(tx)
+		store, err := certificatestore.ArtifactFromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -216,9 +216,9 @@ func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID u
 }
 
 func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
-	var records []artifactstore.PendingConsumption
+	var records []certificatestore.PendingConsumption
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := artifactstore.FromTransaction(tx)
+		store, err := certificatestore.ArtifactFromTransaction(tx)
 		if err != nil {
 			return err
 		}
@@ -301,7 +301,7 @@ func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pending
 			return ErrArtifactDenied
 		}
 		if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-			store, err := artifactstore.FromTransaction(tx)
+			store, err := certificatestore.ArtifactFromTransaction(tx)
 			if err != nil {
 				return err
 			}
@@ -320,7 +320,7 @@ func (s *Service) AbortArtifact(ctx context.Context, id, grantID uuid.UUID) erro
 	// Preserve the durable lease until its bounded expiry. A transport failure
 	// must not make a second concurrently valid grant immediately issuable.
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := artifactstore.FromTransaction(tx)
+		store, err := certificatestore.ArtifactFromTransaction(tx)
 		if err != nil {
 			return err
 		}

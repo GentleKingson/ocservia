@@ -1,4 +1,4 @@
-package browserorigin
+package config
 
 import "testing"
 
@@ -23,9 +23,9 @@ func TestNormalize(t *testing.T) {
 		{"admin.example.com", "", false},
 		{"", "", false},
 	} {
-		got, ok := Normalize(test.value)
+		got, ok := NormalizeBrowserOrigin(test.value)
 		if got != test.want || ok != test.ok {
-			t.Fatalf("Normalize(%q) = %q,%v; want %q,%v", test.value, got, ok, test.want, test.ok)
+			t.Fatalf("NormalizeBrowserOrigin(%q) = %q,%v; want %q,%v", test.value, got, ok, test.want, test.ok)
 		}
 	}
 }

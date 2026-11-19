@@ -14,7 +14,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/databasetest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 )
 
@@ -30,10 +30,10 @@ func authenticationBackendFixture(t *testing.T) (database.Backend, database.Back
 func authenticationBackendFixtureWithIsolation(t *testing.T, isolated bool) (database.Backend, database.Backend) {
 	t.Helper()
 	if isolated {
-		runtime, owner := databasetest.OpenIsolated(t, t, "r203_http")
+		runtime, owner := testfixture.OpenIsolated(t, t, "r203_http")
 		return postgres.WrapPool(runtime), postgres.WrapPool(owner)
 	}
-	return databasetest.OpenRuntime(t), nil
+	return testfixture.OpenRuntime(t), nil
 }
 
 // This executes the actual Controller HTTP login, cookie authentication and

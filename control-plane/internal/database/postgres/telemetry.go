@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
+	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -241,3 +243,119 @@ func (s telemetryStore) SecurityEvent(ctx context.Context, id uuid.UUID) (teleme
 	err := s.tx.QueryRow(ctx, `SELECT observed_at,severity,event_type,detail FROM telemetry_security_events WHERE event_id=$1`, id).Scan(&e.ObservedAt, &e.Severity, &e.Type, &e.Detail)
 	return e, err
 }
+
+func (s telemetryStore) InsertHistory(ctx context.Context, nodeID, batchID uuid.UUID, samples []telemetrystore.Sample) error {
+	for _, sample := range samples {
+		if _, err := s.tx.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, nodeID, batchID, sample.SampledAt, sample.Metric, sample.Value); err != nil {
+			return fmt.Errorf("insert telemetry sample: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s telemetryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since value.Timestamp) ([]telemetrystore.Point, error) {
+	if err := since.Validate(); err != nil {
+		return nil, err
+	}
+	if !since.Valid {
+		return nil, database.ErrConstraint
+	}
+	query := `SELECT sampled_at,metric,1,value,value,value FROM telemetry_samples WHERE node_id=$1 AND metric=$2 AND sampled_at >= $3 ORDER BY sampled_at LIMIT 2000`
+	switch resolution {
+	case "raw":
+	case "5m", "1h":
+		query = fmt.Sprintf(`SELECT bucket_at,metric,sample_count,min_value,max_value,avg_value FROM telemetry_rollups_%s WHERE node_id=$1 AND metric=$2 AND bucket_at >= $3 ORDER BY bucket_at LIMIT 2000`, resolution)
+	default:
+		return nil, database.ErrConstraint
+	}
+	rows, err := s.tx.Query(ctx, query, nodeID, metric, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	points := []telemetrystore.Point{}
+	for rows.Next() {
+		var p telemetrystore.Point
+		if err := rows.Scan(&p.At, &p.Metric, &p.Count, &p.Minimum, &p.Maximum, &p.Average); err != nil {
+			return nil, err
+		}
+		points = append(points, p)
+	}
+	return points, rows.Err()
+}
+
+func (s telemetryStore) MaintainHistory(ctx context.Context, now time.Time) error {
+	for _, table := range []struct {
+		name, interval string
+		width          time.Duration
+	}{{"telemetry_rollups_5m", "5 minutes", 5 * time.Minute}, {"telemetry_rollups_1h", "1 hour", time.Hour}} {
+		// Recompute the entire accepted lateness window, including the complete
+		// first bucket; a partial bucket would overwrite its earlier samples.
+		since := now.UTC().Add(-14 * 24 * time.Hour).Truncate(table.width)
+		_, err := s.tx.Exec(ctx, fmt.Sprintf(`INSERT INTO %s AS existing(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin($1::interval,sampled_at,'2000-01-01 00:00:00+00'::timestamptz),count(*),min(value),max(value),avg(value) FROM telemetry_samples WHERE sampled_at >= $2 GROUP BY 1,2,3 ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value WHERE (existing.sample_count,existing.min_value,existing.max_value,existing.avg_value) IS DISTINCT FROM (EXCLUDED.sample_count,EXCLUDED.min_value,EXCLUDED.max_value,EXCLUDED.avg_value)`, table.name), table.interval, since)
+		if err != nil {
+			return err
+		}
+	}
+	if _, err := s.tx.Exec(ctx, `SELECT telemetry_prune_rollups($1)`, now); err != nil {
+		return err
+	}
+	_, err := s.tx.Exec(ctx, `SELECT telemetry_drop_expired_partitions($1)`, now.Add(-14*24*time.Hour))
+	return err
+}
+
+var _ telemetrystore.Store = telemetryStore{}
+
+func (b *Backend) ValidateTelemetryRuntime(ctx context.Context) error {
+	var safe bool
+	err := b.QueryRow(ctx, `SELECT NOT has_schema_privilege(current_user,'public','CREATE') AND NOT has_table_privilege(current_user,'telemetry_rollups_5m','DELETE,TRUNCATE') AND NOT has_table_privilege(current_user,'telemetry_rollups_1h','DELETE,TRUNCATE') AND has_function_privilege(current_user,'telemetry_prune_rollups(timestamptz)','EXECUTE') AND has_function_privilege(current_user,'telemetry_drop_expired_partitions(timestamptz)','EXECUTE') AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb FROM pg_catalog.pg_roles WHERE rolname=current_user`).Scan(&safe)
+	if err != nil {
+		return err
+	}
+	if !safe {
+		return fmt.Errorf("runtime telemetry maintenance privileges are missing or unrestricted: %w", database.ErrPermission)
+	}
+	if err := b.QueryRow(ctx, `SELECT NOT has_function_privilege(current_user,'telemetry_ensure_month_partition(timestamptz)','EXECUTE')`).Scan(&safe); err != nil {
+		return err
+	}
+	if !safe {
+		return fmt.Errorf("runtime has indirect telemetry partition DDL capability: %w", database.ErrPermission)
+	}
+	if err := b.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM generate_series(date_trunc('month',(now()-interval '14 days') AT TIME ZONE 'UTC'),date_trunc('month',(now()+interval '5 minutes') AT TIME ZONE 'UTC'),interval '1 month') month WHERE NOT EXISTS(SELECT 1 FROM pg_inherits WHERE inhparent='public.telemetry_samples'::regclass AND inhrelid=to_regclass('public.telemetry_samples_'||to_char(month,'YYYYMM'))))`).Scan(&safe); err != nil {
+		return err
+	}
+	if !safe {
+		return fmt.Errorf("required telemetry month is not provisioned: %w", database.ErrConstraint)
+	}
+	return nil
+}
+
+// UsageStore borrows a transaction; it cannot open or commit another one.
+type UsageStore struct{ tx database.Tx }
+
+func NewUsageStore(tx database.Tx) *UsageStore { return &UsageStore{tx: tx} }
+
+func (t *transaction) UsageStore() userstore.UsageStore { return NewUsageStore(t) }
+
+func (s *UsageStore) LockNode(ctx context.Context, nodeID uuid.UUID) error {
+	var id uuid.UUID
+	return s.tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR UPDATE`, nodeID).Scan(&id)
+}
+
+func (s *UsageStore) LockCursor(ctx context.Context, nodeID uuid.UUID, sample userstore.UsageCursor) (userstore.UsageCursor, error) {
+	prior := userstore.UsageCursor{SessionID: sample.SessionID, Connected: sample.Connected}
+	err := s.tx.QueryRow(ctx, `SELECT username,rx_bytes,tx_bytes,observed_at FROM user_usage_cursors WHERE node_id=$1 AND session_id=$2 AND connected_at=$3 FOR UPDATE`, nodeID, sample.SessionID, sample.Connected).Scan(&prior.Username, &prior.RXBytes, &prior.TXBytes, &prior.ObservedAt)
+	return prior, err
+}
+
+func (s *UsageStore) PutCursor(ctx context.Context, nodeID uuid.UUID, sample userstore.UsageCursor) error {
+	_, err := s.tx.Exec(ctx, `INSERT INTO user_usage_cursors(node_id,session_id,connected_at,username,rx_bytes,tx_bytes,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(node_id,session_id,connected_at) DO UPDATE SET username=EXCLUDED.username,rx_bytes=EXCLUDED.rx_bytes,tx_bytes=EXCLUDED.tx_bytes,observed_at=EXCLUDED.observed_at WHERE EXCLUDED.observed_at>user_usage_cursors.observed_at`, nodeID, sample.SessionID, sample.Connected, sample.Username, sample.RXBytes, sample.TXBytes, sample.ObservedAt)
+	return err
+}
+
+func (s *UsageStore) AddUsage(ctx context.Context, nodeID uuid.UUID, sample userstore.UsageCursor, period string, start value.Timestamp, rx, tx int64) error {
+	_, err := s.tx.Exec(ctx, `INSERT INTO observed_user_usage(node_id,username,period,period_start,rx_bytes,tx_bytes,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(node_id,username,period,period_start) DO UPDATE SET rx_bytes=LEAST(9223372036854775807::numeric,observed_user_usage.rx_bytes::numeric+EXCLUDED.rx_bytes::numeric)::bigint,tx_bytes=LEAST(9223372036854775807::numeric,observed_user_usage.tx_bytes::numeric+EXCLUDED.tx_bytes::numeric)::bigint,observed_at=GREATEST(observed_user_usage.observed_at,EXCLUDED.observed_at)`, nodeID, sample.Username, period, start, rx, tx, sample.ObservedAt)
+	return err
+}
+
+var _ userstore.UsageStore = (*UsageStore)(nil)

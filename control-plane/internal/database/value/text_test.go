@@ -1,4 +1,4 @@
-package postgresinput
+package value
 
 import "testing"
 

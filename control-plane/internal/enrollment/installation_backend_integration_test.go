@@ -18,14 +18,13 @@ import (
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
-	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation/attestationstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
 
 var errAttestationRollback = errors.New("injected attestation registration rollback")
 
-type attestationRollbackStore struct{ attestationstore.Store }
+type attestationRollbackStore struct{ privdattestation.Store }
 
 func (s attestationRollbackStore) BumpNodeRevision(ctx context.Context, node uuid.UUID, at time.Time) error {
 	if err := s.Store.BumpNodeRevision(ctx, node, at); err != nil {
@@ -48,8 +47,8 @@ func (tx installationRollbackTx) EnrollmentStore() enrollmentstore.EnrollmentSto
 	store, _ := enrollmentstore.Enrollment(tx.Tx)
 	return store
 }
-func (tx installationRollbackTx) PrivdAttestationStore() attestationstore.Store {
-	store, _ := attestationstore.From(tx.Tx)
+func (tx installationRollbackTx) PrivdAttestationStore() privdattestation.Store {
+	store, _ := privdattestation.StoreFrom(tx.Tx)
 	return attestationRollbackStore{store}
 }
 
@@ -180,7 +179,7 @@ func TestInstallationBackendIntegration(t *testing.T) {
 		t.Fatal("registered recovery status", err)
 	}
 	f.within(t, func(tx database.Tx) error {
-		keys, err := attestationstore.From(tx)
+		keys, err := privdattestation.StoreFrom(tx)
 		if err != nil {
 			return err
 		}

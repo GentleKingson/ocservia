@@ -21,7 +21,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
-	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
@@ -478,11 +477,11 @@ func validateBatch(batch Batch, now time.Time) error {
 	}
 	earliest := now.Add(-MaxTelemetryAge)
 	latest := now.Add(MaxTelemetrySkew)
-	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.Before(earliest) || batch.Snapshot.ObservedAt.After(latest) || !postgresinput.ValidText(batch.Snapshot.BootID, 128) || batch.Snapshot.AgentInstance == uuid.Nil {
+	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.Before(earliest) || batch.Snapshot.ObservedAt.After(latest) || !value.ValidText(batch.Snapshot.BootID, 128) || batch.Snapshot.AgentInstance == uuid.Nil {
 		return errors.New("observed snapshot identity or time is invalid")
 	}
-	for _, value := range []string{batch.Snapshot.AgentVersion, batch.Snapshot.OcservVersion, batch.Snapshot.OSRelease} {
-		if !postgresinput.ValidText(value, 128) {
+	for _, text := range []string{batch.Snapshot.AgentVersion, batch.Snapshot.OcservVersion, batch.Snapshot.OSRelease} {
+		if !value.ValidText(text, 128) {
 			return errors.New("observed version is invalid")
 		}
 	}
@@ -494,7 +493,7 @@ func validateBatch(batch Batch, now time.Time) error {
 	}
 	seenUpgradeOperations := make(map[uuid.UUID]struct{}, len(batch.Snapshot.UpgradeResults))
 	for _, report := range batch.Snapshot.UpgradeResults {
-		if report.OperationID.Version() != 7 || report.State == "" || !semanticpayload.ValidAgentUpgradeTargetVersion(report.TargetVersion) || !postgresinput.ValidText(report.Detail, 160) || report.Proof == nil {
+		if report.OperationID.Version() != 7 || report.State == "" || !semanticpayload.ValidAgentUpgradeTargetVersion(report.TargetVersion) || !value.ValidText(report.Detail, 160) || report.Proof == nil {
 			return errors.New("upgrade result report is invalid")
 		}
 		if _, err := privdattestation.CanonicalAgentUpgradeResultProofV1(report.Proof); err != nil ||
@@ -574,7 +573,7 @@ func validateBatch(batch Batch, now time.Time) error {
 	}
 	sessionIDs := make(map[string]struct{}, len(batch.Sessions))
 	for _, session := range batch.Sessions {
-		if !postgresinput.ValidText(session.ID, 256) || !namePattern.MatchString(session.Username) || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
+		if !value.ValidText(session.ID, 256) || !namePattern.MatchString(session.Username) || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
 			return errors.New("session observation is invalid")
 		}
 		if !insertUnique(sessionIDs, session.ID) {
@@ -587,7 +586,7 @@ func validateBatch(batch Batch, now time.Time) error {
 		}
 	}
 	for _, event := range batch.Security {
-		if event.ID == uuid.Nil || event.ID.Version() != 7 || event.ObservedAt.IsZero() || event.ObservedAt.Before(earliest) || event.ObservedAt.After(latest) || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || !postgresinput.ValidText(event.Type, 128) || !validObject(event.Detail) {
+		if event.ID == uuid.Nil || event.ID.Version() != 7 || event.ObservedAt.IsZero() || event.ObservedAt.Before(earliest) || event.ObservedAt.After(latest) || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || !value.ValidText(event.Type, 128) || !validObject(event.Detail) {
 			return errors.New("security telemetry is invalid")
 		}
 	}

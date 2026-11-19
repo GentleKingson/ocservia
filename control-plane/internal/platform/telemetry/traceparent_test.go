@@ -1,4 +1,4 @@
-package tracecontext
+package telemetry
 
 import (
 	"fmt"

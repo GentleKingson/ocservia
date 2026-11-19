@@ -15,8 +15,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
+	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
-	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	"github.com/google/uuid"
 )
 

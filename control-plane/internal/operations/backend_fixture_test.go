@@ -13,14 +13,14 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
-	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner/ownerstore"
+	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/databasetest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/schedulerlease"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 )
 
@@ -35,7 +35,7 @@ type outboxFixture struct {
 func newOutboxFixture(t *testing.T) *outboxFixture {
 	t.Helper()
 	f := &outboxFixture{workspace: uuid.Must(uuid.NewV7())}
-	runtime, owner := databasetest.OpenIsolated(t, t, "dbtest_outbox")
+	runtime, owner := testfixture.OpenIsolated(t, t, "dbtest_outbox")
 	f.owner, f.backend = postgres.WrapPool(owner), postgres.WrapPool(runtime)
 	var err error
 	f.signer, err = commandauth.NewRandomSigner()
@@ -131,8 +131,8 @@ func (t *commitFaultTx) CommandLimitStore() commandlimit.Store {
 func (t *commitFaultTx) AuditStore() auditstore.Store {
 	return t.Tx.(interface{ AuditStore() auditstore.Store }).AuditStore()
 }
-func (t *commitFaultTx) ConnectionOwnerStore() ownerstore.Store {
-	s, _ := ownerstore.FromTransaction(t.Tx)
+func (t *commitFaultTx) ConnectionOwnerStore() connectionowner.Store {
+	s, _ := connectionowner.StoreFromTransaction(t.Tx)
 	return s
 }
 func (t *commitFaultTx) SchedulerLeaseStore() schedulerlease.Store {

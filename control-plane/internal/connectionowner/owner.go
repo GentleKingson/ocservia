@@ -8,8 +8,6 @@ package connectionowner
 import (
 	"errors"
 	"time"
-
-	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner/ownerstore"
 )
 
 // ErrNotOwner is returned when the connection no longer owns the node lease,
@@ -27,10 +25,6 @@ var ErrLeaseHeld = errors.New("connectionowner: node lease held by another owner
 // term the authority never granted or no longer knows, so readers must fail
 // closed on it.
 var ErrNoOwnerRow = errors.New("connectionowner: node has no ownership row")
-
-// Identity binds an ownership term to exactly one controller process
-// incarnation, mirroring the scheduler leadership identity.
-type Identity = ownerstore.Identity
 
 // Term is one acquired node ownership lease. It is immutable after Acquire.
 // LeaseUntil is the exact deadline the database recorded for the term; callers
@@ -68,6 +62,3 @@ func (t *Term) LeaseUntil() time.Time { return t.leaseUntil }
 // LeaseTTL returns the configured TTL of this term. It is configuration, not
 // an authority: deadlines come from LeaseUntil and Renew.
 func (t *Term) LeaseTTL() time.Duration { return t.leaseTTL }
-
-// OwnerState is a point-in-time read of one node's ownership row.
-type OwnerState = ownerstore.State

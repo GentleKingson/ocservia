@@ -20,11 +20,11 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -168,7 +168,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	attestationKey, err := attestationtest.InstallKey(ctx, pool, nodeID)
+	attestationKey, err := testfixture.InstallKey(ctx, pool, nodeID)
 	testutil.NoError(t, err)
 	endpointID := sha256.Sum256(append([]byte("ocservia/certificate-integration/"), nodeID[:]...))
 	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpointID[:]); err != nil {
@@ -217,7 +217,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: csrResultBytes,
 		AcceptedAt: timestamppb.New(completed), CompletedAt: timestamppb.New(completed),
 	}
-	if err := attestationtest.AttachProof(&csrEnvelope, csrResult, attestationKey, 1); err != nil {
+	if err := testfixture.AttachProof(&csrEnvelope, csrResult, attestationKey, 1); err != nil {
 		t.Fatal(err)
 	}
 	encodedCSRResult, err := proto.Marshal(csrResult)

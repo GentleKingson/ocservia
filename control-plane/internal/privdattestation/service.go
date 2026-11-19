@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation/attestationstore"
 )
 
 const AttestationCapability = "privd_result_attestation_v1"
@@ -20,7 +19,7 @@ func KeyStateMetricsBackend(ctx context.Context, backend database.Backend) ([]Ke
 		return metrics, nil
 	}
 	err := database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := attestationstore.From(tx)
+		store, err := StoreFrom(tx)
 		if err != nil {
 			return err
 		}

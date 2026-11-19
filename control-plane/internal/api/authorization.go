@@ -11,8 +11,8 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
-	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	platformconfig "github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/google/uuid"
 )
 
@@ -221,7 +221,7 @@ func (s *Server) validateBrowserMutation(r *http.Request, principal auth.Princip
 	if s.browserOrigin == "" {
 		return errCrossOrigin
 	}
-	origin, ok := browserorigin.Normalize(r.Header.Get("Origin"))
+	origin, ok := platformconfig.NormalizeBrowserOrigin(r.Header.Get("Origin"))
 	if !ok || origin != s.browserOrigin {
 		return errCrossOrigin
 	}

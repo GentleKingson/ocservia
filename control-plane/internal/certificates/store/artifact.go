@@ -1,5 +1,4 @@
-// Package artifactstore defines the durable certificate download transaction.
-package artifactstore
+package store
 
 import (
 	"context"
@@ -35,7 +34,7 @@ type PendingConsumption struct {
 	Size                 int64
 	ExpiresAt            value.Timestamp
 }
-type Store interface {
+type ArtifactStore interface {
 	Resource(context.Context, uuid.UUID) (uuid.UUID, uuid.UUID, error)
 	LockCapacity(context.Context) error
 	Active(context.Context) (int, error)
@@ -50,8 +49,8 @@ type Store interface {
 	ResetConsumption(context.Context, uuid.UUID, uuid.UUID, bool) error
 }
 
-func FromTransaction(tx database.Tx) (Store, error) {
-	p, ok := tx.(interface{ ArtifactStore() Store })
+func ArtifactFromTransaction(tx database.Tx) (ArtifactStore, error) {
+	p, ok := tx.(interface{ ArtifactStore() ArtifactStore })
 	if !ok {
 		return nil, database.ErrUnsupported
 	}

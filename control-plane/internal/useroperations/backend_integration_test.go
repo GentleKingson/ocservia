@@ -14,7 +14,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/databasetest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
@@ -27,7 +27,7 @@ func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
 
 func userOperationsBackendWithCleanup(t, cleanupT *testing.T) (database.Backend, database.Backend) {
 	t.Helper()
-	runtime, owner := databasetest.OpenIsolated(t, cleanupT, "policy_cleanup")
+	runtime, owner := testfixture.OpenIsolated(t, cleanupT, "policy_cleanup")
 	return postgres.WrapPool(runtime), postgres.WrapPool(owner)
 }
 

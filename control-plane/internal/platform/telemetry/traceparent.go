@@ -1,5 +1,4 @@
-// Package tracecontext validates the Controller's accepted traceparent format.
-package tracecontext
+package telemetry
 
 import "strings"
 
