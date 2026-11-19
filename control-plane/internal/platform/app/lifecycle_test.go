@@ -4,12 +4,39 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 )
+
+func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+type schedulerLog struct {
+	slog.Handler
+	records chan slog.Record
+}
+
+func (h schedulerLog) Handle(ctx context.Context, record slog.Record) error {
+	h.records <- record.Clone()
+	return h.Handler.Handle(ctx, record)
+}
+
+func socketDirectory(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs("../../../..")
+	testutil.NoError(t, err)
+	dir, err := os.MkdirTemp(root, ".app-")
+	testutil.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
 
 type shutdownFunc func(context.Context) error
 
