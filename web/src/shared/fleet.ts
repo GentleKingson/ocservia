@@ -6,7 +6,7 @@ import type {
   UserGroupResourceState,
 } from "@ocservia/api-client";
 import { defineStore } from "pinia";
-import { computed, onScopeDispose, ref } from "vue";
+import { computed, onScopeDispose, ref, shallowRef } from "vue";
 
 import {
   disconnectSession,
@@ -79,11 +79,11 @@ function responseStatus(error: unknown): number | undefined {
 }
 
 export const useFleetStore = defineStore("fleet", () => {
-  const nodes = ref<NodeObservedState[]>([]);
-  const selected = ref<NodeObservedState>();
-  const sessions = ref<NodeSession[]>([]);
-  const ipBans = ref<NodeIpBan[]>([]);
-  const userGroupState = ref<UserGroupResourceState[]>([]);
+  const nodes = shallowRef<NodeObservedState[]>([]);
+  const selected = shallowRef<NodeObservedState>();
+  const sessions = shallowRef<NodeSession[]>([]);
+  const ipBans = shallowRef<NodeIpBan[]>([]);
+  const userGroupState = shallowRef<UserGroupResourceState[]>([]);
   const latestOperation = ref<Operation>();
   const operationTracking = ref(false);
   const operationError = ref("");
@@ -157,49 +157,65 @@ export const useFleetStore = defineStore("fleet", () => {
     return workspaceContext();
   }
 
-  const online = computed(
-    () =>
-      nodes.value.filter((node) => node.connectionState === "online").length,
-  );
-  const offline = computed(
-    () =>
-      nodes.value.filter((node) => node.connectionState !== "online").length,
-  );
-  const relay = computed(
-    () => nodes.value.filter((node) => node.path?.mode === "relay").length,
-  );
-  const direct = computed(
-    () => nodes.value.filter((node) => node.path?.mode === "direct").length,
-  );
-  const sessionCount = computed(() =>
-    nodes.value.reduce((total, node) => total + node.sessionCount, 0),
-  );
-  const agentCurrent = computed(
-    () =>
-      nodes.value.filter((node) => node.agentVersionState === "current").length,
-  );
+  // Single-pass fleet rollup; agentVersionState is optional on the wire, so
+  // anything missing or not yet classified (unknown, unsupported) rolls up as
+  // unknown and current + update + ahead + unknown always sum to nodes.length.
+  const fleetStats = computed(() => {
+    let onlineCount = 0;
+    let offlineCount = 0;
+    let relayCount = 0;
+    let directCount = 0;
+    let totalSessions = 0;
+    let currentCount = 0;
+    let updateCount = 0;
+    let aheadCount = 0;
+    let unknownCount = 0;
+    for (const node of nodes.value) {
+      if (node.connectionState === "online") onlineCount += 1;
+      else offlineCount += 1;
+      const mode = node.path?.mode;
+      if (mode === "relay") relayCount += 1;
+      else if (mode === "direct") directCount += 1;
+      totalSessions += node.sessionCount;
+      switch (node.agentVersionState) {
+        case "current":
+          currentCount += 1;
+          break;
+        case "upgrade_available":
+          updateCount += 1;
+          break;
+        case "ahead":
+          aheadCount += 1;
+          break;
+        default:
+          unknownCount += 1;
+          break;
+      }
+    }
+    return {
+      online: onlineCount,
+      offline: offlineCount,
+      relay: relayCount,
+      direct: directCount,
+      sessionCount: totalSessions,
+      agentCurrent: currentCount,
+      agentUpdateAvailable: updateCount,
+      agentAhead: aheadCount,
+      agentUnknown: unknownCount,
+    };
+  });
+
+  const online = computed(() => fleetStats.value.online);
+  const offline = computed(() => fleetStats.value.offline);
+  const relay = computed(() => fleetStats.value.relay);
+  const direct = computed(() => fleetStats.value.direct);
+  const sessionCount = computed(() => fleetStats.value.sessionCount);
+  const agentCurrent = computed(() => fleetStats.value.agentCurrent);
   const agentUpdateAvailable = computed(
-    () =>
-      nodes.value.filter(
-        (node) => node.agentVersionState === "upgrade_available",
-      ).length,
+    () => fleetStats.value.agentUpdateAvailable,
   );
-  const agentAhead = computed(
-    () =>
-      nodes.value.filter((node) => node.agentVersionState === "ahead").length,
-  );
-  // agentVersionState is optional on the wire, so anything missing or not yet
-  // classified (unknown, unsupported) rolls up as unknown; current, update,
-  // ahead, and unknown therefore always sum to the fleet node count.
-  const agentUnknown = computed(
-    () =>
-      nodes.value.filter(
-        (node) =>
-          node.agentVersionState !== "current" &&
-          node.agentVersionState !== "upgrade_available" &&
-          node.agentVersionState !== "ahead",
-      ).length,
-  );
+  const agentAhead = computed(() => fleetStats.value.agentAhead);
+  const agentUnknown = computed(() => fleetStats.value.agentUnknown);
 
   async function rebuild(): Promise<void> {
     if (!isPageActive()) return;
@@ -273,25 +289,28 @@ export const useFleetStore = defineStore("fleet", () => {
       if (!isLatestSelect()) return;
       const node = await getNode(nodeId, request.signal);
       if (!isLatestSelect()) return;
-      const rebuiltSessions: NodeSession[] = [];
-      let cursor: string | undefined;
-      do {
-        const page = await listNodeSessions(nodeId, cursor, request.signal);
-        if (!isLatestSelect()) return;
-        rebuiltSessions.push(...page.items);
-        cursor = page.page.hasMore ? page.page.nextCursor : undefined;
-      } while (cursor);
-      if (!isLatestSelect()) return;
-      const rebuiltIpBans = (await listNodeIpBans(nodeId, request.signal))
-        .items;
-      const rebuiltUserGroupState = (
-        await listNodeUserGroupState(nodeId, request.signal)
-      ).items;
+      const loadNodeSessions = async (): Promise<NodeSession[]> => {
+        const rebuiltSessions: NodeSession[] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await listNodeSessions(nodeId, cursor, request.signal);
+          if (!isLatestSelect()) return rebuiltSessions;
+          rebuiltSessions.push(...page.items);
+          cursor = page.page.hasMore ? page.page.nextCursor : undefined;
+        } while (cursor);
+        return rebuiltSessions;
+      };
+      const [rebuiltSessions, ipBansPage, userGroupStatePage] =
+        await Promise.all([
+          loadNodeSessions(),
+          listNodeIpBans(nodeId, request.signal),
+          listNodeUserGroupState(nodeId, request.signal),
+        ]);
       if (!isLatestSelect()) return;
       selected.value = node;
       sessions.value = rebuiltSessions;
-      ipBans.value = rebuiltIpBans;
-      userGroupState.value = rebuiltUserGroupState;
+      ipBans.value = ipBansPage.items;
+      userGroupState.value = userGroupStatePage.items;
       selectionError.value = "";
       unavailable.value = false;
     } catch (error) {

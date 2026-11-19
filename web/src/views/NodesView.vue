@@ -35,6 +35,7 @@ import { Textarea } from "../components/ui/textarea";
 import {
   countFilterValues,
   filterNodes,
+  nodeFilterGroupNames,
   readNodeListQuery,
   sortNodes,
   writeNodeListQuery,
@@ -72,22 +73,62 @@ function clearFilters(): void {
   });
 }
 
+// Decouple filtering/sorting from optional column toggles using primitive
+// reactive keys so showing/hiding columns avoids re-filtering and re-sorting.
+const listSearch = computed(() => listState.value.search);
+const listSort = computed(() => listState.value.sort);
+const listFiltersKey = computed(() =>
+  nodeFilterGroupNames
+    .map((group) => listState.value.filters[group].join(","))
+    .join("|"),
+);
+const listFilters = computed(() => {
+  const parts = listFiltersKey.value.split("|");
+  return Object.fromEntries(
+    nodeFilterGroupNames.map((group, index) => [
+      group,
+      parts[index] ? parts[index].split(",") : [],
+    ]),
+  ) as NodeListState["filters"];
+});
+
 // fleet.nodes only ever holds a complete paged snapshot, so filtering and
 // counts below always cover the whole workspace.
 const visibleNodes = computed(() =>
-  sortNodes(filterNodes(fleet.nodes, listState.value), listState.value.sort),
+  sortNodes(
+    filterNodes(fleet.nodes, {
+      search: listSearch.value,
+      filters: listFilters.value,
+    }),
+    listSort.value,
+  ),
 );
 const filterCounts = computed(() => countFilterValues(fleet.nodes));
+const visibleColumns = computed(() => new Set(listState.value.columns));
 const showColumn = (column: NodeListState["columns"][number]) =>
-  listState.value.columns.includes(column);
+  visibleColumns.value.has(column);
 
 function pathRtt(node: NodeObservedState): string {
   return node.path ? String(Math.round(node.path.rttMs)) : "";
 }
 
-function heartbeatRelative(value: string): string | undefined {
-  return relativeTimestamp(value, now.value.getTime(), locale.value);
-}
+const heartbeatDisplays = computed(() => {
+  const nowMs = now.value.getTime();
+  const activeLocale = locale.value;
+  const displays = new Map<
+    string,
+    { relative: string | undefined; formatted: string }
+  >();
+  for (const node of visibleNodes.value) {
+    const value = node.lastHeartbeatAt;
+    if (!value || displays.has(value)) continue;
+    displays.set(value, {
+      relative: relativeTimestamp(value, nowMs, activeLocale),
+      formatted: formatTimestamp(value),
+    });
+  }
+  return displays;
+});
 
 const trustBadge: Record<string, string> = {
   active: "border-success/40 text-success",
@@ -103,6 +144,7 @@ const agentBadge: Record<string, "default" | "secondary" | "destructive"> = {
 
 const installDialog = ref(false);
 const selected = ref<string[]>([]);
+const selectedSet = computed(() => new Set(selected.value));
 const rolloutDialog = ref(false);
 const rolloutBatchSize = ref(5);
 const rolloutReason = ref("");
@@ -119,7 +161,7 @@ let rolloutUnconfirmed = false;
 
 const selectedNodes = computed(() =>
   fleet.nodes.filter(
-    (node) => selected.value.includes(node.id) && node.agentUpgradeEligible,
+    (node) => selectedSet.value.has(node.id) && node.agentUpgradeEligible,
   ),
 );
 const rolloutTarget = computed(
@@ -142,7 +184,7 @@ const visibleEligibleIds = computed(() =>
 const allVisibleEligibleSelected = computed(
   () =>
     visibleEligibleIds.value.length > 0 &&
-    visibleEligibleIds.value.every((id) => selected.value.includes(id)),
+    visibleEligibleIds.value.every((id) => selectedSet.value.has(id)),
 );
 function selectVisibleEligible(event: Event): void {
   const visible = new Set(visibleEligibleIds.value);
@@ -418,7 +460,7 @@ async function submitRollout(): Promise<void> {
                   v-for="node in visibleNodes"
                   :key="node.id"
                   :data-state="
-                    selected.includes(node.id) ? 'selected' : undefined
+                    selectedSet.has(node.id) ? 'selected' : undefined
                   "
                 >
                   <TableCell class="py-3 pl-4">
@@ -427,7 +469,7 @@ async function submitRollout(): Promise<void> {
                       type="checkbox"
                       class="accent-primary size-4 align-middle"
                       :aria-label="`${$t('rollingUpgrade')}: ${node.name}`"
-                      :checked="selected.includes(node.id)"
+                      :checked="selectedSet.has(node.id)"
                       @change="toggleSelection(node.id)"
                     />
                   </TableCell>
@@ -494,14 +536,18 @@ async function submitRollout(): Promise<void> {
                   <TableCell class="py-3">
                     <template v-if="node.lastHeartbeatAt">
                       <span class="block">{{
-                        heartbeatRelative(node.lastHeartbeatAt) ??
-                        formatTimestamp(node.lastHeartbeatAt)
+                        heartbeatDisplays.get(node.lastHeartbeatAt)?.relative ??
+                        heartbeatDisplays.get(node.lastHeartbeatAt)?.formatted
                       }}</span>
                       <time
-                        v-if="heartbeatRelative(node.lastHeartbeatAt)"
+                        v-if="
+                          heartbeatDisplays.get(node.lastHeartbeatAt)?.relative
+                        "
                         class="text-muted-foreground block text-xs"
                         :datetime="node.lastHeartbeatAt"
-                        >{{ formatTimestamp(node.lastHeartbeatAt) }}</time
+                        >{{
+                          heartbeatDisplays.get(node.lastHeartbeatAt)?.formatted
+                        }}</time
                       >
                     </template>
                     <span v-else class="text-muted-foreground">{{

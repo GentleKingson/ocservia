@@ -1,7 +1,9 @@
 import type {
+  NodeIpBan,
   NodeObservedState,
   NodeSession,
   Operation,
+  UserGroupResourceState,
 } from "@ocservia/api-client";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -444,6 +446,39 @@ describe("controlled fleet operations", () => {
     // Unknown is terminal for a reconciled upgrade: no retry may be inferred.
     expect(getOperation).toHaveBeenCalledTimes(1);
     expect(store.operationTracking).toBe(false);
+    store.$dispose();
+  });
+
+  it("fetches sessions, IP bans, and user/group state concurrently after getNode", async () => {
+    const sessionsDeferred = Promise.withResolvers<{
+      items: NodeSession[];
+      page: { hasMore: boolean };
+    }>();
+    const bansDeferred = Promise.withResolvers<{ items: NodeIpBan[] }>();
+    const usersDeferred = Promise.withResolvers<{
+      items: UserGroupResourceState[];
+    }>();
+    vi.mocked(listNodeSessions).mockReturnValueOnce(sessionsDeferred.promise);
+    vi.mocked(listNodeIpBans).mockReturnValueOnce(bansDeferred.promise);
+    vi.mocked(listNodeUserGroupState).mockReturnValueOnce(
+      usersDeferred.promise,
+    );
+
+    const store = useFleetStore();
+    const pending = store.select(node.id);
+    await vi.waitFor(() => {
+      expect(listNodeSessions).toHaveBeenCalledTimes(1);
+      expect(listNodeIpBans).toHaveBeenCalledTimes(1);
+      expect(listNodeUserGroupState).toHaveBeenCalledTimes(1);
+    });
+
+    sessionsDeferred.resolve({ items: [session], page: { hasMore: false } });
+    bansDeferred.resolve({ items: [] });
+    usersDeferred.resolve({ items: [] });
+    await pending;
+
+    expect(store.selected?.id).toBe(node.id);
+    expect(store.sessions).toEqual([session]);
     store.$dispose();
   });
 });

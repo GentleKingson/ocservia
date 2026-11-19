@@ -25,6 +25,31 @@ export default defineConfig({
   build: {
     // Supported browsers: docs/architecture.md#web-client.
     target: ["chrome111", "edge111", "firefox128", "safari16.4"],
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (
+            id.includes("/vue/") ||
+            id.includes("/@vue/") ||
+            id.includes("/vue-router/") ||
+            id.includes("/pinia/") ||
+            id.includes("/vue-i18n/") ||
+            id.includes("/@intlify/") ||
+            id.includes("/@vueuse/")
+          ) {
+            return "vue-core";
+          }
+          if (id.includes("/reka-ui/")) {
+            return "reka-ui";
+          }
+          if (id.includes("/@lucide/")) {
+            return "lucide";
+          }
+          return undefined;
+        },
+      },
+    },
   },
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },

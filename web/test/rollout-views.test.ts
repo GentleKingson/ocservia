@@ -280,6 +280,27 @@ describe("rollout detail", () => {
     expect(view.unavailable).toBe(false);
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("stops foreground polling on terminal rollouts and resumes on active route change", async () => {
+    mocks.getAgentRollout.mockImplementation((id: string) =>
+      Promise.resolve(
+        rollout(id, id === "rollout-a" ? "succeeded" : "running"),
+      ),
+    );
+    const view = await mount<DetailView>(RolloutDetailView);
+    expect(view.rollout?.state).toBe("succeeded");
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mocks.getAgentRollout).toHaveBeenCalledTimes(1);
+
+    mocks.route.params.rolloutId = "rollout-b";
+    await flush();
+    expect(view.rollout?.id).toBe("rollout-b");
+    expect(view.rollout?.state).toBe("running");
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(mocks.getAgentRollout).toHaveBeenCalledTimes(3);
+  });
 });
 
 interface OperationsState {

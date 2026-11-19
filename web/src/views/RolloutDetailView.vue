@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { ArrowLeft } from "@lucide/vue";
 import { ResponseError, type AgentRolloutNode } from "@ocservia/api-client";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute } from "vue-router";
 
@@ -32,7 +39,7 @@ import { createForegroundRefresh } from "../shared/foreground-refresh";
 const route = useRoute();
 const { t } = useI18n();
 
-const rollout = ref<RolloutDetail | undefined>(undefined);
+const rollout = shallowRef<RolloutDetail | undefined>(undefined);
 const loading = ref(true);
 const unavailable = ref(false);
 const notFound = ref(false);
@@ -56,13 +63,24 @@ const exclusions = computed(() => rollout.value?.excluded ?? []);
 // Failed and unknown stay separate counts so a batch never reads as
 // successful while any node has no confirmed outcome.
 function nodeCounts(nodes: AgentRolloutNode[]) {
-  const count = (...states: string[]) =>
-    nodes.filter((node) => states.includes(node.state)).length;
+  let succeeded = 0;
+  let failed = 0;
+  let unknown = 0;
+  let remainingCount = 0;
+  for (const node of nodes) {
+    if (node.state === "succeeded") succeeded += 1;
+    else if (node.state === "failed" || node.state === "rolled_back")
+      failed += 1;
+    else if (node.state === "unknown") unknown += 1;
+    else if (node.state === "pending" || node.state === "running")
+      remainingCount += 1;
+  }
   return {
     total: nodes.length,
-    succeeded: count("succeeded"),
-    failed: count("failed", "rolled_back"),
-    unknown: count("unknown"),
+    succeeded,
+    failed,
+    unknown,
+    remaining: remainingCount,
   };
 }
 
@@ -85,12 +103,7 @@ const batches = computed(() => {
     }));
 });
 
-const remaining = computed(
-  () =>
-    (rollout.value?.nodes ?? []).filter(
-      (node) => node.state === "pending" || node.state === "running",
-    ).length,
-);
+const remaining = computed(() => totals.value.remaining);
 
 // Every read and resume belongs to one route rollout in one workspace
 // generation; a newer ticket makes all older results inert.
@@ -122,6 +135,8 @@ function reset(): void {
 // Reads directly so the new resource never waits behind an older read.
 function reload(): void {
   reset();
+  foregroundRefresh.stop();
+  foregroundRefresh.start(false);
   void refresh();
 }
 
@@ -145,6 +160,7 @@ async function refresh(): Promise<void> {
     unavailable.value = false;
     notFound.value = false;
     resumeBlocked.value = false;
+    if (!activeStates.has(value.state)) foregroundRefresh.stop();
   } catch (cause) {
     if (!request.current(context)) return;
     notFound.value =
@@ -172,6 +188,8 @@ async function resume(): Promise<void> {
     if (result.id !== value.id || result.workspaceId !== context.id)
       throw new Error(t("rolloutResumeUnconfirmed"));
     rollout.value = result;
+    if (!activeStates.has(result.state)) foregroundRefresh.stop();
+    else foregroundRefresh.start(false);
   } catch (cause) {
     if (!current(context, ticket)) return;
     // A lost POST response is not permission to send the resume again; only

@@ -5,7 +5,7 @@ import {
   type AuditEventPage,
   type AuditVerification,
 } from "@ocservia/api-client";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { listAuditEvents, verifyAuditChain } from "../api/events";
 import {
@@ -34,7 +34,7 @@ import {
 import { auditResultTone } from "@/features/operations/state-tone";
 
 const { t } = useI18n();
-const items = ref<AuditEventPage["items"]>([]);
+const items = shallowRef<AuditEventPage["items"]>([]);
 const loading = ref(false);
 const initialized = ref(false);
 const error = ref("");
@@ -104,6 +104,7 @@ const resultOptions = ["intent", "succeeded", "failed"];
 const search = ref("");
 const resultFilter = ref("");
 const expanded = ref<string[]>([]);
+const expandedSet = computed(() => new Set(expanded.value));
 // Filters narrow only the bounded recent slice already loaded; they never
 // page or query the server.
 const rows = computed(() => {
@@ -136,7 +137,7 @@ const rows = computed(() => {
     );
 });
 function toggle(key: string): void {
-  expanded.value = expanded.value.includes(key)
+  expanded.value = expandedSet.value.has(key)
     ? expanded.value.filter((value) => value !== key)
     : [...expanded.value, key];
 }
@@ -329,7 +330,7 @@ onBeforeUnmount(() => {
                       type="button"
                       variant="ghost"
                       size="icon-sm"
-                      :aria-expanded="expanded.includes(key)"
+                      :aria-expanded="expandedSet.has(key)"
                       :aria-controls="`audit-detail-${key}`"
                       :aria-label="`${$t('auditDetails')}: ${text(item.action)}`"
                       @click="toggle(key)"
@@ -337,7 +338,7 @@ onBeforeUnmount(() => {
                       <ChevronRight
                         aria-hidden="true"
                         class="transition-transform"
-                        :class="expanded.includes(key) ? 'rotate-90' : ''"
+                        :class="expandedSet.has(key) ? 'rotate-90' : ''"
                       />
                     </Button>
                   </TableCell>
@@ -369,7 +370,7 @@ onBeforeUnmount(() => {
                   </TableCell>
                 </TableRow>
                 <TableRow
-                  v-if="expanded.includes(key)"
+                  v-if="expandedSet.has(key)"
                   :id="`audit-detail-${key}`"
                   class="bg-muted/40 hover:bg-muted/40"
                 >

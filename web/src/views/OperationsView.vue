@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { RefreshCw } from "@lucide/vue";
 import type { AgentRollout, Operation } from "@ocservia/api-client";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { getOperation, listOperations } from "../api/operations";
@@ -29,9 +29,9 @@ import {
 import { createReadRequest } from "../shared/read-request";
 import { formatTimestamp } from "../shared/timestamp";
 
-const operations = ref<Operation[]>([]);
+const operations = shallowRef<Operation[]>([]);
 const { t } = useI18n();
-const rollouts = ref<AgentRollout[]>([]);
+const rollouts = shallowRef<AgentRollout[]>([]);
 const rolloutsUnavailable = ref(false);
 const detailState = ref<{ selected?: Operation; error: string }>({ error: "" });
 const selectedOperation = computed(() => detailState.value.selected);
