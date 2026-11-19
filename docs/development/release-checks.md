@@ -433,10 +433,12 @@ The workflow file defines the matrices. The jobs and what they own:
 | Job | Responsibility |
 | --- | --- |
 | `docs` | `scripts/docs-check.sh` only |
-| `go` | `go-check.sh standard` for `control-plane` and `signer`, plus the selected CI guard, release and cross-VM self-tests, source style and contract suites |
-| `rust` | `rust-check.sh` when routing selects Rust; Full also runs the focused vendored iroh patch tests against the lock in [`rust/vendor/iroh/OCSERVIA-PROVENANCE.md`](../../rust/vendor/iroh/OCSERVIA-PROVENANCE.md); installer and Relay-launcher self-tests when routing selects installers |
+| `ci-tools` | Selected CI guard, release and cross-VM self-tests, source style and contract suites via `scripts/ci-tools-check.sh` |
+| `go` | `go-check.sh standard` for `control-plane` and `signer` |
+| `rust` | `rust-check.sh` plus the vendored iroh security regressions; Full also runs the focused vendored iroh patch tests against the lock in [`rust/vendor/iroh/OCSERVIA-PROVENANCE.md`](../../rust/vendor/iroh/OCSERVIA-PROVENANCE.md) |
+| `installers` | Installer and Relay-launcher contract self-tests |
 | `web` | `web-check.sh basic`; no browser installation |
-| `web-browser` | Stubbed production-build browser regressions through `web/test/run-auth-browser.mjs`; Full also serves the build through the Standalone and Integrated gateways with CSP enforcement checks. A missing browser or non-declared skip fails the job |
+| `web-browser` | Stubbed production-build browser regressions through `web/test/run-auth-browser.mjs` inside the version-matched Playwright container image (`PLAYWRIGHT_WORKERS=4`); Full also serves the build through the Standalone and Integrated gateways with CSP enforcement checks. A missing browser or non-declared skip fails the job |
 | `database-smoke` | PostgreSQL 18.x; Quick runs smoke, Full runs full database acceptance; both enforce the SQL artifact window and snapshot equivalence (see [SQL artifact acceptance](#sql-artifact-acceptance)) |
 | `database-recovery-full` | Bundled and external PostgreSQL physical backup/restore with snapshot provenance, Full only |
 | `Basic CI Result` | Always checks routing and the selected job results |
@@ -471,24 +473,27 @@ analysis and is the source of the exact rule order. In outline:
 - Rules for executable code and deployment configuration sit ahead of the
   generic Markdown fallback. Markdown under `web/`, `rust/`, `proto/`,
   `openapi/` or the `deploy/` subdirectories matches its subsystem rule and can
-  trigger web, Rust, database, installer or full Quick suites. Other Markdown
-  selects `docs` alone, apart from exceptions named in the script.
-- `web/*` selects `web` (browser-relevant paths also `web-browser`), `rust/*`
+  trigger web, Rust, database, installer or full Quick suites. Other Markdown,
+  `docs/upstream/*`, repository metadata and `scripts/docs-check.sh` select
+  `docs` alone, apart from exceptions named in the script.
+- `web/*` selects `web` (`web/src/*`, `web/index.html`, `web/e2e/*`, Playwright
+  harness and web build/lock files also select `web-browser`), `rust/*`
   selects `rust`, and `control-plane/{cmd,migrations,internal}/*`, Go locks and
   the database scripts select `go` plus PostgreSQL database smoke.
 - Installer, release, package, Controller and Agent-upgrade scripts, release
   workflows and `deploy/{package,systemd,bootstrap,managed-node,production}`
-  select the release contract suite and installer self-tests.
-- Cross-VM files (`real-e2e.yml`, `deploy/real-e2e`, `scripts/real-e2e-*`)
-  select the `cross-vm` suite (`make real-e2e-check`). The credentialed three-VM
-  run is never started, and the manual-acceptance harnesses
-  (`scripts/resilience-*`, `scripts/security-acceptance-*`) are checked but not
-  run.
-- `ci.yml`, `security.yml`, `scripts/ci-*`, the required-test selectors and
-  `test-toolchain-consistency.sh` select the CI guard suite.
+  select the release contract suite and/or installer self-tests.
+- Cross-VM files (`real-e2e.yml`, `.github/actions/real-e2e-*/*`,
+  `deploy/real-e2e/*`, `scripts/real-e2e-*`) select the `cross-vm` suite
+  (`make real-e2e-check`). The credentialed three-VM run is never started, and
+  the manual-acceptance harnesses (`scripts/resilience-*`,
+  `scripts/security-acceptance-*`) are checked but not run.
+- `ci.yml`, `security.yml`, `scripts/ci-*`, the required-test selectors,
+  `test-ci-relevance.sh`, `test-toolchain-consistency.sh` and public-repository
+  guards select the CI guard suite.
 - `proto/*`, `openapi/*`, `control-plane/gen/*`, `scripts/bootstrap.sh`,
-  `env.sh`, `checksums.txt`, `toolchains.lock` and any unknown path enable all
-  Basic flags and every CI suite at Quick scope.
+  `env.sh`, `checksums.txt`, `toolchains.lock`, `.github/actions/setup-tools/*`
+  and any unknown path enable all Basic flags and every CI suite at Quick scope.
 
 The `source-style` suite checks tracked Shell sources using their shebangs
 (including extensionless launchers) and Python with the pinned Ruff
@@ -498,8 +503,9 @@ version). The Web job also checks the maintained root MJS files and
 build-cache Action with the same ESLint and Prettier configuration. The
 `contracts` suite runs Buf/Redocly lint, breaking checks and a clean regeneration
 in that order, when schemas, templates, generated outputs or generation tools
-change. These suites reuse the existing Go job; ordinary documentation does not
-install their toolchains.
+change. These suites run in the dedicated `ci-tools` job so they run in
+parallel with `go` and only bootstrap `source-style` or `contracts` tools when
+selected; ordinary documentation does not install their toolchains.
 
 Contract comparison uses the PR merge-base or the push event before SHA. Manual
 Basic CI and Release Check require an explicit `contract_base_ref` naming an
@@ -516,17 +522,16 @@ unresolvable, from an unsupported event, or contains an unrecognized path, the
 router fails closed by enabling every Basic flag and CI tool suite while keeping
 the Quick profile. Path routing never escalates Quick to Full.
 
-Manual dispatches bypass path routing: docs, go, rust, web, web-browser and
-database jobs always run, along with source-style and contract checks in the
-existing Go job. Installer self-tests and Controller cache refresh stay off. A
-manual Full run executes the full PostgreSQL database suite and
-`database-recovery-full`; a manual Quick run executes the PostgreSQL smoke leg.
-Controller cache refresh runs only on pushes to main when
-routing sets `run_controller_cache`. It refreshes the union of the changed
-images' Dockerfile inputs on both native architectures, selects all images for
-shared build machinery and unknown paths, falls back to all images on an empty
-selection, and rejects invalid image names before Docker runs. Product builds
-always build all images.
+Manual dispatches bypass path routing: `docs`, `ci-tools` (`source-style` and
+`contracts`), `go`, `rust`, `web`, `web-browser` and database jobs always run.
+Installer self-tests and Controller cache refresh stay off. A manual Full run
+executes the full PostgreSQL database suite and `database-recovery-full`; a
+manual Quick run executes the PostgreSQL smoke leg. Controller cache refresh
+runs only on pushes to main when routing sets `run_controller_cache`. It
+refreshes the union of the changed images' Dockerfile inputs on both native
+architectures, selects all images for shared build machinery and unknown paths,
+falls back to all images on an empty selection, and rejects invalid image names
+before Docker runs. Product builds always build all images.
 
 ### Workflows
 
@@ -560,18 +565,22 @@ environment.
 Go jobs keep module and build caches next to locked bootstrap downloads. Only
 passing pushes on main write cache entries; pull requests and manual runs
 restore only, and a restored build cache never skips real database tests.
-Bootstrap downloads and `.tools` are cached by profile, OS, architecture and
-tool/bootstrap identity. Web CI and the npm Security scan cache `.cache/npm`
-instead of `node_modules`, and Web jobs still run `npm ci`. Rust jobs share
-`rust/target/debug` under a key built from the toolchain, manifests, lockfile,
-flags and check script. Image builds use per-image, per-architecture BuildKit
-GitHub Actions caches. No workflow caches runtime state or credentials, and
-build caches are never accepted release products or qualification evidence.
-Release Controller jobs cache image-security scanner binaries but never the
-vulnerability database: each run fetches fresh advisory data and fails if the
-feed is unavailable or invalid. Image scans inspect the built image archives
-before smoke tests and registry uploads; Business diagnostic runs do not scan
-images.
+Bootstrap downloads and `.tools` are managed through
+[`.github/actions/setup-tools`](../../.github/actions/setup-tools/action.yml)
+and keyed by profile, OS, architecture and tool/bootstrap identity (with an
+optional `Cargo.lock` suffix and base toolchain fallback when `.tools/cargo`
+caches crates). Web CI, `contracts` checks and the npm Security scan cache
+`.cache/npm` instead of `node_modules`, and Web jobs still run `npm ci`. Rust
+jobs restore `rust/target/debug` and `rust/vendor/iroh/target/debug` with
+`CARGO_INCREMENTAL=0` and save them only on passing pushes to main, falling
+back to the matching Rust toolchain prefix when manifests or lockfiles change.
+Image builds use per-image, per-architecture BuildKit GitHub Actions caches. No
+workflow caches runtime state or credentials, and build caches are never
+accepted release products or qualification evidence. Release Controller jobs
+cache image-security scanner binaries but never the vulnerability database:
+each run fetches fresh advisory data and fails if the feed is unavailable or
+invalid. Image scans inspect the built image archives before smoke tests and
+registry uploads; Business diagnostic runs do not scan images.
 
 ### Manual deep checks and reproduction
 

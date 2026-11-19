@@ -1,0 +1,49 @@
+name: Setup pinned repository tools
+description: Restore and cache pinned bootstrap tools (and optional npm cache) and run scripts/bootstrap.sh.
+inputs:
+  profiles:
+    description: Space-separated scripts/bootstrap.sh profile names (or cache label when skip-bootstrap is true)
+    required: true
+  cache-label:
+    description: Optional cache key label override (defaults to profiles with spaces replaced by hyphens)
+    default: ''
+  key-suffix:
+    description: Optional extra cache key suffix (e.g. Cargo.lock hash when .tools/cargo caches crates)
+    default: ''
+  cache-npm:
+    description: Whether to also cache .cache/npm keyed on web lockfiles
+    default: 'false'
+  skip-bootstrap:
+    description: Restore/save the tool cache without invoking scripts/bootstrap.sh
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Cache pinned tools (${{ inputs.cache-label || inputs.profiles }})
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: |
+          .cache/downloads
+          .tools
+        key: tooling-v5-${{ inputs.cache-label || inputs.profiles }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}${{ inputs.key-suffix }}
+        restore-keys: |
+          tooling-v5-${{ inputs.cache-label || inputs.profiles }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+    - name: Cache npm downloads
+      if: inputs.cache-npm == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: .cache/npm
+        key: npm-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
+        restore-keys: |
+          npm-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}-
+    - name: Bootstrap pinned tools (${{ inputs.profiles }})
+      if: inputs.skip-bootstrap != 'true'
+      shell: bash
+      env:
+        BOOTSTRAP_PROFILES: ${{ inputs.profiles }}
+        npm_config_audit: 'false'
+        npm_config_fund: 'false'
+      run: |
+        for profile in ${BOOTSTRAP_PROFILES}; do
+          scripts/bootstrap.sh "${profile}"
+        done

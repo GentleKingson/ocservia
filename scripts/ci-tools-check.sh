@@ -7,8 +7,11 @@ cd "${ROOT}"
 for suite in ${CI_SUITES}; do
   case "${suite}" in
     guards)
-      bash -n scripts/ci-relevance.sh scripts/required-go-tests.sh scripts/bootstrap.sh
+      bash -n scripts/ci-*.sh scripts/required-go-tests.sh scripts/bootstrap.sh
+      bash scripts/test-ci-relevance.sh
       bash scripts/test-toolchain-consistency.sh
+      bash scripts/check-public-repository.sh
+      bash scripts/test-public-repository-policy.sh
       ;;
     release)
       bash scripts/test-release-upgrade.sh

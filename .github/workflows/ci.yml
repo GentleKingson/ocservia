@@ -41,7 +41,6 @@ jobs:
     outputs:
       profile: ${{ steps.relevance.outputs.profile }}
       database_scope: ${{ steps.relevance.outputs.database_scope }}
-      database_matrix: ${{ steps.relevance.outputs.database_matrix }}
       run_ci_tools: ${{ steps.relevance.outputs.run_ci_tools }}
       ci_suites: ${{ steps.relevance.outputs.ci_suites }}
       run_installers: ${{ steps.relevance.outputs.run_installers }}
@@ -56,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ (github.event_name == 'workflow_dispatch' || inputs.profile == 'full') && 1 || 0 }}
           persist-credentials: false
       - name: Classify the change set
         id: relevance
@@ -78,71 +77,65 @@ jobs:
           persist-credentials: false
       - run: scripts/docs-check.sh
 
+  ci-tools:
+    needs: ci-relevance
+    if: needs.ci-relevance.outputs.run_ci_tools == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: ${{ contains(needs.ci-relevance.outputs.ci_suites, 'contracts') && 0 || 1 }}
+          persist-credentials: false
+      - name: Setup style and contract tools
+        if: contains(needs.ci-relevance.outputs.ci_suites, 'source-style') || contains(needs.ci-relevance.outputs.ci_suites, 'contracts')
+        uses: ./.github/actions/setup-tools
+        with:
+          profiles: ${{ contains(needs.ci-relevance.outputs.ci_suites, 'source-style') && contains(needs.ci-relevance.outputs.ci_suites, 'contracts') && 'source-style contracts' || contains(needs.ci-relevance.outputs.ci_suites, 'contracts') && 'contracts' || 'source-style' }}
+          cache-label: ${{ contains(needs.ci-relevance.outputs.ci_suites, 'source-style') && contains(needs.ci-relevance.outputs.ci_suites, 'contracts') && 'source-style-contracts' || contains(needs.ci-relevance.outputs.ci_suites, 'contracts') && 'contracts' || 'source-style' }}
+          cache-npm: ${{ contains(needs.ci-relevance.outputs.ci_suites, 'contracts') && 'true' || 'false' }}
+      - name: CI guard and workflow contracts
+        env:
+          CI_SUITES: ${{ needs.ci-relevance.outputs.ci_suites }}
+          CONTRACT_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || inputs.contract_base_ref }}
+          CONTRACT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          CONTRACT_EVENT: ${{ github.event_name }}
+        run: bash scripts/ci-tools-check.sh
+
   go:
     needs: ci-relevance
-    if: needs.ci-relevance.outputs.run_go == 'true' || needs.ci-relevance.outputs.run_ci_tools == 'true'
+    if: needs.ci-relevance.outputs.run_go == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - name: Cache pinned go-test tools
-        if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'guards')
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - uses: ./.github/actions/setup-tools
         with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'control-plane/go.sum', 'signer/go.sum') }}
-      - if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'guards')
-        run: scripts/bootstrap.sh go-test
-      - name: Install source style tools
-        id: source-style-tools
-        if: contains(needs.ci-relevance.outputs.ci_suites, 'source-style')
-        run: scripts/bootstrap.sh source-style
-      - name: Install contract tools
-        id: contracts-tools
-        if: contains(needs.ci-relevance.outputs.ci_suites, 'contracts')
-        run: scripts/bootstrap.sh contracts
+          profiles: go-test
       - id: cache-key
-        if: needs.ci-relevance.outputs.run_go == 'true'
         run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
       - id: go-mod-cache
-        if: needs.ci-relevance.outputs.run_go == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-mod
           key: basic-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}
       - id: go-build-cache
-        if: needs.ci-relevance.outputs.run_go == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-build
           key: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
           restore-keys: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
-      - name: CI guard and workflow contracts
-        id: ci-tools
-        if: needs.ci-relevance.outputs.run_ci_tools == 'true'
-        env:
-          CI_SUITES: ${{ needs.ci-relevance.outputs.ci_suites }}
-          CI_RUN_GO: ${{ needs.ci-relevance.outputs.run_go }}
-          CONTRACT_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || inputs.contract_base_ref }}
-          CONTRACT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          CONTRACT_EVENT: ${{ github.event_name }}
-        run: bash scripts/ci-tools-check.sh
-      - id: go-check
-        if: needs.ci-relevance.outputs.run_go == 'true'
-        run: scripts/go-check.sh standard
+      - run: scripts/go-check.sh standard
       - name: Save Go modules (main only)
-        if: ${{ success() && steps.cache-key.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-mod-cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-mod-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-mod
           key: ${{ steps.go-mod-cache.outputs.cache-primary-key }}
       - name: Save ordinary Go objects (main only)
-        if: ${{ success() && steps.cache-key.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-build-cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-build
@@ -150,38 +143,39 @@ jobs:
 
   rust:
     needs: ci-relevance
-    if: needs.ci-relevance.outputs.run_rust == 'true' || needs.ci-relevance.outputs.run_installers == 'true'
+    if: needs.ci-relevance.outputs.run_rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - name: Cache pinned rust-basic tools
-        if: needs.ci-relevance.outputs.run_rust == 'true'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - uses: ./.github/actions/setup-tools
         with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-rust-basic-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}
-      - name: Cache Rust check and test objects
-        if: needs.ci-relevance.outputs.run_rust == 'true'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+          profiles: rust-basic
+          key-suffix: -${{ hashFiles('rust/Cargo.lock', 'rust/vendor/iroh/Cargo.lock') }}
+      - name: Restore Rust workspace build cache
+        id: rust-target-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: rust/target/debug
-          key: basic-rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/rust-toolchain.toml', 'rust/Cargo.lock', 'rust/**/Cargo.toml', 'rust/.cargo/**', 'rust/vendor/**', 'scripts/rust-check.sh') }}-${{ github.sha }}
-          restore-keys: basic-rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/rust-toolchain.toml', 'rust/Cargo.lock', 'rust/**/Cargo.toml', 'rust/.cargo/**', 'rust/vendor/**', 'scripts/rust-check.sh') }}-
-      - id: rust-tools
-        if: needs.ci-relevance.outputs.run_rust == 'true'
-        run: scripts/bootstrap.sh rust-basic
-      - id: rust-check
-        if: needs.ci-relevance.outputs.run_rust == 'true'
-        run: scripts/rust-check.sh
+          key: basic-rust-target-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-${{ hashFiles('scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock', 'rust/**/Cargo.toml', 'rust/.cargo/**', 'rust/vendor/**', 'scripts/rust-check.sh') }}-${{ github.sha }}
+          restore-keys: |
+            basic-rust-target-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-${{ hashFiles('scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock', 'rust/**/Cargo.toml', 'rust/.cargo/**', 'rust/vendor/**', 'scripts/rust-check.sh') }}-
+            basic-rust-target-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-
+      - name: Restore vendored iroh build cache
+        id: iroh-target-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/vendor/iroh/target/debug
+          key: basic-iroh-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml', 'rust/vendor/iroh/**') }}
+          restore-keys: |
+            basic-iroh-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-
+      - run: scripts/rust-check.sh
       - name: Vendored iroh security regressions
         # Archive lock graph, not production evidence; see rust/vendor/iroh/OCSERVIA-PROVENANCE.md.
-        if: needs.ci-relevance.outputs.run_rust == 'true'
         run: |
           source scripts/env.sh
           cd rust
@@ -196,7 +190,7 @@ jobs:
           grep -q '^test result: ok. 1 passed;' "${RUNNER_TEMP}/iroh-transfer-tests.log"
       - name: Vendored iroh patch regressions (Full)
         # Archive lock graph, not production evidence; see rust/vendor/iroh/OCSERVIA-PROVENANCE.md.
-        if: needs.ci-relevance.outputs.profile == 'full' && needs.ci-relevance.outputs.run_rust == 'true'
+        if: needs.ci-relevance.outputs.profile == 'full'
         run: |
           source scripts/env.sh
           cd rust
@@ -215,8 +209,29 @@ jobs:
             | tee "${RUNNER_TEMP}/iroh-vendor-tests.log"
           # A renamed test would otherwise match nothing and still pass.
           grep -q '^test result: ok. 10 passed;' "${RUNNER_TEMP}/iroh-vendor-tests.log"
+      - name: Save Rust workspace build cache (main only)
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rust-target-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/target/debug
+          key: ${{ steps.rust-target-cache.outputs.cache-primary-key }}
+      - name: Save vendored iroh build cache (main only)
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.iroh-target-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/vendor/iroh/target/debug
+          key: ${{ steps.iroh-target-cache.outputs.cache-primary-key }}
+
+  installers:
+    needs: ci-relevance
+    if: needs.ci-relevance.outputs.run_installers == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Relay launcher and installer contracts
-        if: needs.ci-relevance.outputs.run_installers == 'true'
         run: |
           bash scripts/test-managed-node-install.sh
           TEST_RELEASE_VERSION=0.2.1-rc.1 bash scripts/test-managed-node-install.sh release-contracts
@@ -237,39 +252,24 @@ jobs:
     if: needs.ci-relevance.outputs.run_web == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      npm_config_audit: "false"
-      npm_config_fund: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Cache pinned web tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - uses: ./.github/actions/setup-tools
         with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
-      - name: Cache npm downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
-      - run: scripts/bootstrap.sh web
+          profiles: web
+          cache-npm: 'true'
       - run: scripts/web-check.sh basic
 
   web-browser:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_web_browser == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
-      npm_config_audit: "false"
-      npm_config_fund: "false"
       # Shared UI regressions run in mobile Chromium and all three engines.
       BROWSER_PROJECTS: desktop mobile firefox webkit
-      BROWSER_ENGINES: chromium firefox webkit
       # Full also serves the build through the production Standalone gateway and
       # then the Integrated Edge and gateway, where the cross-engine specs fail
       # on any CSP violation.
@@ -278,66 +278,74 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Cache pinned web tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - uses: ./.github/actions/setup-tools
         with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
-      - name: Cache npm downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
-      - run: scripts/bootstrap.sh web
-      - name: Install Playwright browsers
-        run: |
-          source scripts/env.sh
-          cd web
-          # shellcheck disable=SC2086 # space-separated engine list
-          npx --no-install playwright install --with-deps ${BROWSER_ENGINES}
-      - name: Browser regressions on the production build
+          profiles: web
+          cache-npm: 'true'
+      - name: Build production web bundle
         run: |
           source scripts/env.sh
           cd web
           npm --prefix src/api/generated run build
           npm run build
-          args=()
-          for project in ${BROWSER_PROJECTS}; do args+=("--project=${project}"); done
-          specs=(agent-rollout.spec.ts node-forms.spec.ts shell-navigation.spec.ts apple-layout.spec.ts)
-          if [[ -z "${BROWSER_GATEWAYS}" ]]; then
-            node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}"
+      - name: Browser regressions on the production build
+        run: |
+          pw_version="$(jq -r '.devDependencies["@playwright/test"]' web/package.json)"
+          pw_version="${pw_version#^}"
+          [[ "${pw_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          pw_tmp="$(mktemp -d /tmp/ocservia-pw.XXXXXX)"
+          chmod 0755 "${pw_tmp}"
+          mkdir -p "${pw_tmp}/home" "${pw_tmp}/cache"
+          trap 'rm -rf -- "${pw_tmp}"' EXIT
+          docker_args=(
+            --rm --init --ipc=host --network=host
+            -v "${PWD}:${PWD}:ro"
+            -v "${pw_tmp}:${pw_tmp}"
+            -w "${PWD}/web"
+            -e "PATH=${PWD}/.tools/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            -e "TMPDIR=${pw_tmp}"
+            -e "HOME=${pw_tmp}/home"
+            -e "XDG_CACHE_HOME=${pw_tmp}/cache"
+            -e "PLAYWRIGHT_WORKERS=4"
+            -e "BROWSER_PROJECTS=${BROWSER_PROJECTS}"
+            -e "BROWSER_GATEWAYS=${BROWSER_GATEWAYS}"
+          )
+          if [[ -n "${BROWSER_GATEWAYS}" ]]; then
+            docker_args+=(
+              -v "$(command -v docker):/usr/local/bin/docker:ro"
+              -v /var/run/docker.sock:/var/run/docker.sock
+            )
           fi
-          for gateway in ${BROWSER_GATEWAYS}; do
-            node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}" "--gateway=${gateway}"
-          done
+          docker run "${docker_args[@]}" "mcr.microsoft.com/playwright:v${pw_version}-noble" \
+            bash -euo pipefail -c '
+              trap '\''rm -rf -- "${TMPDIR:?}"/*'\'' EXIT
+              args=()
+              for project in ${BROWSER_PROJECTS}; do args+=("--project=${project}"); done
+              specs=(agent-rollout.spec.ts node-forms.spec.ts shell-navigation.spec.ts apple-layout.spec.ts)
+              if [[ -z "${BROWSER_GATEWAYS}" ]]; then
+                node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}"
+              fi
+              for gateway in ${BROWSER_GATEWAYS}; do
+                node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}" "--gateway=${gateway}"
+              done
+            '
 
   database-smoke:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_database == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ needs.ci-relevance.outputs.database_scope == 'full' && 90 || 25 }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.ci-relevance.outputs.database_matrix) }}
     env:
-      PG_MAJOR: ${{ matrix.postgres }}
-      ENGINE: ${{ matrix.engine }}
+      PG_MAJOR: '18'
       DATABASE_TEST_SCOPE: ${{ needs.ci-relevance.outputs.database_scope }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Cache pinned go-test tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - uses: ./.github/actions/setup-tools
         with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'control-plane/go.sum', 'signer/go.sum') }}
-      - run: scripts/bootstrap.sh go-test
+          profiles: go-test
       - id: cache-key
         run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
       - id: go-mod-cache
@@ -354,14 +362,14 @@ jobs:
             basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
             basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
       - name: Enforce SQL artifact window and fixed checkpoint
-        run: bash scripts/database-artifact-policy.sh "$ENGINE"
+        run: bash scripts/database-artifact-policy.sh postgres
       - run: scripts/database-integration.sh
       - name: Check current schema source and independent replay equivalence
         run: bash scripts/database-postgres-snapshot.sh check
       - name: Verify PostgreSQL 18 volume lifecycle
         run: bash scripts/test-postgres-volume-layout.sh
-      - name: Save database Go objects (one main writer)
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.engine == 'postgres' && steps.go-build-cache.outputs.cache-hit != 'true' }}
+      - name: Save database Go objects (main only)
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-build
@@ -372,27 +380,36 @@ jobs:
     if: needs.ci-relevance.outputs.profile == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        engine: [postgres]
-    env:
-      ENGINE: ${{ matrix.engine }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - run: scripts/bootstrap.sh go-test
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: go-test
+      - id: cache-key
+        run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-mod
+          key: basic-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-build
+          key: basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
+          restore-keys: |
+            basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
+            basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
       - run: |
-          RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ENGINE}" \
-            ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-${ENGINE}" \
+          RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-postgres" \
+            ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-postgres" \
             bash scripts/external-postgres-backup-restore-smoke.sh
       - name: Preserve database recovery evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: database-recovery-${{ matrix.engine }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/database-recovery-${{ matrix.engine }}
+          name: database-recovery-postgres-${{ github.run_id }}
+          path: ${{ runner.temp }}/database-recovery-postgres
           if-no-files-found: warn
           retention-days: 7
 
@@ -431,7 +448,7 @@ jobs:
   basic-ci-result:
     name: Basic CI Result
     if: always()
-    needs: [ci-relevance, docs, go, rust, web, web-browser, database-smoke, database-recovery-full]
+    needs: [ci-relevance, docs, ci-tools, go, rust, installers, web, web-browser, database-smoke, database-recovery-full]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -449,14 +466,19 @@ jobs:
               all(["run_docs", "run_go", "run_rust", "run_web", "run_web_browser", "run_database", "run_ci_tools"][]; $routing[.] == "true") and
               ($routing.ci_suites | split(" ") | index("source-style") != null and index("contracts") != null)
             else true end) and
-            all(["docs", "go", "rust", "web", "web-browser", "database-smoke"][];
-              . as $job | (if $job == "go" then ($routing.run_go == "true" or $routing.run_ci_tools == "true")
-                elif $job == "rust" then ($routing.run_rust == "true" or $routing.run_installers == "true")
-                elif $job == "database-smoke" then $routing.run_database == "true"
-                elif $job == "web-browser" then $routing.run_web_browser == "true"
-                else $routing["run_" + $job] == "true" end) as $selected |
-              ($selected and $results[$job].result == "success") or
-              ($selected == false and $results[$job].result == "skipped")) and
+            all([
+              ["docs", "run_docs"],
+              ["ci-tools", "run_ci_tools"],
+              ["go", "run_go"],
+              ["rust", "run_rust"],
+              ["installers", "run_installers"],
+              ["web", "run_web"],
+              ["web-browser", "run_web_browser"],
+              ["database-smoke", "run_database"]
+            ][];
+              ($routing[.[1]] == "true") as $selected |
+              ($selected and $results[.[0]].result == "success") or
+              ($selected == false and $results[.[0]].result == "skipped")) and
             (if $routing.profile == "full" then
               .["database-recovery-full"].result == "success"
             else .["database-recovery-full"].result == "skipped" end)'

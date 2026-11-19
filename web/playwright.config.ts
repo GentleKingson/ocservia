@@ -6,6 +6,10 @@ import { defineConfig, devices } from "@playwright/test";
 const crossEngineSpecs =
   /(^|\/)(login|auth-workspace|agent-rollout|node-forms|user-password|shell-navigation|apple-layout|nodes-list|node-detail|operations|audit|csp-control)\.spec\.ts$/;
 
+const parsedWorkers = Number(process.env.PLAYWRIGHT_WORKERS);
+const workers =
+  Number.isInteger(parsedWorkers) && parsedWorkers > 0 ? parsedWorkers : 1;
+
 export default defineConfig({
   testDir: "./e2e",
   outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR ?? "test-results",
@@ -24,7 +28,7 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 10_000 },
   retries: 0,
-  workers: 1,
+  workers,
   // Each project names its engine; a global browserName would override them.
   projects: [
     {

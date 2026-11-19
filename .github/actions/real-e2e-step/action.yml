@@ -1,0 +1,61 @@
+name: Cross-VM rendezvous step
+description: Optionally wait for a peer artifact, execute a Cross-VM hosted phase, and optionally publish the resulting artifact.
+inputs:
+  wait-name:
+    description: Rendezvous artifact basename to wait for (without real-e2e- prefix or run-id suffix)
+    default: ''
+  wait-dir:
+    description: Target subdirectory passed to real-e2e-hosted.sh wait-download (defaults to wait-name)
+    default: ''
+  wait-peer:
+    description: Peer job display name for liveness monitoring while waiting
+    default: ''
+  token:
+    description: GitHub token for wait-download API calls (required when wait-name is set)
+    default: ''
+  script:
+    description: Driver script under scripts/ (real-e2e-hosted.sh or real-e2e-relay-host.sh)
+    default: real-e2e-hosted.sh
+  phase:
+    description: Phase subcommand to run (empty to skip phase execution)
+    default: ''
+  relay-token:
+    description: Optional REAL_E2E_RELAY_TOKEN passed to the phase
+    default: ''
+  publish-name:
+    description: Rendezvous artifact basename to publish (without real-e2e- prefix or run-id suffix)
+    default: ''
+  publish-path:
+    description: Artifact directory to publish (defaults to role outbox/<publish-name>)
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Wait for ${{ inputs.wait-name }}
+      if: inputs.wait-name != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        WAIT_NAME: ${{ inputs.wait-name }}
+        WAIT_DIR: ${{ inputs.wait-dir || inputs.wait-name }}
+        WAIT_PEER: ${{ inputs.wait-peer }}
+      run: >-
+        bash scripts/real-e2e-hosted.sh wait-download
+        "real-e2e-${WAIT_NAME}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        "${WAIT_DIR}" "${WAIT_PEER}"
+    - name: Run ${{ inputs.phase }}
+      if: inputs.phase != ''
+      shell: bash
+      env:
+        DRIVER_SCRIPT: ${{ inputs.script }}
+        PHASE: ${{ inputs.phase }}
+        REAL_E2E_RELAY_TOKEN: ${{ inputs.relay-token }}
+      run: bash "scripts/${DRIVER_SCRIPT}" "${PHASE}"
+    - name: Publish ${{ inputs.publish-name }}
+      if: inputs.publish-name != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: real-e2e-${{ inputs.publish-name }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ inputs.publish-path || format('{0}/ocservia-real-e2e-{1}-{2}/outbox/{3}', runner.temp, env.REAL_E2E_ROLE, env.RUN_ID, inputs.publish-name) }}
+        if-no-files-found: error
+        retention-days: 1
