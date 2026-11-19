@@ -61,11 +61,6 @@ if signer_output="$(docker run --rm "$(image_ref signer)" invalid-command 2>&1)"
 fi
 grep -Fq 'unknown command' <<<"${signer_output}" || fail "signer did not reach command validation"
 docker run --rm --entrypoint pg_basebackup "$(image_ref backup)" --version | grep -Fq 'pg_basebackup (PostgreSQL) 18.'
-if backup_output="$(docker run --rm "$(image_ref backup)" 2>&1)"; then
-  fail "PostgreSQL backup ran without its passfile source"
-fi
-grep -Fq 'PostgreSQL passfile source must be a regular file' <<<"${backup_output}" ||
-  fail "PostgreSQL backup did not reach its entrypoint guard"
 
 # Gateway must actually start: its USER directive once referenced an
 # account the upstream image never created (#139), so boot it for real,

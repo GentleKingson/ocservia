@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Ellipsis } from "@lucide/vue";
-import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
+import { ResponseError } from "@ocservia/api-client";
 import { useIntervalFn, useNow } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -107,10 +107,6 @@ const filterCounts = computed(() => countFilterValues(fleet.nodes));
 const visibleColumns = computed(() => new Set(listState.value.columns));
 const showColumn = (column: NodeListState["columns"][number]) =>
   visibleColumns.value.has(column);
-
-function pathRtt(node: NodeObservedState): string {
-  return node.path ? String(Math.round(node.path.rttMs)) : "";
-}
 
 const heartbeatDisplays = computed(() => {
   const nowMs = now.value.getTime();
@@ -559,7 +555,8 @@ async function submitRollout(): Promise<void> {
                     <span
                       v-if="node.path"
                       class="text-muted-foreground block text-xs"
-                      >{{ pathRtt(node) }} {{ $t("milliseconds") }}</span
+                      >{{ Math.round(node.path.rttMs) }}
+                      {{ $t("milliseconds") }}</span
                     >
                   </TableCell>
                   <TableCell v-if="showColumn('ocserv')" class="py-3">{{

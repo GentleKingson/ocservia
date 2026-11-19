@@ -46,15 +46,6 @@ impl EventState {
         }
         true
     }
-
-    fn pop_oldest(&mut self) {
-        if let Some(evicted) = self.retained.pop_front()
-            && is_telemetry(&evicted)
-        {
-            self.telemetry_retained -= 1;
-            self.telemetry_retained_bytes -= evicted.payload.len();
-        }
-    }
 }
 
 impl Shared {
@@ -89,8 +80,13 @@ impl Shared {
             // A full queue of control events is never displaced by telemetry.
             state.retained.len() < capacity || state.evict_oldest_telemetry()
         } else {
-            if state.retained.len() == capacity && !state.evict_oldest_telemetry() {
-                state.pop_oldest();
+            if state.retained.len() == capacity
+                && !state.evict_oldest_telemetry()
+                && let Some(evicted) = state.retained.pop_front()
+                && is_telemetry(&evicted)
+            {
+                state.telemetry_retained -= 1;
+                state.telemetry_retained_bytes -= evicted.payload.len();
             }
             true
         };

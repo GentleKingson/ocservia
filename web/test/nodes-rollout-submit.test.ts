@@ -1,5 +1,5 @@
-import { renderer } from "./renderer";
-import { nextTick, ssrContextKey } from "vue";
+import { mountSetup } from "./renderer";
+import { nextTick } from "vue";
 import { ResponseError } from "@ocservia/api-client";
 import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -59,15 +59,10 @@ async function flush() {
   for (let i = 0; i < 8; i++) await nextTick();
 }
 async function mount(): Promise<View> {
-  const app = renderer.createApp({ ...NodesView, render: () => null });
-  app.provide(ssrContextKey, {});
-  const instance = app.mount({});
-  unmount = () => {
-    app.unmount();
-    unmount = undefined;
-  };
+  const mounted = mountSetup(NodesView);
+  unmount = mounted.unmount;
   await flush();
-  const view = (instance.$ as unknown as { setupState: View }).setupState;
+  const view = mounted.view as View;
   view.selected = ["node-a"];
   view.rolloutDialog = true;
   view.rolloutReason = "first";

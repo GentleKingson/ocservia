@@ -330,54 +330,6 @@ async fn dispatch_attested(
     }
 }
 
-#[cfg(test)]
-const TEST_ENDPOINT_ID: [u8; 32] = [9; 32];
-
-#[cfg(test)]
-async fn dispatch(
-    request: PrivdRequest,
-    node_id: &[u8; 16],
-    command_keys: &ControllerCommandKeyring,
-    adapter: &Adapter,
-) -> PrivdResponse {
-    let key = Arc::new(SigningKey::from_bytes(&[41; 32]));
-    let kid: Arc<str> = Arc::from(key_id(&key.verifying_key()));
-    dispatch_attested(
-        &request,
-        node_id,
-        &TEST_ENDPOINT_ID,
-        command_keys,
-        &key,
-        &kid,
-        &UpgradeScheduler::disabled(),
-        adapter,
-    )
-    .await
-}
-
-#[cfg(test)]
-async fn dispatch_upgrade(
-    request: PrivdRequest,
-    node_id: &[u8; 16],
-    command_keys: &ControllerCommandKeyring,
-    adapter: &Adapter,
-    upgrades: &UpgradeScheduler,
-) -> PrivdResponse {
-    let key = Arc::new(SigningKey::from_bytes(&[41; 32]));
-    let kid: Arc<str> = Arc::from(key_id(&key.verifying_key()));
-    dispatch_attested(
-        &request,
-        node_id,
-        &TEST_ENDPOINT_ID,
-        command_keys,
-        &key,
-        &kid,
-        upgrades,
-        adapter,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_lines)]
 async fn execute_read(
     operation: Option<privd_request::Operation>,

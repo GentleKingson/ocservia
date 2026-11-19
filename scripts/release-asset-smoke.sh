@@ -32,7 +32,6 @@ trap 'exit 1' HUP INT TERM
 printf 'release_tag=%s\narch=%s\nharness_commit=%s\n' \
   "${release_tag}" "${arch}" "$(git -C "${ROOT}" rev-parse HEAD)" >"${ARTIFACT_DIR}/release-assets-summary.txt"
 : >"${ARTIFACT_DIR}/release-assets-downloads.txt"
-: >"${ARTIFACT_DIR}/release-assets-sha256.txt"
 
 base="https://github.com/GentleKingson/ocservia/releases/download/${release_tag}"
 archive="ocservia-agent-${version}-linux-${arch}.tar.gz"
@@ -45,7 +44,6 @@ for name in "${archive}" "${archive}.sha256" \
     --tlsv1.2 --connect-timeout 15 --max-time 300 --retry 2 \
     --output "${work}/${name}" "${url}"
   test -s "${work}/${name}"
-  (cd "${work}" && sha256sum -- "${name}") >>"${ARTIFACT_DIR}/release-assets-sha256.txt"
 done
 # Check exactly the requested archive, never arbitrary paths from a checksum file.
 checksum="$(cat "${work}/${archive}.sha256")"

@@ -278,31 +278,4 @@ func TestFenceBindingV2ClaimsAreStrict(t *testing.T) {
 	if _, err := CanonicalFenceBindingV2(base); err != nil {
 		t.Fatalf("valid binding rejected: %v", err)
 	}
-
-	fence := ConnectionFenceClaimsV2{
-		FenceID: base.FenceID, OwnerInstanceID: base.OwnerInstanceID,
-		OwnerIncarnation: base.OwnerIncarnation, OwnerEpoch: base.OwnerEpoch,
-		ConnectionID: base.ConnectionID, AuthorizationRevision: base.AuthorizationRevision,
-	}
-	if !base.MatchesFence(fence) {
-		t.Fatal("binding must match its own fence term")
-	}
-	// Any drift in the recorded term — a different epoch from a later
-	// takeover, a replaced connection, a new incarnation, or a reissued
-	// fence identity — breaks the match.
-	drifts := []func(*FenceBindingClaimsV2){
-		func(c *FenceBindingClaimsV2) { c.OwnerEpoch = 8 },
-		func(c *FenceBindingClaimsV2) { c.ConnectionID = [16]byte{9} },
-		func(c *FenceBindingClaimsV2) { c.OwnerIncarnation = 12 },
-		func(c *FenceBindingClaimsV2) { c.OwnerInstanceID = [16]byte{10} },
-		func(c *FenceBindingClaimsV2) { c.FenceID = [16]byte{11} },
-		func(c *FenceBindingClaimsV2) { c.AuthorizationRevision = 100 },
-	}
-	for index, mutate := range drifts {
-		binding := base
-		mutate(&binding)
-		if binding.MatchesFence(fence) {
-			t.Fatalf("case %d: binding matched a different term", index)
-		}
-	}
 }

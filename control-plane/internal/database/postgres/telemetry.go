@@ -283,32 +283,9 @@ func (s telemetryStore) ReplaceGroups(ctx context.Context, node uuid.UUID, group
 	return nil
 }
 
-func (s telemetryStore) Groups(ctx context.Context, node uuid.UUID) ([]telemetrystore.Group, error) {
-	rows, err := s.tx.Query(ctx, `SELECT group_name,members,revision,fingerprint,observed_at FROM observed_groups WHERE node_id=$1 ORDER BY group_name COLLATE "C"`, node)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	groups := []telemetrystore.Group{}
-	for rows.Next() {
-		var g telemetrystore.Group
-		if err := rows.Scan(&g.Name, &g.Members, &g.Revision, &g.Fingerprint, &g.ObservedAt); err != nil {
-			return nil, err
-		}
-		groups = append(groups, g)
-	}
-	return groups, rows.Err()
-}
-
 func (s telemetryStore) InsertSecurity(ctx context.Context, node uuid.UUID, e telemetrystore.SecurityEvent) error {
 	_, err := s.tx.Exec(ctx, `INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, e.ID, node, e.ObservedAt, e.Severity, e.Type, e.Detail)
 	return err
-}
-
-func (s telemetryStore) SecurityEvent(ctx context.Context, id uuid.UUID) (telemetrystore.SecurityEvent, error) {
-	e := telemetrystore.SecurityEvent{ID: id}
-	err := s.tx.QueryRow(ctx, `SELECT observed_at,severity,event_type,detail FROM telemetry_security_events WHERE event_id=$1`, id).Scan(&e.ObservedAt, &e.Severity, &e.Type, &e.Detail)
-	return e, err
 }
 
 func (s telemetryStore) InsertHistory(ctx context.Context, nodeID, batchID uuid.UUID, samples []telemetrystore.Sample) error {

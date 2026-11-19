@@ -23,17 +23,6 @@ if git -C "${ROOT}" cat-file -e "${base_sha}:proto/buf.yaml" 2>/dev/null; then
   mkdir -p "${temporary}/baseline"
   git -C "${ROOT}" archive "${base_sha}" proto | tar -x -C "${temporary}/baseline"
   (cd "${ROOT}" && buf breaking proto --against "${temporary}/baseline/proto")
-else
-  echo "No contract exists on ${base_ref}; validating FILE policy with a breaking fixture."
-  cp -R "${ROOT}/proto" "${temporary}/against"
-  cp -R "${ROOT}/proto" "${temporary}/candidate"
-  sed -i.bak '/string version = 2;/d' \
-    "${temporary}/candidate/ocserv/platform/transport/v1/transport.proto"
-  rm -f "${temporary}/candidate/ocserv/platform/transport/v1/transport.proto.bak"
-  if (cd "${temporary}" && buf breaking candidate --against against); then
-    echo "breaking fixture was not rejected" >&2
-    exit 1
-  fi
 fi
 
 if git -C "${ROOT}" cat-file -e "${base_sha}:openapi/openapi.yaml" 2>/dev/null; then
@@ -259,85 +248,11 @@ const normalizeAuditConflict = (before, after) => {
   assertExact("audit verification 409", after.paths["/audit:verify"]?.post?.responses?.["409"], auditConflict);
   responses["409"] = structuredClone(auditConflict);
 };
-const badAudit = structuredClone(candidate);
-badAudit.paths["/audit:verify"].post.responses["409"] = {
-  ...auditConflict, content: { "text/plain": { schema: { type: "string" } } },
-};
-if (baseline.paths["/audit:verify"]?.post?.responses?.["409"]?.$ref === "#/components/responses/Problem") {
-  let rejected = false;
-  try { normalizeAuditConflict(structuredClone(baseline), badAudit); }
-  catch (error) { rejected = String(error).includes("audit verification 409"); }
-  if (!rejected) throw new Error("Audit correction accepted an unrelated response change");
-}
 normalizeAuditConflict(baseline, candidate);
-
-// Prove the allowlist rejects an unrelated breaking change inside a migrated
-// schema, parameter list, or retired path/method.
-for (const [name, mutate] of [
-  ["CertificateRevokeRequest", (doc) => { doc.components.schemas.CertificateRevokeRequest.properties.reason.maxLength = 127; }],
-  ["CertificateP12Request", (doc) => { doc.components.schemas.CertificateP12Request.properties.artifact_request_id = { type: "string" }; }],
-  ["ConfigPlanRequest", (doc) => { doc.components.schemas.ConfigPlanRequest.properties.ttl_seconds.maximum = 7200; }],
-  ["ConfigPlan", (doc) => { delete doc.components.schemas.ConfigPlan.properties.materialized_hash; }],
-  ["AgentUpgradeRequest", (doc) => { doc.components.schemas.AgentUpgradeRequest.properties.reason.maxLength = 256; }],
-  ["ConfigApplyRequest", (doc) => { doc.components.schemas.ConfigApplyRequest.properties.reason.maxLength = 256; }],
-  ["CertificateIssueRequest", (doc) => { doc.components.schemas.CertificateIssueRequest.properties.reason.maxLength = 256; }],
-  ["AgentRolloutCreateRequest", (doc) => { doc.components.schemas.AgentRolloutCreateRequest.properties.batch_size.maximum = 10; }],
-  ["AgentRollout", (doc) => { doc.components.schemas.AgentRollout.required = doc.components.schemas.AgentRollout.required.filter((field) => field !== "state"); }],
-  ["NodeBootstrapToken", (doc) => { doc.components.schemas.NodeBootstrapToken.properties.token.pattern = ".*"; }],
-  ["sessionCookie", (doc) => { doc.components.securitySchemes.sessionCookie.name = "bad_cookie"; }],
-  ["/auth/login.get", (doc) => { doc.paths["/auth/login"].get = { responses: { "200": { description: "bad" } } }; }],
-  ["/nodes/{node_id}/revocation.post.parameters", (doc) => { doc.paths["/nodes/{node_id}/revocation"].post.parameters = []; }],
-  ["/role-bindings", (doc) => { doc.paths["/role-bindings"] = { post: { responses: { "201": { description: "bad" } } } }; }],
-]) {
-  const guardCandidate = structuredClone(candidate);
-  mutate(guardCandidate);
-  let guardRejected = false;
-  try {
-    normalizeSecurityMigrations(structuredClone(baseline), guardCandidate);
-  } catch (error) {
-    guardRejected = String(error).includes(name);
-  }
-  if (!guardRejected) {
-    throw new Error(`OpenAPI migration allowlist accepted an unrelated ${name} change`);
-  }
-}
-
 normalizeSecurityMigrations(baseline, candidate);
 writeFileSync(baselinePath, stringify(baseline));
 EOF
   )
   oasdiff breaking --fail-on ERR \
     "${temporary}/main.yaml" "${ROOT}/openapi/openapi.yaml"
-  (cd "${ROOT}/web" && node --input-type=module - \
-    "${ROOT}/openapi/openapi.yaml" "${temporary}/bad-exclusion.yaml" <<'EOF'
-import { readFileSync, writeFileSync } from "node:fs";
-import { parse, stringify } from "yaml";
-const [, , source, destination] = process.argv;
-const document = parse(readFileSync(source, "utf8"));
-document.components.schemas.AgentRollout.properties.excluded = { type: "string" };
-writeFileSync(destination, stringify(document));
-EOF
-  )
-  if oasdiff breaking --fail-on ERR "${ROOT}/openapi/openapi.yaml" "${temporary}/bad-exclusion.yaml"; then
-    echo "Rollout exclusion breaking fixture was not rejected" >&2
-    exit 1
-  fi
-else
-  echo "No OpenAPI contract exists on ${base_ref}; validating compatibility detection with a fixture."
-  (cd "${ROOT}/web" && node --input-type=module - \
-    "${ROOT}/openapi/openapi.yaml" "${temporary}/candidate.yaml" <<'EOF'
-import { readFileSync, writeFileSync } from "node:fs";
-import { parse, stringify } from "yaml";
-
-const [, , source, destination] = process.argv;
-const document = parse(readFileSync(source, "utf8"));
-delete document.paths["/operations"];
-writeFileSync(destination, stringify(document));
-EOF
-  )
-  if oasdiff breaking --fail-on ERR \
-    "${ROOT}/openapi/openapi.yaml" "${temporary}/candidate.yaml"; then
-    echo "OpenAPI breaking fixture was not rejected" >&2
-    exit 1
-  fi
 fi

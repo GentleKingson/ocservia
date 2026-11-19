@@ -69,10 +69,10 @@ classify_path() {
     .tool-versions|.nvmrc|.node-version|Makefile|\
     scripts/ci-*|scripts/*required-go-tests*|scripts/go-test-environment.sh|\
     scripts/test-ci-relevance.sh|scripts/test-toolchain-consistency.sh|\
-    scripts/check-public-repository.sh|scripts/test-public-repository-policy.sh|\
+    scripts/check-public-repository.sh|\
     scripts/license-check.sh|scripts/test.sh|scripts/verify.sh)
       tools_suite guards ;;
-    scripts/generate.sh|scripts/generated-clean.sh|scripts/check-breaking.sh|scripts/test-generated-clean.sh)
+    scripts/generate.sh|scripts/generated-clean.sh|scripts/check-breaking.sh)
       tools_suite contracts ;;
     scripts/lint.sh) tools_suite source-style; tools_suite contracts ;;
     scripts/format.sh) run_go=true; run_rust=true; run_web=true; tools_suite contracts ;;
@@ -89,10 +89,10 @@ classify_path() {
     .dockerignore|.gitleaksignore|.github/release.yml|\
     .github/actions/build-cache-credentials/*|.github/actions/download-release-product/*|\
     rust/agent-build.Dockerfile|rust/transportd.Dockerfile|\
-    scripts/buildx-cache.sh|scripts/test-build-cache-credentials.sh|\
-    scripts/security-check.sh|scripts/secret-scan.toml|scripts/test-secret-scan-config*.sh|\
+    scripts/buildx-cache.sh|\
+    scripts/security-check.sh|scripts/secret-scan.toml|scripts/test-secret-scan-config-runtime.sh|\
     scripts/release-quick-acceptance.sh|scripts/resilience-capacity*.sh|scripts/security-acceptance-*|\
-    scripts/perf-bench.sh|scripts/test-resilience-capacity-lib.sh)
+    scripts/perf-bench.sh)
       tools_suite release ;;
 
     # Cross-language fixtures and integration drivers (Go + Rust).
@@ -125,12 +125,11 @@ classify_path() {
     deploy/lib/node-bootstrap.sh|deploy/lib/controller-runtime.sh|\
     deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
     deploy/production/systemd/ocservia-agent-relays.conf|\
-    scripts/prepare-bootstrap-release-assets.sh|scripts/release-agent-state-check.sh|\
+    scripts/prepare-bootstrap-release-assets.sh|\
     scripts/package-agent.sh|scripts/verify-agent-package.sh|\
     scripts/test-installer-common.sh|scripts/test-managed-node-install.sh|scripts/test-node-bootstrap.py|\
     scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
-    scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py|\
-    scripts/test-release-agent-state-check.sh)
+    scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py)
       run_installers=true ;;
 
     # Broader release/installer/packaging/deployment paths.

@@ -152,13 +152,6 @@ restart_clients() {
   compose up -d --force-recreate --no-deps --wait --wait-timeout "${wait_timeout}" control-plane backup >/dev/null
 }
 
-restore_files() {
-  local name
-  for name in postgres-app-password postgres-backup-password database-app-url postgres.pgpass; do
-    atomic_secret "${secret_dir}/${name}" "$(cat -- "${recovery_dir}/${name}")"
-  done
-}
-
 credential_pair_active() {
   local app_password="$1" backup_password="$2"
   verify_login ocservia_app "${app_password}" ocservia >/dev/null 2>&1 &&
@@ -188,15 +181,8 @@ file_matches_either() {
   [[ "${value}" == "${first}" || "${value}" == "${second}" ]]
 }
 
-files_match_rotation_state() {
-  file_matches_either "${secret_dir}/postgres-app-password" "${old_app_password}" "${new_app_password}" &&
-    file_matches_either "${secret_dir}/postgres-backup-password" "${old_backup_password}" "${new_backup_password}" &&
-    file_matches_either "${secret_dir}/database-app-url" "${current_app_url}" "${new_app_url}" &&
-    file_matches_either "${secret_dir}/postgres.pgpass" "${current_pgpass}" "${new_pgpass}"
-}
-
 recover() {
-  local status=$? database_state="old" recovery_safe=true
+  local status=$? database_state="old" recovery_safe=true name
   trap - ERR
   [[ "${recovering}" == false ]] || exit "${status}"
   recovering=true
@@ -206,7 +192,12 @@ recover() {
       recovery_safe=false
     fi
   fi
-  if [[ "${files_changed}" == true ]] && ! files_match_rotation_state; then
+  if [[ "${files_changed}" == true ]] && ! {
+    file_matches_either "${secret_dir}/postgres-app-password" "${old_app_password}" "${new_app_password}" &&
+      file_matches_either "${secret_dir}/postgres-backup-password" "${old_backup_password}" "${new_backup_password}" &&
+      file_matches_either "${secret_dir}/database-app-url" "${current_app_url}" "${new_app_url}" &&
+      file_matches_either "${secret_dir}/postgres.pgpass" "${current_pgpass}" "${new_pgpass}"
+  }; then
     recovery_safe=false
   fi
   if [[ "${recovery_safe}" == true && "${database_state}" == new ]]; then
@@ -218,8 +209,10 @@ recover() {
     database_recovered=1
   fi
   if [[ "${recovery_safe}" == true && "${files_changed}" == true ]]; then
-    restore_files
-    files_recovered=$?
+    files_recovered=0
+    for name in postgres-app-password postgres-backup-password database-app-url postgres.pgpass; do
+      atomic_secret "${secret_dir}/${name}" "$(cat -- "${recovery_dir}/${name}")" || files_recovered=1
+    done
   elif [[ "${recovery_safe}" == true ]]; then
     files_recovered=0
   else

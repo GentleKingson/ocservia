@@ -194,34 +194,6 @@ impl ControllerCommandKeyring {
         })
     }
 
-    /// Verifies a Controller-signed per-node connection-owner fence for the
-    /// local node and endpoint. transportd relays fences but cannot mint or
-    /// alter them; the lease deadline bound here is the PostgreSQL-time
-    /// deadline recorded by the database ownership authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns an authorization error when the fence is malformed, expired,
-    /// signed by an unknown key, has an invalid signature, or does not match
-    /// the expected node and endpoint. This second-only compatibility API
-    /// evaluates the supplied second at nanosecond zero; callers with a
-    /// subsecond clock should use [`Self::verify_connection_fence_v2_at`].
-    pub fn verify_connection_fence_v2(
-        &self,
-        fence: &ConnectionFenceV2,
-        expected_node_id: &[u8; 16],
-        expected_endpoint_id: &[u8; 32],
-        now_unix_seconds: i64,
-    ) -> Result<VerifiedConnectionFenceV2, AuthorizationError> {
-        self.verify_connection_fence_v2_at(
-            fence,
-            expected_node_id,
-            expected_endpoint_id,
-            now_unix_seconds,
-            0,
-        )
-    }
-
     /// Verifies a Controller-signed per-node connection-owner fence at an
     /// exact nanosecond-precision wall-clock instant.
     ///
@@ -296,36 +268,6 @@ impl ControllerCommandKeyring {
             expires_at_seconds: claims.expires_at_seconds,
             expires_at_nanos: claims.expires_at_nanos,
         })
-    }
-
-    /// Verifies a Controller-signed operation binding for the local node and
-    /// endpoint. The caller matches the returned claims against the fence
-    /// recorded on the actual dispatch attempt with
-    /// [`FenceBindingClaimsV2::matches_fence`], so late legitimate results
-    /// are accepted while results recorded under any other term are
-    /// rejected.
-    ///
-    /// # Errors
-    ///
-    /// Returns an authorization error when the binding is malformed, expired,
-    /// signed by an unknown key, has an invalid signature, or does not match
-    /// the expected node and endpoint. This second-only compatibility API
-    /// evaluates the supplied second at nanosecond zero; callers with a
-    /// subsecond clock should use [`Self::verify_fence_binding_v2_at`].
-    pub fn verify_fence_binding_v2(
-        &self,
-        binding: &FenceBindingV2,
-        expected_node_id: &[u8; 16],
-        expected_endpoint_id: &[u8; 32],
-        now_unix_seconds: i64,
-    ) -> Result<FenceBindingClaimsV2, AuthorizationError> {
-        self.verify_fence_binding_v2_at(
-            binding,
-            expected_node_id,
-            expected_endpoint_id,
-            now_unix_seconds,
-            0,
-        )
     }
 
     /// Verifies a Controller-signed operation binding at an exact

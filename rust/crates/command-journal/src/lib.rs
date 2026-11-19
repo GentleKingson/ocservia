@@ -507,52 +507,6 @@ impl Journal {
         .collect()
     }
 
-    /// Commits the synthetic side effect and its counter atomically.
-    ///
-    /// Returns `true` only for the first execution. A conflicting payload is rejected.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `SQLite` error; the surrounding transaction prevents a partial effect.
-    pub fn execute_synthetic_effect(
-        &mut self,
-        idempotency_key: &[u8; 16],
-        payload_sha256: &[u8; 32],
-        result: &[u8],
-        now: i64,
-    ) -> Result<bool, rusqlite::Error> {
-        if result.len() > 1024 * 1024 {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(existing) = query_effect(&transaction, idempotency_key)? {
-            if existing.payload_sha256 != *payload_sha256 {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            transaction.commit()?;
-            return Ok(false);
-        }
-        transaction
-            .prepare_cached(
-                "INSERT INTO synthetic_effects(idempotency_key,payload_sha256,result,executed_at) VALUES (?1,?2,?3,?4)",
-            )?
-            .execute(rusqlite::params![
-                idempotency_key.as_slice(),
-                payload_sha256.as_slice(),
-                result,
-                now
-            ])?;
-        transaction
-            .prepare_cached(
-                "UPDATE synthetic_effect_counter SET executions=executions+1 WHERE singleton=1",
-            )?
-            .execute([])?;
-        transaction.commit()?;
-        Ok(true)
-    }
-
     /// Commits the synthetic effect and terminal journal result atomically.
     ///
     /// # Errors
@@ -642,46 +596,6 @@ impl Journal {
         self.connection
             .prepare_cached("SELECT executions FROM synthetic_effect_counter WHERE singleton=1")?
             .query_row([], |row| row.get(0))
-    }
-
-    /// Returns the active `SQLite` journal mode.
-    ///
-    /// # Errors
-    ///
-    /// Returns a query error.
-    pub fn journal_mode(&self) -> Result<String, rusqlite::Error> {
-        self.connection
-            .pragma_query_value(None, "journal_mode", |row| row.get(0))
-    }
-
-    /// Returns the active `SQLite` synchronous durability level.
-    ///
-    /// # Errors
-    ///
-    /// Returns a query error.
-    pub fn synchronous_level(&self) -> Result<u8, rusqlite::Error> {
-        self.connection
-            .pragma_query_value(None, "synchronous", |row| row.get(0))
-    }
-
-    /// Returns whether foreign keys are enabled.
-    ///
-    /// # Errors
-    ///
-    /// Returns a query error.
-    pub fn foreign_keys_enabled(&self) -> Result<bool, rusqlite::Error> {
-        self.connection
-            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
-    }
-
-    /// Returns the configured busy timeout in milliseconds.
-    ///
-    /// # Errors
-    ///
-    /// Returns a query error.
-    pub fn busy_timeout_ms(&self) -> Result<u64, rusqlite::Error> {
-        self.connection
-            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
     }
 
     /// Runs `SQLite`'s complete consistency check on the active journal connection.

@@ -467,7 +467,14 @@ impl EffectStore {
     }
 
     pub(crate) fn tracked_artifact_ids(&self) -> Result<Vec<[u8; 16]>, AdapterError> {
-        query_all_artifacts(&self.connection)
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT artifact_id FROM certificate_artifacts ORDER BY artifact_id")
+            .map_err(sqlite_io)?;
+        let rows = statement
+            .query_map([], |row| fixed_blob(row.get(0)?))
+            .map_err(sqlite_io)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)
     }
 }
 
@@ -596,16 +603,6 @@ fn query_all_artifact_records(
         .map_err(sqlite_io)?;
     let rows = statement
         .query_map([], decode_artifact_row)
-        .map_err(sqlite_io)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)
-}
-
-fn query_all_artifacts(connection: &Connection) -> Result<Vec<[u8; 16]>, AdapterError> {
-    let mut statement = connection
-        .prepare_cached("SELECT artifact_id FROM certificate_artifacts ORDER BY artifact_id")
-        .map_err(sqlite_io)?;
-    let rows = statement
-        .query_map([], |row| fixed_blob(row.get(0)?))
         .map_err(sqlite_io)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)
 }

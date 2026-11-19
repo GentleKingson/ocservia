@@ -90,7 +90,7 @@ pub(super) fn build_telemetry(
                     .command_executor
                     .journal()
                     .applied_revisions("user")
-                    .unwrap_or_default()
+                    .map_err(io::Error::other)?
                     .into_iter()
                     .collect();
                 users = value
@@ -116,7 +116,7 @@ pub(super) fn build_telemetry(
                     .command_executor
                     .journal()
                     .applied_revisions("group")
-                    .unwrap_or_default()
+                    .map_err(io::Error::other)?
                     .into_iter()
                     .collect();
                 groups = value

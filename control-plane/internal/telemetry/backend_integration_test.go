@@ -10,9 +10,9 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
 	"testing"
 	"time"
@@ -24,15 +24,7 @@ import (
 
 func telemetryBackend(t *testing.T) database.Backend {
 	t.Helper()
-	ctx := context.Background()
-	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("real PostgreSQL required")
-	}
-	pool, err := pgxpool.New(ctx, dsn)
-	testutil.NoError(t, err)
-	t.Cleanup(pool.Close)
-	return postgres.WrapPool(pool)
+	return testfixture.OpenRuntime(t)
 }
 
 // This calls the real ingestion service with the runtime principal, including
@@ -148,20 +140,32 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		groups, err := store.Groups(ctx, node)
+		rows, err := tx.Query(ctx, `SELECT group_name FROM observed_groups WHERE node_id=$1 ORDER BY group_name COLLATE "C"`, node)
 		if err != nil {
 			return err
 		}
-		if len(groups) != 1 || groups[0].Name != "operators" {
-			t.Fatalf("groups: %+v", groups)
+		defer rows.Close()
+		var groupNames []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return err
+			}
+			groupNames = append(groupNames, name)
 		}
-		event, err := store.SecurityEvent(ctx, batch.Security[0].ID)
-		if err != nil {
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(groupNames) != 1 || groupNames[0] != "operators" {
+			t.Fatalf("groups: %+v", groupNames)
+		}
+		var detail value.JSONB
+		if err := tx.QueryRow(ctx, `SELECT detail FROM telemetry_security_events WHERE event_id=$1`, batch.Security[0].ID).Scan(&detail); err != nil {
 			return err
 		}
 		expected, _ := value.ParseJSONB(batch.Security[0].Detail)
-		if !bytes.Equal(event.Detail.Bytes(), expected.Bytes()) {
-			t.Fatalf("security detail lost precision: %s", event.Detail.Bytes())
+		if !bytes.Equal(detail.Bytes(), expected.Bytes()) {
+			t.Fatalf("security detail lost precision: %s", detail.Bytes())
 		}
 		since, err := value.FromTime(now.Add(-time.Hour))
 		if err != nil {
@@ -235,14 +239,10 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	positive := value.Timestamp{Micros: value.PositiveInfinity, Valid: true}
 	// Infinite historical timestamps belong to owner-seeded DEFAULT data,
 	// not the runtime ingestion window. Keep the service on its runtime account.
-	ownerDSN := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if ownerDSN == "" {
+	if os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL") == "" {
 		t.Fatal("owner connection required to seed historical telemetry")
 	}
-	ownerPool, err := pgxpool.New(ctx, ownerDSN)
-	testutil.NoError(t, err)
-	t.Cleanup(ownerPool.Close)
-	historyOwner := postgres.WrapPool(ownerPool)
+	historyOwner := postgres.WrapPool(testfixture.OpenOwnerPool(t))
 	for _, at := range []value.Timestamp{negative, positive} {
 		if _, err := historyOwner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'connection_rtt_ms',7)`, node, batch.ID, at); err != nil {
 			t.Fatal(err)

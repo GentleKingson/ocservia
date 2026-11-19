@@ -325,29 +325,11 @@ validate_bootstrap_token_source() {
     fail "BOOTSTRAP_TOKEN_SOURCE must not be accessible by group or other users (found mode ${bootstrap_mode})"
 }
 
-create_launcher_staging() {
-  STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-managed-node.XXXXXX")"
-  trap '[[ -z "${PACKAGE_STAGING_DIR:-}" ]] || priv rm -rf -- "${PACKAGE_STAGING_DIR}"; [[ -z "${STAGING_DIR:-}" ]] || rm -rf -- "${STAGING_DIR}"' EXIT INT TERM
-}
-
-create_package_staging() {
-  # A fixed root-owned sticky parent prevents the launcher from replacing
-  # the protected staging directory through an operator-controlled TMPDIR.
-  PACKAGE_STAGING_DIR="$(priv mktemp -d /var/tmp/ocservia-managed-node-pkg.XXXXXX)"
-}
-
-download_release_artifacts() {
-  local name
-  for name in "$@"; do
-    echo "downloading ${DOWNLOAD_BASE}/${VERSION}/${name}"
-    curl -fsSL --proto '=https' --tlsv1.2 \
-      --output "${STAGING_DIR}/${name}" "${DOWNLOAD_BASE}/${VERSION}/${name}"
-  done
-}
-
 download_native_package() {
   local input actual_digest
-  download_release_artifacts "${PACKAGE_FILE}"
+  echo "downloading ${DOWNLOAD_BASE}/${VERSION}/${PACKAGE_FILE}"
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    --output "${STAGING_DIR}/${PACKAGE_FILE}" "${DOWNLOAD_BASE}/${VERSION}/${PACKAGE_FILE}"
   input="${STAGING_DIR}/${PACKAGE_FILE}"
   [[ -f "${input}" && ! -L "${input}" && -s "${input}" ]] ||
     fail "downloaded package must be a nonempty regular file"
@@ -415,13 +397,6 @@ install_native_package() {
   [[ -x "${AGENT_BINARY}" ]] ||
     fail "the native package install did not install ${AGENT_BINARY}"
   echo "native package installed: ${PACKAGE_FILE} (production relay contract requested)"
-}
-
-resolve_agent_group() {
-  AGENT_GID="$(priv id -g ocserv-agent 2>/dev/null)" ||
-    fail "the ocserv-agent group does not exist; the native package lifecycle must create it"
-  [[ "${AGENT_GID}" =~ ^[0-9]+$ ]] ||
-    fail "cannot resolve the ocserv-agent group id"
 }
 
 ensure_sealing_key() {
@@ -843,11 +818,14 @@ require_commands
 node_bootstrap_prepare
 validate_operator_inputs
 
-create_launcher_staging
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-managed-node.XXXXXX")"
+trap '[[ -z "${PACKAGE_STAGING_DIR:-}" ]] || priv rm -rf -- "${PACKAGE_STAGING_DIR}"; [[ -z "${STAGING_DIR:-}" ]] || rm -rf -- "${STAGING_DIR}"' EXIT INT TERM
 if native_package_satisfied; then
   echo "native package ocservia-agent $(expected_installed_version) already installed; skipping the release download and package installation"
 else
-  create_package_staging
+  # A fixed root-owned sticky parent prevents the launcher from replacing
+  # the protected staging directory through an operator-controlled TMPDIR.
+  PACKAGE_STAGING_DIR="$(priv mktemp -d /var/tmp/ocservia-managed-node-pkg.XXXXXX)"
   download_native_package
   install_native_package
 fi
@@ -856,7 +834,10 @@ fi
 [[ -x "${PRIVD_BINARY}" ]] || fail "the native package did not install ${PRIVD_BINARY}"
 priv "${PRIVD_BINARY}" --host-preflight ||
   fail "host preflight failed before enrollment; follow the resource diagnostic, correct the host deliberately, and rerun"
-resolve_agent_group
+AGENT_GID="$(priv id -g ocserv-agent 2>/dev/null)" ||
+  fail "the ocserv-agent group does not exist; the native package lifecycle must create it"
+[[ "${AGENT_GID}" =~ ^[0-9]+$ ]] ||
+  fail "cannot resolve the ocserv-agent group id"
 detect_enrolled_node
 if [[ -z "${ENROLLED_NODE_ID}" ]]; then
   validate_bootstrap_token_source

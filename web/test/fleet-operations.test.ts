@@ -1,9 +1,10 @@
-import type {
-  NodeIpBan,
-  NodeObservedState,
-  NodeSession,
-  Operation,
-  UserGroupResourceState,
+import {
+  ResponseError,
+  type NodeIpBan,
+  type NodeObservedState,
+  type NodeSession,
+  type Operation,
+  type UserGroupResourceState,
 } from "@ocservia/api-client";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createUser } from "../src/api/users";
 import { disconnectSession, getOperation } from "../src/api/operations";
 import { upgradeNodeAgent } from "../src/api/agents";
+import { listEvents } from "../src/api/events";
 import {
   getNode,
   listNodeIpBans,
@@ -18,7 +20,7 @@ import {
   listNodes,
   listNodeSessions,
 } from "../src/api/nodes";
-import { workspaceContext } from "../src/api/workspace";
+import { getWorkspace, workspaceContext } from "../src/api/workspace";
 import { useFleetStore } from "../src/shared/fleet";
 
 vi.mock("../src/api/users", () => ({
@@ -37,8 +39,8 @@ vi.mock("../src/api/operations", () => ({
 }));
 vi.mock("../src/api/workspace", async (original) => ({
   ...(await original<typeof import("../src/api/workspace")>()),
-  getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
-  workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
+  getWorkspace: vi.fn(),
+  workspaceContext: vi.fn(),
 }));
 vi.mock("../src/api/nodes", () => ({
   getNode: vi.fn(),
@@ -49,9 +51,7 @@ vi.mock("../src/api/nodes", () => ({
 }));
 vi.mock("../src/api/events", () => ({
   eventStreamPath: vi.fn(),
-  listEvents: vi
-    .fn()
-    .mockResolvedValue({ items: [], page: { hasMore: false } }),
+  listEvents: vi.fn(),
   platformEventsEvent: "ocservia:platform-events",
 }));
 vi.mock("../src/api/agents", () => ({
@@ -100,18 +100,20 @@ describe("controlled fleet operations", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     setActivePinia(createPinia());
-    vi.mocked(getNode).mockReset();
-    vi.mocked(getOperation).mockReset();
-    vi.mocked(listNodeIpBans).mockReset();
-    vi.mocked(listNodeUserGroupState).mockReset();
-    vi.mocked(listNodes).mockReset();
-    vi.mocked(listNodeSessions).mockReset();
-    vi.mocked(disconnectSession).mockReset();
-    vi.mocked(upgradeNodeAgent).mockReset();
-    vi.mocked(createUser).mockReset();
+    vi.resetAllMocks();
+    vi.mocked(getWorkspace).mockResolvedValue({
+      id: "workspace",
+      name: "Workspace",
+      slug: "workspace",
+      version: 1,
+    });
     vi.mocked(workspaceContext).mockReturnValue({
       id: "workspace",
       generation: 1,
+    });
+    vi.mocked(listEvents).mockResolvedValue({
+      items: [],
+      page: { hasMore: false },
     });
     vi.mocked(getNode).mockResolvedValue(node);
     vi.mocked(listNodeIpBans).mockResolvedValue({ items: [] });
@@ -188,47 +190,33 @@ describe("controlled fleet operations", () => {
     store.$dispose();
   });
 
-  it("continues polling from unknown until the operation succeeds", async () => {
-    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
-    vi.mocked(getOperation)
-      .mockResolvedValueOnce(operation("unknown"))
-      .mockResolvedValueOnce(operation("succeeded"));
-    vi.mocked(listNodeSessions)
-      .mockResolvedValueOnce({ items: [session], page: { hasMore: false } })
-      .mockResolvedValueOnce({ items: [], page: { hasMore: false } });
-    const store = useFleetStore();
-    await store.select(node.id);
+  it.each(["succeeded", "failed"] as const)(
+    "continues polling from unknown until the operation reaches %s",
+    async (terminalState) => {
+      vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
+      vi.mocked(getOperation)
+        .mockResolvedValueOnce(operation("unknown"))
+        .mockResolvedValueOnce(operation(terminalState));
+      vi.mocked(listNodeSessions)
+        .mockResolvedValueOnce({ items: [session], page: { hasMore: false } })
+        .mockResolvedValueOnce({ items: [], page: { hasMore: false } });
+      const store = useFleetStore();
+      await store.select(node.id);
 
-    const completion = store.disconnectSession(session.id, "support case");
-    await vi.advanceTimersByTimeAsync(750);
-    expect(store.latestOperation?.state).toBe("unknown");
-    await vi.advanceTimersByTimeAsync(1_500);
-    await completion;
+      const completion = store.disconnectSession(session.id, "support case");
+      await vi.advanceTimersByTimeAsync(750);
+      expect(store.latestOperation?.state).toBe("unknown");
+      await vi.advanceTimersByTimeAsync(1_500);
+      await completion;
 
-    expect(store.latestOperation?.state).toBe("succeeded");
-    expect(store.sessions).toEqual([]);
-    expect(getOperation).toHaveBeenCalledTimes(2);
-    store.$dispose();
-  });
-
-  it("continues polling from unknown until the operation fails", async () => {
-    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
-    vi.mocked(getOperation)
-      .mockResolvedValueOnce(operation("unknown"))
-      .mockResolvedValueOnce(operation("failed"));
-    const store = useFleetStore();
-    await store.select(node.id);
-
-    const completion = store.disconnectSession(session.id, "support case");
-    await vi.advanceTimersByTimeAsync(750);
-    expect(store.latestOperation?.state).toBe("unknown");
-    await vi.advanceTimersByTimeAsync(1_500);
-    await completion;
-
-    expect(store.latestOperation?.state).toBe("failed");
-    expect(getOperation).toHaveBeenCalledTimes(2);
-    store.$dispose();
-  });
+      expect(store.latestOperation?.state).toBe(terminalState);
+      expect(store.sessions).toEqual(
+        terminalState === "succeeded" ? [] : [session],
+      );
+      expect(getOperation).toHaveBeenCalledTimes(2);
+      store.$dispose();
+    },
+  );
 
   it("backs off bounded unknown polling without overlapping requests", async () => {
     vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
@@ -360,7 +348,9 @@ describe("controlled fleet operations", () => {
   });
 
   it("does not mark the fleet unavailable when a node selection returns 404", async () => {
-    vi.mocked(getNode).mockRejectedValueOnce({ response: { status: 404 } });
+    vi.mocked(getNode).mockRejectedValueOnce(
+      new ResponseError(new Response(null, { status: 404 })),
+    );
     const store = useFleetStore();
 
     await store.select("missing-node");

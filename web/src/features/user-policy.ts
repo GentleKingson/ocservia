@@ -6,7 +6,7 @@ import {
 
 import { getUserPolicy, setUserPolicy } from "../api/users";
 
-export type QuotaUnit = "MiB" | "GiB";
+type QuotaUnit = "MiB" | "GiB";
 
 export interface UserPolicyForm {
   period: "none" | "monthly" | "lifetime";
@@ -85,10 +85,7 @@ export async function loadUserPolicy(
   try {
     return policyToForm(await getUserPolicy(nodeId, username, signal));
   } catch (error) {
-    if (
-      (error instanceof Response && error.status === 404) ||
-      (error instanceof ResponseError && error.response.status === 404)
-    )
+    if (error instanceof ResponseError && error.response.status === 404)
       return policyToForm();
     throw error;
   }

@@ -605,14 +605,12 @@ VMs:
 
 - `make resilience-smoke` and `make resilience-full` invoke `scripts/resilience-capacity.sh`
   (see [Resilience and capacity](#resilience-and-capacity)).
-- `scripts/security-acceptance-transport.sh` checks Iroh connection budgets,
-  trust updates, revocation, restart and identity churn.
+- Transport connection-budget and admission checks run via `make rust-check`.
 - `scripts/security-acceptance-sse-capacity.sh` checks SSE delivery, reconnect,
   stream cleanup and resource bounds at 1, 10 and 100 viewers.
 - `scripts/security-acceptance-privd.sh` checks the root boundary, systemd
   sandbox, attestation keys, certificate lifecycle and package upgrade/rollback.
-  Results use `TRANSPORT_ACCEPTANCE`, `SSE_CAPACITY_ACCEPTANCE` and
-  `PRIVD_ACCEPTANCE`, with `transport-summary.txt`,
+  Results use `SSE_CAPACITY_ACCEPTANCE` and `PRIVD_ACCEPTANCE`, with
   `sse-capacity-summary.json` and `privd-summary.txt` respectively.
 - `scripts/real-e2e-controller.sh`, `scripts/real-e2e-node.sh`,
   `scripts/real-e2e-artifact.sh` and `deploy/real-e2e` support manual
@@ -1457,7 +1455,7 @@ Run verification checks inside an authorized, isolated environment with all depe
 | Change | Relevant evidence |
 | --- | --- |
 | API adapters, session or Workspace | `test/api-client.test.ts`, generated-auth serialization checks; `node test/run-auth-browser.mjs` against the production build for login/Workspace/SSE races |
-| Configuration/certificate workflows | `test/configuration-feature.test.ts`, `test/certificates-feature.test.ts`, `test/node-config-plan.test.ts`, `test/node-workflows.test.ts`; browser spec `e2e/node-forms.spec.ts` on desktop/mobile |
+| Configuration/certificate workflows | `test/configuration-feature.test.ts`, `test/certificates-feature.test.ts`, `test/node-workflows.test.ts`; browser spec `e2e/node-forms.spec.ts` on desktop/mobile |
 | Operations/rollouts | `test/operation-state-tone.test.ts`, `test/rollout-views.test.ts`, `test/nodes-rollout-submit.test.ts`; browser spec `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume; a real one-node rollout runs in [manual integration](#business-validation) |
 | Audit, overview | Corresponding view/unit tests (`test/audit-view.test.ts`, `test/overview.test.ts`) and browser spec `e2e/apple-layout.spec.ts`; verify authorization, stale/empty states and Workspace switching |
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
@@ -1841,7 +1839,7 @@ gh workflow run release.yml --ref main -f version=0.0.0
 In a rehearsal run, the native Agent and Controller build, image-security and
 smoke jobs must pass alongside asset preparation, and the Publish job must be
 skipped. For local validation of release changes, run
-`scripts/test-release-upgrade.sh`, the package and installer test scripts,
+`scripts/test-release-upgrade.mjs`, the package and installer test scripts,
 ShellCheck (`scripts/lint.sh`), any local workflow linter you have installed, and
 the documentation checks from
 [Choose the validation scope](#choose-the-validation-scope). Never publish release

@@ -14,20 +14,43 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// OpenRuntime connects to the shared integration database configured in
+// OpenRuntimePool connects to the shared integration database configured in
 // OCSERV_TEST_DATABASE_URL, or skips when running without PostgreSQL.
-func OpenRuntime(t testing.TB) *postgres.Backend {
+func OpenRuntimePool(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("real PostgreSQL required")
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	return postgres.WrapPool(pool)
+	return pool
+}
+
+// OpenOwnerPool connects to the owner integration database configured in
+// OCSERV_TEST_OWNER_DATABASE_URL, or skips when running without it.
+func OpenOwnerPool(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+	dsn := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// OpenRuntime connects to the shared integration database configured in
+// OCSERV_TEST_DATABASE_URL, or skips when running without PostgreSQL.
+func OpenRuntime(t testing.TB) *postgres.Backend {
+	t.Helper()
+	return postgres.WrapPool(OpenRuntimePool(t))
 }
 
 // OpenIsolated creates a temporary migrated PostgreSQL database owned by the

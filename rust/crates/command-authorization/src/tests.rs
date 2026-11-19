@@ -502,7 +502,7 @@ fn rust_verifies_go_fence_v2_binding_nanosecond_bounds_and_domain_separation() {
     let fcanon = canonical_connection_fence_v2(&fc).expect("canon fence");
     assert_eq!(hex::encode(&fcanon), s(&ff, "canonical_preimage_hex"));
     let vf = kr
-        .verify_connection_fence_v2(&fence, &fc.node_id, &fc.endpoint_id, 1_700_000_100)
+        .verify_connection_fence_v2_at(&fence, &fc.node_id, &fc.endpoint_id, 1_700_000_100, 0)
         .expect("vf");
     assert_eq!(
         (
@@ -526,13 +526,13 @@ fn rust_verifies_go_fence_v2_binding_nanosecond_bounds_and_domain_separation() {
     );
     assert_eq!(vf.capabilities, fc.capabilities);
     assert_eq!(
-        kr.verify_connection_fence_v2(&fence, &[9; 16], &fc.endpoint_id, 1_700_000_100),
+        kr.verify_connection_fence_v2_at(&fence, &[9; 16], &fc.endpoint_id, 1_700_000_100, 0),
         Err(AuthorizationError::ClaimsInvalid(
             "connection_fence_node_mismatch"
         ))
     );
     assert_eq!(
-        kr.verify_connection_fence_v2(&fence, &fc.node_id, &[9; 32], 1_700_000_100),
+        kr.verify_connection_fence_v2_at(&fence, &fc.node_id, &[9; 32], 1_700_000_100, 0),
         Err(AuthorizationError::ClaimsInvalid(
             "connection_fence_endpoint_mismatch"
         ))
@@ -540,11 +540,11 @@ fn rust_verifies_go_fence_v2_binding_nanosecond_bounds_and_domain_separation() {
     let mut tamp = fence.clone();
     tamp.owner_epoch += 1;
     assert_eq!(
-        kr.verify_connection_fence_v2(&tamp, &fc.node_id, &fc.endpoint_id, 1_700_000_100),
+        kr.verify_connection_fence_v2_at(&tamp, &fc.node_id, &fc.endpoint_id, 1_700_000_100, 0),
         Err(AuthorizationError::SignatureInvalid)
     );
     assert_eq!(
-        kr.verify_connection_fence_v2(&fence, &fc.node_id, &fc.endpoint_id, 1_700_000_301),
+        kr.verify_connection_fence_v2_at(&fence, &fc.node_id, &fc.endpoint_id, 1_700_000_301, 0),
         Err(AuthorizationError::ClaimsInvalid(
             "connection_fence_expired"
         ))
@@ -595,8 +595,14 @@ fn rust_verifies_go_fence_v2_binding_nanosecond_bounds_and_domain_separation() {
             "connection_fence_clock_skew"
         ))
     );
-    kr.verify_connection_fence_v2(&fence, &fc.node_id, &fc.endpoint_id, fc.expires_at_seconds)
-        .expect("sec-only at ns=0");
+    kr.verify_connection_fence_v2_at(
+        &fence,
+        &fc.node_id,
+        &fc.endpoint_id,
+        fc.expires_at_seconds,
+        0,
+    )
+    .expect("sec-only at ns=0");
 
     // Domain separation vs V1.
     let signing = SigningKey::from_bytes(&fixed::<32>(s(&ff, "test_seed_hex")));
@@ -616,7 +622,7 @@ fn rust_verifies_go_fence_v2_binding_nanosecond_bounds_and_domain_separation() {
     v1_body.extend_from_slice(&fcanon[CONNECTION_FENCE_V2_DOMAIN_SEPARATOR.len()..]);
     cross.signature = signing.sign(&v1_body).to_bytes().to_vec();
     assert_eq!(
-        kr.verify_connection_fence_v2(&cross, &fc.node_id, &fc.endpoint_id, 1_700_000_100),
+        kr.verify_connection_fence_v2_at(&cross, &fc.node_id, &fc.endpoint_id, 1_700_000_100, 0),
         Err(AuthorizationError::SignatureInvalid)
     );
 
@@ -629,7 +635,7 @@ fn rust_verifies_go_fence_v2_binding_nanosecond_bounds_and_domain_separation() {
         s(&bf, "canonical_preimage_hex")
     );
     let vb = bkr
-        .verify_fence_binding_v2(&binding, &bc.node_id, &bc.endpoint_id, 1_700_000_100)
+        .verify_fence_binding_v2_at(&binding, &bc.node_id, &bc.endpoint_id, 1_700_000_100, 0)
         .expect("vb");
     assert!(vb.matches_fence(&vf));
     for mutate in [
@@ -645,13 +651,13 @@ fn rust_verifies_go_fence_v2_binding_nanosecond_bounds_and_domain_separation() {
     let mut tb = binding.clone();
     tb.operation_id = vec![9; 16];
     assert_eq!(
-        bkr.verify_fence_binding_v2(&tb, &bc.node_id, &bc.endpoint_id, 1_700_000_100),
+        bkr.verify_fence_binding_v2_at(&tb, &bc.node_id, &bc.endpoint_id, 1_700_000_100, 0),
         Err(AuthorizationError::SignatureInvalid)
     );
     let mut dg = binding.clone();
     dg.signature_version = FenceSignatureVersion::Unspecified.into();
     assert_eq!(
-        bkr.verify_fence_binding_v2(&dg, &bc.node_id, &bc.endpoint_id, 1_700_000_100),
+        bkr.verify_fence_binding_v2_at(&dg, &bc.node_id, &bc.endpoint_id, 1_700_000_100, 0),
         Err(AuthorizationError::UnsupportedVersion)
     );
 
@@ -697,11 +703,12 @@ fn rust_verifies_go_fence_v2_binding_nanosecond_bounds_and_domain_separation() {
             "fence_binding_clock_skew"
         ))
     );
-    bkr.verify_fence_binding_v2(
+    bkr.verify_fence_binding_v2_at(
         &binding,
         &bc.node_id,
         &bc.endpoint_id,
         bc.expires_at_seconds,
+        0,
     )
     .expect("sec-only");
 }

@@ -77,10 +77,6 @@ const eventLabels: Record<string, string> = {
   error: "eventError",
 };
 
-function eventLabel(type: string): string {
-  return eventLabels[type] ?? type;
-}
-
 function timeLabel(value: Date | string): string {
   if (typeof value !== "string")
     return Number.isFinite(value.getTime())
@@ -374,7 +370,9 @@ onBeforeUnmount(() => {
               :key="event.id"
               class="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-sm first:pt-0 last:pb-0"
             >
-              <span class="font-medium">{{ $t(eventLabel(event.type)) }}</span>
+              <span class="font-medium">{{
+                $t(eventLabels[event.type] ?? event.type)
+              }}</span>
               <RouterLink
                 v-if="event.nodeId"
                 :to="{ name: 'node-detail', params: { nodeId: event.nodeId } }"

@@ -169,7 +169,9 @@ func (w *TrustConvergenceWorker) RunOnce(ctx context.Context) (bool, error) {
 		}
 		return true, nil
 	}
-	if err := w.unlockComplete(ctx, job); err != nil {
+	if err := w.withTrust(ctx, func(store enrollmentstore.TrustStore) error {
+		return store.UnlockComplete(ctx, job.TrustJob, w.workerID)
+	}); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -219,12 +221,6 @@ func (w *TrustConvergenceWorker) markCloseApplied(ctx context.Context, job trust
 			return errors.New("record node close convergence changed no row")
 		}
 		return nil
-	})
-}
-
-func (w *TrustConvergenceWorker) unlockComplete(ctx context.Context, job trustConvergenceJob) error {
-	return w.withTrust(ctx, func(store enrollmentstore.TrustStore) error {
-		return store.UnlockComplete(ctx, job.TrustJob, w.workerID)
 	})
 }
 

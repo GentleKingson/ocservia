@@ -93,14 +93,6 @@ type hubMetrics struct {
 	backoffNanos   atomic.Int64
 }
 
-func NewHub(config Config, fetch FetchFunc, resolve ResolveFunc) (*Hub, error) {
-	budget, err := NewWatcherBudget(config.Watchers)
-	if err != nil {
-		return nil, err
-	}
-	return NewHubWithWatcherBudget(config, budget, fetch, resolve)
-}
-
 func NewHubWithWatcherBudget(config Config, budget *WatcherBudget, fetch FetchFunc, resolve ResolveFunc) (*Hub, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -617,10 +609,4 @@ func resetTimer(timer *time.Timer, duration time.Duration) <-chan time.Time {
 	}
 	timer.Reset(duration)
 	return timer.C
-}
-
-func cloneEvent(event Event) Event {
-	cloned := event
-	cloned.Data = append([]byte(nil), event.Data...)
-	return cloned
 }

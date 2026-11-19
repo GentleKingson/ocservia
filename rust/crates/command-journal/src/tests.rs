@@ -27,15 +27,25 @@ fn pragmas_corrupt_readonly_and_full_db_invariants() {
     let db = TempDb::new("pragmas");
     {
         let j = db.open();
-        assert_eq!(j.journal_mode().expect("m").to_ascii_lowercase(), "wal");
-        assert!(j.foreign_keys_enabled().expect("fk"));
-        assert_eq!(
-            (
-                j.busy_timeout_ms().expect("bt"),
-                j.synchronous_level().expect("s")
-            ),
-            (5000, 2)
-        );
+        let mode: String = j
+            .connection
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .expect("m");
+        let fk: bool = j
+            .connection
+            .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+            .expect("fk");
+        let bt: u64 = j
+            .connection
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .expect("bt");
+        let sync: u8 = j
+            .connection
+            .pragma_query_value(None, "synchronous", |r| r.get(0))
+            .expect("s");
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        assert!(fk);
+        assert_eq!((bt, sync), (5000, 2));
         assert_eq!(
             std::fs::metadata(&db.0).expect("md").permissions().mode() & 0o777,
             0o600
@@ -67,10 +77,19 @@ fn pragmas_corrupt_readonly_and_full_db_invariants() {
 
     // Full database rolls back partial synthetic effect.
     let full = TempDb::new("full");
-    let (key, payload) = ([1_u8; 16], [2_u8; 32]);
+    let (key, cmd_id, payload) = ([1_u8; 16], [3_u8; 16], [2_u8; 32]);
     let mut j = full.open();
-    j.accept_command(&key, &[3; 16], &payload, 0, 10)
+    j.accept_command(&key, &cmd_id, &payload, 0, 10)
         .expect("acc");
+    j.transition_command(
+        &key,
+        &[CommandState::Accepted],
+        CommandState::Running,
+        None,
+        None,
+        10,
+    )
+    .expect("run");
     let _ = j
         .connection
         .pragma_update(None, "wal_checkpoint", "TRUNCATE");
@@ -82,7 +101,7 @@ fn pragmas_corrupt_readonly_and_full_db_invariants() {
         .pragma_update(None, "max_page_count", pages)
         .expect("lim");
     assert!(
-        j.execute_synthetic_effect(&key, &payload, &vec![7; 900_000], 11)
+        j.execute_and_complete_synthetic(&key, &cmd_id, &payload, &vec![7; 900_000], 11)
             .is_err()
     );
     assert!(j.synthetic_effect(&key).expect("q").is_none());
@@ -294,7 +313,7 @@ fn telemetry_eviction_and_five_minute_offline_recovery() {
     let pending = j.telemetry_pending(10, 20).expect("p");
     assert_eq!((pending.len(), pending[0].0), (1, sec));
     assert_eq!(j.telemetry_drop_counters().expect("d"), [0, 0, 0, 1]);
-    j.acknowledge_telemetry(&sec).expect("ack");
+    j.acknowledge_telemetry_batch(&[sec]).expect("ack");
     assert_eq!(j.telemetry_pending(10, 20).expect("e").len(), 0);
 
     let recovery_secs = i64::try_from(OFFLINE_RECOVERY_RETENTION_SECONDS).expect("s");
@@ -380,18 +399,36 @@ fn synthetic_effect_atomicity_rollback_and_restart_idempotency() {
         );
     }
 
-    let (k2, p2) = (*uuid::Uuid::now_v7().as_bytes(), [3_u8; 32]);
+    let (k2, c2, p2) = (
+        *uuid::Uuid::now_v7().as_bytes(),
+        *uuid::Uuid::now_v7().as_bytes(),
+        [3_u8; 32],
+    );
     {
         let mut j = db.open();
-        assert!(
-            j.execute_synthetic_effect(&k2, &p2, b"done", 10)
-                .expect("1st")
-        );
+        j.accept_command(&k2, &c2, &p2, 0, 10).expect("a");
+        j.transition_command(
+            &k2,
+            &[CommandState::Accepted],
+            CommandState::Running,
+            None,
+            None,
+            10,
+        )
+        .expect("r");
+        let rec = j
+            .execute_and_complete_synthetic(&k2, &c2, &p2, b"done", 10)
+            .expect("1st");
+        assert_eq!(rec.state, CommandState::Succeeded);
     }
     let mut j = db.open();
+    assert!(matches!(
+        j.accept_command(&k2, &c2, &p2, 0, 11).expect("replay"),
+        AcceptOutcome::Replay(rec) if rec.state == CommandState::Succeeded
+    ));
     assert!(
-        !j.execute_synthetic_effect(&k2, &p2, b"done", 11)
-            .expect("dup")
+        j.execute_and_complete_synthetic(&k2, &c2, &p2, b"done", 11)
+            .is_err()
     );
     assert_eq!(j.synthetic_execution_count().expect("c"), 1);
     assert_eq!(

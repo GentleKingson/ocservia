@@ -12,10 +12,9 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type checkpointFenceFunc func(context.Context, database.Tx) error
@@ -25,15 +24,9 @@ func (f checkpointFenceFunc) AssertTransaction(ctx context.Context, tx database.
 }
 
 func TestCheckpointConcurrentLeaseRenewalIntegration(t *testing.T) {
-	runtimeURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if runtimeURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL not set")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, runtimeURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
 	backend := postgres.WrapPool(pool)
 	for _, test := range []struct {
 		name     string
@@ -97,17 +90,9 @@ func TestCheckpointConcurrentLeaseRenewalIntegration(t *testing.T) {
 }
 
 func TestHashChainCheckpointAndTamperDetectionIntegration(t *testing.T) {
-	runtimeURL, ownerURL := os.Getenv("OCSERV_TEST_DATABASE_URL"), os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if runtimeURL == "" || ownerURL == "" {
-		t.Skip("test database URLs are not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, runtimeURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
-	owner, err := pgxpool.New(ctx, ownerURL)
-	testutil.NoError(t, err)
-	defer owner.Close()
+	pool := testfixture.OpenRuntimePool(t)
+	owner := testfixture.OpenOwnerPool(t)
 	workspaceID := uuid.Must(uuid.NewV7())
 	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'audit tamper',$2,now(),now())`, workspaceID, "audit-"+workspaceID.String())
 	tx, err := pool.Begin(ctx)
@@ -160,17 +145,9 @@ func TestHashChainCheckpointAndTamperDetectionIntegration(t *testing.T) {
 }
 
 func TestForgedDatabaseTailCannotVerifyOrCheckpointIntegration(t *testing.T) {
-	runtimeURL, ownerURL := os.Getenv("OCSERV_TEST_DATABASE_URL"), os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if runtimeURL == "" || ownerURL == "" {
-		t.Skip("test database URLs are not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, runtimeURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
-	owner, err := pgxpool.New(ctx, ownerURL)
-	testutil.NoError(t, err)
-	defer owner.Close()
+	pool := testfixture.OpenRuntimePool(t)
+	owner := testfixture.OpenOwnerPool(t)
 	workspaceID := uuid.Must(uuid.NewV7())
 	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'audit forged tail',$2,now(),now())`, workspaceID, "audit-forged-"+workspaceID.String())
 	tx, err := pool.Begin(ctx)
@@ -211,17 +188,9 @@ func TestForgedDatabaseTailCannotVerifyOrCheckpointIntegration(t *testing.T) {
 }
 
 func TestLegacyAuditTransitionRequiresCheckpointedTailIntegration(t *testing.T) {
-	runtimeURL, ownerURL := os.Getenv("OCSERV_TEST_DATABASE_URL"), os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if runtimeURL == "" || ownerURL == "" {
-		t.Skip("test database URLs are not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, runtimeURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
-	owner, err := pgxpool.New(ctx, ownerURL)
-	testutil.NoError(t, err)
-	defer owner.Close()
+	pool := testfixture.OpenRuntimePool(t)
+	owner := testfixture.OpenOwnerPool(t)
 
 	workspaceID := uuid.Must(uuid.NewV7())
 	eventID := uuid.Must(uuid.NewV7())

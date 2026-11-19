@@ -90,12 +90,6 @@ func AttachProof(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResul
 	return nil
 }
 
-// UpgradeResultProof signs the root-owned durable upgrade evidence used by
-// telemetry integration tests.
-func UpgradeResultProof(nodeID, operationID uuid.UUID, targetVersion string, packageSHA256, resultSHA256 []byte, state string, completedAt time.Time, privateKey ed25519.PrivateKey) (*agentv1.AgentUpgradeResultProof, error) {
-	return UpgradeResultProofAttestingAt(nodeID, operationID, targetVersion, packageSHA256, resultSHA256, state, completedAt, time.Now().UTC(), privateKey)
-}
-
 // UpgradeResultProofAttestingAt mirrors the production signing model: the
 // proof is signed at attestation time, which may be long after the durable
 // effect completed (for example across a privd key rotation).

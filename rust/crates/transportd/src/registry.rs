@@ -251,17 +251,16 @@ impl Shared {
         });
         let disposition = {
             let mut fences = self.inner.fences.lock().await;
-            if let Some(existing) = fences.get(&node_id)
-                && existing.verified.owner_epoch > registered.verified.owner_epoch
-            {
-                let retained_epoch = existing.verified.owner_epoch;
-                return Ok(RegisterOwnerFenceResponse {
-                    disposition: OwnerFenceDisposition::Stale.into(),
-                    retained_epoch,
-                });
-            }
-            match fence_registration_decision(fences.get(&node_id).map(Arc::as_ref), &registered) {
-                FenceRegistration::Stale => OwnerFenceDisposition::Stale,
+            let existing = fences.get(&node_id);
+            match fence_registration_decision(existing.map(Arc::as_ref), &registered) {
+                FenceRegistration::Stale => {
+                    let retained_epoch =
+                        existing.map_or(retained_epoch, |fence| fence.verified.owner_epoch);
+                    return Ok(RegisterOwnerFenceResponse {
+                        disposition: OwnerFenceDisposition::Stale.into(),
+                        retained_epoch,
+                    });
+                }
                 FenceRegistration::EpochCollision => {
                     return Err(Status::invalid_argument(
                         "owner epoch is already claimed by a different fence",

@@ -14,22 +14,18 @@ import (
 	"math/big"
 	"os"
 	"strings"
-	"sync"
 	"time"
 )
 
 const policy = "rsa-client-v1-24h"
 
 type authority struct {
-	cert  *x509.Certificate
-	key   crypto.Signer
-	chain []byte
-	id    string
-
-	poolsOnce     sync.Once
+	cert          *x509.Certificate
+	key           crypto.Signer
+	chain         []byte
+	id            string
 	roots         *x509.CertPool
 	intermediates *x509.CertPool
-	poolsErr      error
 }
 
 func digest(b []byte) string { d := sha256.Sum256(b); return hex.EncodeToString(d[:]) }
@@ -110,45 +106,14 @@ func loadAuthority(chainFile, keyFile string) (*authority, error) {
 	for _, c := range certs[:len(certs)-1] {
 		leafIntermediates.AddCert(c)
 	}
-	a := &authority{
+	return &authority{
 		cert:          ca,
 		key:           signer,
 		chain:         chain,
 		id:            digest(ca.Raw),
 		roots:         roots,
 		intermediates: leafIntermediates,
-	}
-	a.poolsOnce.Do(func() {})
-	return a, nil
-}
-
-func (a *authority) verifyPools() (*x509.CertPool, *x509.CertPool, error) {
-	a.poolsOnce.Do(func() {
-		if a.roots != nil && a.intermediates != nil {
-			return
-		}
-		roots, intermediates := x509.NewCertPool(), x509.NewCertPool()
-		for rest := a.chain; len(bytes.TrimSpace(rest)) > 0; {
-			block, tail := pem.Decode(rest)
-			if block == nil {
-				a.poolsErr = errors.New("invalid CA chain")
-				return
-			}
-			c, err := x509.ParseCertificate(block.Bytes)
-			if err != nil {
-				a.poolsErr = err
-				return
-			}
-			if len(bytes.TrimSpace(tail)) == 0 {
-				roots.AddCert(c)
-			} else {
-				intermediates.AddCert(c)
-			}
-			rest = tail
-		}
-		a.roots, a.intermediates = roots, intermediates
-	})
-	return a.roots, a.intermediates, a.poolsErr
+	}, nil
 }
 
 func parseCSR(der []byte) (*x509.CertificateRequest, error) {
@@ -215,11 +180,10 @@ func (a *authority) issue(csr *x509.CertificateRequest, serial *big.Int) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	roots, intermediates, err := a.verifyPools()
-	if err != nil {
-		return nil, err
+	if a.roots == nil || a.intermediates == nil {
+		return nil, errors.New("invalid CA chain")
 	}
-	if _, err := issued.Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+	if _, err := issued.Verify(x509.VerifyOptions{Roots: a.roots, Intermediates: a.intermediates, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
 		return nil, statusError(422)
 	}
 	return append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), a.chain...), nil

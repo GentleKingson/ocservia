@@ -34,9 +34,6 @@ type Store interface {
 	FirstKey(context.Context, uuid.UUID) (string, VerificationKey, error)
 	KeyStateCounts(context.Context) (database.Rows, error)
 	VerificationKey(context.Context, uuid.UUID, string) (VerificationKey, error)
-	// ActiveKeys returns the node's active keys with unexpired validity,
-	// oldest activation first.
-	ActiveKeys(context.Context, uuid.UUID, time.Time) ([]string, error)
 	InsertKey(context.Context, Key) error
 	ApproveCapability(context.Context, uuid.UUID, string) error
 	BumpNodeRevision(context.Context, uuid.UUID, time.Time) error

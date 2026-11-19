@@ -53,9 +53,7 @@ func newLifecycleFixture(t *testing.T) lifecycleFixture {
 
 func (f lifecycleFixture) within(t *testing.T, fn func(database.Tx) error) {
 	t.Helper()
-	if err := database.Within(context.Background(), f.b, database.ReadCommitted, fn); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, database.Within(context.Background(), f.b, database.ReadCommitted, fn))
 }
 
 func (f lifecycleFixture) exec(t *testing.T, query string, args ...any) {
@@ -112,9 +110,7 @@ type trustSnapshot struct {
 func (f lifecycleFixture) snapshot(t *testing.T, id uuid.UUID) trustSnapshot {
 	t.Helper()
 	var v trustSnapshot
-	if err := f.b.QueryRow(context.Background(), `SELECT revision,attempts,update_applied,close_required,close_applied,locked_until,available_at,updated_at,locked_by,last_error FROM node_trust_convergence WHERE node_id=$1`, id).Scan(&v.Revision, &v.Attempts, &v.Update, &v.Required, &v.Close, &v.Until, &v.Available, &v.Updated, &v.Worker, &v.Error); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, f.b.QueryRow(context.Background(), `SELECT revision,attempts,update_applied,close_required,close_applied,locked_until,available_at,updated_at,locked_by,last_error FROM node_trust_convergence WHERE node_id=$1`, id).Scan(&v.Revision, &v.Attempts, &v.Update, &v.Required, &v.Close, &v.Until, &v.Available, &v.Updated, &v.Worker, &v.Error))
 	return v
 }
 
@@ -186,15 +182,9 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 			done <- err
 		}()
 		time.Sleep(600 * time.Millisecond)
-		if err := lock.Commit(ctx); err != nil {
-			t.Fatal(err)
-		}
-		if err := <-done; err != nil {
-			t.Fatal(err)
-		}
-		if err := waiting.Commit(ctx); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, lock.Commit(ctx))
+		testutil.NoError(t, <-done)
+		testutil.NoError(t, waiting.Commit(ctx))
 		stale(t, v)
 		v = claim(t)
 	})
@@ -368,9 +358,7 @@ func TestTrustOwnerEndedBackendIntegration(t *testing.T) {
 			var connection [16]byte
 			copy(connection[:], fence.ConnectionId)
 			if ending == "closed" {
-				if err := manager.CloseSession(ctx, [16]byte(v.NodeID), connection, int64(fence.OwnerEpoch)); err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, manager.CloseSession(ctx, [16]byte(v.NodeID), connection, int64(fence.OwnerEpoch)))
 			} else {
 				// Wait for the actual signed lease deadline. Shortening only the
 				// database deadline would not expire the already-issued fence.

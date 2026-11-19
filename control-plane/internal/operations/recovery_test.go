@@ -70,10 +70,10 @@ func TestPrepareRecoveryEnvelopePreservesLogicalCommand(t *testing.T) {
 func TestValidateSentEnvelopeAllowsOnlyOwnerProofs(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	dispatch, sent := recoveryTestDispatch(t, now, 10*time.Minute)
-	if err := validateSentEnvelope(dispatch, sent); err != nil {
+	if _, err := validateAndDecodeSentEnvelope(dispatch, sent); err != nil {
 		t.Fatalf("valid fenced send rejected: %v", err)
 	}
-	if err := validateSentEnvelope(dispatch, dispatch.Envelope); err != nil {
+	if _, err := validateAndDecodeSentEnvelope(dispatch, dispatch.Envelope); err != nil {
 		t.Fatalf("valid unfenced send rejected: %v", err)
 	}
 
@@ -82,7 +82,7 @@ func TestValidateSentEnvelopeAllowsOnlyOwnerProofs(t *testing.T) {
 	changed.GetSyntheticEcho().Message = "changed"
 	changedBytes, err := proto.Marshal(&changed)
 	testutil.NoError(t, err)
-	if err := validateSentEnvelope(dispatch, changedBytes); err == nil {
+	if _, err := validateAndDecodeSentEnvelope(dispatch, changedBytes); err == nil {
 		t.Fatal("sent envelope changed the semantic payload")
 	}
 
@@ -90,7 +90,7 @@ func TestValidateSentEnvelopeAllowsOnlyOwnerProofs(t *testing.T) {
 	changed.FenceBinding.OwnerEpoch++
 	changedBytes, err = proto.Marshal(&changed)
 	testutil.NoError(t, err)
-	if err := validateSentEnvelope(dispatch, changedBytes); err == nil {
+	if _, err := validateAndDecodeSentEnvelope(dispatch, changedBytes); err == nil {
 		t.Fatal("sent envelope carried mismatched owner proofs")
 	}
 }

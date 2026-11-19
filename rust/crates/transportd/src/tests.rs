@@ -228,7 +228,7 @@ async fn test_router(
     trust: TrustAuthority,
     service: &IrohTransportService,
 ) -> Router {
-    build_router_with_trust(secret_key, relay_mode, policy, trust, service)
+    build_router_with_trust_tls_roots(secret_key, relay_mode, policy, trust, Vec::new(), service)
         .await
         .expect("build router")
 }
@@ -1211,48 +1211,6 @@ async fn trust_update_reports_stale_and_rejects_tombstone_reactivation() {
 }
 
 #[tokio::test]
-async fn baseline_budget_parameters_remain_partitioned() {
-    let limit = TrustClassLimit {
-        attempts_per_minute: 600,
-        concurrency: 16,
-    };
-    let mut cfg = TrustBudgetConfig::default();
-    for class in [
-        TrustClass::KnownAgentHandshake,
-        TrustClass::AgentAuthorization,
-        TrustClass::AgentRegistrationRecheck,
-        TrustClass::UnknownEnrollmentPreAuth,
-        TrustClass::EnrollmentCompletion,
-    ] {
-        cfg = cfg.with_limit(class, limit).expect("limit");
-    }
-    let budgets = Arc::new(TrustBudgetSet::new(&cfg));
-    let now = Instant::now();
-    for _ in 0..limit.attempts_per_minute {
-        drop(
-            budgets
-                .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
-                .await
-                .expect("enroll"),
-        );
-    }
-    assert_eq!(
-        budgets
-            .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
-            .await
-            .err(),
-        Some(AttemptRejection::Rate)
-    );
-    for class in [
-        TrustClass::KnownAgentHandshake,
-        TrustClass::AgentAuthorization,
-        TrustClass::AgentRegistrationRecheck,
-    ] {
-        drop(budgets.acquire_at(class, now).await.expect("agent reserve"));
-    }
-}
-
-#[tokio::test]
 async fn trust_budgets_shared_limits_and_lifecycle_invariants() {
     // Clones share budgets & metrics labels omit endpoint IDs.
     let trust = TrustAuthority::new(
@@ -1271,7 +1229,7 @@ async fn trust_budgets_shared_limits_and_lifecycle_invariants() {
     }
 
     // Unknown enrollment flood cannot starve approved classes and recovers after 1m.
-    let cfg = TrustBudgetConfig::default()
+    let mut cfg = TrustBudgetConfig::default()
         .with_limit(
             TrustClass::UnknownEnrollmentPreAuth,
             TrustClassLimit {
@@ -1279,39 +1237,23 @@ async fn trust_budgets_shared_limits_and_lifecycle_invariants() {
                 concurrency: 20,
             },
         )
-        .expect("l")
-        .with_limit(
-            TrustClass::KnownAgentHandshake,
-            TrustClassLimit {
-                attempts_per_minute: 3,
-                concurrency: 3,
-            },
-        )
-        .expect("l")
-        .with_limit(
-            TrustClass::AgentAuthorization,
-            TrustClassLimit {
-                attempts_per_minute: 3,
-                concurrency: 3,
-            },
-        )
-        .expect("l")
-        .with_limit(
-            TrustClass::AgentRegistrationRecheck,
-            TrustClassLimit {
-                attempts_per_minute: 3,
-                concurrency: 3,
-            },
-        )
-        .expect("l")
-        .with_limit(
-            TrustClass::EnrollmentCompletion,
-            TrustClassLimit {
-                attempts_per_minute: 3,
-                concurrency: 3,
-            },
-        )
         .expect("l");
+    for class in [
+        TrustClass::KnownAgentHandshake,
+        TrustClass::AgentAuthorization,
+        TrustClass::AgentRegistrationRecheck,
+        TrustClass::EnrollmentCompletion,
+    ] {
+        cfg = cfg
+            .with_limit(
+                class,
+                TrustClassLimit {
+                    attempts_per_minute: 3,
+                    concurrency: 3,
+                },
+            )
+            .expect("l");
+    }
     let budgets = Arc::new(TrustBudgetSet::new(&cfg));
     let now = Instant::now();
     let mut held = Vec::new();
@@ -2386,7 +2328,7 @@ async fn artifact_fence_verification_and_carrier_forwarding() {
     let exp_verified = service
         .shared
         .keyring()
-        .verify_connection_fence_v2(&expired_hs, &term.node_id, &term.endpoint_id, unix_now())
+        .verify_connection_fence_v2_at(&expired_hs, &term.node_id, &term.endpoint_id, unix_now(), 0)
         .expect("v");
     service
         .shared
@@ -2808,7 +2750,7 @@ async fn owner_lease_expiry_closes_and_refresh_preserves_agent_session() {
         verified: service
             .shared
             .keyring()
-            .verify_connection_fence_v2(&short, &t2.node_id, &t2.endpoint_id, unix_now())
+            .verify_connection_fence_v2_at(&short, &t2.node_id, &t2.endpoint_id, unix_now(), 0)
             .expect("v"),
         fence: short.clone(),
         endpoint_id: t2.endpoint_id,

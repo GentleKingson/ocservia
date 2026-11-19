@@ -123,9 +123,7 @@ type Store interface {
 	MaintainHistory(context.Context, time.Time) error
 
 	ReplaceGroups(context.Context, uuid.UUID, []Group) error
-	Groups(context.Context, uuid.UUID) ([]Group, error)
 	InsertSecurity(context.Context, uuid.UUID, SecurityEvent) error
-	SecurityEvent(context.Context, uuid.UUID) (SecurityEvent, error)
 }
 
 type BatchMaintainer interface {

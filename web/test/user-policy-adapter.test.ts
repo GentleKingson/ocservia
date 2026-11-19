@@ -1,4 +1,4 @@
-import { ResponseError } from "@ocservia/api-client";
+import { ResponseError, type UserPolicy } from "@ocservia/api-client";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/api/users", () => ({
@@ -15,12 +15,29 @@ import {
   policyToForm,
 } from "../src/features/user-policy";
 
+function makePolicy(overrides: Partial<UserPolicy> = {}): UserPolicy {
+  return {
+    nodeId: "019fdc5b-b939-72a1-ae67-8efd197e5688",
+    username: "alice",
+    quotaPeriod: "none",
+    quotaDirection: "rxtx",
+    quotaBytes: 0,
+    version: 1,
+    periodStart: "1970-01-01T00:00:00Z",
+    observedRxBytes: 0,
+    observedTxBytes: 0,
+    exceeded: false,
+    expired: false,
+    convergence: "converged",
+    ...overrides,
+  };
+}
+
 describe("user policy feature", () => {
-  it.each([
-    ["generated", new ResponseError(new Response(null, { status: 404 }))],
-    ["native", new Response(null, { status: 404 })],
-  ])("loads the default form for a %s 404", async (_kind, error) => {
-    vi.mocked(getUserPolicy).mockRejectedValueOnce(error);
+  it("loads the default form for a 404 ResponseError", async () => {
+    vi.mocked(getUserPolicy).mockRejectedValueOnce(
+      new ResponseError(new Response(null, { status: 404 })),
+    );
     await expect(loadUserPolicy("node", "alice")).resolves.toEqual(
       policyToForm(),
     );
@@ -31,9 +48,6 @@ describe("user policy feature", () => {
       "generated non-404",
       new ResponseError(new Response(null, { status: 403 })),
     ],
-    ["native non-404", new Response(null, { status: 500 })],
-    ["null", null],
-    ["undefined", undefined],
     ["network", new TypeError("network unavailable")],
     ["abort", new DOMException("cancelled", "AbortError")],
   ])("preserves the original %s rejection", async (_kind, error) => {
@@ -75,40 +89,24 @@ describe("user policy feature", () => {
   });
 
   it("chooses a lossless display unit", () => {
-    const form = policyToForm({
-      nodeId: "019fdc5b-b939-72a1-ae67-8efd197e5688",
-      username: "alice",
-      quotaPeriod: "lifetime",
-      quotaDirection: "tx",
-      quotaBytes: 3 * 1024 * 1024,
-      version: 1,
-      periodStart: "1970-01-01T00:00:00Z",
-      observedRxBytes: 0,
-      observedTxBytes: 0,
-      exceeded: false,
-      expired: false,
-      convergence: "converged",
-    });
+    const form = policyToForm(
+      makePolicy({
+        quotaPeriod: "lifetime",
+        quotaDirection: "tx",
+        quotaBytes: 3 * 1024 * 1024,
+      }),
+    );
     expect(form.quotaUnit).toBe("MiB");
     expect(form.quotaValue).toBe(3);
   });
 
   it("renders expiry as an exact UTC wall-clock value", () => {
-    const form = policyToForm({
-      nodeId: "019fdc5b-b939-72a1-ae67-8efd197e5688",
-      username: "alice",
-      quotaPeriod: "none",
-      quotaDirection: "rxtx",
-      quotaBytes: 0,
-      expiresAt: "2026-12-31T23:59:00Z",
-      version: 1,
-      periodStart: "2026-12-01T00:00:00Z",
-      observedRxBytes: 0,
-      observedTxBytes: 0,
-      exceeded: false,
-      expired: false,
-      convergence: "converged",
-    });
+    const form = policyToForm(
+      makePolicy({
+        expiresAt: "2026-12-31T23:59:00Z",
+        periodStart: "2026-12-01T00:00:00Z",
+      }),
+    );
     expect(form.expiresAtUtcInput).toBe("2026-12-31T23:59");
   });
 
@@ -119,21 +117,7 @@ describe("user policy feature", () => {
       "+294276-12-31T23:59:59.999999Z",
       "2026-12-31T23:59:59.123456Z",
     ]) {
-      const form = policyToForm({
-        nodeId: "019fdc5b-b939-72a1-ae67-8efd197e5688",
-        username: "alice",
-        quotaPeriod: "none",
-        quotaDirection: "rxtx",
-        quotaBytes: 0,
-        expiresAt: expiry,
-        version: 1,
-        periodStart: "1970-01-01T00:00:00Z",
-        observedRxBytes: 0,
-        observedTxBytes: 0,
-        exceeded: false,
-        expired: false,
-        convergence: "converged",
-      });
+      const form = policyToForm(makePolicy({ expiresAt: expiry }));
       expect(form.expiresAtUtcInput).toBe(expiry.replace(/Z$/, ""));
       expect(expiryInputType(form.expiresAtUtcInput)).toBe("text");
       expect(() => formToRequest(form, "ticket")).toThrow("whole seconds");

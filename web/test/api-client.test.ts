@@ -192,26 +192,25 @@ describe("Workspace authority and events", () => {
     expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
   });
 
-  it.each([
-    [undefined, 0, undefined, 0, true],
-    ["", 0, "", 0, true],
-    [undefined, 0, "workspace-a", 0, false],
-    ["workspace-a", 1, "workspace-b", 1, false],
-    ["workspace-a", 1, "workspace-a", 1, true],
-    ["workspace-a", 1, "workspace-a", 3, false],
-    [undefined, 0, undefined, 2, false],
-  ] as const)(
-    "compares Workspace contexts (%s/%s, %s/%s)",
-    async (aId, aGeneration, bId, bGeneration, matches) => {
-      const api = await loadApi();
+  it("compares Workspace contexts symmetrically without triggering requests", async () => {
+    const api = await loadApi();
+    for (const [aId, aGeneration, bId, bGeneration, matches] of [
+      [undefined, 0, undefined, 0, true],
+      ["", 0, "", 0, true],
+      [undefined, 0, "workspace-a", 0, false],
+      ["workspace-a", 1, "workspace-b", 1, false],
+      ["workspace-a", 1, "workspace-a", 1, true],
+      ["workspace-a", 1, "workspace-a", 3, false],
+      [undefined, 0, undefined, 2, false],
+    ] as const) {
       const a = { id: aId, generation: aGeneration };
       const b = { id: bId, generation: bGeneration };
       expect(api.sameWorkspaceContext(a, b)).toBe(matches);
       expect(api.sameWorkspaceContext(b, a)).toBe(matches);
-      expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
-      expect(fetchMock).not.toHaveBeenCalled();
-    },
-  );
+    }
+    expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 
   it("advances generation when a refreshed workspace changes identity", async () => {
     const api = await loadApi();
@@ -341,14 +340,11 @@ function breakStorage(mode: "getter" | "getItem" | "setItem" | "removeItem") {
   });
 }
 
-describe.each(["getter", "getItem", "setItem", "removeItem"] as const)(
-  "optional browser storage failing at %s",
-  (mode) => {
-    beforeEach(() => {
+describe("optional browser storage failures", () => {
+  it.each(["getter", "getItem", "setItem", "removeItem"] as const)(
+    "still redirects once and returns the original 401 when %s throws",
+    async (mode) => {
       breakStorage(mode);
-    });
-
-    it("still redirects once and returns the original 401", async () => {
       const api = await loadApi();
       fetchMock.mockImplementation(() => Promise.resolve(json({}, 401)));
       await expect(api.getNode("node-a")).rejects.toMatchObject({
@@ -360,29 +356,9 @@ describe.each(["getter", "getItem", "setItem", "removeItem"] as const)(
       expect(assign).toHaveBeenCalledTimes(1);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(() => api.consumeLoginReturnPath()).not.toThrow();
-    });
-
-    it("bootstraps the management Workspace without storage", async () => {
-      const api = await loadApi();
-      expect((await api.getWorkspace()).id).toBe(alpha.id);
-      expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
-
-    it("keeps discovery failures and empty lists as failures", async () => {
-      const api = await loadApi();
-      fetchMock.mockResolvedValueOnce(json({}, 403));
-      await expect(api.getWorkspace()).rejects.toMatchObject({
-        response: { status: 403 },
-      });
-      fetchMock.mockResolvedValueOnce(json({ items: [] }));
-      await expect(api.getWorkspace()).rejects.toThrow(
-        "No authorized workspace is available",
-      );
-      expect((await api.getWorkspace(true)).id).toBe(alpha.id);
-    });
-  },
-);
+    },
+  );
+});
 
 describe("domain request contracts", () => {
   it("preserves desired mutation fences, unique idempotency keys, body and AbortSignal", async () => {

@@ -641,7 +641,6 @@ for lifecycle in launcher root; do
   RUN_STATUS=0
   RUN_OUTPUT="$( (
     unset OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL
-    unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL
     if [[ "${lifecycle}" == root ]] && (( EUID != 0 )); then
       cd "${repo}"
       PATH="${root_lifecycle_bin}" OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \

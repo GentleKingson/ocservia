@@ -151,50 +151,37 @@ fn certificate_binding(
     result: &privd_response::Result,
     effect_record_id: &[u8],
 ) -> Result<Option<PrivdCertificateReceiptBindingV1>, ()> {
-    match (command.payload.as_ref(), result) {
+    let certificate_id = match (command.payload.as_ref(), result) {
         (
             Some(command_envelope::Payload::CertificateCsr(request)),
             privd_response::Result::CertificateCsr(response),
-        ) => Ok(Some(PrivdCertificateReceiptBindingV1 {
-            certificate_id: request.certificate_id.clone(),
-            csr_der_sha256: Sha256::digest(&response.csr_der).to_vec(),
-            public_key_sha256: response.public_key_sha256.clone(),
-            requested_subject_sha256: requested_subject_digest(request).map_err(|_| ())?.to_vec(),
-            root_effect_record_id: effect_record_id.to_vec(),
-        })),
+        ) => {
+            return Ok(Some(PrivdCertificateReceiptBindingV1 {
+                certificate_id: request.certificate_id.clone(),
+                csr_der_sha256: Sha256::digest(&response.csr_der).to_vec(),
+                public_key_sha256: response.public_key_sha256.clone(),
+                requested_subject_sha256: requested_subject_digest(request)
+                    .map_err(|_| ())?
+                    .to_vec(),
+                root_effect_record_id: effect_record_id.to_vec(),
+            }));
+        }
         (
             Some(command_envelope::Payload::CertificateCsr(request)),
             privd_response::Result::Error(error),
-        ) if terminal_result_error_code(error).is_some() => {
-            Ok(Some(PrivdCertificateReceiptBindingV1 {
-                certificate_id: request.certificate_id.clone(),
-                csr_der_sha256: Vec::new(),
-                public_key_sha256: Vec::new(),
-                requested_subject_sha256: Vec::new(),
-                root_effect_record_id: effect_record_id.to_vec(),
-            }))
-        }
-        (Some(command_envelope::Payload::CertificateP12(request)), _) => {
-            Ok(Some(PrivdCertificateReceiptBindingV1 {
-                certificate_id: request.certificate_id.clone(),
-                csr_der_sha256: Vec::new(),
-                public_key_sha256: Vec::new(),
-                requested_subject_sha256: Vec::new(),
-                root_effect_record_id: effect_record_id.to_vec(),
-            }))
-        }
-        (Some(command_envelope::Payload::CertificateRevoke(request)), _) => {
-            Ok(Some(PrivdCertificateReceiptBindingV1 {
-                certificate_id: request.certificate_id.clone(),
-                csr_der_sha256: Vec::new(),
-                public_key_sha256: Vec::new(),
-                requested_subject_sha256: Vec::new(),
-                root_effect_record_id: effect_record_id.to_vec(),
-            }))
-        }
-        (Some(command_envelope::Payload::CertificateCsr(_)), _) => Err(()),
-        _ => Ok(None),
-    }
+        ) if terminal_result_error_code(error).is_some() => &request.certificate_id,
+        (Some(command_envelope::Payload::CertificateP12(request)), _) => &request.certificate_id,
+        (Some(command_envelope::Payload::CertificateRevoke(request)), _) => &request.certificate_id,
+        (Some(command_envelope::Payload::CertificateCsr(_)), _) => return Err(()),
+        _ => return Ok(None),
+    };
+    Ok(Some(PrivdCertificateReceiptBindingV1 {
+        certificate_id: certificate_id.clone(),
+        csr_der_sha256: Vec::new(),
+        public_key_sha256: Vec::new(),
+        requested_subject_sha256: Vec::new(),
+        root_effect_record_id: effect_record_id.to_vec(),
+    }))
 }
 
 pub(crate) fn terminal_result_error_code(error: &PrivdError) -> Option<&'static str> {

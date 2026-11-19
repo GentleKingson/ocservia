@@ -6,27 +6,18 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestReadinessRequiresDatabaseConnectivityIntegration(t *testing.T) {
-	url := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if url == "" || ownerURL == "" {
-		t.Skip("isolated runtime and owner database URLs are required")
-	}
-	pool, err := pgxpool.New(context.Background(), url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
+	owner := testfixture.OpenOwnerPool(t)
 	server, err := NewServer(HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1024, RequestTimeout: time.Second, DevAuth: false, DevAuthToken: "", EventStreams: eventstream.DefaultConfig()}, postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Modules{}, Authorization{})
 	if err != nil {
 		t.Fatal(err)
@@ -41,11 +32,6 @@ func TestReadinessRequiresDatabaseConnectivityIntegration(t *testing.T) {
 		}
 	}
 	check(http.StatusOK)
-	owner, err := pgxpool.New(context.Background(), ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer owner.Close()
 	var role string
 	if err := pool.QueryRow(context.Background(), "SELECT current_user").Scan(&role); err != nil {
 		t.Fatal(err)

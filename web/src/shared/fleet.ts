@@ -1,9 +1,10 @@
-import type {
-  NodeIpBan,
-  NodeObservedState,
-  NodeSession,
-  Operation,
-  UserGroupResourceState,
+import {
+  ResponseError,
+  type NodeIpBan,
+  type NodeObservedState,
+  type NodeSession,
+  type Operation,
+  type UserGroupResourceState,
 } from "@ocservia/api-client";
 import { defineStore } from "pinia";
 import { computed, onScopeDispose, ref, shallowRef } from "vue";
@@ -69,15 +70,6 @@ function pollDelay(state: Operation["state"], recoveryAttempt: number): number {
   );
 }
 
-function responseStatus(error: unknown): number | undefined {
-  if (typeof error !== "object" || error === null || !("response" in error))
-    return undefined;
-  const response = (error as { response?: unknown }).response;
-  if (typeof response !== "object" || response === null) return undefined;
-  const status = (response as { status?: unknown }).status;
-  return typeof status === "number" ? status : undefined;
-}
-
 export const useFleetStore = defineStore("fleet", () => {
   const nodes = shallowRef<NodeObservedState[]>([]);
   const selected = shallowRef<NodeObservedState>();
@@ -102,38 +94,10 @@ export const useFleetStore = defineStore("fleet", () => {
   const streamConnected = ref(false);
   let selectionTarget: string | undefined;
   let connectSequence = 0;
-  const controllers = new Set<AbortController>();
   const rebuildReads = createReadRequest();
   const selectReads = createReadRequest();
   let operationController: AbortController | undefined;
   let operationSequence = 0;
-
-  function trackRequest(): AbortController {
-    const controller = new AbortController();
-    controllers.add(controller);
-    return controller;
-  }
-
-  function releaseRequest(controller: AbortController): void {
-    controllers.delete(controller);
-  }
-
-  function cancelRequest(controller: AbortController | undefined): void {
-    if (!controller) return;
-    controller.abort();
-    controllers.delete(controller);
-  }
-
-  function abortRequests(): void {
-    for (const controller of controllers) controller.abort();
-    controllers.clear();
-    rebuildReads.cancel();
-    selectReads.cancel();
-    operationController = undefined;
-    selecting.value = false;
-    operationTracking.value = false;
-    operationSequence += 1;
-  }
 
   function isCurrent(
     context: WorkspaceContext,
@@ -225,8 +189,7 @@ export const useFleetStore = defineStore("fleet", () => {
     loading.value = true;
     try {
       context = await currentContext();
-      const isLatestRebuild = () =>
-        Boolean(context && request.current(context));
+      const isLatestRebuild = () => request.current(context);
       if (!isLatestRebuild()) return;
       // Read the cursor before the nodes so events racing the snapshot are
       // still delivered. An open stream keeps the cursor current itself.
@@ -256,9 +219,7 @@ export const useFleetStore = defineStore("fleet", () => {
       if (!isLatestRebuild()) return;
       unavailable.value = false;
     } catch {
-      if (!context) return;
-      const isLatestRebuild = request.current(context);
-      if (!isLatestRebuild) return;
+      if (!request.current(context)) return;
       unavailable.value = true;
     } finally {
       if (request.finish()) {
@@ -270,10 +231,7 @@ export const useFleetStore = defineStore("fleet", () => {
   async function select(nodeId: string): Promise<void> {
     selectionTarget = nodeId;
     if (selected.value && selected.value.id !== nodeId) {
-      cancelRequest(operationController);
-      operationController = undefined;
-      operationTracking.value = false;
-      operationSequence += 1;
+      detachOperation();
       selected.value = undefined;
       sessions.value = [];
       ipBans.value = [];
@@ -285,7 +243,7 @@ export const useFleetStore = defineStore("fleet", () => {
     selectionError.value = "";
     try {
       context = await currentContext();
-      const isLatestSelect = () => Boolean(context && request.current(context));
+      const isLatestSelect = () => request.current(context);
       if (!isLatestSelect()) return;
       const node = await getNode(nodeId, request.signal);
       if (!isLatestSelect()) return;
@@ -314,10 +272,8 @@ export const useFleetStore = defineStore("fleet", () => {
       selectionError.value = "";
       unavailable.value = false;
     } catch (error) {
-      if (!context) return;
-      const isLatestSelect = request.current(context);
-      if (!isLatestSelect) return;
-      if (responseStatus(error) === 404) {
+      if (!request.current(context)) return;
+      if (error instanceof ResponseError && error.response.status === 404) {
         selectionError.value = "notFound";
       } else {
         unavailable.value = true;
@@ -339,9 +295,9 @@ export const useFleetStore = defineStore("fleet", () => {
     terminal: Set<string> = terminalStates,
   ): Promise<void> {
     if (!selected.value || operationTracking.value) return;
-    cancelRequest(operationController);
+    operationController?.abort();
     const context = workspaceContext();
-    const controller = trackRequest();
+    const controller = new AbortController();
     operationController = controller;
     operationTracking.value = true;
     const sequence = ++operationSequence;
@@ -386,7 +342,6 @@ export const useFleetStore = defineStore("fleet", () => {
       operationError.value =
         error instanceof Error ? error.message : "Operation failed";
     } finally {
-      releaseRequest(controller);
       if (operationController === controller) {
         operationController = undefined;
         operationTracking.value = false;
@@ -395,115 +350,10 @@ export const useFleetStore = defineStore("fleet", () => {
   }
 
   function detachOperation(): void {
-    if (!operationController) return;
-    cancelRequest(operationController);
+    operationController?.abort();
     operationController = undefined;
     operationTracking.value = false;
     operationSequence += 1;
-  }
-
-  async function disconnectSessionAction(
-    sessionId: string,
-    reason: string,
-  ): Promise<void> {
-    await runOperation((node, signal) =>
-      disconnectSession(node, sessionId, reason, signal),
-    );
-  }
-
-  async function terminate(sessionId: string, reason: string): Promise<void> {
-    await runOperation((node, signal) =>
-      terminateSession(node, sessionId, reason, signal),
-    );
-  }
-
-  async function unban(ip: string, reason: string): Promise<void> {
-    await runOperation((node, signal) => removeIpBan(node, ip, reason, signal));
-  }
-
-  async function reload(reason: string): Promise<void> {
-    await runOperation((node, signal) => reloadService(node, reason, signal));
-  }
-
-  async function upgradeAgent(
-    targetVersion: string,
-    reason: string,
-  ): Promise<void> {
-    await runOperation(
-      (node, signal) => upgradeNodeAgent(node, targetVersion, reason, signal),
-      upgradeTerminalStates,
-    );
-  }
-
-  async function trackOperation(operationId: string): Promise<void> {
-    await runOperation((_node, signal) => getOperation(operationId, signal));
-  }
-
-  async function createUserAction(
-    name: string,
-    version: number,
-    sealedPassword: string,
-    secretKeyId: string,
-    reason: string,
-  ): Promise<void> {
-    await runOperation((node, signal) =>
-      createUser(
-        node.id,
-        name,
-        version,
-        sealedPassword,
-        secretKeyId,
-        reason,
-        signal,
-      ),
-    );
-  }
-  async function disableUserAction(
-    username: string,
-    version: number,
-    reason: string,
-  ): Promise<void> {
-    await runOperation((node, signal) =>
-      disableUser(node.id, username, version, reason, signal),
-    );
-  }
-  async function enableUserAction(
-    username: string,
-    version: number,
-    reason: string,
-  ): Promise<void> {
-    await runOperation((node, signal) =>
-      enableUser(node.id, username, version, reason, signal),
-    );
-  }
-  async function rotatePasswordAction(
-    username: string,
-    version: number,
-    sealedPassword: string,
-    secretKeyId: string,
-    reason: string,
-  ): Promise<void> {
-    await runOperation((node, signal) =>
-      rotateUserPassword(
-        node.id,
-        username,
-        version,
-        sealedPassword,
-        secretKeyId,
-        reason,
-        signal,
-      ),
-    );
-  }
-  async function applyGroupAction(
-    groupName: string,
-    version: number,
-    members: string[],
-    reason: string,
-  ): Promise<void> {
-    await runOperation((node, signal) =>
-      applyGroup(node.id, groupName, version, members, reason, signal),
-    );
   }
 
   function pauseRefresh(): void {
@@ -534,10 +384,6 @@ export const useFleetStore = defineStore("fleet", () => {
         : 15_000,
     pauseRefresh,
   );
-
-  function start(): void {
-    foregroundRefresh.start();
-  }
 
   // Leaving a view stops its reads, but does not cancel accepted mutations.
   function stop(): void {
@@ -624,12 +470,8 @@ export const useFleetStore = defineStore("fleet", () => {
 
   function disconnect(): void {
     stop();
-    connectSequence += 1;
-    source?.close();
-    source = undefined;
     eventCursor = undefined;
-    streamConnected.value = false;
-    abortRequests();
+    detachOperation();
   }
   onScopeDispose(disconnect);
   return {
@@ -657,23 +499,86 @@ export const useFleetStore = defineStore("fleet", () => {
     agentAhead,
     agentUnknown,
     rebuild,
-    start,
+    start: () => {
+      foregroundRefresh.start();
+    },
     stop,
     streamConnected,
     select,
     connect,
     disconnect,
-    disconnectSession: disconnectSessionAction,
-    terminateSession: terminate,
-    removeIpBan: unban,
-    reloadService: reload,
-    upgradeAgent,
-    createUser: createUserAction,
-    disableUser: disableUserAction,
-    enableUser: enableUserAction,
-    rotateUserPassword: rotatePasswordAction,
-    applyGroup: applyGroupAction,
-    trackOperation,
+    disconnectSession: (sessionId: string, reason: string) =>
+      runOperation((node, signal) =>
+        disconnectSession(node, sessionId, reason, signal),
+      ),
+    terminateSession: (sessionId: string, reason: string) =>
+      runOperation((node, signal) =>
+        terminateSession(node, sessionId, reason, signal),
+      ),
+    removeIpBan: (ip: string, reason: string) =>
+      runOperation((node, signal) => removeIpBan(node, ip, reason, signal)),
+    reloadService: (reason: string) =>
+      runOperation((node, signal) => reloadService(node, reason, signal)),
+    upgradeAgent: (targetVersion: string, reason: string) =>
+      runOperation(
+        (node, signal) => upgradeNodeAgent(node, targetVersion, reason, signal),
+        upgradeTerminalStates,
+      ),
+    createUser: (
+      name: string,
+      version: number,
+      sealedPassword: string,
+      secretKeyId: string,
+      reason: string,
+    ) =>
+      runOperation((node, signal) =>
+        createUser(
+          node.id,
+          name,
+          version,
+          sealedPassword,
+          secretKeyId,
+          reason,
+          signal,
+        ),
+      ),
+    disableUser: (username: string, version: number, reason: string) =>
+      runOperation((node, signal) =>
+        disableUser(node.id, username, version, reason, signal),
+      ),
+    enableUser: (username: string, version: number, reason: string) =>
+      runOperation((node, signal) =>
+        enableUser(node.id, username, version, reason, signal),
+      ),
+    rotateUserPassword: (
+      username: string,
+      version: number,
+      sealedPassword: string,
+      secretKeyId: string,
+      reason: string,
+    ) =>
+      runOperation((node, signal) =>
+        rotateUserPassword(
+          node.id,
+          username,
+          version,
+          sealedPassword,
+          secretKeyId,
+          reason,
+          signal,
+        ),
+      ),
+    applyGroup: (
+      groupName: string,
+      version: number,
+      members: string[],
+      reason: string,
+    ) =>
+      runOperation((node, signal) =>
+        applyGroup(node.id, groupName, version, members, reason, signal),
+      ),
+    trackOperation: (operationId: string) =>
+      runOperation((_node, signal) => getOperation(operationId, signal)),
     detachOperation,
   };
 });

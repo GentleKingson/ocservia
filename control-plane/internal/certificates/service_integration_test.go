@@ -137,19 +137,11 @@ func (f *fixtureArtifacts) ConfirmArtifactConsumed(_ context.Context, grant *age
 }
 
 func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
 	owner := pool
-	if ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"); ownerURL != "" {
-		owner, err = pgxpool.New(ctx, ownerURL)
-		testutil.NoError(t, err)
-		defer owner.Close()
+	if os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL") != "" {
+		owner = testfixture.OpenOwnerPool(t)
 	}
 	workspaceID, nodeID, requesterID, requesterSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	for _, setup := range []struct {
@@ -164,16 +156,12 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		{`INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at)VALUES($1,1,1,'fixture-user-key',decode(repeat('11',32),'hex'),now()),($1,2,1,'fixture-p12-key',decode(repeat('22',32),'hex'),now())`, []any{nodeID}},
 		{`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,now()-interval '1 minute')`, []any{workspaceID, requesterID}},
 	} {
-		if _, err = pool.Exec(ctx, setup.query, setup.args...); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Exec(t, ctx, pool, setup.query, setup.args...)
 	}
 	attestationKey, err := testfixture.InstallKey(ctx, pool, nodeID)
 	testutil.NoError(t, err)
 	endpointID := sha256.Sum256(append([]byte("ocservia/certificate-integration/"), nodeID[:]...))
-	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpointID[:]); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpointID[:])
 	defer func() {
 		if err := cleanupCertificateIntegration(context.Background(), owner, workspaceID); err != nil {
 			t.Error(err)
@@ -201,13 +189,9 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	publicDER, _ := x509.MarshalPKIXPublicKey(&key.PublicKey)
 	publicHash := sha256.Sum256(publicDER)
 	var csrEnvelopeBytes []byte
-	if err := pool.QueryRow(ctx, `SELECT c.envelope FROM commands c WHERE c.operation_id=$1`, certificate.OperationID).Scan(&csrEnvelopeBytes); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT c.envelope FROM commands c WHERE c.operation_id=$1`, certificate.OperationID).Scan(&csrEnvelopeBytes))
 	var csrEnvelope agentv1.CommandEnvelope
-	if err := proto.Unmarshal(csrEnvelopeBytes, &csrEnvelope); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, proto.Unmarshal(csrEnvelopeBytes, &csrEnvelope))
 	csrResultBytes, err := proto.Marshal(&agentv1.CertificateCsrResult{CertificateId: certificate.ID[:], CsrDer: csrDER, PublicKeySha256: publicHash[:]})
 	testutil.NoError(t, err)
 	completed := time.Now().UTC().Truncate(time.Microsecond)
@@ -217,9 +201,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: csrResultBytes,
 		AcceptedAt: timestamppb.New(completed), CompletedAt: timestamppb.New(completed),
 	}
-	if err := testfixture.AttachProof(&csrEnvelope, csrResult, attestationKey, 1); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, testfixture.AttachProof(&csrEnvelope, csrResult, attestationKey, 1))
 	encodedCSRResult, err := proto.Marshal(csrResult)
 	testutil.NoError(t, err)
 	if _, err := pool.Exec(ctx, `UPDATE commands SET state='dispatched' WHERE id=$1`, uuid.Must(uuid.FromBytes(csrEnvelope.GetCommandId()))); err != nil {
@@ -236,9 +218,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var nodeVersion int64
-	if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion))
 	if nodeVersion <= 1 {
 		t.Fatalf("attested CSR result did not advance node revision: %d", nodeVersion)
 	}
@@ -269,9 +249,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var originalCertificateExpiry, originalArtifactExpiry pgtype.Timestamptz
-	if err := pool.QueryRow(ctx, `SELECT c.not_after,a.expires_at FROM certificates c JOIN artifact_operations a ON a.certificate_id=c.id WHERE a.id=$1`, grant.ArtifactID).Scan(&originalCertificateExpiry, &originalArtifactExpiry); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT c.not_after,a.expires_at FROM certificates c JOIN artifact_operations a ON a.certificate_id=c.id WHERE a.id=$1`, grant.ArtifactID).Scan(&originalCertificateExpiry, &originalArtifactExpiry))
 	minimum, _ := (value.Timestamp{Valid: true, Micros: value.MinTimestamp}).Time()
 	maximum, _ := (value.Timestamp{Valid: true, Micros: value.EndTimestamp - 1}).Time()
 	for _, tc := range []struct {
@@ -329,9 +307,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 			testutil.NoError(t, err)
 			download.Reader.Close()
 			var lease, granted pgtype.Timestamptz
-			if err := pool.QueryRow(ctx, `SELECT lease_until,active_grant_expires_at FROM artifact_operations WHERE id=$1`, grant.ArtifactID).Scan(&lease, &granted); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, pool.QueryRow(ctx, `SELECT lease_until,active_grant_expires_at FROM artifact_operations WHERE id=$1`, grant.ArtifactID).Scan(&lease, &granted))
 			if lease != granted || !lease.Valid || lease.InfinityModifier != pgtype.Finite || !lease.Time.After(time.Now()) || lease.Time.After(time.Now().Add(2*time.Minute)) {
 				t.Fatal("unbounded grant deadline", lease, granted)
 			}
@@ -583,9 +559,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = service.OpenArtifact(ctx, expiredGrant.ArtifactID, expiredGrant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("expired artifact err=%v", err)
 	}
-	if err := service.Maintain(ctx); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, service.Maintain(ctx))
 	issued, err = service.Get(ctx, certificate.ID)
 	if err != nil || issued.State != "expiring" {
 		t.Fatalf("maintained certificate=%+v err=%v", issued, err)
@@ -606,9 +580,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err := service.CompleteArtifact(ctx, hashGrant.ArtifactID, download.GrantID, download.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-hash-mismatch"); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("artifact hash mismatch err=%v", err)
 	}
-	if err := service.AbortArtifact(ctx, hashGrant.ArtifactID, download.GrantID); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, service.AbortArtifact(ctx, hashGrant.ArtifactID, download.GrantID))
 	secretRef, err := service.CreateSecretRef(ctx, SecretRefRequest{WorkspaceID: workspaceID, ActorID: requesterID, SessionID: requesterSession, Provider: "vault", KeyPath: "production/ocserv/tls", Version: "version-1", Reason: "register external reference", RequestID: "secret-create"})
 	if err != nil || secretRef.State != "active" {
 		t.Fatalf("secret ref=%+v err=%v", secretRef, err)
@@ -620,9 +592,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE certificates SET not_after=now()-interval '1 second' WHERE id=$1`, certificate.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Maintain(ctx); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, service.Maintain(ctx))
 	expired, err := service.Get(ctx, certificate.ID)
 	if err != nil || expired.State != "expired" {
 		t.Fatalf("expired certificate=%+v err=%v", expired, err)
@@ -658,9 +628,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=created_at+interval '1 microsecond' WHERE operation_id=$1::uuid`, op.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := operations.NewBackend(postgres.WrapPool(pool), 50, nil).Expire(ctx); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, operations.NewBackend(postgres.WrapPool(pool), 50, nil).Expire(ctx))
 	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if !errors.Is(err, ErrNotReady) || !replayed || pki.revoked {
 		t.Fatalf("expired revoke retry=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)

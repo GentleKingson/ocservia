@@ -46,17 +46,6 @@ const operationReads = createReadRequest();
 const detailReads = createReadRequest();
 const rolloutReads = createReadRequest();
 
-function invalidateDetail(): void {
-  detailReads.cancel();
-  detailLoading.value = false;
-}
-
-function cancelRequests(): void {
-  operationReads.cancel();
-  invalidateDetail();
-  rolloutReads.cancel();
-}
-
 async function loadOperations(reset = true): Promise<void> {
   const request = operationReads.begin();
   let context: WorkspaceContext | undefined;
@@ -145,7 +134,10 @@ onMounted(() => {
   refresh();
 });
 onBeforeUnmount(() => {
-  cancelRequests();
+  operationReads.cancel();
+  detailReads.cancel();
+  detailLoading.value = false;
+  rolloutReads.cancel();
 });
 </script>
 

@@ -13,6 +13,20 @@ import (
 	"github.com/google/uuid"
 )
 
+func NewHub(config Config, fetch FetchFunc, resolve ResolveFunc) (*Hub, error) {
+	budget, err := NewWatcherBudget(config.Watchers)
+	if err != nil {
+		return nil, err
+	}
+	return NewHubWithWatcherBudget(config, budget, fetch, resolve)
+}
+
+func cloneEvent(event Event) Event {
+	cloned := event
+	cloned.Data = append([]byte(nil), event.Data...)
+	return cloned
+}
+
 func rejectNonNilCursor(_ context.Context, _ string, cursor uuid.UUID) (uint64, error) {
 	if cursor != uuid.Nil {
 		return 0, ErrInvalidCursor

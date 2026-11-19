@@ -231,21 +231,6 @@ setup_docker_apt_repository() {
   apt-get update
 }
 
-install_docker_engine() {
-  setup_docker_apt_repository
-  echo "installing Docker Engine and the Compose plugin from the official repository"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-}
-
-revive_docker_daemon() {
-  docker_daemon_active && return 0
-  if command -v systemctl >/dev/null 2>&1; then
-    echo "Docker daemon is not active; enabling and starting the docker service"
-    systemctl enable --now docker
-  fi
-}
-
 validate_docker_readiness() {
   if ! docker_client_present; then
     record_failure "Docker is required but no usable docker client is installed"
@@ -590,9 +575,15 @@ run_install() {
   else
     echo "Docker is absent; installing Docker Engine and the Compose plugin from the official Docker apt repository"
     install_missing_base_tools
-    install_docker_engine
+    setup_docker_apt_repository
+    echo "installing Docker Engine and the Compose plugin from the official repository"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   fi
-  revive_docker_daemon
+  if ! docker_daemon_active && command -v systemctl >/dev/null 2>&1; then
+    echo "Docker daemon is not active; enabling and starting the docker service"
+    systemctl enable --now docker
+  fi
   validate_docker_readiness
   verify_launcher_docker_access
   if ((${#failures[@]} > 0)); then

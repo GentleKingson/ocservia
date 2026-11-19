@@ -3,27 +3,20 @@ package auth
 import (
 	"context"
 	"errors"
-	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestLocalAuthenticationIntegration(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
 	s, err := NewBackend(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	username := "alice-" + uuid.NewString()

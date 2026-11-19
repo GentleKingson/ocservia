@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
-	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -23,22 +21,16 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/userstate/store"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
 
 func userStateBackend(t *testing.T) database.Backend {
 	t.Helper()
-	ctx := context.Background()
-	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("real PostgreSQL required")
-	}
-	pool, err := pgxpool.New(ctx, dsn)
-	testutil.NoError(t, err)
-	t.Cleanup(pool.Close)
+	pool := testfixture.OpenRuntimePool(t)
 	// PostgreSQL packages share a database. Preserve the fencing epoch, but
 	// leave the singleton expired both before and after this fixture.
 	expireLeadership := func() {
@@ -73,7 +65,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 		exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,$2,true)`, node, capability)
 	}
 	exec(`INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at)VALUES($1,1,1,'key',$2,now())`, node, bytes.Repeat([]byte{1}, 32))
-	signer := integrationCommandSigner()
+	signer := testfixture.CommandSigner(2)
 	s := NewWithSignerBackend(b, signer)
 	request := func(kind MutationKind, name string, version int64) MutationRequest {
 		r := MutationRequest{NodeID: node, Kind: kind, Name: name, ExpectedVersion: version, Members: []string{}, IdempotencyKey: uuid.NewString(), TTL: time.Hour, ActorID: "operator", Reason: "Database backend desired state", RequestID: uuid.NewString(), Traceparent: testTraceparent}

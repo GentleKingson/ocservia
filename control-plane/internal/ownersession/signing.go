@@ -114,12 +114,3 @@ func fixed16(value []byte) ([16]byte, error) {
 	copy(fixed[:], value)
 	return fixed, nil
 }
-
-func fixed32(value []byte) ([32]byte, error) {
-	if len(value) != 32 {
-		return [32]byte{}, errors.New("ownersession: value must be 32 bytes")
-	}
-	var fixed [32]byte
-	copy(fixed[:], value)
-	return fixed, nil
-}

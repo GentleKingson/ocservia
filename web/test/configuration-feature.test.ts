@@ -21,11 +21,12 @@ const plan = {
   validation: "valid",
 } as ConfigPlan;
 
-function setup() {
-  const currentNode = ref({
-    id: "node-a",
-    configRevision: 7,
-  } as NodeObservedState);
+const omitted = Symbol("omitted");
+
+function setup(revision: unknown = 7) {
+  const node: Record<string, unknown> = { id: "node-a", version: 31 };
+  if (revision !== omitted) node.configRevision = revision;
+  const currentNode = ref(node as unknown as NodeObservedState);
   const readReady = ref(true);
   const workspace = ref({ id: "workspace-a", generation: 1 });
   const trackOperation = vi.fn().mockResolvedValue(undefined);
@@ -111,6 +112,51 @@ describe("configuration feature without a page or store", () => {
       reason: "apply",
     });
     expect(trackOperation).toHaveBeenCalledExactlyOnceWith("apply-operation");
+  });
+
+  it.each([0, 7, Number.MAX_SAFE_INTEGER])(
+    "submits the read configuration revision %s, not node.Version",
+    async (revision) => {
+      const { feature } = setup(revision);
+      await feature.openConfigPlan();
+      expect(feature.canSubmitConfigPlan.value).toBe(true);
+      feature.configReason.value = "review configuration";
+      await feature.submitConfigPlan();
+      expect(api.createConfigPlan).toHaveBeenCalledExactlyOnceWith(
+        "node-a",
+        expect.objectContaining({ expectedRevision: revision }),
+      );
+    },
+  );
+
+  it.each([omitted, null, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "7", NaN])(
+    "does not submit omitted, unknown, or imprecise revision %s",
+    async (revision) => {
+      const { feature } = setup(revision);
+      await feature.openConfigPlan();
+      expect(feature.canSubmitConfigPlan.value).toBe(false);
+      feature.configReason.value = "review configuration";
+      await feature.submitConfigPlan();
+      expect(api.createConfigPlan).not.toHaveBeenCalled();
+    },
+  );
+
+  it("preserves the captured revision and reports stale rejection without retry", async () => {
+    const { feature, currentNode } = setup(7);
+    await feature.openConfigPlan();
+    feature.configReason.value = "review configuration";
+    currentNode.value = {
+      id: "node-a",
+      version: 32,
+      configRevision: 8,
+    } as NodeObservedState;
+    api.createConfigPlan.mockRejectedValueOnce(new Error("stale revision"));
+    await feature.submitConfigPlan();
+    expect(api.createConfigPlan).toHaveBeenCalledExactlyOnceWith(
+      "node-a",
+      expect.objectContaining({ expectedRevision: 7 }),
+    );
+    expect(feature.configError.value).toBe("stale revision");
   });
 
   it.each(["read", "node", "workspace"])(

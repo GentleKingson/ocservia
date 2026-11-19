@@ -4,31 +4,22 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestLocalAccountHTTPSharedLimitsIntegration(t *testing.T) {
-	url := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
-	testutil.NoError(t, err)
-	defer pool.Close()
-	otherPool, err := pgxpool.New(ctx, url)
-	testutil.NoError(t, err)
-	defer otherPool.Close()
+	pool := testfixture.OpenRuntimePool(t)
+	otherPool := testfixture.OpenRuntimePool(t)
 	servers := []*Server{newAuthHTTPServer(t, pool, true), newAuthHTTPServer(t, otherPool, true)}
 	logs := []*bytes.Buffer{captureAuthLogs(servers[0]), captureAuthLogs(servers[1])}
 	name := "account-limit-http-" + uuid.NewString()
@@ -83,8 +74,9 @@ func TestLocalAccountHTTPSharedLimitsIntegration(t *testing.T) {
 	}
 	// Account saturation must not enter the emergency credential path.
 	token := uuid.NewString()
-	servers[0].auth, err = auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(token)})
+	authSvc, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(token)})
 	testutil.NoError(t, err)
+	servers[0].auth = authSvc
 	if w := authHTTPRequest(servers[0], "POST", "break-glass", fmt.Sprintf(`{"token":%q}`, token), authTestOrigin); w.Code != 204 {
 		t.Fatalf("break-glass was account-limited: %d %s", w.Code, w.Body)
 	}

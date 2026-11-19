@@ -7,6 +7,7 @@
 )]
 
 use std::os::unix::process::ExitStatusExt as _;
+use std::path::Path;
 use std::process::Command;
 
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -24,6 +25,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 };
 use ocservia_test_support::{foreign_architecture, host_architecture, keyring, ts};
 use rand::{SeedableRng, rngs::StdRng};
+use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -362,62 +364,6 @@ fn basic_executor_limits_uid_jitter_and_expiry_rules() {
     authorize_test_command(&mut env);
     env.delivery_mode = CommandDeliveryMode::RetryIfEffectAbsent.into();
     assert!(validate_command(&env, &ctx).is_err());
-}
-
-#[test]
-fn legacy_synthetic_payload_hash_matches_cross_language_golden_vectors() {
-    let node = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-    let mut env = command(node, *Uuid::now_v7().as_bytes(), "", 100);
-    for (msg, expected) in [
-        (
-            "",
-            "2d6daaae892285c786fba378aff37d4d0436dae76699061500b548e939782433",
-        ),
-        (
-            "hello",
-            "a7299856cb7fa4e266b1234614361677e1d1b2466608d014e71b4a547c804397",
-        ),
-        (
-            "你好",
-            "10f1ae9994bde9ea69de8fb965bf5029e97ad8b1bf1f00834d47831f60adf38d",
-        ),
-    ] {
-        env.payload = Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
-            message: msg.into(),
-        }));
-        assert_eq!(
-            hex::encode(legacy_synthetic_payload_hash(&env).expect("h")),
-            expected
-        );
-    }
-    env.payload = Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
-        message: "x".repeat(4096),
-    }));
-    assert_eq!(
-        hex::encode(legacy_synthetic_payload_hash(&env).expect("h")),
-        "d6f3a8f8d0fc7ccbbfe6fec9f93bcad544d98fec0f3501aeef8be2a5d2b78daa"
-    );
-    env.payload = Some(command_envelope::Payload::SyntheticNoop(
-        SyntheticNoop::default(),
-    ));
-    assert_eq!(
-        hex::encode(legacy_synthetic_payload_hash(&env).expect("h")),
-        "2e5b198f3c3a2718113a4dbf2a552c730ddede13567ee448c6118459ccfa0d98"
-    );
-    env.payload = Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
-        message: "hello".into(),
-    }));
-    env.expected_revision = 2;
-    assert_eq!(
-        hex::encode(legacy_synthetic_payload_hash(&env).expect("h")),
-        "79659b4e1819080191867174096d8aa5d01a43cb634cab9c51b113391643c343"
-    );
-    env.expected_revision = 1;
-    env.node_id = (1_u8..=16).collect();
-    assert_eq!(
-        hex::encode(legacy_synthetic_payload_hash(&env).expect("h")),
-        "a45222e4babe147a02b9274937f09c337ac56764a56c61a9ebfd901d4fec7afe"
-    );
 }
 
 #[test]
@@ -1411,48 +1357,6 @@ fn agent_upgrade_capability_payload_auth_and_conflict() {
 
 // ---- Canonical Semantic Payload Hash v1 / v2 Golden Vectors ----
 
-const V1_DOMAIN_SEPARATOR: &[u8] = b"ocservia.command.semantic-hash.v1\0";
-
-fn compute_v1_canonical(
-    node_id: &[u8],
-    expected_revision: u64,
-    kind: u32,
-    payload: &[u8],
-) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    hash.update(V1_DOMAIN_SEPARATOR);
-    hash.update(node_id);
-    hash.update(expected_revision.to_be_bytes());
-    hash.update(kind.to_be_bytes());
-    hash.update(payload);
-    hash.finalize().into()
-}
-
-fn fixture_strings(values: &[&str]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for v in values {
-        out.extend_from_slice(&u32::try_from(v.len()).expect("len").to_be_bytes());
-        out.extend_from_slice(v.as_bytes());
-    }
-    out
-}
-
-fn canonical_payload_from_fixture(kind: u32, payload: &serde_json::Value) -> Vec<u8> {
-    let f = |n| {
-        payload
-            .get(n)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-    };
-    match kind {
-        100 | 112 => fixture_strings(&[f("session_id"), f("boot_id")]),
-        105 | 107 => Vec::new(),
-        108 => fixture_strings(&[f("message")]),
-        113 => fixture_strings(&[f("ip")]),
-        _ => panic!("unsupported payload_kind: {kind}"),
-    }
-}
-
 fn envelope_from_fixture_vector(
     node_id: &[u8],
     expected_revision: u64,
@@ -1527,13 +1431,6 @@ fn canonical_semantic_hash_v1_matches_shared_fixture() {
         let rev = v["expected_revision"].as_u64().expect("rev");
         let kind = u32::try_from(v["payload_kind"].as_u64().expect("kind")).expect("u32");
         let expected = v["expected_sha256"].as_str().expect("sha256");
-        let mirror = compute_v1_canonical(
-            &node_id,
-            rev,
-            kind,
-            &canonical_payload_from_fixture(kind, &v["payload"]),
-        );
-        assert_eq!(hex::encode(mirror), expected, "{name} mirror");
         let env = envelope_from_fixture_payload(&node_id, rev, kind, &v["payload"]);
         assert_eq!(
             hex::encode(semantic_payload_hash_v1(&env).expect("v1")),

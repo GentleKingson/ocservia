@@ -251,8 +251,8 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			return err
 		}
 	}
-	active, err := s.activeUserOperationCount(ctx)
-	if err != nil {
+	var active int
+	if err := s.withStore(ctx, func(store userstore.Store) (err error) { active, err = store.ActiveOperations(ctx); return }); err != nil {
 		return err
 	}
 	remaining := max(0, s.batchSize-active)
@@ -267,12 +267,6 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-func (s *Service) activeUserOperationCount(ctx context.Context) (int, error) {
-	var count int
-	err := s.withStore(ctx, func(store userstore.Store) (err error) { count, err = store.ActiveOperations(ctx); return })
-	return count, err
 }
 
 func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, error) {

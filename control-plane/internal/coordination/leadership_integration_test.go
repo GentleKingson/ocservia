@@ -3,28 +3,19 @@ package coordination_test
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL not set")
-	}
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testfixture.OpenRuntimePool(t)
 }
 
 func mustIdentity(t *testing.T) coordination.Identity {

@@ -158,7 +158,6 @@ test("runs the canary and batch rollout to completion", async ({ page }) => {
 test("pauses on a failed node and resumes only the failed node", async ({
   page,
 }) => {
-  await page.route("**/api/v1/agent-rollouts", fulfillRolloutCreate);
   const states = [
     rollout("paused", [
       node(canaryNodeId, 0, 0, "succeeded"),

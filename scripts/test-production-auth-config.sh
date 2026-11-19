@@ -36,7 +36,7 @@ OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '%064d' 1)"
 export OCSERV_CONTROLLER_ENDPOINT_ID
 export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test
 export OCSERV_RELAY_URL_A=https://relay-a.example.test
-unset OCSERV_RELAY_URL_B OCSERV_OTEL_BACKEND_ENDPOINT
+unset OCSERV_OTEL_BACKEND_ENDPOINT
 
 # Exercise the published Local-only configuration through the shared Controller installer allowlist.
 awk -v dir="${work}" '

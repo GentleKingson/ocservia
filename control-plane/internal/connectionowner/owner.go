@@ -58,7 +58,3 @@ func (t *Term) Identity() Identity { return t.identity }
 // with the TTL and a local clock is forbidden because clock drift would let a
 // stale owner treat an expired lease as valid.
 func (t *Term) LeaseUntil() time.Time { return t.leaseUntil }
-
-// LeaseTTL returns the configured TTL of this term. It is configuration, not
-// an authority: deadlines come from LeaseUntil and Renew.
-func (t *Term) LeaseTTL() time.Duration { return t.leaseTTL }

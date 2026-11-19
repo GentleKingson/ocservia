@@ -120,9 +120,6 @@ need() {
 
 random_hex() { openssl rand -hex 32; }
 
-# Ed25519 seed (last 32 bytes of the private DER) as lowercase hex.
-seed_hex() { openssl pkey -in "$1" -outform DER | tail -c 32 | od -An -v -tx1 | tr -d ' \n'; }
-
 endpoint_id() {
   local seed
   seed="$(cat -- "$1")"
@@ -188,7 +185,8 @@ openssl pkey -in "${secret_dir}/controller-command-signing-key.pem" -pubout |
   put "${secret_dir}/controller-command-verification-key.pem" 0:65532 0440
 if [[ ! -e "${secret_dir}/controller-iroh.key" ]]; then
   openssl genpkey -algorithm ED25519 -out "${work}/iroh.pem" 2>/dev/null
-  seed_hex "${work}/iroh.pem" >"${work}/iroh.key"
+  # Ed25519 seed (last 32 bytes of the private DER) as lowercase hex.
+  openssl pkey -in "${work}/iroh.pem" -outform DER | tail -c 32 | od -An -v -tx1 | tr -d ' \n' >"${work}/iroh.key"
   place "${work}/iroh.key" "${secret_dir}/controller-iroh.key" 65532:65532 0400
 fi
 put "${signer_dir}/api-token" 65532:65532 0400 <"${secret_dir}/certificate-signer-token"

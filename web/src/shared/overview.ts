@@ -72,7 +72,6 @@ export const useOverviewStore = defineStore("overview", () => {
       operationsAt.value = new Date();
       operationsUnavailable.value = false;
     } catch {
-      if (!context) return;
       if (request.current(context)) operationsUnavailable.value = true;
     } finally {
       request.finish();
@@ -113,23 +112,16 @@ export const useOverviewStore = defineStore("overview", () => {
       eventsAt.value = new Date();
       eventsUnavailable.value = false;
     } catch {
-      if (!context) return;
       if (request.current(context)) eventsUnavailable.value = true;
     } finally {
       request.finish();
     }
   }
 
-  async function refreshSnapshot(): Promise<void> {
-    await Promise.all([loadOperations(), loadEvents()]);
-  }
-
-  function refresh(): void {
-    foregroundRefresh.request();
-  }
-
   const foregroundRefresh = createForegroundRefresh(
-    refreshSnapshot,
+    async () => {
+      await Promise.all([loadOperations(), loadEvents()]);
+    },
     () =>
       fleet.streamConnected &&
       !operationsUnavailable.value &&
@@ -219,7 +211,9 @@ export const useOverviewStore = defineStore("overview", () => {
     recentFailedOperations,
     recentOperations,
     recentEvents,
-    refresh,
+    refresh: () => {
+      foregroundRefresh.request();
+    },
     start,
     stop,
   };

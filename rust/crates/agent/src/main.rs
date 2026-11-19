@@ -92,7 +92,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         command_keys: &command_keys,
         sealing_keys: &config.sealing_keys,
         fence_epoch_floor: &mut fence_epoch_floor,
-        synthetic_barrier_file: config.synthetic_barrier_file.as_deref(),
     };
     let run =
         supervise_controller_sessions(bind_endpoint, controller, &config.relay_mode, &mut session);

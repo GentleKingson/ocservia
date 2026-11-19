@@ -75,10 +75,10 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		fault.armed.Store(true)
 		d := claimOutbox(t, service)
 		fault.armed.Store(true)
-		if err := service.MarkSent(ctx, d); err != nil {
+		if err := service.MarkSentWithEnvelope(ctx, d, d.Envelope); err != nil {
 			t.Fatal("bookkeeping readback", err)
 		}
-		if err := service.MarkSent(ctx, d); err != nil {
+		if err := service.MarkSentWithEnvelope(ctx, d, d.Envelope); err != nil {
 			t.Fatal("bookkeeping replay", err)
 		}
 		if f.count(t, `SELECT count(*) FROM operation_events WHERE state='dispatched'`) != 1 {
@@ -161,9 +161,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			var transportAccepted bool
 			if accepted {
 				sender := outboxSender(func(context.Context, []byte, []byte) error { transportAccepted = true; return nil })
-				if err := sender.SendCommand(ctx, original.NodeID[:], original.Envelope); err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, sender.SendCommand(ctx, original.NodeID[:], original.Envelope))
 			}
 			// Abandon all worker memory without MarkSent/MarkFailed, then restart.
 			service = operations.NewBackend(f.backend, 1, f.signer)
@@ -172,14 +170,12 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				past := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}
 				f.exec(t, `UPDATE node_command_leases SET leased_until=$1 WHERE lease_token=$2`, past, dispatch.LeaseToken)
 				f.exec(t, `UPDATE outbox_events SET locked_until=$1 WHERE id=$2`, past, dispatch.OutboxID)
-				if err := service.Reap(ctx, 3); err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, service.Reap(ctx, 3))
 				op, err := service.Get(ctx, uuid.MustParse(created.ID))
 				if err != nil || op.State != "unknown" {
 					t.Fatal(op, err)
 				}
-				if err := service.MarkSent(ctx, dispatch); err == nil {
+				if err := service.MarkSentWithEnvelope(ctx, dispatch, dispatch.Envelope); err == nil {
 					t.Fatal("expired claim accepted")
 				}
 				if attempt == 3 {
@@ -187,12 +183,8 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				}
 				dispatch = claimOutbox(t, service)
 				var before, after agentv1.CommandEnvelope
-				if err := proto.Unmarshal(original.Envelope, &before); err != nil {
-					t.Fatal(err)
-				}
-				if err := proto.Unmarshal(dispatch.Envelope, &after); err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, proto.Unmarshal(original.Envelope, &before))
+				testutil.NoError(t, proto.Unmarshal(dispatch.Envelope, &after))
 				if after.DeliveryMode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY || !bytes.Equal(before.IdempotencyKey, after.IdempotencyKey) || !bytes.Equal(before.SemanticPayloadSha256, after.SemanticPayloadSha256) {
 					t.Fatal("recovery can replay an unconfirmed effect")
 				}
@@ -213,9 +205,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		testutil.NoError(t, err)
 		d := claimOutbox(t, service)
 		var envelope agentv1.CommandEnvelope
-		if err := proto.Unmarshal(d.Envelope, &envelope); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, proto.Unmarshal(d.Envelope, &envelope))
 		at := timestamppb.Now()
 		result := &agentv1.CommandResult{CommandId: envelope.CommandId, IdempotencyKey: envelope.IdempotencyKey,
 			PayloadSha256: envelope.SemanticPayloadSha256, SemanticPayloadHashVersion: envelope.SemanticPayloadHashVersion,
@@ -228,12 +218,10 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: at, Traceparent: d.Traceparent, Payload: payload}
 		ingress := transportevents.NewBackend(f.backend, f.signer)
 		for range 2 {
-			if err := ingress.Ingest(ctx, event); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, ingress.Ingest(ctx, event))
 		}
 		for range 2 {
-			if err := service.MarkSent(ctx, d); err != nil {
+			if err := service.MarkSentWithEnvelope(ctx, d, d.Envelope); err != nil {
 				t.Fatal("late bookkeeping", err)
 			}
 		}
@@ -327,9 +315,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				t.Fatal("recovery retries were not claimed", jobs, err)
 			}
 			for _, job := range jobs {
-				if err := service.MarkSent(context.Background(), job); err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, service.MarkSentWithEnvelope(context.Background(), job, job.Envelope))
 			}
 			// The retries are sent with no result yet: their leases are gone
 			// and their operations are still Unknown, but they are executing.
@@ -412,27 +398,19 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertUnclaimed()
-			if err := database.Within(ctx, f.backend, database.ReadCommitted, change); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, database.Within(ctx, f.backend, database.ReadCommitted, change))
 			d := claimOutbox(t, service)
 			if d.OperationID != id {
 				t.Fatal("released wrong operation", d)
 			}
-			if err := service.MarkSent(ctx, d); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, service.MarkSentWithEnvelope(ctx, d, d.Envelope))
 			// Repeated release/activation must not revive a published command.
-			if err := database.Within(ctx, f.backend, database.ReadCommitted, change); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, database.Within(ctx, f.backend, database.ReadCommitted, change))
 			assertUnclaimed()
 			// Store errors propagate from a closed transaction.
 			tx, err := f.backend.Begin(ctx, database.ReadCommitted)
 			testutil.NoError(t, err)
-			if err := tx.Rollback(ctx); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, tx.Rollback(ctx))
 			if err := change(tx); err == nil {
 				t.Fatal("closed transaction accepted")
 			}
@@ -506,9 +484,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 	}
 	close(proceed)
 	for range 2 {
-		if err := <-done; err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, <-done)
 	}
 	if attempts.Load() != 3 {
 		t.Fatal("did not exercise one real deadlock rollback", attempts.Load())

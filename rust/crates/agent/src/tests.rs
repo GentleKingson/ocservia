@@ -35,13 +35,13 @@ use uuid::Uuid;
 
 use crate::CONNECTION_FENCING_CAPABILITY;
 use crate::commands::{
-    map_external_effect, observe_external_effect, response_proof, synthetic_receipt_path,
-    terminal_privd_error, terminal_privd_error_code, wait_for_synthetic_barrier,
+    map_external_effect, observe_external_effect_with_reconcile, response_proof,
+    terminal_privd_error_code,
 };
 use crate::session::{
     ActiveSessionAuthority, FenceDecision, SessionGrantAuthority,
     activate_session_connection_fence, fenced_artifact_authority,
-    gate_signed_read_only_stale_diagnostic, negotiate_session_mode, negotiate_session_mode_at,
+    gate_signed_read_only_stale_diagnostic, negotiate_session_mode,
     negotiate_session_mode_at_instant, refresh_fence_epoch_floor, session_capabilities,
     supported_capabilities, verify_fenced_operation,
 };
@@ -124,7 +124,6 @@ fn command_key_config(probe_only: bool) -> Config {
         sealing_keys: test_sealing_keys(),
         stats_file: None,
         relay_ca_file: None,
-        synthetic_barrier_file: None,
     }
 }
 
@@ -223,58 +222,6 @@ fn agent_advertises_connection_owner_fencing_and_read_only_blocks_artifacts() {
     }
 }
 
-#[tokio::test]
-async fn synthetic_barrier_blocks_and_signals_exact_receipt_before_release() {
-    let dir = TempDir::new("barrier");
-    for exact in [false, true] {
-        let cmd_id = Uuid::now_v7();
-        let path = dir.join(if exact { "exact" } else { "any" });
-        let receipt = synthetic_receipt_path(&path);
-        tokio::fs::write(
-            &path,
-            if exact {
-                format!("{cmd_id}\n")
-            } else {
-                String::new()
-            },
-        )
-        .await
-        .expect("arm");
-        if exact {
-            tokio::fs::write(&receipt, b"").await.expect("pre-create");
-        }
-        let p = path.clone();
-        let waiter =
-            tokio::spawn(
-                async move { wait_for_synthetic_barrier(Some(&p), cmd_id.as_bytes()).await },
-            );
-        if exact {
-            tokio::time::timeout(Duration::from_secs(1), async {
-                loop {
-                    if tokio::fs::read_to_string(&receipt)
-                        .await
-                        .is_ok_and(|v| v == format!("{cmd_id}\n"))
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("receipt timeout");
-        } else {
-            tokio::time::sleep(Duration::from_millis(120)).await;
-        }
-        assert!(!waiter.is_finished());
-        tokio::fs::remove_file(&path).await.expect("release");
-        tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("release timeout")
-            .expect("join")
-            .expect("wait");
-    }
-}
-
 #[test]
 fn signed_read_only_stale_diagnostic_never_advances_the_floor() {
     let signing = test_key();
@@ -319,7 +266,7 @@ fn fenced_operation_requires_the_active_term_and_never_advances_the_floor() {
     };
     let active = base().lease(NOW, 100).sign(&signing);
     let active_verified = kr
-        .verify_connection_fence_v2(&active, node.as_bytes(), ep.as_bytes(), NOW)
+        .verify_connection_fence_v2_at(&active, node.as_bytes(), ep.as_bytes(), NOW, 0)
         .expect("active fence");
     let binding = sign_fence_binding(
         &signing,
@@ -528,7 +475,7 @@ fn overlapping_agent_floor_and_handshake_activation_enforce_monotonic_epoch() {
         .capabilities(caps.clone())
         .sign(&signing);
     let old_verified = kr
-        .verify_connection_fence_v2(&old_fence, node.as_bytes(), ep.as_bytes(), NOW)
+        .verify_connection_fence_v2_at(&old_fence, node.as_bytes(), ep.as_bytes(), NOW, 0)
         .expect("old");
     let cmd = [5_u8; 16];
     let old_b = sign_fence_binding(
@@ -587,8 +534,9 @@ fn overlapping_agent_floor_and_handshake_activation_enforce_monotonic_epoch() {
         1_700_000_000,
         1_700_000_300,
     );
-    let mode = negotiate_session_mode_at(&resp, &supported_capabilities(), node, ep, &kr, NOW)
-        .expect("mode");
+    let mode =
+        negotiate_session_mode_at_instant(&resp, &supported_capabilities(), node, ep, &kr, NOW, 0)
+            .expect("mode");
     assert!(
         matches!(&mode, ActiveSessionAuthority::FencedV11 { connection_fence, .. } if connection_fence.owner_epoch == 8)
     );
@@ -781,9 +729,16 @@ fn fenced_handshake_failures_do_not_advance_the_durable_epoch() {
         1_700_000_000,
         1_700_000_300,
     );
-    let ro_mode =
-        negotiate_session_mode_at(&ro_resp, &supported_capabilities(), node, ep, &kr, NOW)
-            .expect("ro");
+    let ro_mode = negotiate_session_mode_at_instant(
+        &ro_resp,
+        &supported_capabilities(),
+        node,
+        ep,
+        &kr,
+        NOW,
+        0,
+    )
+    .expect("ro");
     assert!(matches!(
         &ro_mode,
         ActiveSessionAuthority::SignedReadOnlyV11(_)
@@ -793,9 +748,15 @@ fn fenced_handshake_failures_do_not_advance_the_durable_epoch() {
     assert_eq!(floor, 10);
 
     for (name, resp) in cases {
-        if let Ok(mode) =
-            negotiate_session_mode_at(&resp, &supported_capabilities(), node, ep, &kr, NOW)
-        {
+        if let Ok(mode) = negotiate_session_mode_at_instant(
+            &resp,
+            &supported_capabilities(),
+            node,
+            ep,
+            &kr,
+            NOW,
+            0,
+        ) {
             assert!(
                 activate_session_connection_fence(&mode, &mut journal, &mut floor, NOW, 100)
                     .is_err(),
@@ -1071,8 +1032,10 @@ fn custom_relay_count_and_security_contract() {
 
 #[test]
 fn privd_error_receipt_and_unexpected_result_classification() {
-    assert!(terminal_privd_error(ErrorKind::InvalidRequest.into()));
-    assert!(terminal_privd_error(ErrorKind::CapacityExceeded.into()));
+    assert_eq!(
+        terminal_privd_error_code(ErrorKind::InvalidRequest.into()),
+        Some("privd_rejected")
+    );
     assert_eq!(
         terminal_privd_error_code(ErrorKind::CapacityExceeded.into()),
         Some("capacity_exceeded")
@@ -1082,7 +1045,7 @@ fn privd_error_receipt_and_unexpected_result_classification() {
         ErrorKind::Unavailable,
         ErrorKind::CommandFailed,
     ] {
-        assert!(!terminal_privd_error(non_terminal.into()));
+        assert!(terminal_privd_error_code(non_terminal.into()).is_none());
     }
 
     let payload = command_envelope::Payload::UserPasswordRotate(UserPasswordRotate {
@@ -1147,7 +1110,7 @@ async fn reconcile_observes_password_and_config_effects_and_retries_plan() {
         ..CommandEnvelope::default()
     };
     assert_eq!(
-        observe_external_effect(&client, &pw_env).await,
+        observe_external_effect_with_reconcile(&client, &pw_env, None).await,
         ExternalEffectObservation::AppliedExact
     );
     server.await.expect("server");
@@ -1166,7 +1129,7 @@ async fn reconcile_observes_password_and_config_effects_and_retries_plan() {
         ..CommandEnvelope::default()
     };
     assert_eq!(
-        observe_external_effect(&missing_client, &plan_env).await,
+        observe_external_effect_with_reconcile(&missing_client, &plan_env, None).await,
         ExternalEffectObservation::Absent
     );
 
@@ -1224,7 +1187,10 @@ async fn reconcile_observes_password_and_config_effects_and_retries_plan() {
             )),
             ..CommandEnvelope::default()
         };
-        assert_eq!(observe_external_effect(&c, &env).await, expected);
+        assert_eq!(
+            observe_external_effect_with_reconcile(&c, &env, None).await,
+            expected
+        );
         srv.await.expect("srv");
         std::fs::remove_file(sock).expect("rm sock");
     }

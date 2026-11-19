@@ -427,7 +427,7 @@ validate_current_release() {
   fi
   [[ -e "${CURRENT_RELEASE}" ]] || fail "current release state is missing; refusing to upgrade"
   validate_state_file_path "current release state" "${CURRENT_RELEASE}"
-  validate_manifest_file "current release state" "${CURRENT_RELEASE}" true
+  validate_manifest_file "current release state" "${CURRENT_RELEASE}"
 }
 
 validate_previous_release() {
@@ -435,17 +435,8 @@ validate_previous_release() {
     fail "previous release state must not be a symlink"
   elif [[ -e "${PREVIOUS_RELEASE}" ]]; then
     validate_state_file_path "previous release state" "${PREVIOUS_RELEASE}"
-    validate_manifest_file "previous release state" "${PREVIOUS_RELEASE}" true
+    validate_manifest_file "previous release state" "${PREVIOUS_RELEASE}"
   fi
-}
-
-validate_pending_previous_release() {
-  PENDING_PREVIOUS_TMP="$(mktemp "${STATE_ROOT}/.pending-previous.json.XXXXXX")" ||
-    fail "cannot allocate pending previous release validation file"
-  chmod 600 "${PENDING_PREVIOUS_TMP}"
-  jq -e '.previous_manifest | select(type == "object")' "${PENDING_RELEASE}" >"${PENDING_PREVIOUS_TMP}" ||
-    fail "pending release state is invalid"
-  validate_manifest_file "pending previous release manifest" "${PENDING_PREVIOUS_TMP}" true
 }
 
 reconcile_completed_pending() {
@@ -461,7 +452,12 @@ reconcile_completed_pending() {
     "${PENDING_RELEASE}" >/dev/null; then
     if [[ -n "${PREVIOUS_RELEASE}" ]]; then
       jq -e 'has("previous_manifest")' "${PENDING_RELEASE}" >/dev/null || return
-      validate_pending_previous_release
+      PENDING_PREVIOUS_TMP="$(mktemp "${STATE_ROOT}/.pending-previous.json.XXXXXX")" ||
+        fail "cannot allocate pending previous release validation file"
+      chmod 600 "${PENDING_PREVIOUS_TMP}"
+      jq -e '.previous_manifest | select(type == "object")' "${PENDING_RELEASE}" >"${PENDING_PREVIOUS_TMP}" ||
+        fail "pending release state is invalid"
+      validate_manifest_file "pending previous release manifest" "${PENDING_PREVIOUS_TMP}"
       if [[ -L "${PREVIOUS_RELEASE}" ]]; then
         fail "previous release state must not be a symlink"
       elif [[ -e "${PREVIOUS_RELEASE}" ]]; then

@@ -398,31 +398,8 @@ impl Adapter {
     /// cannot be removed.
     pub async fn cleanup_stale_config_plans(&self) -> Result<(), AdapterError> {
         let _guard = self.config_plan_lock.lock().await;
-        let parent = self
-            .resources
-            .config
-            .parent()
-            .ok_or(AdapterError::InvalidResource)?;
-        let mut entries = tokio::fs::read_dir(parent)
+        self.cleanup_stale_config_prefix(".ocservia-plan-", false)
             .await
-            .map_err(AdapterError::Io)?;
-        while let Some(entry) = entries.next_entry().await.map_err(AdapterError::Io)? {
-            let Some(candidate) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            let Some(suffix) = candidate.strip_prefix(".ocservia-plan-") else {
-                continue;
-            };
-            let Ok(id) = Uuid::parse_str(suffix) else {
-                continue;
-            };
-            if id.get_version_num() == 7 {
-                tokio::fs::remove_file(entry.path())
-                    .await
-                    .map_err(AdapterError::Io)?;
-            }
-        }
-        Ok(())
     }
 
     /// Removes only uncommitted config-apply staging files after a privd restart.
@@ -433,6 +410,15 @@ impl Adapter {
     /// stale staging file cannot be removed.
     pub async fn cleanup_stale_config_apply_staging(&self) -> Result<(), AdapterError> {
         let _guard = self.config_plan_lock.lock().await;
+        self.cleanup_stale_config_prefix(".ocservia-apply-", true)
+            .await
+    }
+
+    async fn cleanup_stale_config_prefix(
+        &self,
+        prefix: &str,
+        sync_parent: bool,
+    ) -> Result<(), AdapterError> {
         let parent = self
             .resources
             .config
@@ -442,8 +428,10 @@ impl Adapter {
             .await
             .map_err(AdapterError::Io)?;
         while let Some(entry) = entries.next_entry().await.map_err(AdapterError::Io)? {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(suffix) = name.strip_prefix(".ocservia-apply-") else {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(suffix) = name.strip_prefix(prefix) else {
                 continue;
             };
             let Ok(id) = Uuid::parse_str(suffix) else {
@@ -455,7 +443,10 @@ impl Adapter {
                     .map_err(AdapterError::Io)?;
             }
         }
-        sync_directory(parent).await
+        if sync_parent {
+            sync_directory(parent).await?;
+        }
+        Ok(())
     }
 }
 

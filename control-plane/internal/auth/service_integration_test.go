@@ -3,25 +3,18 @@ package auth
 import (
 	"context"
 	"errors"
-	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestBreakGlassAlertsAuditsAndRequiresRotationIntegration(t *testing.T) {
-	url := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
-	testutil.NoError(t, err)
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'break glass',$2,now(),now())`, workspaceID, "break-glass-"+workspaceID.String()); err != nil {
 		t.Fatal(err)

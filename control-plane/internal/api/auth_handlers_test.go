@@ -3,16 +3,16 @@ package api
 import (
 	"context"
 	"fmt"
-	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -140,13 +140,7 @@ func TestLocalLoginHTTPAdmission(t *testing.T) {
 }
 
 func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
 
 	s := newAuthHTTPServer(t, pool, true)
 	logs := captureAuthLogs(s)

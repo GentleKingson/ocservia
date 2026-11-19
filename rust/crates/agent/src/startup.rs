@@ -170,7 +170,6 @@ pub(super) struct Config {
     pub(super) sealing_keys: Vec<SealingKeyDescriptorV1>,
     pub(super) stats_file: Option<PathBuf>,
     pub(super) relay_ca_file: Option<PathBuf>,
-    pub(super) synthetic_barrier_file: Option<PathBuf>,
 }
 
 /// Loads the PEM relay certificate authority as additional relay TLS roots.
@@ -248,7 +247,6 @@ pub(super) fn parse_args() -> Result<Config, io::Error> {
         sealing_keys: Vec::new(),
         stats_file: None,
         relay_ca_file: None,
-        synthetic_barrier_file: None,
     };
     let mut relay_mode = String::from("disabled");
     let mut relay_url = None;
@@ -343,12 +341,6 @@ pub(super) fn parse_args() -> Result<Config, io::Error> {
                     return Err(invalid("--relay-ca-file must be an absolute path"));
                 }
                 config.relay_ca_file = Some(path);
-            }
-            "--synthetic-barrier-file" => {
-                config.synthetic_barrier_file = Some(PathBuf::from(required(
-                    &mut args,
-                    "--synthetic-barrier-file",
-                )?));
             }
             _ => return Err(invalid("unknown agent argument")),
         }
@@ -447,13 +439,9 @@ fn validate_absolute_paths(config: &Config, relay_token_file: Option<&Path>) -> 
             .enrollment_token_file
             .as_ref()
             .is_some_and(|path| !path.is_absolute())
-        || config
-            .synthetic_barrier_file
-            .as_ref()
-            .is_some_and(|path| !path.is_absolute())
     {
         return Err(invalid(
-            "identity, Controller command key, token, and synthetic barrier paths must be absolute",
+            "identity, Controller command key, and token paths must be absolute",
         ));
     }
     Ok(())

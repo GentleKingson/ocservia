@@ -271,7 +271,9 @@ func (e *sentDispatchError) Unwrap() error { return e.err }
 // from advancing the owner epoch between transport acceptance and persistence
 // of the exact sent frame.
 func (w *Worker) dispatchFenced(ctx context.Context, job Dispatch) error {
-	if err := w.waitAtPreSendBarrier(ctx, job); err != nil {
+	if err := w.waitAtCommandBarrier(ctx, job.CommandID, "arm", "received", "release", func() error {
+		return w.extendPreSendClaim(ctx, job)
+	}); err != nil {
 		return err
 	}
 	if w.fences == nil {
@@ -358,12 +360,6 @@ func appendOwnerProofsWire(base []byte, fence *agentv1.ConnectionFenceV2, bindin
 		out = protowire.AppendBytes(out, bindingBytes)
 	}
 	return out, nil
-}
-
-func (w *Worker) waitAtPreSendBarrier(ctx context.Context, dispatch Dispatch) error {
-	return w.waitAtCommandBarrier(ctx, dispatch.CommandID, "arm", "received", "release", func() error {
-		return w.extendPreSendClaim(ctx, dispatch)
-	})
 }
 
 func (w *Worker) waitAtPostSendBarrier(ctx context.Context, commandID uuid.UUID) error {

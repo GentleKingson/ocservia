@@ -179,15 +179,14 @@ func TestInstallationBackendIntegration(t *testing.T) {
 		t.Fatal("registered recovery status", err)
 	}
 	f.within(t, func(tx database.Tx) error {
-		keys, err := privdattestation.StoreFrom(tx)
-		if err != nil {
+		var active int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM node_privd_attestation_keys WHERE node_id=$1 AND state='active' AND (valid_until IS NULL OR valid_until>$2)`, node, now).Scan(&active); err != nil {
 			return err
 		}
-		active, err := keys.ActiveKeys(ctx, node, now)
-		if len(active) != 1 {
+		if active != 1 {
 			t.Fatal("duplicate keys", active)
 		}
-		return err
+		return nil
 	})
 	// An expired token must never authorize a first key, even after enrollment.
 	now = now.Add(-2 * time.Minute)

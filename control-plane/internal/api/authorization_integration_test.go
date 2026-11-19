@@ -7,12 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +23,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,21 +33,9 @@ import (
 type certificateArtifactFixture struct{ data []byte }
 
 func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	testutil.NoError(t, err)
-	t.Cleanup(pool.Close)
-	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if ownerURL == "" {
-		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
-	}
-	owner, err := pgxpool.New(ctx, ownerURL)
-	testutil.NoError(t, err)
-	t.Cleanup(owner.Close)
+	pool := testfixture.OpenRuntimePool(t)
+	owner := testfixture.OpenOwnerPool(t)
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap API',$2,now(),now())`, workspaceID, "bootstrap-api-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
@@ -159,14 +147,8 @@ func (*failingArtifactWriter) Write(value []byte) (int, error) {
 }
 
 func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
 	workspaceID, managerID, outsiderID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeA, nodeB, operationID, certificateID, artifactID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	// Only fixture batches use simple protocol; service queries retain the
@@ -272,21 +254,9 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 }
 
 func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	testutil.NoError(t, err)
-	t.Cleanup(pool.Close)
-	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if ownerURL == "" {
-		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
-	}
-	owner, err := pgxpool.New(ctx, ownerURL)
-	testutil.NoError(t, err)
-	t.Cleanup(owner.Close)
+	pool := testfixture.OpenRuntimePool(t)
+	owner := testfixture.OpenOwnerPool(t)
 	workspaceID, identityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeID, sessionID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'synthetic audit',$2,now(),now());
@@ -347,14 +317,8 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 }
 
 func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	// pgx executes one statement per Exec call, so the fixture and cleanup
 	// stay single-statement instead of relying on script-style semicolons.

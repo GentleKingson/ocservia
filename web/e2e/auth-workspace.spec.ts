@@ -53,20 +53,18 @@ async function installEventSourceProbe(page: Page): Promise<void> {
   });
 }
 
-async function mockReadiness(page: Page): Promise<void> {
+async function mockAuthRoutes(
+  page: Page,
+  initialAuthenticated: boolean,
+  assertWorkspaceHeader = false,
+) {
+  await installEventSourceProbe(page);
   await page.route("**/api/v1/readyz", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "{}" }),
   );
-}
-
-test("local login returns to the requested console route and opens the workspace stream", async ({
-  page,
-}) => {
-  await installEventSourceProbe(page);
-  await mockReadiness(page);
-  let authenticated = false;
+  const state = { authenticated: initialAuthenticated, logins: 0 };
   await page.route("**/api/v1/workspaces", (route) =>
-    authenticated
+    state.authenticated
       ? route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -81,17 +79,26 @@ test("local login returns to the requested console route and opens the workspace
         }),
   );
   await page.route("**/api/v1/auth/login", (route) => {
-    authenticated = true;
+    state.authenticated = true;
+    state.logins += 1;
     return route.fulfill({ status: 204 });
   });
   await page.route("**/api/v1/nodes?**", (route) => {
-    expect(route.request().headers()["x-workspace-id"]).toBe(alphaId);
+    if (assertWorkspaceHeader)
+      expect(route.request().headers()["x-workspace-id"]).toBe(alphaId);
     return route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ items: [], page: { has_more: false } }),
     });
   });
+  return state;
+}
+
+test("local login returns to the requested console route and opens the workspace stream", async ({
+  page,
+}) => {
+  await mockAuthRoutes(page, false, true);
 
   await page.goto("/nodes");
   await expect(page).toHaveURL(/\/login$/);
@@ -127,37 +134,7 @@ test("local login returns to the requested console route and opens the workspace
 test("an expired SSE session redirects to local login and restores the console", async ({
   page,
 }) => {
-  await installEventSourceProbe(page);
-  await mockReadiness(page);
-  let authenticated = true;
-  let logins = 0;
-  await page.route("**/api/v1/workspaces", (route) =>
-    authenticated
-      ? route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            items: [{ id: alphaId, name: "Alpha", slug: "alpha", version: 1 }],
-          }),
-        })
-      : route.fulfill({
-          status: 401,
-          contentType: "application/problem+json",
-          body: "{}",
-        }),
-  );
-  await page.route("**/api/v1/auth/login", (route) => {
-    authenticated = true;
-    logins += 1;
-    return route.fulfill({ status: 204 });
-  });
-  await page.route("**/api/v1/nodes?**", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ items: [], page: { has_more: false } }),
-    }),
-  );
+  const auth = await mockAuthRoutes(page, true);
 
   await page.goto("/nodes");
   await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
@@ -174,7 +151,7 @@ test("an expired SSE session redirects to local login and restores the console",
     )
     .toBe(1);
 
-  authenticated = false;
+  auth.authenticated = false;
   await page.evaluate(() => {
     const sources = (
       window as unknown as {
@@ -191,5 +168,5 @@ test("an expired SSE session redirects to local login and restores the console",
 
   await expect(page).toHaveURL(/\/nodes$/);
   await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
-  expect(logins).toBe(1);
+  expect(auth.logins).toBe(1);
 });

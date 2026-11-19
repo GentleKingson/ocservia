@@ -115,27 +115,7 @@ impl EffectStore {
                    PRIMARY KEY(mutation_kind, resource_key)
                  ) STRICT;
                  CREATE INDEX desired_effects_state_idx
-                   ON desired_effects(state);
-                 CREATE TABLE authorized_effects (
-                   command_id BLOB PRIMARY KEY CHECK(length(command_id)=16),
-                   idempotency_key BLOB NOT NULL UNIQUE CHECK(length(idempotency_key)=16),
-                   node_id BLOB NOT NULL CHECK(length(node_id)=16),
-                   operation_id BLOB NOT NULL CHECK(length(operation_id)=16),
-                   payload_sha256 BLOB NOT NULL CHECK(length(payload_sha256)=32),
-                   action TEXT NOT NULL,
-                   authorization_revision INTEGER NOT NULL CHECK(authorization_revision > 0),
-                   effect_kind TEXT NOT NULL,
-                   resource_key TEXT NOT NULL,
-                   effect_revision INTEGER NOT NULL CHECK(effect_revision > 0),
-                   expires_at INTEGER NOT NULL,
-                   state TEXT NOT NULL CHECK(state IN ('prepared','applied')),
-                   delivery_mode INTEGER NOT NULL CHECK(delivery_mode IN (1,3)),
-                   response BLOB NOT NULL CHECK(length(response) <= 393216),
-                   record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
-                   updated_at INTEGER NOT NULL
-                 ) STRICT;
-                 CREATE INDEX authorized_effects_state_expires_idx
-                   ON authorized_effects(state, expires_at);",
+                   ON desired_effects(state);",
                 )
                 .map_err(sqlite_io)?;
             let store_id = *Uuid::now_v7().as_bytes();

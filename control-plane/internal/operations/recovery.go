@@ -207,11 +207,6 @@ const (
 	envelopeFenceBindingField       protowire.Number = 127
 )
 
-func validateSentEnvelope(dispatch Dispatch, encoded []byte) error {
-	_, err := validateAndDecodeSentEnvelope(dispatch, encoded)
-	return err
-}
-
 func validateAndDecodeSentEnvelope(dispatch Dispatch, encoded []byte) (*agentv1.CommandEnvelope, error) {
 	if len(encoded) == 0 || len(encoded) > 1<<20 {
 		return nil, errors.New("operations: sent command envelope size is invalid")

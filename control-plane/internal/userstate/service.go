@@ -471,6 +471,12 @@ func desiredFingerprint(kind MutationKind, name string, members []string) [32]by
 }
 
 func requestHash(request MutationRequest) [32]byte {
+	var key string
+	var secret []byte
+	if request.SealedPassword != nil {
+		key = fmt.Sprintf("%d:%s:%s", request.SealedPassword.Version, request.SealedPassword.Purpose, request.SealedPassword.KeyID)
+		secret = request.SealedPassword.Ciphertext
+	}
 	value := struct {
 		Node          uuid.UUID
 		Kind          MutationKind
@@ -480,22 +486,9 @@ func requestHash(request MutationRequest) [32]byte {
 		Version       int64
 		TTL           int64
 		Actor, Reason string
-	}{request.NodeID, request.Kind, request.Name, sealedKey(request.SealedPassword), normalizeMembers(request.Members), sealedBytes(request.SealedPassword), request.ExpectedVersion, int64(request.TTL / time.Second), request.ActorID, request.Reason}
+	}{request.NodeID, request.Kind, request.Name, key, normalizeMembers(request.Members), secret, request.ExpectedVersion, int64(request.TTL / time.Second), request.ActorID, request.Reason}
 	encoded, _ := json.Marshal(value)
 	return sha256.Sum256(encoded)
-}
-
-func sealedKey(secret *SealedSecret) string {
-	if secret == nil {
-		return ""
-	}
-	return fmt.Sprintf("%d:%s:%s", secret.Version, secret.Purpose, secret.KeyID)
-}
-func sealedBytes(secret *SealedSecret) []byte {
-	if secret == nil {
-		return nil
-	}
-	return secret.Ciphertext
 }
 
 func normalizeMembers(members []string) []string {

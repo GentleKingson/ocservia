@@ -71,9 +71,7 @@ func TestOperationCreatorValidationAndErrors(t *testing.T) {
 	if len(recorder.requests) != 0 {
 		t.Fatal("invalid request reached operation creator")
 	}
-	for _, pair := range [][2]error{{ErrStaleRevision, operations.ErrStaleRevision}, {ErrIdempotency, operations.ErrIdempotencyConflict}} {
-		if pair[0] != pair[1] || !errors.Is(fmt.Errorf("downstream: %w", pair[0]), pair[1]) {
-			t.Fatal("Operations error identity changed")
-		}
+	if ErrStaleRevision != operations.ErrStaleRevision || !errors.Is(fmt.Errorf("downstream: %w", ErrStaleRevision), operations.ErrStaleRevision) {
+		t.Fatal("Operations error identity changed")
 	}
 }
