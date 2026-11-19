@@ -506,6 +506,7 @@ validate_resource_samples "${RESOURCE_SAMPLES}" "${TMP_ROOT}/summary.json" "${MI
 jq --arg profile "${OCSERVIA_RESILIENCE_PROFILE}" '. + {profile:$profile}' "${TMP_ROOT}/summary.json" \
   >"${TMP_ROOT}/summary.json.next"
 mv "${TMP_ROOT}/summary.json.next" "${TMP_ROOT}/summary.json"
+validate_resource_slos "${TMP_ROOT}/summary.json"
 printf 'total run seconds: %s\n' "${TOTAL_RUN_SECONDS}" >>"${TMP_ROOT}/metrics.txt"
 cat "${TMP_ROOT}/summary.json"
 TEST_EXIT=0

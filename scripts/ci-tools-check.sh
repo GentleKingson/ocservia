@@ -20,6 +20,7 @@ for suite in ${CI_SUITES}; do
       bash scripts/test-controller-quick-materials.sh
       bash scripts/test-build-cache-credentials.sh
       bash scripts/test-secret-scan-config.sh
+      bash scripts/test-resilience-capacity-lib.sh
       ;;
     cross-vm)
       make real-e2e-check
