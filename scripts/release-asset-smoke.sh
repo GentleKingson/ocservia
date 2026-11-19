@@ -34,22 +34,18 @@ printf 'release_tag=%s\narch=%s\nharness_commit=%s\n' \
 : >"${ARTIFACT_DIR}/release-assets-downloads.txt"
 : >"${ARTIFACT_DIR}/release-assets-sha256.txt"
 
-download() {
-  local url="$1" name="$2"
+base="https://github.com/GentleKingson/ocservia/releases/download/${release_tag}"
+archive="ocservia-agent-${version}-linux-${arch}.tar.gz"
+for name in "${archive}" "${archive}.sha256" \
+  "ocservia-agent_${version}-1_${arch}.deb" "ocservia-agent-${version}-1.${rpm_arch}.rpm" \
+  managed-node-bootstrap.sh; do
+  url="${base}/${name}"
   printf '%s\n' "${url}" >>"${ARTIFACT_DIR}/release-assets-downloads.txt"
   curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
     --tlsv1.2 --connect-timeout 15 --max-time 300 --retry 2 \
     --output "${work}/${name}" "${url}"
   test -s "${work}/${name}"
   (cd "${work}" && sha256sum -- "${name}") >>"${ARTIFACT_DIR}/release-assets-sha256.txt"
-}
-
-base="https://github.com/GentleKingson/ocservia/releases/download/${release_tag}"
-archive="ocservia-agent-${version}-linux-${arch}.tar.gz"
-for name in "${archive}" "${archive}.sha256" \
-  "ocservia-agent_${version}-1_${arch}.deb" "ocservia-agent-${version}-1.${rpm_arch}.rpm" \
-  managed-node-bootstrap.sh; do
-  download "${base}/${name}" "${name}"
 done
 # Check exactly the requested archive, never arbitrary paths from a checksum file.
 checksum="$(cat "${work}/${archive}.sha256")"

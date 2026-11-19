@@ -64,7 +64,6 @@ if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
     package="$(bash /workspace/scripts/verify-agent-package.sh "$PUBLISHED_AGENT_ARCHIVE" "$(cut -d " " -f 1 "$PUBLISHED_AGENT_ARCHIVE.sha256")")"
     for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
       install -o root -g root -m 0755 "$package/rust/target/release/$binary" "/usr/local/bin/$binary"
-      sha256sum "/usr/local/bin/$binary"
       "/usr/local/bin/$binary" --version
     done > /artifacts/published-binaries.txt
     dpkg-query -W ocserv openssl libc6
