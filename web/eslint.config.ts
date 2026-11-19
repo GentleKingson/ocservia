@@ -11,6 +11,11 @@ const pageOwnedImports = {
     "Keep routing and Fleet/development-simulation state in page composition; use API modules and injected context/tracking callbacks.",
 };
 
+// Keep extraFileExtensions identical across all projectService blocks so
+// typescript-eslint reuses one TypeScript project instead of reloading on every
+// .ts <-> .vue transition.
+const extraFileExtensions = [".vue"];
+
 export default defineConfig(
   eslint.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
@@ -21,6 +26,7 @@ export default defineConfig(
       parserOptions: {
         projectService: true,
         tsconfigRootDir: import.meta.dirname,
+        extraFileExtensions,
       },
     },
   },
@@ -33,7 +39,7 @@ export default defineConfig(
         parser: tseslint.parser,
         projectService: true,
         tsconfigRootDir: import.meta.dirname,
-        extraFileExtensions: [".vue"],
+        extraFileExtensions,
       },
     },
   },

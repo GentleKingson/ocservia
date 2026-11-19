@@ -63,4 +63,38 @@ function close(): void {
       ]),
     );
   }, 30_000);
+
+  it("shares extraFileExtensions across typed .ts and .vue configs", async () => {
+    const readExtraFileExtensions = async (
+      filePath: string,
+    ): Promise<unknown> => {
+      const config: unknown = await eslint.calculateConfigForFile(filePath);
+      if (typeof config !== "object" || config === null) return undefined;
+      const languageOptions = (config as { languageOptions?: unknown })
+        .languageOptions;
+      if (typeof languageOptions !== "object" || languageOptions === null)
+        return undefined;
+      const parserOptions = (languageOptions as { parserOptions?: unknown })
+        .parserOptions;
+      if (typeof parserOptions !== "object" || parserOptions === null)
+        return undefined;
+      return (parserOptions as { extraFileExtensions?: unknown })
+        .extraFileExtensions;
+    };
+
+    const vueExtensions = await readExtraFileExtensions(
+      "src/components/common/CopyButton.vue",
+    );
+    expect(vueExtensions).toEqual([".vue"]);
+    for (const filePath of [
+      "src/main.ts",
+      "test/eslint-vue.test.ts",
+      "e2e/login.spec.ts",
+      "vite.config.ts",
+    ]) {
+      expect(await readExtraFileExtensions(filePath), filePath).toEqual(
+        vueExtensions,
+      );
+    }
+  });
 });
