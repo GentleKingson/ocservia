@@ -38,16 +38,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Restore native-package tool cache
-        id: native-package-tools-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - uses: ./.github/actions/setup-tools
         with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-native-packages-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Bootstrap pinned Rust and nfpm tools
-        run: scripts/bootstrap.sh native-packages
+          profiles: native-packages
       - name: Resolve isolated Agent target cache
         id: agent-target
         run: |
@@ -89,14 +82,6 @@ jobs:
           VERSION="${version}" PACKAGE_ARCH="${{ inputs.arch }}" \
             OUTPUT_DIR="${RUNNER_TEMP}/packages" \
             SOURCE_DATE_EPOCH="${source_date_epoch}" bash scripts/build-release-agent.sh
-      - name: Save native-package tool cache
-        if: ${{ success() && steps.native-package-tools-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: ${{ steps.native-package-tools-cache.outputs.cache-primary-key }}
       - name: Validate native package lifecycle (${{ inputs.arch }})
         id: smoke-packages
         env:
@@ -200,17 +185,9 @@ jobs:
           VERSION="${version}" SOURCE_COMMIT="${source_commit}" \
             CONTROLLER_ARCH="${{ inputs.arch }}" OUTPUT_DIR="${RUNNER_TEMP}/controller-images" \
             bash scripts/build-release-controller.sh
-      - name: Cache pinned image-security tools
-        id: scanner-tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - uses: ./.github/actions/setup-tools
         with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-image-security-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Bootstrap pinned image-security tools
-        id: bootstrap-scanners
-        run: scripts/bootstrap.sh image-security
+          profiles: image-security
       - name: Scan exact Controller image archives
         id: scan-images
         env:

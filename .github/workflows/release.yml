@@ -65,12 +65,14 @@ jobs:
           artifact-ids: ${{ needs.build-amd64.outputs.agent_packages_artifact_id || 'missing' }},${{ needs.build-arm64.outputs.agent_packages_artifact_id || 'missing' }}
           path: ${{ runner.temp }}/assets
           merge-multiple: true
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: npm-security
       - name: Prepare ordinary deployment configuration and bootstrap assets
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           ASSET_DIR: ${{ runner.temp }}/assets
         run: |
-          scripts/bootstrap.sh npm-security
           source scripts/env.sh
           scripts/prepare-bootstrap-release-assets.sh "$ASSET_DIR" "v$VERSION"
           source_commit="$(git rev-parse HEAD)"
