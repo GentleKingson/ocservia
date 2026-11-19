@@ -119,8 +119,8 @@ function current(context: WorkspaceContext, ticket: number): boolean {
 }
 
 // A different rollout or workspace never shows the previous resource or its
-// resume action, and the terminal-state cache starts empty.
-function reset(): void {
+// resume action, and reads directly so it never waits behind an older read.
+function reload(): void {
   invalidate();
   rollout.value = undefined;
   loadedContext = undefined;
@@ -130,11 +130,6 @@ function reset(): void {
   resuming.value = false;
   resumeError.value = "";
   resumeBlocked.value = false;
-}
-
-// Reads directly so the new resource never waits behind an older read.
-function reload(): void {
-  reset();
   foregroundRefresh.stop();
   foregroundRefresh.start(false);
   void refresh();

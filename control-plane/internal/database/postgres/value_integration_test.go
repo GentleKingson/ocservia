@@ -44,10 +44,8 @@ func TestLogicalValuesIntegration(t *testing.T) {
 		if gotTime != ts || !bytes.Equal(gotJSON.Bytes(), j.Bytes()) {
 			t.Fatalf("logical value changed at %d", i)
 		}
-		wantBytes, _ := arr.Bytes()
-		gotBytes, _ := gotArray.Bytes()
 		if arr.Valid != gotArray.Valid || len(arr.Dimensions) != len(gotArray.Dimensions) || len(arr.Elements) != len(gotArray.Elements) || len(arr.Elements) > 0 && (!reflect.DeepEqual(arr.Dimensions, gotArray.Dimensions) || !reflect.DeepEqual(arr.Elements, gotArray.Elements)) {
-			t.Fatalf("array changed: %s != %s", wantBytes, gotBytes)
+			t.Fatalf("array changed: %+v != %+v", arr, gotArray)
 		}
 	}
 	first, err := database.TransactionTime(ctx, tx)

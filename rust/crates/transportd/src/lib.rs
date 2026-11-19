@@ -855,22 +855,6 @@ impl TransportService for IrohTransportService {
     }
 }
 
-/// Builds the controller endpoint with a live Go trust authority.
-///
-/// # Errors
-///
-/// Returns an Iroh bind error when endpoint or transport initialization fails.
-pub async fn build_router_with_trust(
-    secret_key: SecretKey,
-    relay_mode: RelayMode,
-    policy: IdentityPolicy,
-    trust: TrustAuthority,
-    service: &IrohTransportService,
-) -> Result<Router, AcceptError> {
-    build_router_with_trust_tls_roots(secret_key, relay_mode, policy, trust, Vec::new(), service)
-        .await
-}
-
 /// Builds the controller endpoint with a live Go trust authority and
 /// additional relay TLS roots for privately certificated relays.
 ///

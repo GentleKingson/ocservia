@@ -69,10 +69,6 @@ export const i18n = createI18n({
       installPreparation:
         "Run the pinned installer as root on a supported Linux/systemd host, then paste the token at its hidden prompt. It securely retrieves configuration, verifies the package, enrolls and activates the node, registers the root-only privd key, and starts both services.",
       installRun: "Run on the Agent host",
-      installVerify:
-        "Open the node in this Workspace and verify active trust, online connection and fresh telemetry.",
-      installRecovery:
-        "If installation or activation has an unknown outcome, reconcile it first. Preserve the existing Agent identity, keys, Relay configuration and original token binding. Follow the enrollment recovery instructions; never delete identity material to register again.",
       nodesDescription: "Manage the ocserv nodes connected to this workspace.",
       nodeActions: "Actions for {name}",
       viewDetails: "View details",
@@ -131,9 +127,6 @@ export const i18n = createI18n({
       controlPlane: "Control plane",
       lastObservedDirectPaths: "Last observed direct paths",
       pathCountsIncludeOffline: "Includes offline nodes",
-      activeNodes: "Active nodes",
-      pendingOperations: "Pending operations",
-      recentActivity: "Recent activity",
       recentEvents: "Recent events",
       recentOperations: "Recent operations",
       eventsUnavailable: "Events are unavailable",
@@ -275,7 +268,6 @@ export const i18n = createI18n({
       removeBan: "Remove ban",
       noIpBans: "No active IP bans",
       reason: "Reason",
-      nextPage: "Next page",
       upgradeAgent: "Upgrade Agent",
       upgradeAgentTitle: "Upgrade the node agent to the recommended release",
       targetVersion: "Target version",

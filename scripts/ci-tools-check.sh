@@ -11,16 +11,13 @@ for suite in ${CI_SUITES}; do
       bash scripts/test-ci-relevance.sh
       bash scripts/test-toolchain-consistency.sh
       bash scripts/check-public-repository.sh
-      bash scripts/test-public-repository-policy.sh
       ;;
     release)
-      bash scripts/test-release-upgrade.sh
+      node scripts/test-release-upgrade.mjs
+      bash -n scripts/release-quick-acceptance.sh
       bash scripts/test-controller-release-manifest.sh
       bash scripts/test-release-image-security.sh
       bash scripts/test-controller-quick-materials.sh
-      bash scripts/test-build-cache-credentials.sh
-      bash scripts/test-secret-scan-config.sh
-      bash scripts/test-resilience-capacity-lib.sh
       ;;
     cross-vm)
       make real-e2e-check

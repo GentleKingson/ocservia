@@ -28,9 +28,6 @@ import (
 // the carrying envelope.
 const FencingCapability = "ocserv.fencing.v2"
 
-// DefaultLeaseTTL allows renewal and dispatch under a valid owner lease.
-const DefaultLeaseTTL = 30 * time.Second
-
 // gapReconciliationConcurrency bounds parallel transport inventory reads. At
 // the 500-node capacity target it leaves enough waves to complete inside the
 // transport client's three-second recovery deadline without an unbounded dial
@@ -91,11 +88,6 @@ type SessionCloser interface {
 // connection goes away. *transportclient.Client satisfies it.
 type EventStream interface {
 	RunWatch(ctx context.Context, cursors transportclient.CursorStore, handler transportclient.EventHandler) error
-}
-
-// OperationBinder signs one operation binding for the node's current fence.
-type OperationBinder interface {
-	BindOperation(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string) (*agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2, error)
 }
 
 // FencedAction performs the mutation that consumes one fence binding. It
@@ -380,21 +372,6 @@ func (m *Manager) releaseAcquiredTerm(ctx context.Context, term *connectionowner
 	if err := term.ReleaseBackend(ctx, m.backend); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
 		m.logger.ErrorContext(ctx, "release unregistered node lease", "node_id", fmt.Sprintf("%x", term.NodeID()), "error", err)
 	}
-}
-
-// BindOperation signs one operation binding against the node's live session.
-// It renews the lease first when the exact deadline is close and fails
-// closed once the term was taken over, ended, or unregistered. ErrNoFence —
-// the unfenced compatibility path — is returned only when this process never
-// opened a session for the node.
-func (m *Manager) BindOperation(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string) (*agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2, error) {
-	unlock := m.lockNode(nodeID)
-	defer unlock()
-	term, err := m.termForBinding(ctx, nodeID)
-	if err != nil {
-		return nil, nil, err
-	}
-	return m.issueBinding(term, kind, operationID, capability)
 }
 
 // ExecuteFenced issues one fenced mutation for the node's live session. The

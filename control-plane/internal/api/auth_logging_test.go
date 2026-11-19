@@ -9,13 +9,13 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -244,21 +244,9 @@ func TestAuthLogFailureAndInfrastructure(t *testing.T) {
 }
 
 func TestAuthLogSessionFailureIntegration(t *testing.T) {
-	url, ownerURL := os.Getenv("OCSERV_TEST_DATABASE_URL"), os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if url == "" || ownerURL == "" {
-		t.Skip("isolated runtime and owner database URLs required")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	owner, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer owner.Close()
+	pool := testfixture.OpenRuntimePool(t)
+	owner := testfixture.OpenOwnerPool(t)
 	s := newAuthHTTPServer(t, pool, true)
 	b := captureAuthLogs(s)
 	name, password := "auth-log-"+uuid.NewString(), "session-password-log-bait"

@@ -2,7 +2,7 @@ use super::{
     ARTIFACT_CHUNK_BYTES, Adapter, AdapterError, ArtifactData, ArtifactLeaseIdentity,
     CertificateArtifactResult, CertificateCsrResult, CertificateRevokeResult, Digest, Duration,
     EffectStore, HashSet, MAX_ARTIFACT_BYTES, MetadataExt, MutationResult, OpenOptionsExt, Path,
-    PermissionsExt, SealedSecretPurpose, SealedSecretV1, SealedSecretVersion, Sha256,
+    PermissionsExt, SealedSecretPurpose, SealedSecretV1, SealedSecretVersion, Sha256, StagingFile,
     StdOpenOptions, SystemTime, Uuid, Write, Zeroizing, atomic_replace, effect_now, io,
     sync_directory, valid_dns_name,
 };
@@ -102,22 +102,13 @@ impl Adapter {
             ));
         }
         let args = owned.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut new_key_guard = (!existing_key).then(|| StagingFile::new(key_path.clone()));
         let csr = match self.execute(&self.resources.openssl, &args).await {
             Ok(output) if output.stdout.len() >= 64 && output.stdout.len() <= 64 * 1024 => {
                 output.stdout
             }
-            Ok(_) => {
-                if !existing_key {
-                    let _ = tokio::fs::remove_file(&key_path).await;
-                }
-                return Err(AdapterError::MalformedOutput);
-            }
-            Err(error) => {
-                if !existing_key {
-                    let _ = tokio::fs::remove_file(&key_path).await;
-                }
-                return Err(error);
-            }
+            Ok(_) => return Err(AdapterError::MalformedOutput),
+            Err(error) => return Err(error),
         };
         if !existing_key {
             tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
@@ -129,28 +120,17 @@ impl Adapter {
                 &self.resources.openssl,
                 &["pkey", "-in", key_path_text, "-pubout", "-outform", "DER"],
             )
-            .await;
-        let public = match public {
-            Ok(output) if !output.stdout.is_empty() && output.stdout.len() <= 64 * 1024 => {
-                output.stdout
-            }
-            Ok(_) => {
-                if !existing_key {
-                    let _ = tokio::fs::remove_file(&key_path).await;
-                }
-                return Err(AdapterError::MalformedOutput);
-            }
-            Err(error) => {
-                if !existing_key {
-                    let _ = tokio::fs::remove_file(&key_path).await;
-                }
-                return Err(error);
-            }
-        };
+            .await?;
+        if public.stdout.is_empty() || public.stdout.len() > 64 * 1024 {
+            return Err(AdapterError::MalformedOutput);
+        }
+        if let Some(guard) = new_key_guard.as_mut() {
+            guard.disarm();
+        }
         Ok(CertificateCsrResult {
             certificate_id: certificate_id.to_vec(),
             csr_der: csr,
-            public_key_sha256: Sha256::digest(public).to_vec(),
+            public_key_sha256: Sha256::digest(public.stdout).to_vec(),
         })
     }
 
@@ -297,9 +277,7 @@ impl Adapter {
             artifact_expires_at_unix_seconds,
         )?;
         drop(effect_store);
-        let password = self
-            .decrypt_p12_password(sealed_password, &chain_path)
-            .await?;
+        let password = self.decrypt_p12_password(sealed_password).await?;
         let register = |data: &[u8]| {
             let digest = Sha256::digest(data).to_vec();
             let size = u64::try_from(data.len()).map_err(|_| AdapterError::OutputLimit)?;
@@ -392,6 +370,7 @@ impl Adapter {
             .mode(0o600)
             .open(chain_path)
             .map_err(AdapterError::Io)?;
+        let chain_guard = StagingFile::new(chain_path.to_path_buf());
         chain_file
             .write_all(certificate_chain_pem)
             .map_err(AdapterError::Io)?;
@@ -408,6 +387,7 @@ impl Adapter {
                 .open(staging_path)
                 .map_err(AdapterError::Io)?,
         );
+        let mut staging_guard = StagingFile::new(staging_path.to_path_buf());
         let created = self
             .execute_with_input(
                 &self.resources.openssl,
@@ -426,39 +406,30 @@ impl Adapter {
                 password,
             )
             .await;
-        let _ = tokio::fs::remove_file(chain_path).await;
-        if let Err(error) = created {
-            let _ = tokio::fs::remove_file(staging_path).await;
-            return Err(error);
-        }
-        if let Err(error) = self
-            .execute_with_input(
-                &self.resources.openssl,
-                &["pkcs12", "-in", staging_text, "-passin", "stdin", "-noout"],
-                password,
-            )
-            .await
-        {
-            let _ = tokio::fs::remove_file(staging_path).await;
-            return Err(error);
-        }
+        drop(chain_guard);
+        created?;
+        self.execute_with_input(
+            &self.resources.openssl,
+            &["pkcs12", "-in", staging_text, "-passin", "stdin", "-noout"],
+            password,
+        )
+        .await?;
         let data = tokio::fs::read(staging_path)
             .await
             .map_err(AdapterError::Io)?;
         if data.is_empty() || data.len() > MAX_ARTIFACT_BYTES {
-            let _ = tokio::fs::remove_file(staging_path).await;
             return Err(AdapterError::OutputLimit);
         }
         tokio::fs::set_permissions(staging_path, std::fs::Permissions::from_mode(0o600))
             .await
             .map_err(AdapterError::Io)?;
+        staging_guard.disarm();
         Ok(data)
     }
 
     async fn decrypt_p12_password(
         &self,
         sealed_password: &SealedSecretV1,
-        chain_path: &Path,
     ) -> Result<Zeroizing<Vec<u8>>, AdapterError> {
         let key = self
             .resources
@@ -480,26 +451,17 @@ impl Adapter {
                 ],
                 &sealed_password.ciphertext,
             )
-            .await;
-        match decrypted {
-            Ok(value)
-                if !value.stdout.is_empty()
-                    && value.stdout.len() <= 1024
-                    && !value
-                        .stdout
-                        .iter()
-                        .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n')) =>
-            {
-                Ok(Zeroizing::new(value.stdout))
-            }
-            Ok(_) => {
-                let _ = tokio::fs::remove_file(chain_path).await;
-                Err(AdapterError::MalformedOutput)
-            }
-            Err(error) => {
-                let _ = tokio::fs::remove_file(chain_path).await;
-                Err(error)
-            }
+            .await?;
+        if !decrypted.stdout.is_empty()
+            && decrypted.stdout.len() <= 1024
+            && !decrypted
+                .stdout
+                .iter()
+                .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
+        {
+            Ok(Zeroizing::new(decrypted.stdout))
+        } else {
+            Err(AdapterError::MalformedOutput)
         }
     }
 

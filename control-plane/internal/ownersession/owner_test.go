@@ -41,18 +41,6 @@ func TestFixedWidthHelpers(t *testing.T) {
 	if _, err := fixed16(make([]byte, 15)); err == nil {
 		t.Fatal("fixed16 accepted a short value")
 	}
-	if _, err := fixed32(make([]byte, 31)); err == nil {
-		t.Fatal("fixed32 accepted a short value")
-	}
-}
-
-func mustFixed16(t *testing.T, value []byte) [16]byte {
-	t.Helper()
-	fixed, err := fixed16(value)
-	if err != nil {
-		t.Fatalf("fixed16: %v", err)
-	}
-	return fixed
 }
 
 // TestStateUpdateOperationIDMatchesSharedVector pins the domain-separated

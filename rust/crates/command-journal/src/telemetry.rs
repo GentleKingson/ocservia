@@ -133,19 +133,6 @@ impl Journal {
         Ok(pending)
     }
 
-    /// Removes a delivered batch idempotently.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `SQLite` failure.
-    pub fn acknowledge_telemetry(&self, batch_id: &[u8; 16]) -> Result<(), rusqlite::Error> {
-        let mut stmt = self
-            .connection
-            .prepare_cached("DELETE FROM telemetry_buffer WHERE batch_id=?1")?;
-        stmt.execute([batch_id.as_slice()])?;
-        Ok(())
-    }
-
     /// Removes multiple delivered telemetry batches idempotently in a single
     /// transaction so buffered backlog drains incur one `synchronous=FULL`
     /// commit instead of one commit per batch.

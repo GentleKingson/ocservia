@@ -312,44 +312,6 @@ func parseHex4(data []byte, pos int) (uint16, bool) {
 	return out, true
 }
 
-// validEscapes rejects invalid UTF-16 surrogate escapes and escaped NUL in raw
-// JSON byte streams (also used by ParseTextArray).
-func validEscapes(data []byte) bool {
-	inString := false
-	for i := 0; i < len(data); i++ {
-		if data[i] == '"' {
-			inString = !inString
-			continue
-		}
-		if !inString || data[i] != '\\' {
-			continue
-		}
-		i++
-		if i >= len(data) {
-			return false
-		}
-		if data[i] != 'u' {
-			continue
-		}
-		u, ok := parseHex4(data, i+1)
-		if !ok || u == 0 || (u >= 0xdc00 && u <= 0xdfff) {
-			return false
-		}
-		i += 4
-		if u >= 0xd800 && u <= 0xdbff {
-			if i+6 >= len(data) || data[i+1] != '\\' || data[i+2] != 'u' {
-				return false
-			}
-			low, ok := parseHex4(data, i+3)
-			if !ok || low < 0xdc00 || low > 0xdfff {
-				return false
-			}
-			i += 6
-		}
-	}
-	return true
-}
-
 func (p *jsonParser) parseNumber() (decimalNumber, error) {
 	start := p.pos
 	if p.pos < len(p.data) && p.data[p.pos] == '-' {

@@ -22,8 +22,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 use ocservia_contracts::session::{ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME};
 use prost::Message;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use uuid::Uuid;
 
 pub(super) async fn handle_command_stream(
@@ -118,19 +117,6 @@ async fn process_command(
         now_unix_seconds,
         cancelled: false,
     };
-    if matches!(
-        envelope.payload,
-        Some(
-            command_envelope::Payload::SyntheticNoop(_)
-                | command_envelope::Payload::SyntheticEcho(_)
-        )
-    ) {
-        wait_for_synthetic_barrier(
-            session.synthetic_barrier_file,
-            envelope.command_id.as_slice(),
-        )
-        .await?;
-    }
     let external = matches!(
         envelope.payload,
         Some(
@@ -177,7 +163,6 @@ async fn process_command(
         error_code = %result.error_code,
         "command delivery produced a result"
     );
-    log_synthetic_effect(session.command_executor, envelope, &result);
     Ok(result)
 }
 
@@ -208,45 +193,6 @@ fn delivery_result(
             unknown_result(record.as_ref(), code)
         }
         Err(CommandError::InjectedCrash(_)) => unreachable!("crash injection is test-only"),
-    }
-}
-
-fn log_synthetic_effect(
-    executor: &CommandExecutor,
-    envelope: &CommandEnvelope,
-    result: &CommandResult,
-) {
-    if matches!(
-        envelope.payload,
-        Some(command_envelope::Payload::SyntheticNoop(_))
-    ) && let Ok(key) = <&[u8; 16]>::try_from(envelope.idempotency_key.as_slice())
-    {
-        let journal = executor.journal();
-        if let (Ok(effect), Ok(executions)) = (
-            journal.synthetic_effect(key),
-            journal.synthetic_execution_count(),
-        ) {
-            use sha2::{Digest as _, Sha256};
-            tracing::info!(
-            event_type = "synthetic_effect_observed",
-            command_id = %hex::encode(&envelope.command_id),
-            message_id = %hex::encode(&envelope.message_id),
-            idempotency_key = %hex::encode(key),
-            effect_present = effect.is_some(),
-            effect_executed_at = effect.as_ref().map(|value| value.executed_at),
-            journal_total_executions = executions,
-            result_sha256 = %hex::encode(Sha256::digest(&result.result)),
-            effect_result_sha256 = %effect.as_ref().map_or_else(String::new, |value| hex::encode(Sha256::digest(&value.result))),
-            effect_payload_sha256 = %effect.as_ref().map_or_else(String::new, |value| hex::encode(value.payload_sha256)),
-            "read-only synthetic journal observation"
-            );
-        } else {
-            tracing::warn!(
-                event_type = "synthetic_effect_observation_failed",
-                command_id = %hex::encode(&envelope.command_id),
-                "synthetic journal diagnostic unavailable"
-            );
-        }
     }
 }
 
@@ -314,67 +260,6 @@ async fn send_command_result(
         .await?;
     send.write_all(&encoded).await?;
     send.finish()?;
-    Ok(())
-}
-
-fn synthetic_barrier_target(raw: &str) -> Result<Option<Uuid>, io::Error> {
-    if raw.is_empty() {
-        return Ok(None);
-    }
-    let value = raw.strip_suffix('\n').unwrap_or(raw);
-    if value.is_empty() || value.contains(['\n', '\r']) {
-        return Err(invalid("synthetic barrier target is invalid"));
-    }
-    let target =
-        Uuid::parse_str(value).map_err(|_| invalid("synthetic barrier target is not a UUID"))?;
-    if target.to_string() != value {
-        return Err(invalid("synthetic barrier target is not canonical"));
-    }
-    Ok(Some(target))
-}
-
-pub(super) fn synthetic_receipt_path(barrier_path: &Path) -> PathBuf {
-    let mut path = barrier_path.as_os_str().to_owned();
-    path.push(".received");
-    PathBuf::from(path)
-}
-
-async fn read_synthetic_barrier(path: &Path) -> Result<Option<Option<Uuid>>, io::Error> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(raw) => Ok(Some(synthetic_barrier_target(&raw)?)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-pub(super) async fn wait_for_synthetic_barrier(
-    path: Option<&Path>,
-    command_id: &[u8],
-) -> Result<(), io::Error> {
-    let Some(path) = path else {
-        return Ok(());
-    };
-    let command_id = Uuid::from_slice(command_id)
-        .map_err(|_| invalid("synthetic barrier command ID is invalid"))?;
-    let Some(target) = read_synthetic_barrier(path).await? else {
-        return Ok(());
-    };
-    if let Some(target) = target {
-        if target != command_id {
-            return Ok(());
-        }
-        tokio::fs::write(
-            synthetic_receipt_path(path),
-            format!("{command_id}\n").as_bytes(),
-        )
-        .await?;
-    }
-    while let Some(target) = read_synthetic_barrier(path).await? {
-        if target.is_some_and(|target| target != command_id) {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
     Ok(())
 }
 
@@ -468,8 +353,10 @@ fn settle_privd_response(
         Some(privd_response::Result::CertificateRevoke(result)) => Ok(result.encode_to_vec()),
         Some(privd_response::Result::CertificateP12(result)) => Ok(result.encode_to_vec()),
         Some(privd_response::Result::AgentUpgradeScheduled(result)) => Ok(result.encode_to_vec()),
-        Some(privd_response::Result::Error(error)) if terminal_privd_error(error.kind) => {
-            let code = terminal_privd_error_code(error.kind).unwrap_or("privd_rejected");
+        Some(privd_response::Result::Error(error)) => {
+            let Some(code) = terminal_privd_error_code(error.kind) else {
+                return executor.mark_external_unknown(command, "privd_outcome_unknown", now);
+            };
             Err(code)
         }
         _ => {
@@ -512,10 +399,6 @@ pub(super) fn response_proof(response: &PrivdResponse) -> Option<(Vec<u8>, i64)>
     }
     let encoded = proof.encode_to_vec();
     (encoded.len() <= 65_536).then_some((encoded, receipt.completed_at.as_ref()?.seconds))
-}
-
-pub(super) fn terminal_privd_error(kind: i32) -> bool {
-    terminal_privd_error_code(kind).is_some()
 }
 
 pub(super) fn terminal_privd_error_code(kind: i32) -> Option<&'static str> {
@@ -579,15 +462,7 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, String,
     }
 }
 
-#[cfg(test)]
-pub(super) async fn observe_external_effect(
-    privd: &PrivdClient,
-    envelope: &CommandEnvelope,
-) -> ExternalEffectObservation {
-    observe_external_effect_with_reconcile(privd, envelope, None).await
-}
-
-async fn observe_external_effect_with_reconcile(
+pub(super) async fn observe_external_effect_with_reconcile(
     privd: &PrivdClient,
     envelope: &CommandEnvelope,
     prefetched_reconcile: Option<Result<PrivdResponse, io::Error>>,

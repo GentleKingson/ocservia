@@ -141,12 +141,6 @@ func NewBackend(backend database.Backend, operationService *operations.Service, 
 	return &Service{backend: backend, operations: operationService, signer: signer, sealer: sealer, artifacts: artifacts, grantSigner: grantSigner, now: func() time.Time { return time.Now().UTC() }}
 }
 
-// NewArtifactDownloads constructs downloads, durable consumption recovery and
-// expiry maintenance, and certificate reads without issuance dependencies.
-func NewArtifactDownloads(backend database.Backend, artifacts ArtifactFetcher, signer *commandauth.Signer) *Service {
-	return &Service{backend: backend, artifacts: artifacts, grantSigner: signer, now: func() time.Time { return time.Now().UTC() }}
-}
-
 // EnableOwnerFencing runs artifact mutations inside the connection owner's
 // fencing interval. Artifact transfers are owner-fenced operations: a stale
 // owner must neither fetch nor confirm artifacts, and no binding may outlive

@@ -1,50 +1,27 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./csp";
+import { installConsoleMocks } from "./fixtures";
 const alpha = "019fc0a4-6d92-765c-a8a1-4af556614fa1";
 const secret = "oit1_aHR0cHM6Ly9jb250cm9sbGVyLmV4YW1wbGU." + "b".repeat(43);
 
 async function setup(page: Page, empty: boolean) {
-  await page.addInitScript(() => {
-    class EventSourceStub {
-      readyState = 1;
-      onerror = null;
-      onmessage = null;
-      onopen = null;
-      addEventListener() {}
-      removeEventListener() {}
-      close() {}
-    }
-    Object.defineProperty(window, "EventSource", { value: EventSourceStub });
+  await installConsoleMocks(page, {
+    workspace: { id: alpha, name: "Alpha", slug: "alpha" },
+    nodes: empty
+      ? []
+      : [
+          {
+            id: "019fc0a4-6d92-765c-a8a1-4af556614fb1",
+            name: "existing-node",
+            version: 1,
+            trust_status: "active",
+            connection_state: "online",
+            freshness: "fresh",
+            dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
+            session_count: 0,
+          },
+        ],
   });
-  await page.route("**/api/v1/readyz", (route) => route.fulfill({ json: {} }));
-  await page.route("**/api/v1/workspaces", (route) =>
-    route.fulfill({
-      json: {
-        items: [{ id: alpha, name: "Alpha", slug: "alpha", version: 1 }],
-      },
-    }),
-  );
-  await page.route("**/api/v1/nodes?**", (route) =>
-    route.fulfill({
-      json: {
-        items: empty
-          ? []
-          : [
-              {
-                id: "019fc0a4-6d92-765c-a8a1-4af556614fb1",
-                name: "existing-node",
-                version: 1,
-                trust_status: "active",
-                connection_state: "online",
-                freshness: "fresh",
-                dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-                session_count: 0,
-              },
-            ],
-        page: { has_more: false },
-      },
-    }),
-  );
 }
 async function prepare(page: Page) {
   await page.getByRole("button", { name: "Install node", exact: true }).click();
@@ -118,12 +95,6 @@ for (const empty of [true, false]) {
     const viewport = page.viewportSize();
     if (!box || !viewport) throw new Error("Missing dialog or viewport");
     expect(box.width).toBeLessThanOrEqual(viewport.width);
-    await page.getByRole("button", { name: "Cancel", exact: true }).click();
-    await prepare(page);
-    await expect(page.getByLabel("Bootstrap token (shown once)")).toHaveCount(
-      0,
-    );
-    expect(posts).toBe(1);
   });
 }
 

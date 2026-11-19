@@ -1,6 +1,7 @@
-import { createRenderer, nextTick, reactive, ssrContextKey } from "vue";
+import { nextTick, reactive } from "vue";
 import { ResponseError, type AgentRollout } from "@ocservia/api-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mountSetup } from "./renderer";
 
 const mocks = vi.hoisted(() => ({
   getAgentRollout: vi.fn(),
@@ -28,34 +29,6 @@ vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 import OperationsView from "../src/views/OperationsView.vue";
 import RolloutDetailView from "../src/views/RolloutDetailView.vue";
 
-const renderer = createRenderer<object, object>({
-  createElement: () => ({}),
-  createText: () => ({}),
-  createComment: () => ({}),
-  insert: () => {},
-  remove: () => {},
-  setText: () => {},
-  setElementText: () => {},
-  parentNode: () => null,
-  nextSibling: () => null,
-  patchProp: () => {},
-});
-
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve(value: T): void;
-  reject(cause: unknown): void;
-}
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (cause: unknown) => void;
-  const promise = new Promise<T>((done, fail) => {
-    resolve = done;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
-}
-
 function rollout(id: string, state: string, workspaceId = "workspace-a") {
   return {
     id,
@@ -78,24 +51,20 @@ function responseError(status: number): ResponseError {
 }
 
 let workspace = { id: "workspace-a", generation: 1 };
-
 let unmount: (() => void) | undefined;
+
 // Foreground reads requested by a route or workspace change run on a 0 ms timer.
 async function flush() {
   for (let i = 0; i < 8; i++) await nextTick();
   await vi.advanceTimersByTimeAsync(0);
   for (let i = 0; i < 8; i++) await nextTick();
 }
+
 async function mount<T>(component: object): Promise<T> {
-  const app = renderer.createApp({ ...component, render: () => null });
-  app.provide(ssrContextKey, {});
-  const instance = app.mount({});
-  unmount = () => {
-    app.unmount();
-    unmount = undefined;
-  };
+  const mounted = mountSetup(component);
+  unmount = mounted.unmount;
   await flush();
-  return (instance.$ as unknown as { setupState: T }).setupState;
+  return mounted.view as T;
 }
 
 beforeEach(() => {
@@ -128,38 +97,29 @@ interface DetailView {
 }
 
 describe("rollout detail", () => {
-  it("keeps the newer route rollout when an older read finishes last", async () => {
-    const slow = deferred<AgentRollout>();
-    mocks.getAgentRollout.mockImplementation((id: string) =>
-      id === "rollout-a" ? slow.promise : rollout("rollout-b", "running"),
-    );
-    const view = await mount<DetailView>(RolloutDetailView);
-    mocks.route.params.rolloutId = "rollout-b";
-    await flush();
-    expect(view.rollout?.id).toBe("rollout-b");
-    slow.resolve(rollout("rollout-a", "paused"));
-    await flush();
-    expect(view.rollout?.id).toBe("rollout-b");
-    expect(view.loading).toBe(false);
-  });
-
-  it("ignores an older read that fails after the route changed", async () => {
-    const slow = deferred<AgentRollout>();
-    mocks.getAgentRollout.mockImplementation((id: string) =>
-      id === "rollout-a" ? slow.promise : rollout("rollout-b", "running"),
-    );
-    const view = await mount<DetailView>(RolloutDetailView);
-    mocks.route.params.rolloutId = "rollout-b";
-    await flush();
-    slow.reject(responseError(404));
-    await flush();
-    expect(view.rollout?.id).toBe("rollout-b");
-    expect(view.notFound).toBe(false);
-    expect(view.unavailable).toBe(false);
-  });
+  it.each(["resolve", "reject"] as const)(
+    "ignores an older read that %ss after the route changed",
+    async (outcome) => {
+      const slow = Promise.withResolvers<AgentRollout>();
+      mocks.getAgentRollout.mockImplementation((id: string) =>
+        id === "rollout-a" ? slow.promise : rollout("rollout-b", "running"),
+      );
+      const view = await mount<DetailView>(RolloutDetailView);
+      mocks.route.params.rolloutId = "rollout-b";
+      await flush();
+      expect(view.rollout?.id).toBe("rollout-b");
+      if (outcome === "resolve") slow.resolve(rollout("rollout-a", "paused"));
+      else slow.reject(responseError(404));
+      await flush();
+      expect(view.rollout?.id).toBe("rollout-b");
+      expect(view.loading).toBe(false);
+      expect(view.notFound).toBe(false);
+      expect(view.unavailable).toBe(false);
+    },
+  );
 
   it("drops a read from an earlier route before returning to it", async () => {
-    const first = deferred<AgentRollout>();
+    const first = Promise.withResolvers<AgentRollout>();
     mocks.getAgentRollout.mockReturnValueOnce(first.promise);
     mocks.getAgentRollout.mockReturnValue(new Promise(() => {}));
     const view = await mount<DetailView>(RolloutDetailView);
@@ -171,25 +131,6 @@ describe("rollout detail", () => {
     await flush();
     expect(view.rollout).toBeUndefined();
     expect(view.loading).toBe(true);
-  });
-
-  it("reads the new rollout after a terminal one on the same route", async () => {
-    mocks.getAgentRollout.mockImplementation((id: string) =>
-      Promise.resolve(
-        rollout(id, id === "rollout-a" ? "succeeded" : "running"),
-      ),
-    );
-    const view = await mount<DetailView>(RolloutDetailView);
-    expect(view.rollout?.state).toBe("succeeded");
-    mocks.route.params.rolloutId = "rollout-b";
-    await nextTick();
-    expect(view.rollout).toBeUndefined();
-    await flush();
-    expect(view.rollout?.id).toBe("rollout-b");
-    expect(mocks.getAgentRollout).toHaveBeenLastCalledWith(
-      "rollout-b",
-      expect.any(AbortSignal),
-    );
   });
 
   it("rejects a rollout reported for another workspace", async () => {
@@ -213,7 +154,7 @@ describe("rollout detail", () => {
   });
 
   it("does not write a late resume into another rollout", async () => {
-    const resume = deferred<AgentRollout>();
+    const resume = Promise.withResolvers<AgentRollout>();
     mocks.getAgentRollout.mockImplementation((id: string) =>
       Promise.resolve(rollout(id, "paused")),
     );
@@ -230,7 +171,7 @@ describe("rollout detail", () => {
   });
 
   it("keeps the resumed state when an older paused read returns", async () => {
-    const staleRead = deferred<AgentRollout>();
+    const staleRead = Promise.withResolvers<AgentRollout>();
     mocks.getAgentRollout.mockResolvedValueOnce(rollout("rollout-a", "paused"));
     mocks.getAgentRollout.mockReturnValueOnce(staleRead.promise);
     mocks.getAgentRollout.mockResolvedValue(rollout("rollout-a", "running"));
@@ -246,11 +187,12 @@ describe("rollout detail", () => {
     expect(view.resuming).toBe(false);
   });
 
-  it("never resends a resume whose response was lost", async () => {
-    mocks.getAgentRollout.mockResolvedValue(rollout("rollout-a", "paused"));
+  it("blocks resending a lost resume until a fresh read confirms the pause", async () => {
+    const followUp = Promise.withResolvers<AgentRollout>();
+    mocks.getAgentRollout.mockResolvedValueOnce(rollout("rollout-a", "paused"));
+    mocks.getAgentRollout.mockReturnValueOnce(followUp.promise);
     mocks.resumeAgentRollout.mockRejectedValue(new TypeError("network"));
     const view = await mount<DetailView>(RolloutDetailView);
-    mocks.getAgentRollout.mockReturnValue(new Promise(() => {}));
     await view.resume();
     expect(view.resumeError).toBe("rolloutResumeUnconfirmed");
     expect(view.resumeBlocked).toBe(true);
@@ -258,20 +200,14 @@ describe("rollout detail", () => {
     await flush();
     expect(mocks.resumeAgentRollout).toHaveBeenCalledTimes(1);
     expect(mocks.getAgentRollout).toHaveBeenCalledTimes(2);
-  });
-
-  it("re-enables resume only after a fresh read confirms the pause", async () => {
-    mocks.getAgentRollout.mockResolvedValue(rollout("rollout-a", "paused"));
-    mocks.resumeAgentRollout.mockRejectedValue(new TypeError("network"));
-    const view = await mount<DetailView>(RolloutDetailView);
-    await view.resume();
+    followUp.resolve(rollout("rollout-a", "paused"));
     await flush();
     expect(view.resumeBlocked).toBe(false);
     expect(view.rollout?.state).toBe("paused");
   });
 
   it("stops reading and writing after unmount", async () => {
-    const read = deferred<AgentRollout>();
+    const read = Promise.withResolvers<AgentRollout>();
     mocks.getAgentRollout.mockReturnValue(read.promise);
     const view = await mount<DetailView>(RolloutDetailView);
     unmount?.();
@@ -294,9 +230,15 @@ describe("rollout detail", () => {
     expect(mocks.getAgentRollout).toHaveBeenCalledTimes(1);
 
     mocks.route.params.rolloutId = "rollout-b";
+    await nextTick();
+    expect(view.rollout).toBeUndefined();
     await flush();
     expect(view.rollout?.id).toBe("rollout-b");
     expect(view.rollout?.state).toBe("running");
+    expect(mocks.getAgentRollout).toHaveBeenLastCalledWith(
+      "rollout-b",
+      expect.any(AbortSignal),
+    );
     expect(vi.getTimerCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(2_000);
     expect(mocks.getAgentRollout).toHaveBeenCalledTimes(3);
@@ -318,8 +260,8 @@ describe("operations rollout list", () => {
     });
   });
 
-  it("clears stale list state on refresh and drops the older rollout page", async () => {
-    const slow = deferred<{ rollouts: AgentRollout[] }>();
+  it("refreshes both lists and drops an older rollout page", async () => {
+    const slow = Promise.withResolvers<{ rollouts: AgentRollout[] }>();
     mocks.listAgentRollouts.mockResolvedValueOnce({
       rollouts: [rollout("rollout-a", "running")],
     });
@@ -332,6 +274,7 @@ describe("operations rollout list", () => {
     view.refresh();
     await flush();
     expect(mocks.listAgentRollouts).toHaveBeenCalledTimes(2);
+    expect(mocks.listOperations).toHaveBeenCalledTimes(2);
     view.refresh();
     await flush();
     slow.resolve({ rollouts: [rollout("rollout-a", "paused")] });
@@ -339,17 +282,8 @@ describe("operations rollout list", () => {
     expect(view.rollouts.map((item) => item.id)).toEqual(["rollout-b"]);
   });
 
-  it("refreshes the rollout list from the page refresh action", async () => {
-    mocks.listAgentRollouts.mockResolvedValue({ rollouts: [] });
-    const view = await mount<OperationsState>(OperationsView);
-    view.refresh();
-    await flush();
-    expect(mocks.listAgentRollouts).toHaveBeenCalledTimes(2);
-    expect(mocks.listOperations).toHaveBeenCalledTimes(2);
-  });
-
   it("ignores an operation detail failure after unmount", async () => {
-    const detail = deferred<unknown>();
+    const detail = Promise.withResolvers<unknown>();
     mocks.listAgentRollouts.mockResolvedValue({ rollouts: [] });
     mocks.getOperation.mockReturnValue(detail.promise);
     const view = await mount<OperationsState>(OperationsView);

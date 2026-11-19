@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -19,21 +18,13 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
-
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
-	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("real PostgreSQL required")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	testutil.NoError(t, err)
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
 	ws, node, secretRef := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	for _, fixture := range []struct {
 		sql  string
@@ -111,9 +102,7 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 		},
 	}
 	sum, err := configprofile.Hash(candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	wantHash := fmt.Sprintf("%x", sum)
 	// Freeze wire keys independently of Plan's tags, including false values and
 	// omitted fields. Only the validated generated IDs and times vary.

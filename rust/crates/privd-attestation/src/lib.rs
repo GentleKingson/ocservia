@@ -397,15 +397,6 @@ pub fn canonical_receipt_v1(receipt: &PrivdResultReceiptV1) -> Result<Vec<u8>, R
     Ok(encoded)
 }
 
-/// Hashes the validated canonical V1 receipt.
-///
-/// # Errors
-///
-/// Returns an error when the receipt cannot be canonically encoded.
-pub fn receipt_digest(receipt: &PrivdResultReceiptV1) -> Result<[u8; 32], ReceiptError> {
-    Ok(Sha256::digest(canonical_receipt_v1(receipt)?).into())
-}
-
 /// Canonical requested certificate subject digest shared with Controller.
 ///
 /// # Errors

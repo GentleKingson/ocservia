@@ -105,7 +105,7 @@ func (s *Service) CreateBootstrapToken(ctx context.Context, spec BootstrapTokenS
 }
 
 func (s *Service) createBootstrapToken(ctx context.Context, spec BootstrapTokenSpec, encoded string) (Token, error) {
-	if (len(spec.ExpectedEndpointID) != 0 && len(spec.ExpectedEndpointID) != 32) || spec.WorkspaceID == uuid.Nil || !validShort(spec.Environment, 64) || !validOptional(spec.ExpectedNodeName, 128) || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
+	if (len(spec.ExpectedEndpointID) != 0 && len(spec.ExpectedEndpointID) != 32) || spec.WorkspaceID == uuid.Nil || !validShort(spec.Environment, 64) || (spec.ExpectedNodeName != "" && !validShort(spec.ExpectedNodeName, 128)) || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
 		return Token{}, ErrInvalidRequest
 	}
 	ttl := spec.TTL
@@ -232,7 +232,7 @@ func (s *Service) consumeToken(ctx context.Context, store enrollmentstore.Enroll
 }
 
 func bootstrapTokenDigest(value string) ([sha256.Size]byte, bool) {
-	if !isBootstrapToken(value) {
+	if !strings.HasPrefix(value, BootstrapTokenPrefix) && !strings.HasPrefix(value, installEnrollmentPrefix) {
 		return [sha256.Size]byte{}, false
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(value[5:])
@@ -240,10 +240,6 @@ func bootstrapTokenDigest(value string) ([sha256.Size]byte, bool) {
 		return [sha256.Size]byte{}, false
 	}
 	return sha256.Sum256([]byte(value)), true
-}
-
-func isBootstrapToken(value string) bool {
-	return strings.HasPrefix(value, BootstrapTokenPrefix) || strings.HasPrefix(value, installEnrollmentPrefix)
 }
 
 func bootstrapNodeState(_ string, node enrollmentstore.Node) bool {
@@ -326,7 +322,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	sealingKeys := slices.Clone(request.GetSealingKeys())
 	slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
 	for _, key := range sealingKeys {
-		if err := store.InsertSealingKey(ctx, nodeID, sealingKey(key), at); err != nil {
+		if err := store.InsertSealingKey(ctx, nodeID, enrollmentstore.SealingKey{Purpose: int32(key.GetPurpose()), Version: int32(key.GetVersion()), ID: key.GetKeyId(), Digest: key.GetPublicKeySha256()}, at); err != nil {
 			return nil, fmt.Errorf("record bootstrap password sealing key: %w", err)
 		}
 	}
@@ -806,7 +802,6 @@ func validShort(value string, maximum int) bool {
 	length := utf8.RuneCountInString(value)
 	return value == trimmed && length > 0 && length <= maximum
 }
-func validOptional(value string, maximum int) bool { return value == "" || validShort(value, maximum) }
 func validActor(actor, request, reason string) bool {
 	return validShort(actor, 256) && validShort(request, 128) && validShort(reason, 1024)
 }
@@ -819,10 +814,6 @@ func rollback(tx database.Tx) {
 func tokenUnexpired(expires value.Timestamp, now time.Time) bool {
 	at, err := value.FromTime(now)
 	return err == nil && expires.Valid && expires.Micros > at.Micros
-}
-
-func sealingKey(key *agentv1.SealingKeyDescriptorV1) enrollmentstore.SealingKey {
-	return enrollmentstore.SealingKey{Purpose: int32(key.GetPurpose()), Version: int32(key.GetVersion()), ID: key.GetKeyId(), Digest: key.GetPublicKeySha256()}
 }
 
 func (s *Service) begin(ctx context.Context, isolation database.Isolation) (database.Tx, enrollmentstore.EnrollmentStore, error) {

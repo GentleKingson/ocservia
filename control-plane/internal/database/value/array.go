@@ -1,10 +1,7 @@
 package value
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
-	"io"
 	"math"
 	"strings"
 	"unicode/utf8"
@@ -53,58 +50,6 @@ func (a TextArray) Validate() error {
 		}
 	}
 	return nil
-}
-
-func (a TextArray) Bytes() ([]byte, error) {
-	if !a.Valid {
-		return nil, nil
-	}
-	if err := a.Validate(); err != nil {
-		return nil, err
-	}
-	if a.Dimensions == nil {
-		a.Dimensions = []Dimension{}
-	}
-	if a.Elements == nil {
-		a.Elements = []*string{}
-	}
-	return json.Marshal(a)
-}
-
-func ParseTextArray(data []byte) (TextArray, error) {
-	if data == nil {
-		return TextArray{}, nil
-	}
-	if !utf8.Valid(data) || !validEscapes(data) {
-		return TextArray{}, errors.New("database: invalid array Unicode")
-	}
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(data, &envelope); err != nil || len(envelope) != 2 || len(envelope["dimensions"]) == 0 || envelope["dimensions"][0] != '[' || len(envelope["elements"]) == 0 || envelope["elements"][0] != '[' {
-		return TextArray{}, errors.New("database: invalid array representation")
-	}
-	var dimensions []map[string]json.RawMessage
-	if err := json.Unmarshal(envelope["dimensions"], &dimensions); err != nil {
-		return TextArray{}, errors.New("database: invalid array dimensions")
-	}
-	for _, d := range dimensions {
-		if len(d) != 2 || d["length"] == nil || d["lower_bound"] == nil {
-			return TextArray{}, errors.New("database: incomplete array dimensions")
-		}
-	}
-	var a TextArray
-	d := json.NewDecoder(bytes.NewReader(data))
-	d.DisallowUnknownFields()
-	if len(data) == 0 || data[0] != '{' {
-		return TextArray{}, errors.New("database: invalid array representation")
-	}
-	if err := d.Decode(&a); err != nil {
-		return TextArray{}, errors.New("database: invalid array representation")
-	}
-	if d.Decode(new(any)) != io.EOF {
-		return TextArray{}, errors.New("database: trailing array representation")
-	}
-	a.Valid = true
-	return a, a.Validate()
 }
 
 func TextList(values []string) TextArray {

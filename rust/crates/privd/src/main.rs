@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "ocservia-privd",
         ocservia_contracts::agent_upgrade::release_version(),
     )?;
-    let (config, resources, limits) = parse_args()?;
+    let (config, resources, limits) = parse_args_from(env::args().skip(1))?;
     let adapter = Adapter::new(resources, limits);
     adapter.cleanup_stale_user_staging().await?;
     adapter.cleanup_stale_config_plans().await?;
@@ -146,10 +146,6 @@ async fn shutdown() {
         _ = tokio::signal::ctrl_c() => {}
         () = terminate => {}
     }
-}
-
-fn parse_args() -> Result<(ServerConfig, FixedResources, Limits), io::Error> {
-    parse_args_from(env::args().skip(1))
 }
 
 #[allow(clippy::too_many_lines)]

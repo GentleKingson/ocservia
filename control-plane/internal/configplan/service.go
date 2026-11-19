@@ -25,7 +25,6 @@ import (
 var (
 	ErrStaleRevision = operations.ErrStaleRevision
 	ErrCapability    = errors.New("configuration planning capability is unavailable")
-	ErrIdempotency   = operations.ErrIdempotencyConflict
 )
 
 type CreateRequest struct {
@@ -334,8 +333,6 @@ func (s *Service) Resource(ctx context.Context, id uuid.UUID) (workspaceID, node
 	})
 	return
 }
-
-func IsNotFound(err error) bool { return errors.Is(err, database.ErrNotFound) }
 
 func safeDiff(redactedCandidate string) string {
 	var diff strings.Builder

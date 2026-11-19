@@ -47,18 +47,12 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 		}
 		var id uuid.UUID
 		var raw []byte
-		if err := f.owner.QueryRow(ctx, `SELECT id,envelope FROM commands WHERE operation_id=$1`, uuid.MustParse(op.ID)).Scan(&id, &raw); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, f.owner.QueryRow(ctx, `SELECT id,envelope FROM commands WHERE operation_id=$1`, uuid.MustParse(op.ID)).Scan(&id, &raw))
 		var envelope agentv1.CommandEnvelope
-		if err := proto.Unmarshal(raw, &envelope); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, proto.Unmarshal(raw, &envelope))
 		envelope.IssuedAt = timestamppb.New(old.Add(-time.Hour))
 		envelope.ExpiresAt = timestamppb.New(old)
-		if err := f.signer.Authorize(&envelope); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, f.signer.Authorize(&envelope))
 		raw, err = proto.Marshal(&envelope)
 		testutil.NoError(t, err)
 		state := "succeeded"
@@ -73,9 +67,7 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 		f.exec(t, `UPDATE outbox_events SET payload=$1,published_at=$2 WHERE command_id=$3`, raw, terminal, id)
 		if i == 35 {
 			var outbox uuid.UUID
-			if err := f.owner.QueryRow(ctx, `SELECT id FROM outbox_events WHERE command_id=$1`, id).Scan(&outbox); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, f.owner.QueryRow(ctx, `SELECT id FROM outbox_events WHERE command_id=$1`, id).Scan(&outbox))
 			f.exec(t, `INSERT INTO command_attempts(id,command_id,outbox_event_id,worker_id,attempt_number,state,started_at,finished_at)VALUES($1,$2,$3,$4,1,'unknown',$5,$6)`, uuid.New(), id, outbox, uuid.New(), created, terminal)
 		}
 		if i == 36 {
@@ -94,21 +86,15 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 	if count() != 0 {
 		t.Fatal("lost fence committed compaction")
 	}
-	if err := worker.RunOnce(ctx); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, worker.RunOnce(ctx))
 	if count() != historyretention.BatchSize {
 		t.Fatal("batch not bounded", count())
 	}
-	if err := worker.RunOnce(ctx); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, worker.RunOnce(ctx))
 	if count() != 33 {
 		t.Fatal("Unknown/running not preserved", count())
 	}
-	if err := worker.RunOnce(ctx); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, worker.RunOnce(ctx))
 	if count() != 33 {
 		t.Fatal("compaction not idempotent")
 	}
@@ -117,13 +103,9 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 		t.Fatal("idempotency identity lost", again, replay, err)
 	}
 	var compact, digest []byte
-	if err := f.owner.QueryRow(ctx, `SELECT envelope,envelope_sha256 FROM commands WHERE operation_id=$1`, uuid.MustParse(firstID)).Scan(&compact, &digest); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, f.owner.QueryRow(ctx, `SELECT envelope,envelope_sha256 FROM commands WHERE operation_id=$1`, uuid.MustParse(firstID)).Scan(&compact, &digest))
 	var header agentv1.CommandEnvelope
-	if err := proto.Unmarshal(compact, &header); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, proto.Unmarshal(compact, &header))
 	if header.Payload != nil || header.Authorization == nil || len(digest) != 32 || !bytes.Equal(header.NodeId, node[:]) {
 		t.Fatal("compact authority evidence missing")
 	} // Ordinary revoked-node history is independent of command detail. Keep
@@ -137,9 +119,7 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 		f.exec(t, `INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,'boot',$3,'test','test','test','{"detail":1}','{}','{}',$4)`, id, terminal, uuid.New(), terminal)
 	}
 
-	if err := worker.RunOnce(ctx); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, worker.RunOnce(ctx))
 	if n := f.count(t, `SELECT count(*) FROM node_observed_snapshots WHERE node_id=$1 AND ocserv='{}'`, retiredNode); n != 1 {
 		t.Fatal("retired snapshot not compacted")
 	}

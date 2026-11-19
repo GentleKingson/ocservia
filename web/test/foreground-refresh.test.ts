@@ -15,9 +15,6 @@ describe("foreground refresh", () => {
     vi.stubGlobal(
       "document",
       Object.assign(new EventTarget(), {
-        get visibilityState() {
-          return hidden ? "hidden" : "visible";
-        },
         hasFocus: () => focused,
       }),
     );

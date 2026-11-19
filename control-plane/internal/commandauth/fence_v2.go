@@ -128,20 +128,6 @@ func (s *Signer) IssueFenceBindingV2(operationKind agentv1.FenceOperationKind, o
 	}, nil
 }
 
-// MatchesFence reports whether this binding was signed for exactly the fence
-// term of the recorded dispatch attempt: owner instance, incarnation,
-// connection, epoch, fence identity, and authorization revision. A late
-// legitimate result still matches its own attempt's fence; a result recorded
-// under any other term does not.
-func (c FenceBindingClaimsV2) MatchesFence(fence ConnectionFenceClaimsV2) bool {
-	return c.FenceID == fence.FenceID &&
-		c.OwnerInstanceID == fence.OwnerInstanceID &&
-		c.OwnerIncarnation == fence.OwnerIncarnation &&
-		c.OwnerEpoch == fence.OwnerEpoch &&
-		c.ConnectionID == fence.ConnectionID &&
-		c.AuthorizationRevision == fence.AuthorizationRevision
-}
-
 // CanonicalConnectionFenceV2 returns the exact domain-separated connection
 // fence signing bytes. It never serializes Protobuf and shares no domain with
 // any V1 contract, so V1 and V2 proofs can never cross-validate.

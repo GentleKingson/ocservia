@@ -1,5 +1,5 @@
-import { renderer } from "./renderer";
-import { nextTick, ssrContextKey } from "vue";
+import { mountSetup } from "./renderer";
+import { nextTick } from "vue";
 import { ResponseError } from "@ocservia/api-client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
@@ -47,14 +47,10 @@ async function flush() {
   for (let i = 0; i < 8; i++) await nextTick();
 }
 async function mount(): Promise<View> {
-  const app = renderer.createApp({ ...AuditView, render: () => null });
-  app.provide(ssrContextKey, {});
-  const instance = app.mount({});
-  unmount = () => {
-    app.unmount();
-  };
+  const mounted = mountSetup(AuditView);
+  unmount = mounted.unmount;
   await flush();
-  return (instance.$ as unknown as { setupState: View }).setupState;
+  return mounted.view as View;
 }
 beforeEach(() => {
   vi.resetAllMocks();

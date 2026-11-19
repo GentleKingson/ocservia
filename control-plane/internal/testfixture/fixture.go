@@ -61,12 +61,3 @@ func InsertActiveNode(t testing.TB, ctx context.Context, pool *pgxpool.Pool, wor
 	)
 	return nodeID, endpointID
 }
-
-// GrantCapability approves a capability for a node.
-func GrantCapability(t testing.TB, ctx context.Context, pool *pgxpool.Pool, nodeID uuid.UUID, capability string) {
-	t.Helper()
-	testutil.Exec(t, ctx, pool,
-		`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,true)`,
-		nodeID, capability,
-	)
-}

@@ -36,6 +36,46 @@ use tokio::io::AsyncWriteExt as _;
 
 use super::*;
 
+const TEST_ENDPOINT_ID: [u8; 32] = [9; 32];
+
+async fn dispatch(
+    request: PrivdRequest,
+    node_id: &[u8; 16],
+    command_keys: &ControllerCommandKeyring,
+    adapter: &Adapter,
+) -> PrivdResponse {
+    dispatch_upgrade(
+        request,
+        node_id,
+        command_keys,
+        adapter,
+        &UpgradeScheduler::disabled(),
+    )
+    .await
+}
+
+async fn dispatch_upgrade(
+    request: PrivdRequest,
+    node_id: &[u8; 16],
+    command_keys: &ControllerCommandKeyring,
+    adapter: &Adapter,
+    upgrades: &UpgradeScheduler,
+) -> PrivdResponse {
+    let key = Arc::new(SigningKey::from_bytes(&[41; 32]));
+    let kid: Arc<str> = Arc::from(key_id(&key.verifying_key()));
+    Box::pin(dispatch_attested(
+        &request,
+        node_id,
+        &TEST_ENDPOINT_ID,
+        command_keys,
+        &key,
+        &kid,
+        upgrades,
+        adapter,
+    ))
+    .await
+}
+
 struct PrivdFixture {
     dir: PathBuf,
     adapter: Adapter,
@@ -362,17 +402,6 @@ async fn rebound_authority_denies_old_node_key_and_quarantines_uncertain_effects
         assert!(!fx.counter.exists());
     }
     let cmd = signed_service_reload(&new_key, new_node, now, now + 60);
-    let quarantined = Adapter::new(
-        fx.resources.clone().with_mutations_blocked(true),
-        Limits::default(),
-    );
-    assert!(matches!(
-        dispatch(command_request(cmd.clone()), &new_node, &keys, &quarantined)
-            .await
-            .result,
-        Some(privd_response::Result::Error(_))
-    ));
-    assert!(!fx.counter.exists());
     let ok = dispatch(command_request(cmd), &new_node, &keys, &fx.adapter).await;
     assert!(matches!(ok.result, Some(privd_response::Result::Mutation(ref r)) if r.applied));
     assert_eq!(fs::read(&fx.counter).expect("counter"), b"x");

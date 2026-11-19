@@ -1852,6 +1852,27 @@ async fn certificate_csr_keeps_private_key_local() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn certificate_p12_is_encrypted_bounded_and_replayable() {
+    fn lease_for<'a>(
+        cert_id: &'a Uuid,
+        art: &'a Uuid,
+        op: &'a Uuid,
+        subj: &'a str,
+        max_bytes: u64,
+        grant: &'a Uuid,
+        exp: i64,
+    ) -> ArtifactLeaseIdentity<'a> {
+        ArtifactLeaseIdentity {
+            artifact_id: art.as_bytes(),
+            certificate_id: cert_id.as_bytes(),
+            certificate_version: 1,
+            operation_id: op.as_bytes(),
+            authorized_subject: subj,
+            max_bytes,
+            grant_id: grant.as_bytes(),
+            expires_at_unix_seconds: exp,
+        }
+    }
+
     let dir = TempDir::new("p12");
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("0700");
     let user_priv = dir.join("user-sealing-private.pem");
@@ -1982,6 +2003,20 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
     let expires_at = effect_now().expect("now") + 600;
     let artifact_dir = dir.join("artifacts");
 
+    let make_p12 = async |art: Uuid, op: Uuid, secret: &SealedSecretV1| {
+        adapter
+            .certificate_p12(
+                cert_id.as_bytes(),
+                art.as_bytes(),
+                &chain,
+                secret,
+                1,
+                op.as_bytes(),
+                expires_at,
+            )
+            .await
+    };
+
     // Cross-purpose and tampered ciphertexts fail closed.
     let mut tampered = sealed_p12.clone();
     tampered.ciphertext[0] ^= 1;
@@ -1993,20 +2028,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         ..sealed_p12.clone()
     };
     for bad in [&tampered, &wrong_purpose, &user_ct_in_p12] {
-        assert!(
-            adapter
-                .certificate_p12(
-                    cert_id.as_bytes(),
-                    Uuid::now_v7().as_bytes(),
-                    &chain,
-                    bad,
-                    1,
-                    Uuid::now_v7().as_bytes(),
-                    expires_at
-                )
-                .await
-                .is_err()
-        );
+        assert!(make_p12(Uuid::now_v7(), Uuid::now_v7(), bad).await.is_err());
     }
     assert!(
         adapter
@@ -2024,16 +2046,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
     // Create, verify permissions/hash/password protection, replay, and detect corruption.
     let artifact_id = Uuid::now_v7();
     let op_id = Uuid::now_v7();
-    let result = adapter
-        .certificate_p12(
-            cert_id.as_bytes(),
-            artifact_id.as_bytes(),
-            &chain,
-            &sealed_p12,
-            1,
-            op_id.as_bytes(),
-            expires_at,
-        )
+    let result = make_p12(artifact_id, op_id, &sealed_p12)
         .await
         .expect("create p12");
     let artifact = artifact_dir.join(format!("{artifact_id}.p12"));
@@ -2065,32 +2078,13 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         format!("pass:{}", String::from_utf8_lossy(password)).as_ref(),
         "-noout".as_ref(),
     ]);
-    let replay = adapter
-        .certificate_p12(
-            cert_id.as_bytes(),
-            artifact_id.as_bytes(),
-            &chain,
-            &sealed_p12,
-            1,
-            op_id.as_bytes(),
-            expires_at,
-        )
+    let replay = make_p12(artifact_id, op_id, &sealed_p12)
         .await
         .expect("replay");
     assert_eq!(replay.artifact_sha256, result.artifact_sha256);
     std::fs::write(&artifact, b"truncated").expect("corrupt");
     assert!(matches!(
-        adapter
-            .certificate_p12(
-                cert_id.as_bytes(),
-                artifact_id.as_bytes(),
-                &chain,
-                &sealed_p12,
-                1,
-                op_id.as_bytes(),
-                expires_at
-            )
-            .await,
+        make_p12(artifact_id, op_id, &sealed_p12).await,
         Err(AdapterError::InvalidResource)
     ));
     assert!(!artifact.exists());
@@ -2102,32 +2096,22 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
     let int_out = artifact_dir.join(format!(".{int_art}.p12"));
     std::fs::write(&int_chain, b"stale").expect("stale chain");
     std::fs::write(&int_out, b"stale").expect("stale out");
-    let int_res = adapter
-        .certificate_p12(
-            cert_id.as_bytes(),
-            int_art.as_bytes(),
-            &chain,
-            &sealed_p12,
-            1,
-            int_op.as_bytes(),
-            expires_at,
-        )
+    let int_res = make_p12(int_art, int_op, &sealed_p12)
         .await
         .expect("recover staging");
     assert!(!int_chain.exists() && !int_out.exists());
 
     let grant_id = Uuid::now_v7();
     let subject = Uuid::now_v7().to_string();
-    let lease = ArtifactLeaseIdentity {
-        artifact_id: int_art.as_bytes(),
-        certificate_id: cert_id.as_bytes(),
-        certificate_version: 1,
-        operation_id: int_op.as_bytes(),
-        authorized_subject: &subject,
-        max_bytes: int_res.artifact_size,
-        grant_id: grant_id.as_bytes(),
-        expires_at_unix_seconds: effect_now().expect("now") + 300,
-    };
+    let lease = lease_for(
+        &cert_id,
+        &int_art,
+        &int_op,
+        &subject,
+        int_res.artifact_size,
+        &grant_id,
+        effect_now().expect("now") + 300,
+    );
     let (a, b) = tokio::join!(
         adapter.artifact_read(lease, 0),
         adapter.artifact_read(lease, 0)
@@ -2277,44 +2261,25 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
     // Certificate revoke removes available, leased, prepared, and staging artifacts.
     let avail_art = Uuid::now_v7();
     let avail_op = Uuid::now_v7();
-    let avail_res = adapter
-        .certificate_p12(
-            cert_id.as_bytes(),
-            avail_art.as_bytes(),
-            &chain,
-            &sealed_p12,
-            1,
-            avail_op.as_bytes(),
-            expires_at,
-        )
+    let avail_res = make_p12(avail_art, avail_op, &sealed_p12)
         .await
         .expect("avail");
     let leased_art = Uuid::now_v7();
     let leased_op = Uuid::now_v7();
-    let leased_res = adapter
-        .certificate_p12(
-            cert_id.as_bytes(),
-            leased_art.as_bytes(),
-            &chain,
-            &sealed_p12,
-            1,
-            leased_op.as_bytes(),
-            expires_at,
-        )
+    let leased_res = make_p12(leased_art, leased_op, &sealed_p12)
         .await
         .expect("leased");
     let rev_grant = Uuid::now_v7();
     let rev_subj = Uuid::now_v7().to_string();
-    let rev_lease = ArtifactLeaseIdentity {
-        artifact_id: leased_art.as_bytes(),
-        certificate_id: cert_id.as_bytes(),
-        certificate_version: 1,
-        operation_id: leased_op.as_bytes(),
-        authorized_subject: &rev_subj,
-        max_bytes: leased_res.artifact_size,
-        grant_id: rev_grant.as_bytes(),
-        expires_at_unix_seconds: effect_now().expect("now") + 300,
-    };
+    let rev_lease = lease_for(
+        &cert_id,
+        &leased_art,
+        &leased_op,
+        &rev_subj,
+        leased_res.artifact_size,
+        &rev_grant,
+        effect_now().expect("now") + 300,
+    );
     adapter
         .artifact_read(rev_lease, 0)
         .await

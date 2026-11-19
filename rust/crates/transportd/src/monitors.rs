@@ -75,7 +75,7 @@ impl SessionHandler {
         recv: &mut iroh::endpoint::RecvStream,
     ) -> Result<Option<NegotiatedSession>, AcceptError> {
         if matches!(self.kind, ProtocolKind::Enroll) {
-            let request = read_enrollment(recv).await?;
+            let request: EnrollRequest = read_message(recv, "enrollment").await?;
             validate_enrollment(&request, connection.remote_id())?;
             let response = self.trust.enroll(request).await?;
             write_message(send, &response).await?;
@@ -88,7 +88,7 @@ impl SessionHandler {
             connection.close(VarInt::from_u32(0), reason);
             return Ok(None);
         }
-        let handshake = read_handshake(recv).await?;
+        let handshake: SessionHandshake = read_message(recv, "handshake").await?;
         validate_handshake(&handshake, connection.remote_id())?;
         validate_protocol_version(&handshake)?;
         let response = self
@@ -412,18 +412,6 @@ fn monitor_paths(
             drop(registry);
         }
     })
-}
-
-async fn read_handshake(
-    recv: &mut iroh::endpoint::RecvStream,
-) -> Result<SessionHandshake, AcceptError> {
-    read_message(recv, "handshake").await
-}
-
-async fn read_enrollment(
-    recv: &mut iroh::endpoint::RecvStream,
-) -> Result<EnrollRequest, AcceptError> {
-    read_message(recv, "enrollment").await
 }
 
 async fn read_message<M: Message + Default>(

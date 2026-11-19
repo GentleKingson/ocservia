@@ -1,5 +1,5 @@
-import { renderer } from "./renderer";
-import { nextTick, ssrContextKey } from "vue";
+import { mountSetup } from "./renderer";
+import { nextTick } from "vue";
 import { ResponseError } from "@ocservia/api-client";
 import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { NodeInstallConfig } from "../src/features/nodes/node-install";
@@ -39,18 +39,10 @@ const close = vi.fn();
 const token = "oit1_aHR0cHM6Ly9jb250cm9sbGVyLmV4YW1wbGU." + "a".repeat(43);
 const result = () => ({ token, expiresAt: new Date(Date.now() + 900_000) });
 async function mount() {
-  const app = renderer.createApp(
-    { ...NodeInstallDialog, render: () => null },
-    { onClose: close },
-  );
-  app.provide(ssrContextKey, {});
-  const instance = app.mount({});
-  unmount = () => {
-    app.unmount();
-    unmount = undefined;
-  };
+  const mounted = mountSetup(NodeInstallDialog, { onClose: close });
+  unmount = mounted.unmount;
   for (let i = 0; i < 4; i++) await nextTick();
-  const view = (instance.$ as unknown as { setupState: View }).setupState;
+  const view = mounted.view as View;
   Object.assign(view.config, {
     name: "edge-1",
     release: "v1.2.3",

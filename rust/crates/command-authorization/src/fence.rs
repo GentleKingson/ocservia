@@ -215,21 +215,12 @@ pub fn canonical_connection_fence_v2(
         || claims.lease_until_nanos >= 1_000_000_000
         || claims.issued_at_nanos >= 1_000_000_000
         || claims.expires_at_nanos >= 1_000_000_000
-        || !deadline_strictly_after(
-            claims.lease_until_seconds,
-            claims.lease_until_nanos,
-            claims.issued_at_seconds,
-            claims.issued_at_nanos,
-        )
-        || !deadline_not_after(
-            claims.lease_until_seconds,
-            claims.lease_until_nanos,
-            claims.expires_at_seconds,
-            claims.expires_at_nanos,
-        )
-        || claims.expires_at_seconds < claims.issued_at_seconds
-        || (claims.expires_at_seconds == claims.issued_at_seconds
-            && claims.expires_at_nanos <= claims.issued_at_nanos)
+        || (claims.lease_until_seconds, claims.lease_until_nanos)
+            <= (claims.issued_at_seconds, claims.issued_at_nanos)
+        || (claims.lease_until_seconds, claims.lease_until_nanos)
+            > (claims.expires_at_seconds, claims.expires_at_nanos)
+        || (claims.expires_at_seconds, claims.expires_at_nanos)
+            <= (claims.issued_at_seconds, claims.issued_at_nanos)
     {
         return Err(AuthorizationError::ClaimsInvalid(
             "connection_fence_claims_invalid",
@@ -396,24 +387,6 @@ fn fence_operation_kind_value(value: i32) -> Result<u32, AuthorizationError> {
             "fence_binding_operation_kind_invalid",
         )),
     }
-}
-
-fn deadline_strictly_after(
-    until_seconds: i64,
-    until_nanos: u32,
-    from_seconds: i64,
-    from_nanos: u32,
-) -> bool {
-    until_seconds > from_seconds || (until_seconds == from_seconds && until_nanos > from_nanos)
-}
-
-fn deadline_not_after(
-    until_seconds: i64,
-    until_nanos: u32,
-    limit_seconds: i64,
-    limit_nanos: u32,
-) -> bool {
-    until_seconds < limit_seconds || (until_seconds == limit_seconds && until_nanos <= limit_nanos)
 }
 
 pub(crate) fn timestamp_expired(

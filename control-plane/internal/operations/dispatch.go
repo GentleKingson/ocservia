@@ -13,7 +13,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/proto"
 )
 
 func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, lease time.Duration) ([]Dispatch, error) {
@@ -95,10 +94,6 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 	return claimed, nil
 }
 
-func (s *Service) MarkSent(ctx context.Context, dispatch Dispatch) error {
-	return s.MarkSentWithEnvelope(ctx, dispatch, dispatch.Envelope)
-}
-
 // MarkSentWithEnvelope persists the exact frame accepted by transport, including
 // the owner proofs added after Claim. Reconnect recovery needs that precise term.
 func (s *Service) MarkSentWithEnvelope(ctx context.Context, dispatch Dispatch, sentEnvelope []byte) error {
@@ -121,13 +116,6 @@ func (s *Service) MarkFailed(ctx context.Context, dispatch Dispatch, cause error
 }
 
 func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, message string, sentEnvelope []byte, envelope *agentv1.CommandEnvelope) error {
-	if sent && envelope == nil {
-		var decoded agentv1.CommandEnvelope
-		if err := proto.Unmarshal(sentEnvelope, &decoded); err != nil {
-			return fmt.Errorf("decode sent command delivery mode: %w", err)
-		}
-		envelope = &decoded
-	}
 	err := database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		if err := commandlimit.Lock(ctx, tx); err != nil {
 			return fmt.Errorf("serialize dispatch completion: %w", err)

@@ -238,11 +238,6 @@ select_lifecycle() {
   fail "the Docker client is installed but this user cannot use the Docker daemon; the Docker permission model is never modified here — grant this user Docker daemon access per Docker's official post-install steps and rerun, or pass --root-lifecycle explicitly"
 }
 
-prepare_runtime() {
-  runtime_fetch "${TARGET}" "${VERSION}"
-  echo "verified runtime: ${TARGET}"
-}
-
 check_release_installer() {
   [[ -x "${TARGET}/deploy/production/install.sh" && ! -L "${TARGET}/deploy/production/install.sh" ]] ||
     fail "release ${VERSION} at ${TARGET} does not ship the production installer (deploy/production/install.sh is missing or not executable); use a release that does"
@@ -431,6 +426,7 @@ if [[ "${INTERACTIVE}" == true ]]; then
   [[ "${QUICK}" == true ]] || install_ui_save "${CONFIG_FILE}" "${CONTROLLER_INSTALL_ENV_NAMES[@]}"
 fi
 walk_source_root true
-prepare_runtime
+runtime_fetch "${TARGET}" "${VERSION}"
+echo "verified runtime: ${TARGET}"
 check_release_installer
 hand_off

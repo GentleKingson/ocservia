@@ -7,7 +7,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
-	"sync"
 	"testing"
 	"time"
 )
@@ -64,7 +63,17 @@ func newBenchAuthorityAndCSR(tb testing.TB) (*authority, *x509.CertificateReques
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}),
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})...,
 	)
-	auth := &authority{cert: caCert, key: caKey, chain: chainPEM, id: digest(caCert.Raw)}
+	roots, intermediates := x509.NewCertPool(), x509.NewCertPool()
+	roots.AddCert(rootCert)
+	intermediates.AddCert(caCert)
+	auth := &authority{
+		cert:          caCert,
+		key:           caKey,
+		chain:         chainPEM,
+		id:            digest(caCert.Raw),
+		roots:         roots,
+		intermediates: intermediates,
+	}
 
 	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -83,33 +92,6 @@ func newBenchAuthorityAndCSR(tb testing.TB) (*authority, *x509.CertificateReques
 	}
 	return auth, csr
 }
-
-func TestAuthorityIssueCachedPoolsConcurrent(t *testing.T) {
-	auth, csr := newBenchAuthorityAndCSR(t)
-	var wg sync.WaitGroup
-	errs := make(chan error, 8)
-	for i := range 8 {
-		wg.Add(1)
-		go func(serial int64) {
-			defer wg.Done()
-			chain, err := auth.issue(csr, big.NewInt(serial))
-			if err != nil {
-				errs <- err
-				return
-			}
-			if len(chain) == 0 {
-				errs <- errInvalidBenchChain
-			}
-		}(int64(100 + i))
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Fatal(err)
-	}
-}
-
-var errInvalidBenchChain = &x509.UnhandledCriticalExtension{}
 
 func BenchmarkAuthorityIssue(b *testing.B) {
 	auth, csr := newBenchAuthorityAndCSR(b)

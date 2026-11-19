@@ -101,14 +101,6 @@ download_artifact() {
   return 1
 }
 
-default_peer_job_name() {
-  if [[ -n "${REAL_E2E_ARTIFACT_PEER_JOB_NAME:-}" ]]; then
-    printf '%s\n' "${REAL_E2E_ARTIFACT_PEER_JOB_NAME}"
-    return 0
-  fi
-  return 1
-}
-
 peer_job_state() {
   local response="${1:?jobs API response is required}"
   local peer_job="${2:?peer job name is required}"
@@ -177,7 +169,7 @@ wait_download() {
     return 2
   fi
   if [[ -z "${peer_job}" ]]; then
-    peer_job="$(default_peer_job_name || true)"
+    peer_job="${REAL_E2E_ARTIFACT_PEER_JOB_NAME:-}"
   fi
   if [[ -n "${peer_job}" && ("${peer_job}" == *$'\n'* || ${#peer_job} -gt 128) ]]; then
     echo "peer job name is invalid" >&2

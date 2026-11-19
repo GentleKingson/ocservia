@@ -31,41 +31,23 @@ import (
 )
 
 func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
 	ownerPool := pool
-	if ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"); ownerURL != "" {
-		ownerPool, err = pgxpool.New(ctx, ownerURL)
-		testutil.NoError(t, err)
-		defer ownerPool.Close()
+	if os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL") != "" {
+		ownerPool = testfixture.OpenOwnerPool(t)
 	}
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err = pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Configuration plan test',$2,now(),now())`, workspaceID, "config-plan-"+workspaceID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = pool.Exec(ctx, `INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at) VALUES($1,now(),'complete',$2,'0.7.0','1.2.4','test','{}','{}','{}',now())`, nodeID, uuid.Must(uuid.NewV7())); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Configuration plan test',$2,now(),now())`, workspaceID, "config-plan-"+workspaceID.String())
+	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String())
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at) VALUES($1,now(),'complete',$2,'0.7.0','1.2.4','test','{}','{}','{}',now())`, nodeID, uuid.Must(uuid.NewV7()))
 	attestationKey, err := testfixture.InstallKey(ctx, pool, nodeID)
 	testutil.NoError(t, err)
 	endpointID := sha256.Sum256(append([]byte("ocservia/configplan-integration/"), nodeID[:]...))
-	if _, err = pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpointID[:]); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpointID[:])
 	for _, capability := range []string{configprofile.PlanCapability, configprofile.ApplyCapability} {
-		if _, err = pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,$2,true)`, nodeID, capability); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Exec(t, ctx, pool, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,$2,true)`, nodeID, capability)
 	}
 	defer func() {
 		if err := cleanupConfigPlanIntegration(context.Background(), ownerPool, workspaceID); err != nil {
@@ -147,7 +129,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	creator.assertLast(t, ctx, 3, wantCreate)
 	changed := request
 	changed.Reason = "different content under the same key"
-	if _, _, err := service.Create(ctx, changed); !errors.Is(err, ErrIdempotency) {
+	if _, _, err := service.Create(ctx, changed); !errors.Is(err, operations.ErrIdempotencyConflict) {
 		t.Fatal("conflicting replay", err)
 	}
 	if _, _, err := service.Apply(ctx, ApplyRequest{PlanID: plan.ID, IdempotencyKey: "pending", Reason: "pending plan"}); !errors.Is(err, ErrStaleRevision) {
@@ -166,13 +148,9 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var envelopeBytes []byte
-	if err := pool.QueryRow(ctx, `SELECT c.envelope FROM commands c WHERE c.operation_id=$1`, plan.OperationID).Scan(&envelopeBytes); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT c.envelope FROM commands c WHERE c.operation_id=$1`, plan.OperationID).Scan(&envelopeBytes))
 	var envelope agentv1.CommandEnvelope
-	if err := proto.Unmarshal(envelopeBytes, &envelope); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, proto.Unmarshal(envelopeBytes, &envelope))
 	if envelope.GetCompleteConfigPlan() == nil || len(envelope.GetCompleteConfigPlan().GetCandidateHash()) != 32 || envelope.GetExpectedRevision() != 1 || envelope.GetCompleteConfigPlan().GetCandidate().GetExpectedRevision() != 0 {
 		t.Fatalf("typed envelope=%v", &envelope)
 	}
@@ -180,9 +158,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	eventID := uuid.Must(uuid.NewV7())
 	hash, _ := hex.DecodeString(plan.CandidateHash)
 	var candidateRedacted string
-	if err := pool.QueryRow(ctx, `SELECT candidate_redacted FROM config_plans WHERE id=$1`, plan.ID).Scan(&candidateRedacted); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT candidate_redacted FROM config_plans WHERE id=$1`, plan.ID).Scan(&candidateRedacted))
 	currentHash := make([]byte, 32)
 	materializedHash := make([]byte, 32)
 	for index := range currentHash {
@@ -204,9 +180,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes,
 		AcceptedAt: timestamppb.New(completedPlan), CompletedAt: timestamppb.New(completedPlan),
 	}
-	if err := testfixture.AttachProof(&envelope, planResult, attestationKey, 1); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, testfixture.AttachProof(&envelope, planResult, attestationKey, 1))
 	encodedPlanResult, err := proto.Marshal(planResult)
 	testutil.NoError(t, err)
 	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{
@@ -290,9 +264,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		},
 	})
 	var applyEnvelopeBytes []byte
-	if err := pool.QueryRow(ctx, `SELECT c.envelope FROM commands c JOIN config_apply_operations x ON x.operation_id=c.operation_id WHERE x.operation_id=$1`, apply.ID).Scan(&applyEnvelopeBytes); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT c.envelope FROM commands c JOIN config_apply_operations x ON x.operation_id=c.operation_id WHERE x.operation_id=$1`, apply.ID).Scan(&applyEnvelopeBytes))
 	var applyEnvelope agentv1.CommandEnvelope
 	if proto.Unmarshal(applyEnvelopeBytes, &applyEnvelope) != nil || applyEnvelope.GetCompleteConfigApply() == nil || !bytes.Equal(applyEnvelope.GetCompleteConfigApply().GetCandidateHash(), hash) || !bytes.Equal(applyEnvelope.GetCompleteConfigApply().GetExpectedCurrentHash(), currentHash) || applyEnvelope.GetCompleteConfigApply().GetDesiredRevision() != 1 {
 		t.Fatalf("apply envelope invalid: %v", &applyEnvelope)
@@ -311,16 +283,12 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=created_at+interval '1 microsecond' WHERE id=$1`, applyCommandID); err != nil {
 		t.Fatal(err)
 	}
-	if err := operations.NewBackend(postgres.WrapPool(pool), 50, commandSigner).Reap(ctx, 3); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, operations.NewBackend(postgres.WrapPool(pool), 50, commandSigner).Reap(ctx, 3))
 	var commandState, operationState, missingOutcomeState string
 	var commandExpiry, operationExpiry time.Time
 	var missingOutcomeEnvelopeBytes []byte
 	var missingOutcomeUnpublished bool
-	if err := pool.QueryRow(ctx, `SELECT c.state,o.state,x.state,c.expires_at,o.expires_at,c.envelope,b.published_at IS NULL FROM commands c JOIN operations o ON o.id=c.operation_id JOIN config_apply_operations x ON x.operation_id=o.id JOIN outbox_events b ON b.command_id=c.id WHERE c.id=$1`, applyCommandID).Scan(&commandState, &operationState, &missingOutcomeState, &commandExpiry, &operationExpiry, &missingOutcomeEnvelopeBytes, &missingOutcomeUnpublished); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT c.state,o.state,x.state,c.expires_at,o.expires_at,c.envelope,b.published_at IS NULL FROM commands c JOIN operations o ON o.id=c.operation_id JOIN config_apply_operations x ON x.operation_id=o.id JOIN outbox_events b ON b.command_id=c.id WHERE c.id=$1`, applyCommandID).Scan(&commandState, &operationState, &missingOutcomeState, &commandExpiry, &operationExpiry, &missingOutcomeEnvelopeBytes, &missingOutcomeUnpublished))
 	var missingOutcomeEnvelope agentv1.CommandEnvelope
 	if proto.Unmarshal(missingOutcomeEnvelopeBytes, &missingOutcomeEnvelope) != nil || commandState != "unknown" || operationState != "unknown" || missingOutcomeState != "unknown" || !commandExpiry.After(time.Now()) || !operationExpiry.Equal(commandExpiry) || missingOutcomeEnvelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY || bytes.Equal(missingOutcomeEnvelope.GetMessageId(), applyEnvelope.GetMessageId()) || !missingOutcomeUnpublished {
 		t.Fatalf("missing outcome command=%s operation=%s apply=%s command_expiry=%s operation_expiry=%s envelope=%v unpublished=%v", commandState, operationState, missingOutcomeState, commandExpiry, operationExpiry, &missingOutcomeEnvelope, missingOutcomeUnpublished)
@@ -351,9 +319,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	}
 	var recoveryEnvelopeBytes []byte
 	var recoveryUnpublished bool
-	if err := pool.QueryRow(ctx, `SELECT c.envelope,o.published_at IS NULL FROM commands c JOIN outbox_events o ON o.command_id=c.id WHERE c.id=$1`, applyCommandID).Scan(&recoveryEnvelopeBytes, &recoveryUnpublished); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT c.envelope,o.published_at IS NULL FROM commands c JOIN outbox_events o ON o.command_id=c.id WHERE c.id=$1`, applyCommandID).Scan(&recoveryEnvelopeBytes, &recoveryUnpublished))
 	var recoveryEnvelope agentv1.CommandEnvelope
 	if proto.Unmarshal(recoveryEnvelopeBytes, &recoveryEnvelope) != nil || recoveryEnvelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY || !recoveryUnpublished {
 		t.Fatalf("invalid evidence did not schedule reconciliation: %v unpublished=%v", &recoveryEnvelope, recoveryUnpublished)
@@ -368,21 +334,15 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	validResult := &agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()}
-	if err := testfixture.AttachProof(&applyEnvelope, validResult, attestationKey, 1); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, testfixture.AttachProof(&applyEnvelope, validResult, attestationKey, 1))
 	commandResultBytes, err := proto.Marshal(validResult)
 	testutil.NoError(t, err)
 	applyEventID := uuid.Must(uuid.NewV7())
-	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: applyEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: commandResultBytes}); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: applyEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: commandResultBytes}))
 	var applyState, lockReason string
 	var automationLocked bool
 	var criticalAlerts int
-	if err := pool.QueryRow(ctx, `SELECT x.state,s.automation_locked,COALESCE(s.automation_lock_reason,''),(SELECT count(*) FROM security_alerts WHERE workspace_id=x.workspace_id AND kind='config_apply.rollback_failed') FROM config_apply_operations x JOIN node_config_state s ON s.node_id=x.node_id WHERE x.operation_id=$1`, applyOperationID).Scan(&applyState, &automationLocked, &lockReason, &criticalAlerts); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT x.state,s.automation_locked,COALESCE(s.automation_lock_reason,''),(SELECT count(*) FROM security_alerts WHERE workspace_id=x.workspace_id AND kind='config_apply.rollback_failed') FROM config_apply_operations x JOIN node_config_state s ON s.node_id=x.node_id WHERE x.operation_id=$1`, applyOperationID).Scan(&applyState, &automationLocked, &lockReason, &criticalAlerts))
 	metrics, err := operations.NewBackend(postgres.WrapPool(pool), 50, nil).Metrics(ctx)
 	if err != nil || applyState != "failed_critical" || !automationLocked || lockReason != "config_apply_rollback_failed" || criticalAlerts != 1 || metrics.ConfigFailedCritical < 1 {
 		t.Fatalf("critical apply state=%s locked=%v reason=%s alerts=%d metrics=%+v err=%v", applyState, automationLocked, lockReason, criticalAlerts, metrics, err)

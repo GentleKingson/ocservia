@@ -194,23 +194,6 @@ func (s privdAttestationStore) VerificationKey(ctx context.Context, node uuid.UU
 	return k, err
 }
 
-func (s privdAttestationStore) ActiveKeys(ctx context.Context, node uuid.UUID, now time.Time) ([]string, error) {
-	rows, err := s.tx.Query(ctx, `SELECT key_id FROM node_privd_attestation_keys WHERE node_id=$1 AND state='active' AND (valid_until IS NULL OR valid_until>$2) ORDER BY activated_at FOR UPDATE`, node, now)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var active []string
-	for rows.Next() {
-		var keyID string
-		if err = rows.Scan(&keyID); err != nil {
-			return nil, err
-		}
-		active = append(active, keyID)
-	}
-	return active, rows.Err()
-}
-
 func (s privdAttestationStore) InsertKey(ctx context.Context, k privdattestation.Key) error {
 	_, err := s.tx.Exec(ctx, `INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,predecessor_key_id) VALUES($1,$2,'ed25519',$3,'active',$4,$4,$4,$5)`,
 		k.NodeID, k.KeyID, k.PublicKey, k.CreatedAt, k.PredecessorKeyID)

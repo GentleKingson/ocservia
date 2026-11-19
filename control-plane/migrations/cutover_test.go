@@ -37,12 +37,8 @@ func releasedCheckpoint(t *testing.T, pool *pgxpool.Pool) {
 	if _, err := tx.Exec(context.Background(), string(sql)); err != nil {
 		t.Fatal(err)
 	}
-	if err := insertRevisionReceipt(context.Background(), tx, 1, 0, checkpointChecksum, 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.Commit(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, insertRevisionReceipt(context.Background(), tx, 1, 0, checkpointChecksum, 1))
+	testutil.NoError(t, tx.Commit(context.Background()))
 }
 
 func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
@@ -74,20 +70,14 @@ func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
 	}
 	for _, pool := range []*pgxpool.Pool{upgraded, fresh} {
 		for range 2 {
-			if err := Migrate(ctx, pool); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, Migrate(ctx, pool))
 		}
-		if err := GrantRuntimePrivileges(ctx, pool, "ocservia_app"); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, GrantRuntimePrivileges(ctx, pool, "ocservia_app"))
 		a, err := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
 		testutil.NoError(t, err)
 		expected, err := a.catalog(a.schema.Baseline.Number)
 		testutil.NoError(t, err)
-		if err := validateStaticSchema(ctx, pool, expected); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, validateStaticSchema(ctx, pool, expected))
 		rows, err := readRevisionReceipts(ctx, pool)
 		// The cutover lands on the new baseline; later revisions then execute on
 		// top of it, while a fresh install records only the current checkpoint.
@@ -121,12 +111,8 @@ func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
 		"SELECT jsonb_agg(to_jsonb(r)-'updated_at' ORDER BY id)::text FROM scheduler_leadership r",
 	} {
 		var left, right *string
-		if err := upgraded.QueryRow(ctx, query).Scan(&left); err != nil {
-			t.Fatal(err)
-		}
-		if err := fresh.QueryRow(ctx, query).Scan(&right); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, upgraded.QueryRow(ctx, query).Scan(&left))
+		testutil.NoError(t, fresh.QueryRow(ctx, query).Scan(&right))
 		if (left == nil) != (right == nil) || (left != nil && *left != *right) {
 			t.Fatal("checkpoint/fresh ACL or mandatory seeds differ", query, left, right)
 		}
@@ -174,9 +160,7 @@ func TestPostgreSQLCutoverCleanupRollback(t *testing.T) {
 	a, _ := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
 	query := strings.Replace(staticFingerprintSQL, "AND NOT c.relispartition", "AND c.relname NOT IN ('schema_migrations','schema_snapshot_origin') AND NOT c.relispartition", 1)
 	var catalog string
-	if err := pool.QueryRow(ctx, query).Scan(&catalog); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, query).Scan(&catalog))
 	a.upgrade.Base.Metadata, _ = json.Marshal(map[string]string{"catalog_sha256": fmt.Sprintf("%x", sha256.Sum256([]byte(catalog)))})
 	conn, err := pool.Acquire(ctx)
 	testutil.NoError(t, err)

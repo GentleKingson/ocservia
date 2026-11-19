@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|ci-quality|source-style|contracts|secret-scan|go-test|go-quality|go-security|go-rust-integration|native|native-packages|package-tools|image-security|rust-basic|rust-validation|rust-security|web|npm-security|security]" >&2
+  echo "usage: $0 [all|source-style|contracts|secret-scan|go-test|go-security|native-packages|package-tools|image-security|rust-basic|rust-security|web|npm-security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | ci-quality | source-style | contracts | secret-scan | go-test | go-quality | go-security | go-rust-integration | native | native-packages | package-tools | image-security | rust-basic | rust-validation | rust-security | web | npm-security | security) ;;
+  all | source-style | contracts | secret-scan | go-test | go-security | native-packages | package-tools | image-security | rust-basic | rust-security | web | npm-security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -65,10 +65,11 @@ download() {
     curl --fail --location --retry 3 --output "${destination}.tmp" "${url}" || return 1
     verify_sha256 "${destination}.tmp" "${expected}" || return 1
     mv "${destination}.tmp" "${destination}" || return 1
+  else
+    # Command substitutions do not reliably inherit errexit. Never return a path
+    # after failed verification, even when the caller assigns download's output.
+    verify_sha256 "${destination}" "${expected}" || return 1
   fi
-  # Command substitutions do not reliably inherit errexit. Never return a path
-  # after failed verification, even when the caller assigns download's output.
-  verify_sha256 "${destination}" "${expected}" || return 1
   printf '%s\n' "${destination}"
 }
 
@@ -452,21 +453,6 @@ case "${PROFILE}" in
     install_ruff
     install_web_dependencies
     ;;
-  ci-quality)
-    install_go
-    install_node
-    install_npm
-    install_rust
-    install_contract_tools
-    install_gitleaks
-    install_rust_quality_tools
-    install_sccache
-    verify_java
-    verify_host_command jq
-    verify_host_command shellcheck
-    install_ruff
-    install_web_dependencies
-    ;;
   source-style)
     verify_host_command shellcheck
     verify_host_command python3
@@ -488,39 +474,18 @@ case "${PROFILE}" in
     install_go
     verify_host_command jq
     ;;
-  go-quality)
-    install_go
-    install_go_quality_tools
-    verify_host_command jq
-    ;;
   go-security)
     install_go
     install_govulncheck
-    ;;
-  go-rust-integration)
-    install_go
-    install_rust
-    install_go_quality_tools
-    install_sccache
-    verify_host_command jq
     ;;
   rust-basic)
     install_rust
     install_rust_validation_components
     ;;
-  rust-validation)
-    install_rust
-    install_rust_quality_tools
-    install_sccache
-    ;;
   rust-security)
     install_rust
     install_cargo_audit
     install_cargo_deny
-    ;;
-  native)
-    install_rust
-    install_sccache
     ;;
   native-packages)
     install_rust
@@ -542,15 +507,5 @@ case "${PROFILE}" in
   npm-security)
     install_node
     install_npm
-    ;;
-  security)
-    install_go
-    install_node
-    install_npm
-    install_rust
-    install_gitleaks
-    install_cargo_deny
-    install_sccache
-    install_web_dependencies
     ;;
 esac

@@ -121,7 +121,6 @@ awk -v dir="${fixture}" '
 ' "${ROOT}/docs/operations/authentication.md"
 (
   unset OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL
-  unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL
   run --non-interactive --config "${fixture}/auth-1.env"
 )
 while IFS= read -r setting; do

@@ -175,7 +175,6 @@ pub struct FixedResources {
     p12_secret_key_id: String,
     effect_store: PathBuf,
     effect_store_key: PathBuf,
-    mutations_blocked: bool,
     certificate_key_dir: PathBuf,
     config_tls_root: PathBuf,
 }
@@ -197,7 +196,6 @@ impl Default for FixedResources {
             p12_secret_key_id: String::from("p12-default"),
             effect_store: PathBuf::from("/var/lib/ocservia-privd/desired-effects.sqlite3"),
             effect_store_key: PathBuf::from("/var/lib/ocservia-privd/desired-effects.key"),
-            mutations_blocked: false,
             certificate_key_dir: PathBuf::from("/var/lib/ocservia-privd/certificates"),
             config_tls_root: PathBuf::from("/etc/ocservia-agent/config-tls"),
         }
@@ -205,13 +203,6 @@ impl Default for FixedResources {
 }
 
 impl FixedResources {
-    /// Quarantines privileged writes while a retired binding has unresolved effects.
-    #[must_use]
-    pub fn with_mutations_blocked(mut self, blocked: bool) -> Self {
-        self.mutations_blocked = blocked;
-        self
-    }
-
     /// Constructs resources from trusted process-startup configuration.
     ///
     /// These values are never populated from an Agent RPC.
@@ -461,9 +452,6 @@ impl Adapter {
         &self,
         identity: AuthorizedEffectIdentity<'_>,
     ) -> Result<AuthorizedEffectDecision, AdapterError> {
-        if self.resources.mutations_blocked {
-            return Err(AdapterError::Unavailable);
-        }
         EffectStore::open_for_mutation(&self.resources)?.prepare_authorized(identity)
     }
 

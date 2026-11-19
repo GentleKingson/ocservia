@@ -23,7 +23,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // TestAgentRolloutFleetLifecycleIntegration proves the durable canary and
@@ -34,19 +33,11 @@ import (
 // only the non-succeeded nodes with a fresh upgrade attempt, and terminal
 // completion once every batch has succeeded.
 func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
+	pool := testfixture.OpenRuntimePool(t)
 	ownerPool := pool
-	if ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"); ownerURL != "" && ownerURL != databaseURL {
-		ownerPool, err = pgxpool.New(ctx, ownerURL)
-		testutil.NoError(t, err)
-		defer ownerPool.Close()
+	if ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"); ownerURL != "" && ownerURL != os.Getenv("OCSERV_TEST_DATABASE_URL") {
+		ownerPool = testfixture.OpenOwnerPool(t)
 	}
 	workspaceID, operatorID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	operatorSession := uuid.Must(uuid.NewV7())
@@ -148,9 +139,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	trustedDigest := bytes.Repeat([]byte{0x63}, 32)
 	manifest := filepath.Join(t.TempDir(), "agent-releases.json")
 	manifestJSON := `{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"` + hex.EncodeToString(trustedDigest) + `"}]}`
-	if err := os.WriteFile(manifest, []byte(manifestJSON), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.WriteFile(manifest, []byte(manifestJSON), 0o600))
 	catalog, err := releasecatalog.Load(manifest)
 	testutil.NoError(t, err)
 	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
@@ -226,9 +215,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		} `json:"excluded"`
 	}
 	var created rolloutResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(response.Body.Bytes(), &created))
 	rolloutID := uuid.MustParse(created.ID)
 	if created.State != "queued" || created.CurrentBatch != 0 {
 		t.Fatalf("rollout header = %+v", created)
@@ -263,9 +250,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatalf("replayed rollout status=%d replayed=%q", replay.Code, replay.Header().Get("Idempotency-Replayed"))
 	}
 	var replayed rolloutResponse
-	if err := json.Unmarshal(replay.Body.Bytes(), &replayed); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(replay.Body.Bytes(), &replayed))
 	assertExclusions("replayed", replayed)
 	if replayed.ID != rolloutID.String() || replay.Header().Get("Location") != "/api/v1/agent-rollouts/"+rolloutID.String() {
 		t.Fatalf("replay returned a different rollout: %+v location=%q", replayed, replay.Header().Get("Location"))
@@ -300,9 +285,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Fatalf("foreign workspace admin listed rollouts status=%d body=%s", listed.Code, listed.Body.String())
 	}
 	var fetched rolloutResponse
-	if err := json.Unmarshal(got.Body.Bytes(), &fetched); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(got.Body.Bytes(), &fetched))
 	assertExclusions("fetched", fetched)
 	if conflict := postRollout("rollout-create-1", rolloutBody(5, nodeIDs...)); conflict.Code != http.StatusConflict {
 		t.Fatalf("idempotency conflict status=%d body=%s", conflict.Code, conflict.Body.String())
@@ -337,9 +320,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	}
 	countNodeUpgrades := func(nodeID uuid.UUID) int {
 		var count int
-		if err := pool.QueryRow(ctx, "SELECT count(*) FROM agent_upgrade_operations WHERE node_id=$1", nodeID).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM agent_upgrade_operations WHERE node_id=$1", nodeID).Scan(&count))
 		return count
 	}
 	setState := func(nodeID uuid.UUID, state string) {
@@ -348,27 +329,19 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		}
 	}
 
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	if countNodeUpgrades(canaryID) != 1 || countNodeUpgrades(batchID) != 0 || countNodeUpgrades(otherID) != 0 {
 		t.Fatalf("canary dispatch must be exactly one node upgrade")
 	}
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	if countNodeUpgrades(canaryID) != 1 {
 		t.Fatalf("repeated advance duplicated the canary upgrade")
 	}
 
 	setState(canaryID, "unknown")
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	var rolloutState, pauseCode string
-	if err := pool.QueryRow(ctx, "SELECT state,pause_code FROM agent_rollouts WHERE id=$1", rolloutID).Scan(&rolloutState, &pauseCode); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, "SELECT state,pause_code FROM agent_rollouts WHERE id=$1", rolloutID).Scan(&rolloutState, &pauseCode))
 	if rolloutState != "paused" || pauseCode != "node_unknown" {
 		t.Fatalf("unknown outcome must pause: state=%s pause=%s", rolloutState, pauseCode)
 	}
@@ -391,49 +364,35 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if resumed := resume(rolloutID, "rollout-resume-1"); resumed.Code != http.StatusOK {
 		t.Fatalf("resume status=%d body=%s", resumed.Code, resumed.Body.String())
 	}
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	if countNodeUpgrades(canaryID) != 2 {
 		t.Fatalf("resume must dispatch a fresh upgrade attempt, got %d operations", countNodeUpgrades(canaryID))
 	}
 
 	setState(canaryID, "succeeded")
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	if countNodeUpgrades(batchID) != 1 || countNodeUpgrades(otherID) != 1 {
 		t.Fatalf("batch one must dispatch after canary success")
 	}
 
 	setState(batchID, "failed")
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, "SELECT state,pause_code FROM agent_rollouts WHERE id=$1", rolloutID).Scan(&rolloutState, &pauseCode); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
+	testutil.NoError(t, pool.QueryRow(ctx, "SELECT state,pause_code FROM agent_rollouts WHERE id=$1", rolloutID).Scan(&rolloutState, &pauseCode))
 	if rolloutState != "paused" || pauseCode != "node_failed" {
 		t.Fatalf("failure must pause: state=%s pause=%s", rolloutState, pauseCode)
 	}
 	if resumed := resume(rolloutID, "rollout-resume-2"); resumed.Code != http.StatusOK {
 		t.Fatalf("second resume status=%d body=%s", resumed.Code, resumed.Body.String())
 	}
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	if countNodeUpgrades(batchID) != 2 || countNodeUpgrades(otherID) != 1 {
 		t.Fatalf("resume must requeue only the failed node: batch=%d other=%d", countNodeUpgrades(batchID), countNodeUpgrades(otherID))
 	}
 
 	setState(batchID, "succeeded")
 	setState(otherID, "succeeded")
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, "SELECT state FROM agent_rollouts WHERE id=$1", rolloutID).Scan(&rolloutState); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
+	testutil.NoError(t, pool.QueryRow(ctx, "SELECT state FROM agent_rollouts WHERE id=$1", rolloutID).Scan(&rolloutState))
 	if rolloutState != "succeeded" {
 		t.Fatalf("completed rollout state=%s, want succeeded", rolloutState)
 	}
@@ -447,17 +406,13 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		var body struct {
 			ID string `json:"id"`
 		}
-		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
 		return uuid.MustParse(body.ID)
 	}
 	countRolloutNodeUpgrades := func(rID, nID uuid.UUID) int {
 		t.Helper()
 		var count int
-		if err := pool.QueryRow(ctx, "SELECT count(*) FROM agent_upgrade_operations u JOIN operations o ON o.id=u.operation_id WHERE o.request_id=$1", "agent-rollout:"+rID.String()+":"+nID.String()).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM agent_upgrade_operations u JOIN operations o ON o.id=u.operation_id WHERE o.request_id=$1", "agent-rollout:"+rID.String()+":"+nID.String()).Scan(&count))
 		return count
 	}
 	completeRolloutUpgrades := func(rID uuid.UUID, filter string) {
@@ -470,12 +425,8 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		t.Helper()
 		var state, code, nodeState, failureCode string
 		var currentBatch int
-		if err := pool.QueryRow(ctx, "SELECT state,pause_code,current_batch FROM agent_rollouts WHERE id=$1", id).Scan(&state, &code, &currentBatch); err != nil {
-			t.Fatal(err)
-		}
-		if err := pool.QueryRow(ctx, "SELECT state,failure_code FROM agent_rollout_nodes WHERE rollout_id=$1 AND node_id=$2", id, nodeID).Scan(&nodeState, &failureCode); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, pool.QueryRow(ctx, "SELECT state,pause_code,current_batch FROM agent_rollouts WHERE id=$1", id).Scan(&state, &code, &currentBatch))
+		testutil.NoError(t, pool.QueryRow(ctx, "SELECT state,failure_code FROM agent_rollout_nodes WHERE rollout_id=$1 AND node_id=$2", id, nodeID).Scan(&nodeState, &failureCode))
 		if state != "paused" || code != "node_skipped" || currentBatch != wantBatch || nodeState != "skipped" || failureCode != reason {
 			t.Fatalf("skipped rollout %s = state %s/%s batch %d node %s/%s", id, state, code, currentBatch, nodeState, failureCode)
 		}
@@ -485,9 +436,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, "UPDATE nodes SET status='offline' WHERE id=$1", canaryID); err != nil {
 		t.Fatal(err)
 	}
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	assertPausedSkip(canarySkipRolloutID, canaryID, 0, "offline")
 	if countRolloutNodeUpgrades(canarySkipRolloutID, canaryID)+countRolloutNodeUpgrades(canarySkipRolloutID, batchID)+countRolloutNodeUpgrades(canarySkipRolloutID, otherID) != 0 {
 		t.Fatal("an ineligible canary must not dispatch any rollout operation")
@@ -498,28 +447,20 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if resumed := resume(canarySkipRolloutID, "rollout-resume-skipped-canary"); resumed.Code != http.StatusOK {
 		t.Fatalf("resume skipped canary status=%d body=%s", resumed.Code, resumed.Body.String())
 	}
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	if countRolloutNodeUpgrades(canarySkipRolloutID, canaryID) != 1 || countRolloutNodeUpgrades(canarySkipRolloutID, batchID) != 0 || countRolloutNodeUpgrades(canarySkipRolloutID, otherID) != 0 {
 		t.Fatal("resuming a skipped canary must retry the canary before ordinary batches")
 	}
 	completeRolloutUpgrades(canarySkipRolloutID, "agent-rollout:"+canarySkipRolloutID.String()+":%")
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	if countRolloutNodeUpgrades(canarySkipRolloutID, batchID) != 1 || countRolloutNodeUpgrades(canarySkipRolloutID, otherID) != 1 {
 		t.Fatal("ordinary batches may start only after the retried canary succeeds")
 	}
 	completeRolloutUpgrades(canarySkipRolloutID, "agent-rollout:"+canarySkipRolloutID.String()+":%")
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 
 	batchSkipRolloutID := createRollout("rollout-batch-skip", 1)
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	if countRolloutNodeUpgrades(batchSkipRolloutID, canaryID) != 1 {
 		t.Fatal("batch-skip rollout must dispatch its canary first")
 	}
@@ -527,9 +468,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, "UPDATE nodes SET status='offline' WHERE id=$1", batchID); err != nil {
 		t.Fatal(err)
 	}
-	if err := advance(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, advance())
 	assertPausedSkip(batchSkipRolloutID, batchID, 1, "offline")
 	if countRolloutNodeUpgrades(batchSkipRolloutID, batchID) != 0 || countRolloutNodeUpgrades(batchSkipRolloutID, otherID) != 0 {
 		t.Fatal("an ineligible ordinary-batch node must hold it and every later batch")

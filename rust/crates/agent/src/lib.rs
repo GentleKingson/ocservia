@@ -5,7 +5,6 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::io;
-use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_agent_protocol::{
@@ -25,8 +24,6 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 };
 use prost::Message;
 use rand::{Rng, RngExt};
-#[cfg(test)]
-use sha2::{Digest, Sha256};
 use tokio::net::UnixStream;
 use uuid::Uuid;
 
@@ -922,68 +919,6 @@ struct ValidatedCommand {
     external: bool,
 }
 
-/// Reproduces the historical UNSPECIFIED payload hash used by synthetic Noop/Echo
-/// compatibility vectors. This test helper also retains the historical typed-payload
-/// cases; its Protobuf encoding is not the current canonical V1/V2 identity.
-///
-/// # Errors
-///
-/// Rejects unsupported payload types.
-#[cfg(test)]
-fn legacy_synthetic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
-    let (capability, payload_bytes) = match envelope.payload.as_ref() {
-        Some(command_envelope::Payload::SyntheticNoop(payload)) => {
-            ("synthetic.noop", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::SyntheticEcho(payload)) => {
-            ("synthetic.echo", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::SessionDisconnect(payload)) => {
-            ("ocserv.session.disconnect", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::SessionTerminate(payload)) => {
-            ("ocserv.session.terminate", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::IpBanRemove(payload)) => {
-            ("ocserv.ip_ban.remove", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::ServiceReload(payload)) => {
-            ("ocserv.service.reload", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::CertificateCsr(payload)) => {
-            ("ocserv.certificate.issue", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::CertificateP12(payload)) => {
-            ("ocserv.certificate.issue", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
-            ("ocserv.certificate.revoke", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::UserCreate(payload)) => {
-            ("ocserv.users.write", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::UserDisable(payload)) => {
-            ("ocserv.users.write", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::UserEnable(payload)) => {
-            ("ocserv.users.write", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
-            ("ocserv.users.write", payload.encode_to_vec())
-        }
-        Some(command_envelope::Payload::GroupApply(payload)) => {
-            ("ocserv.groups.write", payload.encode_to_vec())
-        }
-        _ => return Err(CommandError::Rejected("capability_rejected")),
-    };
-    let mut hash = Sha256::new();
-    hash.update(capability.as_bytes());
-    hash.update(&envelope.node_id);
-    hash.update(envelope.expected_revision.to_be_bytes());
-    hash.update(payload_bytes);
-    Ok(hash.finalize().into())
-}
-
 /// Computes the versioned canonical semantic hash (v1) for a command envelope.
 ///
 /// Follows `docs/development/command-semantic-hash-v1.md`. The preimage is
@@ -1384,21 +1319,6 @@ impl Default for Backoff {
 }
 
 impl Backoff {
-    /// Creates a bounded Full Jitter policy.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero or inverted bounds.
-    pub fn new(base: Duration, cap: Duration) -> Result<Self, io::Error> {
-        if base.is_zero() || cap < base {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "backoff bounds invalid",
-            ));
-        }
-        Ok(Self { base, cap })
-    }
-
     /// Returns a uniformly jittered delay between zero and the exponential cap.
     #[must_use]
     pub fn delay(&self, attempt: u32, rng: &mut impl Rng) -> Duration {
@@ -1628,31 +1548,6 @@ pub fn ensure_unprivileged(effective_uid: u32) -> Result<(), io::Error> {
     Ok(())
 }
 
-/// Reads a bounded, fixed host identity file.
-///
-/// # Errors
-///
-/// Rejects missing, oversized, empty, or control-character-containing content.
-async fn read_host_value(path: &Path, max_bytes: usize) -> Result<String, io::Error> {
-    let bytes = tokio::fs::read(path).await?;
-    if bytes.is_empty() || bytes.len() > max_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "host identity value size invalid",
-        ));
-    }
-    let value = String::from_utf8(bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "host identity value invalid"))?;
-    let value = value.trim();
-    if value.is_empty() || value.chars().any(char::is_control) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "host identity value invalid",
-        ));
-    }
-    Ok(value.to_owned())
-}
-
 /// Reads the bounded `ID` field from the fixed os-release file.
 ///
 /// # Errors
@@ -1693,7 +1588,23 @@ pub async fn read_os_release() -> Result<String, io::Error> {
 ///
 /// Rejects missing, oversized, malformed, or empty content.
 pub async fn read_boot_id() -> Result<String, io::Error> {
-    read_host_value(Path::new("/proc/sys/kernel/random/boot_id"), 64).await
+    let bytes = tokio::fs::read("/proc/sys/kernel/random/boot_id").await?;
+    if bytes.is_empty() || bytes.len() > 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "host identity value size invalid",
+        ));
+    }
+    let value = String::from_utf8(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "host identity value invalid"))?;
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "host identity value invalid",
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 #[cfg(test)]

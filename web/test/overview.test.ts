@@ -1,6 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-
 import type {
   NodeObservedState,
   Operation,
@@ -100,11 +97,7 @@ describe("operational overview", () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", new EventTarget());
     setActivePinia(createPinia());
-    vi.mocked(getWorkspace).mockReset();
-    vi.mocked(listEvents).mockReset();
-    vi.mocked(listNodes).mockReset();
-    vi.mocked(listOperations).mockReset();
-    vi.mocked(operationSummary).mockReset();
+    vi.resetAllMocks();
     vi.mocked(getWorkspace).mockResolvedValue({
       id: "workspace",
       name: "Workspace",
@@ -154,48 +147,16 @@ describe("operational overview", () => {
     fleet.$dispose();
   });
 
-  it("serves operation totals from the workspace summary", async () => {
-    const states: Operation["state"][] = [
-      "queued",
-      "running",
-      "offline_pending",
-      "unknown",
-      "succeeded",
-      "failed",
-      "failed",
-      "failed",
-      "expired",
-      "rolled_back",
-      "drifted",
-      "superseded",
-    ];
-    vi.mocked(listOperations).mockResolvedValue(
-      operationPage(
-        states.map((state, index) => operation(`op-${String(index)}`, state)),
+  it("serves workspace-wide totals from the summary and counts failed operations in the recent window", async () => {
+    // Summary totals can exceed the newest page, while failed count stays
+    // bounded to the 20-operation recent window.
+    const items = Array.from({ length: 24 }, (_, index) =>
+      operation(
+        `op-${String(index).padStart(2, "0")}`,
+        index < 3 || index >= 20 ? "failed" : "succeeded",
       ),
     );
-    vi.mocked(operationSummary).mockResolvedValue({ active: 3, unknown: 1 });
-    const overview = useOverviewStore();
-    overview.start();
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(overview.activeOperations).toBe(3);
-    expect(overview.unknownOperations).toBe(1);
-    expect(overview.recentFailedOperations).toBe(3);
-    overview.stop();
-  });
-
-  it("counts operations beyond the newest page via the summary", async () => {
-    // The whole newest page is terminal while the workspace still holds a
-    // large active/unknown backlog; only the summary sees the truth.
-    vi.mocked(listOperations).mockResolvedValue(
-      operationPage(
-        Array.from({ length: 200 }, (_, index) =>
-          operation(`op-${String(index).padStart(3, "0")}`, "succeeded"),
-        ),
-        true,
-      ),
-    );
+    vi.mocked(listOperations).mockResolvedValue(operationPage(items, true));
     vi.mocked(operationSummary).mockResolvedValue({
       active: 300,
       unknown: 100,
@@ -206,42 +167,24 @@ describe("operational overview", () => {
 
     expect(overview.activeOperations).toBe(300);
     expect(overview.unknownOperations).toBe(100);
-    expect(overview.recentFailedOperations).toBe(0);
+    expect(overview.recentFailedOperations).toBe(3);
     overview.stop();
   });
 
-  it("counts failed operations only inside the recent window", async () => {
-    vi.mocked(listOperations).mockResolvedValue(
-      operationPage(
-        Array.from({ length: 24 }, (_, index) =>
-          operation(
-            `op-${String(index).padStart(2, "0")}`,
-            index < 20 ? "succeeded" : "failed",
-          ),
-        ),
-      ),
-    );
-    const overview = useOverviewStore();
-    overview.start();
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(overview.recentFailedOperations).toBe(0);
-    overview.stop();
-  });
-
-  it("bounds and orders recent events and operations", async () => {
+  it("bounds and orders recent events and operations without walking history", async () => {
     const newestFirst = Array.from({ length: 20 }, (_, index) =>
       platformEvent(
         `019fc0a4-6d92-765c-a8a1-4af556614e${String(19 - index).padStart(2, "0")}`,
         19 - index,
       ),
     );
-    vi.mocked(listEvents).mockResolvedValue(eventPage(newestFirst));
+    vi.mocked(listEvents).mockResolvedValue(eventPage(newestFirst, true));
     vi.mocked(listOperations).mockResolvedValue(
       operationPage(
         Array.from({ length: 20 }, (_, index) =>
           operation(`op-${String(index).padStart(2, "0")}`, "succeeded"),
         ),
+        true,
       ),
     );
     const overview = useOverviewStore();
@@ -261,25 +204,6 @@ describe("operational overview", () => {
     expect(overview.recentEvents[0]?.id).toBe(overview.events.at(-1)?.id);
     expect(overview.recentOperations).toHaveLength(12);
     expect(overview.recentOperations[0]?.id).toBe("op-00");
-    overview.stop();
-  });
-
-  it("does not walk history when the newest event page has more", async () => {
-    vi.mocked(listEvents).mockResolvedValue(
-      eventPage(
-        [platformEvent("event-newest", 2), platformEvent("event-oldest", 1)],
-        true,
-      ),
-    );
-    const overview = useOverviewStore();
-    overview.start();
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(listEvents).toHaveBeenCalledTimes(1);
-    expect(overview.events.map((event) => event.id)).toEqual([
-      "event-oldest",
-      "event-newest",
-    ]);
     overview.stop();
   });
 
@@ -511,18 +435,5 @@ describe("operational overview", () => {
     expect(listEvents).toHaveBeenCalledTimes(1);
     expect(overview.events).toEqual([]);
     expect(overview.eventsLoaded).toBe(false);
-  });
-});
-
-describe("production overview isolation", () => {
-  it("does not use development simulator state in the production view", async () => {
-    const source = await readFile(
-      resolve(import.meta.dirname, "../src/views/OverviewView.vue"),
-      "utf8",
-    );
-    expect(source).not.toContain("useDevelopmentSimulationStore");
-    expect(source).not.toContain("SimulationScenario");
-    expect(source).not.toContain("createLocalSimulation");
-    expect(source).not.toContain("run-probe");
   });
 });

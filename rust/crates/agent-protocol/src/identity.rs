@@ -84,12 +84,6 @@ impl Identity {
         self.key.public()
     }
 
-    /// Returns the pinned controller `EndpointID`.
-    #[must_use]
-    pub const fn controller_endpoint_id(&self) -> EndpointId {
-        self.controller
-    }
-
     /// Borrows the secret key without exposing it through formatting.
     #[must_use]
     pub const fn secret_key(&self) -> &SecretKey {

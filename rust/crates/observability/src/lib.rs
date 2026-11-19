@@ -42,8 +42,8 @@ pub fn init(
 /// Returns an error when the initial write to `path` fails, so callers fail
 /// fast instead of silently producing no statistics.
 pub fn spawn_runtime_stats_writer(path: std::path::PathBuf) -> Result<(), StatsWriteError> {
-    write_runtime_stats(&path)?;
     let handle = tokio::runtime::Handle::try_current().map_err(StatsWriteError::NoRuntime)?;
+    write_runtime_stats_with_alive(&path, handle.metrics().num_alive_tasks())?;
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -72,13 +72,6 @@ pub fn spawn_runtime_stats_writer(path: std::path::PathBuf) -> Result<(), StatsW
         }
     });
     Ok(())
-}
-
-fn write_runtime_stats(path: &std::path::Path) -> Result<(), StatsWriteError> {
-    let alive = tokio::runtime::Handle::try_current()
-        .map(|handle| handle.metrics().num_alive_tasks())
-        .map_err(StatsWriteError::NoRuntime)?;
-    write_runtime_stats_with_alive(path, alive)
 }
 
 fn write_runtime_stats_with_alive(

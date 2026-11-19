@@ -2,8 +2,6 @@ package transportevents
 
 import (
 	"context"
-	"crypto/sha256"
-	"os"
 	"testing"
 	"time"
 
@@ -37,13 +35,8 @@ type commandResultFixture struct {
 
 func newCommandResultFixture(t *testing.T) commandResultFixture {
 	t.Helper()
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	testutil.NoError(t, err)
+	pool := testfixture.OpenRuntimePool(t)
 	operationID, commandID, key := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	messageID := uuid.Must(uuid.NewV7())
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -80,7 +73,6 @@ func newCommandResultFixture(t *testing.T) commandResultFixture {
 		} {
 			_, _ = pool.Exec(context.Background(), statement, operationID, commandID, nodeID, workspaceID)
 		}
-		pool.Close()
 	})
 	return commandResultFixture{pool: pool, service: NewBackend(postgres.WrapPool(pool), signer), signer: signer, workspaceID: workspaceID, nodeID: nodeID, endpointID: endpointID, operationID: operationID, commandID: commandID, envelope: &envelope, payloadHash: payloadHash, traceparent: traceparent, issuedAt: now, originalTime: now}
 }
@@ -91,30 +83,6 @@ func integrationCommandSigner() *commandauth.Signer {
 
 func integrationEndpoint(nodeID uuid.UUID) [32]byte {
 	return testfixture.EndpointForNode("ocservia/development-simulator/", nodeID)
-}
-
-func assertEventQuarantined(t *testing.T, pool *pgxpool.Pool, eventID, nodeID uuid.UUID, reasonCode string) {
-	t.Helper()
-	var quarantinedNode, cursorID uuid.UUID
-	var quarantinedReason string
-	var payloadHash []byte
-	var eventCount int
-	if err := pool.QueryRow(context.Background(), `SELECT node_id,reason_code,payload_sha256 FROM transport_event_quarantine WHERE event_id=$1`, eventID).Scan(&quarantinedNode, &quarantinedReason, &payloadHash); err != nil {
-		t.Fatalf("read quarantined event %s: %v", eventID, err)
-	}
-	if quarantinedNode != nodeID || quarantinedReason != reasonCode || len(payloadHash) != sha256.Size {
-		t.Fatalf("quarantine evidence node=%s reason=%q hash_bytes=%d", quarantinedNode, quarantinedReason, len(payloadHash))
-	}
-	if err := pool.QueryRow(context.Background(), `SELECT event_id FROM transport_event_cursor WHERE singleton AND valid`).Scan(&cursorID); err != nil {
-		t.Fatalf("read durable transport cursor: %v", err)
-	}
-	if cursorID != eventID {
-		t.Fatalf("durable cursor=%s, want quarantined event %s", cursorID, eventID)
-	}
-	testutil.NoError(t, pool.QueryRow(context.Background(), `SELECT count(*) FROM transport_events WHERE event_id=$1`, eventID).Scan(&eventCount))
-	if eventCount != 0 {
-		t.Fatalf("quarantined event %s reached the business event table", eventID)
-	}
 }
 
 func (fixture *commandResultFixture) validResult() *agentv1.CommandResult {

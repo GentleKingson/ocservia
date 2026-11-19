@@ -1,11 +1,6 @@
-import {
-  createRenderer,
-  h,
-  ssrContextKey,
-  type Ref,
-  type Component,
-} from "vue";
+import { h, ssrContextKey, type Ref, type Component } from "vue";
 import type { NodeObservedState } from "@ocservia/api-client";
+import { renderer } from "./renderer";
 import NodeDetailView from "../src/views/NodeDetailView.vue";
 import NodeConfigurationDialog from "../src/features/configuration/NodeConfigurationDialog.vue";
 import NodeCertificateDialog from "../src/features/certificates/NodeCertificateDialog.vue";
@@ -20,19 +15,6 @@ const certificates = {
   render: () => null,
 } as Component;
 const userGroup = { ...NodeUserGroupDialog, render: () => null } as Component;
-
-const renderer = createRenderer<object, object>({
-  createElement: () => ({}),
-  createText: () => ({}),
-  createComment: () => ({}),
-  insert: () => {},
-  remove: () => {},
-  setText: () => {},
-  setElementText: () => {},
-  parentNode: () => null,
-  nextSibling: () => null,
-  patchProp: () => {},
-});
 
 export function mountNodeDetail() {
   // Vitest loads SSR-compiled SFCs. Mount their real setups with a minimal

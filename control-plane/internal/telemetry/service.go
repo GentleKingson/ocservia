@@ -210,10 +210,6 @@ func (s *Service) applyAgentVersionState(node *Node) {
 	node.AgentVersionState = ClassifyAgentVersion(node.AgentVersion, s.recommendedAgentVersion)
 }
 
-func (s *Service) ListNodes(ctx context.Context, after uuid.UUID, limit int) ([]Node, bool, error) {
-	return s.ListNodesInWorkspace(ctx, uuid.Nil, after, limit)
-}
-
 func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after uuid.UUID, limit int) ([]Node, bool, error) {
 	if limit < 1 || limit > 200 {
 		return nil, false, errors.New("node page size must be between 1 and 200")

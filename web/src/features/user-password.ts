@@ -32,6 +32,7 @@ export async function sealUserPassword(
       binding.publicKeyDer.length > 1368
     )
       throw new Error("passwordKeyChanged");
+    let key: CryptoKey;
     try {
       const binary = atob(binding.publicKeyDer);
       if (btoa(binary) !== binding.publicKeyDer) throw new Error();
@@ -43,11 +44,6 @@ export async function sealUserPassword(
         ) !== binding.publicKeySha256
       )
         throw new Error();
-    } catch {
-      throw new Error("passwordKeyChanged");
-    }
-    let key: CryptoKey;
-    try {
       key = await subtle.importKey(
         "spki",
         der,

@@ -58,7 +58,7 @@ fn perf_journal_telemetry_enqueue_evict_drain() {
 
     let start = Instant::now();
     for (id, _) in &pending {
-        journal.acknowledge_telemetry(id).expect("ack");
+        journal.acknowledge_telemetry_batch(&[*id]).expect("ack");
     }
     let ack_elapsed = start.elapsed();
     println!(

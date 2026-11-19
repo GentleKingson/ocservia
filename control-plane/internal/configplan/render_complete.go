@@ -14,8 +14,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const MaxCandidateBytes = 256 * 1024
-
 var (
 	ErrInvalid   = errors.New("configuration plan is invalid")
 	labelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)

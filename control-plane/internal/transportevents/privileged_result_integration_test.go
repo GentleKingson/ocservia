@@ -2,7 +2,6 @@ package transportevents
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -10,12 +9,10 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
-
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -27,17 +24,9 @@ import (
 //     settles it;
 //   - the Agent's unsigned effect_absent never authorizes an executable retry.
 func TestPrivilegedResultTrustIntegration(t *testing.T) {
-	databaseURL, ownerURL := os.Getenv("OCSERV_TEST_DATABASE_URL"), os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
-	if databaseURL == "" || ownerURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL and OCSERV_TEST_OWNER_DATABASE_URL are required")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	testutil.NoError(t, err)
-	defer pool.Close()
-	cleanupPool, err := pgxpool.New(ctx, ownerURL)
-	testutil.NoError(t, err)
-	defer cleanupPool.Close()
+	pool := testfixture.OpenRuntimePool(t)
+	cleanupPool := testfixture.OpenOwnerPool(t)
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'privileged trust',$2,now(),now())`, workspaceID, "privileged-trust-"+workspaceID.String())
 	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'privileged-node','active',1,now(),now())`, nodeID, workspaceID)

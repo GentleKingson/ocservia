@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
 	"slices"
 	"sync"
 	"testing"
@@ -13,22 +12,14 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OCSERV_TEST_DATABASE_URL not set")
-	}
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testfixture.OpenRuntimePool(t)
 }
 
 func mustUUIDv7(t *testing.T) uuid.UUID {
@@ -119,15 +110,26 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 	}
 
 	operationID := mustUUIDv7(t)
-	fence, binding, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.service.reload")
-	if err != nil || binding.GetOwnerEpoch() != fence.GetOwnerEpoch() {
-		t.Fatalf("bind operation = %v", err)
+	var boundFence *agentv1.ConnectionFenceV2
+	var binding *agentv1.FenceBindingV2
+	if err := manager.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.service.reload",
+		func(_ context.Context, f *agentv1.ConnectionFenceV2, b *agentv1.FenceBindingV2) error {
+			boundFence, binding = f, b
+			return nil
+		}); err != nil || boundFence == nil || binding == nil || binding.GetOwnerEpoch() != boundFence.GetOwnerEpoch() {
+		t.Fatalf("execute fenced = %v", err)
 	}
-	if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.tenant.admin"); !errors.Is(err, ErrCapabilityNotFenced) {
+	if err := manager.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.tenant.admin",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error { return nil }); !errors.Is(err, ErrCapabilityNotFenced) {
 		t.Fatalf("unheld capability error = %v, want ErrCapabilityNotFenced", err)
 	}
-	if _, _, err := manager.BindOperation(context.Background(), mustUUIDv7(t), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.service.reload"); !errors.Is(err, ErrNoFence) {
-		t.Fatalf("unknown node error = %v, want ErrNoFence", err)
+	unfenced := false
+	if err := manager.ExecuteFenced(context.Background(), mustUUIDv7(t), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.service.reload",
+		func(_ context.Context, f *agentv1.ConnectionFenceV2, b *agentv1.FenceBindingV2) error {
+			unfenced = f == nil && b == nil
+			return nil
+		}); err != nil || !unfenced {
+		t.Fatalf("unknown node execute = (%v, unfenced %v), want unfenced compatibility path", err, unfenced)
 	}
 }
 
@@ -158,8 +160,9 @@ func TestManagerTakeoverFailsClosedIntegration(t *testing.T) {
 	}
 
 	operationID := mustUUIDv7(t)
-	if _, _, err := owner.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.fencing.v2"); !errors.Is(err, ErrNotOwner) {
-		t.Fatalf("stale owner bind error = %v, want ErrNotOwner", err)
+	if err := owner.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.fencing.v2",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error { return nil }); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("stale owner execute error = %v, want ErrNotOwner", err)
 	}
 	firstConnection, err := fixed16(firstFence.GetConnectionId())
 	if err != nil {
@@ -168,8 +171,14 @@ func TestManagerTakeoverFailsClosedIntegration(t *testing.T) {
 	if owner.OwnsTerm(nodeID, firstConnection, int64(firstFence.GetOwnerEpoch())) {
 		t.Fatal("stale manager retained local recovery authority")
 	}
-	if _, _, err := successor.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, mustUUIDv7(t), "ocserv.fencing.v2"); err != nil {
-		t.Fatalf("successor bind: %v", err)
+	if err := successor.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, mustUUIDv7(t), "ocserv.fencing.v2",
+		func(_ context.Context, f *agentv1.ConnectionFenceV2, b *agentv1.FenceBindingV2) error {
+			if f == nil || b == nil {
+				return errors.New("missing fence or binding")
+			}
+			return nil
+		}); err != nil {
+		t.Fatalf("successor execute: %v", err)
 	}
 }
 
@@ -207,8 +216,14 @@ func TestManagerConcurrentLifecycleIsRaceFreeIntegration(t *testing.T) {
 				return
 			}
 			for attempt := 0; attempt < 8; attempt++ {
-				if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); err != nil {
-					t.Errorf("concurrent bind %d/%d: %v", index, attempt, err)
+				if err := manager.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2",
+					func(_ context.Context, f *agentv1.ConnectionFenceV2, b *agentv1.FenceBindingV2) error {
+						if f == nil || b == nil {
+							return errors.New("missing fence or binding")
+						}
+						return nil
+					}); err != nil {
+					t.Errorf("concurrent execute %d/%d: %v", index, attempt, err)
 					return
 				}
 			}
@@ -224,9 +239,13 @@ func TestManagerConcurrentLifecycleIsRaceFreeIntegration(t *testing.T) {
 			highest = epoch
 		}
 	}
-	fence, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2")
-	if err != nil {
-		t.Fatalf("post-race bind: %v", err)
+	var fence *agentv1.ConnectionFenceV2
+	if err := manager.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2",
+		func(_ context.Context, f *agentv1.ConnectionFenceV2, _ *agentv1.FenceBindingV2) error {
+			fence = f
+			return nil
+		}); err != nil {
+		t.Fatalf("post-race execute: %v", err)
 	}
 	if fence.GetOwnerEpoch() < highest {
 		t.Fatalf("retained epoch %d is lower than the observed maximum %d", fence.GetOwnerEpoch(), highest)

@@ -526,18 +526,33 @@ func requestHash(r CreateRequest) [32]byte {
 	case ConfigPlanPayload:
 		intent.CompleteProfile = p.CompleteCandidate != nil
 		intent.CandidateHash, intent.PlanRevision = fmt.Sprintf("%x", p.CandidateHash), p.PlanRevision
-		intent.PlanTemplate, intent.OcservVersion, intent.PlanCapabilities = planTemplate(p.PlanMetadata), p.OcservVersion, p.PlanCapabilities
+		if p.PlanMetadata != nil {
+			intent.PlanTemplate = p.PlanMetadata.TemplateName
+		}
+		intent.OcservVersion, intent.PlanCapabilities = p.OcservVersion, p.PlanCapabilities
 	case ConfigApplyPayload:
 		intent.CompleteProfile, intent.MaterializedHash, intent.PlanExpiresAt = p.CompleteCandidate != nil, hex.EncodeToString(p.MaterializedHash), p.PlanExpiresAt
 		intent.CandidateHash, intent.ExpectedCurrentHash = fmt.Sprintf("%x", p.CandidateHash), fmt.Sprintf("%x", p.ExpectedCurrentHash)
-		intent.DesiredRevision, intent.PlanRevision, intent.PlanID = p.DesiredRevision, p.PlanRevision, applyPlanID(p.ApplyMetadata)
+		intent.DesiredRevision, intent.PlanRevision = p.DesiredRevision, p.PlanRevision
+		if p.ApplyMetadata != nil {
+			intent.PlanID = p.ApplyMetadata.PlanID
+		}
 	case CertificateCSRPayload:
 		intent.CommonName, intent.DNSNames, intent.KeyBits = p.CommonName, p.DNSNames, p.KeyBits
 	case CertificateP12Payload:
 		intent.CertificateID, intent.CertificateVersion, intent.ArtifactID = p.CertificateID, p.CertificateVersion, p.ArtifactID
-		intent.CertificateChainHash, intent.SealedPasswordHash = hashBytes(p.CertificateChain), sealedPasswordHash(p.SealedPassword)
-		intent.SecretKeyID, intent.SecretVersion, intent.SecretPurpose = sealedPasswordKeyID(p.SealedPassword), sealedPasswordVersion(p.SealedPassword), sealedPasswordPurpose(p.SealedPassword)
-		intent.ArtifactTokenHash, intent.ArtifactRequestHash, intent.ArtifactExpiresAt = artifactTokenHash(p.ArtifactMetadata), artifactRequestHash(p.ArtifactMetadata), artifactExpiry(p.ArtifactMetadata)
+		intent.CertificateChainHash = hashBytes(p.CertificateChain)
+		if p.SealedPassword != nil {
+			intent.SealedPasswordHash = hashBytes(p.SealedPassword.GetCiphertext())
+			intent.SecretKeyID = p.SealedPassword.GetKeyId()
+			intent.SecretVersion = int32(p.SealedPassword.GetVersion())
+			intent.SecretPurpose = int32(p.SealedPassword.GetPurpose())
+		}
+		if p.ArtifactMetadata != nil {
+			intent.ArtifactTokenHash = hex.EncodeToString(p.ArtifactMetadata.TokenSHA256)
+			intent.ArtifactRequestHash = hex.EncodeToString(p.ArtifactMetadata.RequestHash)
+			intent.ArtifactExpiresAt = p.ArtifactMetadata.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
 	case CertificateRevokePayload:
 		intent.CertificateID, intent.CertificateVersion, intent.RevocationReason, intent.HoldDispatch = p.CertificateID, p.CertificateVersion, p.RevocationReason, p.HoldDispatch
 	case AgentUpgradePayload:
@@ -561,65 +576,6 @@ func hashBytes(value []byte) string {
 
 func validSealedP12(secret *agentv1.SealedSecretV1) bool {
 	return secret != nil && secret.GetVersion() == agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1 && secret.GetPurpose() == agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD && strings.TrimSpace(secret.GetKeyId()) != "" && len(secret.GetKeyId()) <= 128 && len(secret.GetCiphertext()) >= 32 && len(secret.GetCiphertext()) <= 16*1024
-}
-func sealedPasswordHash(secret *agentv1.SealedSecretV1) string {
-	if secret == nil {
-		return ""
-	}
-	return hashBytes(secret.GetCiphertext())
-}
-func sealedPasswordKeyID(secret *agentv1.SealedSecretV1) string {
-	if secret == nil {
-		return ""
-	}
-	return secret.GetKeyId()
-}
-func sealedPasswordVersion(secret *agentv1.SealedSecretV1) int32 {
-	if secret == nil {
-		return 0
-	}
-	return int32(secret.GetVersion())
-}
-func sealedPasswordPurpose(secret *agentv1.SealedSecretV1) int32 {
-	if secret == nil {
-		return 0
-	}
-	return int32(secret.GetPurpose())
-}
-
-func artifactTokenHash(metadata *ArtifactMetadata) string {
-	if metadata == nil {
-		return ""
-	}
-	return hex.EncodeToString(metadata.TokenSHA256)
-}
-
-func artifactRequestHash(metadata *ArtifactMetadata) string {
-	if metadata == nil {
-		return ""
-	}
-	return hex.EncodeToString(metadata.RequestHash)
-}
-
-func artifactExpiry(metadata *ArtifactMetadata) string {
-	if metadata == nil {
-		return ""
-	}
-	return metadata.ExpiresAt.UTC().Format(time.RFC3339Nano)
-}
-
-func planTemplate(metadata *ConfigPlanMetadata) string {
-	if metadata == nil {
-		return ""
-	}
-	return metadata.TemplateName
-}
-
-func applyPlanID(metadata *ConfigApplyMetadata) uuid.UUID {
-	if metadata == nil {
-		return uuid.Nil
-	}
-	return metadata.PlanID
 }
 
 func normalizedAuditIntent(r CreateRequest) (actorID, action, reason string) {

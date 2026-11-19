@@ -22,7 +22,6 @@ use prost::Message;
 use std::collections::HashSet;
 use std::future::Future;
 use std::io;
-use std::path::Path;
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
@@ -68,7 +67,6 @@ pub(super) struct SessionContext<'a> {
     pub(super) command_keys: &'a ControllerCommandKeyring,
     pub(super) sealing_keys: &'a [SealingKeyDescriptorV1],
     pub(super) fence_epoch_floor: &'a mut u64,
-    pub(super) synthetic_barrier_file: Option<&'a Path>,
 }
 
 pub(super) struct SessionGrantAuthority {
@@ -106,10 +104,6 @@ impl ActiveSessionAuthority {
             Self::SignedReadOnlyV11(_) => "signed_read_only_v1_1",
             Self::FencedV11 { .. } => "fenced_v1_1",
         }
-    }
-
-    fn capability_count(&self) -> usize {
-        self.grant().negotiated_capabilities.len()
     }
 
     fn expires_at_unix_seconds(&self) -> i64 {
@@ -249,7 +243,7 @@ async fn connect_once(
     tracing::info!(
         controller = %controller.id,
         session_mode = session_authority.name(),
-        negotiated_capabilities = session_authority.capability_count(),
+        negotiated_capabilities = session_authority.grant().negotiated_capabilities.len(),
         "agent session accepted"
     );
     let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
@@ -271,7 +265,13 @@ async fn connect_once(
                 let observations=session.privd.snapshot().await?;
                 // Durable upgrade outcome evidence is best-effort: an older
                 // privd without the fixed read simply yields an empty report.
-                let upgrade_outcomes=session.privd.upgrade_results().await.unwrap_or_default();
+                let upgrade_outcomes = match session.privd.upgrade_results().await {
+                    Ok(outcomes) => outcomes,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "failed to read privd upgrade results");
+                        Vec::new()
+                    }
+                };
                 sequence=sequence.saturating_add(1);
                 let drops = session.command_executor.journal().telemetry_drop_counters()?;
                 let batch = build_telemetry(session, sequence, &observations, upgrade_outcomes, &connection, drops)?;
@@ -445,26 +445,6 @@ pub(super) fn negotiate_session_mode(
         command_keys,
         i64::try_from(now.as_secs())?,
         now.subsec_nanos(),
-    )
-}
-
-#[cfg(test)]
-pub(super) fn negotiate_session_mode_at(
-    response: &SessionHandshakeResponse,
-    supported_capabilities: &[String],
-    node_id: Uuid,
-    endpoint_id: EndpointId,
-    command_keys: &ControllerCommandKeyring,
-    now_unix_seconds: i64,
-) -> Result<ActiveSessionAuthority, Box<dyn std::error::Error + Send + Sync>> {
-    negotiate_session_mode_at_instant(
-        response,
-        supported_capabilities,
-        node_id,
-        endpoint_id,
-        command_keys,
-        now_unix_seconds,
-        0,
     )
 }
 

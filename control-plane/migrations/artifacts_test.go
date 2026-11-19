@@ -24,17 +24,13 @@ func futurePostgresArtifacts(t *testing.T) (string, []byte, string) {
 	t.Helper()
 	ctx := context.Background()
 	reference := snapshotDatabase(t)
-	if err := Migrate(ctx, reference); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, Migrate(ctx, reference))
 	statement := "ALTER TABLE public.workspaces ADD COLUMN artifact_probe text;\n"
 	if _, err := reference.Exec(ctx, statement); err != nil {
 		t.Fatal(err)
 	}
 	var catalog string
-	if err := reference.QueryRow(ctx, staticFingerprintSQL).Scan(&catalog); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, reference.QueryRow(ctx, staticFingerprintSQL).Scan(&catalog))
 	sum := sha256.Sum256([]byte(catalog))
 	after := fmt.Sprintf("%x", sum)
 	original, err := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
@@ -60,12 +56,8 @@ func postgresDatabaseDigest(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
 	ctx := context.Background()
 	var catalog, receipts string
-	if err := pool.QueryRow(ctx, staticFingerprintSQL).Scan(&catalog); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, "SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY epoch,revision),'[]')::text FROM public.schema_revisions r").Scan(&receipts); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, staticFingerprintSQL).Scan(&catalog))
+	testutil.NoError(t, pool.QueryRow(ctx, "SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY epoch,revision),'[]')::text FROM public.schema_revisions r").Scan(&receipts))
 	return catalog + receipts
 }
 
@@ -75,26 +67,18 @@ func TestPostgreSQLArtifactFreshAndUpgrade(t *testing.T) {
 	testutil.NoError(t, err)
 	current := original.schema.Baseline.Number
 	upgraded := snapshotDatabase(t)
-	if err := Migrate(ctx, upgraded); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, Migrate(ctx, upgraded))
 	schema, upgrade, after := futurePostgresArtifacts(t)
 	usePostgresArtifacts(t, schema, upgrade)
 	for range 2 {
-		if err := Migrate(ctx, upgraded); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, Migrate(ctx, upgraded))
 	}
 	fresh := snapshotDatabase(t)
 	for range 2 {
-		if err := Migrate(ctx, fresh); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, Migrate(ctx, fresh))
 	}
 	for _, pool := range []*pgxpool.Pool{fresh, upgraded} {
-		if err := validateStaticSchema(ctx, pool, after); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, validateStaticSchema(ctx, pool, after))
 		var old int
 		if err := pool.QueryRow(ctx, "SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('schema_migrations','schema_snapshot_origin')").Scan(&old); err != nil || old != 0 {
 			t.Fatal("fabricated legacy history", old, err)
@@ -121,9 +105,7 @@ func TestPostgreSQLArtifactUnsupportedNoMutation(t *testing.T) {
 	} {
 		t.Run(tamper, func(t *testing.T) {
 			pool := snapshotDatabase(t)
-			if err := Migrate(ctx, pool); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, Migrate(ctx, pool))
 			if _, err := pool.Exec(ctx, tamper); err != nil {
 				t.Fatal(err)
 			}
@@ -141,9 +123,7 @@ func TestPostgreSQLArtifactUnsupportedNoMutation(t *testing.T) {
 func TestPostgreSQLArtifactRollback(t *testing.T) {
 	ctx := context.Background()
 	pool := snapshotDatabase(t)
-	if err := Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, Migrate(ctx, pool))
 	schema, upgrade, _ := futurePostgresArtifacts(t)
 	upgrade = []byte(strings.Replace(string(upgrade), "ADD COLUMN artifact_probe text;\n", "ADD COLUMN artifact_probe text;\nSELECT 1/0;\n", 1))
 	// This is a new unpublished failing revision: keep its covered-history
@@ -169,9 +149,7 @@ func TestPostgreSQLArtifactRollback(t *testing.T) {
 func TestPostgreSQLArtifactMalformedNoMutation(t *testing.T) {
 	ctx := context.Background()
 	pool := snapshotDatabase(t)
-	if err := Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, Migrate(ctx, pool))
 	usePostgresArtifacts(t, schemaSQL, append(append([]byte(nil), upgradeSQL...), []byte("-- ocservia:revision=2\n")...))
 	before := postgresDatabaseDigest(t, pool)
 	if err := Migrate(ctx, pool); err == nil {
@@ -185,9 +163,7 @@ func TestPostgreSQLArtifactMalformedNoMutation(t *testing.T) {
 func TestPostgreSQLArtifactHistoryMutationNoMutation(t *testing.T) {
 	ctx := context.Background()
 	pool := snapshotDatabase(t)
-	if err := Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, Migrate(ctx, pool))
 	schema, upgrade, _ := futurePostgresArtifacts(t)
 	upgrade = []byte(strings.Replace(string(upgrade), "ADD COLUMN artifact_probe", "ADD  COLUMN artifact_probe", 1))
 	usePostgresArtifacts(t, schema, upgrade)
