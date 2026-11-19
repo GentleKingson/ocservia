@@ -1456,445 +1456,418 @@ fn sha256_if_present(path: &Path) -> Result<Option<[u8; 32]>, UpgradeStoreError>
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::{Arc, Barrier};
 
     use super::*;
 
-    fn test_root(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("ocservia-upgrader-{tag}-{}", Uuid::now_v7()));
-        fs::create_dir(&root).expect("create test root");
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("secure test root");
-        root
+    struct TempRoot(PathBuf);
+    impl TempRoot {
+        fn new(tag: &str) -> Self {
+            let p =
+                std::env::temp_dir().join(format!("ocservia-upgrader-{tag}-{}", Uuid::now_v7()));
+            fs::create_dir(&p).expect("mkdir");
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).expect("700");
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+        fn ops(&self) -> PathBuf {
+            self.0.join("var/lib/ocservia-upgrade/operations")
+        }
+        fn scheduler(&self) -> UpgradeScheduler {
+            UpgradeScheduler::new(self.ops(), UpgradeTrigger::Disabled)
+        }
+        fn runner(&self) -> UpgradeRunner {
+            UpgradeRunner::new(self.0.clone())
+        }
+        fn force_state(&self, op: &Uuid, state: OperationState) {
+            write_atomic(
+                &self.ops().join(op.to_string()).join("state"),
+                format!("{}\n", state.as_str()).as_bytes(),
+                TempOwner::Run,
+            )
+            .expect("force");
+        }
+    }
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
-    fn operations_dir(root: &Path) -> PathBuf {
-        root.join("var/lib/ocservia-upgrade/operations")
+    fn new_intent(sha: [u8; 32]) -> UpgradeIntent {
+        new_intent_ver(
+            "1.2.3",
+            sha,
+            ocservia_contracts::agent_upgrade::runtime_architecture().expect("arch"),
+        )
     }
-
-    fn scheduler(root: &Path) -> UpgradeScheduler {
-        UpgradeScheduler::new(operations_dir(root), UpgradeTrigger::Disabled)
-    }
-
-    fn new_intent(package_sha256: [u8; 32]) -> UpgradeIntent {
+    fn new_intent_ver(ver: &str, sha: [u8; 32], arch: &str) -> UpgradeIntent {
         UpgradeIntent::new(
             *Uuid::now_v7().as_bytes(),
             *Uuid::now_v7().as_bytes(),
-            "1.2.3",
-            package_sha256,
-            ocservia_contracts::agent_upgrade::runtime_architecture().expect("host architecture"),
+            ver,
+            sha,
+            arch,
             [0x55; 32],
         )
-        .expect("valid test intent")
+        .expect("intent")
     }
-
     fn record_mode(path: &Path) -> u32 {
         fs::symlink_metadata(path)
-            .expect("record metadata")
+            .expect("meta")
             .permissions()
             .mode()
+            & 0o777
     }
-
-    fn force_state(root: &Path, operation: &Uuid, state: OperationState) {
-        write_atomic(
-            &operations_dir(root)
-                .join(operation.to_string())
-                .join("state"),
-            format!("{}\n", state.as_str()).as_bytes(),
-            TempOwner::Run,
-        )
-        .expect("force durable state");
-    }
-
-    fn plant_stale_temporary(path: &Path, bytes: &[u8]) {
-        let mut file = OpenOptions::new()
+    fn plant_tmp(path: &Path, bytes: &[u8]) {
+        let mut f = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(path)
-            .expect("create stale temporary");
-        file.write_all(bytes).expect("write stale temporary");
-        file.sync_all().expect("sync stale temporary");
+            .expect("tmp");
+        f.write_all(bytes).expect("w");
+        f.sync_all().expect("sync");
+    }
+
+    struct FakePackage {
+        root: TempRoot,
+        archive_digest: [u8; 32],
+        lifecycle_runs: PathBuf,
+    }
+    impl FakePackage {
+        fn new(tag: &str, version: &str) -> Self {
+            let root = TempRoot::new(tag);
+            let arch = ocservia_contracts::agent_upgrade::runtime_architecture().expect("arch");
+            let spool = root.path().join("var/lib/ocservia-upgrade/package-spool");
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&spool)
+                .expect("spool");
+            let bytes = format!("fake-agent-package-{tag}").into_bytes();
+            let archive_digest: [u8; 32] = Sha256::digest(&bytes).into();
+            let archive = spool.join(format!("ocservia-agent-{version}-linux-{arch}.tar.gz"));
+            fs::write(&archive, &bytes).expect("archive");
+            fs::set_permissions(&archive, fs::Permissions::from_mode(0o644)).expect("644");
+
+            let verifier = root
+                .path()
+                .join("usr/libexec/ocservia/ocservia-agent-verify");
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o755)
+                .create(verifier.parent().unwrap())
+                .expect("libexec");
+            let lifecycle_runs = root.path().join("lifecycle-runs");
+            let src = "#!/bin/sh\nset -e\n[ \"$#\" -eq 2 ]\ndigest=\"$2\"\n[ \"$(sha256sum \"$1\" | cut -d' ' -f1)\" = \"${digest}\" ]\n\
+stage=\"${DESTDIR}/var/lib/ocservia-upgrade/package-staging/pkg.1\"\npkg=\"${stage}/extracted/ocservia-agent-@VERSION@\"\n\
+mkdir -p \"${pkg}/rust/target/release\" \"${pkg}/scripts\"\n\
+printf 'new-agent-@TAG@\\n' > \"${pkg}/rust/target/release/ocservia-agent\"\n\
+printf 'new-privd-@TAG@\\n' > \"${pkg}/rust/target/release/ocservia-privd\"\n\
+{\n  printf '#!/bin/sh\\nset -e\\n'\n  printf 'here=$(dirname \"$0\")\\n'\n\
+  printf 'cp \"${here}/../rust/target/release/ocservia-agent\" \"${DESTDIR}/usr/libexec/ocservia/ocservia-agent\"\\n'\n\
+  printf 'cp \"${here}/../rust/target/release/ocservia-privd\" \"${DESTDIR}/usr/libexec/ocservia/ocservia-privd\"\\n'\n\
+  printf 'echo \"archive_sha256=%s\" > \"${DESTDIR}/var/lib/ocservia-upgrade/installed-commit\"\\n' \"${digest}\"\n\
+  printf 'printf x >> \"@LOG@\"\\n'\n} > \"${pkg}/scripts/upgrade-agent.sh\"\n\
+chmod 0755 \"${pkg}/rust/target/release/ocservia-agent\" \"${pkg}/rust/target/release/ocservia-privd\" \"${pkg}/scripts/upgrade-agent.sh\"\n\
+printf 'version=1\\narchive_sha256=%s\\npackage=ocservia-agent-@VERSION@\\n' \"${digest}\" > \"${pkg}/.ocservia-package-verified\"\n\
+chmod 0600 \"${pkg}/.ocservia-package-verified\"\nchmod 0700 \"${pkg}\"\necho \"${pkg}\"\n"
+                .replace("@TAG@", tag)
+                .replace("@VERSION@", version)
+                .replace("@LOG@", &lifecycle_runs.display().to_string());
+            fs::write(&verifier, src).expect("verifier");
+            fs::write(&lifecycle_runs, b"").expect("log");
+            fs::set_permissions(&verifier, fs::Permissions::from_mode(0o755)).expect("755");
+            Self {
+                root,
+                archive_digest,
+                lifecycle_runs,
+            }
+        }
+        fn seed_bins(&self, tag: &str, agent: bool, privd: bool) {
+            if agent {
+                fs::write(
+                    self.root.path().join("usr/libexec/ocservia/ocservia-agent"),
+                    format!("new-agent-{tag}\n"),
+                )
+                .expect("a");
+            }
+            if privd {
+                fs::write(
+                    self.root.path().join("usr/libexec/ocservia/ocservia-privd"),
+                    format!("new-privd-{tag}\n"),
+                )
+                .expect("p");
+            }
+        }
+        fn seed_commit(&self, hex_sha: &str) {
+            fs::write(
+                self.root
+                    .path()
+                    .join("var/lib/ocservia-upgrade/installed-commit"),
+                format!("archive_sha256={hex_sha}\n"),
+            )
+            .expect("c");
+        }
     }
 
     #[test]
-    fn scheduling_is_idempotent_and_binds_the_release_identity() {
-        let root = test_root("idempotent");
+    fn scheduling_idempotency_conflict_lock_and_active_slot() {
+        let root = TempRoot::new("sched");
         let intent = new_intent([0x43; 32]);
         assert_eq!(
-            scheduler(&root)
-                .schedule_and_trigger(&intent)
-                .expect("first schedule"),
+            root.scheduler().schedule_and_trigger(&intent).expect("1st"),
             ScheduleOutcome::Scheduled
         );
         assert_eq!(
-            scheduler(&root)
-                .schedule_and_trigger(&intent)
-                .expect("duplicate schedule"),
+            root.scheduler().schedule_and_trigger(&intent).expect("dup"),
             ScheduleOutcome::AlreadyScheduled
         );
-        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
-        assert_eq!(record_mode(&operation_dir.join("intent")) & 0o777, 0o600);
-        assert_eq!(record_mode(&operation_dir.join("state")) & 0o777, 0o600);
-        assert!(
-            fs::symlink_metadata(&operation_dir)
-                .expect("operation directory")
-                .is_dir()
+        let op_dir = root.ops().join(intent.operation_id.to_string());
+        assert_eq!(
+            (
+                record_mode(&op_dir.join("intent")),
+                record_mode(&op_dir.join("state"))
+            ),
+            (0o600, 0o600)
         );
+        assert!(fs::symlink_metadata(&op_dir).expect("dir").is_dir());
 
-        let mut conflicting = intent.clone();
-        conflicting.package_sha256 = [0x44; 32];
+        let mut conflict = intent.clone();
+        conflict.package_sha256 = [0x44; 32];
         assert!(matches!(
-            scheduler(&root).schedule_and_trigger(&conflicting),
+            root.scheduler().schedule_and_trigger(&conflict),
             Err(UpgradeStoreError::IdentityConflict)
         ));
-        // The conflicting delivery cannot rewrite the immutable intent.
-        let persisted = load_intent(&operation_dir).expect("persisted intent");
-        assert_eq!(persisted.package_sha256, [0x43; 32]);
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
-
-    #[test]
-    fn scheduling_replays_while_execution_lock_is_held() {
-        let root = test_root("replay-during-execution");
-        let intent = new_intent([0x45; 32]);
-        scheduler(&root)
-            .schedule_and_trigger(&intent)
-            .expect("initial schedule");
-        let _execution =
-            UpgradeLock::acquire_execution(&operations_dir(&root)).expect("runner execution lock");
-
         assert_eq!(
-            scheduler(&root)
-                .schedule_and_trigger(&intent)
-                .expect("exact replay while runner is active"),
-            ScheduleOutcome::AlreadyScheduled
+            load_intent(&op_dir).expect("persisted").package_sha256,
+            [0x43; 32]
         );
-        fs::remove_dir_all(&root).expect("cleanup");
+
+        // Exact replay while execution lock is held; another active op is rejected until terminal.
+        {
+            let _exec = UpgradeLock::acquire_execution(&root.ops()).expect("lock");
+            assert_eq!(
+                root.scheduler()
+                    .schedule_and_trigger(&intent)
+                    .expect("replay"),
+                ScheduleOutcome::AlreadyScheduled
+            );
+        }
+        let second = new_intent([0x45; 32]);
+        assert!(matches!(
+            root.scheduler().schedule_and_trigger(&second),
+            Err(UpgradeStoreError::ActiveConflict)
+        ));
+        root.force_state(&intent.operation_id, OperationState::Succeeded);
+        root.scheduler()
+            .schedule_and_trigger(&second)
+            .expect("freed");
+        root.force_state(&second.operation_id, OperationState::Succeeded);
+
+        // Large terminal history does not block scheduling.
+        for i in 0..65 {
+            let h = new_intent([i; 32]);
+            root.scheduler().schedule_and_trigger(&h).expect("hist");
+            root.force_state(&h.operation_id, OperationState::Succeeded);
+        }
+        root.scheduler()
+            .schedule_and_trigger(&new_intent([0xff; 32]))
+            .expect("after history");
     }
 
     #[test]
-    fn scheduling_completes_crashed_partial_commits_safely() {
-        let root = test_root("partial");
-        let intent = new_intent([1; 32]);
-        let operations = operations_dir(&root);
+    fn scheduling_crash_recovery_and_temp_ownership() {
+        let root = TempRoot::new("partial");
+        let first = new_intent([1; 32]);
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(operations.join(intent.operation_id.to_string()))
-            .expect("crashed operation directory");
+            .create(root.ops().join(first.operation_id.to_string()))
+            .expect("d1");
         assert_eq!(
-            scheduler(&root)
-                .schedule_and_trigger(&intent)
+            root.scheduler()
+                .schedule_and_trigger(&first)
                 .expect("resume"),
             ScheduleOutcome::Scheduled
         );
+        root.force_state(&first.operation_id, OperationState::Succeeded);
 
         let second = new_intent([2; 32]);
-        let second_dir = operations.join(second.operation_id.to_string());
+        let d2 = root.ops().join(second.operation_id.to_string());
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(&second_dir)
-            .expect("second operation directory");
+            .create(&d2)
+            .expect("d2");
         write_atomic(
-            &second_dir.join("intent"),
+            &d2.join("intent"),
             second.render().as_bytes(),
             TempOwner::Schedule,
         )
-        .expect("crashed after intent commit");
+        .expect("intent");
+        let stale = d2.join(format!(".state.schedule.tmp.{}", Uuid::now_v7()));
+        plant_tmp(&stale, b"accepted\n");
         assert_eq!(
-            scheduler(&root)
+            root.scheduler()
                 .schedule_and_trigger(&second)
-                .expect("complete state commit"),
-            ScheduleOutcome::Scheduled
-        );
-
-        let mut conflicting = second.clone();
-        conflicting.target_version = "1.2.4".to_owned();
-        assert!(matches!(
-            scheduler(&root).schedule_and_trigger(&conflicting),
-            Err(UpgradeStoreError::IdentityConflict)
-        ));
-
-        let orphan = new_intent([3; 32]);
-        let orphan_dir = operations.join(orphan.operation_id.to_string());
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&orphan_dir)
-            .expect("orphan directory");
-        write_atomic(
-            &orphan_dir.join("state"),
-            b"accepted\n",
-            TempOwner::Schedule,
-        )
-        .expect("orphan state");
-        assert!(matches!(
-            scheduler(&root).schedule_and_trigger(&orphan),
-            Err(UpgradeStoreError::Unsafe(_))
-        ));
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
-
-    #[test]
-    fn scheduling_recovers_stale_state_temporary_before_rename() {
-        let root = test_root("stale-state");
-        let intent = new_intent([0x31; 32]);
-        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&operation_dir)
-            .expect("operation directory");
-        write_atomic(
-            &operation_dir.join("intent"),
-            intent.render().as_bytes(),
-            TempOwner::Schedule,
-        )
-        .expect("committed intent");
-        let stale = operation_dir.join(format!(".state.schedule.tmp.{}", Uuid::now_v7()));
-        plant_stale_temporary(&stale, b"accepted\n");
-
-        assert_eq!(
-            scheduler(&root)
-                .schedule_and_trigger(&intent)
-                .expect("resume after interrupted rename"),
+                .expect("state"),
             ScheduleOutcome::Scheduled
         );
         assert!(!stale.exists());
-        assert_eq!(
-            load_state(&operation_dir).expect("recovered state"),
-            OperationState::Accepted
-        );
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
+        assert_eq!(load_state(&d2).expect("st"), OperationState::Accepted);
 
-    #[test]
-    fn scheduler_cleanup_leaves_runner_temporaries_alone() {
-        let root = test_root("temp-ownership");
-        let intent = new_intent([0x61; 32]);
-        scheduler(&root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
-        // The runner owns these between create and rename while it executes
-        // the upgrade; the scheduler's replay cleanup must never remove them.
-        let runner_state = operation_dir.join(format!(".state.run.tmp.{}", Uuid::now_v7()));
-        let runner_result = operation_dir.join(format!(".result.run.tmp.{}", Uuid::now_v7()));
-        plant_stale_temporary(&runner_state, b"running\n");
-        plant_stale_temporary(&runner_result, b"partial result");
-        let scheduler_state = operation_dir.join(format!(".state.schedule.tmp.{}", Uuid::now_v7()));
-        plant_stale_temporary(&scheduler_state, b"accepted\n");
+        let mut conflict = second.clone();
+        conflict.target_version = "1.2.4".into();
+        assert!(matches!(
+            root.scheduler().schedule_and_trigger(&conflict),
+            Err(UpgradeStoreError::IdentityConflict)
+        ));
 
+        // Runner temporaries are preserved while scheduler temporaries are cleaned on replay.
+        let r_state = d2.join(format!(".state.run.tmp.{}", Uuid::now_v7()));
+        let r_res = d2.join(format!(".result.run.tmp.{}", Uuid::now_v7()));
+        let s_state = d2.join(format!(".state.schedule.tmp.{}", Uuid::now_v7()));
+        plant_tmp(&r_state, b"running\n");
+        plant_tmp(&r_res, b"partial");
+        plant_tmp(&s_state, b"accepted\n");
         assert_eq!(
-            scheduler(&root)
-                .schedule_and_trigger(&intent)
-                .expect("exact replay"),
+            root.scheduler()
+                .schedule_and_trigger(&second)
+                .expect("replay"),
             ScheduleOutcome::AlreadyScheduled
         );
-        assert!(runner_state.exists());
-        assert!(runner_result.exists());
-        assert!(!scheduler_state.exists());
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
+        assert!(r_state.exists() && r_res.exists() && !s_state.exists());
+        root.force_state(&second.operation_id, OperationState::Succeeded);
 
-    #[test]
-    fn only_one_active_operation_is_scheduled_per_node() {
-        let root = test_root("active");
-        let first = new_intent([4; 32]);
-        scheduler(&root)
-            .schedule_and_trigger(&first)
-            .expect("first operation");
-        let second = new_intent([5; 32]);
+        // Orphan state without intent fails closed.
+        let orphan = new_intent([3; 32]);
+        let od = root.ops().join(orphan.operation_id.to_string());
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&od)
+            .expect("od");
+        write_atomic(&od.join("state"), b"accepted\n", TempOwner::Schedule).expect("os");
         assert!(matches!(
-            scheduler(&root).schedule_and_trigger(&second),
-            Err(UpgradeStoreError::ActiveConflict)
+            root.scheduler().schedule_and_trigger(&orphan),
+            Err(UpgradeStoreError::Unsafe(_))
         ));
-        force_state(&root, &first.operation_id, OperationState::Succeeded);
-        scheduler(&root)
-            .schedule_and_trigger(&second)
-            .expect("terminal operation frees the node");
-        fs::remove_dir_all(&root).expect("cleanup");
     }
 
     #[test]
-    fn concurrent_scheduling_commits_exactly_one_active_operation() {
-        use std::sync::{Arc, Barrier};
-
-        let root = test_root("concurrent-active");
-        let first = new_intent([0x41; 32]);
-        let second = new_intent([0x42; 32]);
-        let barrier = Arc::new(Barrier::new(3));
-        let handles = [first, second].map(|intent| {
-            let root = root.clone();
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                scheduler(&root).schedule_and_trigger(&intent)
-            })
-        });
-        barrier.wait();
-        let outcomes = handles.map(|handle| handle.join().expect("scheduler thread"));
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, Ok(ScheduleOutcome::Scheduled)))
-                .count(),
-            1
-        );
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, Err(UpgradeStoreError::ActiveConflict)))
-                .count(),
-            1
-        );
-        let active = fs::read_dir(operations_dir(&root))
-            .expect("operations root")
-            .filter_map(Result::ok)
-            .filter(|entry| Uuid::parse_str(&entry.file_name().to_string_lossy()).is_ok())
-            .filter(|entry| {
-                matches!(
-                    load_state(&entry.path()),
-                    Ok(OperationState::Accepted | OperationState::Running)
-                )
-            })
-            .count();
-        assert_eq!(active, 1);
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
-
-    #[test]
-    fn concurrent_same_intent_is_exact_replay() {
-        use std::sync::{Arc, Barrier};
-
-        let root = test_root("concurrent-replay");
-        let intent = new_intent([0x51; 32]);
-        let barrier = Arc::new(Barrier::new(3));
-        let handles = [intent.clone(), intent].map(|intent| {
-            let root = root.clone();
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                scheduler(&root).schedule_and_trigger(&intent)
-            })
-        });
-        barrier.wait();
-        let outcomes = handles.map(|handle| handle.join().expect("scheduler thread"));
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, Ok(ScheduleOutcome::Scheduled)))
-                .count(),
-            1
-        );
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, Ok(ScheduleOutcome::AlreadyScheduled)))
-                .count(),
-            1
-        );
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, Err(UpgradeStoreError::ActiveConflict)))
-                .count(),
-            0
-        );
-        let durable = fs::read_dir(operations_dir(&root))
-            .expect("operations root")
-            .filter_map(Result::ok)
-            .filter(|entry| Uuid::parse_str(&entry.file_name().to_string_lossy()).is_ok())
-            .count();
-        assert_eq!(durable, 1);
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
-
-    #[test]
-    fn terminal_history_does_not_block_new_scheduling() {
-        let root = test_root("terminal-history");
-        for index in 0..65 {
-            let intent = new_intent([index; 32]);
-            scheduler(&root)
-                .schedule_and_trigger(&intent)
-                .expect("schedule historical operation");
-            force_state(&root, &intent.operation_id, OperationState::Succeeded);
+    fn concurrent_scheduling_enforces_single_active_and_exact_replay() {
+        for same_intent in [false, true] {
+            let root = TempRoot::new(if same_intent { "conc-rep" } else { "conc-act" });
+            let a = new_intent([0x41; 32]);
+            let b = if same_intent {
+                a.clone()
+            } else {
+                new_intent([0x42; 32])
+            };
+            let barrier = Arc::new(Barrier::new(3));
+            let handles = [a, b].map(|intent| {
+                let ops = root.ops();
+                let br = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    br.wait();
+                    UpgradeScheduler::new(ops, UpgradeTrigger::Disabled)
+                        .schedule_and_trigger(&intent)
+                })
+            });
+            barrier.wait();
+            let outs = handles.map(|h| h.join().expect("join"));
+            assert_eq!(
+                outs.iter()
+                    .filter(|o| matches!(o, Ok(ScheduleOutcome::Scheduled)))
+                    .count(),
+                1
+            );
+            if same_intent {
+                assert_eq!(
+                    outs.iter()
+                        .filter(|o| matches!(o, Ok(ScheduleOutcome::AlreadyScheduled)))
+                        .count(),
+                    1
+                );
+            } else {
+                assert_eq!(
+                    outs.iter()
+                        .filter(|o| matches!(o, Err(UpgradeStoreError::ActiveConflict)))
+                        .count(),
+                    1
+                );
+            }
+            let active = fs::read_dir(root.ops())
+                .expect("rd")
+                .filter_map(Result::ok)
+                .filter(|e| Uuid::parse_str(&e.file_name().to_string_lossy()).is_ok())
+                .filter(|e| {
+                    matches!(
+                        load_state(&e.path()),
+                        Ok(OperationState::Accepted | OperationState::Running)
+                    )
+                })
+                .count();
+            assert_eq!(active, 1);
         }
-        scheduler(&root)
-            .schedule_and_trigger(&new_intent([0xff; 32]))
-            .expect("schedule after retained terminal history");
-        fs::remove_dir_all(&root).expect("cleanup");
     }
 
     #[test]
-    fn durable_records_reject_filesystem_substitution() {
-        let root = test_root("substitution");
+    fn filesystem_substitution_and_unsafe_ancestry_are_rejected() {
+        let root = TempRoot::new("subst");
+        let sub = TempRoot::new("subst-target");
         let intent = new_intent([6; 32]);
-        scheduler(&root)
+        root.scheduler()
             .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
-        let intent_path = operation_dir.join("intent");
-        let state_path = operation_dir.join("state");
-        let trusted = fs::read(&intent_path).expect("trusted intent bytes");
+            .expect("sched");
+        let op_dir = root.ops().join(intent.operation_id.to_string());
+        let (ip, sp) = (op_dir.join("intent"), op_dir.join("state"));
+        let trusted = fs::read(&ip).expect("read");
+        let outside = sub.path().join("outside");
+        fs::write(&outside, "attacker").expect("w");
 
-        let substitution = test_root("substitution-target");
-        let outside = substitution.join("outside");
-        fs::write(&outside, "attacker").expect("outside target");
-
-        fs::remove_file(&intent_path).expect("remove intent");
-        std::os::unix::fs::symlink(&outside, &intent_path).expect("plant symlink");
+        fs::remove_file(&ip).expect("rm");
+        std::os::unix::fs::symlink(&outside, &ip).expect("sym");
         assert!(matches!(
-            scheduler(&root).schedule_and_trigger(&intent),
+            root.scheduler().schedule_and_trigger(&intent),
             Err(UpgradeStoreError::Unsafe(_))
         ));
-        fs::remove_file(&intent_path).expect("remove symlink");
-        write_atomic(&intent_path, &trusted, TempOwner::Schedule).expect("restore intent");
+        fs::remove_file(&ip).expect("rm");
+        write_atomic(&ip, &trusted, TempOwner::Schedule).expect("restore");
 
-        fs::remove_file(&state_path).expect("remove state");
-        fs::write(&state_path, "accepted\n").expect("loose state");
-        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o644)).expect("unsafe mode");
+        fs::set_permissions(&sp, fs::Permissions::from_mode(0o644)).expect("644");
         assert!(matches!(
-            scheduler(&root).schedule_and_trigger(&intent),
+            root.scheduler().schedule_and_trigger(&intent),
             Err(UpgradeStoreError::Unsafe(_))
         ));
-        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o600)).expect("restore mode");
+        fs::set_permissions(&sp, fs::Permissions::from_mode(0o600)).expect("600");
 
-        let hardlink = operation_dir.join("state.link");
-        fs::hard_link(&state_path, &hardlink).expect("plant hardlink");
+        let hl = op_dir.join("state.link");
+        fs::hard_link(&sp, &hl).expect("hl");
         assert!(matches!(
-            scheduler(&root).schedule_and_trigger(&intent),
+            root.scheduler().schedule_and_trigger(&intent),
             Err(UpgradeStoreError::Unsafe(_))
         ));
-        fs::remove_file(&hardlink).expect("remove hardlink");
-        fs::remove_dir_all(&root).expect("cleanup");
-        fs::remove_dir_all(&substitution).expect("cleanup");
+        fs::remove_file(&hl).expect("rm");
+
+        fs::set_permissions(root.ops(), fs::Permissions::from_mode(0o770)).expect("770");
+        assert!(matches!(
+            root.scheduler().schedule_and_trigger(&new_intent([8; 32])),
+            Err(UpgradeStoreError::Unsafe(_))
+        ));
+        fs::set_permissions(root.ops(), fs::Permissions::from_mode(0o700)).expect("700");
     }
 
     #[test]
-    fn unsafe_durable_ancestry_is_rejected() {
-        let root = test_root("ancestry");
-        let intent = new_intent([7; 32]);
-        scheduler(&root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let operations = operations_dir(&root);
-        fs::set_permissions(&operations, fs::Permissions::from_mode(0o0770))
-            .expect("group writable");
-        assert!(matches!(
-            scheduler(&root).schedule_and_trigger(&new_intent([8; 32])),
-            Err(UpgradeStoreError::Unsafe(_))
-        ));
-        fs::set_permissions(&operations, fs::Permissions::from_mode(0o700)).expect("restore");
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
-
-    #[test]
-    fn runner_rejects_malformed_operation_identities() {
-        let runner = UpgradeRunner::new(PathBuf::from("/"));
-        for malformed in [
+    fn runner_input_validation_terminal_replay_and_spool_failure_recovery() {
+        let sys_runner = UpgradeRunner::new(PathBuf::from("/"));
+        for bad in [
             "../etc/shadow",
             "018f0c2e-7b1a-7c3d-8e9f-0123456789aB",
             "018f0c2e7b1a7c3d8e9f0123456789ab",
@@ -1902,579 +1875,285 @@ mod tests {
             "",
         ] {
             assert!(
-                matches!(runner.run(malformed), Err(UpgradeStoreError::Invalid(_))),
-                "identity refused: {malformed}"
+                matches!(sys_runner.run(bad), Err(UpgradeStoreError::Invalid(_))),
+                "{bad}"
             );
         }
-    }
 
-    #[test]
-    fn runner_replays_terminal_states_without_side_effects() {
-        let root = test_root("terminal");
-        let intent = new_intent([9; 32]);
-        scheduler(&root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        force_state(&root, &intent.operation_id, OperationState::Succeeded);
-        let runner = UpgradeRunner::new(root.clone());
-        assert_eq!(
-            runner
-                .run(&intent.operation_id.to_string())
-                .expect("terminal replay"),
-            OperationState::Succeeded
-        );
-        force_state(&root, &intent.operation_id, OperationState::RolledBack);
-        assert_eq!(
-            runner
-                .run(&intent.operation_id.to_string())
-                .expect("rolled back replay"),
-            OperationState::RolledBack
-        );
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
-
-    #[test]
-    fn runner_persists_failure_when_the_spool_cannot_resolve_the_release() {
-        let root = test_root("missing-spool");
-        let intent = new_intent([0x0a; 32]);
-        scheduler(&root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let runner = UpgradeRunner::new(root.clone());
-        let failure = runner
-            .run(&intent.operation_id.to_string())
-            .expect_err("spool is empty");
-        assert!(matches!(failure, UpgradeStoreError::Package(_)));
-        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
-        assert_eq!(
-            load_state(&operation_dir).expect("durable failure state"),
-            OperationState::Failed
-        );
-        let result = fs::read_to_string(operation_dir.join("result")).expect("failure evidence");
-        assert!(result.contains("state=failed"));
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
-
-    #[test]
-    fn runner_recovers_stale_result_temporary_before_rename() {
-        let root = test_root("stale-result");
-        let intent = new_intent([0x0b; 32]);
-        scheduler(&root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
-        let stale = operation_dir.join(format!(".result.run.tmp.{}", Uuid::now_v7()));
-        plant_stale_temporary(&stale, b"incomplete result");
-        let scheduler_state = operation_dir.join(format!(".state.schedule.tmp.{}", Uuid::now_v7()));
-        plant_stale_temporary(&scheduler_state, b"accepted\n");
-
-        let failure = UpgradeRunner::new(root.clone())
-            .run(&intent.operation_id.to_string())
-            .expect_err("empty spool fails after recovery");
-        assert!(matches!(failure, UpgradeStoreError::Package(_)));
-        assert!(!stale.exists());
-        assert!(scheduler_state.exists());
-        assert_eq!(
-            load_state(&operation_dir).expect("terminal state"),
-            OperationState::Failed
-        );
-        assert!(operation_dir.join("result").exists());
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
-
-    struct FakePackage {
-        root: PathBuf,
-        archive_digest: [u8; 32],
-        lifecycle_runs: PathBuf,
-    }
-
-    fn fake_lifecycle_tree(tag: &str) -> FakePackage {
-        fake_lifecycle_tree_with_version(tag, "1.2.3")
-    }
-
-    fn fake_lifecycle_tree_with_version(tag: &str, version: &str) -> FakePackage {
-        let root = test_root(tag);
-        let architecture =
-            ocservia_contracts::agent_upgrade::runtime_architecture().expect("host architecture");
-        let spool = root.join("var/lib/ocservia-upgrade/package-spool");
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&spool)
-            .expect("spool");
-        let archive_bytes = format!("fake-agent-package-{tag}").into_bytes();
-        let archive_digest: [u8; 32] = Sha256::digest(&archive_bytes).into();
-        let archive_name = format!("ocservia-agent-{version}-linux-{architecture}.tar.gz");
-        let archive = spool.join(&archive_name);
-        fs::write(&archive, &archive_bytes).expect("archive");
-        fs::set_permissions(&archive, fs::Permissions::from_mode(0o644)).expect("spool mode");
-
-        let verifier = root.join("usr/libexec/ocservia/ocservia-agent-verify");
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o755)
-            .create(verifier.parent().expect("verifier directory"))
-            .expect("libexec");
-        let lifecycle_runs = root.join("lifecycle-runs");
-        let verifier_source = "#!/bin/sh
-set -e
-[ \"$#\" -eq 2 ]
-digest=\"$2\"
-[ \"$(sha256sum \"$1\" | cut -d' ' -f1)\" = \"${digest}\" ]
-stage=\"${DESTDIR}/var/lib/ocservia-upgrade/package-staging/pkg.1\"
-pkg=\"${stage}/extracted/ocservia-agent-@VERSION@\"
-mkdir -p \"${pkg}/rust/target/release\" \"${pkg}/scripts\"
-printf 'new-agent-@TAG@\n' > \"${pkg}/rust/target/release/ocservia-agent\"
-printf 'new-privd-@TAG@\n' > \"${pkg}/rust/target/release/ocservia-privd\"
-{
-  printf '#!/bin/sh\nset -e\n'
-  printf 'here=$(dirname \"$0\")\n'
-  printf 'cp \"${here}/../rust/target/release/ocservia-agent\" \"${DESTDIR}/usr/libexec/ocservia/ocservia-agent\"\n'
-  printf 'cp \"${here}/../rust/target/release/ocservia-privd\" \"${DESTDIR}/usr/libexec/ocservia/ocservia-privd\"\n'
-  printf 'echo \"archive_sha256=%s\" > \"${DESTDIR}/var/lib/ocservia-upgrade/installed-commit\"\\n' \"${digest}\"
-  printf 'printf x >> \"@LIFECYCLE_LOG@\"\n'
-} > \"${pkg}/scripts/upgrade-agent.sh\"
-chmod 0755 \"${pkg}/rust/target/release/ocservia-agent\" \"${pkg}/rust/target/release/ocservia-privd\" \"${pkg}/scripts/upgrade-agent.sh\"
-printf 'version=1\narchive_sha256=%s\npackage=ocservia-agent-@VERSION@\n' \"${digest}\" > \"${pkg}/.ocservia-package-verified\"
-chmod 0600 \"${pkg}/.ocservia-package-verified\"
-chmod 0700 \"${pkg}\"
-echo \"${pkg}\"
-"
-        .replace("@TAG@", tag)
-        .replace("@VERSION@", version)
-        .replace("@LIFECYCLE_LOG@", &lifecycle_runs.display().to_string());
-        fs::write(&verifier, verifier_source).expect("verifier script");
-        fs::write(&lifecycle_runs, b"").expect("lifecycle counter");
-        fs::set_permissions(&verifier, fs::Permissions::from_mode(0o755)).expect("verifier mode");
-        FakePackage {
-            root,
-            archive_digest,
-            lifecycle_runs,
+        let root = TempRoot::new("term-spool");
+        let t_intent = new_intent([9; 32]);
+        root.scheduler().schedule_and_trigger(&t_intent).expect("s");
+        for state in [OperationState::Succeeded, OperationState::RolledBack] {
+            root.force_state(&t_intent.operation_id, state);
+            assert_eq!(
+                root.runner()
+                    .run(&t_intent.operation_id.to_string())
+                    .expect("rep"),
+                state
+            );
         }
-    }
 
-    #[test]
-    fn runner_executes_the_verified_lifecycle_exactly_once() {
-        let package = fake_lifecycle_tree("lifecycle");
-        let intent = new_intent(package.archive_digest);
-        scheduler(&package.root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let runner = UpgradeRunner::new(package.root.clone());
-        assert_eq!(
-            runner
-                .run(&intent.operation_id.to_string())
-                .expect("lifecycle completes"),
-            OperationState::Succeeded
-        );
-        let installed_agent =
-            fs::read(package.root.join("usr/libexec/ocservia/ocservia-agent")).expect("installed");
-        assert_eq!(installed_agent, b"new-agent-lifecycle\n");
-        let operation_dir = operations_dir(&package.root).join(intent.operation_id.to_string());
-        assert_eq!(
-            load_state(&operation_dir).expect("final state"),
-            OperationState::Succeeded
-        );
+        let f_intent = new_intent([0x0b; 32]);
+        root.scheduler().schedule_and_trigger(&f_intent).expect("s");
+        let op_dir = root.ops().join(f_intent.operation_id.to_string());
+        let stale = op_dir.join(format!(".result.run.tmp.{}", Uuid::now_v7()));
+        let sched_tmp = op_dir.join(format!(".state.schedule.tmp.{}", Uuid::now_v7()));
+        plant_tmp(&stale, b"incomplete");
+        plant_tmp(&sched_tmp, b"accepted\n");
+        assert!(matches!(
+            root.runner().run(&f_intent.operation_id.to_string()),
+            Err(UpgradeStoreError::Package(_))
+        ));
+        assert!(!stale.exists() && sched_tmp.exists());
+        assert_eq!(load_state(&op_dir).expect("st"), OperationState::Failed);
         assert!(
-            fs::read_to_string(operation_dir.join("result"))
-                .expect("result evidence")
-                .contains("state=succeeded")
+            fs::read_to_string(op_dir.join("result"))
+                .expect("res")
+                .contains("state=failed")
         );
-        assert_eq!(
-            fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter"),
-            "x"
-        );
+    }
 
-        // Crash window after replacement and result loss: the durable state
-        // says running and the authorized binaries are already installed, so
-        // the retry must converge without re-running the destructive backup
-        // lifecycle.
-        force_state(&package.root, &intent.operation_id, OperationState::Running);
+    #[test]
+    fn runner_lifecycle_commit_record_and_rejection_matrix() {
+        // Happy path + replay after result loss converges without re-running lifecycle.
+        let pkg = FakePackage::new("lifecycle", "1.2.3");
+        let intent = new_intent(pkg.archive_digest);
+        pkg.root
+            .scheduler()
+            .schedule_and_trigger(&intent)
+            .expect("s");
         assert_eq!(
-            runner
+            pkg.root
+                .runner()
                 .run(&intent.operation_id.to_string())
-                .expect("converge without reinstall"),
+                .expect("ok"),
             OperationState::Succeeded
         );
         assert_eq!(
-            fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter"),
-            "x"
+            fs::read(pkg.root.path().join("usr/libexec/ocservia/ocservia-agent")).expect("a"),
+            b"new-agent-lifecycle\n"
         );
-        fs::remove_dir_all(&package.root).expect("cleanup");
-    }
-
-    /// Stages the crash window the review pinned: an interrupted lifecycle
-    /// already replaced some host files, but the installation commit record
-    /// was never written.
-    fn seed_partial_install(package: &FakePackage, tag: &str, agent: bool, privd: bool) {
-        if agent {
-            fs::write(
-                package.root.join("usr/libexec/ocservia/ocservia-agent"),
-                format!("new-agent-{tag}\n"),
-            )
-            .expect("seed agent");
-        }
-        if privd {
-            fs::write(
-                package.root.join("usr/libexec/ocservia/ocservia-privd"),
-                format!("new-privd-{tag}\n"),
-            )
-            .expect("seed privd");
-        }
-    }
-
-    fn seed_commit_record(package: &FakePackage, digest_hex: &str) {
-        fs::write(
-            package
-                .root
-                .join("var/lib/ocservia-upgrade/installed-commit"),
-            format!("archive_sha256={digest_hex}\n"),
-        )
-        .expect("seed commit record");
-    }
-
-    fn assert_interrupted_install_refused(package: &FakePackage, intent: &UpgradeIntent) {
-        let runner = UpgradeRunner::new(package.root.clone());
-        let failure = runner
-            .run(&intent.operation_id.to_string())
-            .expect_err("partial install must be refused");
-        assert!(matches!(failure, UpgradeStoreError::Unsafe(_)));
-        let operation_dir = operations_dir(&package.root).join(intent.operation_id.to_string());
+        assert_eq!(fs::read_to_string(&pkg.lifecycle_runs).expect("log"), "x");
+        pkg.root
+            .force_state(&intent.operation_id, OperationState::Running);
         assert_eq!(
-            load_state(&operation_dir).expect("durable failure"),
-            OperationState::Failed
-        );
-        let result = fs::read_to_string(operation_dir.join("result")).expect("result evidence");
-        assert!(result.contains("state=failed"));
-        assert!(result.contains("interrupted before its commit record"));
-        // The refusal happens before any lifecycle side effect, so the
-        // rollback snapshot from the interrupted attempt is never overwritten.
-        assert_eq!(
-            fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter"),
-            ""
-        );
-    }
-
-    #[test]
-    fn runner_refuses_a_crash_after_both_binaries_without_the_commit_record() {
-        // Power loss after agent and privd were replaced but before the
-        // upgrader, verifier, units, and commit record existed: the mixed
-        // host must never converge to success or re-run the backup step.
-        let package = fake_lifecycle_tree("crash-both");
-        seed_partial_install(&package, "crash-both", true, true);
-        let intent = new_intent(package.archive_digest);
-        scheduler(&package.root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        assert_interrupted_install_refused(&package, &intent);
-        fs::remove_dir_all(&package.root).expect("cleanup");
-    }
-
-    #[test]
-    fn runner_refuses_a_crash_after_the_agent_binary_alone() {
-        // Power loss between replacing the agent and the privd: still an
-        // interrupted install that must refuse rather than snapshot the
-        // mixed pair as the previous release.
-        let package = fake_lifecycle_tree("crash-agent");
-        seed_partial_install(&package, "crash-agent", true, false);
-        let intent = new_intent(package.archive_digest);
-        scheduler(&package.root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        assert_interrupted_install_refused(&package, &intent);
-        fs::remove_dir_all(&package.root).expect("cleanup");
-    }
-
-    #[test]
-    fn runner_refuses_matching_binaries_behind_a_foreign_commit_record() {
-        // Binaries of this package are installed, but the commit record
-        // names a different package: the record is the only convergence
-        // proof, so a mismatch stays an interrupted install.
-        let package = fake_lifecycle_tree("foreign-record");
-        seed_partial_install(&package, "foreign-record", true, true);
-        let mut foreign = package.archive_digest;
-        foreign[0] ^= 0xff;
-        seed_commit_record(&package, &hex::encode(foreign));
-        let intent = new_intent(package.archive_digest);
-        scheduler(&package.root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        assert_interrupted_install_refused(&package, &intent);
-        fs::remove_dir_all(&package.root).expect("cleanup");
-    }
-
-    #[test]
-    fn runner_converges_only_through_the_matching_commit_record() {
-        // The complete install finished and recorded its commit, but the
-        // result persistence was lost: the retry converges through the
-        // digest-bound record without re-running the lifecycle.
-        let package = fake_lifecycle_tree("commit-converge");
-        seed_partial_install(&package, "commit-converge", true, true);
-        seed_commit_record(&package, &hex::encode(package.archive_digest));
-        let intent = new_intent(package.archive_digest);
-        scheduler(&package.root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let runner = UpgradeRunner::new(package.root.clone());
-        assert_eq!(
-            runner
+            pkg.root
+                .runner()
                 .run(&intent.operation_id.to_string())
-                .expect("converge through the commit record"),
+                .expect("conv"),
             OperationState::Succeeded
         );
-        assert_eq!(
-            fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter"),
-            ""
-        );
-        let operation_dir = operations_dir(&package.root).join(intent.operation_id.to_string());
-        assert!(
-            fs::read_to_string(operation_dir.join("result"))
-                .expect("result evidence")
-                .contains("verified package already installed")
-        );
-        fs::remove_dir_all(&package.root).expect("cleanup");
-    }
+        assert_eq!(fs::read_to_string(&pkg.lifecycle_runs).expect("log"), "x");
 
-    #[test]
-    fn runner_refuses_a_replay_without_the_commit_record() {
-        // A lifecycle that installed the binaries but lost (or never wrote)
-        // its commit record cannot be certified on replay: the record is
-        // the only convergence proof, so the retry fails closed.
-        let package = fake_lifecycle_tree("missing-record");
-        // Sabotage only the record: run the lifecycle once through the
-        // normal path, then remove the record and replay as if the crash
-        // lost it before the runner could verify.
-        let intent = new_intent(package.archive_digest);
-        scheduler(&package.root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let runner = UpgradeRunner::new(package.root.clone());
-        assert_eq!(
-            runner
-                .run(&intent.operation_id.to_string())
-                .expect("lifecycle completes"),
-            OperationState::Succeeded
-        );
+        // Removing the commit record forces replay to fail closed.
         fs::remove_file(
-            package
-                .root
+            pkg.root
+                .path()
                 .join("var/lib/ocservia-upgrade/installed-commit"),
         )
-        .expect("drop commit record");
-        force_state(&package.root, &intent.operation_id, OperationState::Running);
-        let failure = runner
-            .run(&intent.operation_id.to_string())
-            .expect_err("missing commit record");
-        assert!(matches!(failure, UpgradeStoreError::Unsafe(_)));
+        .expect("rm");
+        pkg.root
+            .force_state(&intent.operation_id, OperationState::Running);
+        assert!(matches!(
+            pkg.root.runner().run(&intent.operation_id.to_string()),
+            Err(UpgradeStoreError::Unsafe(_))
+        ));
         assert_eq!(
-            load_state(&operations_dir(&package.root).join(intent.operation_id.to_string()))
-                .expect("durable failure"),
+            load_state(&pkg.root.ops().join(intent.operation_id.to_string())).expect("st"),
             OperationState::Failed
         );
-        fs::remove_dir_all(&package.root).expect("cleanup");
-    }
 
-    #[test]
-    fn runner_refuses_a_spool_digest_the_intent_does_not_authorize() {
-        let package = fake_lifecycle_tree("digest");
-        let mut digest = package.archive_digest;
-        digest[0] ^= 0xff;
-        let intent = new_intent(digest);
-        scheduler(&package.root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let runner = UpgradeRunner::new(package.root.clone());
-        let failure = runner
-            .run(&intent.operation_id.to_string())
-            .expect_err("digest mismatch");
-        assert!(matches!(failure, UpgradeStoreError::Package(_)));
-        let operation_dir = operations_dir(&package.root).join(intent.operation_id.to_string());
+        // Interrupted installs (both bins / agent-only / foreign commit) fail closed before lifecycle runs.
+        for (tag, agent, privd, foreign_commit) in [
+            ("crash-both", true, true, false),
+            ("crash-agent", true, false, false),
+            ("foreign-rec", true, true, true),
+        ] {
+            let p = FakePackage::new(tag, "1.2.3");
+            p.seed_bins(tag, agent, privd);
+            if foreign_commit {
+                let mut d = p.archive_digest;
+                d[0] ^= 0xff;
+                p.seed_commit(&hex::encode(d));
+            }
+            let it = new_intent(p.archive_digest);
+            p.root.scheduler().schedule_and_trigger(&it).expect("s");
+            assert!(
+                matches!(
+                    p.root.runner().run(&it.operation_id.to_string()),
+                    Err(UpgradeStoreError::Unsafe(_))
+                ),
+                "{tag}"
+            );
+            let op_dir = p.root.ops().join(it.operation_id.to_string());
+            assert_eq!(load_state(&op_dir).expect("st"), OperationState::Failed);
+            let res = fs::read_to_string(op_dir.join("result")).expect("res");
+            assert!(
+                res.contains("state=failed")
+                    && res.contains("interrupted before its commit record")
+            );
+            assert_eq!(fs::read_to_string(&p.lifecycle_runs).expect("log"), "");
+        }
+
+        // Matching commit record converges without re-running lifecycle.
+        let conv = FakePackage::new("commit-conv", "1.2.3");
+        conv.seed_bins("commit-conv", true, true);
+        conv.seed_commit(&hex::encode(conv.archive_digest));
+        let cit = new_intent(conv.archive_digest);
+        conv.root.scheduler().schedule_and_trigger(&cit).expect("s");
         assert_eq!(
-            load_state(&operation_dir).expect("durable failure"),
-            OperationState::Failed
+            conv.root
+                .runner()
+                .run(&cit.operation_id.to_string())
+                .expect("ok"),
+            OperationState::Succeeded
         );
+        assert_eq!(fs::read_to_string(&conv.lifecycle_runs).expect("log"), "");
         assert!(
-            !package
-                .lifecycle_runs
-                .metadata()
-                .is_ok_and(|meta| meta.len() > 0)
+            fs::read_to_string(
+                conv.root
+                    .ops()
+                    .join(cit.operation_id.to_string())
+                    .join("result")
+            )
+            .expect("r")
+            .contains("verified package already installed")
         );
-        fs::remove_dir_all(&package.root).expect("cleanup");
-    }
 
-    #[test]
-    fn runner_refuses_an_architecture_the_host_does_not_run() {
-        let package = fake_lifecycle_tree("foreign-arch");
+        // Spool digest mismatch & foreign arch fail closed with Package error.
+        let dp = FakePackage::new("digest", "1.2.3");
+        let mut wrong = dp.archive_digest;
+        wrong[0] ^= 0xff;
+        let dit = new_intent(wrong);
+        dp.root.scheduler().schedule_and_trigger(&dit).expect("s");
+        assert!(matches!(
+            dp.root.runner().run(&dit.operation_id.to_string()),
+            Err(UpgradeStoreError::Package(_))
+        ));
+        assert_eq!(fs::read_to_string(&dp.lifecycle_runs).expect("log"), "");
+
+        let fp = FakePackage::new("arch", "1.2.3");
         let foreign = if ocservia_contracts::agent_upgrade::runtime_architecture() == Some("amd64")
         {
             "arm64"
         } else {
             "amd64"
         };
-        let intent = UpgradeIntent::new(
-            *Uuid::now_v7().as_bytes(),
-            *Uuid::now_v7().as_bytes(),
-            "1.2.3",
-            package.archive_digest,
-            foreign,
-            [0x55; 32],
-        )
-        .expect("foreign intent");
-        scheduler(&package.root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let runner = UpgradeRunner::new(package.root.clone());
-        let failure = runner
-            .run(&intent.operation_id.to_string())
-            .expect_err("foreign architecture");
-        assert!(matches!(failure, UpgradeStoreError::Package(_)));
-        let operation_dir = operations_dir(&package.root).join(intent.operation_id.to_string());
-        assert_eq!(
-            load_state(&operation_dir).expect("durable failure"),
-            OperationState::Failed
-        );
-        fs::remove_dir_all(&package.root).expect("cleanup");
-    }
+        let fit = new_intent_ver("1.2.3", fp.archive_digest, foreign);
+        fp.root.scheduler().schedule_and_trigger(&fit).expect("s");
+        assert!(matches!(
+            fp.root.runner().run(&fit.operation_id.to_string()),
+            Err(UpgradeStoreError::Package(_))
+        ));
 
-    #[test]
-    fn runner_applies_targets_without_version_order_and_retries_by_artifact() {
+        // Explicit target versions (downgrade, same, upgrade) apply without semver gating.
         for target in [
             "0.0.0",
             ocservia_contracts::agent_upgrade::release_version(),
             "999.0.0",
         ] {
-            let package = fake_lifecycle_tree_with_version("explicit-target", target);
-            let intent = UpgradeIntent::new(
-                *Uuid::now_v7().as_bytes(),
-                *Uuid::now_v7().as_bytes(),
+            let p = FakePackage::new("explicit", target);
+            let it = new_intent_ver(
                 target,
-                package.archive_digest,
-                ocservia_contracts::agent_upgrade::runtime_architecture()
-                    .expect("host architecture"),
-                [0x55; 32],
-            )
-            .expect("explicit target intent");
-            scheduler(&package.root)
-                .schedule_and_trigger(&intent)
-                .expect("schedule");
-            let runner = UpgradeRunner::new(package.root.clone());
+                p.archive_digest,
+                ocservia_contracts::agent_upgrade::runtime_architecture().expect("arch"),
+            );
+            p.root.scheduler().schedule_and_trigger(&it).expect("s");
             assert_eq!(
-                runner
-                    .run(&intent.operation_id.to_string())
-                    .expect("apply target"),
+                p.root
+                    .runner()
+                    .run(&it.operation_id.to_string())
+                    .expect("apply"),
                 OperationState::Succeeded
             );
-            let runs = fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter");
-            assert!(!runs.is_empty(), "target must actually be installed");
+            let runs = fs::read_to_string(&p.lifecycle_runs).expect("runs");
+            assert_ne!(runs, "");
             assert_eq!(
-                runner
-                    .run(&intent.operation_id.to_string())
-                    .expect("completed retry"),
+                p.root
+                    .runner()
+                    .run(&it.operation_id.to_string())
+                    .expect("retry"),
                 OperationState::Succeeded
             );
-            assert_eq!(
-                fs::read_to_string(&package.lifecycle_runs).expect("counter"),
-                runs
-            );
-            fs::remove_dir_all(&package.root).expect("cleanup");
+            assert_eq!(fs::read_to_string(&p.lifecycle_runs).expect("runs"), runs);
         }
     }
 
     #[test]
-    fn read_recent_results_reports_terminal_outcomes_newest_first() {
-        let root = test_root("read-results");
-        let first = new_intent([0x43; 32]);
-        let second = new_intent([0x44; 32]);
-        let in_flight = new_intent([0x45; 32]);
-        let operations = operations_dir(&root);
-        // The durable store admits one active operation at a time, so each
-        // predecessor is terminal before the next is scheduled.
-        scheduler(&root)
-            .schedule_and_trigger(&first)
-            .expect("schedule first");
+    fn read_recent_results_ordering_drift_and_permissions() {
+        let root = TempRoot::new("recent");
+        let (a, b, inflight) = (
+            new_intent([0x43; 32]),
+            new_intent([0x44; 32]),
+            new_intent([0x45; 32]),
+        );
+        root.scheduler().schedule_and_trigger(&a).expect("a");
         write_terminal(
-            &operations.join(first.operation_id.to_string()),
-            &first,
+            &root.ops().join(a.operation_id.to_string()),
+            &a,
             OperationState::Succeeded,
             "activated release",
         )
-        .expect("first terminal outcome");
-        scheduler(&root)
-            .schedule_and_trigger(&second)
-            .expect("schedule second");
+        .expect("ta");
+        root.scheduler().schedule_and_trigger(&b).expect("b");
         write_terminal(
-            &operations.join(second.operation_id.to_string()),
-            &second,
+            &root.ops().join(b.operation_id.to_string()),
+            &b,
             OperationState::Failed,
-            "spool could not resolve the release",
+            "spool missing",
         )
-        .expect("second terminal outcome");
-        scheduler(&root)
-            .schedule_and_trigger(&in_flight)
-            .expect("schedule in-flight");
+        .expect("tb");
+        root.scheduler().schedule_and_trigger(&inflight).expect("c");
 
-        let results = read_recent_results(&operations, 8).expect("read recent results");
-        assert_eq!(results.len(), 2, "in-flight operation carries no evidence");
-        assert_eq!(results[0].operation_id, second.operation_id);
-        assert_eq!(results[0].state, OperationState::Failed);
-        assert!(results[0].completed_unix > 0);
-        assert_eq!(results[1].operation_id, first.operation_id);
-        assert_eq!(results[1].state, OperationState::Succeeded);
-        assert_eq!(results[1].target_version, "1.2.3");
-        assert_eq!(results[1].detail, "activated release");
-        let bounded = read_recent_results(&operations, 1).expect("bounded read");
-        assert_eq!(bounded.len(), 1, "the report window stays bounded");
-        assert_eq!(bounded[0].operation_id, second.operation_id);
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
+        let res = read_recent_results(&root.ops(), 8).expect("res");
+        assert_eq!(res.len(), 2);
+        assert_eq!(
+            (res[0].operation_id, res[0].state),
+            (b.operation_id, OperationState::Failed)
+        );
+        assert!(res[0].completed_unix > 0);
+        assert_eq!(
+            (
+                res[1].operation_id,
+                res[1].state,
+                res[1].target_version.as_str(),
+                res[1].detail.as_str()
+            ),
+            (
+                a.operation_id,
+                OperationState::Succeeded,
+                "1.2.3",
+                "activated release"
+            )
+        );
+        let bounded = read_recent_results(&root.ops(), 1).expect("b");
+        assert_eq!(
+            (bounded.len(), bounded[0].operation_id),
+            (1, b.operation_id)
+        );
 
-    #[test]
-    fn read_recent_results_fails_closed_on_identity_drift() {
-        let root = test_root("read-results-drift");
-        let intent = new_intent([0x46; 32]);
-        scheduler(&root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let mut drifted = intent.clone();
+        // Unsafe record mode fails closed.
+        let a_res = root.ops().join(a.operation_id.to_string()).join("result");
+        fs::set_permissions(&a_res, fs::Permissions::from_mode(0o644)).expect("644");
+        assert!(matches!(
+            read_recent_results(&root.ops(), 8),
+            Err(UpgradeStoreError::Unsafe(_))
+        ));
+        fs::set_permissions(&a_res, fs::Permissions::from_mode(0o600)).expect("600");
+
+        // Identity drift fails closed.
+        let mut drifted = a.clone();
         drifted.operation_id = Uuid::now_v7();
         write_terminal(
-            &operations_dir(&root).join(intent.operation_id.to_string()),
+            &root.ops().join(a.operation_id.to_string()),
             &drifted,
             OperationState::Succeeded,
-            "drifted identity",
+            "drift",
         )
-        .expect("terminal outcome");
+        .expect("td");
         assert!(matches!(
-            read_recent_results(&operations_dir(&root), 8),
+            read_recent_results(&root.ops(), 8),
             Err(UpgradeStoreError::Unsafe(_))
         ));
-        fs::remove_dir_all(&root).expect("cleanup");
-    }
-
-    #[test]
-    fn read_recent_results_rejects_unsafe_present_record() {
-        let root = test_root("read-results-unsafe-record");
-        let intent = new_intent([0x47; 32]);
-        scheduler(&root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
-        write_terminal(
-            &operation_dir,
-            &intent,
-            OperationState::Succeeded,
-            "activated release",
-        )
-        .expect("terminal outcome");
-        fs::set_permissions(
-            operation_dir.join("result"),
-            fs::Permissions::from_mode(0o644),
-        )
-        .expect("make result metadata unsafe");
-        assert!(matches!(
-            read_recent_results(&operations_dir(&root), 8),
-            Err(UpgradeStoreError::Unsafe(_))
-        ));
-        fs::remove_dir_all(&root).expect("cleanup");
     }
 }

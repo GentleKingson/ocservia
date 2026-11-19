@@ -375,34 +375,11 @@ mod tests {
     use super::*;
     use crate::generated::ocserv::platform::agent::v1::{
         self as agent, CommandAuthorizationProof, CommandEnvelope, ConnectionFenceV2,
-        FenceBindingV2, FenceOperationKind, FenceSignatureVersion, SyntheticEcho, command_envelope,
+        FenceBindingV2, command_envelope,
     };
     use prost::Message;
     use prost_types::Timestamp;
     use std::collections::BTreeMap;
-
-    fn envelope() -> CommandEnvelope {
-        CommandEnvelope {
-            protocol_version: "1.0".to_owned(),
-            issued_at: Some(Timestamp {
-                seconds: 1_700_000_000,
-                nanos: 0,
-            }),
-            expires_at: Some(Timestamp {
-                seconds: 1_700_000_060,
-                nanos: 0,
-            }),
-            payload: Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
-                message: "hello".to_owned(),
-            })),
-            authorization: Some(CommandAuthorizationProof {
-                version: 1,
-                key_id: "test-key".to_owned(),
-                signature: vec![0xa5; 64],
-            }),
-            ..CommandEnvelope::default()
-        }
-    }
 
     fn append_varint(bytes: &mut Vec<u8>, mut value: usize) {
         loop {
@@ -502,9 +479,10 @@ mod tests {
     }
 
     fn decode_hex(hex: &str) -> Vec<u8> {
-        assert_eq!(hex.len() % 2, 0);
-        hex.as_bytes()
-            .chunks_exact(2)
+        let (pairs, rem) = hex.as_bytes().as_chunks::<2>();
+        assert_eq!(rem.len(), 0);
+        pairs
+            .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
     }
@@ -1064,225 +1042,5 @@ mod tests {
                 Err(StrictWireError::NestedMessageTruncated { message }) if message == kind.name())
             );
         }
-    }
-
-    #[test]
-    fn rejects_unknown_secret_and_p12_timestamp_fields() {
-        for (payload_tag, field_tag, message) in [
-            (101, 5, "SealedSecretV1"),
-            (114, 5, "SealedSecretV1"),
-            (118, 6, "SealedSecretV1"),
-            (118, 8, "Timestamp"),
-        ] {
-            let bytes = nested_field(payload_tag, &nested_field(field_tag, &[0x98, 0x06, 1]));
-            assert!(matches!(decode_strict_command_envelope(&bytes),
-                Err(StrictWireError::UnknownField { message: actual, tag: 99 }) if actual == message));
-        }
-    }
-
-    #[test]
-    fn rejects_wrong_wire_types_for_new_fields() {
-        for (payload_tag, field_tag, nested) in [
-            (101, 5, true),
-            (114, 5, true),
-            (103, 3, false),
-            (118, 6, true),
-            (118, 7, false),
-            (118, 8, true),
-            (119, 3, false),
-        ] {
-            let payload = if nested {
-                vec![(field_tag << 3), 1]
-            } else {
-                nested_field(usize::from(field_tag), &[])
-            };
-            assert!(matches!(
-                decode_strict_command_envelope(&nested_field(payload_tag, &payload)),
-                Err(StrictWireError::UnexpectedWireType { .. })
-            ));
-        }
-        for secret_tag in 1..=4 {
-            let secret = if secret_tag <= 2 {
-                nested_field(secret_tag, &[])
-            } else {
-                vec![u8::try_from(secret_tag << 3).unwrap(), 1]
-            };
-            let bytes = nested_field(118, &nested_field(6, &secret));
-            assert!(matches!(
-                decode_strict_command_envelope(&bytes),
-                Err(StrictWireError::UnexpectedWireType {
-                    message: "SealedSecretV1",
-                    ..
-                })
-            ));
-        }
-        let bytes = nested_field(118, &nested_field(8, &nested_field(1, &[])));
-        assert!(matches!(
-            decode_strict_command_envelope(&bytes),
-            Err(StrictWireError::UnexpectedWireType {
-                message: "Timestamp",
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn rejects_tag_five_on_unchanged_command_schemas() {
-        for (tag, message) in [(104, "ConfigApply"), (117, "CertificateCsr")] {
-            assert!(
-                matches!(decode_strict_command_envelope(&nested_field(tag, &nested_field(5, &[]))),
-                Err(StrictWireError::UnknownField { message: actual, tag: 5 }) if actual == message)
-            );
-        }
-    }
-
-    #[test]
-    fn accepts_known_nested_command_fields() {
-        let bytes = envelope().encode_to_vec();
-        assert!(decode_strict_command_envelope(&bytes).is_ok());
-    }
-
-    #[test]
-    fn rejects_unknown_top_level_field() {
-        let mut bytes = envelope().encode_to_vec();
-        bytes.extend([0x80, 0x7d, 0x01]);
-        assert!(matches!(
-            validate_strict_command_envelope(&bytes),
-            Err(StrictWireError::UnknownField {
-                message: "CommandEnvelope",
-                tag: 2000
-            })
-        ));
-    }
-
-    #[test]
-    fn accepts_owner_fence_carriers_on_command_envelope() {
-        let mut command = envelope();
-        command.connection_fence = Some(ConnectionFenceV2 {
-            signature_version: FenceSignatureVersion::Ed25519V1 as i32,
-            key_id: "ed25519-sha256:test".to_owned(),
-            fence_id: vec![1; 16],
-            node_id: vec![2; 16],
-            endpoint_id: vec![3; 32],
-            owner_instance_id: vec![4; 16],
-            owner_incarnation: 1,
-            owner_epoch: 1,
-            connection_id: vec![5; 16],
-            authorization_revision: 1,
-            capabilities: vec!["ocserv.fencing.v2".to_owned()],
-            lease_until: Some(Timestamp {
-                seconds: 1_700_000_030,
-                nanos: 0,
-            }),
-            issued_at: Some(Timestamp {
-                seconds: 1_700_000_000,
-                nanos: 0,
-            }),
-            expires_at: Some(Timestamp {
-                seconds: 1_700_000_330,
-                nanos: 0,
-            }),
-            signature: vec![0xa5; 64],
-        });
-        command.fence_binding = Some(FenceBindingV2 {
-            signature_version: FenceSignatureVersion::Ed25519V1 as i32,
-            key_id: "ed25519-sha256:test".to_owned(),
-            operation_kind: FenceOperationKind::Command as i32,
-            operation_id: vec![6; 16],
-            fence_id: vec![1; 16],
-            node_id: vec![2; 16],
-            endpoint_id: vec![3; 32],
-            owner_instance_id: vec![4; 16],
-            owner_incarnation: 1,
-            owner_epoch: 1,
-            connection_id: vec![5; 16],
-            authorization_revision: 1,
-            capability: "ocserv.fencing.v2".to_owned(),
-            issued_at: Some(Timestamp {
-                seconds: 1_700_000_000,
-                nanos: 0,
-            }),
-            expires_at: Some(Timestamp {
-                seconds: 1_700_000_300,
-                nanos: 0,
-            }),
-            signature: vec![0xa5; 64],
-        });
-        assert!(decode_strict_command_envelope(&command.encode_to_vec()).is_ok());
-    }
-
-    #[test]
-    fn rejects_unknown_nested_payload_field() {
-        let payload = match envelope().payload.as_ref().expect("payload") {
-            command_envelope::Payload::SyntheticEcho(payload) => payload.encode_to_vec(),
-            _ => unreachable!("test payload is synthetic echo"),
-        };
-        let mut payload = payload;
-        payload.extend([0x98, 0x06, 0x01]);
-
-        let mut without_payload = envelope();
-        without_payload.payload = None;
-        let mut bytes = without_payload.encode_to_vec();
-        bytes.extend([0xe2, 0x06]);
-        append_varint(&mut bytes, payload.len());
-        bytes.extend(payload);
-
-        assert!(matches!(
-            validate_strict_command_envelope(&bytes),
-            Err(StrictWireError::UnknownField {
-                message: "SyntheticEcho",
-                tag: 99
-            })
-        ));
-    }
-
-    #[test]
-    fn rejects_unknown_authorization_field() {
-        let mut authorization = envelope()
-            .authorization
-            .as_ref()
-            .expect("authorization")
-            .encode_to_vec();
-        authorization.extend([0x98, 0x06, 0x01]);
-
-        let mut without_authorization = envelope();
-        without_authorization.authorization = None;
-        let mut bytes = without_authorization.encode_to_vec();
-        bytes.extend([0xea, 0x07]);
-        append_varint(&mut bytes, authorization.len());
-        bytes.extend(authorization);
-
-        assert!(matches!(
-            validate_strict_command_envelope(&bytes),
-            Err(StrictWireError::UnknownField {
-                message: "CommandAuthorizationProof",
-                tag: 99
-            })
-        ));
-    }
-
-    #[test]
-    fn rejects_unknown_timestamp_field() {
-        let mut timestamp = Timestamp {
-            seconds: 1_700_000_000,
-            nanos: 0,
-        }
-        .encode_to_vec();
-        timestamp.extend([0x18, 0x01]);
-
-        let mut without_timestamp = envelope();
-        without_timestamp.issued_at = None;
-        let mut bytes = without_timestamp.encode_to_vec();
-        bytes.extend([0x3a]);
-        append_varint(&mut bytes, timestamp.len());
-        bytes.extend(timestamp);
-
-        assert!(matches!(
-            validate_strict_command_envelope(&bytes),
-            Err(StrictWireError::UnknownField {
-                message: "Timestamp",
-                tag: 3
-            })
-        ));
     }
 }

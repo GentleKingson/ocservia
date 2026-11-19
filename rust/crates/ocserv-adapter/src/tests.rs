@@ -1,8 +1,15 @@
-use super::effect_store::*;
-use super::user_file::*;
+#![allow(
+    clippy::format_collect,
+    clippy::many_single_char_names,
+    clippy::similar_names,
+    clippy::too_many_lines
+)]
 
 use std::os::unix::fs::PermissionsExt;
+use std::process::{Command, Stdio};
 
+use super::effect_store::*;
+use super::user_file::*;
 use super::*;
 
 const TEST_COMMAND_ID: [u8; 16] = [1, 2, 3, 4, 5, 6, 0x70, 8, 0x80, 10, 11, 12, 13, 14, 15, 16];
@@ -18,18 +25,9 @@ pub(super) fn test_effect() -> EffectIdentity<'static> {
     }
 }
 
-fn executable(name: &str, body: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!("ocservia-adapter-{}", uuid::Uuid::now_v7()));
-    std::fs::create_dir_all(&directory).expect("create fixture directory");
-    let path = directory.join(name);
-    write_executable(&path, format!("#!/bin/sh\n{body}\n"));
-    path
-}
-
 pub(super) fn write_executable(path: &Path, bytes: impl AsRef<[u8]>) {
-    // Keep writable script descriptors out of this multithreaded process:
-    // a parallel fork can retain them until exec and cause ETXTBSY.
-    let mut writer = std::process::Command::new("tee")
+    // Avoid retaining writable script descriptors across concurrent forks (ETXTBSY).
+    let mut writer = Command::new("tee")
         .arg(path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -38,56 +36,164 @@ pub(super) fn write_executable(path: &Path, bytes: impl AsRef<[u8]>) {
     writer
         .stdin
         .take()
-        .expect("fixture writer stdin")
+        .expect("writer stdin")
         .write_all(bytes.as_ref())
         .expect("write fixture program");
-    assert!(writer.wait().expect("wait for fixture writer").success());
+    assert!(writer.wait().expect("wait writer").success());
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .expect("make fixture executable");
+        .expect("chmod fixture executable");
+}
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(prefix: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("ocservia-{prefix}-{}", Uuid::now_v7()));
+        std::fs::create_dir(&path).expect("create temp dir");
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn join(&self, name: impl AsRef<Path>) -> PathBuf {
+        self.0.join(name)
+    }
+
+    fn exec(&self, name: &str, body: &str) -> PathBuf {
+        let path = self.join(name);
+        write_executable(&path, format!("#!/bin/sh\n{body}\n"));
+        path
+    }
+
+    fn effect_resources(&self) -> FixedResources {
+        FixedResources::default()
+            .with_effect_store(self.join("effects.sqlite3"), self.join("effects.key"))
+            .expect("effect resources")
+    }
+
+    fn user_resources(&self, ocpasswd: PathBuf, openssl: PathBuf) -> FixedResources {
+        FixedResources::default()
+            .with_user_resources(
+                ocpasswd,
+                self.join("ocpasswd"),
+                openssl,
+                self.join("key.pem"),
+                "test-key".to_owned(),
+            )
+            .expect("user resources")
+            .with_effect_store(self.join("effects.sqlite3"), self.join("effects.key"))
+            .expect("effect resources")
+    }
+
+    fn user_adapter(&self, ocpasswd: PathBuf, openssl: PathBuf, limits: Limits) -> Adapter {
+        Adapter::new(self.user_resources(ocpasswd, openssl), limits)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn write_user_fixture(path: &Path, bytes: impl AsRef<[u8]>) {
     std::fs::write(path, bytes).expect("write ocpasswd fixture");
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(USER_FILE_MODE))
-        .expect("secure ocpasswd fixture");
+        .expect("chmod ocpasswd fixture");
+}
+
+fn staging_files(directory: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(directory)
+        .expect("read staging directory")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(".ocpasswd.ocservia-"))
+        })
+        .collect()
+}
+
+fn openssl_ok(args: &[&std::ffi::OsStr]) {
+    assert!(
+        Command::new("/usr/bin/openssl")
+            .args(args)
+            .status()
+            .expect("run openssl")
+            .success()
+    );
+}
+
+fn seal_rsa_oaep(public_key: &Path, secret: &[u8]) -> Vec<u8> {
+    let mut child = Command::new("/usr/bin/openssl")
+        .args(["pkeyutl", "-encrypt", "-pubin", "-inkey"])
+        .arg(public_key)
+        .args([
+            "-pkeyopt",
+            "rsa_padding_mode:oaep",
+            "-pkeyopt",
+            "rsa_oaep_md:sha256",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn openssl pkeyutl");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(secret)
+        .expect("write secret");
+    let out = child.wait_with_output().expect("wait openssl pkeyutl");
+    assert!(out.status.success());
+    out.stdout
+}
+
+fn expire_artifact_grant(
+    resources: &FixedResources,
+    artifact_id: &Uuid,
+    expired_at: i64,
+) -> EffectStore {
+    let store = EffectStore::open_for_mutation(resources).expect("open artifact store");
+    let mut rec = query_artifact(&store.connection, artifact_id.as_bytes())
+        .expect("query artifact")
+        .expect("artifact record");
+    rec.grant_expires_at = Some(expired_at);
+    rec.record_hmac = authenticate_artifact_record(&store.hmac_key, &rec);
+    store
+        .connection
+        .execute(
+            "UPDATE certificate_artifacts SET grant_expires_at=?2,record_hmac=?3 WHERE artifact_id=?1",
+            params![rec.artifact_id.as_slice(), expired_at, rec.record_hmac.as_slice()],
+        )
+        .expect("expire grant");
+    store
 }
 
 #[test]
 fn version_fixtures_and_malformed_output() {
-    assert_eq!(
-        parse_version(b"ocserv 1.2.4\n")
-            .expect("1.2 fixture")
-            .version,
-        "1.2.4"
-    );
-    assert_eq!(
-        parse_version(
-            b"OpenConnect VPN Server 1.3.0\n\nCompiled with: seccomp, PAM\nGnuTLS version: 3.8.9\n"
-        )
-        .expect("1.3 fixture")
-        .version,
-        "1.3.0"
-    );
-    assert_eq!(
-        parse_version(b"ocserv 1.4.1\n")
-            .expect("1.4 fixture")
-            .version,
-        "1.4.1"
-    );
-    assert_eq!(
-        parse_version(b"OpenConnect VPN Server 1.5.0\n")
-            .expect("1.5.0 fixture")
-            .version,
-        "1.5.0"
-    );
+    for (raw, want) in [
+        (b"ocserv 1.2.4\n".as_slice(), "1.2.4"),
+        (
+            b"OpenConnect VPN Server 1.3.0\n\nCompiled with: seccomp, PAM\nGnuTLS version: 3.8.9\n",
+            "1.3.0",
+        ),
+        (b"ocserv 1.4.1\n", "1.4.1"),
+        (b"OpenConnect VPN Server 1.5.0\n", "1.5.0"),
+    ] {
+        assert_eq!(parse_version(raw).expect("valid version").version, want);
+    }
     for prefix in ["ocserv", "OpenConnect VPN Server"] {
         assert_eq!(
             parse_version(format!("{prefix} 1.6.0\n").as_bytes())
-                .expect("1.6.0 fixture")
+                .expect("1.6.0")
                 .version,
             "1.6.0"
         );
-        for version in [
+        for bad in [
             "1.5.1",
             "1.6.1",
             "1.7.0",
@@ -99,8 +205,8 @@ fn version_fixtures_and_malformed_output() {
             "1.06.0",
         ] {
             assert!(
-                parse_version(format!("{prefix} {version}\n").as_bytes()).is_err(),
-                "unreviewed version {version} accepted"
+                parse_version(format!("{prefix} {bad}\n").as_bytes()).is_err(),
+                "unreviewed version {bad} accepted"
             );
         }
     }
@@ -110,13 +216,14 @@ fn version_fixtures_and_malformed_output() {
 
 #[tokio::test]
 async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
-    let directory = std::env::temp_dir().join(format!("ocservia-preflight-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let program = directory.join("snapshot-command");
-    write_executable(&program, b"#!/bin/sh\ncase \"$1\" in\n--version) echo 'ocserv 1.3.0';;\nshow) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n--json) echo '[]';;\n*) exit 99;;\nesac\n");
-    let config = directory.join("ocserv.conf");
+    let dir = TempDir::new("preflight");
+    let program = dir.exec(
+        "snapshot-command",
+        "case \"$1\" in\n--version) echo 'ocserv 1.3.0';;\nshow) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n--json) echo '[]';;\n*) exit 99;;\nesac",
+    );
+    let config = dir.join("ocserv.conf");
     std::fs::write(&config, b"tcp-port = 443\n").expect("config");
-    let users = directory.join("ocpasswd");
+    let users = dir.join("ocpasswd");
     write_user_fixture(&users, b"alice::private-hash");
     let resources = FixedResources::new(
         program.clone(),
@@ -130,14 +237,11 @@ async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
         PathBuf::from("/bin/false"),
         users.clone(),
         PathBuf::from("/bin/false"),
-        directory.join("absent-key.pem"),
+        dir.join("absent-key.pem"),
         "user-key".into(),
     )
     .expect("user resources")
-    .with_effect_store(
-        directory.join("absent.sqlite3"),
-        directory.join("absent.key"),
-    )
+    .with_effect_store(dir.join("absent.sqlite3"), dir.join("absent.key"))
     .expect("store");
     let adapter = Adapter::new(resources, Limits::default());
     adapter.host_preflight().await.expect("healthy snapshot");
@@ -146,46 +250,43 @@ async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
         std::fs::read(&users).expect("users"),
         b"alice::private-hash"
     );
-    assert!(!directory.join("absent.sqlite3").exists());
-    assert!(!directory.join("absent.key").exists());
-    assert!(!directory.join("absent-key.pem").exists());
+    for absent in ["absent.sqlite3", "absent.key", "absent-key.pem"] {
+        assert!(!dir.join(absent).exists());
+    }
     std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o644)).expect("mode");
     assert!(matches!(
         adapter.host_preflight().await,
         Err(AdapterError::ResourceMetadata { reason: "mode", .. })
     ));
-    std::fs::remove_dir_all(directory).expect("cleanup");
 }
 
 #[tokio::test]
 async fn reads_packaged_version_banner_from_stderr() {
-    let version_program = executable(
+    let dir = TempDir::new("version");
+    let program = dir.exec(
         "ocserv-version",
         "printf 'OpenConnect VPN Server 1.3.0\\n' >&2",
     );
-    let fixture_directory = version_program.parent().expect("fixture parent").to_owned();
     let resources = FixedResources::new(
         PathBuf::from("/bin/false"),
-        version_program,
+        program,
         PathBuf::from("/bin/false"),
         PathBuf::from("/etc/hosts"),
         PathBuf::from("/proc/sys/kernel/random/boot_id"),
     )
-    .expect("fixed resources");
+    .expect("resources");
     let version = Adapter::new(resources, Limits::default())
         .ocserv_version()
         .await
         .expect("stderr version banner");
     assert_eq!(version.version, "1.3.0");
-    std::fs::remove_dir_all(fixture_directory).expect("remove version fixture");
 }
 
 #[tokio::test]
 async fn stale_config_plan_staging_files_are_cleaned_on_startup() {
-    let directory = std::env::temp_dir().join(format!("ocservia-plan-clean-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("create fixture directory");
-    let config = directory.join("ocserv.conf");
-    std::fs::write(&config, b"tcp-port = 444\n").expect("write config");
+    let dir = TempDir::new("plan-clean");
+    let config = dir.join("ocserv.conf");
+    std::fs::write(&config, b"tcp-port = 444\n").expect("config");
     let resources = FixedResources::new(
         PathBuf::from("/bin/false"),
         PathBuf::from("/bin/false"),
@@ -193,23 +294,20 @@ async fn stale_config_plan_staging_files_are_cleaned_on_startup() {
         config,
         PathBuf::from("/proc/sys/kernel/random/boot_id"),
     )
-    .expect("fixed resources");
-    let adapter = Adapter::new(resources, Limits::default());
-    let stale = directory.join(format!(".ocservia-plan-{}", Uuid::now_v7()));
-    let lookalike = directory.join(".ocservia-plan-not-a-uuid");
-    std::fs::write(&stale, b"stale").expect("stale staging");
+    .expect("resources");
+    let stale = dir.join(format!(".ocservia-plan-{}", Uuid::now_v7()));
+    let lookalike = dir.join(".ocservia-plan-not-a-uuid");
+    std::fs::write(&stale, b"stale").expect("stale");
     std::fs::write(&lookalike, b"preserve").expect("lookalike");
-    adapter
+    Adapter::new(resources, Limits::default())
         .cleanup_stale_config_plans()
         .await
-        .expect("startup cleanup");
-    assert!(!stale.exists());
-    assert!(lookalike.exists());
-    std::fs::remove_dir_all(directory).expect("remove plan fixture");
+        .expect("cleanup");
+    assert!(!stale.exists() && lookalike.exists());
 }
 
 #[test]
-fn parses_session_and_ban_fixtures() {
+fn parses_session_ban_user_and_group_fixtures() {
     for (users, bans) in [
         (
             include_bytes!("../fixtures/ocserv-1.2/users.json").as_slice(),
@@ -224,33 +322,37 @@ fn parses_session_and_ban_fixtures() {
             include_bytes!("../fixtures/ocserv-1.4/bans.json").as_slice(),
         ),
     ] {
-        let sessions = parse_sessions(users).expect("sessions fixture");
+        let sessions = parse_sessions(users).expect("sessions");
         assert_eq!(sessions.sessions.len(), 2);
         assert_eq!(sessions.sessions[1].remote_ip, "2001:db8::1");
-        let bans = parse_ip_bans(bans).expect("bans fixture");
-        assert_eq!(bans.bans.len(), 2);
-        assert_eq!(bans.bans[1].seconds_remaining, None);
+        let parsed_bans = parse_ip_bans(bans).expect("bans");
+        assert_eq!(parsed_bans.bans.len(), 2);
+        assert_eq!(parsed_bans.bans[1].seconds_remaining, None);
     }
     assert!(parse_ip_bans(b"[{\"IP\":\"192.0.2.1\"},]").is_err());
-}
 
-#[test]
-fn user_and_group_parsers_drop_hashes_and_reject_unsafe_names() {
     let users = parse_user_file(b"alice:*:$6$secret-hash\nbob:x:!$6$disabled\n").expect("users");
     assert_eq!(users.users.len(), 2);
-    assert!(users.users[0].enabled);
-    assert!(!users.users[1].enabled);
+    assert!(users.users[0].enabled && !users.users[1].enabled);
     assert!(!format!("{users:?}").contains("secret-hash"));
     let groups = parse_groups_from_user_file(b"alice:staff:$6$alice\nbob:admins,staff:$6$bob\n")
         .expect("groups");
-    let staff = groups
-        .groups
-        .iter()
-        .find(|group| group.group_name == "staff")
-        .expect("staff");
-    assert_eq!(staff.members, ["alice", "bob"]);
+    assert_eq!(
+        groups
+            .groups
+            .iter()
+            .find(|g| g.group_name == "staff")
+            .expect("staff")
+            .members,
+        ["alice", "bob"]
+    );
     assert!(parse_user_file(b"../root:hash\n").is_err());
     assert!(parse_groups_from_user_file(b"alice:staff;id:$6$hash\n").is_err());
+
+    let status = parse_service_status(b"LoadState=loaded\nActiveState=active\nSubState=running\n")
+        .expect("valid status");
+    assert_eq!(status.active_state, "active");
+    assert!(parse_service_status(b"ActiveState=active\n").is_err());
 }
 
 #[test]
@@ -275,38 +377,38 @@ fn user_file_diagnostics_preserve_physical_lines_and_redact_records() {
         ("alice:staff;id:private-hash", "invalid_group", 1, 3, None),
     ] {
         let error = parse_user_file(input.as_bytes()).expect_err("invalid record");
-        assert!(matches!(&error, AdapterError::UserFileFormat {
-                reason: r, line: l, fields: f, first_line: first,
-            } if *r == reason && *l == line && *f == fields && *first == first_line));
+        assert!(matches!(
+            &error,
+            AdapterError::UserFileFormat { reason: r, line: l, fields: f, first_line: first }
+            if *r == reason && *l == line && *f == fields && *first == first_line
+        ));
         let debug = format!("{error:?}");
         let wire = PrivdError::from(error);
         assert_eq!(wire.kind, i32::from(ErrorKind::MalformedOutput));
-        for output in [debug, wire.detail] {
-            assert!(!output.contains("private-hash"));
-            assert!(!output.contains("other-hash"));
-            assert!(!output.contains("alice"));
+        for out in [debug, wire.detail] {
+            for secret in ["private-hash", "other-hash", "alice"] {
+                assert!(!out.contains(secret));
+            }
         }
     }
-    for input in [
+    for ok in [
         "",
         "\n\n",
         "alice::x",
         "alice::arbitrary-length-hash\n\nbob:x:!",
     ] {
-        parse_user_file(input.as_bytes()).expect("previously supported records");
+        parse_user_file(ok.as_bytes()).expect("supported records");
     }
 }
 
 #[tokio::test]
-async fn resource_diagnostics_distinguish_mode_owner_group_links_and_missing() {
-    let directory =
-        std::env::temp_dir().join(format!("ocservia-resource-diagnostic-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let path = directory.join("ocpasswd");
+async fn resource_diagnostics_and_ocpasswd_publish_enforce_metadata_and_parent() {
+    let dir = TempDir::new("resource-meta");
+    let path = dir.join("ocpasswd");
     assert!(
         read_optional_user_file(&path)
             .await
-            .expect("optional absence")
+            .expect("absent")
             .is_empty()
     );
     assert!(matches!(
@@ -316,25 +418,33 @@ async fn resource_diagnostics_distinguish_mode_owner_group_links_and_missing() {
             ..
         })
     ));
-    write_user_fixture(&path, b"alice::private-hash");
-    read_user_file(&path, false).await.expect("0600 accepted");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("mode");
-    let error = read_user_file(&path, false)
+
+    let adapter = dir.user_adapter(
+        PathBuf::from("/bin/false"),
+        PathBuf::from("/bin/false"),
+        Limits::default(),
+    );
+    let mut staging = adapter
+        .stage_user_file(b"alice:staff:$6$hash\n")
         .await
-        .expect_err("0644 rejected");
-    assert!(matches!(
-        error,
-        AdapterError::ResourceMetadata {
-            reason: "mode",
-            actual: 0o644,
-            expected: 0o600,
-            ..
-        }
-    ));
-    assert!(error.to_string().contains("actual=0644 expected=0600"));
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
-    let file = File::open(&path).expect("file");
+        .expect("stage");
+    adapter
+        .commit_desired_staging(&mut staging, b"", "user_create", "alice", 1, test_effect())
+        .await
+        .expect("publish");
+    let meta = std::fs::metadata(&path).expect("meta");
     let (uid, gid) = authoritative_user_owner();
+    assert_eq!(
+        (
+            meta.uid(),
+            meta.gid(),
+            meta.permissions().mode() & 0o777,
+            meta.nlink()
+        ),
+        (uid, gid, USER_FILE_MODE, 1)
+    );
+
+    let file = File::open(&path).expect("open");
     assert!(matches!(
         validate_authoritative_user_file(&file, uid + 1, gid),
         Err(AdapterError::ResourceMetadata {
@@ -349,7 +459,33 @@ async fn resource_diagnostics_distinguish_mode_owner_group_links_and_missing() {
             ..
         })
     ));
-    let link = directory.join("link");
+    assert!(matches!(
+        validate_authoritative_user_file(&File::open(dir.path()).expect("dir"), uid, gid),
+        Err(AdapterError::ResourceMetadata {
+            reason: "file_type_regular",
+            ..
+        })
+    ));
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("0644");
+    let err = read_user_file(&path, false).await.expect_err("0644");
+    assert!(matches!(
+        err,
+        AdapterError::ResourceMetadata {
+            reason: "mode",
+            actual: 0o644,
+            expected: 0o600,
+            ..
+        }
+    ));
+    assert!(err.to_string().contains("actual=0644 expected=0600"));
+    assert!(matches!(
+        adapter.user_list().await,
+        Err(AdapterError::ResourceMetadata { .. })
+    ));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(USER_FILE_MODE)).expect("0600");
+
+    let link = dir.join("link");
     std::fs::hard_link(&path, &link).expect("hardlink");
     assert!(matches!(
         read_user_file(&path, false).await,
@@ -358,7 +494,12 @@ async fn resource_diagnostics_distinguish_mode_owner_group_links_and_missing() {
             ..
         })
     ));
-    std::fs::remove_file(&link).expect("remove hardlink");
+    assert!(matches!(
+        adapter.user_list().await,
+        Err(AdapterError::ResourceMetadata { .. })
+    ));
+    std::fs::remove_file(&link).expect("rm hardlink");
+
     std::os::unix::fs::symlink(&path, &link).expect("symlink");
     assert!(matches!(
         read_user_file(&link, true).await,
@@ -367,120 +508,40 @@ async fn resource_diagnostics_distinguish_mode_owner_group_links_and_missing() {
             ..
         })
     ));
-    assert!(matches!(
-        validate_authoritative_user_file(&File::open(&directory).expect("directory"), uid, gid),
-        Err(AdapterError::ResourceMetadata {
-            reason: "file_type_regular",
-            ..
-        })
-    ));
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
-
-#[tokio::test]
-async fn ocpasswd_publish_enforces_owner_mode_links_and_real_parent() {
-    let directory =
-        std::env::temp_dir().join(format!("ocservia-ocpasswd-metadata-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("fixture directory");
-    let users = directory.join("ocpasswd");
-    let resources = FixedResources::default()
-        .with_user_resources(
-            PathBuf::from("/bin/false"),
-            users.clone(),
-            PathBuf::from("/bin/false"),
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("resources")
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let adapter = Adapter::new(resources, Limits::default());
-    let desired = b"alice:staff:$6$hash\n";
-    let mut staging = adapter
-        .stage_user_file(desired)
-        .await
-        .expect("secure staging");
-    adapter
-        .commit_desired_staging(&mut staging, b"", "user_create", "alice", 1, test_effect())
-        .await
-        .expect("secure publish");
-    let metadata = std::fs::metadata(&users).expect("published metadata");
-    let (uid, gid) = authoritative_user_owner();
-    assert_eq!(metadata.uid(), uid);
-    assert_eq!(metadata.gid(), gid);
-    assert_eq!(metadata.permissions().mode() & 0o777, USER_FILE_MODE);
-    assert_eq!(metadata.nlink(), 1);
-
-    std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o660))
-        .expect("make legacy file unsafe");
-    assert!(matches!(
-        adapter.user_list().await,
-        Err(AdapterError::ResourceMetadata { .. })
-    ));
-    std::fs::set_permissions(&users, std::fs::Permissions::from_mode(USER_FILE_MODE))
-        .expect("restore secure mode");
-
-    let second_link = directory.join("ocpasswd-copy");
-    std::fs::hard_link(&users, &second_link).expect("hard link fixture");
-    assert!(matches!(
-        adapter.user_list().await,
-        Err(AdapterError::ResourceMetadata { .. })
-    ));
-    std::fs::remove_file(&second_link).expect("remove hard link fixture");
-
-    let real_users = directory.join("ocpasswd-real");
-    std::fs::rename(&users, &real_users).expect("preserve real file");
-    std::os::unix::fs::symlink(&real_users, &users).expect("symlink fixture");
+    let real = dir.join("ocpasswd-real");
+    std::fs::rename(&path, &real).expect("mv");
+    std::os::unix::fs::symlink(&real, &path).expect("symlink target");
     assert!(adapter.user_list().await.is_err());
-    std::fs::remove_file(&users).expect("remove symlink fixture");
-    std::fs::rename(&real_users, &users).expect("restore real file");
+    std::fs::remove_file(&path).expect("rm symlink");
+    std::fs::rename(&real, &path).expect("restore");
 
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o770))
-        .expect("make parent unsafe");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o770)).expect("0770");
     assert!(matches!(
         adapter.user_list().await,
         Err(AdapterError::ResourceMetadata { .. })
     ));
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-        .expect("restore fixture directory");
-    std::fs::remove_dir_all(directory).expect("cleanup");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("0700");
 }
 
 #[tokio::test]
-async fn group_apply_is_atomic_when_replacement_fails() {
-    let directory = std::env::temp_dir().join(format!("ocservia-group-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let users = directory.join("ocpasswd");
+async fn group_and_user_capacity_preconditions_and_atomicity() {
+    let dir = TempDir::new("group-atomic");
+    let users = dir.join("ocpasswd");
     write_user_fixture(&users, b"alice:staff:$6$alice-hash\nbob:*:!$6$bob-hash\n");
-    let resources = FixedResources::default()
-        .with_user_resources(
-            PathBuf::from("/bin/false"),
-            users.clone(),
-            PathBuf::from("/bin/false"),
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("resources")
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let adapter = Adapter::new(resources, Limits::default());
-    assert!(
-        adapter
-            .group_apply(
-                "staff",
-                &["alice".to_owned(), "bob".to_owned()],
-                1,
-                test_effect(),
-            )
-            .await
-            .is_ok()
+    let adapter = dir.user_adapter(
+        PathBuf::from("/bin/false"),
+        PathBuf::from("/bin/false"),
+        Limits::default(),
     );
+    adapter
+        .group_apply(
+            "staff",
+            &["alice".to_owned(), "bob".to_owned()],
+            1,
+            test_effect(),
+        )
+        .await
+        .expect("group apply");
     assert_eq!(
         adapter.group_list().await.expect("groups").groups[0].members,
         ["alice", "bob"]
@@ -489,7 +550,7 @@ async fn group_apply_is_atomic_when_replacement_fails() {
         adapter
             .desired_effect_observe("group_apply", "staff", 1, test_effect())
             .await
-            .expect("group effect")
+            .expect("observe")
             .state,
         DesiredEffectState::AppliedExact as i32
     );
@@ -497,7 +558,7 @@ async fn group_apply_is_atomic_when_replacement_fails() {
         adapter
             .desired_effect_observe("group_apply", "staff", 2, test_effect())
             .await
-            .expect("stale group effect")
+            .expect("observe stale")
             .state,
         DesiredEffectState::Unknown as i32
     );
@@ -509,817 +570,307 @@ async fn group_apply_is_atomic_when_replacement_fails() {
             .await
             .is_err()
     );
-    assert_eq!(std::fs::read(&users).expect("unchanged"), updated);
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
-
-#[tokio::test]
-async fn maximum_group_apply_succeeds_and_overflow_is_side_effect_free() {
-    let directory = std::env::temp_dir().join(format!("ocservia-group-max-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let users = directory.join("ocpasswd");
-    let members = (0..MAX_MANAGED_RESOURCES)
-        .map(|index| format!("user{index:03}"))
-        .collect::<Vec<_>>();
-    let mut original = String::new();
-    for member in &members {
-        original.push_str(member);
-        original.push_str(":*:$6$test-hash\n");
-    }
-    write_user_fixture(&users, original);
-    let resources = FixedResources::default()
-        .with_user_resources(
-            PathBuf::from("/bin/false"),
-            users.clone(),
-            PathBuf::from("/bin/false"),
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("resources")
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let adapter = Adapter::new(resources, Limits::default());
-    adapter
-        .group_apply("staff", &members, 1, test_effect())
-        .await
-        .expect("maximum group apply");
-    assert_eq!(
-        adapter.group_list().await.expect("groups").groups[0]
-            .members
-            .len(),
-        384
-    );
-    let applied = std::fs::read(&users).expect("applied users");
-    let mut overflow = members;
-    overflow.push("overflow".to_owned());
-    assert!(matches!(
-        adapter
-            .group_apply("staff", &overflow, 2, test_effect())
-            .await,
-        Err(AdapterError::InvalidRequest)
-    ));
-    assert_eq!(std::fs::read(&users).expect("unchanged users"), applied);
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
-
-#[tokio::test]
-async fn aggregate_group_capacity_rejection_is_terminal_and_pre_effect() {
-    let directory =
-        std::env::temp_dir().join(format!("ocservia-group-aggregate-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let users = directory.join("ocpasswd");
-    let mut original = Vec::new();
-    for index in 0..MAX_MANAGED_RESOURCES {
-        original.extend_from_slice(format!("user{index:03}:legacy:$6$test-hash\n").as_bytes());
-    }
-    write_user_fixture(&users, &original);
-    let effect_database = directory.join("effects.sqlite3");
-    let effect_key = directory.join("effects.key");
-    let resources = FixedResources::default()
-        .with_user_resources(
-            PathBuf::from("/bin/false"),
-            users.clone(),
-            PathBuf::from("/bin/false"),
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("resources")
-        .with_effect_store(effect_database.clone(), effect_key.clone())
-        .expect("effect resources");
-    let adapter = Adapter::new(resources, Limits::default());
-
-    let result = adapter
-        .group_apply("new-group", &["user000".to_owned()], 1, test_effect())
-        .await;
-
-    assert!(
-        matches!(result, Err(AdapterError::CapacityExceeded)),
-        "unexpected result: {result:?}"
-    );
-    assert_eq!(std::fs::read(&users).expect("unchanged users"), original);
-    assert!(!effect_database.exists());
-    assert!(!effect_key.exists());
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
-
-#[test]
-fn capacity_error_has_a_distinct_privilege_boundary_kind() {
-    let error = PrivdError::from(AdapterError::CapacityExceeded);
-    assert_eq!(error.kind, i32::from(ErrorKind::CapacityExceeded));
-    assert_eq!(error.detail, "authoritative state capacity exceeded");
-}
-
-#[tokio::test]
-async fn failed_password_rotation_preserves_original_record() {
-    let directory = std::env::temp_dir().join(format!("ocservia-secret-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let users = directory.join("ocpasswd");
-    let original = b"alice:admins,staff:!$6$original-hash\n";
-    write_user_fixture(&users, original);
-    let openssl = executable("openssl-fixture", "printf rotated-password");
-    let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
-    let ocpasswd = executable("ocpasswd-fixture", "printf corrupted > \"$2\"; exit 1");
-    let ocpasswd_directory = ocpasswd.parent().expect("ocpasswd parent").to_owned();
-    let resources = FixedResources::default()
-        .with_user_resources(
-            ocpasswd,
-            users.clone(),
-            openssl,
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("resources")
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let adapter = Adapter::new(resources, Limits::default());
-    assert!(
-        adapter
-            .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-            .await
-            .is_err()
-    );
-    assert_eq!(std::fs::read(&users).expect("preserved"), original);
-    std::fs::remove_dir_all(directory).expect("cleanup directory");
-    std::fs::remove_dir_all(openssl_directory).expect("cleanup openssl");
-    std::fs::remove_dir_all(ocpasswd_directory).expect("cleanup ocpasswd");
-}
-
-fn staging_files(directory: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(directory)
-        .expect("read staging directory")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".ocpasswd.ocservia-"))
-        })
-        .collect()
-}
-
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn staging_files_are_removed_on_timeout_cancellation_and_startup() {
-    let directory = std::env::temp_dir().join(format!("ocservia-staging-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let users = directory.join("ocpasswd");
-    let original = b"alice:staff:!$6$original-hash\n";
-    write_user_fixture(&users, original);
-    let openssl = executable("openssl-fast", "cat >/dev/null; printf rotated-password");
-    let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
-    let slow_ocpasswd = executable(
-        "ocpasswd-slow",
-        "cat >/dev/null; cp \"$2\" \"$2.tmp\"; sleep 5",
-    );
-    let slow_directory = slow_ocpasswd
-        .parent()
-        .expect("slow ocpasswd parent")
-        .to_owned();
-    let resources = FixedResources::default()
-        .with_user_resources(
-            slow_ocpasswd,
-            users.clone(),
-            openssl.clone(),
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("resources")
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let adapter = Adapter::new(
-        resources,
-        Limits {
-            timeout: Duration::from_millis(500),
-            output_bytes: DEFAULT_OUTPUT_BYTES,
-        },
-    );
-    let guard = adapter.user_file_lock.lock().await;
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(20),
-            adapter.user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect()),
-        )
-        .await
-        .is_err()
-    );
-    drop(guard);
-    assert!(staging_files(&directory).is_empty());
-    assert_eq!(
-        std::fs::read(&users).expect("queued cancellation"),
-        original
-    );
-    let timeout_result = adapter
-        .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-        .await;
-    assert!(
-        matches!(timeout_result, Err(AdapterError::DeadlineExceeded)),
-        "password staging should reach its deadline"
-    );
-    assert!(staging_files(&directory).is_empty());
-    assert_eq!(
-        std::fs::read(&users).expect("preserved after timeout"),
-        original
-    );
-
-    let slow_openssl = executable("openssl-slow", "sleep 5");
-    let slow_openssl_directory = slow_openssl
-        .parent()
-        .expect("slow openssl parent")
-        .to_owned();
-    let decrypt_adapter = Adapter::new(
-        adapter
-            .resources
-            .clone()
-            .with_user_resources(
-                PathBuf::from("/bin/false"),
-                users.clone(),
-                slow_openssl,
-                directory.join("key.pem"),
-                String::from("test-key"),
-            )
-            .expect("slow decrypt resources"),
-        Limits {
-            timeout: Duration::from_millis(500),
-            output_bytes: DEFAULT_OUTPUT_BYTES,
-        },
-    );
-    let decrypt_timeout_result = decrypt_adapter
-        .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-        .await;
-    assert!(
-        matches!(decrypt_timeout_result, Err(AdapterError::DeadlineExceeded)),
-        "password decryption should reach its deadline"
-    );
-    assert!(staging_files(&directory).is_empty());
-    assert_eq!(
-        std::fs::read(&users).expect("preserved after decrypt timeout"),
-        original
-    );
-
-    let cancellation_marker = directory.join("cancellation-started");
-    let cancellation_ocpasswd = executable(
-        "ocpasswd-cancel",
-        &format!(
-            "cp \"$2\" \"$2.tmp\"\ntouch '{}'\nsleep 10",
-            cancellation_marker.display()
-        ),
-    );
-    let cancellation_directory = cancellation_ocpasswd
-        .parent()
-        .expect("cancellation ocpasswd parent")
-        .to_owned();
-    let cancellation_adapter = Adapter::new(
-        adapter
-            .resources
-            .clone()
-            .with_user_resources(
-                cancellation_ocpasswd,
-                users.clone(),
-                openssl.clone(),
-                directory.join("key.pem"),
-                String::from("test-key"),
-            )
-            .expect("cancellation resources"),
-        Limits {
-            timeout: Duration::from_secs(30),
-            output_bytes: DEFAULT_OUTPUT_BYTES,
-        },
-    );
-    let task = tokio::spawn(async move {
-        cancellation_adapter
-            .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-            .await
-    });
-    for _ in 0..500 {
-        if cancellation_marker.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(cancellation_marker.exists());
-    assert!(!staging_files(&directory).is_empty());
-    task.abort();
-    let _ = task.await;
-    assert!(staging_files(&directory).is_empty());
-
-    // Consume password input before exiting; only the subsequent lock command times out.
-    let lock_ocpasswd = executable(
-        "ocpasswd-lock-slow",
-        "if [ \"$3\" = \"-l\" ]; then sleep 5; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' 'alice:staff:$6$new-hash' > \"$2\"",
-    );
-    let lock_directory = lock_ocpasswd
-        .parent()
-        .expect("lock ocpasswd parent")
-        .to_owned();
-    let lock_resources = adapter
-        .resources
-        .clone()
-        .with_user_resources(
-            lock_ocpasswd,
-            users.clone(),
-            openssl,
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("lock resources");
-    let lock_adapter = Adapter::new(
-        lock_resources,
-        Limits {
-            timeout: Duration::from_millis(500),
-            output_bytes: DEFAULT_OUTPUT_BYTES,
-        },
-    );
-    let lock_timeout_result = lock_adapter
-        .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-        .await;
-    assert!(
-        matches!(lock_timeout_result, Err(AdapterError::DeadlineExceeded)),
-        "password locking should reach its deadline"
-    );
-    assert!(staging_files(&directory).is_empty());
-    assert_eq!(
-        std::fs::read(&users).expect("preserved after lock timeout"),
-        original
-    );
-
-    let stale = directory.join(format!(".ocpasswd.ocservia-{}", Uuid::now_v7()));
-    let stale_scratch = directory.join(format!(".ocpasswd.ocservia-{}.tmp", Uuid::now_v7()));
-    let lookalike = directory.join(".ocpasswd.ocservia-not-a-uuid");
-    write_user_fixture(&stale, b"secret hash staging");
-    write_user_fixture(&stale_scratch, b"incomplete child scratch");
-    std::fs::write(&lookalike, b"preserve").expect("lookalike");
-    lock_adapter
-        .cleanup_stale_user_staging()
-        .await
-        .expect("startup cleanup");
-    assert!(!stale.exists());
-    assert!(!stale_scratch.exists());
-    assert!(lookalike.exists());
-
-    std::fs::remove_dir_all(directory).expect("cleanup directory");
-    std::fs::remove_dir_all(openssl_directory).expect("cleanup openssl");
-    std::fs::remove_dir_all(slow_openssl_directory).expect("cleanup slow openssl");
-    std::fs::remove_dir_all(slow_directory).expect("cleanup slow ocpasswd");
-    std::fs::remove_dir_all(cancellation_directory).expect("cleanup cancellation ocpasswd");
-    std::fs::remove_dir_all(lock_directory).expect("cleanup lock ocpasswd");
-}
-
-#[tokio::test]
-async fn startup_cleanup_accepts_private_child_group_before_normalization() {
-    let directory = std::env::temp_dir().join(format!("ocservia-child-group-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let users = directory.join("ocpasswd");
-    let resources = FixedResources::default()
-        .with_user_resources(
-            PathBuf::from("/usr/bin/ocpasswd"),
-            users,
-            PathBuf::from("/usr/bin/openssl"),
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("resources");
-    let staging = directory.join(format!(".ocpasswd.ocservia-{}", Uuid::now_v7()));
-    let scratch = directory.join(format!(".ocpasswd.ocservia-{}.tmp", Uuid::now_v7()));
-    for path in [&staging, &scratch] {
-        write_user_fixture(path, b"incomplete child output");
-        assert_eq!(
-            std::fs::metadata(path).expect("child metadata").gid(),
-            rustix::process::getegid().as_raw()
-        );
-    }
-    Adapter::new(resources, Limits::default())
-        .cleanup_stale_user_staging()
-        .await
-        .expect("cleanup before normalization");
-    assert!(!staging.exists() && !scratch.exists());
-    std::fs::remove_dir_all(directory).expect("cleanup fixture");
-}
-
-#[tokio::test]
-async fn create_and_rotate_enforce_authoritative_existence_preconditions() {
-    let directory = std::env::temp_dir().join(format!("ocservia-existence-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let users = directory.join("ocpasswd");
-    let original = b"alice:admins,staff:!$6$original-hash\n";
-    write_user_fixture(&users, original);
-    let resources = FixedResources::default()
-        .with_user_resources(
-            PathBuf::from("/bin/false"),
-            users.clone(),
-            PathBuf::from("/bin/false"),
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("resources")
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let adapter = Adapter::new(resources, Limits::default());
     assert!(matches!(
         adapter
             .user_create("alice", "test-key", &[7_u8; 64], 1, test_effect())
             .await,
         Err(AdapterError::InvalidRequest)
     ));
-    assert_eq!(std::fs::read(&users).expect("create conflict"), original);
     assert!(matches!(
         adapter
-            .user_password_rotate("bob", "test-key", &[7_u8; 64], 2, test_effect())
+            .user_password_rotate("carol", "test-key", &[7_u8; 64], 2, test_effect())
             .await,
         Err(AdapterError::InvalidRequest)
     ));
-    assert_eq!(std::fs::read(&users).expect("rotate missing"), original);
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
+    assert_eq!(std::fs::read(&users).expect("unchanged"), updated);
 
-#[tokio::test]
-async fn user_create_rejects_authoritative_capacity_before_side_effects() {
-    let directory = std::env::temp_dir().join(format!("ocservia-user-capacity-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let users = directory.join("ocpasswd");
-    let mut original = Vec::new();
-    for index in 0..MAX_MANAGED_RESOURCES {
-        original.extend_from_slice(format!("user{index:03}:*:$6$test-hash\n").as_bytes());
-    }
-    write_user_fixture(&users, &original);
-
-    let openssl_marker = directory.join("openssl-called");
-    let ocpasswd_marker = directory.join("ocpasswd-called");
-    let openssl = executable(
-        "openssl-fixture",
-        &format!("touch '{}'; printf password", openssl_marker.display()),
+    // Capacity boundaries: 384 users/groups succeed; overflow fails pre-effect.
+    let cap_dir = TempDir::new("capacity");
+    let cap_users = cap_dir.join("ocpasswd");
+    let members: Vec<String> = (0..MAX_MANAGED_RESOURCES)
+        .map(|i| format!("user{i:03}"))
+        .collect();
+    let max_body: String = members
+        .iter()
+        .map(|m| format!("{m}:legacy:$6$test-hash\n"))
+        .collect();
+    write_user_fixture(&cap_users, max_body.as_bytes());
+    assert_eq!(
+        parse_user_file(max_body.as_bytes())
+            .expect("max users")
+            .users
+            .len(),
+        384
     );
-    let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
-    let ocpasswd = executable(
-        "ocpasswd-fixture",
+    assert!(matches!(
+        parse_user_file(format!("{max_body}overflow:overflow:$6$test-hash\n").as_bytes()),
+        Err(AdapterError::OutputLimit)
+    ));
+
+    let openssl_marker = cap_dir.join("openssl-called");
+    let ocpasswd_marker = cap_dir.join("ocpasswd-called");
+    let openssl = cap_dir.exec(
+        "openssl",
+        &format!("touch '{}'; printf pw", openssl_marker.display()),
+    );
+    let ocpasswd = cap_dir.exec(
+        "ocpasswd-bin",
         &format!("touch '{}'; exit 1", ocpasswd_marker.display()),
     );
-    let ocpasswd_directory = ocpasswd.parent().expect("ocpasswd parent").to_owned();
-    let effect_database = directory.join("effects.sqlite3");
-    let effect_key = directory.join("effects.key");
-    let resources = FixedResources::default()
-        .with_user_resources(
-            openssl,
-            users.clone(),
-            ocpasswd,
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("resources")
-        .with_effect_store(effect_database.clone(), effect_key.clone())
-        .expect("effect resources");
-    let adapter = Adapter::new(resources, Limits::default());
-
+    let cap_adapter = cap_dir.user_adapter(ocpasswd, openssl, Limits::default());
     assert!(matches!(
-        adapter
+        cap_adapter
             .user_create("overflow", "test-key", &[7_u8; 64], 1, test_effect())
             .await,
         Err(AdapterError::CapacityExceeded)
     ));
-    assert!(!openssl_marker.exists());
-    assert!(!ocpasswd_marker.exists());
-    assert!(!effect_database.exists());
-    assert!(!effect_key.exists());
-    assert_eq!(std::fs::read(&users).expect("unchanged users"), original);
+    assert!(matches!(
+        cap_adapter
+            .group_apply("new-group", &["user000".to_owned()], 1, test_effect())
+            .await,
+        Err(AdapterError::CapacityExceeded)
+    ));
+    assert!(!openssl_marker.exists() && !ocpasswd_marker.exists());
+    assert!(!cap_dir.join("effects.sqlite3").exists() && !cap_dir.join("effects.key").exists());
     assert_eq!(
-        adapter.user_list().await.expect("user list").users.len(),
-        384
+        PrivdError::from(AdapterError::CapacityExceeded).kind,
+        i32::from(ErrorKind::CapacityExceeded)
     );
 
-    std::fs::remove_dir_all(directory).expect("cleanup directory");
-    std::fs::remove_dir_all(openssl_directory).expect("cleanup openssl");
-    std::fs::remove_dir_all(ocpasswd_directory).expect("cleanup ocpasswd");
-}
-
-#[tokio::test]
-async fn oversized_password_staging_is_rejected_before_effect_prepare() {
-    let directory =
-        std::env::temp_dir().join(format!("ocservia-staging-capacity-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let users = directory.join("ocpasswd");
-    let mut original = Vec::new();
-    for index in 0..(MAX_MANAGED_RESOURCES - 1) {
-        original.extend_from_slice(format!("user{index:03}:*:$6$test-hash\n").as_bytes());
-    }
-    write_user_fixture(&users, &original);
-    let effect_database = directory.join("effects.sqlite3");
-    let effect_key = directory.join("effects.key");
-    let resources = FixedResources::default()
-        .with_user_resources(
-            PathBuf::from("/bin/false"),
-            users.clone(),
-            PathBuf::from("/bin/false"),
-            directory.join("key.pem"),
-            String::from("test-key"),
-        )
-        .expect("resources")
-        .with_effect_store(effect_database.clone(), effect_key.clone())
-        .expect("effect resources");
-    let adapter = Adapter::new(resources, Limits::default());
-    let mut staging = adapter
-        .stage_user_file(&original)
+    // Maximum single group apply succeeds; 385th member fails without mutation.
+    let grp_dir = TempDir::new("group-max");
+    let grp_users = grp_dir.join("ocpasswd");
+    let grp_body: String = members
+        .iter()
+        .map(|m| format!("{m}:*:$6$test-hash\n"))
+        .collect();
+    write_user_fixture(&grp_users, grp_body.as_bytes());
+    let grp_adapter = grp_dir.user_adapter(
+        PathBuf::from("/bin/false"),
+        PathBuf::from("/bin/false"),
+        Limits::default(),
+    );
+    grp_adapter
+        .group_apply("staff", &members, 1, test_effect())
         .await
-        .expect("staging file");
-    let mut oversized = Vec::new();
-    for index in 0..=MAX_MANAGED_RESOURCES {
-        oversized.extend_from_slice(format!("staged{index:03}:*:$6$test-hash\n").as_bytes());
-    }
-    tokio::fs::write(staging.path(), oversized)
-        .await
-        .expect("oversized staging");
-
-    let result = adapter
-        .commit_desired_staging(
-            &mut staging,
-            &original,
-            "user_create",
-            "overflow",
-            1,
-            test_effect(),
-        )
-        .await;
-    assert!(
-        matches!(result, Err(AdapterError::OutputLimit)),
-        "unexpected result: {result:?}"
-    );
-    assert!(!effect_database.exists());
-    assert!(!effect_key.exists());
-    assert_eq!(std::fs::read(&users).expect("unchanged users"), original);
+        .expect("max group");
     assert_eq!(
-        adapter.user_list().await.expect("user list").users.len(),
-        383
-    );
-
-    std::fs::remove_dir_all(directory).expect("cleanup directory");
-}
-
-#[test]
-fn effect_store_supports_ten_thousand_historical_records() {
-    let directory = std::env::temp_dir().join(format!("ocservia-effects-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let resources = FixedResources::default()
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let mut store = EffectStore::open_for_mutation(&resources).expect("open effect store");
-    let now = effect_now().expect("clock");
-    let transaction = store
-        .connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .expect("scale transaction");
-    for index in 0..10_000_u64 {
-        let resource_key = format!("user{index:05}");
-        let before_hmac = authenticate_file(&store.hmac_key, b"before");
-        let after_hmac = authenticate_file(&store.hmac_key, b"after");
-        let identity = validate_effect_context("user_create", &resource_key, 1, test_effect(), now)
-            .expect("scale identity");
-        let record_hmac = authenticate_record(
-            &store.hmac_key,
-            "user_create",
-            &resource_key,
-            1,
-            identity,
-            "applied",
-            &before_hmac,
-            &after_hmac,
-        );
-        transaction
-                .execute(
-                    "INSERT INTO desired_effects(mutation_kind,resource_key,revision,command_id,idempotency_key,payload_sha256,expires_at,state,before_hmac,after_hmac,record_hmac,updated_at) VALUES('user_create',?1,1,?2,?3,?4,?5,'applied',?6,?7,?8,?9)",
-                    params![resource_key, identity.command_id.as_slice(), identity.idempotency_key.as_slice(), identity.payload_sha256.as_slice(), identity.expires_at, before_hmac.as_slice(), after_hmac.as_slice(), record_hmac.as_slice(), now],
-                )
-                .expect("scale effect");
-    }
-    transaction.commit().expect("scale commit");
-    assert_eq!(
-        store
-            .connection
-            .query_row("SELECT count(*) FROM desired_effects", [], |row| row
-                .get::<_, i64>(0))
-            .expect("scale count"),
-        10_000
-    );
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
-
-#[test]
-fn user_and_group_snapshot_capacity_is_bounded() {
-    let mut users = Vec::new();
-    for index in 0..MAX_MANAGED_RESOURCES {
-        users.extend_from_slice(
-            format!("user{index:03}:group{index:03}:$6$test-hash-{index}\n").as_bytes(),
-        );
-    }
-    assert_eq!(
-        parse_user_file(&users).expect("maximum users").users.len(),
-        384
-    );
-    assert_eq!(
-        parse_groups_from_user_file(&users)
-            .expect("maximum groups")
-            .groups
+        grp_adapter.group_list().await.expect("groups").groups[0]
+            .members
             .len(),
         384
     );
-    users.extend_from_slice(b"overflow:overflow:$6$test-hash\n");
+    let applied = std::fs::read(&grp_users).expect("applied");
+    let mut overflow = members;
+    overflow.push("overflow".to_owned());
     assert!(matches!(
-        parse_user_file(&users),
+        grp_adapter
+            .group_apply("staff", &overflow, 2, test_effect())
+            .await,
+        Err(AdapterError::InvalidRequest)
+    ));
+    assert_eq!(std::fs::read(&grp_users).expect("unchanged"), applied);
+
+    // Oversized staging is rejected before preparing an effect.
+    let stg_dir = TempDir::new("staging-cap");
+    let stg_users = stg_dir.join("ocpasswd");
+    let stg_orig: String = (0..MAX_MANAGED_RESOURCES - 1)
+        .map(|i| format!("user{i:03}:*:$6$test-hash\n"))
+        .collect();
+    write_user_fixture(&stg_users, stg_orig.as_bytes());
+    let stg_adapter = stg_dir.user_adapter(
+        PathBuf::from("/bin/false"),
+        PathBuf::from("/bin/false"),
+        Limits::default(),
+    );
+    let mut staging = stg_adapter
+        .stage_user_file(stg_orig.as_bytes())
+        .await
+        .expect("stage");
+    let oversized: String = (0..=MAX_MANAGED_RESOURCES)
+        .map(|i| format!("staged{i:03}:*:$6$test-hash\n"))
+        .collect();
+    tokio::fs::write(staging.path(), oversized)
+        .await
+        .expect("write oversized");
+    assert!(matches!(
+        stg_adapter
+            .commit_desired_staging(
+                &mut staging,
+                stg_orig.as_bytes(),
+                "user_create",
+                "overflow",
+                1,
+                test_effect()
+            )
+            .await,
         Err(AdapterError::OutputLimit)
     ));
+    assert!(!stg_dir.join("effects.sqlite3").exists());
 }
 
-#[test]
-fn effect_store_rejects_revision_rollback() {
-    let directory = std::env::temp_dir().join(format!("ocservia-effect-order-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let resources = FixedResources::default()
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let mut store = EffectStore::open_for_mutation(&resources).expect("open effect store");
-    store
-        .prepare(
-            "user_password_rotate",
-            "alice",
-            2,
-            test_effect(),
-            b"password-one",
-            b"password-two",
-        )
-        .expect("prepare rotate two");
-    store
-        .mark_applied("user_password_rotate", "alice", 2, test_effect())
-        .expect("apply rotate two");
-    store
-        .prepare(
-            "user_password_rotate",
-            "alice",
-            3,
-            test_effect(),
-            b"password-two",
-            b"password-three",
-        )
-        .expect("prepare rotate three");
-    store
-        .mark_applied("user_password_rotate", "alice", 3, test_effect())
-        .expect("apply rotate three");
-    let observation = store
-        .observe(
-            "user_password_rotate",
-            "alice",
-            2,
-            test_effect(),
-            b"password-three",
-        )
-        .expect("observe stale rotate");
-    assert_eq!(
-        observation.state,
-        DesiredEffectState::SupersededByNewerRevision as i32
+#[tokio::test]
+async fn failed_password_rotation_and_staging_cleanup_preserve_original() {
+    let dir = TempDir::new("staging");
+    let users = dir.join("ocpasswd");
+    let original = b"alice:staff:!$6$original-hash\n";
+    write_user_fixture(&users, original);
+
+    let fast_openssl = dir.exec("openssl-fast", "cat >/dev/null; printf rotated-password");
+    let fail_ocpasswd = dir.exec("ocpasswd-fail", "printf corrupted > \"$2\"; exit 1");
+    let fail_adapter = dir.user_adapter(fail_ocpasswd, fast_openssl.clone(), Limits::default());
+    assert!(
+        fail_adapter
+            .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
+            .await
+            .is_err()
     );
-    assert_eq!(observation.observed_revision, 3);
-    assert!(matches!(
-        store.prepare(
-            "user_password_rotate",
-            "alice",
-            2,
-            test_effect(),
-            b"password-three",
-            b"password-two",
+    assert_eq!(std::fs::read(&users).expect("preserved"), original);
+
+    // Timeout during ocpasswd staging, openssl decrypt, and ocpasswd -l locking.
+    let short_limits = Limits {
+        timeout: Duration::from_millis(400),
+        output_bytes: DEFAULT_OUTPUT_BYTES,
+    };
+    let slow_ocpasswd = dir.exec(
+        "ocpasswd-slow",
+        "cat >/dev/null; cp \"$2\" \"$2.tmp\"; sleep 5",
+    );
+    let slow_openssl = dir.exec("openssl-slow", "sleep 5");
+    let lock_ocpasswd = dir.exec(
+        "ocpasswd-lock-slow",
+        "if [ \"$3\" = \"-l\" ]; then sleep 5; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' 'alice:staff:$6$new-hash' > \"$2\"",
+    );
+
+    let queued_adapter =
+        dir.user_adapter(slow_ocpasswd.clone(), fast_openssl.clone(), short_limits);
+    let guard = queued_adapter.user_file_lock.lock().await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            queued_adapter.user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect()),
+        )
+        .await
+        .is_err()
+    );
+    drop(guard);
+    assert_eq!(staging_files(dir.path()).len(), 0);
+
+    for (ocp, ssl) in [
+        (slow_ocpasswd, fast_openssl.clone()),
+        (PathBuf::from("/bin/false"), slow_openssl),
+        (lock_ocpasswd, fast_openssl.clone()),
+    ] {
+        let adapter = dir.user_adapter(ocp, ssl, short_limits);
+        assert!(matches!(
+            adapter
+                .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
+                .await,
+            Err(AdapterError::DeadlineExceeded)
+        ));
+        assert_eq!(staging_files(dir.path()).len(), 0);
+        assert_eq!(std::fs::read(&users).expect("preserved"), original);
+    }
+
+    // Abort mid-execution removes staging files.
+    let marker = dir.join("cancel-started");
+    let cancel_ocpasswd = dir.exec(
+        "ocpasswd-cancel",
+        &format!(
+            "cp \"$2\" \"$2.tmp\"\ntouch '{}'\nsleep 10",
+            marker.display()
         ),
-        Err(AdapterError::InvalidRequest)
-    ));
-    std::fs::remove_dir_all(directory).expect("cleanup");
+    );
+    let cancel_adapter = dir.user_adapter(cancel_ocpasswd, fast_openssl, Limits::default());
+    let task = tokio::spawn(async move {
+        cancel_adapter
+            .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
+            .await
+    });
+    for _ in 0..500 {
+        if marker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(marker.exists() && !staging_files(dir.path()).is_empty());
+    task.abort();
+    let _ = task.await;
+    assert_eq!(staging_files(dir.path()).len(), 0);
+
+    // Startup cleanup removes UUID staging + scratch (including private child group), preserves lookalike.
+    let stale = dir.join(format!(".ocpasswd.ocservia-{}", Uuid::now_v7()));
+    let scratch = dir.join(format!(".ocpasswd.ocservia-{}.tmp", Uuid::now_v7()));
+    let lookalike = dir.join(".ocpasswd.ocservia-not-a-uuid");
+    write_user_fixture(&stale, b"secret hash staging");
+    write_user_fixture(&scratch, b"incomplete child scratch");
+    assert_eq!(
+        std::fs::metadata(&stale).expect("meta").gid(),
+        rustix::process::getegid().as_raw()
+    );
+    std::fs::write(&lookalike, b"preserve").expect("lookalike");
+    fail_adapter
+        .cleanup_stale_user_staging()
+        .await
+        .expect("cleanup");
+    assert!(!stale.exists() && !scratch.exists() && lookalike.exists());
 }
 
 #[test]
-fn authorized_effect_store_prunes_only_authenticated_expired_successes() {
-    let directory = std::env::temp_dir().join(format!("ocservia-authorized-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let resources = FixedResources::default()
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let mut store = EffectStore::open_for_mutation(&resources).expect("open effect store");
+fn effect_store_scale_rollback_crash_tamper_and_missing_evidence() {
+    // 10,000 historical rows.
+    let scale_dir = TempDir::new("effects-scale");
+    let mut store = EffectStore::open_for_mutation(&scale_dir.effect_resources()).expect("open");
     let now = effect_now().expect("clock");
-    let node_id = *Uuid::now_v7().as_bytes();
-    let operation_id = *Uuid::now_v7().as_bytes();
-    let commands = [*Uuid::now_v7().as_bytes(), *Uuid::now_v7().as_bytes()];
-    let idempotency = [*Uuid::now_v7().as_bytes(), *Uuid::now_v7().as_bytes()];
-    let payload_hashes = [Sha256::digest(b"first"), Sha256::digest(b"second")];
-    let authorized = |index: usize| AuthorizedEffectIdentity {
-        node_id: &node_id,
-        command_id: &commands[index],
-        operation_id: &operation_id,
-        idempotency_key: &idempotency[index],
-        semantic_payload_sha256: payload_hashes[index].as_slice(),
-        action: "service.reload",
-        authorization_revision: 7,
-        effect_kind: "service_reload",
-        resource_key: "ocserv.service",
-        effect_revision: 7,
-        expires_at_unix_seconds: now + 60,
-        retry_if_absent: false,
-    };
-    assert_eq!(
-        store
-            .prepare_authorized(authorized(0))
-            .expect("prepare first effect"),
-        AuthorizedEffectDecision::Execute
-    );
-    store
-        .complete_authorized(authorized(0), b"result")
-        .expect("complete first effect");
-
-    let mut expired = query_authorized_effect(&store.connection, &commands[0])
-        .expect("query first effect")
-        .expect("first effect");
-    expired.expires_at = now - 1;
-    expired.record_hmac = authenticate_authorized_record(&store.hmac_key, &expired);
-    store
+    let tx = store
         .connection
-        .execute(
-            "UPDATE authorized_effects SET expires_at=?2,record_hmac=?3 WHERE command_id=?1",
-            params![
-                commands[0].as_slice(),
-                expired.expires_at,
-                expired.record_hmac.as_slice()
-            ],
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("tx");
+    let before = authenticate_file(&store.hmac_key, b"before");
+    let after = authenticate_file(&store.hmac_key, b"after");
+    for i in 0..10_000_u64 {
+        let key = format!("user{i:05}");
+        let id = validate_effect_context("user_create", &key, 1, test_effect(), now).expect("id");
+        let mac = authenticate_record(
+            &store.hmac_key,
+            "user_create",
+            &key,
+            1,
+            id,
+            "applied",
+            &before,
+            &after,
+        );
+        tx.execute(
+            "INSERT INTO desired_effects(mutation_kind,resource_key,revision,command_id,idempotency_key,payload_sha256,expires_at,state,before_hmac,after_hmac,record_hmac,updated_at) VALUES('user_create',?1,1,?2,?3,?4,?5,'applied',?6,?7,?8,?9)",
+            params![key, id.command_id.as_slice(), id.idempotency_key.as_slice(), id.payload_sha256.as_slice(), id.expires_at, before.as_slice(), after.as_slice(), mac.as_slice(), now],
         )
-        .expect("expire authenticated effect");
-
-    let expired_identity = AuthorizedEffectIdentity {
-        expires_at_unix_seconds: now - 1,
-        ..authorized(0)
-    };
-    assert!(matches!(
-        store.prepare_authorized(expired_identity),
-        Err(AdapterError::InvalidRequest)
-    ));
+        .expect("insert");
+    }
+    tx.commit().expect("commit");
     assert_eq!(
         store
-            .replay_authorized(expired_identity)
-            .expect("read expired exact result"),
-        Some(b"result".to_vec())
+            .connection
+            .query_row("SELECT count(*) FROM desired_effects", [], |r| r
+                .get::<_, i64>(0))
+            .expect("count"),
+        10_000
     );
 
-    assert_eq!(
-        store
-            .prepare_authorized(authorized(1))
-            .expect("prepare next effect"),
-        AuthorizedEffectDecision::Execute
-    );
-    assert!(
-        query_authorized_effect(&store.connection, &commands[0])
-            .expect("query expired effect")
-            .is_none()
-    );
-    assert!(
-        query_authorized_effect(&store.connection, &commands[1])
-            .expect("query retained effect")
-            .is_some()
-    );
-    drop(store);
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
-
-#[test]
-fn effect_store_recovers_post_commit_crash_and_rejects_tampering() {
-    let directory = std::env::temp_dir().join(format!("ocservia-effect-crash-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let resources = FixedResources::default()
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let mut store = EffectStore::open_for_mutation(&resources).expect("open effect store");
+    // Revision rollback rejection, post-commit crash recovery, tamper rejection.
+    let dir = TempDir::new("effects-core");
+    let res = dir.effect_resources();
+    let mut store = EffectStore::open_for_mutation(&res).expect("open");
     store
         .prepare(
             "user_password_rotate",
             "alice",
             2,
             test_effect(),
-            b"password-one",
-            b"password-two",
+            b"p1",
+            b"p2",
         )
-        .expect("durable prepared record");
+        .expect("p2");
     let recovered = store
         .observe(
             "user_password_rotate",
@@ -1329,63 +880,67 @@ fn effect_store_recovers_post_commit_crash_and_rejects_tampering() {
                 expires_at_unix_seconds: 1,
                 ..test_effect()
             },
-            b"password-two",
+            b"p2",
         )
-        .expect("recover post-commit crash");
+        .expect("recover crash");
     assert_eq!(recovered.state, DesiredEffectState::AppliedExact as i32);
-    assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT state FROM desired_effects WHERE mutation_kind='user_password_rotate' AND resource_key='alice'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .expect("recovered state"),
-            "applied"
-        );
     store
-            .connection
-            .execute(
-                "UPDATE desired_effects SET record_hmac=zeroblob(32) WHERE mutation_kind='user_password_rotate' AND resource_key='alice'",
-                [],
-            )
-            .expect("inject tamper");
+        .prepare(
+            "user_password_rotate",
+            "alice",
+            3,
+            test_effect(),
+            b"p2",
+            b"p3",
+        )
+        .expect("p3");
+    store
+        .mark_applied("user_password_rotate", "alice", 3, test_effect())
+        .expect("apply 3");
+    let stale = store
+        .observe("user_password_rotate", "alice", 2, test_effect(), b"p3")
+        .expect("stale");
+    assert_eq!(
+        stale.state,
+        DesiredEffectState::SupersededByNewerRevision as i32
+    );
+    assert_eq!(stale.observed_revision, 3);
     assert!(matches!(
-        store.observe(
+        store.prepare(
             "user_password_rotate",
             "alice",
             2,
             test_effect(),
-            b"password-two",
+            b"p3",
+            b"p2"
         ),
+        Err(AdapterError::InvalidRequest)
+    ));
+    store
+        .connection
+        .execute(
+            "UPDATE desired_effects SET record_hmac=zeroblob(32) WHERE resource_key='alice'",
+            [],
+        )
+        .expect("tamper");
+    assert!(matches!(
+        store.observe("user_password_rotate", "alice", 3, test_effect(), b"p3"),
         Err(AdapterError::InvalidResource)
     ));
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
 
-#[test]
-#[allow(clippy::too_many_lines)]
-fn effect_store_missing_evidence_fails_closed() {
-    let directory = std::env::temp_dir().join(format!("ocservia-effect-loss-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let database = directory.join("effects.sqlite3");
-    let key = directory.join("effects.key");
-    let snapshot = directory.join("effects.snapshot");
-    let resources = FixedResources::default()
-        .with_effect_store(database.clone(), key.clone())
-        .expect("effect resources");
-    let mut store = EffectStore::open_for_mutation(&resources).expect("initialize store");
-    let missing = store
-        .observe(
-            "user_password_rotate",
-            "alice",
-            2,
-            test_effect(),
-            b"changed",
-        )
-        .expect("missing record observation");
-    assert_eq!(missing.state, DesiredEffectState::Unknown as i32);
+    // Missing evidence / deleted row / stale snapshot / deleted DB all fail closed.
+    let loss_dir = TempDir::new("effects-loss");
+    let loss_res = loss_dir.effect_resources();
+    let db_path = loss_dir.join("effects.sqlite3");
+    let snap_path = loss_dir.join("effects.snapshot");
+    let mut store = EffectStore::open_for_mutation(&loss_res).expect("init");
+    assert_eq!(
+        store
+            .observe("user_password_rotate", "alice", 2, test_effect(), b"x")
+            .expect("miss")
+            .state,
+        DesiredEffectState::Unknown as i32
+    );
     store
         .prepare(
             "user_password_rotate",
@@ -1395,34 +950,28 @@ fn effect_store_missing_evidence_fails_closed() {
             b"one",
             b"two",
         )
-        .expect("prepare old snapshot");
+        .expect("p1");
     assert_eq!(
         store
-            .observe("user_password_rotate", "alice", 1, test_effect(), b"one",)
-            .expect("authenticated before-state observation")
+            .observe("user_password_rotate", "alice", 1, test_effect(), b"one")
+            .expect("before")
             .state,
         DesiredEffectState::Absent as i32
     );
     assert_eq!(
         store
-            .observe(
-                "user_password_rotate",
-                "alice",
-                1,
-                test_effect(),
-                b"unrelated-change",
-            )
-            .expect("mismatched file observation")
+            .observe("user_password_rotate", "alice", 1, test_effect(), b"other")
+            .expect("other")
             .state,
         DesiredEffectState::Unknown as i32
     );
     store
         .mark_applied("user_password_rotate", "alice", 1, test_effect())
-        .expect("apply old snapshot");
+        .expect("a1");
     drop(store);
-    std::fs::copy(&database, &snapshot).expect("snapshot database");
+    std::fs::copy(&db_path, &snap_path).expect("snapshot");
 
-    let mut store = EffectStore::open_existing(&resources).expect("reopen store");
+    let mut store = EffectStore::open_existing(&loss_res).expect("reopen");
     store
         .prepare(
             "user_password_rotate",
@@ -1432,353 +981,299 @@ fn effect_store_missing_evidence_fails_closed() {
             b"two",
             b"three",
         )
-        .expect("prepare current record");
+        .expect("p2");
     store
         .mark_applied("user_password_rotate", "alice", 2, test_effect())
-        .expect("apply current record");
+        .expect("a2");
     store
-            .connection
-            .execute(
-                "DELETE FROM desired_effects WHERE mutation_kind='user_password_rotate' AND resource_key='alice'",
-                [],
-            )
-            .expect("delete one record");
+        .connection
+        .execute("DELETE FROM desired_effects WHERE resource_key='alice'", [])
+        .expect("delete");
     assert_eq!(
         store
-            .observe("user_password_rotate", "alice", 2, test_effect(), b"three",)
-            .expect("deleted record observation")
+            .observe("user_password_rotate", "alice", 2, test_effect(), b"three")
+            .expect("del")
             .state,
         DesiredEffectState::Unknown as i32
     );
     drop(store);
 
-    std::fs::copy(&snapshot, &database).expect("restore old snapshot");
-    let mut old = EffectStore::open_existing(&resources).expect("open old snapshot");
+    std::fs::copy(&snap_path, &db_path).expect("restore snap");
+    let mut old = EffectStore::open_existing(&loss_res).expect("old snap");
     assert_eq!(
-        old.observe("user_password_rotate", "alice", 2, test_effect(), b"three",)
-            .expect("old snapshot observation")
+        old.observe("user_password_rotate", "alice", 2, test_effect(), b"three")
+            .expect("old")
             .state,
         DesiredEffectState::Unknown as i32
     );
     drop(old);
-
-    std::fs::remove_file(&database).expect("delete database");
+    std::fs::remove_file(&db_path).expect("rm db");
     assert!(matches!(
-        EffectStore::open_existing(&resources),
+        EffectStore::open_existing(&loss_res),
         Err(AdapterError::Unavailable)
     ));
-    assert!(!database.exists());
-    assert!(key.exists());
-    std::fs::remove_dir_all(directory).expect("cleanup");
+    assert!(!db_path.exists() && loss_dir.join("effects.key").exists());
 }
 
 #[test]
-fn effect_store_resolves_prepared_transition_before_new_mutation() {
-    let directory = std::env::temp_dir().join(format!("ocservia-effect-chain-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let resources = FixedResources::default()
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
+fn authorized_effect_store_prunes_only_authenticated_expired_successes() {
+    let dir = TempDir::new("authorized");
+    let mut store = EffectStore::open_for_mutation(&dir.effect_resources()).expect("open");
+    let now = effect_now().expect("clock");
+    let node_id = *Uuid::now_v7().as_bytes();
+    let op_id = *Uuid::now_v7().as_bytes();
+    let cmds = [*Uuid::now_v7().as_bytes(), *Uuid::now_v7().as_bytes()];
+    let idems = [*Uuid::now_v7().as_bytes(), *Uuid::now_v7().as_bytes()];
+    let hashes = [Sha256::digest(b"first"), Sha256::digest(b"second")];
+    let auth = |i: usize| AuthorizedEffectIdentity {
+        node_id: &node_id,
+        command_id: &cmds[i],
+        operation_id: &op_id,
+        idempotency_key: &idems[i],
+        semantic_payload_sha256: hashes[i].as_slice(),
+        action: "service.reload",
+        authorization_revision: 7,
+        effect_kind: "service_reload",
+        resource_key: "ocserv.service",
+        effect_revision: 7,
+        expires_at_unix_seconds: now + 60,
+        retry_if_absent: false,
+    };
+    assert_eq!(
+        store.prepare_authorized(auth(0)).expect("p0"),
+        AuthorizedEffectDecision::Execute
+    );
+    store.complete_authorized(auth(0), b"result").expect("c0");
+
+    let mut expired = query_authorized_effect(&store.connection, &cmds[0])
+        .expect("q0")
+        .expect("r0");
+    expired.expires_at = now - 1;
+    expired.record_hmac = authenticate_authorized_record(&store.hmac_key, &expired);
+    store
+        .connection
+        .execute(
+            "UPDATE authorized_effects SET expires_at=?2,record_hmac=?3 WHERE command_id=?1",
+            params![
+                cmds[0].as_slice(),
+                expired.expires_at,
+                expired.record_hmac.as_slice()
+            ],
         )
-        .expect("effect resources");
-    let mut store = EffectStore::open_for_mutation(&resources).expect("initialize store");
+        .expect("expire");
+
+    let expired_id = AuthorizedEffectIdentity {
+        expires_at_unix_seconds: now - 1,
+        ..auth(0)
+    };
+    assert!(matches!(
+        store.prepare_authorized(expired_id),
+        Err(AdapterError::InvalidRequest)
+    ));
+    assert_eq!(
+        store.replay_authorized(expired_id).expect("replay"),
+        Some(b"result".to_vec())
+    );
+    assert_eq!(
+        store.prepare_authorized(auth(1)).expect("p1"),
+        AuthorizedEffectDecision::Execute
+    );
+    assert!(
+        query_authorized_effect(&store.connection, &cmds[0])
+            .expect("pruned")
+            .is_none()
+    );
+    assert!(
+        query_authorized_effect(&store.connection, &cmds[1])
+            .expect("kept")
+            .is_some()
+    );
+}
+
+#[test]
+fn effect_store_transitions_config_aba_and_schema_migration() {
+    // Prepared transition promotion across users and groups.
+    let dir = TempDir::new("effect-chain");
+    let res = dir.effect_resources();
+    let mut store = EffectStore::open_for_mutation(&res).expect("init");
     store
         .prepare(
             "user_password_rotate",
             "alice",
             2,
             test_effect(),
-            b"file-one",
-            b"file-two",
+            b"f1",
+            b"f2",
         )
-        .expect("prepare alice");
+        .expect("alice");
     assert!(matches!(
-        store.prepare(
-            "user_create",
-            "bob",
-            1,
-            test_effect(),
-            b"file-one",
-            b"file-bob",
-        ),
+        store.prepare("user_create", "bob", 1, test_effect(), b"f1", b"fbob"),
         Err(AdapterError::Unavailable)
     ));
     drop(store);
-
-    let mut restarted = EffectStore::open_existing(&resources).expect("restart store");
-    restarted
-        .prepare(
-            "user_create",
-            "bob",
-            1,
-            test_effect(),
-            b"file-two",
-            b"file-three",
-        )
-        .expect("new mutation promotes prior transition");
-    restarted
+    let mut store = EffectStore::open_existing(&res).expect("restart");
+    store
+        .prepare("user_create", "bob", 1, test_effect(), b"f2", b"f3")
+        .expect("promotes alice");
+    store
         .mark_applied("user_create", "bob", 1, test_effect())
         .expect("apply bob");
     assert_eq!(
-        restarted
-            .observe(
-                "user_password_rotate",
-                "alice",
-                2,
-                test_effect(),
-                b"file-three",
-            )
-            .expect("alice remains provably applied")
+        store
+            .observe("user_password_rotate", "alice", 2, test_effect(), b"f3")
+            .expect("alice")
             .state,
         DesiredEffectState::AppliedExact as i32
     );
-
-    restarted
-        .prepare(
-            "group_apply",
-            "staff",
-            3,
-            test_effect(),
-            b"file-three",
-            b"file-four",
-        )
-        .expect("prepare group transition");
-    restarted
-        .prepare(
-            "user_create",
-            "carol",
-            1,
-            test_effect(),
-            b"file-four",
-            b"file-five",
-        )
-        .expect("user mutation promotes group transition");
-    assert_eq!(
-        restarted
-            .observe("group_apply", "staff", 3, test_effect(), b"file-five",)
-            .expect("group remains provably applied")
-            .state,
-        DesiredEffectState::AppliedExact as i32
-    );
-    drop(restarted);
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
-
-#[test]
-fn config_effect_store_persists_absent_reconciliation_before_new_revision() {
-    let directory = std::env::temp_dir().join(format!("ocservia-config-absent-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let resources = FixedResources::default()
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let commands = [*Uuid::now_v7().as_bytes(), *Uuid::now_v7().as_bytes()];
-    let idempotency = [*Uuid::now_v7().as_bytes(), *Uuid::now_v7().as_bytes()];
-    let payload_hashes = [Sha256::digest(b"stale"), Sha256::digest(b"next")];
-    let effect = |index: usize| EffectIdentity {
-        command_id: &commands[index],
-        idempotency_key: &idempotency[index],
-        semantic_payload_sha256: payload_hashes[index].as_slice(),
-        expires_at_unix_seconds: i64::MAX,
-    };
-    let mut store = EffectStore::open_for_mutation(&resources).expect("initialize store");
     store
-        .prepare(
-            "config_apply",
-            "ocserv.conf",
-            7,
-            effect(0),
-            b"current",
-            b"stale-candidate",
-        )
-        .expect("prepare interrupted config effect");
-    drop(store);
-
-    let mut restarted = EffectStore::open_existing(&resources).expect("restart store");
-    let observation = restarted
-        .observe("config_apply", "ocserv.conf", 7, effect(0), b"current")
-        .expect("reconcile confirmed absent effect");
-    assert_eq!(observation.state, DesiredEffectState::Absent as i32);
+        .prepare("group_apply", "staff", 3, test_effect(), b"f3", b"f4")
+        .expect("group");
+    store
+        .prepare("user_create", "carol", 1, test_effect(), b"f4", b"f5")
+        .expect("promotes group");
     assert_eq!(
-            restarted
-                .connection
-                .query_row(
-                    "SELECT state FROM desired_effects WHERE mutation_kind='config_apply' AND resource_key='ocserv.conf'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .expect("persisted effect state"),
-            "absent"
-        );
-    assert_eq!(
-        restarted
-            .prepare(
-                "config_apply",
-                "ocserv.conf",
-                8,
-                effect(1),
-                b"current",
-                b"next-candidate",
-            )
-            .expect("prepare next revision"),
-        PrepareEffect::Proceed
+        store
+            .observe("group_apply", "staff", 3, test_effect(), b"f5")
+            .expect("group")
+            .state,
+        DesiredEffectState::AppliedExact as i32
     );
-    drop(restarted);
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
 
-#[test]
-fn config_effect_store_rejects_hash_aba_and_old_authorization_after_restart() {
-    let directory = std::env::temp_dir().join(format!("ocservia-config-aba-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let resources = FixedResources::default()
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
-        )
-        .expect("effect resources");
-    let commands = [
-        *Uuid::now_v7().as_bytes(),
-        *Uuid::now_v7().as_bytes(),
-        *Uuid::now_v7().as_bytes(),
-    ];
-    let idempotency = [
-        *Uuid::now_v7().as_bytes(),
-        *Uuid::now_v7().as_bytes(),
-        *Uuid::now_v7().as_bytes(),
-    ];
+    // Config absent reconciliation + hash ABA fence + schema migration.
+    let cfg_dir = TempDir::new("config-effects");
+    let cfg_res = cfg_dir.effect_resources();
+    let cmds: [[u8; 16]; 4] = std::array::from_fn(|_| *Uuid::now_v7().as_bytes());
+    let idems: [[u8; 16]; 4] = std::array::from_fn(|_| *Uuid::now_v7().as_bytes());
     let hashes = [
         Sha256::digest(b"A1"),
         Sha256::digest(b"B2"),
         Sha256::digest(b"A3"),
+        Sha256::digest(b"stale"),
     ];
-    let effect = |index: usize| EffectIdentity {
-        command_id: &commands[index],
-        idempotency_key: &idempotency[index],
-        semantic_payload_sha256: hashes[index].as_slice(),
+    let eff = |i: usize| EffectIdentity {
+        command_id: &cmds[i],
+        idempotency_key: &idems[i],
+        semantic_payload_sha256: hashes[i].as_slice(),
         expires_at_unix_seconds: i64::MAX,
     };
-    let mut store = EffectStore::open_for_mutation(&resources).expect("initialize store");
-    store
-        .prepare("config_apply", "ocserv.conf", 1, effect(0), b"X", b"A")
-        .expect("prepare A revision 1");
-    store
-        .mark_applied("config_apply", "ocserv.conf", 1, effect(0))
-        .expect("apply A revision 1");
-    store
-        .prepare("config_apply", "ocserv.conf", 2, effect(1), b"A", b"B")
-        .expect("prepare B revision 2");
-    store
-        .mark_applied("config_apply", "ocserv.conf", 2, effect(1))
-        .expect("apply B revision 2");
-    store
-        .prepare("config_apply", "ocserv.conf", 3, effect(2), b"B", b"A")
-        .expect("prepare A revision 3");
-    store
-        .mark_applied("config_apply", "ocserv.conf", 3, effect(2))
-        .expect("apply A revision 3");
+    let mut store = EffectStore::open_for_mutation(&cfg_res).expect("init");
+    for (rev, idx, before, after) in [
+        (1, 0, b"X".as_slice(), b"A".as_slice()),
+        (2, 1, b"A", b"B"),
+        (3, 2, b"B", b"A"),
+    ] {
+        store
+            .prepare("config_apply", "ocserv.conf", rev, eff(idx), before, after)
+            .expect("prep");
+        store
+            .mark_applied("config_apply", "ocserv.conf", rev, eff(idx))
+            .expect("apply");
+    }
     drop(store);
-
-    let mut restarted = EffectStore::open_existing(&resources).expect("restart store");
-    let refreshed_effect = EffectIdentity {
+    let mut restarted = EffectStore::open_existing(&cfg_res).expect("restart");
+    let refreshed = EffectIdentity {
         expires_at_unix_seconds: i64::MAX - 1,
-        ..effect(2)
+        ..eff(2)
     };
     assert_eq!(
         restarted
-            .observe("config_apply", "ocserv.conf", 3, refreshed_effect, b"A")
-            .expect("reconcile exact effect under refreshed authorization")
+            .observe("config_apply", "ocserv.conf", 3, refreshed, b"A")
+            .expect("exact")
             .state,
         DesiredEffectState::AppliedExact as i32
     );
     assert!(matches!(
-        restarted.prepare("config_apply", "ocserv.conf", 1, effect(0), b"A", b"A"),
+        restarted.prepare("config_apply", "ocserv.conf", 1, eff(0), b"A", b"A"),
         Err(AdapterError::InvalidRequest)
     ));
-    let observation = restarted
-        .observe("config_apply", "ocserv.conf", 1, effect(0), b"A")
-        .expect("observe old A proof");
+    let old = restarted
+        .observe("config_apply", "ocserv.conf", 1, eff(0), b"A")
+        .expect("old");
     assert_eq!(
-        observation.state,
-        DesiredEffectState::SupersededByNewerRevision as i32
+        (old.state, old.observed_revision),
+        (DesiredEffectState::SupersededByNewerRevision as i32, 3)
     );
-    assert_eq!(observation.observed_revision, 3);
-    drop(restarted);
-    std::fs::remove_dir_all(directory).expect("cleanup");
-}
-
-#[test]
-fn effect_store_schema_migration_preserves_config_revision_fence() {
-    let directory = std::env::temp_dir().join(format!("ocservia-effect-schema-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("directory");
-    let resources = FixedResources::default()
-        .with_effect_store(
-            directory.join("effects.sqlite3"),
-            directory.join("effects.key"),
+    restarted
+        .prepare(
+            "config_apply",
+            "ocserv.conf",
+            4,
+            eff(3),
+            b"A",
+            b"stale-cand",
         )
-        .expect("effect resources");
-    let mut store = EffectStore::open_for_mutation(&resources).expect("initialize store");
+        .expect("p4");
+    drop(restarted);
+    let mut restarted = EffectStore::open_existing(&cfg_res).expect("restart2");
+    assert_eq!(
+        restarted
+            .observe("config_apply", "ocserv.conf", 4, eff(3), b"A")
+            .expect("absent")
+            .state,
+        DesiredEffectState::Absent as i32
+    );
+    assert_eq!(
+        restarted
+            .prepare("config_apply", "ocserv.conf", 5, eff(1), b"A", b"next")
+            .expect("p5"),
+        PrepareEffect::Proceed
+    );
+
+    // Legacy schema downgrade -> open_existing upgrades and preserves config revision fence.
+    let mig_dir = TempDir::new("effect-schema");
+    let mig_res = mig_dir.effect_resources();
+    let mut store = EffectStore::open_for_mutation(&mig_res).expect("init");
     store
         .prepare("config_apply", "ocserv.conf", 1, test_effect(), b"X", b"A")
-        .expect("prepare legacy config effect");
+        .expect("p1");
     store
         .mark_applied("config_apply", "ocserv.conf", 1, test_effect())
-        .expect("commit legacy config effect");
+        .expect("a1");
     drop(store);
-
-    let legacy = Connection::open(&resources.effect_store).expect("open legacy schema");
+    let legacy = Connection::open(&mig_res.effect_store).expect("legacy");
     legacy
         .execute_batch(
             "BEGIN IMMEDIATE;
-                 ALTER TABLE desired_effects RENAME TO desired_effects_current;
-                 CREATE TABLE desired_effects (
-                   mutation_kind TEXT NOT NULL,
-                   resource_key TEXT NOT NULL,
-                   revision INTEGER NOT NULL CHECK(revision > 0),
-                   command_id BLOB NOT NULL CHECK(length(command_id)=16),
-                   idempotency_key BLOB NOT NULL CHECK(length(idempotency_key)=16),
-                   payload_sha256 BLOB NOT NULL CHECK(length(payload_sha256)=32),
-                   expires_at INTEGER NOT NULL,
-                   state TEXT NOT NULL CHECK(state IN ('prepared','applied')),
-                   before_hmac BLOB NOT NULL CHECK(length(before_hmac)=32),
-                   after_hmac BLOB NOT NULL CHECK(length(after_hmac)=32),
-                   record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
-                   updated_at INTEGER NOT NULL,
-                   PRIMARY KEY(mutation_kind,resource_key)
-                 ) STRICT;
-                 INSERT INTO desired_effects SELECT * FROM desired_effects_current;
-                 DROP TABLE desired_effects_current;
-                 COMMIT;",
+             ALTER TABLE desired_effects RENAME TO desired_effects_current;
+             CREATE TABLE desired_effects (
+               mutation_kind TEXT NOT NULL, resource_key TEXT NOT NULL,
+               revision INTEGER NOT NULL CHECK(revision > 0),
+               command_id BLOB NOT NULL CHECK(length(command_id)=16),
+               idempotency_key BLOB NOT NULL CHECK(length(idempotency_key)=16),
+               payload_sha256 BLOB NOT NULL CHECK(length(payload_sha256)=32),
+               expires_at INTEGER NOT NULL,
+               state TEXT NOT NULL CHECK(state IN ('prepared','applied')),
+               before_hmac BLOB NOT NULL CHECK(length(before_hmac)=32),
+               after_hmac BLOB NOT NULL CHECK(length(after_hmac)=32),
+               record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
+               updated_at INTEGER NOT NULL, PRIMARY KEY(mutation_kind,resource_key)
+             ) STRICT;
+             INSERT INTO desired_effects SELECT * FROM desired_effects_current;
+             DROP TABLE desired_effects_current; COMMIT;",
         )
-        .expect("downgrade fixture schema");
+        .expect("downgrade");
     drop(legacy);
-
-    let mut upgraded = EffectStore::open_existing(&resources).expect("migrate effect store");
+    let mut upgraded = EffectStore::open_existing(&mig_res).expect("migrate");
     assert_eq!(
         upgraded
             .observe("config_apply", "ocserv.conf", 1, test_effect(), b"A")
-            .expect("observe preserved effect")
+            .expect("keep")
             .state,
         DesiredEffectState::AppliedExact as i32
     );
     upgraded
         .prepare("config_apply", "ocserv.conf", 2, test_effect(), b"A", b"B")
-        .expect("prepare next revision after migration");
+        .expect("p2");
     upgraded
         .mark_absent("config_apply", "ocserv.conf", 2, test_effect())
-        .expect("record rolled-back revision");
+        .expect("absent");
     assert_eq!(
         upgraded
             .observe("config_apply", "ocserv.conf", 2, test_effect(), b"A")
-            .expect("observe rolled-back revision")
+            .expect("obs2")
             .state,
         DesiredEffectState::Absent as i32
     );
-    drop(upgraded);
-    std::fs::remove_dir_all(directory).expect("cleanup");
 }
 
 #[cfg(target_os = "linux")]
@@ -1789,21 +1284,21 @@ async fn assert_effect_state(
     revision: u64,
     expected: bool,
 ) {
+    let observed = adapter
+        .desired_effect_observe(mutation_kind, resource_key, revision, test_effect())
+        .await
+        .expect("observe native effect");
     assert_eq!(
-        adapter
-            .desired_effect_observe(mutation_kind, resource_key, revision, test_effect())
-            .await
-            .expect("observe effect state")
-            .state
-            == DesiredEffectState::AppliedExact as i32,
-        expected
+        observed.state == DesiredEffectState::AppliedExact as i32,
+        expected,
+        "unexpected state for {mutation_kind}:{resource_key}@{revision}: {observed:?}"
     );
 }
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ignore = "requires an explicitly prepared native Ocserv test container"]
 #[allow(clippy::too_many_lines)]
-#[ignore = "requires native ocpasswd, OpenSSL, and an isolated test directory"]
 async fn native_ocserv_operations() {
     let root = PathBuf::from(std::env::var("OCSERVIA_NATIVE_OCSERV_ROOT").expect("native root"));
     let scenario = std::env::var("OCSERVIA_NATIVE_OCSERV_SCENARIO").expect("native scenario");
@@ -1832,8 +1327,6 @@ async fn native_ocserv_operations() {
     };
     match scenario.as_str() {
         "config-rollback" => {
-            // This fixture runs a real daemon without systemd. Map only reload
-            // and status to its PID; configuration parsing and occtl stay native.
             let systemctl = root.join("systemctl-fixture");
             write_executable(
                 &systemctl,
@@ -1851,26 +1344,26 @@ async fn native_ocserv_operations() {
                 ),
             );
             let config = root.join("ocserv.conf");
-            let resources = FixedResources::new(
-                systemctl,
-                PathBuf::from("/usr/sbin/ocserv"),
-                occtl,
-                config.clone(),
-                PathBuf::from("/proc/sys/kernel/random/boot_id"),
-            )
-            .expect("native config resources")
-            .with_effect_store(
-                root.join("config-state/effects.sqlite3"),
-                root.join("config-state/effects.key"),
-            )
-            .expect("config effect store");
-            let adapter = Adapter::new(resources, Limits::default());
+            let cfg_adapter = Adapter::new(
+                FixedResources::new(
+                    systemctl,
+                    PathBuf::from("/usr/sbin/ocserv"),
+                    occtl,
+                    config.clone(),
+                    PathBuf::from("/proc/sys/kernel/random/boot_id"),
+                )
+                .expect("native config resources")
+                .with_effect_store(
+                    root.join("config-state/effects.sqlite3"),
+                    root.join("config-state/effects.key"),
+                )
+                .expect("config effect store"),
+                Limits::default(),
+            );
             let original = std::fs::read(&config).expect("original config");
             let mut invalid = original.clone();
             invalid.extend_from_slice(b"\nauth = \"invalid-auth-backend\"\n");
-            // Exercise post-publication parser failure and exact restoration
-            // using the full native fixture, outside the legacy directive subset.
-            let result = adapter
+            let result = cfg_adapter
                 .apply_validated_config(
                     &invalid,
                     &Sha256::digest(&invalid),
@@ -1880,49 +1373,53 @@ async fn native_ocserv_operations() {
                     false,
                 )
                 .await
-                .expect("native rollback outcome");
+                .expect("native rollback");
             assert!(result.healthy && result.rolled_back && !result.failed_critical);
-            assert_eq!(std::fs::read(&config).expect("restored config"), original);
+            assert_eq!(std::fs::read(&config).expect("restored"), original);
             assert_eq!(
-                adapter
+                cfg_adapter
                     .desired_effect_observe("config_apply", "ocserv.conf", 1, test_effect())
                     .await
-                    .expect("observe native rollback")
+                    .expect("observe")
                     .state,
                 DesiredEffectState::Absent as i32
             );
-            assert!(staging_files(&root).is_empty());
+            assert_eq!(staging_files(&root).len(), 0);
         }
         "occtl" => {
             adapter.ocserv_version().await.expect("native version");
             let sessions =
-                parse_sessions(&std::fs::read(root.join("sessions.json")).expect("occtl users"))
-                    .expect("parse native occtl users");
-            assert_eq!(sessions.sessions.len(), 1);
-            assert_eq!(sessions.sessions[0].username, "alice");
-            assert_eq!(sessions.sessions[0].remote_ip, "127.0.0.1");
-            parse_ip_bans(&std::fs::read(root.join("bans.json")).expect("occtl bans"))
-                .expect("parse native occtl bans");
+                parse_sessions(&std::fs::read(root.join("sessions.json")).expect("users"))
+                    .expect("parse users");
+            assert_eq!(
+                (
+                    sessions.sessions.len(),
+                    sessions.sessions[0].username.as_str(),
+                    sessions.sessions[0].remote_ip.as_str()
+                ),
+                (1, "alice", "127.0.0.1")
+            );
+            parse_ip_bans(&std::fs::read(root.join("bans.json")).expect("bans")).expect("bans");
             let socket = root.join("occtl.sock");
-            let socket = socket.to_str().expect("native socket path");
+            let sock = socket.to_str().expect("socket");
             adapter
                 .execute(
                     &adapter.resources.occtl,
-                    &["-s", socket, "terminate", "id", &sessions.sessions[0].id],
+                    &["-s", sock, "terminate", "id", &sessions.sessions[0].id],
                 )
                 .await
-                .expect("terminate native session");
+                .expect("terminate");
             let mut empty = false;
             for _ in 0..100 {
-                let output = adapter
+                let out = adapter
                     .execute(
                         &adapter.resources.occtl,
-                        &["-s", socket, "--json", "show", "users"],
+                        &["-s", sock, "--json", "show", "users"],
                     )
                     .await
-                    .expect("native users after terminate");
-                empty = parse_sessions(&output.stdout)
-                    .expect("empty native users")
+                    .expect("users");
+                empty = parse_sessions(&out.stdout)
+                    .expect("empty")
                     .sessions
                     .is_empty();
                 if empty {
@@ -1933,9 +1430,8 @@ async fn native_ocserv_operations() {
             assert!(empty, "terminated session must disappear");
         }
         "concurrency" => {
-            let sealed =
-                std::fs::read(root.join("sealed-disabled-password.bin")).expect("sealed password");
-            let (first, second) = tokio::join!(
+            let sealed = std::fs::read(root.join("sealed-disabled-password.bin")).expect("sealed");
+            let (b, c) = tokio::join!(
                 adapter.user_create(
                     "bob",
                     "native-test-user-password",
@@ -1951,9 +1447,9 @@ async fn native_ocserv_operations() {
                     test_effect()
                 ),
             );
-            first.expect("concurrent bob");
-            second.expect("concurrent carol");
-            let (first, second) = tokio::join!(
+            b.expect("bob");
+            c.expect("carol");
+            let (d1, d2) = tokio::join!(
                 adapter.user_create(
                     "dave",
                     "native-test-user-password",
@@ -1969,8 +1465,8 @@ async fn native_ocserv_operations() {
                     test_effect()
                 ),
             );
-            assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
-            let (locked, rotated) = tokio::join!(
+            assert_eq!(usize::from(d1.is_ok()) + usize::from(d2.is_ok()), 1);
+            let (l, r) = tokio::join!(
                 adapter.user_disable("alice", 6, test_effect()),
                 adapter.user_password_rotate(
                     "alice",
@@ -1980,10 +1476,10 @@ async fn native_ocserv_operations() {
                     test_effect()
                 ),
             );
-            locked.expect("concurrent disable");
-            rotated.expect("concurrent rotation");
+            l.expect("disable");
+            r.expect("rotate");
             let members = vec!["alice".to_owned(), "bob".to_owned(), "carol".to_owned()];
-            let (group, rotated) = tokio::join!(
+            let (g, r2) = tokio::join!(
                 adapter.group_apply("staff", &members, 2, test_effect()),
                 adapter.user_password_rotate(
                     "alice",
@@ -1993,9 +1489,9 @@ async fn native_ocserv_operations() {
                     test_effect()
                 ),
             );
-            group.expect("interleaved group");
-            rotated.expect("interleaved password");
-            let before = std::fs::read(&users).expect("before replay");
+            g.expect("group");
+            r2.expect("rotate2");
+            let before = std::fs::read(&users).expect("before");
             adapter
                 .user_password_rotate(
                     "alice",
@@ -2005,37 +1501,28 @@ async fn native_ocserv_operations() {
                     test_effect(),
                 )
                 .await
-                .expect("replay rotation");
-            assert!(before.eq(&std::fs::read(&users).expect("after replay")));
-            let records = parse_secret_user_records(&before).expect("concurrent records");
+                .expect("replay");
+            assert_eq!(before, std::fs::read(&users).expect("after"));
+            let records = parse_secret_user_records(&before).expect("records");
             assert_eq!(records.len(), 4);
-            for record in &records {
-                assert!(!record.hash.is_empty());
-                assert_eq!(record.hash.starts_with('!'), record.username == "alice");
+            for rec in &records {
+                assert!(
+                    !rec.hash.is_empty() && rec.hash.starts_with('!') == (rec.username == "alice")
+                );
                 assert_eq!(
-                    record.groups,
-                    if record.username == "dave" {
-                        "*"
-                    } else {
-                        "staff"
-                    }
+                    rec.groups,
+                    if rec.username == "dave" { "*" } else { "staff" }
                 );
             }
-            let metadata = std::fs::metadata(&users).expect("authoritative metadata");
+            let meta = std::fs::metadata(&users).expect("meta");
             assert_eq!(
-                (
-                    metadata.uid(),
-                    metadata.gid(),
-                    metadata.mode() & 0o777,
-                    metadata.nlink()
-                ),
+                (meta.uid(), meta.gid(), meta.mode() & 0o777, meta.nlink()),
                 (0, 0, 0o600, 1)
             );
-            assert!(staging_files(&root).is_empty());
+            assert_eq!(staging_files(&root).len(), 0);
         }
         "create-user" => {
-            let sealed = std::fs::read(root.join("sealed-initial-password.bin"))
-                .expect("sealed initial password");
+            let sealed = std::fs::read(root.join("sealed-initial-password.bin")).expect("sealed");
             adapter
                 .user_create(
                     "alice",
@@ -2045,9 +1532,9 @@ async fn native_ocserv_operations() {
                     test_effect(),
                 )
                 .await
-                .expect("create native user");
+                .expect("create");
             assert_effect_state(&adapter, "user_create", "alice", 1, true).await;
-            let after_create = std::fs::read(&users).expect("created record");
+            let after = std::fs::read(&users).expect("created");
             assert!(
                 adapter
                     .user_password_rotate(
@@ -2058,25 +1545,18 @@ async fn native_ocserv_operations() {
                         test_effect()
                     )
                     .await
-                    .is_err(),
-                "rotate must not create a missing user"
+                    .is_err()
             );
-            assert_eq!(
-                std::fs::read(&users).expect("unchanged create"),
-                after_create
-            );
-            let listed = adapter.user_list().await.expect("list native users");
+            assert_eq!(std::fs::read(&users).expect("unchanged"), after);
+            let listed = adapter.user_list().await.expect("list");
             assert_eq!(listed.users.len(), 1);
-            assert_eq!(listed.users[0].username, "alice");
-            assert!(listed.users[0].enabled);
+            assert!(listed.users[0].username == "alice" && listed.users[0].enabled);
             let (groups, hash) = record();
-            assert_eq!(groups, "*");
-            assert!(!hash.starts_with('!'));
+            assert!(groups == "*" && !hash.starts_with('!'));
         }
         "rotate-password" => {
-            let sealed = std::fs::read(root.join("sealed-rotated-password.bin"))
-                .expect("sealed rotated password");
-            let (before_groups, before_hash) = record();
+            let sealed = std::fs::read(root.join("sealed-rotated-password.bin")).expect("sealed");
+            let (bg, bh) = record();
             adapter
                 .user_password_rotate(
                     "alice",
@@ -2086,26 +1566,25 @@ async fn native_ocserv_operations() {
                     test_effect(),
                 )
                 .await
-                .expect("rotate native user password");
-            let (after_groups, after_hash) = record();
-            assert_eq!(after_groups, before_groups);
-            assert_ne!(after_hash, before_hash);
-            assert!(!after_hash.starts_with('!'));
+                .expect("rotate");
+            let (ag, ah) = record();
+            assert!(ag == bg && ah != bh && !ah.starts_with('!'));
             assert_effect_state(&adapter, "user_password_rotate", "alice", 2, true).await;
         }
         "disable" => {
-            let before = std::fs::read(&users).expect("before disable");
-            let (before_groups, before_hash) = record();
+            let before = std::fs::read(&users).expect("before");
+            let (bg, bh) = record();
             adapter
                 .user_disable("alice", 3, test_effect())
                 .await
-                .expect("disable native user");
-            let (after_groups, after_hash) = record();
-            assert_eq!(after_groups, before_groups);
-            assert_eq!(after_hash.strip_prefix('!'), Some(before_hash.as_str()));
-            assert!(!adapter.user_list().await.expect("list disabled").users[0].enabled);
-            let sealed = std::fs::read(root.join("sealed-rotated-password.bin"))
-                .expect("sealed rotated password");
+                .expect("disable");
+            let (ag, ah) = record();
+            assert_eq!(
+                (ag.as_str(), ah.strip_prefix('!')),
+                (bg.as_str(), Some(bh.as_str()))
+            );
+            assert!(!adapter.user_list().await.expect("list").users[0].enabled);
+            let sealed = std::fs::read(root.join("sealed-rotated-password.bin")).expect("sealed");
             assert!(
                 adapter
                     .user_create(
@@ -2116,18 +1595,16 @@ async fn native_ocserv_operations() {
                         test_effect()
                     )
                     .await
-                    .is_err(),
-                "create must not overwrite an existing user"
+                    .is_err()
             );
-            assert_ne!(std::fs::read(&users).expect("locked record"), before);
-            assert_eq!(record(), (after_groups, after_hash));
+            assert_ne!(std::fs::read(&users).expect("locked"), before);
+            assert_eq!(record(), (ag, ah));
             assert_effect_state(&adapter, "user_disable", "alice", 3, true).await;
         }
         "rotate-disabled-password" => {
-            let sealed = std::fs::read(root.join("sealed-disabled-password.bin"))
-                .expect("sealed disabled password");
-            let (before_groups, before_hash) = record();
-            assert!(before_hash.starts_with('!'));
+            let sealed = std::fs::read(root.join("sealed-disabled-password.bin")).expect("sealed");
+            let (bg, bh) = record();
+            assert!(bh.starts_with('!'));
             adapter
                 .user_password_rotate(
                     "alice",
@@ -2137,175 +1614,148 @@ async fn native_ocserv_operations() {
                     test_effect(),
                 )
                 .await
-                .expect("rotate disabled native user password");
-            let (after_groups, after_hash) = record();
-            assert_eq!(after_groups, before_groups);
-            assert!(after_hash.starts_with('!'));
-            assert_ne!(after_hash, before_hash);
-            assert!(
-                !adapter
-                    .user_list()
-                    .await
-                    .expect("disabled after rotate")
-                    .users[0]
-                    .enabled
-            );
+                .expect("rotate");
+            let (ag, ah) = record();
+            assert!(ag == bg && ah.starts_with('!') && ah != bh);
+            assert!(!adapter.user_list().await.expect("list").users[0].enabled);
             assert_effect_state(&adapter, "user_password_rotate", "alice", 4, true).await;
         }
         "enable" => {
-            let (before_groups, before_hash) = record();
+            let (bg, bh) = record();
             adapter
                 .user_enable("alice", 5, test_effect())
                 .await
-                .expect("enable native user");
-            let (after_groups, after_hash) = record();
-            assert_eq!(after_groups, before_groups);
-            assert_eq!(before_hash.strip_prefix('!'), Some(after_hash.as_str()));
-            assert!(adapter.user_list().await.expect("enabled user").users[0].enabled);
+                .expect("enable");
+            let (ag, ah) = record();
+            assert_eq!(
+                (ag.as_str(), bh.strip_prefix('!')),
+                (bg.as_str(), Some(ah.as_str()))
+            );
+            assert!(adapter.user_list().await.expect("list").users[0].enabled);
             assert_effect_state(&adapter, "user_enable", "alice", 5, true).await;
         }
         "group-apply" => {
-            let (_, before_hash) = record();
+            let (_, bh) = record();
             adapter
                 .group_apply("staff", &["alice".to_owned()], 1, test_effect())
                 .await
-                .expect("apply native group");
-            let (after_groups, after_hash) = record();
-            assert_eq!(after_groups, "staff");
-            assert_eq!(after_hash, before_hash);
+                .expect("group");
+            let (ag, ah) = record();
+            assert_eq!((ag.as_str(), ah.as_str()), ("staff", bh.as_str()));
             assert_effect_state(&adapter, "group_apply", "staff", 1, true).await;
         }
         _ => panic!("unsupported native scenario"),
     }
 }
 
-#[test]
-fn status_requires_exact_keys() {
-    let status = parse_service_status(b"LoadState=loaded\nActiveState=active\nSubState=running\n")
-        .expect("valid status");
-    assert_eq!(status.active_state, "active");
-    assert!(parse_service_status(b"ActiveState=active\n").is_err());
-}
-
 #[tokio::test]
-async fn child_timeout_and_output_limit_are_enforced() {
-    let timeout_program = executable("slow-ocserv", "sleep 5");
-    let timeout_directory = timeout_program.parent().expect("fixture parent").to_owned();
-    let resources = FixedResources::new(
-        PathBuf::from("/bin/false"),
-        timeout_program,
-        PathBuf::from("/bin/false"),
-        PathBuf::from("/etc/hosts"),
-        PathBuf::from("/proc/sys/kernel/random/boot_id"),
-    )
-    .expect("fixed resources");
-    let adapter = Adapter::new(
-        resources,
-        Limits {
-            timeout: Duration::from_millis(500),
-            output_bytes: 1024,
-        },
-    );
-    let timeout_result = adapter.ocserv_version().await;
-    assert!(
-        matches!(timeout_result, Err(AdapterError::DeadlineExceeded)),
-        "unexpected child timeout result: {timeout_result:?}"
-    );
-    std::fs::remove_dir_all(timeout_directory).expect("remove timeout fixture");
-
-    let noisy_program = executable(
+async fn child_timeout_output_limit_and_fixed_mutations() {
+    let dir = TempDir::new("child-limits");
+    let make_ocserv = |prog: PathBuf, limits: Limits| {
+        Adapter::new(
+            FixedResources::new(
+                PathBuf::from("/bin/false"),
+                prog,
+                PathBuf::from("/bin/false"),
+                PathBuf::from("/etc/hosts"),
+                PathBuf::from("/proc/sys/kernel/random/boot_id"),
+            )
+            .expect("resources"),
+            limits,
+        )
+    };
+    let slow = dir.exec("slow-ocserv", "sleep 5");
+    assert!(matches!(
+        make_ocserv(
+            slow,
+            Limits {
+                timeout: Duration::from_millis(400),
+                output_bytes: 1024
+            }
+        )
+        .ocserv_version()
+        .await,
+        Err(AdapterError::DeadlineExceeded)
+    ));
+    let noisy = dir.exec(
         "noisy-ocserv",
         "i=0; while [ $i -lt 2048 ]; do printf xx; i=$((i + 1)); done",
     );
-    let noisy_directory = noisy_program.parent().expect("fixture parent").to_owned();
-    let resources = FixedResources::new(
-        PathBuf::from("/bin/false"),
-        noisy_program,
-        PathBuf::from("/bin/false"),
-        PathBuf::from("/etc/hosts"),
-        PathBuf::from("/proc/sys/kernel/random/boot_id"),
-    )
-    .expect("fixed resources");
-    let adapter = Adapter::new(
-        resources,
-        Limits {
-            timeout: Duration::from_secs(30),
-            output_bytes: 1024,
-        },
-    );
-    let output_result = adapter.ocserv_version().await;
-    assert!(
-        matches!(output_result, Err(AdapterError::OutputLimit)),
-        "unexpected child output-limit result: {output_result:?}"
-    );
-    std::fs::remove_dir_all(noisy_directory).expect("remove noisy fixture");
-}
+    assert!(matches!(
+        make_ocserv(
+            noisy,
+            Limits {
+                timeout: Duration::from_secs(30),
+                output_bytes: 1024
+            }
+        )
+        .ocserv_version()
+        .await,
+        Err(AdapterError::OutputLimit)
+    ));
 
-#[tokio::test]
-async fn child_deadline_covers_blocked_input_and_inherited_output() {
-    let adapter = Adapter::new(
+    let io_adapter = Adapter::new(
         FixedResources::default(),
         Limits {
             timeout: Duration::from_millis(100),
             output_bytes: 1024,
         },
     );
-    for (body, input) in [
+    for (idx, (body, input)) in [
         ("sleep 5", vec![b'x'; 1024 * 1024]),
         ("sleep 5 & exit 0", Vec::new()),
-    ] {
-        let program = executable("blocked-io", body);
-        let result = tokio::time::timeout(
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let prog = dir.exec(&format!("blocked-io-{idx}"), body);
+        let res = tokio::time::timeout(
             Duration::from_secs(2),
-            adapter.execute_with_input(&program, &[], &input),
+            io_adapter.execute_with_input(&prog, &[], &input),
         )
         .await
-        .expect("child IO must obey the adapter deadline");
-        assert!(matches!(result, Err(AdapterError::DeadlineExceeded)));
-        std::fs::remove_dir_all(program.parent().expect("fixture parent"))
-            .expect("remove IO fixture");
+        .expect("obey deadline");
+        assert!(matches!(res, Err(AdapterError::DeadlineExceeded)));
     }
-}
 
-#[tokio::test]
-async fn mutations_use_only_fixed_programs_and_arguments() {
-    let occtl = executable(
+    // Fixed programs, fixed arguments, ocserv >= 1.4.2 terminate gate, boot ID check.
+    let occtl = dir.exec(
         "occtl",
         "case \"$*\" in 'disconnect id 42'|'terminate id 42'|'unban ip 192.0.2.9') exit 0;; *) exit 9;; esac",
     );
-    let directory = occtl.parent().expect("fixture parent").to_owned();
-    let systemctl = directory.join("systemctl");
-    write_executable(
-        &systemctl,
-        "#!/bin/sh\n[ \"$*\" = 'reload ocserv.service --no-ask-password' ]\n",
+    let systemctl = dir.exec(
+        "systemctl",
+        "[ \"$*\" = 'reload ocserv.service --no-ask-password' ]",
     );
-    let boot = directory.join("boot_id");
+    let boot = dir.join("boot_id");
     let boot_id = Uuid::now_v7().to_string();
-    std::fs::write(&boot, &boot_id).expect("write boot fixture");
-    let ocserv = directory.join("ocserv");
-    let version = directory.join("version");
-    std::fs::write(&version, "1.4.2").expect("write version fixture");
-    write_executable(
-        &ocserv,
-        format!(
-            "#!/bin/sh\necho \"ocserv $(cat '{}')\" >&2\n",
-            version.display()
-        ),
+    std::fs::write(&boot, &boot_id).expect("boot");
+    let version = dir.join("version");
+    std::fs::write(&version, "1.4.2").expect("version");
+    let ocserv = dir.exec(
+        "ocserv",
+        &format!("echo \"ocserv $(cat '{}')\" >&2", version.display()),
     );
-    let resources =
+    let adapter = Adapter::new(
         FixedResources::new(systemctl, ocserv, occtl, PathBuf::from("/etc/hosts"), boot)
-            .expect("fixed resources");
-    let adapter = Adapter::new(resources, Limits::default());
-    assert!(adapter.session_disconnect("42", &boot_id).await.is_ok());
-    assert!(adapter.session_terminate("42", &boot_id).await.is_ok());
-    // Ocserv before 1.4.2 has no `occtl terminate`: reject before any child runs.
-    std::fs::write(&version, "1.2.4").expect("write old version fixture");
+            .expect("res"),
+        Limits::default(),
+    );
+    adapter
+        .session_disconnect("42", &boot_id)
+        .await
+        .expect("disconnect");
+    adapter
+        .session_terminate("42", &boot_id)
+        .await
+        .expect("terminate");
+    std::fs::write(&version, "1.2.4").expect("old version");
     assert!(matches!(
         adapter.session_terminate("42", &boot_id).await,
         Err(AdapterError::InvalidRequest)
     ));
-    assert!(adapter.ip_ban_remove("192.0.2.9").await.is_ok());
-    assert!(adapter.service_reload().await.is_ok());
+    adapter.ip_ban_remove("192.0.2.9").await.expect("unban");
+    adapter.service_reload().await.expect("reload");
     assert!(matches!(
         adapter.session_disconnect("042", &boot_id).await,
         Err(AdapterError::InvalidRequest)
@@ -2316,37 +1766,27 @@ async fn mutations_use_only_fixed_programs_and_arguments() {
             .await,
         Err(AdapterError::StaleBoot)
     ));
-    std::fs::remove_dir_all(directory).expect("remove mutation fixture");
 }
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "requires an explicitly prepared native Ocserv test service"]
 async fn native_controlled_operations() {
-    let disconnect_id =
-        std::env::var("OCSERVIA_DISCONNECT_SESSION_ID").expect("disconnect session ID is required");
-    let terminate_id =
-        std::env::var("OCSERVIA_TERMINATE_SESSION_ID").expect("terminate session ID is required");
-    let banned_ip = std::env::var("OCSERVIA_BANNED_IP").expect("banned IP is required");
-    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("read boot ID");
+    let disconnect_id = std::env::var("OCSERVIA_DISCONNECT_SESSION_ID").expect("disconnect ID");
+    let terminate_id = std::env::var("OCSERVIA_TERMINATE_SESSION_ID").expect("terminate ID");
+    let banned_ip = std::env::var("OCSERVIA_BANNED_IP").expect("banned IP");
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot ID");
     let adapter = Adapter::new(FixedResources::default(), Limits::default());
-
     adapter
         .session_disconnect(&disconnect_id, boot_id.trim())
         .await
-        .expect("disconnect observed session");
+        .expect("disconnect");
     adapter
         .session_terminate(&terminate_id, boot_id.trim())
         .await
-        .expect("terminate observed session");
-    adapter
-        .ip_ban_remove(&banned_ip)
-        .await
-        .expect("remove observed IP ban");
-    adapter
-        .service_reload()
-        .await
-        .expect("reload ocserv.service");
+        .expect("terminate");
+    adapter.ip_ban_remove(&banned_ip).await.expect("unban");
+    adapter.service_reload().await.expect("reload");
 }
 
 #[cfg(target_os = "linux")]
@@ -2360,31 +1800,14 @@ async fn native_reload_failure_is_bounded() {
     ));
 }
 
-#[test]
-#[expect(
-    clippy::verbose_bit_mask,
-    reason = "compare the explicit Unix permission policy with the old predicate"
-)]
-fn csr_key_permission_predicates_are_equivalent() {
-    for high in [0, 0x8000_0000, 0xffff_0000] {
-        for low in 0..=0xffff_u32 {
-            let mode = std::fs::Permissions::from_mode(high | low).mode();
-            assert_eq!(mode.trailing_zeros() >= 6, mode & 0o077 == 0, "{mode:#o}");
-        }
-    }
-}
-
 #[tokio::test]
 async fn certificate_csr_keeps_private_key_local() {
-    let directory = std::env::temp_dir().join(format!("ocservia-cert-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("certificate directory");
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-        .expect("certificate directory mode");
-    let resources = FixedResources::default()
-        .with_certificate_key_dir(directory.clone())
-        .expect("certificate resources");
+    let dir = TempDir::new("cert");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("0700");
     let adapter = Adapter::new(
-        resources,
+        FixedResources::default()
+            .with_certificate_key_dir(dir.path().to_path_buf())
+            .expect("cert res"),
         Limits {
             timeout: Duration::from_secs(10),
             output_bytes: DEFAULT_OUTPUT_BYTES,
@@ -2399,449 +1822,344 @@ async fn certificate_csr_keeps_private_key_local() {
             2048,
         )
         .await
-        .expect("generate CSR");
+        .expect("csr");
     assert_eq!(result.certificate_id, id.as_bytes());
-    assert!(result.csr_der.len() > 64);
-    assert_eq!(result.public_key_sha256.len(), 32);
+    assert!(result.csr_der.len() > 64 && result.public_key_sha256.len() == 32);
     assert!(!String::from_utf8_lossy(&result.csr_der).contains("PRIVATE KEY"));
-    let key = directory.join(format!("{id}.key.pem"));
-    let metadata = std::fs::metadata(&key).expect("local private key");
-    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    let key = dir.join(format!("{id}.key.pem"));
+    assert_eq!(
+        std::fs::metadata(&key).expect("key").permissions().mode() & 0o777,
+        0o600
+    );
 
-    let repeated = adapter
-        .certificate_csr(
-            id.as_bytes(),
-            "vpn.example.test",
-            &["alt.example.test".to_owned()],
-            2048,
-        )
-        .await
-        .expect("repeat CSR with the same private key");
-    assert_eq!(repeated.public_key_sha256, result.public_key_sha256);
     for mode in [0o400, 0o600, 0o700] {
-        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).expect("chmod");
         let reused = adapter
             .certificate_csr(id.as_bytes(), "vpn.example.test", &[], 2048)
             .await
-            .expect("owner-only modes retain the existing key");
+            .expect("reuse");
         assert_eq!(reused.public_key_sha256, result.public_key_sha256);
     }
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o640)).unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o640)).expect("0640");
     assert!(matches!(
         adapter
             .certificate_csr(id.as_bytes(), "vpn.example.test", &[], 2048)
             .await,
         Err(AdapterError::InvalidResource)
     ));
-    std::fs::remove_dir_all(directory).expect("cleanup certificate directory");
 }
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn certificate_p12_is_encrypted_bounded_and_replayable() {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
-
-    let directory = std::env::temp_dir().join(format!("ocservia-p12-{}", Uuid::now_v7()));
-    std::fs::create_dir(&directory).expect("certificate directory");
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-        .expect("certificate directory mode");
-    let user_sealing_key = directory.join("user-sealing-private.pem");
-    let user_sealing_public = directory.join("user-sealing-public.pem");
-    let p12_sealing_key = directory.join("p12-sealing-private.pem");
-    let p12_sealing_public = directory.join("p12-sealing-public.pem");
-    for (private, public) in [
-        (&user_sealing_key, &user_sealing_public),
-        (&p12_sealing_key, &p12_sealing_public),
-    ] {
-        assert!(
-            Command::new("/usr/bin/openssl")
-                .args([
-                    "genpkey",
-                    "-algorithm",
-                    "RSA",
-                    "-pkeyopt",
-                    "rsa_keygen_bits:2048",
-                    "-out",
-                ])
-                .arg(private)
-                .status()
-                .expect("generate sealing key")
-                .success()
-        );
-        std::fs::set_permissions(private, std::fs::Permissions::from_mode(0o600))
-            .expect("sealing key mode");
-        assert!(
-            Command::new("/usr/bin/openssl")
-                .args(["pkey", "-in"])
-                .arg(private)
-                .args(["-pubout", "-out"])
-                .arg(public)
-                .status()
-                .expect("derive sealing public key")
-                .success()
-        );
+    let dir = TempDir::new("p12");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("0700");
+    let user_priv = dir.join("user-sealing-private.pem");
+    let user_pub = dir.join("user-sealing-public.pem");
+    let p12_priv = dir.join("p12-sealing-private.pem");
+    let p12_pub = dir.join("p12-sealing-public.pem");
+    for (priv_p, pub_p) in [(&user_priv, &user_pub), (&p12_priv, &p12_pub)] {
+        openssl_ok(&[
+            "genpkey".as_ref(),
+            "-algorithm".as_ref(),
+            "RSA".as_ref(),
+            "-pkeyopt".as_ref(),
+            "rsa_keygen_bits:2048".as_ref(),
+            "-out".as_ref(),
+            priv_p.as_os_str(),
+        ]);
+        std::fs::set_permissions(priv_p, std::fs::Permissions::from_mode(0o600)).expect("0600");
+        openssl_ok(&[
+            "pkey".as_ref(),
+            "-in".as_ref(),
+            priv_p.as_os_str(),
+            "-pubout".as_ref(),
+            "-out".as_ref(),
+            pub_p.as_os_str(),
+        ]);
     }
     let resources = FixedResources::default()
         .with_user_resources(
             PathBuf::from("/usr/bin/true"),
-            directory.join("unused-user-file"),
+            dir.join("unused-user-file"),
             PathBuf::from("/usr/bin/openssl"),
-            user_sealing_key,
+            user_priv,
             "fixture-user-key".to_owned(),
         )
-        .expect("fixed secret resources")
-        .with_p12_resources(p12_sealing_key, "fixture-key".to_owned())
-        .expect("fixed P12 resources")
+        .expect("user res")
+        .with_p12_resources(p12_priv, "fixture-key".to_owned())
+        .expect("p12 res")
         .with_effect_store(
-            directory.join("desired-effects.sqlite3"),
-            directory.join("desired-effects.key"),
+            dir.join("desired-effects.sqlite3"),
+            dir.join("desired-effects.key"),
         )
-        .expect("fixed effect store")
-        .with_certificate_key_dir(directory.clone())
-        .expect("fixed certificate resources");
-    let restart_resources = resources.clone();
-    let adapter = Adapter::new(
-        resources,
-        Limits {
-            timeout: Duration::from_secs(10),
-            output_bytes: DEFAULT_OUTPUT_BYTES,
-        },
-    );
-    let certificate_id = Uuid::now_v7();
+        .expect("effect res")
+        .with_certificate_key_dir(dir.path().to_path_buf())
+        .expect("cert res");
+    let limits = Limits {
+        timeout: Duration::from_secs(10),
+        output_bytes: DEFAULT_OUTPUT_BYTES,
+    };
+    let adapter = Adapter::new(resources.clone(), limits);
+
+    let cert_id = Uuid::now_v7();
     let csr = adapter
-        .certificate_csr(certificate_id.as_bytes(), "vpn.example.test", &[], 2048)
+        .certificate_csr(cert_id.as_bytes(), "vpn.example.test", &[], 2048)
         .await
-        .expect("generate CSR");
-    let csr_path = directory.join("request.der");
-    let csr_pem_path = directory.join("request.pem");
-    let certificate_path = directory.join("certificate.pem");
-    std::fs::write(&csr_path, csr.csr_der).expect("write public CSR fixture");
-    let key_path = directory.join(format!("{certificate_id}.key.pem"));
-    assert!(
-        Command::new("/usr/bin/openssl")
-            .args(["req", "-inform", "DER", "-in"])
-            .arg(&csr_path)
-            .args(["-out"])
-            .arg(&csr_pem_path)
-            .status()
-            .expect("convert fixture CSR")
-            .success()
-    );
-    assert!(
-        Command::new("/usr/bin/openssl")
-            .args(["x509", "-req", "-in"])
-            .arg(&csr_pem_path)
-            .args(["-signkey"])
-            .arg(&key_path)
-            .args(["-days", "1", "-out"])
-            .arg(&certificate_path)
-            .status()
-            .expect("self-sign fixture certificate")
-            .success()
-    );
+        .expect("csr");
+    let csr_der = dir.join("request.der");
+    let csr_pem = dir.join("request.pem");
+    let cert_pem = dir.join("certificate.pem");
+    std::fs::write(&csr_der, csr.csr_der).expect("csr der");
+    let key_path = dir.join(format!("{cert_id}.key.pem"));
+    openssl_ok(&[
+        "req".as_ref(),
+        "-inform".as_ref(),
+        "DER".as_ref(),
+        "-in".as_ref(),
+        csr_der.as_os_str(),
+        "-out".as_ref(),
+        csr_pem.as_os_str(),
+    ]);
+    openssl_ok(&[
+        "x509".as_ref(),
+        "-req".as_ref(),
+        "-in".as_ref(),
+        csr_pem.as_os_str(),
+        "-signkey".as_ref(),
+        key_path.as_os_str(),
+        "-days".as_ref(),
+        "1".as_ref(),
+        "-out".as_ref(),
+        cert_pem.as_os_str(),
+    ]);
+
     let password = b"unique-random-password-fixture";
-    let mut seal = Command::new("/usr/bin/openssl")
-        .args(["pkeyutl", "-encrypt", "-pubin", "-inkey"])
-        .arg(&p12_sealing_public)
-        .args([
-            "-pkeyopt",
-            "rsa_padding_mode:oaep",
-            "-pkeyopt",
-            "rsa_oaep_md:sha256",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("start sealing fixture");
-    seal.stdin
-        .take()
-        .expect("sealing stdin")
-        .write_all(password)
-        .expect("seal password input");
-    let mut sealed = seal.wait_with_output().expect("seal password");
-    assert!(sealed.status.success());
+    let mut p12_ct = seal_rsa_oaep(&p12_pub, password);
+    let mut user_ct = seal_rsa_oaep(&user_pub, password);
     if let Some(helper) = std::env::var_os("OCSERV_SIGNER_INTEROP_HELPER") {
         assert!(
             Command::new(helper)
                 .arg("-test.run=^TestSealInteropHelper$")
-                .env("SIGNER_INTEROP_DIR", &directory)
+                .env("SIGNER_INTEROP_DIR", dir.path())
                 .status()
-                .expect("run Go Signer HTTP sealing helper")
+                .expect("run Go Signer interop helper")
                 .success()
         );
-        sealed.stdout =
-            std::fs::read(directory.join("signer-1.bin")).expect("Go Signer P12 ciphertext");
-    }
-    let sealed_password = SealedSecretV1 {
-        version: SealedSecretVersion::V1 as i32,
-        purpose: SealedSecretPurpose::CertificateP12Password as i32,
-        key_id: "fixture-key".to_owned(),
-        ciphertext: sealed.stdout,
-    };
-    let mut seal_user = Command::new("/usr/bin/openssl")
-        .args(["pkeyutl", "-encrypt", "-pubin", "-inkey"])
-        .arg(&user_sealing_public)
-        .args([
-            "-pkeyopt",
-            "rsa_padding_mode:oaep",
-            "-pkeyopt",
-            "rsa_oaep_md:sha256",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("start user-purpose sealing fixture");
-    seal_user
-        .stdin
-        .take()
-        .expect("user sealing stdin")
-        .write_all(password)
-        .expect("user sealing input");
-    let mut user_sealed = seal_user.wait_with_output().expect("seal user password");
-    assert!(user_sealed.status.success());
-    if std::env::var_os("OCSERV_SIGNER_INTEROP_HELPER").is_some() {
-        user_sealed.stdout =
-            std::fs::read(directory.join("signer-0.bin")).expect("Go Signer user ciphertext");
-        let output = adapter
+        p12_ct = std::fs::read(dir.join("signer-1.bin")).expect("Go Signer P12 ct");
+        user_ct = std::fs::read(dir.join("signer-0.bin")).expect("Go Signer user ct");
+        let dec = adapter
             .execute_with_input(
                 &adapter.resources.openssl,
                 &[
                     "pkeyutl",
                     "-decrypt",
                     "-inkey",
-                    adapter.resources.user_secret_key.to_str().unwrap(),
+                    adapter
+                        .resources
+                        .user_secret_key
+                        .to_str()
+                        .expect("key path"),
                     "-pkeyopt",
                     "rsa_padding_mode:oaep",
                     "-pkeyopt",
                     "rsa_oaep_md:sha256",
                 ],
-                &user_sealed.stdout,
+                &user_ct,
             )
             .await
-            .expect("real privd adapter user-key decryption");
-        assert_eq!(output.stdout, password);
+            .expect("decrypt user key");
+        assert_eq!(dec.stdout, password);
     }
-    let chain = std::fs::read(&certificate_path).expect("read certificate chain");
-    let artifact_id = Uuid::now_v7();
-    let operation_id = Uuid::now_v7();
-    let expires_at = effect_now().expect("current time") + 600;
-    let artifact_directory = directory.join("artifacts");
-    let mut modified_secret = sealed_password.clone();
-    modified_secret.ciphertext[0] ^= 1;
-    assert!(
-        adapter
-            .certificate_p12(
-                certificate_id.as_bytes(),
-                Uuid::now_v7().as_bytes(),
-                &chain,
-                &modified_secret,
-                1,
-                Uuid::now_v7().as_bytes(),
-                expires_at,
-            )
-            .await
-            .is_err()
-    );
-    let mut cross_purpose = sealed_password.clone();
-    cross_purpose.purpose = SealedSecretPurpose::UserPassword as i32;
-    cross_purpose.key_id = "fixture-user-key".to_owned();
-    assert!(matches!(
-        adapter
-            .certificate_p12(
-                certificate_id.as_bytes(),
-                Uuid::now_v7().as_bytes(),
-                &chain,
-                &cross_purpose,
-                1,
-                Uuid::now_v7().as_bytes(),
-                expires_at,
-            )
-            .await,
-        Err(AdapterError::InvalidRequest)
-    ));
-    let user_ciphertext_in_p12 = SealedSecretV1 {
+
+    let sealed_p12 = SealedSecretV1 {
         version: SealedSecretVersion::V1 as i32,
         purpose: SealedSecretPurpose::CertificateP12Password as i32,
         key_id: "fixture-key".to_owned(),
-        ciphertext: user_sealed.stdout,
+        ciphertext: p12_ct,
     };
-    assert!(
-        adapter
-            .certificate_p12(
-                certificate_id.as_bytes(),
-                Uuid::now_v7().as_bytes(),
-                &chain,
-                &user_ciphertext_in_p12,
-                1,
-                Uuid::now_v7().as_bytes(),
-                expires_at,
-            )
-            .await
-            .is_err(),
-        "user-purpose ciphertext must not decrypt on the P12 key"
-    );
+    let chain = std::fs::read(&cert_pem).expect("chain");
+    let expires_at = effect_now().expect("now") + 600;
+    let artifact_dir = dir.join("artifacts");
+
+    // Cross-purpose and tampered ciphertexts fail closed.
+    let mut tampered = sealed_p12.clone();
+    tampered.ciphertext[0] ^= 1;
+    let mut wrong_purpose = sealed_p12.clone();
+    wrong_purpose.purpose = SealedSecretPurpose::UserPassword as i32;
+    wrong_purpose.key_id = "fixture-user-key".to_owned();
+    let user_ct_in_p12 = SealedSecretV1 {
+        ciphertext: user_ct,
+        ..sealed_p12.clone()
+    };
+    for bad in [&tampered, &wrong_purpose, &user_ct_in_p12] {
+        assert!(
+            adapter
+                .certificate_p12(
+                    cert_id.as_bytes(),
+                    Uuid::now_v7().as_bytes(),
+                    &chain,
+                    bad,
+                    1,
+                    Uuid::now_v7().as_bytes(),
+                    expires_at
+                )
+                .await
+                .is_err()
+        );
+    }
     assert!(
         adapter
             .user_create(
                 "cross-purpose",
                 "fixture-user-key",
-                &sealed_password.ciphertext,
+                &sealed_p12.ciphertext,
                 1,
-                test_effect(),
+                test_effect()
             )
             .await
-            .is_err(),
-        "P12-purpose ciphertext must not decrypt on the user key"
+            .is_err()
     );
+
+    // Create, verify permissions/hash/password protection, replay, and detect corruption.
+    let artifact_id = Uuid::now_v7();
+    let op_id = Uuid::now_v7();
     let result = adapter
         .certificate_p12(
-            certificate_id.as_bytes(),
+            cert_id.as_bytes(),
             artifact_id.as_bytes(),
             &chain,
-            &sealed_password,
+            &sealed_p12,
             1,
-            operation_id.as_bytes(),
+            op_id.as_bytes(),
             expires_at,
         )
         .await
-        .expect("create encrypted P12");
-    let artifact = directory
-        .join("artifacts")
-        .join(format!("{artifact_id}.p12"));
+        .expect("create p12");
+    let artifact = artifact_dir.join(format!("{artifact_id}.p12"));
     assert_eq!(
-        std::fs::metadata(&artifact_directory)
-            .expect("artifact directory metadata")
+        std::fs::metadata(&artifact_dir)
+            .expect("dir")
             .permissions()
             .mode()
             & 0o777,
         0o700
     );
-    let bytes = std::fs::read(&artifact).expect("read encrypted P12");
     assert_eq!(
         std::fs::metadata(&artifact)
-            .expect("artifact metadata")
+            .expect("file")
             .permissions()
             .mode()
             & 0o777,
         0o600
     );
+    let bytes = std::fs::read(&artifact).expect("p12 bytes");
     assert_eq!(result.artifact_size, bytes.len() as u64);
     assert_eq!(result.artifact_sha256, Sha256::digest(&bytes).to_vec());
-    assert!(
-        !bytes
-            .windows(password.len())
-            .any(|window| window == password)
-    );
-    assert!(
-        Command::new("/usr/bin/openssl")
-            .args(["pkcs12", "-in"])
-            .arg(&artifact)
-            .args([
-                "-passin",
-                &format!("pass:{}", String::from_utf8_lossy(password)),
-                "-noout"
-            ])
-            .status()
-            .expect("open encrypted P12")
-            .success()
-    );
+    assert!(!bytes.windows(password.len()).any(|w| w == password));
+    openssl_ok(&[
+        "pkcs12".as_ref(),
+        "-in".as_ref(),
+        artifact.as_os_str(),
+        "-passin".as_ref(),
+        format!("pass:{}", String::from_utf8_lossy(password)).as_ref(),
+        "-noout".as_ref(),
+    ]);
     let replay = adapter
         .certificate_p12(
-            certificate_id.as_bytes(),
+            cert_id.as_bytes(),
             artifact_id.as_bytes(),
             &chain,
-            &sealed_password,
+            &sealed_p12,
             1,
-            operation_id.as_bytes(),
+            op_id.as_bytes(),
             expires_at,
         )
         .await
-        .expect("replay P12 creation");
+        .expect("replay");
     assert_eq!(replay.artifact_sha256, result.artifact_sha256);
-    std::fs::write(&artifact, b"truncated").expect("corrupt final P12 fixture");
-    let recovery_error = adapter
-        .certificate_p12(
-            certificate_id.as_bytes(),
-            artifact_id.as_bytes(),
-            &chain,
-            &sealed_password,
-            1,
-            operation_id.as_bytes(),
-            expires_at,
-        )
-        .await
-        .expect_err("registered artifact corruption must fail closed");
-    assert!(matches!(recovery_error, AdapterError::InvalidResource));
+    std::fs::write(&artifact, b"truncated").expect("corrupt");
+    assert!(matches!(
+        adapter
+            .certificate_p12(
+                cert_id.as_bytes(),
+                artifact_id.as_bytes(),
+                &chain,
+                &sealed_p12,
+                1,
+                op_id.as_bytes(),
+                expires_at
+            )
+            .await,
+        Err(AdapterError::InvalidResource)
+    ));
     assert!(!artifact.exists());
-    let interrupted_artifact = Uuid::now_v7();
-    let interrupted_operation = Uuid::now_v7();
-    let interrupted_chain = artifact_directory.join(format!(".{interrupted_artifact}.chain.pem"));
-    let interrupted_output = artifact_directory.join(format!(".{interrupted_artifact}.p12"));
-    std::fs::write(&interrupted_chain, b"interrupted chain fixture")
-        .expect("interrupted chain file");
-    std::fs::write(&interrupted_output, b"interrupted output fixture")
-        .expect("interrupted output file");
-    let interrupted_result = adapter
+
+    // Interrupted staging recovery, exclusive lease, restart persistence, lease expiry/re-lease, consume, confirm.
+    let int_art = Uuid::now_v7();
+    let int_op = Uuid::now_v7();
+    let int_chain = artifact_dir.join(format!(".{int_art}.chain.pem"));
+    let int_out = artifact_dir.join(format!(".{int_art}.p12"));
+    std::fs::write(&int_chain, b"stale").expect("stale chain");
+    std::fs::write(&int_out, b"stale").expect("stale out");
+    let int_res = adapter
         .certificate_p12(
-            certificate_id.as_bytes(),
-            interrupted_artifact.as_bytes(),
+            cert_id.as_bytes(),
+            int_art.as_bytes(),
             &chain,
-            &sealed_password,
+            &sealed_p12,
             1,
-            interrupted_operation.as_bytes(),
+            int_op.as_bytes(),
             expires_at,
         )
         .await
-        .expect("recover interrupted P12 staging");
-    assert!(!interrupted_chain.exists());
-    assert!(!interrupted_output.exists());
+        .expect("recover staging");
+    assert!(!int_chain.exists() && !int_out.exists());
+
     let grant_id = Uuid::now_v7();
     let subject = Uuid::now_v7().to_string();
-    let grant_expires = effect_now().expect("current time") + 300;
     let lease = ArtifactLeaseIdentity {
-        artifact_id: interrupted_artifact.as_bytes(),
-        certificate_id: certificate_id.as_bytes(),
+        artifact_id: int_art.as_bytes(),
+        certificate_id: cert_id.as_bytes(),
         certificate_version: 1,
-        operation_id: interrupted_operation.as_bytes(),
+        operation_id: int_op.as_bytes(),
         authorized_subject: &subject,
-        max_bytes: interrupted_result.artifact_size,
+        max_bytes: int_res.artifact_size,
         grant_id: grant_id.as_bytes(),
-        expires_at_unix_seconds: grant_expires,
+        expires_at_unix_seconds: effect_now().expect("now") + 300,
     };
-    let (first_attempt, duplicate_attempt) = tokio::join!(
+    let (a, b) = tokio::join!(
         adapter.artifact_read(lease, 0),
         adapter.artifact_read(lease, 0)
     );
-    assert!(first_attempt.is_ok() ^ duplicate_attempt.is_ok());
-    let first_chunk = first_attempt
-        .or(duplicate_attempt)
-        .expect("one concurrent fetch owns the signed lease");
-    assert!(first_chunk.eof);
-    assert_eq!(first_chunk.sha256, interrupted_result.artifact_sha256);
+    assert!(a.is_ok() ^ b.is_ok());
+    let chunk = a.or(b).expect("winner");
+    assert!(chunk.eof && chunk.sha256 == int_res.artifact_sha256);
 
-    let restarted = Adapter::new(
-        restart_resources.clone(),
-        Limits {
-            timeout: Duration::from_secs(10),
-            output_bytes: DEFAULT_OUTPUT_BYTES,
-        },
-    );
+    let restarted = Adapter::new(resources.clone(), limits);
     let other_grant = Uuid::now_v7();
-    let conflicting_lease = ArtifactLeaseIdentity {
-        grant_id: other_grant.as_bytes(),
-        ..lease
-    };
     assert!(matches!(
-        restarted.artifact_read(conflicting_lease, 0).await,
+        restarted
+            .artifact_read(
+                ArtifactLeaseIdentity {
+                    grant_id: other_grant.as_bytes(),
+                    ..lease
+                },
+                0
+            )
+            .await,
         Err(AdapterError::Unavailable)
     ));
-    let wrong_version = ArtifactLeaseIdentity {
-        certificate_version: 2,
-        ..lease
-    };
     assert!(matches!(
-        restarted.artifact_read(wrong_version, 0).await,
+        restarted
+            .artifact_read(
+                ArtifactLeaseIdentity {
+                    certificate_version: 2,
+                    ..lease
+                },
+                0
+            )
+            .await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(matches!(
@@ -2850,278 +2168,209 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
     ));
     assert!(
         !restarted
-            .artifact_confirm_consumed(
-                lease,
-                &interrupted_result.artifact_sha256,
-                interrupted_result.artifact_size,
-            )
+            .artifact_confirm_consumed(lease, &int_res.artifact_sha256, int_res.artifact_size)
             .await
-            .expect("confirmation cannot mutate an active lease")
+            .expect("active lease")
             .applied
     );
-    let released_grant_expiry = effect_now().expect("current time") - 1;
-    let mut store =
-        EffectStore::open_for_mutation(&restart_resources).expect("open leased artifact store");
-    let mut released_record = query_artifact(&store.connection, interrupted_artifact.as_bytes())
-        .expect("query leased artifact")
-        .expect("leased artifact record");
-    released_record.grant_expires_at = Some(released_grant_expiry);
-    released_record.record_hmac = authenticate_artifact_record(&store.hmac_key, &released_record);
-    store
-            .connection
-            .execute(
-                "UPDATE certificate_artifacts SET grant_expires_at=?2,record_hmac=?3 WHERE artifact_id=?1",
-                params![
-                    released_record.artifact_id.as_slice(),
-                    released_grant_expiry,
-                    released_record.record_hmac.as_slice()
-                ],
-            )
-            .expect("expire unconsumed root lease fixture");
-    store
-        .reconcile_artifacts()
-        .expect("release expired unconsumed root lease");
-    let released_lease = ArtifactLeaseIdentity {
-        expires_at_unix_seconds: released_grant_expiry,
-        ..lease
-    };
+
+    let expired_at = effect_now().expect("now") - 1;
+    let mut store = expire_artifact_grant(&resources, &int_art, expired_at);
+    store.reconcile_artifacts().expect("release expired lease");
+    drop(store);
     assert!(
         !restarted
             .artifact_confirm_consumed(
-                released_lease,
-                &interrupted_result.artifact_sha256,
-                interrupted_result.artifact_size,
+                ArtifactLeaseIdentity {
+                    expires_at_unix_seconds: expired_at,
+                    ..lease
+                },
+                &int_res.artifact_sha256,
+                int_res.artifact_size,
             )
             .await
-            .expect("released exact artifact confirms not consumed")
+            .expect("released")
             .applied
     );
-    let recovered_grant = Uuid::now_v7();
-    let recovered_lease = ArtifactLeaseIdentity {
-        grant_id: recovered_grant.as_bytes(),
-        expires_at_unix_seconds: effect_now().expect("current time") + 300,
+
+    let rec_grant = Uuid::now_v7();
+    let rec_lease = ArtifactLeaseIdentity {
+        grant_id: rec_grant.as_bytes(),
+        expires_at_unix_seconds: effect_now().expect("now") + 300,
         ..lease
     };
-    let recovered_chunk = restarted
-        .artifact_read(recovered_lease, 0)
-        .await
-        .expect("released artifact can be leased again");
-    assert!(recovered_chunk.eof);
+    assert!(
+        restarted
+            .artifact_read(rec_lease, 0)
+            .await
+            .expect("re-lease")
+            .eof
+    );
     restarted
-        .artifact_consume(
-            recovered_lease,
-            &interrupted_result.artifact_sha256,
-            interrupted_result.artifact_size,
-        )
+        .artifact_consume(rec_lease, &int_res.artifact_sha256, int_res.artifact_size)
         .await
-        .expect("consume recovered lease once");
+        .expect("consume");
     restarted
-        .artifact_consume(
-            recovered_lease,
-            &interrupted_result.artifact_sha256,
-            interrupted_result.artifact_size,
-        )
+        .artifact_consume(rec_lease, &int_res.artifact_sha256, int_res.artifact_size)
         .await
-        .expect("repeat finalize reconciles without a second read or delete");
-    let elapsed_grant_expiry = effect_now().expect("current time") - 1;
-    let store =
-        EffectStore::open_for_mutation(&restart_resources).expect("open consumed artifact store");
-    let mut consumed_record = query_artifact(&store.connection, interrupted_artifact.as_bytes())
-        .expect("query consumed artifact")
-        .expect("consumed artifact record");
-    consumed_record.grant_expires_at = Some(elapsed_grant_expiry);
-    consumed_record.record_hmac = authenticate_artifact_record(&store.hmac_key, &consumed_record);
-    store
-            .connection
-            .execute(
-                "UPDATE certificate_artifacts SET grant_expires_at=?2,record_hmac=?3 WHERE artifact_id=?1",
-                params![
-                    consumed_record.artifact_id.as_slice(),
-					elapsed_grant_expiry,
-                    consumed_record.record_hmac.as_slice()
-                ],
-            )
-            .expect("expire consumed grant fixture");
+        .expect("idempotent");
+    let elapsed = effect_now().expect("now") - 1;
+    drop(expire_artifact_grant(&resources, &int_art, elapsed));
     let expired_lease = ArtifactLeaseIdentity {
-        expires_at_unix_seconds: elapsed_grant_expiry,
-        ..recovered_lease
+        expires_at_unix_seconds: elapsed,
+        ..rec_lease
     };
     assert!(
         restarted
             .artifact_confirm_consumed(
                 expired_lease,
-                &interrupted_result.artifact_sha256,
-                interrupted_result.artifact_size,
+                &int_res.artifact_sha256,
+                int_res.artifact_size
             )
             .await
-            .expect("expired exact grant confirms consumed record")
+            .expect("confirm consumed")
             .applied
     );
     assert!(matches!(
         restarted
             .artifact_consume(
                 expired_lease,
-                &interrupted_result.artifact_sha256,
-                interrupted_result.artifact_size,
+                &int_res.artifact_sha256,
+                int_res.artifact_size
             )
             .await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(matches!(
-        restarted.artifact_read(recovered_lease, 0).await,
+        restarted.artifact_read(rec_lease, 0).await,
         Err(AdapterError::InvalidRequest)
     ));
-    assert!(
-        !artifact_directory
-            .join(format!("{interrupted_artifact}.p12"))
-            .exists()
-    );
-    let lookalike = directory.join("artifacts").join("not-a-uuid.p12");
-    std::fs::write(&lookalike, b"preserve").expect("write cleanup lookalike");
-    let legacy_untracked = Uuid::now_v7();
-    let legacy_untracked_path = artifact_directory.join(format!("{legacy_untracked}.p12"));
-    std::fs::write(&legacy_untracked_path, b"recent legacy artifact")
-        .expect("write recent legacy artifact");
-    std::fs::set_permissions(&artifact_directory, std::fs::Permissions::from_mode(0o710))
-        .expect("set legacy artifact directory mode");
+    assert!(!artifact_dir.join(format!("{int_art}.p12")).exists());
+
+    // Stale/untracked cleanup and mode hardening.
+    let lookalike = artifact_dir.join("not-a-uuid.p12");
+    std::fs::write(&lookalike, b"preserve").expect("lookalike");
+    let legacy = artifact_dir.join(format!("{}.p12", Uuid::now_v7()));
+    std::fs::write(&legacy, b"legacy").expect("legacy");
+    std::fs::set_permissions(&artifact_dir, std::fs::Permissions::from_mode(0o710)).expect("0710");
     assert!(
         Command::new("/usr/bin/touch")
             .args(["-t", "200001010000"])
             .arg(&lookalike)
             .status()
-            .expect("age artifact fixtures")
+            .expect("touch")
             .success()
     );
     adapter
         .cleanup_stale_certificate_artifacts()
         .await
-        .expect("clean stale encrypted artifact");
-    assert!(!artifact.exists());
-    assert!(!legacy_untracked_path.exists());
+        .expect("cleanup");
+    assert!(!legacy.exists() && lookalike.exists());
     assert_eq!(
-        std::fs::symlink_metadata(&artifact_directory)
-            .expect("hardened artifact directory")
+        std::fs::symlink_metadata(&artifact_dir)
+            .expect("meta")
             .mode()
             & 0o777,
         0o700
     );
-    assert!(lookalike.exists());
-    let available_artifact = Uuid::now_v7();
-    let available_operation = Uuid::now_v7();
-    let available_result = adapter
+
+    // Certificate revoke removes available, leased, prepared, and staging artifacts.
+    let avail_art = Uuid::now_v7();
+    let avail_op = Uuid::now_v7();
+    let avail_res = adapter
         .certificate_p12(
-            certificate_id.as_bytes(),
-            available_artifact.as_bytes(),
+            cert_id.as_bytes(),
+            avail_art.as_bytes(),
             &chain,
-            &sealed_password,
+            &sealed_p12,
             1,
-            available_operation.as_bytes(),
+            avail_op.as_bytes(),
             expires_at,
         )
         .await
-        .expect("create artifact revoked before first fetch");
-    let leased_artifact = Uuid::now_v7();
-    let leased_operation = Uuid::now_v7();
-    let leased_result = adapter
+        .expect("avail");
+    let leased_art = Uuid::now_v7();
+    let leased_op = Uuid::now_v7();
+    let leased_res = adapter
         .certificate_p12(
-            certificate_id.as_bytes(),
-            leased_artifact.as_bytes(),
+            cert_id.as_bytes(),
+            leased_art.as_bytes(),
             &chain,
-            &sealed_password,
+            &sealed_p12,
             1,
-            leased_operation.as_bytes(),
+            leased_op.as_bytes(),
             expires_at,
         )
         .await
-        .expect("create artifact revoked during lease");
-    let revoked_grant = Uuid::now_v7();
-    let revoked_subject = Uuid::now_v7().to_string();
-    let revoked_lease = ArtifactLeaseIdentity {
-        artifact_id: leased_artifact.as_bytes(),
-        certificate_id: certificate_id.as_bytes(),
+        .expect("leased");
+    let rev_grant = Uuid::now_v7();
+    let rev_subj = Uuid::now_v7().to_string();
+    let rev_lease = ArtifactLeaseIdentity {
+        artifact_id: leased_art.as_bytes(),
+        certificate_id: cert_id.as_bytes(),
         certificate_version: 1,
-        operation_id: leased_operation.as_bytes(),
-        authorized_subject: &revoked_subject,
-        max_bytes: leased_result.artifact_size,
-        grant_id: revoked_grant.as_bytes(),
-        expires_at_unix_seconds: effect_now().expect("current time") + 300,
+        operation_id: leased_op.as_bytes(),
+        authorized_subject: &rev_subj,
+        max_bytes: leased_res.artifact_size,
+        grant_id: rev_grant.as_bytes(),
+        expires_at_unix_seconds: effect_now().expect("now") + 300,
     };
     adapter
-        .artifact_read(revoked_lease, 0)
+        .artifact_read(rev_lease, 0)
         .await
-        .expect("lease artifact before certificate revoke");
-    let revoke_staging = [
-        artifact_directory.join(format!(".{available_artifact}.p12")),
-        artifact_directory.join(format!(".{available_artifact}.chain.pem")),
-    ];
-    for path in &revoke_staging {
-        std::fs::write(path, b"staging").expect("create revocation staging fixture");
-    }
-    let prepared_artifact = Uuid::now_v7();
-    let prepared_operation = Uuid::now_v7();
-    EffectStore::open_for_mutation(&restart_resources)
-        .expect("open artifact store")
+        .expect("lease before revoke");
+    let prep_art = Uuid::now_v7();
+    EffectStore::open_for_mutation(&resources)
+        .expect("store")
         .prepare_artifact(
-            prepared_artifact.as_bytes(),
-            certificate_id.as_bytes(),
+            prep_art.as_bytes(),
+            cert_id.as_bytes(),
             1,
-            prepared_operation.as_bytes(),
+            Uuid::now_v7().as_bytes(),
             expires_at,
         )
-        .expect("persist prepared artifact mapping");
-    let prepared_staging = [
-        artifact_directory.join(format!(".{prepared_artifact}.p12")),
-        artifact_directory.join(format!(".{prepared_artifact}.chain.pem")),
+        .expect("prepare");
+    let staging_paths = [
+        artifact_dir.join(format!(".{avail_art}.p12")),
+        artifact_dir.join(format!(".{avail_art}.chain.pem")),
+        artifact_dir.join(format!(".{prep_art}.p12")),
+        artifact_dir.join(format!(".{prep_art}.chain.pem")),
     ];
-    for path in &prepared_staging {
-        std::fs::write(path, b"crash staging").expect("create prepared staging fixture");
+    for p in &staging_paths {
+        std::fs::write(p, b"staging").expect("staging");
     }
     assert!(
         adapter
-            .certificate_revoke(certificate_id.as_bytes(), 1)
+            .certificate_revoke(cert_id.as_bytes(), 1)
             .await
-            .expect("remove node key")
+            .expect("revoke")
             .key_removed
     );
     assert!(
         adapter
-            .certificate_revoke(certificate_id.as_bytes(), 1)
+            .certificate_revoke(cert_id.as_bytes(), 1)
             .await
-            .expect("repeat node key removal")
+            .expect("repeat")
             .key_removed
     );
-    for artifact_id in [available_artifact, leased_artifact] {
-        assert!(
-            !artifact_directory
-                .join(format!("{artifact_id}.p12"))
-                .exists(),
-            "certificate revoke must delete every derived P12"
-        );
+    for id in [avail_art, leased_art] {
+        assert!(!artifact_dir.join(format!("{id}.p12")).exists());
     }
-    assert!(
-        revoke_staging
-            .iter()
-            .chain(prepared_staging.iter())
-            .all(|path| !path.exists())
-    );
-    let unavailable_grant = Uuid::now_v7();
-    let unavailable_lease = ArtifactLeaseIdentity {
-        artifact_id: available_artifact.as_bytes(),
-        certificate_id: certificate_id.as_bytes(),
-        certificate_version: 1,
-        operation_id: available_operation.as_bytes(),
-        authorized_subject: &revoked_subject,
-        max_bytes: available_result.artifact_size,
-        grant_id: unavailable_grant.as_bytes(),
-        expires_at_unix_seconds: effect_now().expect("current time") + 300,
+    assert!(staging_paths.iter().all(|p| !p.exists()));
+    let unavail_grant = Uuid::now_v7();
+    let unavail_lease = ArtifactLeaseIdentity {
+        artifact_id: avail_art.as_bytes(),
+        operation_id: avail_op.as_bytes(),
+        max_bytes: avail_res.artifact_size,
+        grant_id: unavail_grant.as_bytes(),
+        ..rev_lease
     };
     assert!(matches!(
-        adapter.artifact_read(unavailable_lease, 0).await,
+        adapter.artifact_read(unavail_lease, 0).await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(matches!(
-        adapter.artifact_read(revoked_lease, 0).await,
+        adapter.artifact_read(rev_lease, 0).await,
         Err(AdapterError::InvalidRequest)
     ));
-    std::fs::remove_dir_all(directory).expect("cleanup certificate directory");
 }

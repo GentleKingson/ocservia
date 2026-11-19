@@ -33,6 +33,7 @@ ed25519-dalek.workspace = true
 futures-util.workspace = true
 iroh = { workspace = true, features = ["test-utils"] }
 iroh-relay = { workspace = true, features = ["test-utils"] }
+ocservia-test-support = { version = "=0.1.0", path = "../test-support" }
 ocservia-transportd = { version = "=0.1.0", path = "../transportd" }
 tonic.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }

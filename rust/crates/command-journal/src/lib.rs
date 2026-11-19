@@ -993,645 +993,425 @@ fn prune_expired_telemetry(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
     use super::*;
 
-    fn temporary_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir()
-            .canonicalize()
-            .expect("tmp")
-            .join(format!("ocservia-{label}-{}.db", uuid::Uuid::now_v7()))
+    struct TempDb(std::path::PathBuf);
+    impl TempDb {
+        fn new(label: &str) -> Self {
+            Self(
+                std::env::temp_dir()
+                    .canonicalize()
+                    .expect("tmp")
+                    .join(format!("ocservia-{label}-{}.db", uuid::Uuid::now_v7())),
+            )
+        }
+        fn open(&self) -> Journal {
+            Journal::open(&self.0).expect("open")
+        }
     }
-
-    fn cleanup(path: &Path) {
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{}", self.0.display(), suffix));
+            }
         }
     }
 
     #[test]
-    fn configures_wal_foreign_keys_and_busy_timeout() {
-        let path = std::env::temp_dir()
-            .canonicalize()
-            .expect("canonical temporary directory")
-            .join(format!("ocservia-journal-{}.db", uuid::Uuid::now_v7()));
-        let journal = Journal::open(&path).expect("open journal");
-        assert_eq!(
-            journal
-                .journal_mode()
-                .expect("journal mode")
-                .to_ascii_lowercase(),
-            "wal"
-        );
-        assert!(journal.foreign_keys_enabled().expect("foreign keys"));
-        assert_eq!(journal.busy_timeout_ms().expect("busy timeout"), 5000);
-        assert_eq!(journal.synchronous_level().expect("synchronous"), 2);
-        assert_eq!(
-            std::fs::metadata(&path)
-                .expect("journal metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-        drop(journal);
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    fn pragmas_corrupt_readonly_and_full_db_invariants() {
+        let db = TempDb::new("pragmas");
+        {
+            let j = db.open();
+            assert_eq!(j.journal_mode().expect("m").to_ascii_lowercase(), "wal");
+            assert!(j.foreign_keys_enabled().expect("fk"));
+            assert_eq!(
+                (
+                    j.busy_timeout_ms().expect("bt"),
+                    j.synchronous_level().expect("s")
+                ),
+                (5000, 2)
+            );
+            assert_eq!(
+                std::fs::metadata(&db.0).expect("md").permissions().mode() & 0o777,
+                0o600
+            );
         }
+
+        // Corrupt database is refused.
+        let corrupt = TempDb::new("corrupt");
+        std::fs::write(&corrupt.0, b"not a sqlite database").expect("w");
+        assert!(Journal::open(&corrupt.0).is_err());
+
+        // Read-only database cannot accept a command (non-root only).
+        let is_root = std::fs::read_to_string("/proc/self/status").is_ok_and(|st| {
+            st.lines().any(|l| {
+                l.strip_prefix("Uid:")
+                    .and_then(|r| r.split_whitespace().nth(1))
+                    == Some("0")
+            })
+        });
+        if !is_root {
+            let ro = TempDb::new("readonly");
+            drop(ro.open());
+            std::fs::set_permissions(&ro.0, std::fs::Permissions::from_mode(0o444)).expect("444");
+            let res = Journal::open(&ro.0)
+                .and_then(|mut j| j.accept_command(&[1; 16], &[2; 16], &[3; 32], 0, 10));
+            std::fs::set_permissions(&ro.0, std::fs::Permissions::from_mode(0o600)).expect("600");
+            assert!(res.is_err());
+        }
+
+        // Full database rolls back partial synthetic effect.
+        let full = TempDb::new("full");
+        let (key, payload) = ([1_u8; 16], [2_u8; 32]);
+        let mut j = full.open();
+        j.accept_command(&key, &[3; 16], &payload, 0, 10)
+            .expect("acc");
+        let _ = j
+            .connection
+            .pragma_update(None, "wal_checkpoint", "TRUNCATE");
+        let pages: u32 = j
+            .connection
+            .pragma_query_value(None, "page_count", |r| r.get(0))
+            .expect("p");
+        j.connection
+            .pragma_update(None, "max_page_count", pages)
+            .expect("lim");
+        assert!(
+            j.execute_synthetic_effect(&key, &payload, &vec![7; 900_000], 11)
+                .is_err()
+        );
+        assert!(j.synthetic_effect(&key).expect("q").is_none());
+        assert_eq!(j.synthetic_execution_count().expect("c"), 0);
     }
 
     #[test]
-    fn terminal_result_and_privd_proof_commit_and_replay_together() {
-        let path = temporary_path("attested-result");
-        let mut journal = Journal::open(&path).expect("open");
-        let key = *uuid::Uuid::now_v7().as_bytes();
-        let command = *uuid::Uuid::now_v7().as_bytes();
-        assert!(matches!(
-            journal
-                .accept_command(&key, &command, &[7; 32], 2, 10)
-                .expect("accept"),
-            AcceptOutcome::Accepted(_)
-        ));
-        journal
-            .transition_command(
-                &key,
+    fn command_identity_replay_attested_proof_and_revision_commit() {
+        let db = TempDb::new("cmd-attested");
+        let (k1, c1) = (
+            *uuid::Uuid::now_v7().as_bytes(),
+            *uuid::Uuid::now_v7().as_bytes(),
+        );
+        {
+            let mut j = db.open();
+            assert!(matches!(
+                j.accept_command(&k1, &c1, &[7; 32], 2, 10).expect("a"),
+                AcceptOutcome::Accepted(_)
+            ));
+            assert!(matches!(
+                j.accept_command(&k1, &c1, &[7; 32], 2, 11).expect("r"),
+                AcceptOutcome::Replay(_)
+            ));
+            assert!(matches!(
+                j.accept_command(&k1, uuid::Uuid::now_v7().as_bytes(), &[7; 32], 2, 12)
+                    .expect("ic1"),
+                AcceptOutcome::IdentityConflict(_)
+            ));
+            assert!(matches!(
+                j.accept_command(uuid::Uuid::now_v7().as_bytes(), &c1, &[7; 32], 2, 13)
+                    .expect("ic2"),
+                AcceptOutcome::IdentityConflict(_)
+            ));
+            assert!(matches!(
+                j.accept_command(&k1, &c1, &[8; 32], 2, 14).expect("pc"),
+                AcceptOutcome::PayloadConflict(_)
+            ));
+            j.transition_command(
+                &k1,
                 &[CommandState::Accepted],
                 CommandState::Running,
                 None,
                 None,
-                11,
+                15,
             )
             .expect("run");
-        let completed = journal
-            .transition_command_attested(
-                &key,
-                &[CommandState::Running],
-                CommandState::Succeeded,
-                Some(b"exact-result"),
-                None,
-                b"opaque-root-receipt",
-                12,
-            )
-            .expect("persist result and proof");
-        assert_eq!(
-            completed.result.as_deref(),
-            Some(b"exact-result".as_slice())
-        );
-        assert_eq!(
-            completed.privileged_result_proof.as_deref(),
-            Some(b"opaque-root-receipt".as_slice())
-        );
-        drop(journal);
-        let mut journal = Journal::open(&path).expect("reopen");
-        let replay = journal
-            .accept_command(&key, &command, &[7; 32], 2, 13)
-            .expect("replay");
-        let AcceptOutcome::Replay(record) = replay else {
-            panic!("expected exact replay");
-        };
-        assert_eq!(record.result, completed.result);
-        assert_eq!(
-            record.privileged_result_proof,
-            completed.privileged_result_proof
-        );
-        drop(journal);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn telemetry_buffer_evicts_raw_before_security_and_counts_drops() {
-        let path = std::env::temp_dir()
-            .canonicalize()
-            .expect("tmp")
-            .join(format!("ocservia-telemetry-{}.db", uuid::Uuid::now_v7()));
-        let mut journal = Journal::open(&path).expect("open");
-        let security = *uuid::Uuid::now_v7().as_bytes();
-        let raw = *uuid::Uuid::now_v7().as_bytes();
-        assert!(
-            journal
-                .enqueue_telemetry(&TelemetryInsert {
-                    batch_id: &security,
-                    priority: 1,
-                    observed_at: 10,
-                    expires_at: 100,
-                    payload: b"security",
-                    now: 20,
-                    max_bytes: 12
-                })
-                .expect("security")
-        );
-        assert!(
-            !journal
-                .enqueue_telemetry(&TelemetryInsert {
-                    batch_id: &raw,
-                    priority: 4,
-                    observed_at: 11,
-                    expires_at: 100,
-                    payload: b"raw-data",
-                    now: 20,
-                    max_bytes: 12
-                })
-                .expect("raw")
-        );
-        let pending = journal.telemetry_pending(10, 20).expect("pending");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].0, security);
-        assert_eq!(
-            journal.telemetry_drop_counters().expect("drops"),
-            [0, 0, 0, 1]
-        );
-        journal.acknowledge_telemetry(&security).expect("ack");
-        assert!(journal.telemetry_pending(10, 20).expect("empty").is_empty());
-        drop(journal);
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+            let done = j
+                .transition_command_attested(
+                    &k1,
+                    &[CommandState::Running],
+                    CommandState::Succeeded,
+                    Some(b"exact-result"),
+                    None,
+                    b"opaque-root-receipt",
+                    16,
+                )
+                .expect("att");
+            assert_eq!(
+                (
+                    done.result.as_deref(),
+                    done.privileged_result_proof.as_deref()
+                ),
+                (
+                    Some(b"exact-result".as_slice()),
+                    Some(b"opaque-root-receipt".as_slice())
+                )
+            );
         }
-    }
-
-    #[test]
-    fn five_minute_offline_recovery_caps_legacy_telemetry_at_boundary() {
-        let recovery_seconds = i64::try_from(OFFLINE_RECOVERY_RETENTION_SECONDS).expect("seconds");
-        let path = temporary_path("five-minute-offline-recovery");
-        let mut journal = Journal::open(&path).expect("open");
-        let legacy = *uuid::Uuid::now_v7().as_bytes();
-        let recovered = *uuid::Uuid::now_v7().as_bytes();
-        journal
-            .enqueue_telemetry(&TelemetryInsert {
-                batch_id: &legacy,
-                priority: 2,
-                observed_at: 1_000,
-                expires_at: 1_000 + 86_400,
-                payload: b"legacy-day-window",
-                now: 1_000,
-                max_bytes: 1_024,
-            })
-            .expect("legacy telemetry");
-        drop(journal);
-
-        let mut journal = Journal::open(&path).expect("reopen upgraded journal");
-        assert!(
-            journal
-                .telemetry_pending(10, 1_299)
-                .expect("pending before boundary")
-                .iter()
-                .any(|item| item.0 == legacy)
-        );
-        assert!(
-            journal
-                .telemetry_pending(10, 1_300)
-                .expect("pending at boundary")
-                .iter()
-                .all(|item| item.0 != legacy)
-        );
+        let mut j = db.open();
+        let AcceptOutcome::Replay(rec) = j.accept_command(&k1, &c1, &[7; 32], 2, 17).expect("rep")
+        else {
+            panic!("expected replay");
+        };
         assert_eq!(
-            journal.telemetry_drop_counters().expect("boundary drop"),
-            [0, 1, 0, 0]
-        );
-
-        journal
-            .enqueue_telemetry(&TelemetryInsert {
-                batch_id: &recovered,
-                priority: 2,
-                observed_at: 1_300,
-                expires_at: 1_300 + recovery_seconds,
-                payload: b"reconnected",
-                now: 1_300,
-                max_bytes: 1_024,
-            })
-            .expect("recovery telemetry");
-        let pending = journal
-            .telemetry_pending(10, 1_301)
-            .expect("pending after recovery");
-        assert!(!pending.iter().any(|item| item.0 == legacy));
-        assert!(pending.iter().any(|item| item.0 == recovered));
-        assert_eq!(
-            journal.telemetry_drop_counters().expect("drops"),
-            [0, 1, 0, 0]
-        );
-        drop(journal);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn command_key_binds_payload_and_replays_persisted_result() {
-        let path = temporary_path("commands");
-        let mut journal = Journal::open(&path).expect("open");
-        let key = *uuid::Uuid::now_v7().as_bytes();
-        let command = *uuid::Uuid::now_v7().as_bytes();
-        let payload = [7_u8; 32];
-        assert!(matches!(
-            journal
-                .accept_command(&key, &command, &payload, 0, 10)
-                .expect("accept"),
-            AcceptOutcome::Accepted(_)
-        ));
-        let completed = journal
-            .transition_command(
-                &key,
-                &[CommandState::Accepted],
+            (
+                rec.state,
+                rec.result.as_deref(),
+                rec.privileged_result_proof.as_deref()
+            ),
+            (
                 CommandState::Succeeded,
-                Some(b"result"),
-                None,
-                11,
+                Some(b"exact-result".as_slice()),
+                Some(b"opaque-root-receipt".as_slice())
             )
-            .expect("complete");
-        assert_eq!(completed.result.as_deref(), Some(b"result".as_slice()));
-        assert!(matches!(
-            journal
-                .accept_command(&key, &command, &payload, 0, 12)
-                .expect("replay"),
-            AcceptOutcome::Replay(CommandRecord {
-                state: CommandState::Succeeded,
-                ..
-            })
-        ));
-        assert!(matches!(
-            journal
-                .accept_command(&key, &command, &[8; 32], 0, 13)
-                .expect("conflict"),
-            AcceptOutcome::PayloadConflict(_)
-        ));
-        drop(journal);
-        cleanup(&path);
-    }
+        );
 
-    #[test]
-    fn external_result_and_applied_revision_commit_together() {
-        let path = temporary_path("applied-revision");
-        let mut journal = Journal::open(&path).expect("open");
-        let key = *uuid::Uuid::now_v7().as_bytes();
-        let command = *uuid::Uuid::now_v7().as_bytes();
-        let payload = [7_u8; 32];
-        journal
-            .accept_command(&key, &command, &payload, 1, 10)
-            .expect("accept");
-        journal
-            .transition_command(
-                &key,
-                &[CommandState::Accepted],
-                CommandState::Running,
-                None,
-                None,
-                11,
-            )
-            .expect("running");
-        journal
-            .complete_external_with_revision_attested(
-                &key,
-                &command,
-                AppliedResourceRevision {
-                    resource_type: "user",
-                    resource_key: "alice",
-                    revision: 2,
-                },
-                b"applied",
-                b"proof",
-                12,
-            )
-            .expect("complete");
-        assert_eq!(
-            journal.applied_revision("user", "alice").expect("revision"),
-            Some(2)
+        // External completion + applied resource revision commit atomically across restart.
+        let (k2, c2) = (
+            *uuid::Uuid::now_v7().as_bytes(),
+            *uuid::Uuid::now_v7().as_bytes(),
         );
-        drop(journal);
-        let journal = Journal::open(&path).expect("reopen");
+        j.accept_command(&k2, &c2, &[7; 32], 1, 20).expect("a");
+        j.transition_command(
+            &k2,
+            &[CommandState::Accepted],
+            CommandState::Running,
+            None,
+            None,
+            21,
+        )
+        .expect("r");
+        j.complete_external_with_revision_attested(
+            &k2,
+            &c2,
+            AppliedResourceRevision {
+                resource_type: "user",
+                resource_key: "alice",
+                revision: 2,
+            },
+            b"applied",
+            b"proof",
+            22,
+        )
+        .expect("c");
+        drop(j);
+        let j = db.open();
+        assert_eq!(j.applied_revision("user", "alice").expect("rev"), Some(2));
         assert_eq!(
-            journal.applied_revision("user", "alice").expect("durable"),
-            Some(2)
-        );
-        assert_eq!(
-            journal
-                .command(&key)
-                .expect("command")
-                .expect("record")
-                .state,
+            j.command(&k2).expect("q").expect("rec").state,
             CommandState::Succeeded
         );
-        drop(journal);
-        cleanup(&path);
     }
 
     #[test]
     fn legacy_resource_revision_schema_migrates_without_losing_fences() {
-        let path = temporary_path("resource-revision-schema");
-        let legacy = Connection::open(&path).expect("open legacy database");
+        let db = TempDb::new("legacy-rev");
+        let legacy = Connection::open(&db.0).expect("open");
         legacy
             .execute_batch(
                 "CREATE TABLE applied_resource_revisions (
-                    resource_type TEXT NOT NULL CHECK (resource_type IN ('user','group')),
-                    resource_key TEXT NOT NULL CHECK (length(resource_key) BETWEEN 1 AND 64),
-                    revision INTEGER NOT NULL CHECK (revision > 0),
-                    updated_at INTEGER NOT NULL,
-                    PRIMARY KEY(resource_type,resource_key)
-                 ) STRICT;
-                 INSERT INTO applied_resource_revisions VALUES ('user','alice',4,10);",
+                resource_type TEXT NOT NULL CHECK (resource_type IN ('user','group')),
+                resource_key TEXT NOT NULL CHECK (length(resource_key) BETWEEN 1 AND 64),
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(resource_type,resource_key)
+             ) STRICT;
+             INSERT INTO applied_resource_revisions VALUES ('user','alice',4,10);",
             )
-            .expect("seed legacy revision fence");
+            .expect("seed");
         drop(legacy);
 
-        let mut journal = Journal::open(&path).expect("migrate journal");
-        assert_eq!(
-            journal
-                .applied_revision("user", "alice")
-                .expect("preserved user revision"),
-            Some(4)
+        let mut j = db.open();
+        assert_eq!(j.applied_revision("user", "alice").expect("u"), Some(4));
+        let (k, c) = (
+            *uuid::Uuid::now_v7().as_bytes(),
+            *uuid::Uuid::now_v7().as_bytes(),
         );
-        let key = *uuid::Uuid::now_v7().as_bytes();
-        let command = *uuid::Uuid::now_v7().as_bytes();
-        journal
-            .accept_command(&key, &command, &[9; 32], 1, 11)
-            .expect("accept config command");
-        journal
-            .transition_command(
-                &key,
-                &[CommandState::Accepted],
-                CommandState::Running,
-                None,
-                None,
-                12,
-            )
-            .expect("run config command");
-        journal
-            .complete_external_with_revision_attested(
-                &key,
-                &command,
-                AppliedResourceRevision {
-                    resource_type: "config",
-                    resource_key: "ocserv.conf",
-                    revision: 1,
-                },
-                b"applied",
-                b"proof",
-                13,
-            )
-            .expect("persist config fence");
+        j.accept_command(&k, &c, &[9; 32], 1, 11).expect("a");
+        j.transition_command(
+            &k,
+            &[CommandState::Accepted],
+            CommandState::Running,
+            None,
+            None,
+            12,
+        )
+        .expect("r");
+        j.complete_external_with_revision_attested(
+            &k,
+            &c,
+            AppliedResourceRevision {
+                resource_type: "config",
+                resource_key: "ocserv.conf",
+                revision: 1,
+            },
+            b"applied",
+            b"proof",
+            13,
+        )
+        .expect("c");
         assert_eq!(
-            journal
-                .applied_revision("config", "ocserv.conf")
-                .expect("config revision"),
+            j.applied_revision("config", "ocserv.conf").expect("cfg"),
             Some(1)
         );
-        drop(journal);
-        cleanup(&path);
     }
 
     #[test]
-    fn command_key_and_command_id_are_one_to_one() {
-        let path = temporary_path("identity");
-        let mut journal = Journal::open(&path).expect("open");
-        let key = *uuid::Uuid::now_v7().as_bytes();
-        let command = *uuid::Uuid::now_v7().as_bytes();
-        let payload = [7_u8; 32];
-        assert!(matches!(
-            journal
-                .accept_command(&key, &command, &payload, 0, 10)
-                .expect("accept"),
-            AcceptOutcome::Accepted(_)
-        ));
-        assert!(matches!(
-            journal
-                .accept_command(&key, &command, &payload, 0, 11)
-                .expect("exact replay"),
-            AcceptOutcome::Replay(_)
-        ));
-        assert!(matches!(
-            journal
-                .accept_command(&key, uuid::Uuid::now_v7().as_bytes(), &payload, 0, 12)
-                .expect("same key conflict"),
-            AcceptOutcome::IdentityConflict(_)
-        ));
-        assert!(matches!(
-            journal
-                .accept_command(uuid::Uuid::now_v7().as_bytes(), &command, &payload, 0, 13)
-                .expect("same command conflict"),
-            AcceptOutcome::IdentityConflict(_)
-        ));
-        assert!(matches!(
-            journal
-                .accept_command(&key, &command, &[8_u8; 32], 0, 14)
-                .expect("payload conflict"),
-            AcceptOutcome::PayloadConflict(_)
-        ));
-        assert_eq!(journal.synthetic_execution_count().expect("count"), 0);
-        drop(journal);
-        cleanup(&path);
+    fn telemetry_eviction_and_five_minute_offline_recovery() {
+        let db = TempDb::new("telemetry");
+        let mut j = db.open();
+        let (sec, raw) = (
+            *uuid::Uuid::now_v7().as_bytes(),
+            *uuid::Uuid::now_v7().as_bytes(),
+        );
+        assert!(
+            j.enqueue_telemetry(&TelemetryInsert {
+                batch_id: &sec,
+                priority: 1,
+                observed_at: 10,
+                expires_at: 100,
+                payload: b"security",
+                now: 20,
+                max_bytes: 12
+            })
+            .expect("s")
+        );
+        assert!(
+            !j.enqueue_telemetry(&TelemetryInsert {
+                batch_id: &raw,
+                priority: 4,
+                observed_at: 11,
+                expires_at: 100,
+                payload: b"raw-data",
+                now: 20,
+                max_bytes: 12
+            })
+            .expect("r")
+        );
+        let pending = j.telemetry_pending(10, 20).expect("p");
+        assert_eq!((pending.len(), pending[0].0), (1, sec));
+        assert_eq!(j.telemetry_drop_counters().expect("d"), [0, 0, 0, 1]);
+        j.acknowledge_telemetry(&sec).expect("ack");
+        assert_eq!(j.telemetry_pending(10, 20).expect("e").len(), 0);
+
+        let recovery_secs = i64::try_from(OFFLINE_RECOVERY_RETENTION_SECONDS).expect("s");
+        let (legacy, rec) = (
+            *uuid::Uuid::now_v7().as_bytes(),
+            *uuid::Uuid::now_v7().as_bytes(),
+        );
+        j.enqueue_telemetry(&TelemetryInsert {
+            batch_id: &legacy,
+            priority: 2,
+            observed_at: 1_000,
+            expires_at: 1_000 + 86_400,
+            payload: b"legacy-day-window",
+            now: 1_000,
+            max_bytes: 1_024,
+        })
+        .expect("l");
+        drop(j);
+        let mut j = db.open();
+        assert!(
+            j.telemetry_pending(10, 1_299)
+                .expect("b")
+                .iter()
+                .any(|x| x.0 == legacy)
+        );
+        assert!(
+            j.telemetry_pending(10, 1_300)
+                .expect("a")
+                .iter()
+                .all(|x| x.0 != legacy)
+        );
+        assert_eq!(j.telemetry_drop_counters().expect("d"), [0, 1, 0, 1]);
+        j.enqueue_telemetry(&TelemetryInsert {
+            batch_id: &rec,
+            priority: 2,
+            observed_at: 1_300,
+            expires_at: 1_300 + recovery_secs,
+            payload: b"reconnected",
+            now: 1_300,
+            max_bytes: 1_024,
+        })
+        .expect("rec");
+        let pending = j.telemetry_pending(10, 1_301).expect("p");
+        assert!(!pending.iter().any(|x| x.0 == legacy) && pending.iter().any(|x| x.0 == rec));
     }
 
     #[test]
-    fn synthetic_effect_and_terminal_result_roll_back_together() {
-        let path = temporary_path("atomic-completion");
-        let key = *uuid::Uuid::now_v7().as_bytes();
-        let command = *uuid::Uuid::now_v7().as_bytes();
-        let payload = [9_u8; 32];
-        let mut journal = Journal::open(&path).expect("open");
-        journal
-            .accept_command(&key, &command, &payload, 0, 10)
-            .expect("accept");
-        journal
-            .transition_command(
-                &key,
+    fn synthetic_effect_atomicity_rollback_and_restart_idempotency() {
+        let db = TempDb::new("synth");
+        let (k1, c1, p1) = (
+            *uuid::Uuid::now_v7().as_bytes(),
+            *uuid::Uuid::now_v7().as_bytes(),
+            [9_u8; 32],
+        );
+        {
+            let mut j = db.open();
+            j.accept_command(&k1, &c1, &p1, 0, 10).expect("a");
+            j.transition_command(
+                &k1,
                 &[CommandState::Accepted],
                 CommandState::Running,
                 None,
                 None,
                 11,
             )
-            .expect("running");
-        journal
-            .connection
-            .execute_batch(
-                "CREATE TEMP TRIGGER fail_terminal_result
-                 BEFORE UPDATE OF state ON command_journal
-                 WHEN NEW.state = 'succeeded'
-                 BEGIN SELECT RAISE(FAIL, 'injected terminal write failure'); END;",
-            )
-            .expect("failure trigger");
-        assert!(
-            journal
-                .execute_and_complete_synthetic(&key, &command, &payload, b"result", 12)
-                .is_err()
-        );
-        assert!(
-            journal
-                .synthetic_effect(&key)
-                .expect("effect query")
-                .is_none()
-        );
-        assert_eq!(journal.synthetic_execution_count().expect("count"), 0);
-        assert_eq!(
-            journal.command(&key).expect("command query").unwrap().state,
-            CommandState::Running
-        );
-        drop(journal);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn synthetic_effect_is_atomic_and_counted_once_across_restart() {
-        let path = temporary_path("effect");
-        let key = *uuid::Uuid::now_v7().as_bytes();
-        let payload = [3_u8; 32];
-        {
-            let mut journal = Journal::open(&path).expect("open");
+            .expect("r");
+            j.connection
+                .execute_batch(
+                    "CREATE TEMP TRIGGER fail_terminal_result
+                 BEFORE UPDATE OF state ON command_journal WHEN NEW.state = 'succeeded'
+                 BEGIN SELECT RAISE(FAIL, 'injected'); END;",
+                )
+                .expect("trig");
             assert!(
-                journal
-                    .execute_synthetic_effect(&key, &payload, b"done", 10)
-                    .expect("first")
+                j.execute_and_complete_synthetic(&k1, &c1, &p1, b"result", 12)
+                    .is_err()
+            );
+            assert!(j.synthetic_effect(&k1).expect("q").is_none());
+            assert_eq!(j.synthetic_execution_count().expect("c"), 0);
+            assert_eq!(
+                j.command(&k1).expect("q").unwrap().state,
+                CommandState::Running
             );
         }
-        let mut journal = Journal::open(&path).expect("reopen");
+
+        let (k2, p2) = (*uuid::Uuid::now_v7().as_bytes(), [3_u8; 32]);
+        {
+            let mut j = db.open();
+            assert!(
+                j.execute_synthetic_effect(&k2, &p2, b"done", 10)
+                    .expect("1st")
+            );
+        }
+        let mut j = db.open();
         assert!(
-            !journal
-                .execute_synthetic_effect(&key, &payload, b"done", 11)
-                .expect("duplicate")
+            !j.execute_synthetic_effect(&k2, &p2, b"done", 11)
+                .expect("dup")
         );
-        assert_eq!(journal.synthetic_execution_count().expect("count"), 1);
+        assert_eq!(j.synthetic_execution_count().expect("c"), 1);
         assert_eq!(
-            journal
-                .synthetic_effect(&key)
-                .expect("effect")
-                .expect("present")
-                .result,
+            j.synthetic_effect(&k2).expect("e").expect("p").result,
             b"done"
         );
-        drop(journal);
-        cleanup(&path);
     }
 
     #[test]
-    fn corrupt_database_is_refused() {
-        let path = temporary_path("corrupt");
-        std::fs::write(&path, b"not a sqlite database").expect("write corrupt fixture");
-        assert!(Journal::open(&path).is_err());
-        cleanup(&path);
-    }
-
-    #[test]
-    fn read_only_database_cannot_accept_a_command() {
-        // Linux effective uid 0 bypasses DAC 0444 file mode bits and can still write to SQLite.
-        if std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .is_some_and(|status| {
-                status.lines().any(|line| {
-                    line.strip_prefix("Uid:")
-                        .and_then(|rest| rest.split_whitespace().nth(1))
-                        == Some("0")
-                })
-            })
+    fn owner_fence_epoch_floor_is_monotonic_durable_and_concurrent_safe() {
+        let db = TempDb::new("fence-floor");
         {
-            return;
+            let j = db.open();
+            assert_eq!(j.owner_fence_epoch_floor().expect("0"), 0);
+            assert_eq!(j.raise_owner_fence_epoch_floor(4).expect("4"), 4);
+            assert_eq!(j.raise_owner_fence_epoch_floor(2).expect("4"), 4);
+            assert_eq!(j.raise_owner_fence_epoch_floor(9).expect("9"), 9);
         }
-        let path = temporary_path("readonly");
-        drop(Journal::open(&path).expect("create"));
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
-            .expect("make read-only");
-        let result = Journal::open(&path)
-            .and_then(|mut journal| journal.accept_command(&[1; 16], &[2; 16], &[3; 32], 0, 10));
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .expect("restore permissions");
-        assert!(result.is_err());
-        cleanup(&path);
-    }
-
-    #[test]
-    fn full_database_does_not_commit_a_partial_effect() {
-        let path = temporary_path("full");
-        let key = [1_u8; 16];
-        let payload = [2_u8; 32];
-        let mut journal = Journal::open(&path).expect("open");
-        journal
-            .accept_command(&key, &[3; 16], &payload, 0, 10)
-            .expect("accept");
-        journal
-            .connection
-            .pragma_update(None, "wal_checkpoint", "TRUNCATE")
-            .ok();
-        let pages: u32 = journal
-            .connection
-            .pragma_query_value(None, "page_count", |row| row.get(0))
-            .expect("pages");
-        journal
-            .connection
-            .pragma_update(None, "max_page_count", pages)
-            .expect("limit pages");
-        assert!(
-            journal
-                .execute_synthetic_effect(&key, &payload, &vec![7; 900_000], 11)
-                .is_err()
-        );
-        assert!(journal.synthetic_effect(&key).expect("query").is_none());
-        assert_eq!(journal.synthetic_execution_count().expect("count"), 0);
-        drop(journal);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn owner_fence_epoch_floor_is_monotonic_and_durable() {
-        let path = temporary_path("fence-floor");
-        {
-            let journal = Journal::open(&path).expect("open");
-            assert_eq!(journal.owner_fence_epoch_floor().expect("floor"), 0);
-            assert_eq!(
-                journal
-                    .raise_owner_fence_epoch_floor(4)
-                    .expect("raise first"),
-                4
-            );
-            assert_eq!(
-                journal
-                    .raise_owner_fence_epoch_floor(2)
-                    .expect("raise lower ignored"),
-                4
-            );
-            assert_eq!(journal.owner_fence_epoch_floor().expect("floor"), 4);
-            assert_eq!(
-                journal
-                    .raise_owner_fence_epoch_floor(9)
-                    .expect("raise higher"),
-                9
-            );
-            assert_eq!(journal.owner_fence_epoch_floor().expect("floor"), 9);
-        }
-        let reopened = Journal::open(&path).expect("reopen");
-        assert_eq!(reopened.owner_fence_epoch_floor().expect("floor"), 9);
-        assert_eq!(
-            reopened
-                .raise_owner_fence_epoch_floor(3)
-                .expect("raise lower ignored after reopen"),
-            9
-        );
-        assert_eq!(reopened.owner_fence_epoch_floor().expect("floor"), 9);
-        drop(reopened);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn owner_fence_epoch_floor_returns_concurrently_persisted_higher_value() {
-        let path = temporary_path("fence-floor-overlap");
-        let stale_writer = Journal::open(&path).expect("open stale writer");
-        let current_writer = Journal::open(&path).expect("open current writer");
-
-        assert_eq!(
-            current_writer
-                .raise_owner_fence_epoch_floor(10)
-                .expect("raise current floor"),
-            10
-        );
-        assert_eq!(
-            stale_writer
-                .raise_owner_fence_epoch_floor(6)
-                .expect("observe current floor from stale writer"),
-            10
-        );
-        assert_eq!(
-            stale_writer.owner_fence_epoch_floor().expect("stale read"),
-            10
-        );
-
-        drop(current_writer);
-        drop(stale_writer);
-        cleanup(&path);
+        let stale = db.open();
+        let current = db.open();
+        assert_eq!(stale.owner_fence_epoch_floor().expect("9"), 9);
+        assert_eq!(current.raise_owner_fence_epoch_floor(10).expect("10"), 10);
+        assert_eq!(stale.raise_owner_fence_epoch_floor(6).expect("10"), 10);
+        assert_eq!(stale.owner_fence_epoch_floor().expect("10"), 10);
     }
 }
