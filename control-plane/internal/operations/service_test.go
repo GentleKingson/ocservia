@@ -11,15 +11,16 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
 
+const testTraceparent = testfixture.Traceparent
+
 func testCommandSigner(t *testing.T) *commandauth.Signer {
 	t.Helper()
-	var seed [32]byte
-	seed[0] = 1
-	return commandauth.NewSignerFromSeed(seed)
+	return testfixture.CommandSigner(1)
 }
 
 func TestCommandResultResponseTimeoutLeavesCompletionHeadroom(t *testing.T) {

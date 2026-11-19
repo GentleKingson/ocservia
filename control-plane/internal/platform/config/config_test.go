@@ -3,687 +3,229 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"reflect"
+	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
+	"golang.org/x/sys/unix"
 )
 
-func TestAuthTrustedProxyCIDRs(t *testing.T) {
-	for _, value := range []string{"", "10.0.0.2/32, 2001:db8::/64", "not-a-cidr", "0.0.0.0/0", "::/0", "::ffff:10.0.0.2/128", "10.0.0.2/32,"} {
-		_, err := Load(nil, func(key string) (string, bool) {
-			switch key {
-			case "OCSERV_DATABASE_URL":
-				return "postgres://db/test", true
-			case "OCSERV_AUTH_TRUSTED_PROXY_CIDRS":
-				return value, true
-			default:
-				return "", false
-			}
-		})
-		valid := value == "" || value == "10.0.0.2/32, 2001:db8::/64"
-		if (err == nil) != valid {
-			t.Fatalf("value=%q err=%v", value, err)
+func loadEnv(args []string, values map[string]string) (Config, error) {
+	return Load(args, func(key string) (string, bool) {
+		v, ok := values[key]
+		return v, ok
+	})
+}
+
+func baseEnv(overrides map[string]string) map[string]string {
+	env := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}
+	for k, v := range overrides {
+		if v == "\x00DELETE" {
+			delete(env, k)
+		} else {
+			env[k] = v
 		}
 	}
-}
-
-func TestSensitiveConfigurationFiles(t *testing.T) {
-	directory := secureKeyTestDirectory(t)
-	database := filepath.Join(directory, "database-url")
-	session := filepath.Join(directory, "session-key")
-	eventKey := filepath.Join(directory, "audit-event-key")
-	testutil.NoError(t, os.WriteFile(database, []byte("postgres://app:secret@postgres/ocservia\n"), 0o600))
-	testutil.NoError(t, os.WriteFile(session, []byte(strings.Repeat("a", 64)+"\n"), 0o600))
-	testutil.NoError(t, os.WriteFile(eventKey, []byte(strings.Repeat("b", 64)+"\n"), 0o600))
-	values := map[string]string{
-		"OCSERV_DATABASE_URL_FILE":         database,
-		"OCSERV_AUDIT_CHECKPOINT_KEY_FILE": session,
-		"OCSERV_AUDIT_EVENT_KEY_ID":        "audit-event-v1",
-		"OCSERV_AUDIT_EVENT_KEY_FILE":      eventKey,
-	}
-	cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.DatabaseURL != "postgres://app:secret@postgres/ocservia" || len(cfg.AuditCheckpointKey) != 32 || len(cfg.AuditEventKey) != 32 {
-		t.Fatalf("unexpected file-backed config: database=%q key=%d", cfg.DatabaseURL, len(cfg.AuditCheckpointKey))
-	}
-
-	values["OCSERV_DATABASE_URL"] = "postgres://inline/ocservia"
-	if _, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
-		t.Fatal("Load() accepted both inline and file-backed database credentials")
-	}
-	delete(values, "OCSERV_DATABASE_URL")
-	symlink := filepath.Join(directory, "database-link")
-	testutil.NoError(t, os.Symlink(database, symlink))
-	values["OCSERV_DATABASE_URL_FILE"] = symlink
-	if _, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
-		t.Fatal("Load() accepted a symlinked secret file")
-	}
-}
-
-func TestAuditEventKeyFileSecurity(t *testing.T) {
-	directory := secureKeyTestDirectory(t)
-	keyPath := filepath.Join(directory, "audit-event-key")
-	testutil.NoError(t, os.WriteFile(keyPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600))
-	if key, err := readStrictHexKeyFile(keyPath, uint32(os.Geteuid())); err != nil || len(key) != 32 {
-		t.Fatalf("secure audit event key rejected: key=%d err=%v", len(key), err)
-	}
-	testutil.NoError(t, os.Chmod(keyPath, 0o644))
-	if _, err := readStrictHexKeyFile(keyPath, uint32(os.Geteuid())); err == nil {
-		t.Fatal("world-readable audit event key accepted")
-	}
-	testutil.NoError(t, os.Chmod(keyPath, 0o600))
-	linkPath := filepath.Join(directory, "audit-event-key-link")
-	testutil.NoError(t, os.Symlink(keyPath, linkPath))
-	if _, err := readStrictHexKeyFile(linkPath, uint32(os.Geteuid())); err == nil {
-		t.Fatal("symlinked audit event key accepted")
-	}
-	hardlinkPath := filepath.Join(directory, "audit-event-key-hardlink")
-	testutil.NoError(t, os.Link(keyPath, hardlinkPath))
-	if _, err := readStrictHexKeyFile(keyPath, uint32(os.Geteuid())); err == nil {
-		t.Fatal("hard-linked audit event key accepted")
-	}
-	testutil.NoError(t, os.Remove(hardlinkPath))
-	unsafeDirectory := filepath.Join(directory, "unsafe")
-	testutil.NoError(t, os.Mkdir(unsafeDirectory, 0o700))
-	unsafeKey := filepath.Join(unsafeDirectory, "key")
-	testutil.NoError(t, os.WriteFile(unsafeKey, []byte(strings.Repeat("b", 64)), 0o600))
-	testutil.NoError(t, os.Chmod(unsafeDirectory, 0o770))
-	if _, err := readStrictHexKeyFile(unsafeKey, uint32(os.Geteuid())); err == nil {
-		t.Fatal("audit event key under writable ancestry accepted")
-	}
+	return env
 }
 
 func secureKeyTestDirectory(t *testing.T) string {
 	t.Helper()
-	directory, err := os.MkdirTemp(".", ".audit-key-test-")
+	dir, err := os.MkdirTemp(".", ".audit-key-test-")
 	testutil.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
-	absolute, err := filepath.Abs(directory)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	abs, err := filepath.Abs(dir)
 	testutil.NoError(t, err)
-	resolved, err := filepath.EvalSymlinks(absolute)
+	resolved, err := filepath.EvalSymlinks(abs)
 	testutil.NoError(t, err)
 	return resolved
 }
 
-func TestAuditEventTestKeyCannotBeUsedInProduction(t *testing.T) {
-	values := map[string]string{
+func prodBaseEnv(t *testing.T) map[string]string {
+	t.Helper()
+	dir := secureKeyTestDirectory(t)
+	keyPath := filepath.Join(dir, "audit-event-key")
+	caPath := filepath.Join(dir, "database-ca.pem")
+	testutil.NoError(t, os.WriteFile(keyPath, []byte(strings.Repeat("22", 32)), 0o600))
+	testutil.NoError(t, os.WriteFile(caPath, []byte("test"), 0o600))
+	return map[string]string{
 		"OCSERV_ENVIRONMENT":              "production",
-		"OCSERV_TEST_AUDIT_EVENT_KEY_HEX": strings.Repeat("11", 32),
-		"OCSERV_AUDIT_EVENT_KEY_ID":       "test-key",
-		"OCSERV_DATABASE_URL":             "postgres://owner:test@postgres/ocservia",
+		"OCSERV_DATABASE_BACKEND":         "postgres",
+		"OCSERV_DATABASE_URL":             "postgres://app:secret@database.example.test:5432/ocservia?sslmode=verify-full",
+		"OCSERV_DATABASE_TLS_CA_FILE":     caPath,
 		"OCSERV_LOCAL_AUTH_ENABLED":       "true",
+		"OCSERV_PUBLIC_ORIGIN":            "https://controller.example.test",
 		"OCSERV_SESSION_KEY":              strings.Repeat("11", 32),
-		"OCSERV_AUDIT_CHECKPOINT_KEY":     strings.Repeat("22", 32),
+		"OCSERV_AUDIT_CHECKPOINT_KEY":     strings.Repeat("33", 32),
+		"OCSERV_AUDIT_EVENT_KEY_ID":       "audit-v1",
+		"OCSERV_AUDIT_EVENT_KEY_FILE":     keyPath,
 		"OCSERV_COMMAND_SIGNING_KEY_FILE": "/run/secrets/controller-command-signing-key.pem",
-		"OCSERV_CONTROLLER_ENDPOINT_ID":   strings.Repeat("0", 64),
-		"OCSERV_CERTIFICATE_SIGNER_URL":   "https://signer.example.test",
-		"OCSERV_CERTIFICATE_SIGNER_TOKEN": strings.Repeat("t", 32),
-	}
-	_, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
-	if err == nil || !strings.Contains(err.Error(), "test-only") {
-		t.Fatalf("production test key error = %v", err)
+		"OCSERV_CONTROLLER_ENDPOINT_ID":   strings.Repeat("ab", 32),
+		"OCSERV_TRANSPORT_UID":            strconv.Itoa(os.Geteuid() + 1),
+		"OCSERV_TRANSPORT_GID":            strconv.Itoa(os.Getegid()),
 	}
 }
 
-func TestAuditEventAndCheckpointKeysMustBeDistinct(t *testing.T) {
-	values := map[string]string{
-		"OCSERV_ENVIRONMENT":              "test",
-		"OCSERV_DATABASE_URL":             "postgres://db/test",
-		"OCSERV_AUDIT_EVENT_KEY_ID":       "test-key",
-		"OCSERV_TEST_AUDIT_EVENT_KEY_HEX": strings.Repeat("11", 32),
-		"OCSERV_AUDIT_CHECKPOINT_KEY":     strings.Repeat("11", 32),
-	}
-	_, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
-	if err == nil || !strings.Contains(err.Error(), "must be distinct") {
-		t.Fatalf("reused audit key error = %v", err)
-	}
-}
-
-func TestDevAuthGuard(t *testing.T) {
-	tests := []struct {
+func TestConfigValidationGuards(t *testing.T) {
+	cases := []struct {
 		name string
+		args []string
 		env  map[string]string
 		ok   bool
 	}{
-		{"development loopback", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_DEV_AUTH": "true"}, true},
-		{"production", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_DEV_AUTH": "true", "OCSERV_ENVIRONMENT": "production"}, false},
-		{"non-loopback", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_DEV_AUTH": "true", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080"}, false},
+		{"trusted proxy empty", nil, baseEnv(map[string]string{"OCSERV_AUTH_TRUSTED_PROXY_CIDRS": ""}), true},
+		{"trusted proxy valid", nil, baseEnv(map[string]string{"OCSERV_AUTH_TRUSTED_PROXY_CIDRS": "10.0.0.2/32, 2001:db8::/64"}), true},
+		{"trusted proxy wildcard v4", nil, baseEnv(map[string]string{"OCSERV_AUTH_TRUSTED_PROXY_CIDRS": "0.0.0.0/0"}), false},
+		{"trusted proxy wildcard v6", nil, baseEnv(map[string]string{"OCSERV_AUTH_TRUSTED_PROXY_CIDRS": "::/0"}), false},
+		{"dev auth loopback", nil, baseEnv(map[string]string{"OCSERV_DEV_AUTH": "true"}), true},
+		{"dev auth non-loopback", nil, baseEnv(map[string]string{"OCSERV_DEV_AUTH": "true", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080"}), false},
+		{"dev auth production", nil, baseEnv(map[string]string{"OCSERV_DEV_AUTH": "true", "OCSERV_ENVIRONMENT": "production"}), false},
+		{"implicit env loopback", nil, baseEnv(map[string]string{"OCSERV_HTTP_ADDRESS": "[::1]:8080"}), true},
+		{"implicit env wildcard rejected", nil, baseEnv(map[string]string{"OCSERV_HTTP_ADDRESS": "0.0.0.0:8080"}), false},
+		{"explicit dev wildcard ok", nil, baseEnv(map[string]string{"OCSERV_ENVIRONMENT": "development", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080"}), true},
+		{"dev auth token short rejected", nil, baseEnv(map[string]string{"OCSERV_DEV_AUTH_TOKEN": "short"}), false},
+		{"dev auth token production rejected", nil, baseEnv(map[string]string{"OCSERV_ENVIRONMENT": "production", "OCSERV_DEV_AUTH_TOKEN": "local-development-token-32-characters"}), false},
+		{"audit event and checkpoint distinct", nil, baseEnv(map[string]string{"OCSERV_ENVIRONMENT": "test", "OCSERV_AUDIT_EVENT_KEY_ID": "k", "OCSERV_TEST_AUDIT_EVENT_KEY_HEX": strings.Repeat("11", 32), "OCSERV_AUDIT_CHECKPOINT_KEY": strings.Repeat("11", 32)}), false},
+		{"legacy role rejected", []string{"--role=api"}, baseEnv(nil), false},
+		{"legacy role all ok", []string{"--role=all"}, baseEnv(map[string]string{"OCSERV_DATABASE_BACKEND": "postgres"}), true},
+		{"non-postgres backend rejected", nil, baseEnv(map[string]string{"OCSERV_DATABASE_BACKEND": "mysql"}), false},
+		{"mismatched dsn rejected", nil, baseEnv(map[string]string{"OCSERV_DATABASE_BACKEND": "postgres", "OCSERV_DATABASE_URL": "mysql://db/test"}), false},
+		{"local auth strict bool rejected", nil, baseEnv(map[string]string{"OCSERV_LOCAL_AUTH_ENABLED": "yes"}), false},
+		{"local auth requires session key", nil, baseEnv(map[string]string{"OCSERV_LOCAL_AUTH_ENABLED": "true"}), false},
+		{"local auth with session key ok", nil, baseEnv(map[string]string{"OCSERV_LOCAL_AUTH_ENABLED": "true", "OCSERV_SESSION_KEY": strings.Repeat("11", 32)}), true},
+		{"transport uid without gid rejected", nil, baseEnv(map[string]string{"OCSERV_TRANSPORT_UID": "12345"}), false},
+		{"invalid controller endpoint rejected", nil, baseEnv(map[string]string{"OCSERV_CONTROLLER_ENDPOINT_ID": strings.Repeat("A", 64)}), false},
+		{"signer https ok", nil, baseEnv(map[string]string{"OCSERV_CERTIFICATE_SIGNER_URL": "https://pki.example.test/v1/sign", "OCSERV_CERTIFICATE_SIGNER_TOKEN": "fixture-token"}), true},
+		{"signer http rejected", nil, baseEnv(map[string]string{"OCSERV_CERTIFICATE_SIGNER_URL": "http://pki.example.test/v1/sign", "OCSERV_CERTIFICATE_SIGNER_TOKEN": "fixture-token"}), false},
+		{"signer orphan ca rejected", nil, baseEnv(map[string]string{"OCSERV_CERTIFICATE_SIGNER_CA_FILE": "/run/secrets/signer-ca.pem"}), false},
+		{"recommended agent semver ok", nil, baseEnv(map[string]string{"OCSERV_RECOMMENDED_AGENT_VERSION": "0.2.0-rc.1"}), true},
+		{"recommended agent non-semver rejected", nil, baseEnv(map[string]string{"OCSERV_RECOMMENDED_AGENT_VERSION": "latest"}), false},
+		{"sse session above identity rejected", nil, baseEnv(map[string]string{"OCSERV_SSE_IDENTITY_LIMIT": "6", "OCSERV_SSE_SESSION_LIMIT": "7"}), false},
+		{"user op concurrency overflow rejected", nil, baseEnv(map[string]string{"OCSERV_USER_OPERATION_CONCURRENCY": "501"}), false},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := Load(nil, func(key string) (string, bool) { v, ok := tt.env[key]; return v, ok })
-			if (err == nil) != tt.ok {
-				t.Fatalf("Load() error = %v, want success %v", err, tt.ok)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := loadEnv(tc.args, tc.env); (err == nil) != tc.ok {
+				t.Fatalf("Load() err = %v, want ok=%v", err, tc.ok)
 			}
 		})
 	}
 }
 
-func TestImplicitEnvironmentRequiresLoopback(t *testing.T) {
-	for _, tt := range []struct {
+func TestProductionConfigurationAndFailClosedGates(t *testing.T) {
+	base := prodBaseEnv(t)
+	if cfg, err := loadEnv(nil, base); err != nil || !cfg.LocalAuthEnabled() || cfg.BrowserOrigin() != "https://controller.example.test" {
+		t.Fatalf("valid production config rejected: err=%v origin=%q", err, cfg.BrowserOrigin())
+	}
+
+	migrateEnv := make(map[string]string, len(base)+1)
+	for k, v := range base {
+		migrateEnv[k] = v
+	}
+	migrateEnv["OCSERV_RUNTIME_DATABASE_ROLE"] = "ocservia_app"
+	if _, err := loadEnv([]string{"--migrate-only"}, migrateEnv); err != nil {
+		t.Fatalf("production --migrate-only rejected: %v", err)
+	}
+
+	mutations := []struct {
 		name string
-		env  map[string]string
-		ok   bool
+		key  string
+		val  string
 	}{
-		{"implicit loopback", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}, true},
-		{"implicit IPv6 loopback", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_HTTP_ADDRESS": "[::1]:8080"}, true},
-		{"implicit all interfaces", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080"}, false},
-		{"implicit empty host", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_HTTP_ADDRESS": ":8080"}, false},
-		{"implicit hostname", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_HTTP_ADDRESS": "controller:8080"}, false},
-		{"explicit development", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "development", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080"}, true},
-		{"explicit test", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "test", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080"}, true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := Load(nil, func(key string) (string, bool) { v, ok := tt.env[key]; return v, ok })
-			if (err == nil) != tt.ok {
-				t.Fatalf("Load() error = %v, want success %v", err, tt.ok)
+		{"local auth disabled", "OCSERV_LOCAL_AUTH_ENABLED", "false"},
+		{"test audit event key", "OCSERV_TEST_AUDIT_EVENT_KEY_HEX", strings.Repeat("11", 32)},
+		{"relative command key", "OCSERV_COMMAND_SIGNING_KEY_FILE", "relative/controller.pem"},
+		{"missing endpoint id", "OCSERV_CONTROLLER_ENDPOINT_ID", ""},
+		{"remote plaintext postgres", "OCSERV_DATABASE_URL", "postgres://app:secret@database.example.test:5432/ocservia?sslmode=disable"},
+		{"missing postgres sslmode", "OCSERV_DATABASE_URL", "postgres://app:secret@database.example.test:5432/ocservia"},
+		{"invalid session key", "OCSERV_SESSION_KEY", strings.Repeat("AA", 32)},
+		{"session ttl too short", "OCSERV_SESSION_TTL", "59s"},
+		{"http public origin", "OCSERV_PUBLIC_ORIGIN", "http://app.example.test"},
+		{"path in public origin", "OCSERV_PUBLIC_ORIGIN", "https://app.example.test/path"},
+		{"local simulator enabled", "OCSERV_LOCAL_SIMULATOR", "true"},
+	}
+	for _, m := range mutations {
+		t.Run(m.name, func(t *testing.T) {
+			env := make(map[string]string, len(base))
+			for k, v := range base {
+				env[k] = v
+			}
+			if m.val == "" {
+				delete(env, m.key)
+			} else {
+				env[m.key] = m.val
+			}
+			if _, err := loadEnv(nil, env); err == nil {
+				t.Fatalf("production accepted invalid %s=%q", m.key, m.val)
 			}
 		})
 	}
 }
 
-func TestDevAuthTokenGuard(t *testing.T) {
-	tests := []struct {
-		name string
-		env  map[string]string
-		ok   bool
-	}{
-		{"development", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "development", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080", "OCSERV_DEV_AUTH_TOKEN": "local-development-token-32-characters"}, true},
-		{"too short", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_DEV_AUTH_TOKEN": "short"}, false},
-		{"production", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "production", "OCSERV_DEV_AUTH_TOKEN": "local-development-token-32-characters"}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := Load(nil, func(key string) (string, bool) { v, ok := tt.env[key]; return v, ok })
-			if (err == nil) != tt.ok {
-				t.Fatalf("Load() error = %v, want success %v", err, tt.ok)
-			}
-		})
-	}
-}
+func TestSensitiveFilesAndLocalBootstrapProtection(t *testing.T) {
+	dir := secureKeyTestDirectory(t)
+	dbFile := filepath.Join(dir, "database-url")
+	ckFile := filepath.Join(dir, "checkpoint-key")
+	evFile := filepath.Join(dir, "audit-event-key")
+	pwFile := filepath.Join(dir, "bootstrap-password")
+	testutil.NoError(t, os.WriteFile(dbFile, []byte("postgres://app:secret@postgres/ocservia\n"), 0o600))
+	testutil.NoError(t, os.WriteFile(ckFile, []byte(strings.Repeat("a", 64)+"\n"), 0o600))
+	testutil.NoError(t, os.WriteFile(evFile, []byte(strings.Repeat("b", 64)+"\n"), 0o600))
+	const password = "bootstrap-test-secret"
+	testutil.NoError(t, os.WriteFile(pwFile, []byte(password+"\r\n"), 0o600))
 
-func TestLegacySelectorsNormalizeAtEntry(t *testing.T) {
-	values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}
-	lookup := func(key string) (string, bool) { value, ok := values[key]; return value, ok }
-	want, err := Load(nil, lookup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	values["OCSERV_DATABASE_BACKEND"] = "postgres"
-	for _, args := range [][]string{nil, {"--role=all"}, {"--role", "all"}} {
-		got, err := Load(args, lookup)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("legacy selectors changed runtime config: args=%v", args)
-		}
-	}
-}
-
-func TestRoleValidation(t *testing.T) {
-	for _, arg := range []string{"--role=", "--role=invalid", "--role=api", "--role=worker", "--role=scheduler"} {
-		_, err := Load([]string{arg}, func(key string) (string, bool) {
-			if key == "OCSERV_DATABASE_URL" {
-				return "postgres://db/test", true
-			}
-			return "", false
-		})
-		if err == nil {
-			t.Fatalf("Load() accepted %s", arg)
-		}
-	}
-}
-
-func TestResultCommitBarrierGuard(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		env  map[string]string
-		ok   bool
-	}{
-		{"development absolute", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR": "/run/test-result-barrier"}, true},
-		{"relative", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR": "barrier"}, false},
-		{"production", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "production", "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR": "/run/test-result-barrier"}, false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := Load(nil, func(key string) (string, bool) { value, ok := test.env[key]; return value, ok })
-			if (err == nil) != test.ok {
-				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
-			}
-		})
-	}
-}
-
-func TestPreSendBarrierGuard(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		env       map[string]string
-		ok        bool
-		wantLease time.Duration
-	}{
-		{"development default lease", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_PRE_SEND_BARRIER_DIR": "/run/test-pre-send-barrier"}, true, 10 * time.Second},
-		{"test minimum lease", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "test", "OCSERV_TEST_PRE_SEND_BARRIER_DIR": "/run/test-pre-send-barrier", "OCSERV_TEST_COMMAND_LEASE": "10s"}, true, 10 * time.Second},
-		{"development maximum lease", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_PRE_SEND_BARRIER_DIR": "/run/test-pre-send-barrier", "OCSERV_TEST_COMMAND_LEASE": "60s"}, true, 60 * time.Second},
-		{"relative", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_PRE_SEND_BARRIER_DIR": "barrier"}, false, 0},
-		{"production", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "production", "OCSERV_TEST_PRE_SEND_BARRIER_DIR": "/run/test-pre-send-barrier", "OCSERV_TEST_COMMAND_LEASE": "60s"}, false, 0},
-		{"lease without barrier", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_COMMAND_LEASE": "60s"}, false, 0},
-		{"lease below minimum", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_PRE_SEND_BARRIER_DIR": "/run/test-pre-send-barrier", "OCSERV_TEST_COMMAND_LEASE": "9s"}, false, 0},
-		{"lease above maximum", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_PRE_SEND_BARRIER_DIR": "/run/test-pre-send-barrier", "OCSERV_TEST_COMMAND_LEASE": "61s"}, false, 0},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			cfg, err := Load(nil, func(key string) (string, bool) { value, ok := test.env[key]; return value, ok })
-			if (err == nil) != test.ok {
-				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
-			}
-			if err == nil && cfg.TestCommandLease != test.wantLease {
-				t.Fatalf("test command lease = %v, want %v", cfg.TestCommandLease, test.wantLease)
-			}
-		})
-	}
-}
-
-func TestSchedulerMaintenanceEvidenceGuard(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		env     map[string]string
-		ok      bool
-		enabled bool
-	}{
-		{"default disabled", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}, true, false},
-		{"development enabled", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true"}, true, true},
-		{"test enabled", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "test", "OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true"}, true, true},
-		{"invalid boolean", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "yes-please"}, false, false},
-		{"production enabled", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "production", "OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true"}, false, false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			cfg, err := Load(nil, func(key string) (string, bool) { value, ok := test.env[key]; return value, ok })
-			if (err == nil) != test.ok {
-				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
-			}
-			if err == nil && cfg.TestSchedulerEvidence != test.enabled {
-				t.Fatalf("scheduler maintenance evidence = %v, want %v", cfg.TestSchedulerEvidence, test.enabled)
-			}
-		})
-	}
-}
-
-func TestMigrateOnlyRequiresRuntimeRole(t *testing.T) {
-	lookup := func(key string) (string, bool) {
-		values := map[string]string{"OCSERV_DATABASE_URL": "postgres://owner@db/test"}
-		value, ok := values[key]
-		return value, ok
-	}
-	if _, err := Load([]string{"--migrate-only"}, lookup); err == nil {
-		t.Fatal("Load() accepted migration mode without a runtime database role")
-	}
-}
-
-func TestMigrateOnlyAcceptsRuntimeRole(t *testing.T) {
-	lookup := func(key string) (string, bool) {
-		values := map[string]string{
-			"OCSERV_DATABASE_URL":          "postgres://owner@db/test",
-			"OCSERV_RUNTIME_DATABASE_ROLE": "ocservia_app",
-		}
-		value, ok := values[key]
-		return value, ok
-	}
-	config, err := Load([]string{"--migrate-only"}, lookup)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if !config.MigrateOnly || config.RuntimeDBRole != "ocservia_app" {
-		t.Fatalf("unexpected migration config: %+v", config)
-	}
-}
-
-func TestProvisionWorkspaceIsExclusiveOneShot(t *testing.T) {
-	lookup := func(key string) (string, bool) {
-		values := map[string]string{
-			"OCSERV_DATABASE_URL":          "postgres://owner@db/test",
-			"OCSERV_RUNTIME_DATABASE_ROLE": "ocservia_app",
-		}
-		value, ok := values[key]
-		return value, ok
-	}
-	config, err := Load([]string{"--provision-management-workspace"}, lookup)
-	if err != nil || !config.ProvisionWorkspace {
-		t.Fatalf("Load() = %+v, %v", config, err)
-	}
-	if _, err := Load([]string{"--provision-management-workspace", "--migrate-only"}, lookup); err == nil {
-		t.Fatal("Load() combined workspace provisioning with migration")
-	}
-}
-
-func TestRemovedSchemaCompatibilityFlagIsRejected(t *testing.T) {
-	lookup := func(key string) (string, bool) {
-		values := map[string]string{
-			"OCSERV_DATABASE_URL":          "postgres://owner@db/test",
-			"OCSERV_RUNTIME_DATABASE_ROLE": "ocservia_app",
-		}
-		value, ok := values[key]
-		return value, ok
-	}
-	for _, args := range [][]string{
-		{"--schema-compatibility-check=29"},
-		{"--schema-compatibility-check=-1"},
-		{"--migrate-only", "--schema-compatibility-check=29"},
-	} {
-		if _, err := Load(args, lookup); err == nil {
-			t.Fatalf("Load(%v) accepted a removed flag", args)
-		}
-	}
-}
-
-func TestLocalSimulatorIsRejectedInProduction(t *testing.T) {
-	lookup := func(key string) (string, bool) {
-		values := map[string]string{
-			"OCSERV_DATABASE_URL":    "postgres://db/test",
-			"OCSERV_ENVIRONMENT":     "production",
-			"OCSERV_LOCAL_SIMULATOR": "true",
-		}
-		value, ok := values[key]
-		return value, ok
-	}
-	if _, err := Load(nil, lookup); err == nil {
-		t.Fatal("Load() accepted the local simulator in production")
-	}
-}
-
-func TestPprofAddressRequiresNonProductionLoopback(t *testing.T) {
-	base := func(environment, address string) func(string) (string, bool) {
-		values := map[string]string{
-			"OCSERV_DATABASE_URL":  "postgres://db/test",
-			"OCSERV_ENVIRONMENT":   environment,
-			"OCSERV_PPROF_ADDRESS": address,
-		}
-		return func(key string) (string, bool) {
-			value, ok := values[key]
-			return value, ok
-		}
-	}
-	for name, lookup := range map[string]func(string) (string, bool){
-		"production":       base("production", "127.0.0.1:6060"),
-		"non-loopback":     base("development", "0.0.0.0:6060"),
-		"missing port":     base("development", "127.0.0.1"),
-		"unparseable host": base("development", "127.0.0.1:x"),
-	} {
-		if _, err := Load(nil, lookup); err == nil {
-			t.Fatalf("Load() accepted pprof address case %q", name)
-		}
-	}
-	for name, lookup := range map[string]func(string) (string, bool){
-		"loopback ipv4": base("development", "127.0.0.1:6060"),
-		"loopback ipv6": base("test", "[::1]:6060"),
-	} {
-		cfg, err := Load(nil, lookup)
-		if err != nil {
-			t.Fatalf("Load() rejected pprof address case %q: %v", name, err)
-		}
-		if cfg.PprofAddress == "" {
-			t.Fatalf("Load() dropped the pprof address in case %q", name)
-		}
-	}
-}
-
-func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
-	cfg, err := Load(nil, func(key string) (string, bool) {
-		if key == "OCSERV_DATABASE_URL" {
-			return "postgres://db/test", true
-		}
-		return "", false
+	cfg, err := loadEnv(nil, map[string]string{
+		"OCSERV_DATABASE_URL_FILE":         dbFile,
+		"OCSERV_AUDIT_CHECKPOINT_KEY_FILE": ckFile,
+		"OCSERV_AUDIT_EVENT_KEY_ID":        "audit-event-v1",
+		"OCSERV_AUDIT_EVENT_KEY_FILE":      evFile,
 	})
 	testutil.NoError(t, err)
-	cfg.Environment = "production"
-	cfg.DatabaseURL = "postgres://127.0.0.1/test"
-	cfg.LocalAuth = true
-	cfg.PublicOrigin = "https://ocservia.example.test"
-	cfg.SessionKey = make([]byte, 32)
-	cfg.AuditCheckpointKey = make([]byte, 32)
-	cfg.AuditEventKeyID = "audit-event-v1"
-	cfg.AuditEventKey = []byte(strings.Repeat("a", 32))
-	cfg.TransportUID = uint32(os.Geteuid() + 1)
-	cfg.TransportGID = uint32(os.Getegid())
-	cfg.TransportIdentitySet = true
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "command signing key") {
-		t.Fatalf("missing production command key error = %v", err)
+	if cfg.DatabaseURL != "postgres://app:secret@postgres/ocservia" || len(cfg.AuditCheckpointKey) != 32 || len(cfg.AuditEventKey) != 32 {
+		t.Fatalf("unexpected file-backed config")
 	}
-	cfg.CommandSigningKeyFile = "relative/controller.pem"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "absolute") {
-		t.Fatalf("relative production command key error = %v", err)
-	}
-	cfg.CommandSigningKeyFile = "/run/secrets/controller_command_signing_key"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "OCSERV_CONTROLLER_ENDPOINT_ID") {
-		t.Fatalf("missing production Controller endpoint ID error = %v", err)
-	}
-	oneShot := cfg
-	oneShot.MigrateOnly, oneShot.RuntimeDBRole = true, "ocservia_app"
-	if err := oneShot.Validate(); err != nil {
-		t.Fatalf("one-shot production command required a Controller endpoint ID: %v", err)
-	}
-	cfg.ControllerEndpointID = strings.Repeat("ab", 32)
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("complete production configuration rejected: %v", err)
-	}
-}
 
-func TestProductionRequiresDistinctTransportIdentity(t *testing.T) {
-	values := map[string]string{
-		"OCSERV_DATABASE_URL":  "postgres://db/test",
-		"OCSERV_TRANSPORT_UID": "12345",
-		"OCSERV_TRANSPORT_GID": "12346",
+	// Reject world-readable, symlinked, hard-linked, or FIFO secret files.
+	testutil.NoError(t, os.Chmod(evFile, 0o644))
+	if _, err := readStrictHexKeyFile(evFile, uint32(os.Geteuid())); err == nil {
+		t.Fatal("world-readable audit event key accepted")
 	}
-	cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	testutil.NoError(t, os.Chmod(evFile, 0o600))
+	linkPath := filepath.Join(dir, "audit-event-link")
+	testutil.NoError(t, os.Symlink(evFile, linkPath))
+	if _, err := readStrictHexKeyFile(linkPath, uint32(os.Geteuid())); err == nil {
+		t.Fatal("symlinked audit event key accepted")
+	}
+	hardPath := filepath.Join(dir, "audit-event-hard")
+	testutil.NoError(t, os.Link(evFile, hardPath))
+	if _, err := readStrictHexKeyFile(evFile, uint32(os.Geteuid())); err == nil {
+		t.Fatal("hard-linked audit event key accepted")
+	}
+	testutil.NoError(t, os.Remove(hardPath))
+
+	bootEnv := baseEnv(map[string]string{
+		"OCSERV_LOCAL_AUTH_ENABLED":            "true",
+		"OCSERV_SESSION_KEY":                   strings.Repeat("a", 64),
+		"OCSERV_LOCAL_BOOTSTRAP_USERNAME":      "first-admin",
+		"OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID":  "01900000-0000-7000-8000-000000000001",
+		"OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE": pwFile,
+	})
+	bootCfg, err := loadEnv([]string{"--bootstrap-local-admin"}, bootEnv)
 	testutil.NoError(t, err)
-	if !cfg.TransportIdentitySet || cfg.TransportUID != 12345 || cfg.TransportGID != 12346 {
-		t.Fatalf("unexpected transport identity: %+v", cfg)
+	if !bootCfg.BootstrapLocalAdmin || bootCfg.LocalBootstrapPassword != password {
+		t.Fatal("bootstrap secret not loaded")
 	}
-
-	delete(values, "OCSERV_TRANSPORT_GID")
-	if _, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
-		t.Fatal("accepted a transport UID without a transport GID")
+	if normalCfg, err := loadEnv(nil, bootEnv); err != nil || normalCfg.LocalBootstrapPassword != "" {
+		t.Fatal("normal startup loaded bootstrap credential")
 	}
-}
-
-func TestControllerEndpointIDValidation(t *testing.T) {
-	for _, value := range []string{"ABC", strings.Repeat("z", 64), strings.Repeat("A", 64)} {
-		_, err := Load(nil, func(key string) (string, bool) {
-			values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_CONTROLLER_ENDPOINT_ID": value}
-			result, ok := values[key]
-			return result, ok
-		})
-		if err == nil {
-			t.Fatalf("accepted controller endpoint %q", value)
-		}
+	bootEnv["OCSERV_LOCAL_BOOTSTRAP_PASSWORD"] = password
+	if _, err := loadEnv([]string{"--bootstrap-local-admin"}, bootEnv); err == nil || strings.Contains(err.Error(), password) {
+		t.Fatal("plaintext bootstrap env accepted or leaked password")
 	}
-}
-
-func TestUserOperationConcurrency(t *testing.T) {
-	lookup := func(key string) (string, bool) {
-		values := map[string]string{
-			"OCSERV_DATABASE_URL":               "postgres://db/test",
-			"OCSERV_USER_OPERATION_CONCURRENCY": "17",
-		}
-		value, ok := values[key]
-		return value, ok
-	}
-	config, err := Load(nil, lookup)
-	if err != nil || config.UserOperationConcurrency != 17 {
-		t.Fatalf("configured concurrency=%d err=%v", config.UserOperationConcurrency, err)
-	}
-	if _, err := Load(nil, func(key string) (string, bool) {
-		values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_USER_OPERATION_CONCURRENCY": "501"}
-		value, ok := values[key]
-		return value, ok
-	}); err == nil {
-		t.Fatal("accepted user operation concurrency above the batch bound")
-	}
-}
-
-func TestSSECapacityConfiguration(t *testing.T) {
-	values := map[string]string{
-		"OCSERV_DATABASE_URL":            "postgres://db/test",
-		"OCSERV_SSE_GLOBAL_LIMIT":        "64",
-		"OCSERV_SSE_IDENTITY_LIMIT":      "6",
-		"OCSERV_SSE_SESSION_LIMIT":       "3",
-		"OCSERV_SSE_WORKSPACE_LIMIT":     "16",
-		"OCSERV_SSE_RESOURCE_LIMIT":      "8",
-		"OCSERV_SSE_WATCHER_LIMIT":       "32",
-		"OCSERV_SSE_QUEUE_CAPACITY":      "64",
-		"OCSERV_SSE_MAX_LIFETIME":        "20m",
-		"OCSERV_SSE_REVALIDATE_INTERVAL": "15s",
-	}
-	cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
-	testutil.NoError(t, err)
-	if cfg.EventStreams.GlobalStreams != 64 || cfg.EventStreams.SessionStreams != 3 || cfg.EventStreams.MaxLifetime != 20*time.Minute {
-		t.Fatalf("unexpected SSE config: %+v", cfg.EventStreams)
-	}
-	values["OCSERV_SSE_SESSION_LIMIT"] = "7"
-	if _, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
-		t.Fatal("accepted a session limit above the identity limit")
-	}
-}
-
-func TestCertificateSignerRequiresHTTPSAndCompleteCredentials(t *testing.T) {
-	tests := []struct {
-		name, endpoint, token string
-		ok                    bool
-	}{
-		{name: "disabled", ok: true},
-		{name: "https", endpoint: "https://pki.example.test/v1/sign", token: "fixture-token", ok: true},
-		{name: "http", endpoint: "http://pki.example.test/v1/sign", token: "fixture-token"},
-		{name: "userinfo", endpoint: "https://user@pki.example.test/v1/sign", token: "fixture-token"},
-		{name: "missing token", endpoint: "https://pki.example.test/v1/sign"},
-		{name: "missing endpoint", token: "fixture-token"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}
-			if test.endpoint != "" {
-				values["OCSERV_CERTIFICATE_SIGNER_URL"] = test.endpoint
-			}
-			if test.token != "" {
-				values["OCSERV_CERTIFICATE_SIGNER_TOKEN"] = test.token
-			}
-			_, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
-			if (err == nil) != test.ok {
-				t.Fatalf("Load() error=%v want success=%v", err, test.ok)
-			}
-		})
-	}
-}
-
-func TestCertificateSignerCAConfiguration(t *testing.T) {
-	values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_CERTIFICATE_SIGNER_CA_FILE": "/run/secrets/signer-ca.pem"}
-	lookup := func(k string) (string, bool) { v, ok := values[k]; return v, ok }
-	if _, err := Load(nil, lookup); err == nil {
-		t.Fatal("orphan signer CA accepted")
-	}
-	values["OCSERV_CERTIFICATE_SIGNER_URL"] = "https://signer:9443/sign"
-	values["OCSERV_CERTIFICATE_SIGNER_TOKEN"] = "fixture-token"
-	cfg, err := Load(nil, lookup)
-	testutil.NoError(t, err)
-	if cfg.CertificateSignerCAFile != values["OCSERV_CERTIFICATE_SIGNER_CA_FILE"] {
-		t.Fatal("CA setting not loaded")
-	}
-}
-
-func TestBrowserOriginUsesPublicOrigin(t *testing.T) {
-	tests := []struct {
-		name         string
-		publicOrigin string
-		want         string
-	}{
-		{name: "host only", publicOrigin: "https://admin.example.com", want: "https://admin.example.com"},
-		{name: "default HTTPS port is normalized away", publicOrigin: "https://admin.example.com:443/", want: "https://admin.example.com"},
-		{name: "non-default port is kept", publicOrigin: "https://admin.example.com:8443", want: "https://admin.example.com:8443"},
-		{name: "uppercase host is normalized", publicOrigin: "https://Admin.Example.COM", want: "https://admin.example.com"},
-		{name: "no public origin yields no origin", want: ""},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}
-			values["OCSERV_PUBLIC_ORIGIN"] = test.publicOrigin
-			cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
-			if err != nil {
-				t.Fatalf("Load() error = %v", err)
-			}
-			if origin := cfg.BrowserOrigin(); origin != test.want {
-				t.Fatalf("BrowserOrigin() = %q, want %q", origin, test.want)
-			}
-			if cfg.PublicOrigin != test.want {
-				t.Fatalf("stored PublicOrigin = %q, want %q", cfg.PublicOrigin, test.want)
-			}
-		})
-	}
-}
-
-func TestRecommendedAgentVersion(t *testing.T) {
-	tests := []struct {
-		name        string
-		value       string
-		want        string
-		wantFailure bool
-	}{
-		{name: "unset keeps classification unknown", value: "", want: ""},
-		{name: "plain semver", value: "0.2.0", want: "0.2.0"},
-		{name: "v-prefixed semver", value: "v0.2.0", want: "v0.2.0"},
-		{name: "prerelease", value: "0.2.0-rc.1", want: "0.2.0-rc.1"},
-		{name: "non-semver rejected", value: "latest", wantFailure: true},
-		{name: "short form accepted", value: "0.2", want: "0.2"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}
-			if test.value != "" {
-				values["OCSERV_RECOMMENDED_AGENT_VERSION"] = test.value
-			}
-			config, err := Load(nil, func(key string) (string, bool) {
-				value, ok := values[key]
-				return value, ok
-			})
-			if test.wantFailure {
-				if err == nil {
-					t.Fatal("invalid recommended agent version accepted")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Load() error = %v", err)
-			}
-			if config.RecommendedAgentVersion != test.want {
-				t.Fatalf("recommended agent version=%q want %q", config.RecommendedAgentVersion, test.want)
-			}
-		})
-	}
-}
-
-func TestProductionPostgreSQLTransportDeclaration(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		values map[string]string
-		ok     bool
-	}{
-		{"undeclared bundled host", map[string]string{"OCSERV_DATABASE_URL": "postgres://postgres/ocservia?sslmode=disable"}, false},
-		{"declared bundled host", map[string]string{"OCSERV_DATABASE_URL": "postgres://postgres/ocservia?sslmode=disable", "OCSERV_DATABASE_BUNDLED_POSTGRES": "true"}, true},
-		{"declared remote host", map[string]string{"OCSERV_DATABASE_URL": "postgres://database.example.test/ocservia?sslmode=disable", "OCSERV_DATABASE_BUNDLED_POSTGRES": "true"}, false},
-		{"invalid declaration", map[string]string{"OCSERV_DATABASE_URL": "postgres://postgres/ocservia?sslmode=disable", "OCSERV_DATABASE_BUNDLED_POSTGRES": "maybe"}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.values["OCSERV_ENVIRONMENT"] = "production"
-			tc.values["OCSERV_RUNTIME_DATABASE_ROLE"] = "ocservia_app"
-			_, err := Load([]string{"--migrate-only"}, func(key string) (string, bool) { v, ok := tc.values[key]; return v, ok })
-			// Later production checks may still fail; only the transport gate matters here.
-			if tc.ok && err != nil && strings.Contains(err.Error(), "PostgreSQL") {
-				t.Fatalf("declared bundled PostgreSQL rejected: %v", err)
-			}
-			if !tc.ok && (err == nil || !strings.Contains(err.Error(), "PostgreSQL") && !strings.Contains(err.Error(), "BUNDLED")) {
-				t.Fatalf("Load() error = %v, want PostgreSQL transport rejection", err)
-			}
-		})
+	fifo := filepath.Join(dir, "fifo")
+	testutil.NoError(t, unix.Mkfifo(fifo, 0o600))
+	if _, err := readBootstrapSecret(fifo); err == nil {
+		t.Fatal("FIFO bootstrap secret accepted")
 	}
 }
