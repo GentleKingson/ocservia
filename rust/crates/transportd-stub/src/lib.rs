@@ -875,6 +875,7 @@ fn new_traceparent() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
 mod tests {
     use super::*;
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
@@ -882,98 +883,153 @@ mod tests {
     };
     use tokio_stream::StreamExt;
 
-    fn probe_request(node_id: Vec<u8>, idempotency_key: Vec<u8>) -> SendCommandRequest {
-        probe_request_with(
-            node_id,
-            idempotency_key,
-            SimulationProbe {
-                heartbeat_count: 1,
-                delay_millis: 0,
-                duplicate_event: false,
-                return_error: false,
-                disconnect_after: false,
-            },
-        )
+    fn uid() -> Vec<u8> {
+        Uuid::now_v7().as_bytes().to_vec()
     }
-
-    fn probe_request_with(
-        node_id: Vec<u8>,
-        idempotency_key: Vec<u8>,
-        probe: SimulationProbe,
-    ) -> SendCommandRequest {
+    fn probe(heartbeats: u32, delay_ms: u32) -> SimulationProbe {
+        SimulationProbe {
+            heartbeat_count: heartbeats,
+            delay_millis: delay_ms,
+            duplicate_event: false,
+            return_error: false,
+            disconnect_after: false,
+        }
+    }
+    fn probe_req(node_id: Vec<u8>, key: Vec<u8>, p: SimulationProbe) -> SendCommandRequest {
         let now = SystemTime::now();
-        let envelope = CommandEnvelope {
-            protocol_version: "1.0".to_owned(),
-            message_id: Uuid::now_v7().as_bytes().to_vec(),
-            command_id: Uuid::now_v7().as_bytes().to_vec(),
-            idempotency_key,
+        let env = CommandEnvelope {
+            protocol_version: "1.0".into(),
+            message_id: uid(),
+            command_id: uid(),
+            idempotency_key: key,
             node_id: node_id.clone(),
             sequence: 1,
             issued_at: Some(now.into()),
             expires_at: Some((now + Duration::from_mins(1)).into()),
-            expected_revision: 0,
             traceparent: new_traceparent(),
-            actor_id: "test".to_owned(),
-            reason: "test".to_owned(),
+            actor_id: "test".into(),
+            reason: "test".into(),
             delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
-            payload: Some(command_envelope::Payload::SimulationProbe(probe)),
+            payload: Some(command_envelope::Payload::SimulationProbe(p)),
             semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
-            semantic_payload_sha256: Vec::new(),
             ..CommandEnvelope::default()
         };
         SendCommandRequest {
             node_id,
-            command_envelope: envelope.encode_to_vec(),
+            command_envelope: env.encode_to_vec(),
         }
+    }
+    async fn wait_node(svc: &StubService, node: &[u8]) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !svc.state.nodes.lock().await.contains_key(node) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connected");
+    }
+    fn close_req(node_id: Vec<u8>, reason: String) -> Request<CloseNodeRequest> {
+        Request::new(CloseNodeRequest {
+            node_id,
+            reason,
+            fence_binding: None,
+        })
     }
 
     #[test]
-    fn traceparent_validation_is_strict() {
+    fn traceparent_queue_cap_and_payload_envelope_bounds() {
         assert!(validate_traceparent(&new_traceparent()).is_ok());
         assert!(validate_traceparent("not-a-trace").is_err());
         assert!(
             validate_traceparent("00-0123456789ABCDEF0123456789abcdef-0123456789abcdef-01")
                 .is_err()
         );
+        assert_eq!(StubService::new(usize::MAX).state.retention, 4096);
+        let ev = new_event(
+            &uid(),
+            TransportEventType::Disconnected,
+            &new_traceparent(),
+            vec![0; MAX_COMMAND_BYTES],
+        );
+        assert!(ev.encoded_len() <= MAX_COMMAND_BYTES + 4 * 1024);
     }
 
     #[tokio::test]
-    async fn accepts_thirty_second_heartbeat_interval() {
-        let service = StubService::new(8);
-        service
-            .send_command(Request::new(probe_request_with(
-                Uuid::now_v7().as_bytes().to_vec(),
-                Uuid::now_v7().as_bytes().to_vec(),
-                SimulationProbe {
-                    heartbeat_count: 1,
-                    delay_millis: 30_000,
-                    duplicate_event: false,
-                    return_error: false,
-                    disconnect_after: false,
-                },
-            )))
+    async fn heartbeat_expiry_capacity_and_idempotency_invariants() {
+        let svc = StubService::new(8);
+        svc.send_command(Request::new(probe_req(uid(), uid(), probe(1, 30_000))))
             .await
-            .expect("30-second heartbeat accepted");
-    }
+            .expect("30s");
 
-    #[tokio::test]
-    async fn expired_command_is_rejected_before_acceptance() {
-        let service = StubService::new(8);
-        let node_id = Uuid::now_v7().as_bytes().to_vec();
-        let mut request = probe_request(node_id, Uuid::now_v7().as_bytes().to_vec());
-        let mut envelope = CommandEnvelope::decode(request.command_envelope.as_slice())
-            .expect("valid command envelope");
+        // Expired command rejected before acceptance.
+        let mut req = probe_req(uid(), uid(), probe(1, 0));
+        let mut env = CommandEnvelope::decode(req.command_envelope.as_slice()).expect("env");
         let now = SystemTime::now();
-        envelope.issued_at = Some((now - Duration::from_mins(2)).into());
-        envelope.expires_at = Some((now - Duration::from_mins(1)).into());
-        request.command_envelope = envelope.encode_to_vec();
+        env.issued_at = Some((now - Duration::from_mins(2)).into());
+        env.expires_at = Some((now - Duration::from_mins(1)).into());
+        req.command_envelope = env.encode_to_vec();
+        let svc_exp = StubService::new(8);
+        assert_eq!(
+            svc_exp
+                .send_command(Request::new(req))
+                .await
+                .expect_err("exp")
+                .code(),
+            tonic::Code::DeadlineExceeded
+        );
+        assert_eq!(svc_exp.state.accepted_commands.lock().await.keys.len(), 0);
 
-        let error = service
-            .send_command(Request::new(request))
+        // Capacity mode reports bounds and emits telemetry.
+        let cap = StubService::new_capacity(8);
+        cap.send_command(Request::new(probe_req(uid(), uid(), probe(1, 0))))
             .await
-            .expect_err("expired command rejected");
-        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
-        assert!(service.state.accepted_commands.lock().await.keys.is_empty());
+            .expect("cap");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while cap.stats().await.active_tasks != 0 || cap.stats().await.accepted_commands != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("done");
+        let retained = cap.state.delivery.lock().await.retained.clone();
+        assert!(
+            retained
+                .iter()
+                .any(|e| e.r#type == i32::from(TransportEventType::Telemetry)
+                    && TelemetryBatch::decode(e.payload.as_slice()).is_ok())
+        );
+        assert_eq!(cap.stats().await.task_capacity, 8);
+
+        // Repeated idempotency key executes once, and keys are not evicted at capacity.
+        let idem = StubService::new(1);
+        let (n1, k1) = (uid(), uid());
+        for _ in 0..2 {
+            assert!(
+                idem.send_command(Request::new(probe_req(n1.clone(), k1.clone(), probe(1, 0))))
+                    .await
+                    .expect("ok")
+                    .into_inner()
+                    .accepted
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while idem.state.tasks.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("done");
+        assert_eq!(
+            idem.send_command(Request::new(probe_req(uid(), uid(), probe(1, 0))))
+                .await
+                .expect_err("cap")
+                .code(),
+            tonic::Code::ResourceExhausted
+        );
+        idem.send_command(Request::new(probe_req(n1, k1.clone(), probe(1, 0))))
+            .await
+            .expect("still idempotent");
+        assert!(idem.state.accepted_commands.lock().await.keys.contains(&k1));
     }
 
     #[tokio::test]
@@ -982,491 +1038,249 @@ mod tests {
             for payload in [
                 command_envelope::Payload::SyntheticNoop(SyntheticNoop {}),
                 command_envelope::Payload::SyntheticEcho(SyntheticEcho {
-                    message: "test".to_owned(),
+                    message: "test".into(),
                 }),
-                command_envelope::Payload::SimulationProbe(SimulationProbe {
-                    heartbeat_count: 1,
-                    delay_millis: 0,
-                    duplicate_event: false,
-                    return_error: false,
-                    disconnect_after: false,
-                }),
+                command_envelope::Payload::SimulationProbe(probe(1, 0)),
             ] {
-                let service = StubService::new(8);
-                let node_id = Uuid::now_v7().as_bytes().to_vec();
-                let key = Uuid::now_v7().as_bytes().to_vec();
-                let mut execute = probe_request(node_id, key);
-                let mut envelope = CommandEnvelope::decode(execute.command_envelope.as_slice())
-                    .expect("valid command envelope");
-                envelope.payload = Some(payload);
-                execute.command_envelope = envelope.encode_to_vec();
+                let svc = StubService::new(8);
+                let mut exec = probe_req(uid(), uid(), probe(1, 0));
+                let mut env =
+                    CommandEnvelope::decode(exec.command_envelope.as_slice()).expect("env");
+                env.payload = Some(payload);
+                exec.command_envelope = env.encode_to_vec();
                 if expired {
                     let now = SystemTime::now();
-                    envelope.issued_at = Some((now - Duration::from_mins(2)).into());
-                    envelope.expires_at = Some((now - Duration::from_mins(1)).into());
+                    env.issued_at = Some((now - Duration::from_mins(2)).into());
+                    env.expires_at = Some((now - Duration::from_mins(1)).into());
                 }
-                envelope.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
-                let mut request = execute.clone();
-                request.command_envelope = envelope.encode_to_vec();
-                let response = service
-                    .send_command(Request::new(request.clone()))
-                    .await
-                    .expect("observe");
-                assert!(response.into_inner().accepted);
+                env.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+                let mut rec = exec.clone();
+                rec.command_envelope = env.encode_to_vec();
+                assert!(
+                    svc.send_command(Request::new(rec.clone()))
+                        .await
+                        .expect("obs")
+                        .into_inner()
+                        .accepted
+                );
                 tokio::task::yield_now().await;
-                let stats = service.stats().await;
-                assert_eq!(stats.accepted_commands, 0);
-                assert_eq!(stats.active_tasks, 0);
-                assert_eq!(stats.retained_events, 0);
-                assert_eq!(stats.connected_nodes, 0);
+                let st = svc.stats().await;
+                assert_eq!(
+                    (
+                        st.accepted_commands,
+                        st.active_tasks,
+                        st.retained_events,
+                        st.connected_nodes
+                    ),
+                    (0, 0, 0, 0)
+                );
 
-                let response = service
-                    .send_command(Request::new(execute))
-                    .await
-                    .expect("ordinary command accepted");
-                assert!(response.into_inner().accepted);
+                assert!(
+                    svc.send_command(Request::new(exec))
+                        .await
+                        .expect("exec")
+                        .into_inner()
+                        .accepted
+                );
                 tokio::time::timeout(Duration::from_secs(1), async {
-                    while service.stats().await.active_tasks != 0 {
+                    while svc.stats().await.active_tasks != 0 {
                         tokio::task::yield_now().await;
                     }
                 })
                 .await
-                .expect("ordinary command completed");
-                let before = service.stats().await;
+                .expect("done");
+                let before = svc.stats().await;
                 assert_eq!(before.accepted_commands, 1);
-                let response = service
-                    .send_command(Request::new(request))
-                    .await
-                    .expect("observe existing command");
-                assert!(response.into_inner().accepted);
+                assert!(
+                    svc.send_command(Request::new(rec))
+                        .await
+                        .expect("obs2")
+                        .into_inner()
+                        .accepted
+                );
                 tokio::task::yield_now().await;
-                assert_eq!(service.stats().await, before);
+                assert_eq!(svc.stats().await, before);
             }
         }
     }
 
-    #[test]
-    fn queue_capacity_is_bounded() {
-        let service = StubService::new(usize::MAX);
-        assert_eq!(service.state.retention, 4096);
-    }
-
     #[tokio::test]
-    async fn capacity_mode_reports_bounds_and_emits_telemetry() {
-        let service = StubService::new_capacity(8);
-        let node_id = Uuid::now_v7().as_bytes().to_vec();
-        service
-            .send_command(Request::new(probe_request(
-                node_id,
-                Uuid::now_v7().as_bytes().to_vec(),
-            )))
-            .await
-            .expect("capacity probe accepted");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let stats = service.stats().await;
-                if stats.active_tasks == 0 && stats.accepted_commands == 1 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("capacity probe completed");
-
-        let events = service.state.delivery.lock().await.retained.clone();
-        assert!(events.iter().any(|event| {
-            event.r#type == i32::from(TransportEventType::Telemetry)
-                && TelemetryBatch::decode(event.payload.as_slice()).is_ok()
-        }));
-        assert_eq!(service.stats().await.task_capacity, 8);
-    }
-
-    #[test]
-    fn maximum_payload_fits_the_transport_envelope_limit() {
-        let event = new_event(
-            Uuid::now_v7().as_bytes(),
-            TransportEventType::Disconnected,
-            &new_traceparent(),
-            vec![0; MAX_COMMAND_BYTES],
-        );
-        assert!(event.encoded_len() <= MAX_COMMAND_BYTES + 4 * 1024);
-    }
-
-    #[tokio::test]
-    async fn repeated_idempotency_key_runs_probe_once() {
-        let service = StubService::new(8);
-        let node_id = Uuid::now_v7().as_bytes().to_vec();
-        let key = Uuid::now_v7().as_bytes().to_vec();
-
-        for _ in 0..2 {
-            let response = service
-                .send_command(Request::new(probe_request(node_id.clone(), key.clone())))
-                .await
-                .expect("probe accepted");
-            assert!(response.into_inner().accepted);
-        }
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if service.state.delivery.lock().await.retained.len() == 3 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("probe completed");
-
-        assert_eq!(service.state.delivery.lock().await.retained.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn idempotency_keys_are_not_evicted_at_capacity() {
-        let service = StubService::new(1);
-        let first_node = Uuid::now_v7().as_bytes().to_vec();
-        let first_key = Uuid::now_v7().as_bytes().to_vec();
-        service
-            .send_command(Request::new(probe_request(
-                first_node.clone(),
-                first_key.clone(),
-            )))
-            .await
-            .expect("first probe accepted");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while service.state.tasks.available_permits() == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("first probe completed");
-
-        let second = service
-            .send_command(Request::new(probe_request(
-                Uuid::now_v7().as_bytes().to_vec(),
-                Uuid::now_v7().as_bytes().to_vec(),
-            )))
-            .await
-            .expect_err("new key rejected at capacity");
-        assert_eq!(second.code(), tonic::Code::ResourceExhausted);
-        service
-            .send_command(Request::new(probe_request(first_node, first_key.clone())))
-            .await
-            .expect("original key remains idempotent");
-        assert!(
-            service
-                .state
-                .accepted_commands
-                .lock()
-                .await
-                .keys
-                .contains(&first_key)
-        );
-    }
-
-    #[tokio::test]
-    async fn closing_node_cancels_in_flight_probe_events() {
-        let service = StubService::new(8);
-        let node_id = Uuid::now_v7().as_bytes().to_vec();
-        let request = probe_request_with(
-            node_id.clone(),
-            Uuid::now_v7().as_bytes().to_vec(),
-            SimulationProbe {
-                heartbeat_count: 2,
-                delay_millis: 250,
-                duplicate_event: false,
-                return_error: false,
-                disconnect_after: false,
-            },
-        );
-        let traceparent = CommandEnvelope::decode(request.command_envelope.as_slice())
-            .expect("valid command envelope")
-            .traceparent;
-        service
-            .send_command(Request::new(request))
-            .await
-            .expect("probe accepted");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !service.state.nodes.lock().await.contains_key(&node_id) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("node connected");
-
-        service
-            .close_node(Request::new(CloseNodeRequest {
-                node_id: node_id.clone(),
-                reason: "operator close".to_owned(),
-                fence_binding: None,
-            }))
-            .await
-            .expect("connected node closed");
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        let events = service.state.delivery.lock().await.retained.clone();
+    async fn close_node_cancellation_validation_and_subscriber_backpressure() {
+        // Unknown node close fails NotFound without publishing.
+        let svc = StubService::new(8);
         assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.r#type == i32::from(TransportEventType::Disconnected))
+            svc.close_node(close_req(uid(), "test".into()))
+                .await
+                .expect_err("nf")
+                .code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(svc.state.delivery.lock().await.retained.len(), 0);
+
+        // Oversized close reason preserves connection; valid close cancels in-flight probe with traceparent.
+        let node = uid();
+        let req = probe_req(node.clone(), uid(), probe(2, 250));
+        let tp = CommandEnvelope::decode(req.command_envelope.as_slice())
+            .expect("env")
+            .traceparent;
+        svc.send_command(Request::new(req)).await.expect("ok");
+        wait_node(&svc, &node).await;
+        assert_eq!(
+            svc.close_node(close_req(node.clone(), "x".repeat(MAX_COMMAND_BYTES + 1)))
+                .await
+                .expect_err("big")
+                .code(),
+            tonic::Code::ResourceExhausted
+        );
+        assert!(svc.state.nodes.lock().await.contains_key(&node));
+        svc.close_node(close_req(node, "operator close".into()))
+            .await
+            .expect("closed");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let evs = svc.state.delivery.lock().await.retained.clone();
+        assert_eq!(
+            evs.iter()
+                .filter(|e| e.r#type == i32::from(TransportEventType::Disconnected))
                 .count(),
             1
         );
-        assert!(events.iter().all(|event| {
-            event.r#type == i32::from(TransportEventType::Connected)
-                || event.r#type == i32::from(TransportEventType::Disconnected)
-        }));
-        assert_eq!(
-            events
-                .iter()
-                .find(|event| event.r#type == i32::from(TransportEventType::Disconnected))
-                .expect("disconnect published")
-                .traceparent,
-            traceparent
+        assert!(
+            evs.iter()
+                .all(|e| e.r#type == i32::from(TransportEventType::Connected)
+                    || e.r#type == i32::from(TransportEventType::Disconnected))
         );
-    }
+        assert_eq!(
+            evs.iter()
+                .find(|e| e.r#type == i32::from(TransportEventType::Disconnected))
+                .unwrap()
+                .traceparent,
+            tp
+        );
 
-    #[tokio::test]
-    async fn slow_subscriber_does_not_block_node_close() {
-        let service = StubService::new(1);
-        let node_id = Uuid::now_v7().as_bytes().to_vec();
-        let _stream = service
+        // Slow subscriber does not block node close, and closed subscribers are reaped.
+        let s1 = StubService::new(1);
+        let first = s1
             .watch_events(Request::new(WatchEventsRequest::default()))
             .await
-            .expect("watch accepted")
-            .into_inner();
-        service
-            .send_command(Request::new(probe_request_with(
-                node_id.clone(),
-                Uuid::now_v7().as_bytes().to_vec(),
-                SimulationProbe {
-                    heartbeat_count: 2,
-                    delay_millis: 0,
-                    duplicate_event: false,
-                    return_error: false,
-                    disconnect_after: false,
-                },
-            )))
+            .expect("w");
+        drop(first);
+        let _slow = s1
+            .watch_events(Request::new(WatchEventsRequest::default()))
             .await
-            .expect("probe accepted");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !service.state.nodes.lock().await.contains_key(&node_id) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("node connected");
-
+            .expect("w2")
+            .into_inner();
+        let n2 = uid();
+        s1.send_command(Request::new(probe_req(n2.clone(), uid(), probe(2, 0))))
+            .await
+            .expect("ok");
+        wait_node(&s1, &n2).await;
         tokio::time::timeout(
             Duration::from_secs(1),
-            service.close_node(Request::new(CloseNodeRequest {
-                node_id,
-                reason: "operator close".to_owned(),
-                fence_binding: None,
-            })),
+            s1.close_node(close_req(n2, "close".into())),
         )
         .await
-        .expect("close was not blocked by subscriber")
-        .expect("node closed");
-    }
+        .expect("fast")
+        .expect("ok");
 
-    #[tokio::test]
-    async fn cancellation_disconnects_subscribers_skipped_during_fanout() {
-        let service = StubService::new(2);
-        let node_id = Uuid::now_v7().as_bytes().to_vec();
+        // Slow subscriber applies publication backpressure.
+        let bp = StubService::new(1);
+        let nb = uid();
+        let mut stream = bp
+            .watch_events(Request::new(WatchEventsRequest::default()))
+            .await
+            .expect("w")
+            .into_inner();
+        bp.publish(new_event(
+            &nb,
+            TransportEventType::Connected,
+            &new_traceparent(),
+            Vec::new(),
+        ))
+        .await;
+        let pub_task = tokio::spawn({
+            let (bp, nb) = (bp.clone(), nb.clone());
+            async move {
+                bp.publish(new_event(
+                    &nb,
+                    TransportEventType::Heartbeat,
+                    &new_traceparent(),
+                    Vec::new(),
+                ))
+                .await;
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!pub_task.is_finished());
+        assert!(stream.next().await.is_some());
+        tokio::time::timeout(Duration::from_secs(1), pub_task)
+            .await
+            .expect("unblocked")
+            .expect("join");
+
+        // Cancellation disconnects skipped subscribers during fanout.
+        let fan = StubService::new(2);
+        let nf = uid();
         let generation = Uuid::now_v7();
         let (cancellation, _) = watch::channel(false);
-        service.state.nodes.lock().await.insert(
-            node_id.clone(),
+        fan.state.nodes.lock().await.insert(
+            nf.clone(),
             ActiveNode {
                 connection: NodeConnection {
-                    node_id: node_id.clone(),
-                    endpoint_id: Uuid::now_v7().as_bytes().to_vec(),
+                    node_id: nf.clone(),
+                    endpoint_id: uid(),
                     path: ConnectionPath::Direct.into(),
-                    round_trip_time_millis: 0,
                     connected_at: Some(now_timestamp()),
-                    agent_instance_id: Uuid::now_v7().as_bytes().to_vec(),
-                    path_detail: "stub/direct".to_owned(),
+                    agent_instance_id: uid(),
+                    path_detail: "stub/direct".into(),
                     last_seen: Some(now_timestamp()),
-                    negotiated_capabilities: Vec::new(),
-                    authorization_revision: 0,
-                    session_expires_at: None,
-                    owner_epoch: 0,
+                    ..NodeConnection::default()
                 },
                 generation,
                 cancellation: cancellation.clone(),
                 traceparent: new_traceparent(),
             },
         );
-        let _slow = service
+        let _slow2 = fan
             .watch_events(Request::new(WatchEventsRequest::default()))
             .await
-            .expect("slow watch accepted")
+            .expect("s")
             .into_inner();
-        let mut healthy = service
+        let mut healthy = fan
             .watch_events(Request::new(WatchEventsRequest::default()))
             .await
-            .expect("healthy watch accepted")
+            .expect("h")
             .into_inner();
-        for event_type in [TransportEventType::Connected, TransportEventType::Heartbeat] {
-            service
-                .publish(new_event(
-                    &node_id,
-                    event_type,
-                    &new_traceparent(),
-                    Vec::new(),
-                ))
+        for t in [TransportEventType::Connected, TransportEventType::Heartbeat] {
+            fan.publish(new_event(&nf, t, &new_traceparent(), Vec::new()))
                 .await;
         }
-        assert!(healthy.next().await.is_some());
-        assert!(healthy.next().await.is_some());
-
-        let publisher = tokio::spawn({
-            let service = service.clone();
-            let node_id = node_id.clone();
+        assert!(healthy.next().await.is_some() && healthy.next().await.is_some());
+        let p2 = tokio::spawn({
+            let (fan, nf) = (fan.clone(), nf.clone());
             async move {
-                service
-                    .publish_if_active(
-                        &node_id,
-                        generation,
-                        new_event(
-                            &node_id,
-                            TransportEventType::CommandResult,
-                            &new_traceparent(),
-                            Vec::new(),
-                        ),
-                    )
-                    .await
-            }
-        });
-        tokio::task::yield_now().await;
-        assert!(!publisher.is_finished());
-        cancellation.send_replace(true);
-        assert!(
-            !tokio::time::timeout(Duration::from_secs(1), publisher)
-                .await
-                .expect("cancelled publication completed")
-                .expect("publisher task completed")
-        );
-        assert!(service.state.delivery.lock().await.subscribers.is_empty());
-        assert!(healthy.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn oversized_close_reason_preserves_connection() {
-        let service = StubService::new(8);
-        let node_id = Uuid::now_v7().as_bytes().to_vec();
-        service
-            .send_command(Request::new(probe_request_with(
-                node_id.clone(),
-                Uuid::now_v7().as_bytes().to_vec(),
-                SimulationProbe {
-                    heartbeat_count: 1,
-                    delay_millis: 250,
-                    duplicate_event: false,
-                    return_error: false,
-                    disconnect_after: false,
-                },
-            )))
-            .await
-            .expect("probe accepted");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !service.state.nodes.lock().await.contains_key(&node_id) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("node connected");
-
-        let result = service
-            .close_node(Request::new(CloseNodeRequest {
-                node_id: node_id.clone(),
-                reason: "x".repeat(MAX_COMMAND_BYTES + 1),
-                fence_binding: None,
-            }))
-            .await
-            .expect_err("oversized close rejected");
-        assert_eq!(result.code(), tonic::Code::ResourceExhausted);
-        assert!(service.state.nodes.lock().await.contains_key(&node_id));
-        service
-            .close_node(Request::new(CloseNodeRequest {
-                node_id,
-                reason: "cleanup".to_owned(),
-                fence_binding: None,
-            }))
-            .await
-            .expect("valid close accepted");
-    }
-
-    #[tokio::test]
-    async fn closing_unknown_node_does_not_publish() {
-        let service = StubService::new(8);
-        let result = service
-            .close_node(Request::new(CloseNodeRequest {
-                node_id: Uuid::now_v7().as_bytes().to_vec(),
-                reason: "test".to_owned(),
-                fence_binding: None,
-            }))
-            .await;
-
-        assert_eq!(
-            result.expect_err("unknown node rejected").code(),
-            tonic::Code::NotFound,
-        );
-        assert!(service.state.delivery.lock().await.retained.is_empty());
-    }
-
-    #[tokio::test]
-    async fn slow_subscriber_applies_publication_backpressure() {
-        let service = StubService::new(1);
-        let node_id = Uuid::now_v7().as_bytes().to_vec();
-        let mut stream = service
-            .watch_events(Request::new(WatchEventsRequest::default()))
-            .await
-            .expect("watch accepted")
-            .into_inner();
-        service
-            .publish(new_event(
-                &node_id,
-                TransportEventType::Connected,
-                &new_traceparent(),
-                Vec::new(),
-            ))
-            .await;
-        let publisher = tokio::spawn({
-            let service = service.clone();
-            let node_id = node_id.clone();
-            async move {
-                service
-                    .publish(new_event(
-                        &node_id,
-                        TransportEventType::Heartbeat,
+                fan.publish_if_active(
+                    &nf,
+                    generation,
+                    new_event(
+                        &nf,
+                        TransportEventType::CommandResult,
                         &new_traceparent(),
                         Vec::new(),
-                    ))
-                    .await;
+                    ),
+                )
+                .await
             }
         });
         tokio::task::yield_now().await;
-        assert!(!publisher.is_finished());
-        assert!(stream.next().await.is_some());
-        tokio::time::timeout(Duration::from_secs(1), publisher)
-            .await
-            .expect("publisher unblocked")
-            .expect("publisher task completed");
-    }
-
-    #[tokio::test]
-    async fn closed_subscribers_do_not_exhaust_capacity() {
-        let service = StubService::new(1);
-        let first = service
-            .watch_events(Request::new(WatchEventsRequest::default()))
-            .await
-            .expect("first watch accepted");
-        drop(first);
-
-        service
-            .watch_events(Request::new(WatchEventsRequest::default()))
-            .await
-            .expect("closed subscriber reaped");
+        assert!(!p2.is_finished());
+        cancellation.send_replace(true);
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(1), p2)
+                .await
+                .expect("t")
+                .expect("j")
+        );
+        assert_eq!(fan.state.delivery.lock().await.subscribers.len(), 0);
+        assert!(healthy.next().await.is_none());
     }
 }

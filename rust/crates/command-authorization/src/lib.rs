@@ -2083,13 +2083,159 @@ fn invalid(message: &'static str) -> io::Error {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use ed25519_dalek::pkcs8::{EncodePublicKey as _, spki::der::pem::LineEnding};
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+        AgentUpgrade, CommandAuthorizationProof, ConfigApply, SyntheticEcho, command_envelope,
+        complete_config_directive,
+    };
+    use prost_types::Timestamp;
+    use serde_json::Value;
+
+    use super::*;
+
+    type ArtifactMutation = (&'static str, fn(&mut ArtifactGrantV1));
+
+    fn load_fixture(name: &str) -> Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../testdata")
+            .join(name);
+        let raw =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        serde_json::from_str(&raw).expect("fixture json")
+    }
+    fn s<'a>(v: &'a Value, k: &str) -> &'a str {
+        v[k].as_str().unwrap_or_else(|| panic!("{k} string"))
+    }
+    fn u(v: &Value, k: &str) -> u64 {
+        v[k].as_u64().unwrap_or_else(|| panic!("{k} u64"))
+    }
+    fn i(v: &Value, k: &str) -> i64 {
+        v[k].as_i64().unwrap_or_else(|| panic!("{k} i64"))
+    }
+    fn u32v(v: &Value, k: &str) -> u32 {
+        u32::try_from(u(v, k)).expect("u32")
+    }
+    fn fixed<const N: usize>(hex_s: &str) -> [u8; N] {
+        hex::decode(hex_s).expect("hex").try_into().expect("len")
+    }
+    fn opt_fixed<const N: usize>(hex_s: &str) -> Option<[u8; N]> {
+        (!hex_s.is_empty()).then(|| fixed(hex_s))
+    }
+    #[allow(clippy::unnecessary_wraps)]
+    fn ts(sec: i64, nanos: u32) -> Option<Timestamp> {
+        Some(Timestamp {
+            seconds: sec,
+            nanos: i32::try_from(nanos).expect("nanos"),
+        })
+    }
+    fn fixture_keyring(f: &Value) -> ControllerCommandKeyring {
+        let pk = VerifyingKey::from_bytes(&fixed::<32>(s(f, "public_key_hex"))).expect("pk");
+        ControllerCommandKeyring::new([pk]).expect("keyring")
+    }
+    fn str_vec(v: &Value, k: &str) -> Vec<String> {
+        v[k].as_array()
+            .expect("arr")
+            .iter()
+            .map(|x| x.as_str().expect("s").to_owned())
+            .collect()
+    }
+
+    fn fence_from_fixture(f: &Value) -> (ConnectionFenceClaimsV2, ConnectionFenceV2) {
+        let c = ConnectionFenceClaimsV2 {
+            signature_version: u32v(f, "signature_version"),
+            key_id: s(f, "key_id").into(),
+            fence_id: fixed(s(f, "fence_id_hex")),
+            node_id: fixed(s(f, "node_id_hex")),
+            endpoint_id: fixed(s(f, "endpoint_id_hex")),
+            owner_instance_id: fixed(s(f, "owner_instance_id_hex")),
+            owner_incarnation: u(f, "owner_incarnation"),
+            owner_epoch: u(f, "owner_epoch"),
+            connection_id: fixed(s(f, "connection_id_hex")),
+            authorization_revision: u(f, "authorization_revision"),
+            capabilities: str_vec(f, "capabilities"),
+            lease_until_seconds: i(f, "lease_until_seconds"),
+            lease_until_nanos: u32v(f, "lease_until_nanos"),
+            issued_at_seconds: i(f, "issued_at_seconds"),
+            issued_at_nanos: u32v(f, "issued_at_nanos"),
+            expires_at_seconds: i(f, "expires_at_seconds"),
+            expires_at_nanos: u32v(f, "expires_at_nanos"),
+        };
+        let m = ConnectionFenceV2 {
+            signature_version: FenceSignatureVersion::Ed25519V1.into(),
+            key_id: c.key_id.clone(),
+            fence_id: c.fence_id.to_vec(),
+            node_id: c.node_id.to_vec(),
+            endpoint_id: c.endpoint_id.to_vec(),
+            owner_instance_id: c.owner_instance_id.to_vec(),
+            owner_incarnation: c.owner_incarnation,
+            owner_epoch: c.owner_epoch,
+            connection_id: c.connection_id.to_vec(),
+            authorization_revision: c.authorization_revision,
+            capabilities: c.capabilities.clone(),
+            lease_until: ts(c.lease_until_seconds, c.lease_until_nanos),
+            issued_at: ts(c.issued_at_seconds, c.issued_at_nanos),
+            expires_at: ts(c.expires_at_seconds, c.expires_at_nanos),
+            signature: hex::decode(s(f, "signature_hex")).expect("sig"),
+        };
+        (c, m)
+    }
+
+    fn binding_from_fixture(f: &Value) -> (FenceBindingClaimsV2, FenceBindingV2) {
+        let c = FenceBindingClaimsV2 {
+            signature_version: u32v(f, "signature_version"),
+            key_id: s(f, "key_id").into(),
+            operation_kind: u32v(f, "operation_kind"),
+            operation_id: fixed(s(f, "operation_id_hex")),
+            fence_id: fixed(s(f, "fence_id_hex")),
+            node_id: fixed(s(f, "node_id_hex")),
+            endpoint_id: fixed(s(f, "endpoint_id_hex")),
+            owner_instance_id: fixed(s(f, "owner_instance_id_hex")),
+            owner_incarnation: u(f, "owner_incarnation"),
+            owner_epoch: u(f, "owner_epoch"),
+            connection_id: fixed(s(f, "connection_id_hex")),
+            authorization_revision: u(f, "authorization_revision"),
+            capability: s(f, "capability").into(),
+            issued_at_seconds: i(f, "issued_at_seconds"),
+            issued_at_nanos: u32v(f, "issued_at_nanos"),
+            expires_at_seconds: i(f, "expires_at_seconds"),
+            expires_at_nanos: u32v(f, "expires_at_nanos"),
+        };
+        let m = FenceBindingV2 {
+            signature_version: FenceSignatureVersion::Ed25519V1.into(),
+            key_id: c.key_id.clone(),
+            operation_kind: FenceOperationKind::try_from(
+                i32::try_from(c.operation_kind).expect("k"),
+            )
+            .expect("k")
+            .into(),
+            operation_id: c.operation_id.to_vec(),
+            fence_id: c.fence_id.to_vec(),
+            node_id: c.node_id.to_vec(),
+            endpoint_id: c.endpoint_id.to_vec(),
+            owner_instance_id: c.owner_instance_id.to_vec(),
+            owner_incarnation: c.owner_incarnation,
+            owner_epoch: c.owner_epoch,
+            connection_id: c.connection_id.to_vec(),
+            authorization_revision: c.authorization_revision,
+            capability: c.capability.clone(),
+            issued_at: ts(c.issued_at_seconds, c.issued_at_nanos),
+            expires_at: ts(c.expires_at_seconds, c.expires_at_nanos),
+            signature: hex::decode(s(f, "signature_hex")).expect("sig"),
+        };
+        (c, m)
+    }
+
     #[test]
-    fn complete_config_matches_go_identity_vectors() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../../testdata/complete-config-v1.json"))
-                .unwrap();
-        let bytes = |name: &str| hex::decode(fixture[name].as_str().unwrap()).unwrap();
+    fn complete_config_matches_go_identity_and_approval_vectors() {
+        let f = load_fixture("complete-config-v1.json");
+        let bytes = |name: &str| hex::decode(s(&f, name)).unwrap();
         let plan =
             ocservia_contracts::decode_strict_command_envelope(&bytes("plan_proto")).unwrap();
         let Some(command_envelope::Payload::CompleteConfigPlan(plan)) = plan.payload else {
@@ -2103,20 +2249,20 @@ mod tests {
             bytes("candidate_hash")
         );
         for kind in ["plan", "apply"] {
-            let envelope = ocservia_contracts::decode_strict_command_envelope(&bytes(&format!(
+            let env = ocservia_contracts::decode_strict_command_envelope(&bytes(&format!(
                 "{kind}_proto"
             )))
             .unwrap();
             assert_eq!(
-                semantic_payload_hash_v2(&envelope).unwrap().as_slice(),
+                semantic_payload_hash_v2(&env).unwrap().as_slice(),
                 bytes(&format!("{kind}_semantic_hash"))
             );
-            assert!(semantic_payload_hash_v1(&envelope).is_err());
+            assert!(semantic_payload_hash_v1(&env).is_err());
             assert_eq!(
-                payload_authorization(&envelope).unwrap().2,
+                payload_authorization(&env).unwrap().2,
                 format!("ocserv.config.complete.{kind}")
             );
-            let mut changed = envelope.clone();
+            let mut changed = env;
             changed.node_id[0] ^= 1;
             assert!(semantic_payload_hash_v2(&changed).is_err());
         }
@@ -2127,1103 +2273,679 @@ mod tests {
         bad.directives.remove(2);
         assert!(ocservia_contracts::config_profile::canonical(&bad).is_err());
         bad = candidate;
-        if let Some(ocservia_contracts::generated::ocserv::platform::agent::v1::complete_config_directive::Value::Tls(value)) = bad.directives[7].value.as_mut() {
-            value.version = "../escape".into();
+        if let Some(complete_config_directive::Value::Tls(v)) = bad.directives[7].value.as_mut() {
+            v.version = "../escape".into();
         }
         assert!(ocservia_contracts::config_profile::canonical(&bad).is_err());
-    }
-    #[test]
-    fn complete_config_accepts_single_admin_and_preserves_legacy_binding() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../../testdata/complete-config-v1.json"))
-                .unwrap();
-        let mut envelope = ocservia_contracts::decode_strict_command_envelope(
-            &hex::decode(fixture["apply_proto"].as_str().unwrap()).unwrap(),
-        )
-        .unwrap();
-        let legacy = semantic_payload_hash_v2(&envelope).unwrap();
-        envelope.approval_id.clear();
-        assert!(semantic_payload_hash_v2(&envelope).is_err());
-        envelope.approval_request_sha256.clear();
-        let direct = semantic_payload_hash_v2(&envelope).unwrap();
+
+        // Single-admin vs legacy approval binding.
+        let mut env =
+            ocservia_contracts::decode_strict_command_envelope(&bytes("apply_proto")).unwrap();
+        let legacy = semantic_payload_hash_v2(&env).unwrap();
+        env.approval_id.clear();
+        assert!(semantic_payload_hash_v2(&env).is_err());
+        env.approval_request_sha256.clear();
+        let direct = semantic_payload_hash_v2(&env).unwrap();
         assert_ne!(direct, legacy);
-        envelope.approval_id = vec![0; 16];
-        assert!(semantic_payload_hash_v2(&envelope).is_err());
-        envelope.approval_id.clear();
-        if let Some(command_envelope::Payload::CompleteConfigApply(payload)) = &mut envelope.payload
-        {
-            payload.materialized_hash[0] ^= 1;
+        env.approval_id = vec![0; 16];
+        assert!(semantic_payload_hash_v2(&env).is_err());
+        env.approval_id.clear();
+        if let Some(command_envelope::Payload::CompleteConfigApply(p)) = &mut env.payload {
+            p.materialized_hash[0] ^= 1;
         }
-        assert_ne!(semantic_payload_hash_v2(&envelope).unwrap(), direct);
+        assert_ne!(semantic_payload_hash_v2(&env).unwrap(), direct);
     }
-    use std::fs;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use ed25519_dalek::Signer as _;
-    use ed25519_dalek::SigningKey;
-    use ed25519_dalek::pkcs8::{EncodePublicKey as _, spki::der::pem::LineEnding};
-    use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        CommandAuthorizationProof, ConfigApply, SyntheticEcho, command_envelope,
-    };
-    use prost_types::Timestamp;
-    use serde_json::Value;
-
-    use super::*;
 
     #[test]
     fn state_update_operation_identity_matches_the_shared_vector() {
-        // The same vector is asserted by the Go ownersession package; it pins
-        // the domain-separated derivation both sides compute independently.
-        let node_id: [u8; 16] =
-            core::array::from_fn(|index| u8::try_from(index + 1).expect("byte"));
-        let endpoint_id: [u8; 32] =
-            core::array::from_fn(|index| u8::try_from(index).expect("byte"));
-        let operation_id =
-            state_update_operation_id(&node_id, &endpoint_id, 2, 7, "review fixture");
-        assert_eq!(
-            hex::encode(operation_id),
-            "f0229ecacf9bb65589e1897c668a48f7"
-        );
-        // Any carrier change must change the identity.
+        let node: [u8; 16] = core::array::from_fn(|i| u8::try_from(i + 1).expect("b"));
+        let ep: [u8; 32] = core::array::from_fn(|i| u8::try_from(i).expect("b"));
+        let id = state_update_operation_id(&node, &ep, 2, 7, "review fixture");
+        assert_eq!(hex::encode(id), "f0229ecacf9bb65589e1897c668a48f7");
         assert_ne!(
-            state_update_operation_id(&node_id, &endpoint_id, 1, 7, "review fixture"),
-            operation_id
+            state_update_operation_id(&node, &ep, 1, 7, "review fixture"),
+            id
         );
         assert_ne!(
-            state_update_operation_id(&node_id, &endpoint_id, 2, 8, "review fixture"),
-            operation_id
+            state_update_operation_id(&node, &ep, 2, 8, "review fixture"),
+            id
         );
         assert_ne!(
-            state_update_operation_id(&node_id, &endpoint_id, 2, 7, "review fixture "),
-            operation_id
+            state_update_operation_id(&node, &ep, 2, 7, "review fixture "),
+            id
         );
-        let mut other_endpoint = endpoint_id;
-        other_endpoint[0] ^= 1;
+        let mut other_ep = ep;
+        other_ep[0] ^= 1;
         assert_ne!(
-            state_update_operation_id(&node_id, &other_endpoint, 2, 7, "review fixture"),
-            operation_id
+            state_update_operation_id(&node, &other_ep, 2, 7, "review fixture"),
+            id
         );
     }
 
     #[test]
-    fn rust_verifies_go_signatures_and_shared_canonical_vectors() {
-        let fixture = load_fixture();
-        assert_eq!(number(&fixture, "version"), 1);
-        let public_key = VerifyingKey::from_bytes(&fixed::<32>(string(&fixture, "public_key_hex")))
-            .expect("fixture public key");
-        assert_eq!(verification_key_id(&public_key), string(&fixture, "key_id"));
-        let keyring = ControllerCommandKeyring::new([public_key]).expect("fixture keyring");
-
-        for vector in fixture["vectors"].as_array().expect("fixture vectors") {
-            let claims = claims_from_fixture(&fixture, vector);
-            let canonical = canonical_v1(&claims).expect("canonical signing input");
+    fn rust_verifies_go_command_session_and_artifact_vectors() {
+        // Command authorization v1 vectors.
+        let f = load_fixture("command-authorization-v1.json");
+        assert_eq!(u(&f, "version"), 1);
+        let pk = VerifyingKey::from_bytes(&fixed::<32>(s(&f, "public_key_hex"))).expect("pk");
+        assert_eq!(verification_key_id(&pk), s(&f, "key_id"));
+        let kr = ControllerCommandKeyring::new([pk]).expect("kr");
+        for v in f["vectors"].as_array().expect("vectors") {
+            let c = CommandAuthorizationV1 {
+                authorization_version: 1,
+                key_id: s(&f, "key_id").into(),
+                protocol_version: s(v, "protocol_version").into(),
+                command_id: fixed(s(v, "command_id_hex")),
+                idempotency_key: fixed(s(v, "idempotency_key_hex")),
+                node_id: fixed(s(v, "node_id_hex")),
+                operation_id: fixed(s(v, "operation_id_hex")),
+                actor_identity: s(v, "actor_identity").into(),
+                action: s(v, "action").into(),
+                required_capability: s(v, "required_capability").into(),
+                approval_id: opt_fixed(s(v, "approval_id_hex")),
+                approval_request_sha256: opt_fixed(s(v, "approval_request_sha256_hex")),
+                expected_revision: u(v, "expected_revision"),
+                semantic_hash_version: u32v(v, "semantic_hash_version"),
+                semantic_payload_sha256: fixed(s(v, "semantic_payload_sha256_hex")),
+                payload_kind: u32v(v, "payload_kind"),
+                delivery_mode: u32v(v, "delivery_mode"),
+                issued_at_seconds: i(v, "issued_at_seconds"),
+                issued_at_nanos: u32v(v, "issued_at_nanos"),
+                expires_at_seconds: i(v, "expires_at_seconds"),
+                expires_at_nanos: u32v(v, "expires_at_nanos"),
+            };
             assert_eq!(
-                hex::encode(&canonical),
-                string(vector, "canonical_preimage_hex"),
-                "{} canonical mismatch",
-                string(vector, "name")
+                hex::encode(canonical_v1(&c).expect("canon")),
+                s(v, "canonical_preimage_hex"),
+                "{}",
+                s(v, "name")
             );
-            let mut envelope = envelope_from_fixture(&claims);
-            envelope.authorization = Some(CommandAuthorizationProof {
-                version: CommandAuthorizationVersion::V1.into(),
-                key_id: claims.key_id.clone(),
-                signature: hex::decode(string(vector, "signature_hex")).expect("signature hex"),
-            });
-            keyring
-                .verify(&envelope)
-                .unwrap_or_else(|error| panic!("{} Go signature: {error}", string(vector, "name")));
+            let payload = match c.payload_kind {
+                104 => command_envelope::Payload::ConfigApply(ConfigApply::default()),
+                108 => command_envelope::Payload::SyntheticEcho(SyntheticEcho::default()),
+                k => panic!("unsupported payload kind {k}"),
+            };
+            let env = CommandEnvelope {
+                protocol_version: c.protocol_version,
+                command_id: c.command_id.to_vec(),
+                idempotency_key: c.idempotency_key.to_vec(),
+                node_id: c.node_id.to_vec(),
+                operation_id: c.operation_id.to_vec(),
+                issued_at: ts(c.issued_at_seconds, c.issued_at_nanos),
+                expires_at: ts(c.expires_at_seconds, c.expires_at_nanos),
+                expected_revision: c.expected_revision,
+                actor_id: c.actor_identity,
+                action: c.action,
+                required_capability: c.required_capability,
+                approval_id: c.approval_id.map_or_else(Vec::new, |x| x.to_vec()),
+                approval_request_sha256: c
+                    .approval_request_sha256
+                    .map_or_else(Vec::new, |x| x.to_vec()),
+                semantic_payload_hash_version: i32::try_from(c.semantic_hash_version).expect("v"),
+                semantic_payload_sha256: c.semantic_payload_sha256.to_vec(),
+                delivery_mode: i32::try_from(c.delivery_mode).expect("d"),
+                payload: Some(payload),
+                authorization: Some(CommandAuthorizationProof {
+                    version: CommandAuthorizationVersion::V1.into(),
+                    key_id: c.key_id,
+                    signature: hex::decode(s(v, "signature_hex")).expect("sig"),
+                }),
+                ..CommandEnvelope::default()
+            };
+            kr.verify(&env)
+                .unwrap_or_else(|e| panic!("{} Go sig: {e}", s(v, "name")));
         }
-    }
 
-    #[test]
-    fn rust_verifies_go_session_grant_and_shared_canonical_vector() {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../testdata/session-grant-v1.json");
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        let fixture: Value = serde_json::from_str(&raw).expect("session grant fixture");
-        let public_key = VerifyingKey::from_bytes(&fixed::<32>(string(&fixture, "public_key_hex")))
-            .expect("fixture public key");
-        let keyring = ControllerCommandKeyring::new([public_key]).expect("fixture keyring");
-        let capabilities = fixture["negotiated_capabilities"]
-            .as_array()
-            .expect("capability array")
-            .iter()
-            .map(|value| value.as_str().expect("capability string").to_owned())
-            .collect::<Vec<_>>();
-        let claims = SessionGrantClaimsV1 {
-            version: u32::try_from(number(&fixture, "version")).expect("version"),
-            key_id: string(&fixture, "key_id").to_owned(),
-            protocol_major: u32::try_from(number(&fixture, "protocol_major"))
-                .expect("protocol major"),
-            protocol_minor: u32::try_from(number(&fixture, "protocol_minor"))
-                .expect("protocol minor"),
-            node_id: fixed::<16>(string(&fixture, "node_id_hex")),
-            endpoint_id: fixed::<32>(string(&fixture, "endpoint_id_hex")),
-            authorization_revision: number(&fixture, "authorization_revision"),
-            negotiated_capabilities: capabilities,
-            issued_at_seconds: signed_number(&fixture, "issued_at_seconds"),
-            issued_at_nanos: u32::try_from(number(&fixture, "issued_at_nanos"))
-                .expect("issued nanos"),
-            expires_at_seconds: signed_number(&fixture, "expires_at_seconds"),
-            expires_at_nanos: u32::try_from(number(&fixture, "expires_at_nanos"))
-                .expect("expiry nanos"),
+        // Session grant v1 vector.
+        let sf = load_fixture("session-grant-v1.json");
+        let skr = fixture_keyring(&sf);
+        let sc = SessionGrantClaimsV1 {
+            version: u32v(&sf, "version"),
+            key_id: s(&sf, "key_id").into(),
+            protocol_major: u32v(&sf, "protocol_major"),
+            protocol_minor: u32v(&sf, "protocol_minor"),
+            node_id: fixed(s(&sf, "node_id_hex")),
+            endpoint_id: fixed(s(&sf, "endpoint_id_hex")),
+            authorization_revision: u(&sf, "authorization_revision"),
+            negotiated_capabilities: str_vec(&sf, "negotiated_capabilities"),
+            issued_at_seconds: i(&sf, "issued_at_seconds"),
+            issued_at_nanos: u32v(&sf, "issued_at_nanos"),
+            expires_at_seconds: i(&sf, "expires_at_seconds"),
+            expires_at_nanos: u32v(&sf, "expires_at_nanos"),
         };
-        let canonical = canonical_session_grant_v1(&claims).expect("canonical session grant");
         assert_eq!(
-            hex::encode(&canonical),
-            string(&fixture, "canonical_preimage_hex")
+            hex::encode(canonical_session_grant_v1(&sc).expect("sg")),
+            s(&sf, "canonical_preimage_hex")
         );
-        let mut grant = SessionGrantV1 {
+        let mut sg = SessionGrantV1 {
             version: SessionGrantVersion::V1.into(),
-            key_id: claims.key_id.clone(),
-            protocol_major: claims.protocol_major,
-            protocol_minor: claims.protocol_minor,
-            node_id: claims.node_id.to_vec(),
-            endpoint_id: claims.endpoint_id.to_vec(),
-            authorization_revision: claims.authorization_revision,
-            negotiated_capabilities: claims.negotiated_capabilities.clone(),
-            issued_at: Some(Timestamp {
-                seconds: claims.issued_at_seconds,
-                nanos: i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
-            }),
-            expires_at: Some(Timestamp {
-                seconds: claims.expires_at_seconds,
-                nanos: i32::try_from(claims.expires_at_nanos).expect("expiry nanos"),
-            }),
-            signature: hex::decode(string(&fixture, "signature_hex")).expect("signature hex"),
+            key_id: sc.key_id.clone(),
+            protocol_major: sc.protocol_major,
+            protocol_minor: sc.protocol_minor,
+            node_id: sc.node_id.to_vec(),
+            endpoint_id: sc.endpoint_id.to_vec(),
+            authorization_revision: sc.authorization_revision,
+            negotiated_capabilities: sc.negotiated_capabilities.clone(),
+            issued_at: ts(sc.issued_at_seconds, sc.issued_at_nanos),
+            expires_at: ts(sc.expires_at_seconds, sc.expires_at_nanos),
+            signature: hex::decode(s(&sf, "signature_hex")).expect("sig"),
         };
-        let verified = keyring
-            .verify_session_grant(
-                &grant,
-                &claims.node_id,
-                &claims.endpoint_id,
-                claims.issued_at_seconds,
-            )
-            .expect("Go-signed session grant");
         assert_eq!(
-            verified.authorization_revision,
-            claims.authorization_revision
+            skr.verify_session_grant(&sg, &sc.node_id, &sc.endpoint_id, sc.issued_at_seconds)
+                .expect("sg")
+                .authorization_revision,
+            sc.authorization_revision
         );
         assert_eq!(
-            keyring.verify_session_grant(
-                &grant,
-                &claims.node_id,
-                &claims.endpoint_id,
-                claims.expires_at_seconds,
-            ),
+            skr.verify_session_grant(&sg, &sc.node_id, &sc.endpoint_id, sc.expires_at_seconds),
             Err(AuthorizationError::ClaimsInvalid("session_grant_expired"))
         );
-
-        let mut unknown_key = grant.clone();
-        unknown_key.key_id = "ed25519-sha256:unknown".to_owned();
+        let mut bad_sg = sg.clone();
+        bad_sg.key_id = "ed25519-sha256:unknown".into();
         assert_eq!(
-            keyring.verify_session_grant(
-                &unknown_key,
-                &claims.node_id,
-                &claims.endpoint_id,
-                claims.issued_at_seconds,
-            ),
+            skr.verify_session_grant(&bad_sg, &sc.node_id, &sc.endpoint_id, sc.issued_at_seconds),
             Err(AuthorizationError::UnknownKey)
         );
-
-        grant.authorization_revision += 1;
+        sg.authorization_revision += 1;
         assert_eq!(
-            keyring.verify_session_grant(
-                &grant,
-                &claims.node_id,
-                &claims.endpoint_id,
-                claims.issued_at_seconds,
-            ),
+            skr.verify_session_grant(&sg, &sc.node_id, &sc.endpoint_id, sc.issued_at_seconds),
             Err(AuthorizationError::SignatureInvalid)
         );
-    }
 
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn rust_verifies_go_artifact_grant_and_rejects_modified_or_expired_claims() {
-        type ArtifactMutation = (&'static str, fn(&mut ArtifactGrantV1));
-
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../testdata/artifact-grant-v1.json");
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        let fixture: Value = serde_json::from_str(&raw).expect("artifact grant fixture");
-        let public_key = VerifyingKey::from_bytes(&fixed::<32>(string(&fixture, "public_key_hex")))
-            .expect("fixture public key");
-        let keyring = ControllerCommandKeyring::new([public_key]).expect("fixture keyring");
-        let claims = ArtifactGrantClaimsV1 {
-            version: u32::try_from(number(&fixture, "version")).expect("version"),
-            key_id: string(&fixture, "key_id").to_owned(),
-            node_id: fixed::<16>(string(&fixture, "node_id_hex")),
-            artifact_id: fixed::<16>(string(&fixture, "artifact_id_hex")),
-            certificate_id: fixed::<16>(string(&fixture, "certificate_id_hex")),
-            certificate_version: number(&fixture, "certificate_version"),
-            operation_id: fixed::<16>(string(&fixture, "operation_id_hex")),
-            authorized_subject: string(&fixture, "authorized_subject").to_owned(),
-            purpose: string(&fixture, "purpose").to_owned(),
-            max_bytes: number(&fixture, "max_bytes"),
-            issued_at_seconds: signed_number(&fixture, "issued_at_seconds"),
-            issued_at_nanos: u32::try_from(number(&fixture, "issued_at_nanos"))
-                .expect("issued nanos"),
-            expires_at_seconds: signed_number(&fixture, "expires_at_seconds"),
-            expires_at_nanos: u32::try_from(number(&fixture, "expires_at_nanos"))
-                .expect("expiry nanos"),
-            grant_id: fixed::<16>(string(&fixture, "grant_id_hex")),
+        // Artifact grant v1 vector.
+        let af = load_fixture("artifact-grant-v1.json");
+        let akr = fixture_keyring(&af);
+        let ac = ArtifactGrantClaimsV1 {
+            version: u32v(&af, "version"),
+            key_id: s(&af, "key_id").into(),
+            node_id: fixed(s(&af, "node_id_hex")),
+            artifact_id: fixed(s(&af, "artifact_id_hex")),
+            certificate_id: fixed(s(&af, "certificate_id_hex")),
+            certificate_version: u(&af, "certificate_version"),
+            operation_id: fixed(s(&af, "operation_id_hex")),
+            authorized_subject: s(&af, "authorized_subject").into(),
+            purpose: s(&af, "purpose").into(),
+            max_bytes: u(&af, "max_bytes"),
+            issued_at_seconds: i(&af, "issued_at_seconds"),
+            issued_at_nanos: u32v(&af, "issued_at_nanos"),
+            expires_at_seconds: i(&af, "expires_at_seconds"),
+            expires_at_nanos: u32v(&af, "expires_at_nanos"),
+            grant_id: fixed(s(&af, "grant_id_hex")),
         };
-        let canonical = canonical_artifact_grant_v1(&claims).expect("canonical artifact grant");
         assert_eq!(
-            hex::encode(canonical),
-            string(&fixture, "canonical_preimage_hex")
+            hex::encode(canonical_artifact_grant_v1(&ac).expect("ag")),
+            s(&af, "canonical_preimage_hex")
         );
-        let grant = ArtifactGrantV1 {
+        let ag = ArtifactGrantV1 {
             version: ArtifactGrantVersion::V1.into(),
-            key_id: claims.key_id.clone(),
-            node_id: claims.node_id.to_vec(),
-            artifact_id: claims.artifact_id.to_vec(),
-            certificate_id: claims.certificate_id.to_vec(),
-            certificate_version: claims.certificate_version,
-            operation_id: claims.operation_id.to_vec(),
-            authorized_subject: claims.authorized_subject.clone(),
-            purpose: claims.purpose.clone(),
-            max_bytes: claims.max_bytes,
-            issued_at: Some(Timestamp {
-                seconds: claims.issued_at_seconds,
-                nanos: i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
-            }),
-            expires_at: Some(Timestamp {
-                seconds: claims.expires_at_seconds,
-                nanos: i32::try_from(claims.expires_at_nanos).expect("expiry nanos"),
-            }),
-            grant_id: claims.grant_id.to_vec(),
-            signature: hex::decode(string(&fixture, "signature_hex")).expect("signature hex"),
+            key_id: ac.key_id.clone(),
+            node_id: ac.node_id.to_vec(),
+            artifact_id: ac.artifact_id.to_vec(),
+            certificate_id: ac.certificate_id.to_vec(),
+            certificate_version: ac.certificate_version,
+            operation_id: ac.operation_id.to_vec(),
+            authorized_subject: ac.authorized_subject.clone(),
+            purpose: ac.purpose.clone(),
+            max_bytes: ac.max_bytes,
+            issued_at: ts(ac.issued_at_seconds, ac.issued_at_nanos),
+            expires_at: ts(ac.expires_at_seconds, ac.expires_at_nanos),
+            grant_id: ac.grant_id.to_vec(),
+            signature: hex::decode(s(&af, "signature_hex")).expect("sig"),
         };
-        keyring
-            .verify_artifact_grant(
-                &grant,
-                &claims.node_id,
-                &claims.artifact_id,
-                &claims.purpose,
-                claims.max_bytes,
-                claims.issued_at_seconds,
-            )
-            .expect("Go-signed artifact grant");
+        akr.verify_artifact_grant(
+            &ag,
+            &ac.node_id,
+            &ac.artifact_id,
+            &ac.purpose,
+            ac.max_bytes,
+            ac.issued_at_seconds,
+        )
+        .expect("ag");
         assert_eq!(
-            keyring.verify_artifact_grant(
-                &grant,
-                &claims.node_id,
-                &claims.artifact_id,
-                &claims.purpose,
-                claims.max_bytes,
-                claims.expires_at_seconds,
+            akr.verify_artifact_grant(
+                &ag,
+                &ac.node_id,
+                &ac.artifact_id,
+                &ac.purpose,
+                ac.max_bytes,
+                ac.expires_at_seconds
             ),
             Err(AuthorizationError::ClaimsInvalid("artifact_grant_expired"))
         );
-        keyring
-            .verify_artifact_grant_for_confirmation(
-                &grant,
-                &claims.node_id,
-                &claims.artifact_id,
-                &claims.purpose,
-                claims.max_bytes,
-                claims.expires_at_seconds,
-            )
-            .expect("expired exact grant remains valid only for read-only confirmation");
-        let mut forged_confirmation = grant.clone();
-        forged_confirmation.signature[0] ^= 1;
+        akr.verify_artifact_grant_for_confirmation(
+            &ag,
+            &ac.node_id,
+            &ac.artifact_id,
+            &ac.purpose,
+            ac.max_bytes,
+            ac.expires_at_seconds,
+        )
+        .expect("confirm");
+        let mut forged = ag.clone();
+        forged.signature[0] ^= 1;
         assert_eq!(
-            keyring.verify_artifact_grant_for_confirmation(
-                &forged_confirmation,
-                &claims.node_id,
-                &claims.artifact_id,
-                &claims.purpose,
-                claims.max_bytes,
-                claims.expires_at_seconds,
+            akr.verify_artifact_grant_for_confirmation(
+                &forged,
+                &ac.node_id,
+                &ac.artifact_id,
+                &ac.purpose,
+                ac.max_bytes,
+                ac.expires_at_seconds
             ),
             Err(AuthorizationError::SignatureInvalid)
         );
-
-        let mut unknown_key = grant.clone();
-        unknown_key.key_id = "ed25519-sha256:unknown".to_owned();
+        let mut unk = ag.clone();
+        unk.key_id = "ed25519-sha256:unknown".into();
         assert_eq!(
-            keyring.verify_artifact_grant(
-                &unknown_key,
-                &claims.node_id,
-                &claims.artifact_id,
-                &claims.purpose,
-                claims.max_bytes,
-                claims.issued_at_seconds,
+            akr.verify_artifact_grant(
+                &unk,
+                &ac.node_id,
+                &ac.artifact_id,
+                &ac.purpose,
+                ac.max_bytes,
+                ac.issued_at_seconds
             ),
             Err(AuthorizationError::UnknownKey)
         );
-
-        let mut wrong_node = claims.node_id;
+        let mut wrong_node = ac.node_id;
         wrong_node[0] ^= 1;
         assert_eq!(
-            keyring.verify_artifact_grant(
-                &grant,
+            akr.verify_artifact_grant(
+                &ag,
                 &wrong_node,
-                &claims.artifact_id,
-                &claims.purpose,
-                claims.max_bytes,
-                claims.issued_at_seconds,
+                &ac.artifact_id,
+                &ac.purpose,
+                ac.max_bytes,
+                ac.issued_at_seconds
             ),
             Err(AuthorizationError::ClaimsInvalid(
                 "artifact_grant_node_mismatch"
             ))
         );
-
         let mutations: [ArtifactMutation; 4] = [
-            ("certificate version", |value: &mut ArtifactGrantV1| {
-                value.certificate_version += 1;
-            }),
-            ("operation", |value: &mut ArtifactGrantV1| {
-                value.operation_id[0] ^= 1;
-            }),
-            ("grant ID", |value: &mut ArtifactGrantV1| {
-                value.grant_id[0] ^= 1;
-            }),
-            ("signature", |value: &mut ArtifactGrantV1| {
-                value.signature[0] ^= 1;
-            }),
+            ("cert_ver", |v| v.certificate_version += 1),
+            ("op", |v| v.operation_id[0] ^= 1),
+            ("grant_id", |v| v.grant_id[0] ^= 1),
+            ("sig", |v| v.signature[0] ^= 1),
         ];
-        for (name, mutate) in mutations {
-            let mut modified = grant.clone();
-            mutate(&mut modified);
+        for (name, m) in mutations {
+            let mut mod_g = ag.clone();
+            m(&mut mod_g);
             assert_eq!(
-                keyring.verify_artifact_grant(
-                    &modified,
-                    &claims.node_id,
-                    &claims.artifact_id,
-                    &claims.purpose,
-                    claims.max_bytes,
-                    claims.issued_at_seconds,
+                akr.verify_artifact_grant(
+                    &mod_g,
+                    &ac.node_id,
+                    &ac.artifact_id,
+                    &ac.purpose,
+                    ac.max_bytes,
+                    ac.issued_at_seconds
                 ),
                 Err(AuthorizationError::SignatureInvalid),
-                "{name} mutation"
+                "{name}"
             );
         }
     }
 
     #[test]
-    fn verification_key_loader_rejects_unsafe_paths() {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let directory = std::env::current_dir()
-            .expect("current directory")
-            .join(format!(".command-key-test-{}-{suffix}", std::process::id()));
-        fs::create_dir(&directory).expect("create test directory");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("secure directory mode");
-        let key_path = directory.join("controller.pem");
-        let key = SigningKey::from_bytes(&[7; 32]).verifying_key();
-        fs::write(
-            &key_path,
-            key.to_public_key_pem(LineEnding::LF).expect("public PEM"),
+    fn rust_verifies_go_fence_v2_binding_nanosecond_bounds_and_domain_separation() {
+        let ff = load_fixture("connection-fence-v2.json");
+        let kr = fixture_keyring(&ff);
+        let (fc, fence) = fence_from_fixture(&ff);
+        let fcanon = canonical_connection_fence_v2(&fc).expect("canon fence");
+        assert_eq!(hex::encode(&fcanon), s(&ff, "canonical_preimage_hex"));
+        let vf = kr
+            .verify_connection_fence_v2(&fence, &fc.node_id, &fc.endpoint_id, 1_700_000_100)
+            .expect("vf");
+        assert_eq!(
+            (
+                vf.fence_id,
+                vf.owner_instance_id,
+                vf.owner_incarnation,
+                vf.owner_epoch,
+                vf.connection_id,
+                vf.authorization_revision,
+                vf.lease_until_seconds
+            ),
+            (
+                fc.fence_id,
+                fc.owner_instance_id,
+                fc.owner_incarnation,
+                fc.owner_epoch,
+                fc.connection_id,
+                fc.authorization_revision,
+                fc.lease_until_seconds
+            )
+        );
+        assert_eq!(vf.capabilities, fc.capabilities);
+        assert_eq!(
+            kr.verify_connection_fence_v2(&fence, &[9; 16], &fc.endpoint_id, 1_700_000_100),
+            Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_node_mismatch"
+            ))
+        );
+        assert_eq!(
+            kr.verify_connection_fence_v2(&fence, &fc.node_id, &[9; 32], 1_700_000_100),
+            Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_endpoint_mismatch"
+            ))
+        );
+        let mut tamp = fence.clone();
+        tamp.owner_epoch += 1;
+        assert_eq!(
+            kr.verify_connection_fence_v2(&tamp, &fc.node_id, &fc.endpoint_id, 1_700_000_100),
+            Err(AuthorizationError::SignatureInvalid)
+        );
+        assert_eq!(
+            kr.verify_connection_fence_v2(&fence, &fc.node_id, &fc.endpoint_id, 1_700_000_301),
+            Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_expired"
+            ))
+        );
+
+        // Nanosecond bounds on fence v2.
+        let skew = fc
+            .issued_at_seconds
+            .checked_sub(MAX_FUTURE_SKEW_SECONDS)
+            .expect("skew");
+        kr.verify_connection_fence_v2_at(
+            &fence,
+            &fc.node_id,
+            &fc.endpoint_id,
+            fc.expires_at_seconds,
+            fc.expires_at_nanos - 1,
         )
-        .expect("write public key");
-        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect("secure key mode");
-        let uid = rustix::process::geteuid().as_raw();
-        let gid = rustix::process::getegid().as_raw();
+        .expect("1ns before");
         assert_eq!(
-            load_verification_key(&key_path, uid, gid).expect("safe key"),
-            key
-        );
-
-        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).expect("unsafe key mode");
-        assert!(load_verification_key(&key_path, uid, gid).is_err());
-        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
-            .expect("restore key mode");
-        let link_path = directory.join("controller-link.pem");
-        symlink(&key_path, &link_path).expect("key symlink");
-        assert!(load_verification_key(&link_path, uid, gid).is_err());
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o770))
-            .expect("unsafe ancestry mode");
-        assert!(load_verification_key(&key_path, uid, gid).is_err());
-
-        fs::remove_file(&link_path).expect("remove link");
-        fs::remove_file(&key_path).expect("remove key");
-        fs::remove_dir(&directory).expect("remove test directory");
-    }
-
-    #[test]
-    fn shared_agent_privd_key_requires_root_group_readable_metadata() {
-        let agent_owner = 997;
-        let agent_group = 998;
-        let allowed_for_agent = |uid, gid, mode| {
-            verification_key_metadata_allowed(uid, gid, mode, agent_owner, agent_group)
-        };
-        let allowed_for_privd =
-            |uid, gid, mode| verification_key_metadata_allowed(uid, gid, mode, 0, agent_group);
-
-        for mode in [0o440, 0o640] {
-            assert!(allowed_for_agent(0, agent_group, mode));
-            assert!(allowed_for_privd(0, agent_group, mode));
-        }
-
-        for mode in [0o400, 0o600] {
-            assert!(allowed_for_agent(agent_owner, agent_group, mode));
-            assert!(!allowed_for_privd(agent_owner, agent_group, mode));
-            assert!(!allowed_for_agent(0, agent_group, mode));
-            assert!(allowed_for_privd(0, agent_group, mode));
-        }
-
-        assert!(!allowed_for_agent(0, agent_group + 1, 0o640));
-        assert!(!allowed_for_privd(0, agent_group + 1, 0o640));
-    }
-
-    fn load_fixture() -> Value {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../testdata/command-authorization-v1.json");
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        serde_json::from_str(&raw)
-            .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
-    }
-
-    fn claims_from_fixture(document: &Value, vector: &Value) -> CommandAuthorizationV1 {
-        CommandAuthorizationV1 {
-            authorization_version: 1,
-            key_id: string(document, "key_id").to_owned(),
-            protocol_version: string(vector, "protocol_version").to_owned(),
-            command_id: fixed::<16>(string(vector, "command_id_hex")),
-            idempotency_key: fixed::<16>(string(vector, "idempotency_key_hex")),
-            node_id: fixed::<16>(string(vector, "node_id_hex")),
-            operation_id: fixed::<16>(string(vector, "operation_id_hex")),
-            actor_identity: string(vector, "actor_identity").to_owned(),
-            action: string(vector, "action").to_owned(),
-            required_capability: string(vector, "required_capability").to_owned(),
-            approval_id: optional_fixed_hex::<16>(string(vector, "approval_id_hex")),
-            approval_request_sha256: optional_fixed_hex::<32>(string(
-                vector,
-                "approval_request_sha256_hex",
-            )),
-            expected_revision: number(vector, "expected_revision"),
-            semantic_hash_version: u32::try_from(number(vector, "semantic_hash_version"))
-                .expect("semantic version"),
-            semantic_payload_sha256: fixed::<32>(string(vector, "semantic_payload_sha256_hex")),
-            payload_kind: u32::try_from(number(vector, "payload_kind")).expect("payload kind"),
-            delivery_mode: u32::try_from(number(vector, "delivery_mode")).expect("delivery mode"),
-            issued_at_seconds: signed_number(vector, "issued_at_seconds"),
-            issued_at_nanos: u32::try_from(number(vector, "issued_at_nanos"))
-                .expect("issued nanos"),
-            expires_at_seconds: signed_number(vector, "expires_at_seconds"),
-            expires_at_nanos: u32::try_from(number(vector, "expires_at_nanos"))
-                .expect("expiry nanos"),
-        }
-    }
-
-    fn envelope_from_fixture(claims: &CommandAuthorizationV1) -> CommandEnvelope {
-        let payload = match claims.payload_kind {
-            104 => command_envelope::Payload::ConfigApply(ConfigApply::default()),
-            108 => command_envelope::Payload::SyntheticEcho(SyntheticEcho::default()),
-            kind => panic!("unsupported fixture payload kind {kind}"),
-        };
-        CommandEnvelope {
-            protocol_version: claims.protocol_version.clone(),
-            command_id: claims.command_id.to_vec(),
-            idempotency_key: claims.idempotency_key.to_vec(),
-            node_id: claims.node_id.to_vec(),
-            operation_id: claims.operation_id.to_vec(),
-            issued_at: Some(Timestamp {
-                seconds: claims.issued_at_seconds,
-                nanos: i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
-            }),
-            expires_at: Some(Timestamp {
-                seconds: claims.expires_at_seconds,
-                nanos: i32::try_from(claims.expires_at_nanos).expect("expiry nanos"),
-            }),
-            expected_revision: claims.expected_revision,
-            actor_id: claims.actor_identity.clone(),
-            action: claims.action.clone(),
-            required_capability: claims.required_capability.clone(),
-            approval_id: claims
-                .approval_id
-                .map_or_else(Vec::new, |value| value.to_vec()),
-            approval_request_sha256: claims
-                .approval_request_sha256
-                .map_or_else(Vec::new, |value| value.to_vec()),
-            semantic_payload_hash_version: i32::try_from(claims.semantic_hash_version)
-                .expect("semantic version"),
-            semantic_payload_sha256: claims.semantic_payload_sha256.to_vec(),
-            delivery_mode: i32::try_from(claims.delivery_mode).expect("delivery mode"),
-            payload: Some(payload),
-            authorization: None,
-            ..CommandEnvelope::default()
-        }
-    }
-
-    fn string<'a>(value: &'a Value, name: &str) -> &'a str {
-        value[name]
-            .as_str()
-            .unwrap_or_else(|| panic!("fixture field {name} must be a string"))
-    }
-
-    fn number(value: &Value, name: &str) -> u64 {
-        value[name]
-            .as_u64()
-            .unwrap_or_else(|| panic!("fixture field {name} must be u64"))
-    }
-
-    fn signed_number(value: &Value, name: &str) -> i64 {
-        value[name]
-            .as_i64()
-            .unwrap_or_else(|| panic!("fixture field {name} must be i64"))
-    }
-
-    fn fixed<const N: usize>(value: &str) -> [u8; N] {
-        hex::decode(value)
-            .expect("fixture hex")
-            .try_into()
-            .unwrap_or_else(|_| panic!("fixture hex must contain {N} bytes"))
-    }
-
-    fn optional_fixed_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
-        (!value.is_empty()).then(|| fixed(value))
-    }
-
-    fn load_v2_fixture(name: &str) -> Value {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../testdata")
-            .join(name);
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        serde_json::from_str(&raw).expect("V2 fixture")
-    }
-
-    fn v2_keyring(fixture: &Value) -> ControllerCommandKeyring {
-        let public_key = VerifyingKey::from_bytes(&fixed::<32>(string(fixture, "public_key_hex")))
-            .expect("fixture public key");
-        ControllerCommandKeyring::new([public_key]).expect("fixture keyring")
-    }
-
-    fn fence_claims_from_fixture(fixture: &Value) -> ConnectionFenceClaimsV2 {
-        let capabilities = fixture["capabilities"]
-            .as_array()
-            .expect("capability array")
-            .iter()
-            .map(|value| value.as_str().expect("capability string").to_owned())
-            .collect::<Vec<_>>();
-        ConnectionFenceClaimsV2 {
-            signature_version: u32::try_from(number(fixture, "signature_version"))
-                .expect("signature version"),
-            key_id: string(fixture, "key_id").to_owned(),
-            fence_id: fixed::<16>(string(fixture, "fence_id_hex")),
-            node_id: fixed::<16>(string(fixture, "node_id_hex")),
-            endpoint_id: fixed::<32>(string(fixture, "endpoint_id_hex")),
-            owner_instance_id: fixed::<16>(string(fixture, "owner_instance_id_hex")),
-            owner_incarnation: number(fixture, "owner_incarnation"),
-            owner_epoch: number(fixture, "owner_epoch"),
-            connection_id: fixed::<16>(string(fixture, "connection_id_hex")),
-            authorization_revision: number(fixture, "authorization_revision"),
-            capabilities,
-            lease_until_seconds: signed_number(fixture, "lease_until_seconds"),
-            lease_until_nanos: u32::try_from(number(fixture, "lease_until_nanos"))
-                .expect("lease nanos"),
-            issued_at_seconds: signed_number(fixture, "issued_at_seconds"),
-            issued_at_nanos: u32::try_from(number(fixture, "issued_at_nanos"))
-                .expect("issued nanos"),
-            expires_at_seconds: signed_number(fixture, "expires_at_seconds"),
-            expires_at_nanos: u32::try_from(number(fixture, "expires_at_nanos"))
-                .expect("expiry nanos"),
-        }
-    }
-
-    fn fence_message_from_fixture(
-        fixture: &Value,
-        claims: &ConnectionFenceClaimsV2,
-    ) -> ConnectionFenceV2 {
-        ConnectionFenceV2 {
-            signature_version: FenceSignatureVersion::Ed25519V1.into(),
-            key_id: claims.key_id.clone(),
-            fence_id: claims.fence_id.to_vec(),
-            node_id: claims.node_id.to_vec(),
-            endpoint_id: claims.endpoint_id.to_vec(),
-            owner_instance_id: claims.owner_instance_id.to_vec(),
-            owner_incarnation: claims.owner_incarnation,
-            owner_epoch: claims.owner_epoch,
-            connection_id: claims.connection_id.to_vec(),
-            authorization_revision: claims.authorization_revision,
-            capabilities: claims.capabilities.clone(),
-            lease_until: Some(Timestamp {
-                seconds: claims.lease_until_seconds,
-                nanos: i32::try_from(claims.lease_until_nanos).expect("lease nanos"),
-            }),
-            issued_at: Some(Timestamp {
-                seconds: claims.issued_at_seconds,
-                nanos: i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
-            }),
-            expires_at: Some(Timestamp {
-                seconds: claims.expires_at_seconds,
-                nanos: i32::try_from(claims.expires_at_nanos).expect("expiry nanos"),
-            }),
-            signature: hex::decode(string(fixture, "signature_hex")).expect("signature hex"),
-        }
-    }
-
-    fn binding_claims_from_fixture(fixture: &Value) -> FenceBindingClaimsV2 {
-        FenceBindingClaimsV2 {
-            signature_version: u32::try_from(number(fixture, "signature_version"))
-                .expect("signature version"),
-            key_id: string(fixture, "key_id").to_owned(),
-            operation_kind: u32::try_from(number(fixture, "operation_kind"))
-                .expect("operation kind"),
-            operation_id: fixed::<16>(string(fixture, "operation_id_hex")),
-            fence_id: fixed::<16>(string(fixture, "fence_id_hex")),
-            node_id: fixed::<16>(string(fixture, "node_id_hex")),
-            endpoint_id: fixed::<32>(string(fixture, "endpoint_id_hex")),
-            owner_instance_id: fixed::<16>(string(fixture, "owner_instance_id_hex")),
-            owner_incarnation: number(fixture, "owner_incarnation"),
-            owner_epoch: number(fixture, "owner_epoch"),
-            connection_id: fixed::<16>(string(fixture, "connection_id_hex")),
-            authorization_revision: number(fixture, "authorization_revision"),
-            capability: string(fixture, "capability").to_owned(),
-            issued_at_seconds: signed_number(fixture, "issued_at_seconds"),
-            issued_at_nanos: u32::try_from(number(fixture, "issued_at_nanos"))
-                .expect("issued nanos"),
-            expires_at_seconds: signed_number(fixture, "expires_at_seconds"),
-            expires_at_nanos: u32::try_from(number(fixture, "expires_at_nanos"))
-                .expect("expiry nanos"),
-        }
-    }
-
-    fn binding_message_from_fixture(
-        fixture: &Value,
-        claims: &FenceBindingClaimsV2,
-    ) -> FenceBindingV2 {
-        FenceBindingV2 {
-            signature_version: FenceSignatureVersion::Ed25519V1.into(),
-            key_id: claims.key_id.clone(),
-            operation_kind: FenceOperationKind::try_from(
-                i32::try_from(claims.operation_kind).expect("operation kind"),
-            )
-            .expect("operation kind")
-            .into(),
-            operation_id: claims.operation_id.to_vec(),
-            fence_id: claims.fence_id.to_vec(),
-            node_id: claims.node_id.to_vec(),
-            endpoint_id: claims.endpoint_id.to_vec(),
-            owner_instance_id: claims.owner_instance_id.to_vec(),
-            owner_incarnation: claims.owner_incarnation,
-            owner_epoch: claims.owner_epoch,
-            connection_id: claims.connection_id.to_vec(),
-            authorization_revision: claims.authorization_revision,
-            capability: claims.capability.clone(),
-            issued_at: Some(Timestamp {
-                seconds: claims.issued_at_seconds,
-                nanos: i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
-            }),
-            expires_at: Some(Timestamp {
-                seconds: claims.expires_at_seconds,
-                nanos: i32::try_from(claims.expires_at_nanos).expect("expiry nanos"),
-            }),
-            signature: hex::decode(string(fixture, "signature_hex")).expect("signature hex"),
-        }
-    }
-
-    #[test]
-    fn rust_verifies_go_connection_fence_v2_and_shared_canonical_vector() {
-        let fixture = load_v2_fixture("connection-fence-v2.json");
-        let keyring = v2_keyring(&fixture);
-        let claims = fence_claims_from_fixture(&fixture);
-        let canonical = canonical_connection_fence_v2(&claims).expect("canonical fence");
-        assert_eq!(
-            hex::encode(&canonical),
-            string(&fixture, "canonical_preimage_hex")
-        );
-        let fence = fence_message_from_fixture(&fixture, &claims);
-        let verified = keyring
-            .verify_connection_fence_v2(&fence, &claims.node_id, &claims.endpoint_id, 1_700_000_100)
-            .expect("verified fence");
-        assert_eq!(verified.fence_id, claims.fence_id);
-        assert_eq!(verified.owner_instance_id, claims.owner_instance_id);
-        assert_eq!(verified.owner_incarnation, claims.owner_incarnation);
-        assert_eq!(verified.owner_epoch, claims.owner_epoch);
-        assert_eq!(verified.connection_id, claims.connection_id);
-        assert_eq!(
-            verified.authorization_revision,
-            claims.authorization_revision
-        );
-        assert_eq!(verified.capabilities, claims.capabilities);
-        assert_eq!(verified.lease_until_seconds, claims.lease_until_seconds);
-
-        // Wrong node or endpoint never verifies, even with a valid signature.
-        let err = keyring
-            .verify_connection_fence_v2(&fence, &[9; 16], &claims.endpoint_id, 1_700_000_100)
-            .expect_err("wrong node");
-        assert_eq!(
-            err,
-            AuthorizationError::ClaimsInvalid("connection_fence_node_mismatch")
-        );
-        let err = keyring
-            .verify_connection_fence_v2(&fence, &claims.node_id, &[9; 32], 1_700_000_100)
-            .expect_err("wrong endpoint");
-        assert_eq!(
-            err,
-            AuthorizationError::ClaimsInvalid("connection_fence_endpoint_mismatch")
-        );
-
-        // A tampered epoch invalidates the signature, and an expired fence is
-        // rejected before signature evaluation.
-        let mut tampered = fence.clone();
-        tampered.owner_epoch += 1;
-        let err = keyring
-            .verify_connection_fence_v2(
-                &tampered,
-                &claims.node_id,
-                &claims.endpoint_id,
-                1_700_000_100,
-            )
-            .expect_err("tampered epoch");
-        assert_eq!(err, AuthorizationError::SignatureInvalid);
-        let err = keyring
-            .verify_connection_fence_v2(&fence, &claims.node_id, &claims.endpoint_id, 1_700_000_301)
-            .expect_err("expired fence");
-        assert_eq!(
-            err,
-            AuthorizationError::ClaimsInvalid("connection_fence_expired")
-        );
-    }
-
-    #[test]
-    fn connection_fence_v2_time_bounds_are_nanosecond_precise() {
-        let fixture = load_v2_fixture("connection-fence-v2.json");
-        let keyring = v2_keyring(&fixture);
-        let claims = fence_claims_from_fixture(&fixture);
-        let fence = fence_message_from_fixture(&fixture, &claims);
-
-        keyring
-            .verify_connection_fence_v2_at(
+            kr.verify_connection_fence_v2_at(
                 &fence,
-                &claims.node_id,
-                &claims.endpoint_id,
-                claims.expires_at_seconds,
-                claims
-                    .expires_at_nanos
-                    .checked_sub(1)
-                    .expect("expiry nanos"),
-            )
-            .expect("one nanosecond before expiry");
-        let err = keyring
-            .verify_connection_fence_v2_at(
-                &fence,
-                &claims.node_id,
-                &claims.endpoint_id,
-                claims.expires_at_seconds,
-                claims.expires_at_nanos,
-            )
-            .expect_err("exact expiry deadline");
-        assert_eq!(
-            err,
-            AuthorizationError::ClaimsInvalid("connection_fence_expired")
+                &fc.node_id,
+                &fc.endpoint_id,
+                fc.expires_at_seconds,
+                fc.expires_at_nanos
+            ),
+            Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_expired"
+            ))
         );
-
-        let future_skew_boundary = claims
-            .issued_at_seconds
-            .checked_sub(MAX_FUTURE_SKEW_SECONDS)
-            .expect("future skew boundary");
-        keyring
-            .verify_connection_fence_v2_at(
-                &fence,
-                &claims.node_id,
-                &claims.endpoint_id,
-                future_skew_boundary,
-                claims.issued_at_nanos,
-            )
-            .expect("exact future skew boundary");
-        let err = keyring
-            .verify_connection_fence_v2_at(
-                &fence,
-                &claims.node_id,
-                &claims.endpoint_id,
-                future_skew_boundary,
-                claims.issued_at_nanos.checked_sub(1).expect("issued nanos"),
-            )
-            .expect_err("one nanosecond beyond future skew");
+        kr.verify_connection_fence_v2_at(
+            &fence,
+            &fc.node_id,
+            &fc.endpoint_id,
+            skew,
+            fc.issued_at_nanos,
+        )
+        .expect("exact skew");
         assert_eq!(
-            err,
-            AuthorizationError::ClaimsInvalid("connection_fence_clock_skew")
-        );
-
-        keyring
-            .verify_connection_fence_v2(
+            kr.verify_connection_fence_v2_at(
                 &fence,
-                &claims.node_id,
-                &claims.endpoint_id,
-                claims.expires_at_seconds,
-            )
-            .expect("second-only API evaluates at nanosecond zero");
-    }
-
-    #[test]
-    fn rust_verifies_go_fence_binding_v2_and_shared_canonical_vector() {
-        let fixture = load_v2_fixture("fence-binding-v2.json");
-        let keyring = v2_keyring(&fixture);
-        let claims = binding_claims_from_fixture(&fixture);
-        let canonical = canonical_fence_binding_v2(&claims).expect("canonical binding");
-        assert_eq!(
-            hex::encode(&canonical),
-            string(&fixture, "canonical_preimage_hex")
+                &fc.node_id,
+                &fc.endpoint_id,
+                skew,
+                fc.issued_at_nanos - 1
+            ),
+            Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_clock_skew"
+            ))
         );
-        let binding = binding_message_from_fixture(&fixture, &claims);
-        let verified = keyring
-            .verify_fence_binding_v2(
-                &binding,
-                &claims.node_id,
-                &claims.endpoint_id,
-                1_700_000_100,
-            )
-            .expect("verified binding");
+        kr.verify_connection_fence_v2(&fence, &fc.node_id, &fc.endpoint_id, fc.expires_at_seconds)
+            .expect("sec-only at ns=0");
 
-        // The binding matches the fence of its own dispatch attempt...
-        let fence_fixture = load_v2_fixture("connection-fence-v2.json");
-        let fence_claims = fence_claims_from_fixture(&fence_fixture);
-        let fence = fence_message_from_fixture(&fence_fixture, &fence_claims);
-        let verified_fence = keyring
-            .verify_connection_fence_v2(
-                &fence,
-                &fence_claims.node_id,
-                &fence_claims.endpoint_id,
-                1_700_000_100,
-            )
-            .expect("verified fence");
-        assert!(verified.matches_fence(&verified_fence));
-
-        // ...and never a fence recorded under any other term.
-        let mut drifted = verified_fence.clone();
-        drifted.owner_epoch += 1;
-        assert!(!verified.matches_fence(&drifted));
-        let mut drifted = verified_fence.clone();
-        drifted.connection_id = [9; 16];
-        assert!(!verified.matches_fence(&drifted));
-        let mut drifted = verified_fence;
-        drifted.fence_id = [9; 16];
-        assert!(!verified.matches_fence(&drifted));
-
-        // A tampered operation identity invalidates the signature.
-        let mut tampered = binding.clone();
-        tampered.operation_id = vec![9; 16];
-        let err = keyring
-            .verify_fence_binding_v2(
-                &tampered,
-                &claims.node_id,
-                &claims.endpoint_id,
-                1_700_000_100,
-            )
-            .expect_err("tampered operation");
-        assert_eq!(err, AuthorizationError::SignatureInvalid);
-
-        // An unsupported signature version fails closed.
-        let mut downgraded = binding;
-        downgraded.signature_version = FenceSignatureVersion::Unspecified.into();
-        let err = keyring
-            .verify_fence_binding_v2(
-                &downgraded,
-                &claims.node_id,
-                &claims.endpoint_id,
-                1_700_000_100,
-            )
-            .expect_err("downgraded version");
-        assert_eq!(err, AuthorizationError::UnsupportedVersion);
-    }
-
-    #[test]
-    fn fence_binding_v2_time_bounds_are_nanosecond_precise() {
-        let fixture = load_v2_fixture("fence-binding-v2.json");
-        let keyring = v2_keyring(&fixture);
-        let claims = binding_claims_from_fixture(&fixture);
-        let binding = binding_message_from_fixture(&fixture, &claims);
-
-        keyring
-            .verify_fence_binding_v2_at(
-                &binding,
-                &claims.node_id,
-                &claims.endpoint_id,
-                claims.expires_at_seconds,
-                claims
-                    .expires_at_nanos
-                    .checked_sub(1)
-                    .expect("expiry nanos"),
-            )
-            .expect("one nanosecond before expiry");
-        let err = keyring
-            .verify_fence_binding_v2_at(
-                &binding,
-                &claims.node_id,
-                &claims.endpoint_id,
-                claims.expires_at_seconds,
-                claims.expires_at_nanos,
-            )
-            .expect_err("exact expiry deadline");
-        assert_eq!(
-            err,
-            AuthorizationError::ClaimsInvalid("fence_binding_expired")
-        );
-
-        let future_skew_boundary = claims
-            .issued_at_seconds
-            .checked_sub(MAX_FUTURE_SKEW_SECONDS)
-            .expect("future skew boundary");
-        keyring
-            .verify_fence_binding_v2_at(
-                &binding,
-                &claims.node_id,
-                &claims.endpoint_id,
-                future_skew_boundary,
-                claims.issued_at_nanos,
-            )
-            .expect("exact future skew boundary");
-        let err = keyring
-            .verify_fence_binding_v2_at(
-                &binding,
-                &claims.node_id,
-                &claims.endpoint_id,
-                future_skew_boundary,
-                claims.issued_at_nanos.checked_sub(1).expect("issued nanos"),
-            )
-            .expect_err("one nanosecond beyond future skew");
-        assert_eq!(
-            err,
-            AuthorizationError::ClaimsInvalid("fence_binding_clock_skew")
-        );
-
-        keyring
-            .verify_fence_binding_v2(
-                &binding,
-                &claims.node_id,
-                &claims.endpoint_id,
-                claims.expires_at_seconds,
-            )
-            .expect("second-only API evaluates at nanosecond zero");
-    }
-
-    #[test]
-    fn rust_fence_v2_never_cross_validates_v1_domains() {
-        let fixture = load_v2_fixture("connection-fence-v2.json");
-        let claims = fence_claims_from_fixture(&fixture);
-        let canonical = canonical_connection_fence_v2(&claims).expect("canonical fence");
-        let signing = SigningKey::from_bytes(&fixed::<32>(string(&fixture, "test_seed_hex")));
-        let signature = signing.sign(&canonical).to_bytes();
-
-        // Signing any V1 domain prefix over the V2 body never verifies as a
-        // V2 fence, and the V2 domain separators are disjoint from V1.
-        for v1_domain in [
+        // Domain separation vs V1.
+        let signing = SigningKey::from_bytes(&fixed::<32>(s(&ff, "test_seed_hex")));
+        let sig = signing.sign(&fcanon).to_bytes();
+        for v1 in [
             DOMAIN_SEPARATOR,
             SESSION_GRANT_DOMAIN_SEPARATOR,
             ARTIFACT_GRANT_DOMAIN_SEPARATOR,
         ] {
-            let mut forged = Vec::with_capacity(canonical.len());
-            forged.extend_from_slice(v1_domain);
-            forged.extend_from_slice(&canonical[CONNECTION_FENCE_V2_DOMAIN_SEPARATOR.len()..]);
-            let forged_signature = signing.sign(&forged).to_bytes();
-            assert_ne!(hex::encode(forged), hex::encode(&canonical));
-            assert_ne!(hex::encode(forged_signature), hex::encode(signature));
+            let mut forged = v1.to_vec();
+            forged.extend_from_slice(&fcanon[CONNECTION_FENCE_V2_DOMAIN_SEPARATOR.len()..]);
+            assert_ne!(forged, fcanon);
+            assert_ne!(signing.sign(&forged).to_bytes(), sig);
         }
+        let mut cross = fence;
+        let mut v1_body = SESSION_GRANT_DOMAIN_SEPARATOR.to_vec();
+        v1_body.extend_from_slice(&fcanon[CONNECTION_FENCE_V2_DOMAIN_SEPARATOR.len()..]);
+        cross.signature = signing.sign(&v1_body).to_bytes().to_vec();
+        assert_eq!(
+            kr.verify_connection_fence_v2(&cross, &fc.node_id, &fc.endpoint_id, 1_700_000_100),
+            Err(AuthorizationError::SignatureInvalid)
+        );
 
-        let keyring = v2_keyring(&fixture);
-        let mut fence = fence_message_from_fixture(&fixture, &claims);
-        // A correct signature over a V1-prefixed preimage must not verify.
-        let mut v1_style = Vec::new();
-        v1_style.extend_from_slice(SESSION_GRANT_DOMAIN_SEPARATOR);
-        v1_style.extend_from_slice(&canonical[CONNECTION_FENCE_V2_DOMAIN_SEPARATOR.len()..]);
-        fence.signature = signing.sign(&v1_style).to_bytes().to_vec();
-        let err = keyring
-            .verify_connection_fence_v2(&fence, &claims.node_id, &claims.endpoint_id, 1_700_000_100)
-            .expect_err("V1-domain signature on V2 message");
-        assert_eq!(err, AuthorizationError::SignatureInvalid);
+        // Fence binding v2 vector + term matching + nanosecond bounds.
+        let bf = load_fixture("fence-binding-v2.json");
+        let bkr = fixture_keyring(&bf);
+        let (bc, binding) = binding_from_fixture(&bf);
+        assert_eq!(
+            hex::encode(canonical_fence_binding_v2(&bc).expect("canon binding")),
+            s(&bf, "canonical_preimage_hex")
+        );
+        let vb = bkr
+            .verify_fence_binding_v2(&binding, &bc.node_id, &bc.endpoint_id, 1_700_000_100)
+            .expect("vb");
+        assert!(vb.matches_fence(&vf));
+        for mutate in [
+            (|f: &mut VerifiedConnectionFenceV2| f.owner_epoch += 1)
+                as fn(&mut VerifiedConnectionFenceV2),
+            |f| f.connection_id = [9; 16],
+            |f| f.fence_id = [9; 16],
+        ] {
+            let mut drifted = vf.clone();
+            mutate(&mut drifted);
+            assert!(!vb.matches_fence(&drifted));
+        }
+        let mut tb = binding.clone();
+        tb.operation_id = vec![9; 16];
+        assert_eq!(
+            bkr.verify_fence_binding_v2(&tb, &bc.node_id, &bc.endpoint_id, 1_700_000_100),
+            Err(AuthorizationError::SignatureInvalid)
+        );
+        let mut dg = binding.clone();
+        dg.signature_version = FenceSignatureVersion::Unspecified.into();
+        assert_eq!(
+            bkr.verify_fence_binding_v2(&dg, &bc.node_id, &bc.endpoint_id, 1_700_000_100),
+            Err(AuthorizationError::UnsupportedVersion)
+        );
+
+        let bskew = bc
+            .issued_at_seconds
+            .checked_sub(MAX_FUTURE_SKEW_SECONDS)
+            .expect("bskew");
+        bkr.verify_fence_binding_v2_at(
+            &binding,
+            &bc.node_id,
+            &bc.endpoint_id,
+            bc.expires_at_seconds,
+            bc.expires_at_nanos - 1,
+        )
+        .expect("1ns");
+        assert_eq!(
+            bkr.verify_fence_binding_v2_at(
+                &binding,
+                &bc.node_id,
+                &bc.endpoint_id,
+                bc.expires_at_seconds,
+                bc.expires_at_nanos
+            ),
+            Err(AuthorizationError::ClaimsInvalid("fence_binding_expired"))
+        );
+        bkr.verify_fence_binding_v2_at(
+            &binding,
+            &bc.node_id,
+            &bc.endpoint_id,
+            bskew,
+            bc.issued_at_nanos,
+        )
+        .expect("exact");
+        assert_eq!(
+            bkr.verify_fence_binding_v2_at(
+                &binding,
+                &bc.node_id,
+                &bc.endpoint_id,
+                bskew,
+                bc.issued_at_nanos - 1
+            ),
+            Err(AuthorizationError::ClaimsInvalid(
+                "fence_binding_clock_skew"
+            ))
+        );
+        bkr.verify_fence_binding_v2(
+            &binding,
+            &bc.node_id,
+            &bc.endpoint_id,
+            bc.expires_at_seconds,
+        )
+        .expect("sec-only");
+    }
+
+    #[test]
+    fn verification_key_loader_and_shared_metadata_policy() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::current_dir()
+            .expect("cwd")
+            .join(format!(".command-key-test-{}-{suffix}", std::process::id()));
+        fs::create_dir(&dir).expect("mkdir");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("700");
+        let key_path = dir.join("controller.pem");
+        let key = SigningKey::from_bytes(&[7; 32]).verifying_key();
+        fs::write(
+            &key_path,
+            key.to_public_key_pem(LineEnding::LF).expect("pem"),
+        )
+        .expect("write");
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect("600");
+        let (uid, gid) = (
+            rustix::process::geteuid().as_raw(),
+            rustix::process::getegid().as_raw(),
+        );
+        assert_eq!(
+            load_verification_key(&key_path, uid, gid).expect("safe"),
+            key
+        );
+
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).expect("644");
+        assert!(load_verification_key(&key_path, uid, gid).is_err());
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect("600");
+        let link = dir.join("controller-link.pem");
+        symlink(&key_path, &link).expect("symlink");
+        assert!(load_verification_key(&link, uid, gid).is_err());
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o770)).expect("770");
+        assert!(load_verification_key(&key_path, uid, gid).is_err());
+        let _ = fs::remove_dir_all(&dir);
+
+        let (agent_user_id, agent_group_id) = (997, 998);
+        for mode in [0o440, 0o640] {
+            assert!(verification_key_metadata_allowed(
+                0,
+                agent_group_id,
+                mode,
+                agent_user_id,
+                agent_group_id
+            ));
+            assert!(verification_key_metadata_allowed(
+                0,
+                agent_group_id,
+                mode,
+                0,
+                agent_group_id
+            ));
+        }
+        for mode in [0o400, 0o600] {
+            assert!(verification_key_metadata_allowed(
+                agent_user_id,
+                agent_group_id,
+                mode,
+                agent_user_id,
+                agent_group_id
+            ));
+            assert!(!verification_key_metadata_allowed(
+                agent_user_id,
+                agent_group_id,
+                mode,
+                0,
+                agent_group_id
+            ));
+            assert!(!verification_key_metadata_allowed(
+                0,
+                agent_group_id,
+                mode,
+                agent_user_id,
+                agent_group_id
+            ));
+            assert!(verification_key_metadata_allowed(
+                0,
+                agent_group_id,
+                mode,
+                0,
+                agent_group_id
+            ));
+        }
+        assert!(!verification_key_metadata_allowed(
+            0,
+            agent_group_id + 1,
+            0o640,
+            agent_user_id,
+            agent_group_id
+        ));
+        assert!(!verification_key_metadata_allowed(
+            0,
+            agent_group_id + 1,
+            0o640,
+            0,
+            agent_group_id
+        ));
     }
 
     #[test]
     fn canonical_semantic_hash_v2_matches_shared_agent_upgrade_vector() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../testdata/semantic-payload-hash-v2-agent-upgrade.json");
-        let fixture: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
-        )
-        .expect("parse agent upgrade vector fixture");
-        let vector = fixture.get("vector").expect("vector");
-        assert_eq!(
-            vector["payload_kind"].as_u64(),
-            Some(128),
-            "agent upgrade payload kind is the oneof tag"
-        );
-        let node_id =
-            hex::decode(vector["node_id_hex"].as_str().expect("node ID")).expect("node ID hex");
-        let package_sha256 = hex::decode(
-            vector["package_sha256_hex"]
-                .as_str()
-                .expect("package digest"),
-        )
-        .expect("package digest hex");
-        let envelope = CommandEnvelope {
-            node_id,
-            expected_revision: vector["authorization_revision"]
-                .as_u64()
-                .expect("authorization revision"),
-            payload: Some(command_envelope::Payload::AgentUpgrade(
-                ocservia_contracts::generated::ocserv::platform::agent::v1::AgentUpgrade {
-                    target_version: vector["target_version"]
-                        .as_str()
-                        .expect("target version")
-                        .to_owned(),
-                    package_sha256,
-                    architecture: vector["architecture"]
-                        .as_str()
-                        .expect("architecture")
-                        .to_owned(),
-                },
-            )),
+        let f = load_fixture("semantic-payload-hash-v2-agent-upgrade.json");
+        let v = &f["vector"];
+        assert_eq!(u(v, "payload_kind"), 128);
+        let env = CommandEnvelope {
+            node_id: hex::decode(s(v, "node_id_hex")).expect("node"),
+            expected_revision: u(v, "authorization_revision"),
+            payload: Some(command_envelope::Payload::AgentUpgrade(AgentUpgrade {
+                target_version: s(v, "target_version").into(),
+                package_sha256: hex::decode(s(v, "package_sha256_hex")).expect("sha"),
+                architecture: s(v, "architecture").into(),
+            })),
             ..CommandEnvelope::default()
         };
-        let digest = semantic_payload_hash_v2(&envelope).expect("v2 agent upgrade hash");
-        assert_eq!(
-            hex::encode(digest),
-            vector["expected_sha256"].as_str().expect("expected hash")
-        );
-        // Every release identity field changes the canonical digest, and any
-        // malformed identity is refused instead of hashed.
-        for (name, mutated) in [
-            ("target-version", "1.2.4"),
-            ("architecture", "amd64"),
-            ("bogus-version", "latest"),
-            ("short-version", "1.2"),
+        let digest = semantic_payload_hash_v2(&env).expect("v2");
+        assert_eq!(hex::encode(digest), s(v, "expected_sha256"));
+        for (name, val, reject) in [
+            ("ver", "1.2.4", false),
+            ("arch", "amd64", false),
+            ("ver", "latest", true),
+            ("ver", "1.2", true),
         ] {
-            let mut changed = envelope.clone();
-            if let Some(command_envelope::Payload::AgentUpgrade(payload)) = changed.payload.as_mut()
-            {
-                if name.ends_with("version") {
-                    payload.target_version = mutated.to_owned();
+            let mut c = env.clone();
+            if let Some(command_envelope::Payload::AgentUpgrade(p)) = c.payload.as_mut() {
+                if name == "ver" {
+                    p.target_version = val.into();
                 } else {
-                    payload.architecture = mutated.to_owned();
+                    p.architecture = val.into();
                 }
             }
-            let outcome = semantic_payload_hash_v2(&changed);
-            if name.starts_with("bogus") || name.starts_with("short") {
-                assert!(
-                    matches!(
-                        outcome,
-                        Err(AuthorizationError::ClaimsInvalid("agent_upgrade_invalid"))
-                    ),
-                    "{name} must be rejected"
+            if reject {
+                assert_eq!(
+                    semantic_payload_hash_v2(&c),
+                    Err(AuthorizationError::ClaimsInvalid("agent_upgrade_invalid"))
                 );
             } else {
-                let changed_digest = outcome.expect("valid mutated identity");
-                assert_ne!(changed_digest, digest, "{name} must be bound");
+                assert_ne!(semantic_payload_hash_v2(&c).expect("ok"), digest);
             }
         }
-        let mut short_digest = envelope;
-        if let Some(command_envelope::Payload::AgentUpgrade(payload)) =
-            short_digest.payload.as_mut()
-        {
-            payload.package_sha256.pop();
+        let mut short = env;
+        if let Some(command_envelope::Payload::AgentUpgrade(p)) = short.payload.as_mut() {
+            p.package_sha256.pop();
         }
-        assert!(matches!(
-            semantic_payload_hash_v2(&short_digest),
+        assert_eq!(
+            semantic_payload_hash_v2(&short),
             Err(AuthorizationError::ClaimsInvalid("agent_upgrade_invalid"))
-        ));
+        );
     }
 }

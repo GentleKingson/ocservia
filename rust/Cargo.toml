@@ -11,6 +11,7 @@ members = [
   "crates/ocserv-adapter",
   "crates/privd",
   "crates/privd-attestation",
+  "crates/test-support",
   "crates/transportd",
   "crates/transportd-stub",
   "crates/upgrader",

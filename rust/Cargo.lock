@@ -2377,6 +2377,7 @@ dependencies = [
  "ocservia-command-journal",
  "ocservia-contracts",
  "ocservia-observability",
+ "ocservia-test-support",
  "ocservia-transportd",
  "prost",
  "prost-types",
@@ -2467,6 +2468,7 @@ dependencies = [
  "hex",
  "ocservia-agent-protocol",
  "ocservia-contracts",
+ "ocservia-test-support",
  "rand",
  "rusqlite",
  "rustix",
@@ -2491,6 +2493,7 @@ dependencies = [
  "ocservia-observability",
  "ocservia-ocserv-adapter",
  "ocservia-privd-attestation",
+ "ocservia-test-support",
  "ocservia-upgrader",
  "prost",
  "prost-types",
@@ -2529,6 +2532,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocservia-test-support"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "ocservia-command-authorization",
+ "ocservia-contracts",
+ "prost-types",
+ "uuid",
+]
+
+[[package]]
 name = "ocservia-transportd"
 version = "0.1.0"
 dependencies = [
@@ -2543,6 +2557,7 @@ dependencies = [
  "ocservia-contracts",
  "ocservia-observability",
  "ocservia-privd-attestation",
+ "ocservia-test-support",
  "prost",
  "prost-types",
  "rustix",

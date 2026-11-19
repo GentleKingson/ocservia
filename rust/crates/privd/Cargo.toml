@@ -28,6 +28,7 @@ tracing.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
+ocservia-test-support = { version = "=0.1.0", path = "../test-support" }
 prost-types.workspace = true
 rusqlite.workspace = true
 
