@@ -181,20 +181,25 @@ func (s operationStore) FailDispatch(ctx context.Context, d operationstore.Dispa
 
 func (s operationStore) ExtendDispatch(ctx context.Context, d operationstore.Dispatch, worker uuid.UUID, duration time.Duration) error {
 	var owner uuid.UUID
-	var at value.Timestamp
-	err := s.QueryRow(ctx, `SELECT lease.worker_id,clock_timestamp() FROM outbox_events AS outbox
+	err := s.QueryRow(ctx, `SELECT lease.worker_id FROM outbox_events AS outbox
 		JOIN node_command_leases AS lease ON lease.command_id=$2 AND lease.node_id=$3
 		JOIN command_attempts AS attempt ON attempt.id=$4 AND attempt.command_id=$2 AND attempt.outbox_event_id=$1
 		WHERE outbox.id=$1 AND outbox.command_id=$2 AND outbox.published_at IS NULL
 		AND lease.lease_token=$5 AND lease.leased_until>clock_timestamp()
 		AND outbox.locked_by=lease.worker_id AND outbox.locked_until>clock_timestamp()
 		AND attempt.worker_id=lease.worker_id AND attempt.state='sending' AND attempt.finished_at IS NULL
-		FOR UPDATE OF outbox,lease,attempt`, d.OutboxID, d.CommandID, d.NodeID, d.AttemptID, d.LeaseToken).Scan(&owner, &at)
+		FOR UPDATE OF outbox,lease,attempt`, d.OutboxID, d.CommandID, d.NodeID, d.AttemptID, d.LeaseToken).Scan(&owner)
 	if err != nil {
 		return err
 	}
 	if owner != worker {
 		return errors.New("pre-send claim belongs to another worker")
+	}
+	// Read wall time after FOR UPDATE acquires row locks so lease extension
+	// never uses a pre-wait timestamp.
+	var at value.Timestamp
+	if err := s.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&at); err != nil {
+		return err
 	}
 	until, err := at.Add(duration)
 	if err != nil {
