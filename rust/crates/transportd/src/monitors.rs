@@ -31,7 +31,7 @@ use crate::{
 
 /// Upper bound on a single deadline sleep in `monitor_owner_lease` so wall-clock
 /// NTP jumps are re-checked periodically without 1-second per-node polling.
-const MAX_LEASE_SLEEP: Duration = Duration::from_secs(60);
+const MAX_LEASE_SLEEP: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ProtocolKind {
