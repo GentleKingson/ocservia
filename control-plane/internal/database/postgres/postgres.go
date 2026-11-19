@@ -178,18 +178,21 @@ func (s *SchedulerLeaseStore) Put(ctx context.Context, v schedulerlease.State, n
 	return err
 }
 func (s *SchedulerLeaseStore) Assert(ctx context.Context, owner schedulerlease.Owner, epoch int64) error {
-	var until, at value.Timestamp
-	err := s.tx.QueryRow(ctx, `SELECT lease_until, clock_timestamp() FROM scheduler_leadership WHERE id=1 AND instance_id=$1 AND incarnation=$2 AND epoch=$3 AND lease_until>clock_timestamp() FOR SHARE OF scheduler_leadership`, owner.InstanceID, owner.Incarnation, epoch).Scan(&until, &at)
+	var until value.Timestamp
+	err := s.tx.QueryRow(ctx, `SELECT lease_until FROM scheduler_leadership WHERE id=1 AND instance_id=$1 AND incarnation=$2 AND epoch=$3 AND lease_until>clock_timestamp() FOR SHARE OF scheduler_leadership`, owner.InstanceID, owner.Incarnation, epoch).Scan(&until)
 	if errors.Is(err, database.ErrNotFound) {
 		return schedulerlease.ErrLost
 	}
 	if err != nil {
 		return err
 	}
-	if until.Micros <= at.Micros {
+	// PostgreSQL evaluates SELECT targetlist expressions before LockRows blocks
+	// on FOR SHARE, so wall time must be read in a separate query after locking.
+	at, err := database.WallTime(ctx, s.tx)
+	if err == nil && until.Micros <= at.Micros {
 		return schedulerlease.ErrLost
 	}
-	return nil
+	return err
 }
 
 func (t *transaction) TransactionTime(ctx context.Context) (value.Timestamp, error) {
