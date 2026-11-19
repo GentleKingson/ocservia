@@ -134,7 +134,18 @@ fn decode_registration_digest(value: &str) -> io::Result<[u8; 32]> {
 }
 
 async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                let _ = signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        () = terminate => {}
+    }
 }
 
 fn parse_args() -> Result<(ServerConfig, FixedResources, Limits), io::Error> {

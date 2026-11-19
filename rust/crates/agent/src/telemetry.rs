@@ -86,58 +86,61 @@ pub(super) fn build_telemetry(
             }
             Some(privd_response::Result::UserList(value)) => {
                 user_snapshot_complete = true;
+                let applied_users: std::collections::HashMap<String, u64> = session
+                    .command_executor
+                    .journal()
+                    .applied_revisions("user")
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
                 users = value
                     .users
                     .iter()
                     .map(|user| {
-                        let canonical = format!(
-                            "{{\"name\":\"{}\",\"enabled\":{}}}",
-                            user.username, user.enabled
-                        );
+                        let revision = applied_users
+                            .get(user.username.as_str())
+                            .copied()
+                            .unwrap_or(0);
                         UserObservation {
                             username: user.username.clone(),
                             enabled: user.enabled,
-                            revision: session
-                                .journal
-                                .applied_revision("user", &user.username)
-                                .ok()
-                                .flatten()
-                                .unwrap_or(0),
-                            fingerprint_sha256: sha2::Sha256::digest(canonical.as_bytes()).to_vec(),
+                            revision,
+                            fingerprint_sha256: user_fingerprint(&user.username, user.enabled),
                         }
                     })
                     .collect();
             }
             Some(privd_response::Result::GroupList(value)) => {
                 group_snapshot_complete = true;
+                let mut applied_groups: std::collections::HashMap<String, u64> = session
+                    .command_executor
+                    .journal()
+                    .applied_revisions("group")
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
                 groups = value
                     .groups
                     .iter()
                     .map(|group| {
-                        let revision = session
-                            .journal
-                            .applied_revision("group", &group.group_name)
-                            .ok()
-                            .flatten()
+                        let revision = applied_groups
+                            .remove(group.group_name.as_str())
                             .unwrap_or(0);
                         group_observation(group.group_name.clone(), group.members.clone(), revision)
                     })
                     .collect();
+                if !applied_groups.is_empty() {
+                    groups.extend(applied_groups.into_iter().map(|(group_name, revision)| {
+                        group_observation(group_name, Vec::new(), revision)
+                    }));
+                }
+                groups.sort_by(|left, right| left.group_name.cmp(&right.group_name));
             }
             _ => {}
         }
     }
     if !user_snapshot_complete || !group_snapshot_complete {
         return Err(invalid("privd user/group snapshot incomplete"));
-    }
-    if let Ok(applied_groups) = session.journal.applied_revisions("group") {
-        for (group_name, revision) in applied_groups {
-            if groups.iter().any(|group| group.group_name == group_name) {
-                continue;
-            }
-            groups.push(group_observation(group_name, Vec::new(), revision));
-        }
-        groups.sort_by(|left, right| left.group_name.cmp(&right.group_name));
     }
     if users.len() > MAX_MANAGED_RESOURCES || groups.len() > MAX_MANAGED_RESOURCES.saturating_mul(2)
     {
@@ -219,18 +222,38 @@ fn upgrade_report(outcome: UpgradeOperationResult) -> AgentUpgradeResultReport {
     }
 }
 
+fn user_fingerprint(username: &str, enabled: bool) -> Vec<u8> {
+    let mut hash = sha2::Sha256::new();
+    hash.update(br#"{"name":""#);
+    hash.update(username.as_bytes());
+    hash.update(br#"","enabled":"#);
+    hash.update(if enabled {
+        b"true}" as &[u8]
+    } else {
+        b"false}"
+    });
+    hash.finalize().to_vec()
+}
+
 fn group_observation(group_name: String, members: Vec<String>, revision: u64) -> GroupObservation {
-    let encoded_members = members
-        .iter()
-        .map(|member| format!("\"{member}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    let canonical = format!("{{\"name\":\"{group_name}\",\"members\":[{encoded_members}]}}");
+    let mut hash = sha2::Sha256::new();
+    hash.update(br#"{"name":""#);
+    hash.update(group_name.as_bytes());
+    hash.update(br#"","members":["#);
+    for (idx, member) in members.iter().enumerate() {
+        if idx > 0 {
+            hash.update(b",");
+        }
+        hash.update(b"\"");
+        hash.update(member.as_bytes());
+        hash.update(b"\"");
+    }
+    hash.update(b"]}");
     GroupObservation {
         group_name,
         members,
         revision,
-        fingerprint_sha256: sha2::Sha256::digest(canonical.as_bytes()).to_vec(),
+        fingerprint_sha256: hash.finalize().to_vec(),
     }
 }
 

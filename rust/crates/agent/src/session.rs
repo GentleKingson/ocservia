@@ -61,7 +61,6 @@ pub(super) struct SessionContext<'a> {
     pub(super) node_id: Uuid,
     pub(super) endpoint_id: EndpointId,
     pub(super) privd: &'a PrivdClient,
-    pub(super) journal: &'a mut Journal,
     pub(super) command_executor: &'a mut CommandExecutor,
     pub(super) boot_id: &'a str,
     pub(super) os_release: &'a str,
@@ -274,16 +273,41 @@ async fn connect_once(
                 // privd without the fixed read simply yields an empty report.
                 let upgrade_outcomes=session.privd.upgrade_results().await.unwrap_or_default();
                 sequence=sequence.saturating_add(1);
-                let drops=session.journal.telemetry_drop_counters()?;
-                let batch=build_telemetry(session,sequence,&observations,upgrade_outcomes,&connection,drops)?;
-                let payload=batch.encode_to_vec();
-                let batch_id: [u8;16]=batch.batch_id.as_slice().try_into().map_err(|_| invalid("telemetry batch ID invalid"))?;
-                let now=SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
-                session.journal.enqueue_telemetry(&TelemetryInsert { batch_id: &batch_id, priority: 2, observed_at: i64::try_from(now)?, expires_at: i64::try_from(now+OFFLINE_RECOVERY_RETENTION_SECONDS)?, payload: &payload, now: i64::try_from(now)?, max_bytes: 64*1024*1024 })?;
-                for (pending_id,pending) in session.journal.telemetry_pending(32, i64::try_from(now)?)? {
-                    send_telemetry(&connection,&pending).await?;
-                    session.journal.acknowledge_telemetry(&pending_id)?;
+                let drops = session.command_executor.journal().telemetry_drop_counters()?;
+                let batch = build_telemetry(session, sequence, &observations, upgrade_outcomes, &connection, drops)?;
+                let payload = batch.encode_to_vec();
+                let batch_id: [u8; 16] = batch.batch_id.as_slice().try_into().map_err(|_| invalid("telemetry batch ID invalid"))?;
+                let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+                session.command_executor.journal_mut().enqueue_telemetry(&TelemetryInsert {
+                    batch_id: &batch_id,
+                    priority: 2,
+                    observed_at: i64::try_from(now)?,
+                    expires_at: i64::try_from(now + OFFLINE_RECOVERY_RETENTION_SECONDS)?,
+                    payload: &payload,
+                    now: i64::try_from(now)?,
+                    max_bytes: 64 * 1024 * 1024,
+                })?;
+                let pending_batches = session
+                    .command_executor
+                    .journal_mut()
+                    .telemetry_pending(32, i64::try_from(now)?)?;
+                let mut delivered = Vec::with_capacity(pending_batches.len());
+                for (pending_id, pending) in pending_batches {
+                    if let Err(error) = send_telemetry(&connection, &pending).await {
+                        if !delivered.is_empty() {
+                            let _ = session
+                                .command_executor
+                                .journal_mut()
+                                .acknowledge_telemetry_batch(&delivered);
+                        }
+                        return Err(error);
+                    }
+                    delivered.push(pending_id);
                 }
+                session
+                    .command_executor
+                    .journal_mut()
+                    .acknowledge_telemetry_batch(&delivered)?;
                 tracing::info!(node_id = %session.node_id, sequence, "agent telemetry delivered");
             },
         }
@@ -305,7 +329,7 @@ fn negotiate_and_activate_session(
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     activate_session_connection_fence(
         &authority,
-        session.journal,
+        session.command_executor.journal_mut(),
         session.fence_epoch_floor,
         i64::try_from(now.as_secs())?,
         now.subsec_nanos(),

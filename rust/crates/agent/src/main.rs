@@ -42,7 +42,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let command_keys = load_controller_command_keys(&config)?;
     let relay_tls_roots = std::sync::Arc::new(load_relay_tls_roots(&config)?);
-    let mut journal = Journal::open(&config.journal)?;
     let mut command_executor = CommandExecutor::new(Journal::open(&config.journal)?);
     let privd = PrivdClient::new(config.privd_socket, Duration::from_secs(5))?;
     // The startup snapshot is a health gate: it fails fast when privd or the
@@ -53,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let command_keys = command_keys.expect("non-probe Agent requires command keys");
-    let mut fence_epoch_floor = journal.owner_fence_epoch_floor()?;
+    let mut fence_epoch_floor = command_executor.journal().owner_fence_epoch_floor()?;
     tracing::info!(
         fence_epoch_floor,
         "loaded connection-owner fencing epoch floor"
@@ -86,7 +85,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         node_id,
         endpoint_id: identity.endpoint_id(),
         privd: &privd,
-        journal: &mut journal,
         command_executor: &mut command_executor,
         boot_id: &boot_id,
         os_release: &os_release,

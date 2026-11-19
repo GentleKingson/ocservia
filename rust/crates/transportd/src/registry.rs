@@ -1,27 +1,40 @@
-use super::{
-    AcceptError, Arc, Connection, ConnectionFenceV2, FenceBindingV2, FenceOperationKind,
-    FenceRegistration, IdentityPolicy, NegotiatedSession, NodeConnection, OwnerFenceDisposition,
-    RegisterOwnerFenceResponse, RegisteredConnection, RegisteredFence, Shared, Status,
-    TransportEventType, VarInt, event_with_term, fence_registration_decision, fixed16, fixed32,
-    lease_expired_at, protocol_error, unix_now_parts, validate_uuid,
-};
 use std::collections::HashMap;
-use std::sync::Weak;
-use tokio::sync::OwnedSemaphorePermit;
+use std::sync::{Arc, Weak};
+
+use iroh::endpoint::{Connection, VarInt};
+use iroh::protocol::AcceptError;
+use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+    ConnectionFenceV2, FenceBindingV2, FenceOperationKind,
+};
+use ocservia_contracts::generated::ocserv::platform::transport::v1::{
+    NodeConnection, NodeTrustState, OwnerFenceDisposition, RegisterOwnerFenceResponse,
+    TransportEventType,
+};
+use tokio::sync::{Notify, OwnedSemaphorePermit};
+use tonic::Status;
+
+use crate::command_stream::event_with_term;
+use crate::fence::{
+    FenceRegistration, RegisteredFence, fence_registration_decision, fixed16, fixed32,
+    lease_expired_at, unix_now_parts, validate_uuid,
+};
+use crate::monitors::{NegotiatedSession, protocol_error};
+use crate::trust::IdentityPolicy;
+use crate::{RegisteredConnection, Shared};
 
 impl Shared {
     pub(super) async fn retire_prior_authorization(
         &self,
         node_id: &[u8],
         revision: u64,
-        state: super::NodeTrustState,
+        state: NodeTrustState,
     ) {
         let mut registry = self.inner.connections.lock().await;
         if registry
             .get(node_id)
             .is_some_and(|entry| entry.authorization_revision < revision)
         {
-            let reason = if state == super::NodeTrustState::Revoked {
+            let reason = if state == NodeTrustState::Revoked {
                 b"node revoked".as_slice()
             } else {
                 b"node authorization changed".as_slice()
@@ -30,8 +43,8 @@ impl Shared {
         }
     }
 
-    pub(super) async fn registered_fence(&self, node_id: &[u8]) -> Option<RegisteredFence> {
-        self.inner.fences.lock().await.get(node_id).cloned()
+    pub(super) async fn registered_fence(&self, node_id: &[u8]) -> Option<Arc<RegisteredFence>> {
+        self.inner.fences.lock().await.get(node_id).map(Arc::clone)
     }
 
     pub(super) async fn remove(
@@ -54,6 +67,7 @@ impl Shared {
         self.inner.registration_tokens.lock().await.remove(node_id);
         let registered = registry.remove(node_id);
         if let Some(registered) = &registered {
+            registered.lease_notify.notify_one();
             registered.connection.close(VarInt::from_u32(0x104), reason);
             self.publish(event_with_term(
                 node_id,
@@ -99,7 +113,8 @@ impl Shared {
         }
         {
             let mut fences = self.inner.fences.lock().await;
-            match fence_registration_decision(fences.get(&node_id), &session.fence) {
+            match fence_registration_decision(fences.get(&node_id).map(Arc::as_ref), &session.fence)
+            {
                 FenceRegistration::Stale => {
                     drop(fences);
                     drop(registry);
@@ -117,7 +132,7 @@ impl Shared {
                     ));
                 }
                 FenceRegistration::Apply | FenceRegistration::Refresh => {
-                    fences.insert(node_id.clone(), session.fence.clone());
+                    fences.insert(node_id.clone(), Arc::clone(&session.fence));
                 }
             }
         }
@@ -130,10 +145,12 @@ impl Shared {
                 negotiated_capabilities: session.negotiated_capabilities,
                 authorization_revision: session.authorization_revision,
                 session_expires_at: session.session_expires_at,
-                fence: session.fence.clone(),
+                fence: Arc::clone(&session.fence),
+                lease_notify: Arc::new(Notify::new()),
             },
         );
         if let Some(previous) = replaced {
+            previous.lease_notify.notify_one();
             previous
                 .connection
                 .close(VarInt::from_u32(0x106), b"superseded connection");
@@ -175,7 +192,7 @@ impl Shared {
                 (
                     entry.connection.clone(),
                     entry.metadata.endpoint_id.clone(),
-                    entry.fence.clone(),
+                    Arc::clone(&entry.fence),
                 )
             })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
@@ -191,7 +208,7 @@ impl Shared {
             .await?;
         Ok((
             connection,
-            dispatch_fence.map(|registered| registered.fence),
+            dispatch_fence.map(|registered| registered.fence.clone()),
         ))
     }
 
@@ -226,15 +243,16 @@ impl Shared {
                 "owner fence endpoint does not match the registered session",
             ));
         }
-        let registered = RegisteredFence {
-            verified: verified.clone(),
+        let retained_epoch = verified.owner_epoch;
+        let registered = Arc::new(RegisteredFence {
+            verified,
             fence,
             endpoint_id,
-        };
+        });
         let disposition = {
             let mut fences = self.inner.fences.lock().await;
             if let Some(existing) = fences.get(&node_id)
-                && existing.verified.owner_epoch > verified.owner_epoch
+                && existing.verified.owner_epoch > registered.verified.owner_epoch
             {
                 let retained_epoch = existing.verified.owner_epoch;
                 return Ok(RegisterOwnerFenceResponse {
@@ -242,7 +260,7 @@ impl Shared {
                     retained_epoch,
                 });
             }
-            match fence_registration_decision(fences.get(&node_id), &registered) {
+            match fence_registration_decision(fences.get(&node_id).map(Arc::as_ref), &registered) {
                 FenceRegistration::Stale => OwnerFenceDisposition::Stale,
                 FenceRegistration::EpochCollision => {
                     return Err(Status::invalid_argument(
@@ -250,23 +268,30 @@ impl Shared {
                     ));
                 }
                 FenceRegistration::Refresh => {
-                    fences.insert(node_id.clone(), registered.clone());
+                    fences.insert(node_id.clone(), Arc::clone(&registered));
                     OwnerFenceDisposition::Refreshed
                 }
                 FenceRegistration::Apply => {
-                    fences.insert(node_id.clone(), registered.clone());
+                    fences.insert(node_id.clone(), Arc::clone(&registered));
                     OwnerFenceDisposition::Applied
                 }
             }
         };
-        let retained_epoch = verified.owner_epoch;
-        if disposition == OwnerFenceDisposition::Applied
-            && connections
+        if disposition == OwnerFenceDisposition::Refreshed
+            && let Some(entry) = connections.get(&node_id)
+        {
+            entry.lease_notify.notify_one();
+        }
+        if disposition == OwnerFenceDisposition::Applied {
+            if connections
                 .get(&node_id)
                 .is_some_and(|entry| entry.fence.verified.fence_id != registered.verified.fence_id)
-        {
-            self.remove_locked(&mut connections, &node_id, b"owner fence superseded")
-                .await;
+            {
+                self.remove_locked(&mut connections, &node_id, b"owner fence superseded")
+                    .await;
+            } else if let Some(entry) = connections.get(&node_id) {
+                entry.lease_notify.notify_one();
+            }
         }
         Ok(RegisterOwnerFenceResponse {
             disposition: disposition.into(),
@@ -293,7 +318,7 @@ pub(super) async fn finish_session(
     let finishing = registry
         .get(node_id)
         .filter(|entry| entry.connection.stable_id() == connection.stable_id())
-        .map(|entry| entry.fence.clone());
+        .map(|entry| Arc::clone(&entry.fence));
     if let Some(fence) = finishing {
         registry.remove(node_id);
         shared

@@ -2,22 +2,26 @@
 
 #![forbid(unsafe_code)]
 
+mod telemetry;
+#[cfg(test)]
+#[allow(clippy::too_many_lines)]
+mod tests;
+
 use std::path::Path;
 use std::time::Duration;
 use std::{fs, os::unix::fs::PermissionsExt as _};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
+pub use crate::telemetry::{OFFLINE_RECOVERY_RETENTION_SECONDS, PendingTelemetry, TelemetryInsert};
+
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const OWNER_FENCE_EPOCH_FLOOR_KEY: &str = "owner_fence_epoch_floor";
-
-/// Maximum time that telemetry remains buffered while an Agent is offline.
-pub const OFFLINE_RECOVERY_RETENTION_SECONDS: u64 = 300;
 
 /// SQLite-backed Agent local state.
 #[derive(Debug)]
 pub struct Journal {
-    connection: Connection,
+    pub(crate) connection: Connection,
 }
 
 /// Persisted command state. A non-terminal state is never guessed to be a failure.
@@ -87,21 +91,6 @@ pub struct SyntheticEffect {
     pub result: Vec<u8>,
     pub executed_at: i64,
 }
-
-/// One bounded telemetry record and its local retention policy.
-#[derive(Clone, Copy)]
-pub struct TelemetryInsert<'a> {
-    pub batch_id: &'a [u8; 16],
-    pub priority: u8,
-    pub observed_at: i64,
-    pub expires_at: i64,
-    pub payload: &'a [u8],
-    pub now: i64,
-    pub max_bytes: u64,
-}
-
-/// A buffered batch identifier and encoded payload.
-pub type PendingTelemetry = ([u8; 16], Vec<u8>);
 
 /// One successfully applied desired-state resource revision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,6 +182,10 @@ impl Journal {
              ) STRICT;
              CREATE INDEX IF NOT EXISTS telemetry_buffer_eviction
                 ON telemetry_buffer(priority DESC, observed_at ASC);
+             CREATE INDEX IF NOT EXISTS telemetry_buffer_expires_idx
+                ON telemetry_buffer(expires_at);
+             CREATE INDEX IF NOT EXISTS telemetry_buffer_observed_idx
+                ON telemetry_buffer(observed_at);
              CREATE TABLE IF NOT EXISTS telemetry_drop_counters (
                 priority INTEGER PRIMARY KEY NOT NULL CHECK (priority BETWEEN 1 AND 4),
                 dropped INTEGER NOT NULL DEFAULT 0 CHECK (dropped >= 0)
@@ -235,10 +228,17 @@ impl Journal {
         let by_command = query_command_by_id(&transaction, command_id)?;
         let outcome = match (by_key, by_command) {
             (None, None) => {
-                transaction.execute(
-                    "INSERT INTO command_journal(idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,privileged_result_proof,accepted_at,updated_at) VALUES (?1,?2,?3,?4,'accepted',NULL,NULL,NULL,?5,?5)",
-                    rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), payload_sha256.as_slice(), payload_hash_version, now],
-                )?;
+                transaction
+                    .prepare_cached(
+                        "INSERT INTO command_journal(idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,privileged_result_proof,accepted_at,updated_at) VALUES (?1,?2,?3,?4,'accepted',NULL,NULL,NULL,?5,?5)",
+                    )?
+                    .execute(rusqlite::params![
+                        idempotency_key.as_slice(),
+                        command_id.as_slice(),
+                        payload_sha256.as_slice(),
+                        payload_hash_version,
+                        now
+                    ])?;
                 AcceptOutcome::Accepted(
                     query_command(&transaction, idempotency_key)?
                         .ok_or(rusqlite::Error::QueryReturnedNoRows)?,
@@ -312,10 +312,18 @@ impl Journal {
         if !from.contains(&current.state) {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        self.connection.execute(
-            "UPDATE command_journal SET state=?2,result=?3,error_code=?4,updated_at=?5 WHERE idempotency_key=?1 AND state=?6",
-            rusqlite::params![idempotency_key.as_slice(), to.as_str(), result, error_code, now, current.state.as_str()],
-        )?;
+        self.connection
+            .prepare_cached(
+                "UPDATE command_journal SET state=?2,result=?3,error_code=?4,updated_at=?5 WHERE idempotency_key=?1 AND state=?6",
+            )?
+            .execute(rusqlite::params![
+                idempotency_key.as_slice(),
+                to.as_str(),
+                result,
+                error_code,
+                now,
+                current.state.as_str()
+            ])?;
         self.command(idempotency_key)?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
@@ -351,10 +359,19 @@ impl Journal {
         if !from.contains(&current.state) {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        self.connection.execute(
-            "UPDATE command_journal SET state=?2,result=?3,error_code=?4,privileged_result_proof=?5,updated_at=?6 WHERE idempotency_key=?1 AND state=?7",
-            rusqlite::params![idempotency_key.as_slice(), to.as_str(), result, error_code, proof, now, current.state.as_str()],
-        )?;
+        self.connection
+            .prepare_cached(
+                "UPDATE command_journal SET state=?2,result=?3,error_code=?4,privileged_result_proof=?5,updated_at=?6 WHERE idempotency_key=?1 AND state=?7",
+            )?
+            .execute(rusqlite::params![
+                idempotency_key.as_slice(),
+                to.as_str(),
+                result,
+                error_code,
+                proof,
+                now,
+                current.state.as_str()
+            ])?;
         self.command(idempotency_key)?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
@@ -394,22 +411,38 @@ impl Journal {
         }
         let revision =
             i64::try_from(resource.revision).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        transaction.execute(
-            "INSERT INTO applied_resource_revisions(resource_type,resource_key,revision,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(resource_type,resource_key) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE excluded.revision >= applied_resource_revisions.revision",
-            rusqlite::params![resource.resource_type, resource.resource_key, revision, now],
-        )?;
-        let stored: i64 = transaction.query_row(
-            "SELECT revision FROM applied_resource_revisions WHERE resource_type=?1 AND resource_key=?2",
-            rusqlite::params![resource.resource_type, resource.resource_key],
-            |row| row.get(0),
-        )?;
+        transaction
+            .prepare_cached(
+                "INSERT INTO applied_resource_revisions(resource_type,resource_key,revision,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(resource_type,resource_key) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE excluded.revision >= applied_resource_revisions.revision",
+            )?
+            .execute(rusqlite::params![
+                resource.resource_type,
+                resource.resource_key,
+                revision,
+                now
+            ])?;
+        let stored: i64 = transaction
+            .prepare_cached(
+                "SELECT revision FROM applied_resource_revisions WHERE resource_type=?1 AND resource_key=?2",
+            )?
+            .query_row(
+                rusqlite::params![resource.resource_type, resource.resource_key],
+                |row| row.get(0),
+            )?;
         if stored != revision {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let updated = transaction.execute(
-            "UPDATE command_journal SET state='succeeded',result=?3,error_code=NULL,privileged_result_proof=?4,updated_at=?5 WHERE idempotency_key=?1 AND command_id=?2 AND state='running'",
-            rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), result, proof, now],
-        )?;
+        let updated = transaction
+            .prepare_cached(
+                "UPDATE command_journal SET state='succeeded',result=?3,error_code=NULL,privileged_result_proof=?4,updated_at=?5 WHERE idempotency_key=?1 AND command_id=?2 AND state='running'",
+            )?
+            .execute(rusqlite::params![
+                idempotency_key.as_slice(),
+                command_id.as_slice(),
+                result,
+                proof,
+                now
+            ])?;
         if updated != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -429,11 +462,12 @@ impl Journal {
         resource_type: &str,
         resource_key: &str,
     ) -> Result<Option<u64>, rusqlite::Error> {
-        let result = self.connection.query_row(
+        let mut stmt = self.connection.prepare_cached(
             "SELECT revision FROM applied_resource_revisions WHERE resource_type=?1 AND resource_key=?2",
-            rusqlite::params![resource_type, resource_key],
-            |row| row.get::<_, i64>(0),
-        );
+        )?;
+        let result = stmt.query_row(rusqlite::params![resource_type, resource_key], |row| {
+            row.get::<_, i64>(0)
+        });
         match result {
             Ok(value) => u64::try_from(value)
                 .map(Some)
@@ -455,7 +489,7 @@ impl Journal {
         if !matches!(resource_type, "user" | "group" | "config") {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT resource_key,revision FROM applied_resource_revisions WHERE resource_type=?1 ORDER BY resource_key",
         )?;
         let rows = statement.query_map([resource_type], |row| {
@@ -490,7 +524,9 @@ impl Journal {
         if result.len() > 1024 * 1024 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let transaction = self.connection.transaction()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(existing) = query_effect(&transaction, idempotency_key)? {
             if existing.payload_sha256 != *payload_sha256 {
                 return Err(rusqlite::Error::InvalidQuery);
@@ -498,14 +534,21 @@ impl Journal {
             transaction.commit()?;
             return Ok(false);
         }
-        transaction.execute(
-            "INSERT INTO synthetic_effects(idempotency_key,payload_sha256,result,executed_at) VALUES (?1,?2,?3,?4)",
-            rusqlite::params![idempotency_key.as_slice(), payload_sha256.as_slice(), result, now],
-        )?;
-        transaction.execute(
-            "UPDATE synthetic_effect_counter SET executions=executions+1 WHERE singleton=1",
-            [],
-        )?;
+        transaction
+            .prepare_cached(
+                "INSERT INTO synthetic_effects(idempotency_key,payload_sha256,result,executed_at) VALUES (?1,?2,?3,?4)",
+            )?
+            .execute(rusqlite::params![
+                idempotency_key.as_slice(),
+                payload_sha256.as_slice(),
+                result,
+                now
+            ])?;
+        transaction
+            .prepare_cached(
+                "UPDATE synthetic_effect_counter SET executions=executions+1 WHERE singleton=1",
+            )?
+            .execute([])?;
         transaction.commit()?;
         Ok(true)
     }
@@ -542,19 +585,33 @@ impl Journal {
                 return Err(rusqlite::Error::InvalidQuery);
             }
         } else {
-            transaction.execute(
-                "INSERT INTO synthetic_effects(idempotency_key,payload_sha256,result,executed_at) VALUES (?1,?2,?3,?4)",
-                rusqlite::params![idempotency_key.as_slice(), payload_sha256.as_slice(), result, now],
-            )?;
-            transaction.execute(
-                "UPDATE synthetic_effect_counter SET executions=executions+1 WHERE singleton=1",
-                [],
-            )?;
+            transaction
+                .prepare_cached(
+                    "INSERT INTO synthetic_effects(idempotency_key,payload_sha256,result,executed_at) VALUES (?1,?2,?3,?4)",
+                )?
+                .execute(rusqlite::params![
+                    idempotency_key.as_slice(),
+                    payload_sha256.as_slice(),
+                    result,
+                    now
+                ])?;
+            transaction
+                .prepare_cached(
+                    "UPDATE synthetic_effect_counter SET executions=executions+1 WHERE singleton=1",
+                )?
+                .execute([])?;
         }
-        let updated = transaction.execute(
-            "UPDATE command_journal SET state='succeeded',result=?4,error_code=NULL,updated_at=?5 WHERE idempotency_key=?1 AND command_id=?2 AND payload_sha256=?3 AND state='running'",
-            rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), payload_sha256.as_slice(), result, now],
-        )?;
+        let updated = transaction
+            .prepare_cached(
+                "UPDATE command_journal SET state='succeeded',result=?4,error_code=NULL,updated_at=?5 WHERE idempotency_key=?1 AND command_id=?2 AND payload_sha256=?3 AND state='running'",
+            )?
+            .execute(rusqlite::params![
+                idempotency_key.as_slice(),
+                command_id.as_slice(),
+                payload_sha256.as_slice(),
+                result,
+                now
+            ])?;
         if updated != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -582,11 +639,9 @@ impl Journal {
     ///
     /// Returns a query error.
     pub fn synthetic_execution_count(&self) -> Result<u64, rusqlite::Error> {
-        self.connection.query_row(
-            "SELECT executions FROM synthetic_effect_counter WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )
+        self.connection
+            .prepare_cached("SELECT executions FROM synthetic_effect_counter WHERE singleton=1")?
+            .query_row([], |row| row.get(0))
     }
 
     /// Returns the active `SQLite` journal mode.
@@ -645,129 +700,6 @@ impl Journal {
         }
     }
 
-    /// Enqueues one bounded telemetry batch, evicting oldest low-priority data first.
-    ///
-    /// Returns `false` when this batch was itself evicted. Expired records count as drops.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for invalid limits, invalid input, or a `SQLite` failure.
-    pub fn enqueue_telemetry(
-        &mut self,
-        insert: &TelemetryInsert<'_>,
-    ) -> Result<bool, rusqlite::Error> {
-        let TelemetryInsert {
-            batch_id,
-            priority,
-            observed_at,
-            expires_at,
-            payload,
-            now,
-            max_bytes,
-        } = *insert;
-        if !(1..=4).contains(&priority)
-            || payload.is_empty()
-            || payload.len() > 512 * 1024
-            || expires_at <= observed_at
-            || max_bytes == 0
-        {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let transaction = self.connection.transaction()?;
-        prune_expired_telemetry(&transaction, now)?;
-        transaction.execute(
-            "INSERT INTO telemetry_buffer (batch_id,priority,observed_at,expires_at,payload) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(batch_id) DO NOTHING",
-            rusqlite::params![batch_id.as_slice(), priority, observed_at, expires_at, payload],
-        )?;
-        loop {
-            let bytes: u64 = transaction.query_row(
-                "SELECT coalesce(sum(length(payload)),0) FROM telemetry_buffer",
-                [],
-                |row| row.get(0),
-            )?;
-            if bytes <= max_bytes {
-                break;
-            }
-            let evicted = transaction.query_row(
-                "DELETE FROM telemetry_buffer WHERE batch_id=(SELECT batch_id FROM telemetry_buffer ORDER BY priority DESC,observed_at ASC,batch_id LIMIT 1) RETURNING batch_id,priority",
-                [],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, u8>(1)?)),
-            )?;
-            increment_drop(&transaction, evicted.1, 1)?;
-        }
-        let retained = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM telemetry_buffer WHERE batch_id=?1)",
-            [batch_id.as_slice()],
-            |row| row.get(0),
-        )?;
-        transaction.commit()?;
-        Ok(retained)
-    }
-
-    /// Prunes records past their stored expiry or maximum offline recovery age,
-    /// then returns eligible payloads in delivery priority and observation order.
-    ///
-    /// # Errors
-    ///
-    /// Returns a query error.
-    pub fn telemetry_pending(
-        &mut self,
-        limit: usize,
-        now: i64,
-    ) -> Result<Vec<PendingTelemetry>, rusqlite::Error> {
-        if limit == 0 || limit > 256 {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let transaction = self.connection.transaction()?;
-        prune_expired_telemetry(&transaction, now)?;
-        let mut statement = transaction.prepare(
-            "SELECT batch_id,payload FROM telemetry_buffer ORDER BY priority,observed_at,batch_id LIMIT ?1",
-        )?;
-        let pending = statement
-            .query_map([limit], |row| {
-                let id = row.get::<_, Vec<u8>>(0)?;
-                let id: [u8; 16] = id.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
-                Ok((id, row.get(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-        transaction.commit()?;
-        Ok(pending)
-    }
-
-    /// Removes a delivered batch idempotently.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `SQLite` failure.
-    pub fn acknowledge_telemetry(&self, batch_id: &[u8; 16]) -> Result<(), rusqlite::Error> {
-        self.connection.execute(
-            "DELETE FROM telemetry_buffer WHERE batch_id=?1",
-            [batch_id.as_slice()],
-        )?;
-        Ok(())
-    }
-
-    /// Returns drop counters ordered as security, health, aggregate, raw history.
-    ///
-    /// # Errors
-    ///
-    /// Returns a query error.
-    pub fn telemetry_drop_counters(&self) -> Result<[u64; 4], rusqlite::Error> {
-        let mut counters = [0_u64; 4];
-        let mut statement = self
-            .connection
-            .prepare("SELECT priority,dropped FROM telemetry_drop_counters")?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, usize>(0)?, row.get::<_, u64>(1)?))
-        })?;
-        for row in rows {
-            let (priority, count) = row?;
-            counters[priority - 1] = count;
-        }
-        Ok(counters)
-    }
-
     /// Reads the durable connection-owner fencing epoch floor, or zero when
     /// no fence has been accepted yet.
     ///
@@ -777,11 +709,8 @@ impl Journal {
     pub fn owner_fence_epoch_floor(&self) -> Result<u64, rusqlite::Error> {
         let value: Option<Vec<u8>> = self
             .connection
-            .query_row(
-                "SELECT value FROM agent_metadata WHERE key=?1",
-                [OWNER_FENCE_EPOCH_FLOOR_KEY],
-                |row| row.get(0),
-            )
+            .prepare_cached("SELECT value FROM agent_metadata WHERE key=?1")?
+            .query_row([OWNER_FENCE_EPOCH_FLOOR_KEY], |row| row.get(0))
             .optional()?;
         let Some(bytes) = value else {
             return Ok(0);
@@ -802,16 +731,20 @@ impl Journal {
     /// Returns a write or decoding error.
     pub fn raise_owner_fence_epoch_floor(&self, epoch: u64) -> Result<u64, rusqlite::Error> {
         let value = epoch.to_be_bytes();
-        let persisted: Vec<u8> = self.connection.query_row(
-            "INSERT INTO agent_metadata(key,value) VALUES(?1,?2)
-             ON CONFLICT(key) DO UPDATE SET value=CASE
-                 WHEN excluded.value>agent_metadata.value THEN excluded.value
-                 ELSE agent_metadata.value
-             END
-             RETURNING value",
-            rusqlite::params![OWNER_FENCE_EPOCH_FLOOR_KEY, value.as_slice()],
-            |row| row.get(0),
-        )?;
+        let persisted: Vec<u8> = self
+            .connection
+            .prepare_cached(
+                "INSERT INTO agent_metadata(key,value) VALUES(?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=CASE
+                     WHEN excluded.value>agent_metadata.value THEN excluded.value
+                     ELSE agent_metadata.value
+                 END
+                 RETURNING value",
+            )?
+            .query_row(
+                rusqlite::params![OWNER_FENCE_EPOCH_FLOOR_KEY, value.as_slice()],
+                |row| row.get(0),
+            )?;
         persisted
             .try_into()
             .map(u64::from_be_bytes)
@@ -886,7 +819,7 @@ fn query_command(
     connection: &Connection,
     idempotency_key: &[u8; 16],
 ) -> Result<Option<CommandRecord>, rusqlite::Error> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,privileged_result_proof,accepted_at,updated_at FROM command_journal WHERE idempotency_key=?1",
     )?;
     let mut rows = statement.query([idempotency_key.as_slice()])?;
@@ -914,7 +847,7 @@ fn query_command_by_id(
     connection: &Connection,
     command_id: &[u8; 16],
 ) -> Result<Option<CommandRecord>, rusqlite::Error> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,privileged_result_proof,accepted_at,updated_at FROM command_journal WHERE command_id=?1",
     )?;
     let mut rows = statement.query([command_id.as_slice()])?;
@@ -939,7 +872,7 @@ fn query_effect(
     connection: &Connection,
     idempotency_key: &[u8; 16],
 ) -> Result<Option<SyntheticEffect>, rusqlite::Error> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT payload_sha256,result,executed_at FROM synthetic_effects WHERE idempotency_key=?1",
     )?;
     let mut rows = statement.query([idempotency_key.as_slice()])?;
@@ -955,463 +888,4 @@ fn query_effect(
 
 fn fixed_blob<const N: usize>(value: Vec<u8>) -> Result<[u8; N], rusqlite::Error> {
     value.try_into().map_err(|_| rusqlite::Error::InvalidQuery)
-}
-
-fn increment_drop(
-    transaction: &rusqlite::Transaction<'_>,
-    priority: u8,
-    count: u64,
-) -> Result<(), rusqlite::Error> {
-    transaction.execute("INSERT INTO telemetry_drop_counters(priority,dropped) VALUES (?1,?2) ON CONFLICT(priority) DO UPDATE SET dropped=dropped+excluded.dropped",rusqlite::params![priority,count])?;
-    Ok(())
-}
-
-fn prune_expired_telemetry(
-    transaction: &rusqlite::Transaction<'_>,
-    now: i64,
-) -> Result<(), rusqlite::Error> {
-    let recovery_seconds = i64::try_from(OFFLINE_RECOVERY_RETENTION_SECONDS)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let observed_cutoff = now.saturating_sub(recovery_seconds);
-    let mut expired = transaction.prepare(
-        "SELECT priority, count(*) FROM telemetry_buffer WHERE expires_at <= ?1 OR observed_at <= ?2 GROUP BY priority",
-    )?;
-    let expired_counts = expired
-        .query_map(rusqlite::params![now, observed_cutoff], |row| {
-            Ok((row.get::<_, u8>(0)?, row.get::<_, u64>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(expired);
-    transaction.execute(
-        "DELETE FROM telemetry_buffer WHERE expires_at <= ?1 OR observed_at <= ?2",
-        rusqlite::params![now, observed_cutoff],
-    )?;
-    for (expired_priority, count) in expired_counts {
-        increment_drop(transaction, expired_priority, count)?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_lines)]
-mod tests {
-    use super::*;
-
-    struct TempDb(std::path::PathBuf);
-    impl TempDb {
-        fn new(label: &str) -> Self {
-            Self(
-                std::env::temp_dir()
-                    .canonicalize()
-                    .expect("tmp")
-                    .join(format!("ocservia-{label}-{}.db", uuid::Uuid::now_v7())),
-            )
-        }
-        fn open(&self) -> Journal {
-            Journal::open(&self.0).expect("open")
-        }
-    }
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(format!("{}{}", self.0.display(), suffix));
-            }
-        }
-    }
-
-    #[test]
-    fn pragmas_corrupt_readonly_and_full_db_invariants() {
-        let db = TempDb::new("pragmas");
-        {
-            let j = db.open();
-            assert_eq!(j.journal_mode().expect("m").to_ascii_lowercase(), "wal");
-            assert!(j.foreign_keys_enabled().expect("fk"));
-            assert_eq!(
-                (
-                    j.busy_timeout_ms().expect("bt"),
-                    j.synchronous_level().expect("s")
-                ),
-                (5000, 2)
-            );
-            assert_eq!(
-                std::fs::metadata(&db.0).expect("md").permissions().mode() & 0o777,
-                0o600
-            );
-        }
-
-        // Corrupt database is refused.
-        let corrupt = TempDb::new("corrupt");
-        std::fs::write(&corrupt.0, b"not a sqlite database").expect("w");
-        assert!(Journal::open(&corrupt.0).is_err());
-
-        // Read-only database cannot accept a command (non-root only).
-        let is_root = std::fs::read_to_string("/proc/self/status").is_ok_and(|st| {
-            st.lines().any(|l| {
-                l.strip_prefix("Uid:")
-                    .and_then(|r| r.split_whitespace().nth(1))
-                    == Some("0")
-            })
-        });
-        if !is_root {
-            let ro = TempDb::new("readonly");
-            drop(ro.open());
-            std::fs::set_permissions(&ro.0, std::fs::Permissions::from_mode(0o444)).expect("444");
-            let res = Journal::open(&ro.0)
-                .and_then(|mut j| j.accept_command(&[1; 16], &[2; 16], &[3; 32], 0, 10));
-            std::fs::set_permissions(&ro.0, std::fs::Permissions::from_mode(0o600)).expect("600");
-            assert!(res.is_err());
-        }
-
-        // Full database rolls back partial synthetic effect.
-        let full = TempDb::new("full");
-        let (key, payload) = ([1_u8; 16], [2_u8; 32]);
-        let mut j = full.open();
-        j.accept_command(&key, &[3; 16], &payload, 0, 10)
-            .expect("acc");
-        let _ = j
-            .connection
-            .pragma_update(None, "wal_checkpoint", "TRUNCATE");
-        let pages: u32 = j
-            .connection
-            .pragma_query_value(None, "page_count", |r| r.get(0))
-            .expect("p");
-        j.connection
-            .pragma_update(None, "max_page_count", pages)
-            .expect("lim");
-        assert!(
-            j.execute_synthetic_effect(&key, &payload, &vec![7; 900_000], 11)
-                .is_err()
-        );
-        assert!(j.synthetic_effect(&key).expect("q").is_none());
-        assert_eq!(j.synthetic_execution_count().expect("c"), 0);
-    }
-
-    #[test]
-    fn command_identity_replay_attested_proof_and_revision_commit() {
-        let db = TempDb::new("cmd-attested");
-        let (k1, c1) = (
-            *uuid::Uuid::now_v7().as_bytes(),
-            *uuid::Uuid::now_v7().as_bytes(),
-        );
-        {
-            let mut j = db.open();
-            assert!(matches!(
-                j.accept_command(&k1, &c1, &[7; 32], 2, 10).expect("a"),
-                AcceptOutcome::Accepted(_)
-            ));
-            assert!(matches!(
-                j.accept_command(&k1, &c1, &[7; 32], 2, 11).expect("r"),
-                AcceptOutcome::Replay(_)
-            ));
-            assert!(matches!(
-                j.accept_command(&k1, uuid::Uuid::now_v7().as_bytes(), &[7; 32], 2, 12)
-                    .expect("ic1"),
-                AcceptOutcome::IdentityConflict(_)
-            ));
-            assert!(matches!(
-                j.accept_command(uuid::Uuid::now_v7().as_bytes(), &c1, &[7; 32], 2, 13)
-                    .expect("ic2"),
-                AcceptOutcome::IdentityConflict(_)
-            ));
-            assert!(matches!(
-                j.accept_command(&k1, &c1, &[8; 32], 2, 14).expect("pc"),
-                AcceptOutcome::PayloadConflict(_)
-            ));
-            j.transition_command(
-                &k1,
-                &[CommandState::Accepted],
-                CommandState::Running,
-                None,
-                None,
-                15,
-            )
-            .expect("run");
-            let done = j
-                .transition_command_attested(
-                    &k1,
-                    &[CommandState::Running],
-                    CommandState::Succeeded,
-                    Some(b"exact-result"),
-                    None,
-                    b"opaque-root-receipt",
-                    16,
-                )
-                .expect("att");
-            assert_eq!(
-                (
-                    done.result.as_deref(),
-                    done.privileged_result_proof.as_deref()
-                ),
-                (
-                    Some(b"exact-result".as_slice()),
-                    Some(b"opaque-root-receipt".as_slice())
-                )
-            );
-        }
-        let mut j = db.open();
-        let AcceptOutcome::Replay(rec) = j.accept_command(&k1, &c1, &[7; 32], 2, 17).expect("rep")
-        else {
-            panic!("expected replay");
-        };
-        assert_eq!(
-            (
-                rec.state,
-                rec.result.as_deref(),
-                rec.privileged_result_proof.as_deref()
-            ),
-            (
-                CommandState::Succeeded,
-                Some(b"exact-result".as_slice()),
-                Some(b"opaque-root-receipt".as_slice())
-            )
-        );
-
-        // External completion + applied resource revision commit atomically across restart.
-        let (k2, c2) = (
-            *uuid::Uuid::now_v7().as_bytes(),
-            *uuid::Uuid::now_v7().as_bytes(),
-        );
-        j.accept_command(&k2, &c2, &[7; 32], 1, 20).expect("a");
-        j.transition_command(
-            &k2,
-            &[CommandState::Accepted],
-            CommandState::Running,
-            None,
-            None,
-            21,
-        )
-        .expect("r");
-        j.complete_external_with_revision_attested(
-            &k2,
-            &c2,
-            AppliedResourceRevision {
-                resource_type: "user",
-                resource_key: "alice",
-                revision: 2,
-            },
-            b"applied",
-            b"proof",
-            22,
-        )
-        .expect("c");
-        drop(j);
-        let j = db.open();
-        assert_eq!(j.applied_revision("user", "alice").expect("rev"), Some(2));
-        assert_eq!(
-            j.command(&k2).expect("q").expect("rec").state,
-            CommandState::Succeeded
-        );
-    }
-
-    #[test]
-    fn legacy_resource_revision_schema_migrates_without_losing_fences() {
-        let db = TempDb::new("legacy-rev");
-        let legacy = Connection::open(&db.0).expect("open");
-        legacy
-            .execute_batch(
-                "CREATE TABLE applied_resource_revisions (
-                resource_type TEXT NOT NULL CHECK (resource_type IN ('user','group')),
-                resource_key TEXT NOT NULL CHECK (length(resource_key) BETWEEN 1 AND 64),
-                revision INTEGER NOT NULL CHECK (revision > 0),
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY(resource_type,resource_key)
-             ) STRICT;
-             INSERT INTO applied_resource_revisions VALUES ('user','alice',4,10);",
-            )
-            .expect("seed");
-        drop(legacy);
-
-        let mut j = db.open();
-        assert_eq!(j.applied_revision("user", "alice").expect("u"), Some(4));
-        let (k, c) = (
-            *uuid::Uuid::now_v7().as_bytes(),
-            *uuid::Uuid::now_v7().as_bytes(),
-        );
-        j.accept_command(&k, &c, &[9; 32], 1, 11).expect("a");
-        j.transition_command(
-            &k,
-            &[CommandState::Accepted],
-            CommandState::Running,
-            None,
-            None,
-            12,
-        )
-        .expect("r");
-        j.complete_external_with_revision_attested(
-            &k,
-            &c,
-            AppliedResourceRevision {
-                resource_type: "config",
-                resource_key: "ocserv.conf",
-                revision: 1,
-            },
-            b"applied",
-            b"proof",
-            13,
-        )
-        .expect("c");
-        assert_eq!(
-            j.applied_revision("config", "ocserv.conf").expect("cfg"),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn telemetry_eviction_and_five_minute_offline_recovery() {
-        let db = TempDb::new("telemetry");
-        let mut j = db.open();
-        let (sec, raw) = (
-            *uuid::Uuid::now_v7().as_bytes(),
-            *uuid::Uuid::now_v7().as_bytes(),
-        );
-        assert!(
-            j.enqueue_telemetry(&TelemetryInsert {
-                batch_id: &sec,
-                priority: 1,
-                observed_at: 10,
-                expires_at: 100,
-                payload: b"security",
-                now: 20,
-                max_bytes: 12
-            })
-            .expect("s")
-        );
-        assert!(
-            !j.enqueue_telemetry(&TelemetryInsert {
-                batch_id: &raw,
-                priority: 4,
-                observed_at: 11,
-                expires_at: 100,
-                payload: b"raw-data",
-                now: 20,
-                max_bytes: 12
-            })
-            .expect("r")
-        );
-        let pending = j.telemetry_pending(10, 20).expect("p");
-        assert_eq!((pending.len(), pending[0].0), (1, sec));
-        assert_eq!(j.telemetry_drop_counters().expect("d"), [0, 0, 0, 1]);
-        j.acknowledge_telemetry(&sec).expect("ack");
-        assert_eq!(j.telemetry_pending(10, 20).expect("e").len(), 0);
-
-        let recovery_secs = i64::try_from(OFFLINE_RECOVERY_RETENTION_SECONDS).expect("s");
-        let (legacy, rec) = (
-            *uuid::Uuid::now_v7().as_bytes(),
-            *uuid::Uuid::now_v7().as_bytes(),
-        );
-        j.enqueue_telemetry(&TelemetryInsert {
-            batch_id: &legacy,
-            priority: 2,
-            observed_at: 1_000,
-            expires_at: 1_000 + 86_400,
-            payload: b"legacy-day-window",
-            now: 1_000,
-            max_bytes: 1_024,
-        })
-        .expect("l");
-        drop(j);
-        let mut j = db.open();
-        assert!(
-            j.telemetry_pending(10, 1_299)
-                .expect("b")
-                .iter()
-                .any(|x| x.0 == legacy)
-        );
-        assert!(
-            j.telemetry_pending(10, 1_300)
-                .expect("a")
-                .iter()
-                .all(|x| x.0 != legacy)
-        );
-        assert_eq!(j.telemetry_drop_counters().expect("d"), [0, 1, 0, 1]);
-        j.enqueue_telemetry(&TelemetryInsert {
-            batch_id: &rec,
-            priority: 2,
-            observed_at: 1_300,
-            expires_at: 1_300 + recovery_secs,
-            payload: b"reconnected",
-            now: 1_300,
-            max_bytes: 1_024,
-        })
-        .expect("rec");
-        let pending = j.telemetry_pending(10, 1_301).expect("p");
-        assert!(!pending.iter().any(|x| x.0 == legacy) && pending.iter().any(|x| x.0 == rec));
-    }
-
-    #[test]
-    fn synthetic_effect_atomicity_rollback_and_restart_idempotency() {
-        let db = TempDb::new("synth");
-        let (k1, c1, p1) = (
-            *uuid::Uuid::now_v7().as_bytes(),
-            *uuid::Uuid::now_v7().as_bytes(),
-            [9_u8; 32],
-        );
-        {
-            let mut j = db.open();
-            j.accept_command(&k1, &c1, &p1, 0, 10).expect("a");
-            j.transition_command(
-                &k1,
-                &[CommandState::Accepted],
-                CommandState::Running,
-                None,
-                None,
-                11,
-            )
-            .expect("r");
-            j.connection
-                .execute_batch(
-                    "CREATE TEMP TRIGGER fail_terminal_result
-                 BEFORE UPDATE OF state ON command_journal WHEN NEW.state = 'succeeded'
-                 BEGIN SELECT RAISE(FAIL, 'injected'); END;",
-                )
-                .expect("trig");
-            assert!(
-                j.execute_and_complete_synthetic(&k1, &c1, &p1, b"result", 12)
-                    .is_err()
-            );
-            assert!(j.synthetic_effect(&k1).expect("q").is_none());
-            assert_eq!(j.synthetic_execution_count().expect("c"), 0);
-            assert_eq!(
-                j.command(&k1).expect("q").unwrap().state,
-                CommandState::Running
-            );
-        }
-
-        let (k2, p2) = (*uuid::Uuid::now_v7().as_bytes(), [3_u8; 32]);
-        {
-            let mut j = db.open();
-            assert!(
-                j.execute_synthetic_effect(&k2, &p2, b"done", 10)
-                    .expect("1st")
-            );
-        }
-        let mut j = db.open();
-        assert!(
-            !j.execute_synthetic_effect(&k2, &p2, b"done", 11)
-                .expect("dup")
-        );
-        assert_eq!(j.synthetic_execution_count().expect("c"), 1);
-        assert_eq!(
-            j.synthetic_effect(&k2).expect("e").expect("p").result,
-            b"done"
-        );
-    }
-
-    #[test]
-    fn owner_fence_epoch_floor_is_monotonic_durable_and_concurrent_safe() {
-        let db = TempDb::new("fence-floor");
-        {
-            let j = db.open();
-            assert_eq!(j.owner_fence_epoch_floor().expect("0"), 0);
-            assert_eq!(j.raise_owner_fence_epoch_floor(4).expect("4"), 4);
-            assert_eq!(j.raise_owner_fence_epoch_floor(2).expect("4"), 4);
-            assert_eq!(j.raise_owner_fence_epoch_floor(9).expect("9"), 9);
-        }
-        let stale = db.open();
-        let current = db.open();
-        assert_eq!(stale.owner_fence_epoch_floor().expect("9"), 9);
-        assert_eq!(current.raise_owner_fence_epoch_floor(10).expect("10"), 10);
-        assert_eq!(stale.raise_owner_fence_epoch_floor(6).expect("10"), 10);
-        assert_eq!(stale.owner_fence_epoch_floor().expect("10"), 10);
-    }
 }

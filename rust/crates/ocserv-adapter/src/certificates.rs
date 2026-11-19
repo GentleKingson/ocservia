@@ -515,10 +515,18 @@ impl Adapter {
         identity: ArtifactLeaseIdentity<'_>,
         offset: u64,
     ) -> Result<ArtifactData, AdapterError> {
+        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+
         let _guard = self.certificate_artifact_lock.lock().await;
-        let record = EffectStore::open_for_mutation(&self.resources)?.lease_artifact(identity)?;
+        let mut store = EffectStore::open_for_mutation(&self.resources)?;
+        let record = store.lease_artifact(identity)?;
         if offset != record.active_offset || offset > record.content_size {
             return Err(AdapterError::InvalidRequest);
+        }
+        let total_size =
+            usize::try_from(record.content_size).map_err(|_| AdapterError::InvalidResource)?;
+        if total_size > MAX_ARTIFACT_BYTES {
+            return Err(AdapterError::InvalidResource);
         }
         let artifact = Uuid::from_bytes(record.artifact_id);
         let path = self
@@ -526,25 +534,71 @@ impl Adapter {
             .certificate_key_dir
             .join("artifacts")
             .join(format!("{artifact}.p12"));
-        let metadata = tokio::fs::symlink_metadata(&path)
+        let symlink_meta = tokio::fs::symlink_metadata(&path)
             .await
             .map_err(AdapterError::Io)?;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.permissions().mode() & 0o077 != 0
-            || metadata.len() != record.content_size
+        if !symlink_meta.is_file()
+            || symlink_meta.file_type().is_symlink()
+            || symlink_meta.permissions().mode() & 0o077 != 0
+            || symlink_meta.len() != record.content_size
         {
             return Err(AdapterError::InvalidResource);
         }
-        let data = tokio::fs::read(&path).await.map_err(AdapterError::Io)?;
-        if data.len() > MAX_ARTIFACT_BYTES
-            || Sha256::digest(&data).as_slice() != record.content_sha256
+        let mut file = tokio::fs::File::open(&path)
+            .await
+            .map_err(AdapterError::Io)?;
+        let fd_meta = file.metadata().await.map_err(AdapterError::Io)?;
+        if !fd_meta.is_file()
+            || fd_meta.permissions().mode() & 0o077 != 0
+            || fd_meta.len() != record.content_size
+            || fd_meta.dev() != symlink_meta.dev()
+            || fd_meta.ino() != symlink_meta.ino()
         {
             return Err(AdapterError::InvalidResource);
         }
+
         let start = usize::try_from(offset).map_err(|_| AdapterError::InvalidRequest)?;
-        let end = start.saturating_add(ARTIFACT_CHUNK_BYTES).min(data.len());
-        EffectStore::open_for_mutation(&self.resources)?.advance_artifact(
+        let end = start.saturating_add(ARTIFACT_CHUNK_BYTES).min(total_size);
+        let chunk_len = end - start;
+        let mut chunk = Vec::with_capacity(chunk_len);
+
+        if offset == 0 {
+            // Stream-verify full file SHA-256 on lease start while keeping only
+            // the first chunk (<= 256 KiB) in memory.
+            let mut hasher = Sha256::new();
+            let mut buf = vec![0_u8; 64 * 1024].into_boxed_slice();
+            let mut total_read = 0_usize;
+            loop {
+                let n = file.read(&mut buf).await.map_err(AdapterError::Io)?;
+                if n == 0 {
+                    break;
+                }
+                total_read = total_read
+                    .checked_add(n)
+                    .ok_or(AdapterError::InvalidResource)?;
+                if total_read > MAX_ARTIFACT_BYTES || total_read > total_size {
+                    return Err(AdapterError::InvalidResource);
+                }
+                hasher.update(&buf[..n]);
+                if chunk.len() < chunk_len {
+                    let take = (chunk_len - chunk.len()).min(n);
+                    chunk.extend_from_slice(&buf[..take]);
+                }
+            }
+            if total_read != total_size || hasher.finalize().as_slice() != record.content_sha256 {
+                return Err(AdapterError::InvalidResource);
+            }
+        } else {
+            file.seek(io::SeekFrom::Start(offset))
+                .await
+                .map_err(AdapterError::Io)?;
+            chunk.resize(chunk_len, 0);
+            file.read_exact(&mut chunk)
+                .await
+                .map_err(AdapterError::Io)?;
+        }
+
+        store.advance_artifact(
             identity,
             offset,
             u64::try_from(end).map_err(|_| AdapterError::OutputLimit)?,
@@ -553,8 +607,8 @@ impl Adapter {
             artifact_id: record.artifact_id.to_vec(),
             grant_id: identity.grant_id.to_vec(),
             offset,
-            data: data[start..end].to_vec(),
-            eof: end == data.len(),
+            data: chunk,
+            eof: end == total_size,
             sha256: record.content_sha256.to_vec(),
         })
     }

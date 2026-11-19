@@ -49,7 +49,7 @@ pub(super) async fn handle_command_stream(
             session.privd,
             grant,
             active_fence,
-            session.journal,
+            session.command_executor.journal_mut(),
             session.fence_epoch_floor,
         )
         .await;
@@ -66,7 +66,7 @@ pub(super) async fn handle_command_stream(
             session.privd,
             grant,
             active_fence,
-            session.journal,
+            session.command_executor.journal_mut(),
             session.fence_epoch_floor,
         )
         .await;
@@ -92,7 +92,10 @@ async fn process_command(
     authority: &ActiveSessionAuthority,
     envelope: &CommandEnvelope,
 ) -> Result<CommandResult, Box<dyn std::error::Error + Send + Sync>> {
-    refresh_fence_epoch_floor(session.journal, session.fence_epoch_floor)?;
+    refresh_fence_epoch_floor(
+        session.command_executor.journal_mut(),
+        session.fence_epoch_floor,
+    )?;
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     let now_unix_seconds = i64::try_from(now.as_secs())?;
     if stale_command_owner(
@@ -401,7 +404,9 @@ async fn execute_external_command(
                     .begin_attested_recovery(envelope, context)?;
                 (command, Some(response))
             } else {
-                let observed = observe_external_effect(session.privd, envelope).await;
+                let observed =
+                    observe_external_effect_with_reconcile(session.privd, envelope, Some(response))
+                        .await;
                 return session
                     .command_executor
                     .reconcile_external(envelope, context, observed);
@@ -574,9 +579,18 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, String,
     }
 }
 
+#[cfg(test)]
 pub(super) async fn observe_external_effect(
     privd: &PrivdClient,
     envelope: &CommandEnvelope,
+) -> ExternalEffectObservation {
+    observe_external_effect_with_reconcile(privd, envelope, None).await
+}
+
+async fn observe_external_effect_with_reconcile(
+    privd: &PrivdClient,
+    envelope: &CommandEnvelope,
+    prefetched_reconcile: Option<Result<PrivdResponse, io::Error>>,
 ) -> ExternalEffectObservation {
     // Planning is side-effect free. After privd startup cleanup, an interrupted
     // validation can always be retried from the immutable candidate.
@@ -631,9 +645,10 @@ pub(super) async fn observe_external_effect(
                 ))
                 .await
         }
-        payload if desired_effect_identity(payload).is_some() => {
-            privd.call_reconcile(envelope).await
-        }
+        payload if desired_effect_identity(payload).is_some() => match prefetched_reconcile {
+            Some(response) => response,
+            None => privd.call_reconcile(envelope).await,
+        },
         _ => return ExternalEffectObservation::Unknown,
     };
     let Ok(response) = response else {

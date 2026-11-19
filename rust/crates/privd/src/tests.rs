@@ -9,17 +9,19 @@ use std::os::unix::fs::{OpenOptionsExt as _, chown, symlink};
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use ocservia_agent_protocol::{
-    ArtifactConsumeRequest, ArtifactReadRequest, ReadRequest, UpgradeResultListRequest,
-    privd_request,
+    ArtifactConsumeRequest, ArtifactReadRequest, PrivilegedRequestMode, ReadRequest,
+    UpgradeResultListRequest, privd_request,
 };
 use ocservia_command_authorization::{
-    canonical_artifact_grant_v1, canonical_v1, claims_from_envelope_v1, verification_key_id,
+    ArtifactGrantClaimsV1, canonical_artifact_grant_v1, canonical_v1, claims_from_envelope_v1,
+    verification_key_id,
 };
 use ocservia_contracts::config_profile;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentUpgrade, ArtifactGrantV1, ArtifactGrantVersion, CertificateP12, CommandDeliveryMode,
-    CompleteConfigApply, CompleteConfigCandidate, CompleteConfigDirective, ConnectionFenceV2,
-    FenceBindingV2, IpBanRemove, NodeLocalTlsReference, SealedSecretPurpose, SealedSecretV1,
+    CommandResultState, CompleteConfigApply, CompleteConfigCandidate, CompleteConfigDirective,
+    ConnectionFenceV2, FenceBindingV2, FenceOperationKind, IpBanRemove, NodeLocalTlsReference,
+    PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose, SealedSecretV1,
     SealedSecretVersion, ServiceReload, SessionDisconnect, SessionTerminate, UserCreate,
     command_envelope, complete_config_directive,
 };
@@ -29,6 +31,7 @@ use ocservia_test_support::{
     sign_command_v2, sign_fence_binding, ts, unix_seconds,
 };
 use ocservia_upgrader::UpgradeTrigger;
+use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
 use super::*;
@@ -1219,13 +1222,17 @@ async fn direct_socket_authorization_and_wire_variants_preserve_effects() {
     let cmd = signed_service_reload(&signing, node_id, now, now + 60);
     let send = |bytes: Vec<u8>, peer_uid| {
         let (mut client, server) = UnixStream::pair().expect("pair");
+        let attestation_key = Arc::new(SigningKey::from_bytes(&[41; 32]));
+        let attestation_key_id: Arc<str> =
+            Arc::from(verification_key_id(&attestation_key.verifying_key()));
         let task = tokio::spawn(handle_client(
             server,
             peer_uid,
             node_id,
             TEST_ENDPOINT_ID,
             keys.clone(),
-            Arc::new(SigningKey::from_bytes(&[41; 32])),
+            attestation_key,
+            attestation_key_id,
             UpgradeScheduler::disabled(),
             fx.adapter.clone(),
         ));
@@ -1390,12 +1397,16 @@ async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
     let req = unsigned_request(Some(privd_request::Operation::UpgradeResultList(
         UpgradeResultListRequest {},
     )));
+    let attestation_key = Arc::new(SigningKey::from_bytes(&[41; 32]));
+    let attestation_key_id: Arc<str> =
+        Arc::from(verification_key_id(&attestation_key.verifying_key()));
     let resp = dispatch_attested(
         &req,
         &node_id,
         &TEST_ENDPOINT_ID,
         &keys,
-        &SigningKey::from_bytes(&[41; 32]),
+        &attestation_key,
+        &attestation_key_id,
         &scheduler,
         &adapter,
     )

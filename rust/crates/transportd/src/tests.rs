@@ -2396,11 +2396,11 @@ async fn artifact_fence_verification_and_carrier_forwarding() {
         .await
         .get_mut(node_id.as_slice())
         .expect("s")
-        .fence = RegisteredFence {
+        .fence = Arc::new(RegisteredFence {
         verified: exp_verified,
         fence: expired_hs.clone(),
         endpoint_id: term.endpoint_id,
-    };
+    });
     let fence = signed_fence(&key, &term, 60);
     register_fence(&service, &fence).await;
 
@@ -2804,7 +2804,7 @@ async fn owner_lease_expiry_closes_and_refresh_preserves_agent_session() {
         .await
         .get_mut(n2.as_slice())
         .expect("s")
-        .fence = RegisteredFence {
+        .fence = Arc::new(RegisteredFence {
         verified: service
             .shared
             .keyring()
@@ -2812,7 +2812,7 @@ async fn owner_lease_expiry_closes_and_refresh_preserves_agent_session() {
             .expect("v"),
         fence: short.clone(),
         endpoint_id: t2.endpoint_id,
-    };
+    });
     register_fence(&service, &short).await;
     register_fence(&service, &signed_fence(&key, &t2, 120)).await;
     assert!(
@@ -3096,16 +3096,18 @@ async fn fenced_admin_operations_binding_and_lost_ack_recovery() {
             .code(),
         tonic::Code::NotFound
     );
-    service
-        .shared
-        .inner
-        .fences
-        .lock()
-        .await
-        .get_mut(n2.as_slice())
-        .expect("f")
-        .verified
-        .lease_until_seconds = 0;
+    Arc::make_mut(
+        service
+            .shared
+            .inner
+            .fences
+            .lock()
+            .await
+            .get_mut(n2.as_slice())
+            .expect("f"),
+    )
+    .verified
+    .lease_until_seconds = 0;
     assert_eq!(
         service
             .update_node_trust(Request::new(revoke))
@@ -3199,4 +3201,108 @@ async fn restored_trust_snapshot_blocks_revoked_endpoint_without_operation_histo
         shutdown(&service, router).await.expect("shut");
         client.close().await;
     }
+}
+
+#[test]
+fn identity_policy_reverse_index_rejects_duplicate_nodes_and_updates_atomically() {
+    let ep_a = SecretKey::generate().public();
+    let ep_b = SecretKey::generate().public();
+    let ep_c = SecretKey::generate().public();
+    let node_1 = vec![0x11; 16];
+    let node_2 = vec![0x22; 16];
+
+    // Snapshot with two active endpoints bound to the same node_id must be rejected atomically.
+    let policy = IdentityPolicy::default();
+    assert!(
+        policy
+            .replace_snapshot([
+                (ep_a, node_1.clone(), NodeTrustState::Active, 1),
+                (ep_b, node_1.clone(), NodeTrustState::Active, 1),
+            ])
+            .is_err()
+    );
+    assert!(!policy.permits(ep_a, AGENT_ALPN));
+    assert!(!policy.permits(ep_b, AGENT_ALPN));
+
+    // Clean snapshot installs both forward and reverse bindings.
+    policy
+        .replace_snapshot([(ep_a, node_1.clone(), NodeTrustState::Active, 2)])
+        .expect("valid snapshot");
+    assert!(policy.permits(ep_a, AGENT_ALPN));
+
+    // A second endpoint trying to claim node_1 while ep_a is still Active is rejected via O(1) index.
+    let (disp, prev_rev, retained_rev, retained_state) =
+        policy.update_with_status(ep_b, node_1.clone(), NodeTrustState::Active, 3);
+    assert_eq!(
+        (disp, prev_rev, retained_rev, retained_state),
+        (
+            PolicyUpdateDisposition::Rejected,
+            0,
+            0,
+            NodeTrustState::Unspecified
+        )
+    );
+    assert!(!policy.permits(ep_b, AGENT_ALPN));
+
+    // Same-revision idempotent update returns Applied; stale revision returns Stale.
+    assert_eq!(
+        policy.update_with_status(ep_a, node_1.clone(), NodeTrustState::Active, 2),
+        (
+            PolicyUpdateDisposition::Applied,
+            2,
+            2,
+            NodeTrustState::Active
+        )
+    );
+    assert_eq!(
+        policy.update_with_status(ep_a, node_1.clone(), NodeTrustState::Active, 1),
+        (PolicyUpdateDisposition::Stale, 2, 2, NodeTrustState::Active)
+    );
+
+    // Revoking ep_a atomically evicts node_1 from the reverse index so a replacement endpoint can bind.
+    assert_eq!(
+        policy.update_with_status(ep_a, node_1.clone(), NodeTrustState::Revoked, 4),
+        (
+            PolicyUpdateDisposition::Applied,
+            2,
+            4,
+            NodeTrustState::Revoked
+        )
+    );
+    assert!(policy.revoked(ep_a));
+    assert!(!policy.permits(ep_a, AGENT_ALPN));
+
+    // Replacement endpoint ep_b can now bind to node_1, while ep_c binds independently to node_2.
+    assert_eq!(
+        policy.update_with_status(ep_b, node_1.clone(), NodeTrustState::Active, 5),
+        (
+            PolicyUpdateDisposition::Applied,
+            0,
+            5,
+            NodeTrustState::Active
+        )
+    );
+    assert_eq!(
+        policy.update_with_status(ep_c, node_2, NodeTrustState::Active, 1),
+        (
+            PolicyUpdateDisposition::Applied,
+            0,
+            1,
+            NodeTrustState::Active
+        )
+    );
+    assert!(policy.permits(ep_b, AGENT_ALPN));
+    assert!(policy.permits(ep_c, AGENT_ALPN));
+
+    // Once ep_b holds node_1, another endpoint claiming node_1 is rejected again.
+    let ep_d = SecretKey::generate().public();
+    assert_eq!(
+        policy.update_with_status(ep_d, node_1, NodeTrustState::Active, 6),
+        (
+            PolicyUpdateDisposition::Rejected,
+            0,
+            0,
+            NodeTrustState::Unspecified
+        )
+    );
 }
