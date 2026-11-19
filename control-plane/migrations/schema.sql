@@ -2,11 +2,11 @@
 -- ocservia:format=1
 -- ocservia:engine=postgresql
 -- ocservia:epoch=2
--- ocservia:revision=3
--- ocservia:history-sha256=153e171051c19dac0caecd6d2fd13c582fe574ad1482a4ec8dafa8167e57bf88
+-- ocservia:revision=4
+-- ocservia:history-sha256=07312c4848d34a44976eec140c47c84010f1ec1c88c0178df8fe664b971df830
 
 -- ocservia:step=001:baseline
--- ocservia:metadata={"catalog_sha256":"f021bb005b544187af3888a0ea3c65e5e6d7abec18b8f117a4b4236f90c139d3"}
+-- ocservia:metadata={"catalog_sha256":"892cda01819ab42b44f5bcbfa5fe0e9fc7f5e644cc658d9f8b214d419d67001a"}
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
 SET LOCAL idle_in_transaction_session_timeout = 0;
@@ -1583,6 +1583,8 @@ CREATE INDEX commands_node_state_idx ON public.commands USING btree (node_id, st
 
 CREATE INDEX commands_pending_resource_idx ON public.commands USING btree (node_id, resource_type, resource_key, created_at) WHERE ((state = 'queued'::text) AND (resource_type IS NOT NULL));
 
+CREATE INDEX commands_queued_expiry_idx ON public.commands USING btree (expires_at) WHERE (state = 'queued'::text);
+
 CREATE INDEX commands_retention_idx ON public.commands USING btree (updated_at, id) WHERE (details_compacted_at IS NULL);
 
 CREATE INDEX config_apply_operations_node_created_idx ON public.config_apply_operations USING btree (node_id, created_at DESC, operation_id DESC);
@@ -1613,7 +1615,11 @@ CREATE INDEX operation_events_operation_sequence_idx ON public.operation_events 
 
 CREATE INDEX operations_active_command_limit_idx ON public.operations USING btree (state, id) WHERE (state = ANY (ARRAY['dispatched'::text, 'accepted'::text, 'running'::text, 'unknown'::text]));
 
+CREATE INDEX operations_node_backlog_idx ON public.operations USING btree (node_id) WHERE (state = ANY (ARRAY['queued'::text, 'offline_pending'::text, 'dispatched'::text, 'accepted'::text, 'running'::text, 'unknown'::text]));
+
 CREATE INDEX operations_queued_backlog_idx ON public.operations USING btree (workspace_id, node_id, id) WHERE (state = ANY (ARRAY['queued'::text, 'offline_pending'::text]));
+
+CREATE INDEX operations_workspace_backlog_idx ON public.operations USING btree (workspace_id) WHERE (state = ANY (ARRAY['queued'::text, 'offline_pending'::text, 'dispatched'::text, 'accepted'::text, 'running'::text, 'unknown'::text]));
 
 CREATE INDEX operations_workspace_created_idx ON public.operations USING btree (workspace_id, created_at DESC, id DESC);
 
