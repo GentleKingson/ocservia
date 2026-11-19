@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -19,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -44,8 +46,11 @@ type Worker struct {
 }
 
 const (
-	defaultCommandLease = 10 * time.Second
-	maxTestCommandLease = 60 * time.Second
+	defaultCommandLease    = 10 * time.Second
+	maxTestCommandLease    = 60 * time.Second
+	dispatchBatchLimit     = 16
+	maxDispatchConcurrency = 8
+	maxDrainBatchesPerTick = 8
 )
 
 func NewWorker(service *Service, sender Sender, logger *slog.Logger) (*Worker, error) {
@@ -94,6 +99,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	maintenance := time.NewTicker(time.Second)
 	defer poll.Stop()
 	defer maintenance.Stop()
+	wakeup := w.service.Wakeup()
 	for {
 		select {
 		case <-ctx.Done():
@@ -108,51 +114,102 @@ func (w *Worker) Run(ctx context.Context) error {
 			if err := w.service.ReconcileAgentUpgrades(ctx); err != nil {
 				w.logger.ErrorContext(ctx, "reconcile agent upgrades", "error", err)
 			}
+		case <-wakeup:
+			w.drain(ctx)
 		case <-poll.C:
-			if err := w.dispatch(ctx); err != nil {
-				w.logger.ErrorContext(ctx, "dispatch outbox batch", "error", err)
-			}
+			w.drain(ctx)
+		}
+	}
+}
+
+func (w *Worker) drain(ctx context.Context) {
+	for range maxDrainBatchesPerTick {
+		if ctx.Err() != nil {
+			return
+		}
+		claimed, full, err := w.dispatchBatch(ctx)
+		if err != nil {
+			w.logger.ErrorContext(ctx, "dispatch outbox batch", "error", err)
+			return
+		}
+		if !full || claimed == 0 {
+			return
 		}
 	}
 }
 
 func (w *Worker) dispatch(ctx context.Context) error {
+	_, _, err := w.dispatchBatch(ctx)
+	return err
+}
+
+func (w *Worker) dispatchBatch(ctx context.Context) (int, bool, error) {
 	_, armedBeforeClaim, err := w.readBarrierArm("arm")
 	if err != nil {
-		return err
+		return 0, false, err
 	}
-	limit := 16
+	limit := dispatchBatchLimit
 	if armedBeforeClaim {
 		limit = 1
 	}
 	jobs, err := w.service.Claim(ctx, w.id, limit, defaultCommandLease)
 	if err != nil {
-		return err
+		return 0, false, err
 	}
+	claimedCount := len(jobs)
 	jobs, err = w.selectPreSendBarrierTarget(ctx, jobs)
 	if err != nil {
-		return err
+		return claimedCount, false, err
 	}
-	for _, job := range jobs {
-		jobCtx := propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": job.Traceparent})
-		jobCtx, span := otel.Tracer("ocservia.operations").Start(jobCtx, "outbox.dispatch", trace.WithSpanKind(trace.SpanKindProducer))
-		err := w.dispatchFenced(jobCtx, job)
-		if err != nil {
-			span.RecordError(err)
-			span.End()
-			var accepted *sentDispatchError
-			if errors.As(err, &accepted) {
-				w.logger.ErrorContext(ctx, "record command dispatch success", "command_id", job.CommandID, "error", accepted.err)
-				continue
-			}
-			if markErr := w.service.MarkFailed(ctx, job, err); markErr != nil {
-				w.logger.ErrorContext(ctx, "record command dispatch failure", "command_id", job.CommandID, "error", markErr)
-			}
-			continue
+	if len(jobs) == 0 {
+		return claimedCount, false, nil
+	}
+	// DispatchCandidates selects at most one command per node, so cross-node
+	// dispatches are independent; keep pre-send barrier runs strictly serial.
+	if len(jobs) == 1 || armedBeforeClaim || w.preSendBarrierDir != "" {
+		for _, job := range jobs {
+			w.dispatchOne(ctx, job)
 		}
-		span.End()
+		return claimedCount, claimedCount == limit && !armedBeforeClaim, nil
 	}
-	return nil
+	workerCount := min(maxDispatchConcurrency, len(jobs))
+	queue := make(chan Dispatch, len(jobs))
+	for _, job := range jobs {
+		queue <- job
+	}
+	close(queue)
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer wg.Done()
+			for job := range queue {
+				w.dispatchOne(ctx, job)
+			}
+		}()
+	}
+	wg.Wait()
+	return claimedCount, claimedCount == limit, nil
+}
+
+func (w *Worker) dispatchOne(ctx context.Context, job Dispatch) {
+	jobCtx := propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": job.Traceparent})
+	jobCtx, span := otel.Tracer("ocservia.operations").Start(jobCtx, "outbox.dispatch", trace.WithSpanKind(trace.SpanKindProducer))
+	err := w.dispatchFenced(jobCtx, job)
+	if err != nil {
+		span.RecordError(err)
+		span.End()
+		var accepted *sentDispatchError
+		if errors.As(err, &accepted) {
+			w.logger.ErrorContext(ctx, "record command dispatch success", "command_id", job.CommandID, "error", accepted.err)
+			return
+		}
+		if markErr := w.service.MarkFailed(ctx, job, err); markErr != nil {
+			w.logger.ErrorContext(ctx, "record command dispatch failure", "command_id", job.CommandID, "error", markErr)
+		}
+		return
+	}
+	span.End()
 }
 
 func (w *Worker) readBarrierArm(name string) (uuid.UUID, bool, error) {
@@ -229,19 +286,30 @@ func (w *Worker) dispatchFenced(ctx context.Context, job Dispatch) error {
 		}
 		return nil
 	}
-	envelope := &agentv1.CommandEnvelope{}
-	if err := proto.Unmarshal(job.Envelope, envelope); err != nil {
-		return fmt.Errorf("decode command envelope for fencing: %w", err)
+	requiredCapability, cleanWire := scanEnvelopeForFencing(job.Envelope)
+	var fallbackEnvelope *agentv1.CommandEnvelope
+	if !cleanWire {
+		fallbackEnvelope = &agentv1.CommandEnvelope{}
+		if err := proto.Unmarshal(job.Envelope, fallbackEnvelope); err != nil {
+			return fmt.Errorf("decode command envelope for fencing: %w", err)
+		}
+		requiredCapability = fallbackEnvelope.GetRequiredCapability()
 	}
 	var nodeID [16]byte
 	copy(nodeID[:], job.NodeID[:])
 	var commandID [16]byte
 	copy(commandID[:], job.CommandID[:])
-	return w.fences.ExecuteFenced(ctx, nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, commandID, envelope.GetRequiredCapability(),
+	return w.fences.ExecuteFenced(ctx, nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, commandID, requiredCapability,
 		func(ctx context.Context, fence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-			envelope.ConnectionFence = fence
-			envelope.FenceBinding = binding
-			fenced, err := proto.Marshal(envelope)
+			var fenced []byte
+			var err error
+			if cleanWire {
+				fenced, err = appendOwnerProofsWire(job.Envelope, fence, binding)
+			} else {
+				fallbackEnvelope.ConnectionFence = fence
+				fallbackEnvelope.FenceBinding = binding
+				fenced, err = proto.Marshal(fallbackEnvelope)
+			}
 			if err != nil {
 				return fmt.Errorf("encode fenced command envelope: %w", err)
 			}
@@ -256,6 +324,40 @@ func (w *Worker) dispatchFenced(ctx context.Context, job Dispatch) error {
 			}
 			return nil
 		})
+}
+
+func appendOwnerProofsWire(base []byte, fence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) ([]byte, error) {
+	if fence == nil && binding == nil {
+		return base, nil
+	}
+	var fenceBytes, bindingBytes []byte
+	var err error
+	extra := 0
+	if fence != nil {
+		fenceBytes, err = proto.Marshal(fence)
+		if err != nil {
+			return nil, err
+		}
+		extra += protowire.SizeTag(envelopeConnectionFenceField) + protowire.SizeBytes(len(fenceBytes))
+	}
+	if binding != nil {
+		bindingBytes, err = proto.Marshal(binding)
+		if err != nil {
+			return nil, err
+		}
+		extra += protowire.SizeTag(envelopeFenceBindingField) + protowire.SizeBytes(len(bindingBytes))
+	}
+	out := make([]byte, len(base), len(base)+extra)
+	copy(out, base)
+	if fence != nil {
+		out = protowire.AppendTag(out, envelopeConnectionFenceField, protowire.BytesType)
+		out = protowire.AppendBytes(out, fenceBytes)
+	}
+	if binding != nil {
+		out = protowire.AppendTag(out, envelopeFenceBindingField, protowire.BytesType)
+		out = protowire.AppendBytes(out, bindingBytes)
+	}
+	return out, nil
 }
 
 func (w *Worker) waitAtPreSendBarrier(ctx context.Context, dispatch Dispatch) error {

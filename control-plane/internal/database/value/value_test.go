@@ -1,6 +1,7 @@
 package value
 
 import (
+	"encoding/json"
 	"runtime"
 	"strings"
 	"testing"
@@ -103,6 +104,29 @@ func TestDecimalSizeMatchesCanonicalText(t *testing.T) {
 		n, err := newDecimal(input)
 		if err != nil || int64(len(n.String())) != n.size {
 			t.Fatal(input, n.String(), n.size, err)
+		}
+	}
+}
+
+func TestJSONBStringEscapingMatchesStdlib(t *testing.T) {
+	samples := []string{
+		"plain ascii 123",
+		`quotes " and backslash \ and slash /`,
+		"controls \b\f\n\r\t\x01\x1f",
+		"html <script>&</script>",
+		"separators \u2028 and \u2029 and emoji 😀 中文",
+	}
+	for _, s := range samples {
+		want, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := ParseJSONB(want)
+		if err != nil {
+			t.Fatalf("ParseJSONB(%s): %v", want, err)
+		}
+		if string(got.Bytes()) != string(want) {
+			t.Fatalf("mismatch for %q:\n got=%s\nwant=%s", s, got.Bytes(), want)
 		}
 	}
 }

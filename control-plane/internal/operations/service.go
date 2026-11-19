@@ -128,11 +128,40 @@ type Service struct {
 	signer                    *commandauth.Signer
 	agentUpgradeReconcileTime time.Duration
 	releaseCatalog            *releasecatalog.Catalog
+	notify                    chan struct{}
 }
 
 // NewBackend supplies the common operation and background Worker lifecycle.
 func NewBackend(backend database.Backend, commandLimit int, signer *commandauth.Signer) *Service {
-	return &Service{backend: backend, now: func() time.Time { return time.Now().UTC() }, commandLimit: commandLimit, signer: signer, agentUpgradeReconcileTime: defaultAgentUpgradeReconcileTimeout}
+	return &Service{
+		backend:                   backend,
+		now:                       func() time.Time { return time.Now().UTC() },
+		commandLimit:              commandLimit,
+		signer:                    signer,
+		agentUpgradeReconcileTime: defaultAgentUpgradeReconcileTimeout,
+		notify:                    make(chan struct{}, 1),
+	}
+}
+
+// Notify wakes an attached outbox worker without blocking the caller so newly
+// committed commands dispatch immediately instead of waiting for the next poll
+// tick.
+func (s *Service) Notify() {
+	if s == nil || s.notify == nil {
+		return
+	}
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
+}
+
+// Wakeup returns the coalesced notification channel for an outbox worker.
+func (s *Service) Wakeup() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.notify
 }
 
 // SetAgentUpgradeReconcileTimeout installs the bounded single-node upgrade
@@ -322,9 +351,15 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 			return err
 		})
 		if confirmed == nil {
+			if availableAt == created {
+				s.Notify()
+			}
 			return existing, false, nil
 		}
 		return Operation{}, false, fmt.Errorf("commit operation transaction: %w", err)
+	}
+	if availableAt == created {
+		s.Notify()
 	}
 	nodeText, commandText := request.NodeID.String(), commandID.String()
 	operation := Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: created, UpdatedAt: created, ExpiresAt: &expiry}
@@ -355,6 +390,40 @@ func (s *Service) ListEvents(ctx context.Context, operationID, after uuid.UUID, 
 		return nil, fmt.Errorf("list operation events: %w", err)
 	}
 	return events, nil
+}
+
+// ListEventsWithState returns operation events after cursor and, when no new
+// events are present, reads the operation's current state within the same
+// transaction so SSE watchers detect already-terminal operations without a
+// second transaction or join.
+func (s *Service) ListEventsWithState(ctx context.Context, operationID, after uuid.UUID, limit int) ([]Event, string, error) {
+	if limit < 1 || limit > 200 {
+		return nil, "", ErrInvalidRequest
+	}
+	var events []Event
+	var state string
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := operationstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		events, err = store.Events(ctx, operationID, after, limit)
+		if err != nil {
+			return err
+		}
+		if len(events) == 0 {
+			state, err = store.OperationState(ctx, operationID)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, database.ErrNotFound) {
+			return nil, "", database.ErrNotFound
+		}
+		return nil, "", fmt.Errorf("list operation events: %w", err)
+	}
+	return events, state, nil
 }
 
 func (s *Service) EventSequence(ctx context.Context, operationID, eventID uuid.UUID) (int64, bool, error) {

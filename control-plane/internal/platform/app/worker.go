@@ -16,14 +16,19 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/trustserver"
 )
 
-func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, commandSigner *commandauth.Signer, operationService *operations.Service, logger *slog.Logger) (*transportevents.Service, ownersession.FencedExecutor, error) {
+func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, commandSigner *commandauth.Signer, operationService *operations.Service, logger *slog.Logger) (*transportevents.Service, ownersession.FencedExecutor, func(), error) {
 	var err error
 	var workerTransport *transportclient.Client
 	var ownerSessions *ownersession.Manager
+	cleanup := func() {
+		if workerTransport != nil {
+			_ = workerTransport.Close()
+		}
+	}
 	if cfg.LocalSimulator || cfg.ControllerEndpointID != "" {
 		workerTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("configure transport client: %w", err)
+			return nil, nil, cleanup, fmt.Errorf("configure transport client: %w", err)
 		}
 	}
 	if cfg.ControllerEndpointID != "" {
@@ -32,7 +37,8 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		// the leases, signs fences, and pushes them to transportd.
 		ownerSessions, err = ownersession.NewManagerBackend(backend, commandSigner, workerTransport, cfg.OwnerLeaseTTL, logger)
 		if err != nil {
-			return nil, nil, fmt.Errorf("configure connection owner sessions: %w", err)
+			cleanup()
+			return nil, nil, func() {}, fmt.Errorf("configure connection owner sessions: %w", err)
 		}
 		life.start("run owner sessions", ownerSessions.Run)
 		// Transport disconnects, replacements, and revoke-driven closes end
@@ -41,7 +47,8 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		life.start("watch owner transport", func(ctx context.Context) error { return ownerSessions.WatchTransport(ctx, workerTransport) })
 		trust, err := trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.NewWithOwnerSessionsBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner, ownerSessions)), cfg.TransportUID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("configure trust server: %w", err)
+			cleanup()
+			return nil, nil, func() {}, fmt.Errorf("configure trust server: %w", err)
 		}
 		life.trust = trust
 		life.start("serve trust UDS", func(context.Context) error { return trust.Serve() })
@@ -50,9 +57,11 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 	if ownerSessions != nil {
 		eventService = transportevents.NewBackendWithCommandRecovery(backend, commandSigner, operationService, ownerSessions)
 	}
+	eventService.SetLocalSimulator(cfg.LocalSimulator)
 	if cfg.TestResultCommitBarrier != "" {
 		if err := eventService.EnableResultCommitBarrier(cfg.TestResultCommitBarrier); err != nil {
-			return nil, nil, fmt.Errorf("configure result commit barrier: %w", err)
+			cleanup()
+			return nil, nil, func() {}, fmt.Errorf("configure result commit barrier: %w", err)
 		}
 	}
 	var fenceExecutor ownersession.FencedExecutor
@@ -66,21 +75,24 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		var operationWorker *operations.Worker
 		operationWorker, err = operations.NewFencedWorker(operationService, transport, fenceExecutor, logger)
 		if err != nil {
-			return nil, nil, fmt.Errorf("configure outbox worker: %w", err)
+			cleanup()
+			return nil, nil, func() {}, fmt.Errorf("configure outbox worker: %w", err)
 		}
 		if cfg.TestPreSendBarrier != "" {
 			if err := operationWorker.EnablePreSendBarrier(cfg.TestPreSendBarrier, cfg.TestCommandLease); err != nil {
-				return nil, nil, fmt.Errorf("configure command pre-send barrier: %w", err)
+				cleanup()
+				return nil, nil, func() {}, fmt.Errorf("configure command pre-send barrier: %w", err)
 			}
 		}
 		life.start("run outbox worker", operationWorker.Run)
 		var trustWorker *enrollment.TrustConvergenceWorker
 		trustWorker, err = enrollment.NewFencedTrustConvergenceWorkerBackend(backend, transport, fenceExecutor, logger)
 		if err != nil {
-			return nil, nil, fmt.Errorf("configure trust convergence worker: %w", err)
+			cleanup()
+			return nil, nil, func() {}, fmt.Errorf("configure trust convergence worker: %w", err)
 		}
 		life.start("run trust convergence worker", trustWorker.Run)
 	}
 
-	return eventService, fenceExecutor, nil
+	return eventService, fenceExecutor, cleanup, nil
 }

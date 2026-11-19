@@ -24,6 +24,7 @@ type Event struct {
 	ID       uuid.UUID
 	Sequence uint64
 	Name     string
+	// Data holds immutable read-only payload bytes shared across subscribers.
 	Data     []byte
 	Terminal bool
 }
@@ -235,11 +236,13 @@ type subscribeResponse struct {
 }
 
 type subscriber struct {
-	id       uint64
-	sequence uint64
-	events   chan Event
-	done     chan error
-	once     sync.Once
+	id            uint64
+	sequence      uint64
+	catchingUp    bool
+	catchupCursor uuid.UUID
+	events        chan Event
+	done          chan error
+	once          sync.Once
 }
 
 func (s *subscriber) finish(err error) {
@@ -281,6 +284,7 @@ type watcher struct {
 	// independent so reconnect replay cannot be skipped by shared fan-out.
 	cursorSequence  uint64
 	hasCursor       bool
+	liveTerminal    bool
 	cursorSequences map[uuid.UUID]uint64
 	cursorOrder     []uuid.UUID
 	backoff         time.Duration
@@ -396,10 +400,15 @@ func (w *watcher) add(request subscribeRequest) (*subscriber, error) {
 		id: w.nextID, sequence: sequence,
 		events: make(chan Event, w.hub.config.SubscriberQueue), done: make(chan error, 1),
 	}
-	if !w.hasCursor || sequence < w.cursorSequence {
+	if !w.hasCursor {
 		w.cursor = request.after
 		w.cursorSequence = sequence
 		w.hasCursor = true
+	} else if sequence < w.cursorSequence {
+		// Isolate lagging reconnect replay to this subscriber instead of
+		// rewinding the shared live cursor for already-caught-up peers.
+		subscriber.catchingUp = true
+		subscriber.catchupCursor = request.after
 	}
 	w.subscribers[subscriber.id] = subscriber
 	return subscriber, nil
@@ -457,49 +466,124 @@ func (w *watcher) poll() (bool, error) {
 	if !w.hasCursor {
 		return false, nil
 	}
-	w.hub.metrics.queries.Add(1)
-	events, err := w.hub.fetch(w.ctx, w.scope, w.cursor, watcherPageSize)
-	if err != nil {
-		w.hub.metrics.databaseErrors.Add(1)
-		return false, err
-	}
-	terminal := false
-	for _, event := range events {
-		if event.Name != "" && (event.ID == uuid.Nil || event.Sequence == 0 || event.Sequence <= w.cursorSequence) {
-			return false, errors.New("event source returned a non-advancing durable cursor")
+	if !w.liveTerminal {
+		w.hub.metrics.queries.Add(1)
+		events, err := w.hub.fetch(w.ctx, w.scope, w.cursor, watcherPageSize)
+		if err != nil {
+			w.hub.metrics.databaseErrors.Add(1)
+			return false, err
 		}
-		if event.ID != uuid.Nil {
-			w.cursor = event.ID
-			w.cursorSequence = event.Sequence
-			w.remember(event.ID, event.Sequence)
-		}
-		if event.Terminal {
-			terminal = true
-		}
-		if event.Name == "" {
-			continue
-		}
-		for id, subscriber := range w.subscribers {
-			if event.Sequence <= subscriber.sequence {
+		for _, event := range events {
+			if event.Name != "" && (event.ID == uuid.Nil || event.Sequence == 0 || event.Sequence <= w.cursorSequence) {
+				return false, errors.New("event source returned a non-advancing durable cursor")
+			}
+			if event.ID != uuid.Nil {
+				w.cursor = event.ID
+				w.cursorSequence = event.Sequence
+				w.remember(event.ID, event.Sequence)
+			}
+			if event.Terminal {
+				w.liveTerminal = true
+			}
+			if event.Name == "" {
 				continue
 			}
+			for id, subscriber := range w.subscribers {
+				if subscriber.catchingUp || event.Sequence <= subscriber.sequence {
+					continue
+				}
+				select {
+				case subscriber.events <- event:
+					subscriber.sequence = event.Sequence
+				default:
+					delete(w.subscribers, id)
+					w.hub.metrics.slowConsumers.Add(1)
+					subscriber.finish(ErrSlowConsumer)
+				}
+			}
+		}
+	}
+	remainingCatchup := false
+	for id, subscriber := range w.subscribers {
+		if !subscriber.catchingUp {
+			continue
+		}
+		if err := w.pollCatchup(id, subscriber); err != nil {
+			return false, err
+		}
+		if _, alive := w.subscribers[id]; alive && subscriber.catchingUp {
+			remainingCatchup = true
+		}
+	}
+	if w.liveTerminal {
+		for id, subscriber := range w.subscribers {
+			if subscriber.catchingUp {
+				continue
+			}
+			delete(w.subscribers, id)
+			subscriber.finish(nil)
+		}
+		return !remainingCatchup, nil
+	}
+	return false, nil
+}
+
+func (w *watcher) pollCatchup(id uint64, subscriber *subscriber) error {
+	w.hub.metrics.queries.Add(1)
+	events, err := w.hub.fetch(w.ctx, w.scope, subscriber.catchupCursor, watcherPageSize)
+	if err != nil {
+		w.hub.metrics.databaseErrors.Add(1)
+		return err
+	}
+	if len(events) == 0 {
+		subscriber.catchingUp = false
+		subscriber.catchupCursor = uuid.Nil
+		return nil
+	}
+	for _, event := range events {
+		if event.Name != "" && (event.ID == uuid.Nil || event.Sequence == 0 || event.Sequence <= subscriber.sequence) {
+			return errors.New("event source returned a non-advancing durable cursor")
+		}
+		// Never advance past the live watcher cursor during catch-up; once the
+		// subscriber reaches w.cursorSequence, hand it off to shared live fanout
+		// so all peers observe newer events together.
+		if event.Name != "" && event.Sequence > w.cursorSequence && !w.liveTerminal {
+			subscriber.catchingUp = false
+			subscriber.catchupCursor = uuid.Nil
+			return nil
+		}
+		if event.ID != uuid.Nil {
+			subscriber.catchupCursor = event.ID
+			w.remember(event.ID, event.Sequence)
+		}
+		if event.Name != "" && event.Sequence > subscriber.sequence {
 			select {
-			case subscriber.events <- cloneEvent(event):
+			case subscriber.events <- event:
 				subscriber.sequence = event.Sequence
 			default:
 				delete(w.subscribers, id)
 				w.hub.metrics.slowConsumers.Add(1)
 				subscriber.finish(ErrSlowConsumer)
+				return nil
 			}
 		}
-	}
-	if terminal {
-		for id, subscriber := range w.subscribers {
-			delete(w.subscribers, id)
-			subscriber.finish(nil)
+		if event.Terminal {
+			w.liveTerminal = true
+			subscriber.catchingUp = false
+			subscriber.catchupCursor = uuid.Nil
+			return nil
+		}
+		if subscriber.sequence >= w.cursorSequence {
+			subscriber.catchingUp = false
+			subscriber.catchupCursor = uuid.Nil
+			return nil
 		}
 	}
-	return terminal, nil
+	if subscriber.sequence >= w.cursorSequence || len(events) < watcherPageSize {
+		subscriber.catchingUp = false
+		subscriber.catchupCursor = uuid.Nil
+	}
+	return nil
 }
 
 func (w *watcher) nextBackoff() time.Duration {

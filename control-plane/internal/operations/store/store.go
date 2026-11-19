@@ -141,6 +141,7 @@ type Store interface {
 	ExpireQueued(context.Context) error
 	SupersedePending(context.Context, uuid.UUID, string, value.Timestamp) error
 	Get(context.Context, uuid.UUID) (Operation, error)
+	OperationState(context.Context, uuid.UUID) (string, error)
 	ListInWorkspace(context.Context, uuid.UUID, uuid.UUID, int) ([]Operation, error)
 	SummaryInWorkspace(context.Context, uuid.UUID) (Summary, error)
 	FindIdempotent(context.Context, uuid.UUID, string, []byte) (Operation, bool, error)

@@ -9,6 +9,7 @@ import (
 )
 
 type ResultCommand struct {
+	OperationID           uuid.UUID
 	Compacted             bool
 	Envelope              []byte
 	State                 string
@@ -74,7 +75,7 @@ type ResultStore interface {
 	Workspace(context.Context, uuid.UUID) (uuid.UUID, error)
 	Alert(context.Context, uuid.UUID, uuid.UUID, string, string, value.Timestamp) error
 	UpdateCommand(context.Context, uuid.UUID, string, value.Timestamp) (bool, error)
-	UpdateOperation(context.Context, uuid.UUID, string, bool, value.Timestamp) (ResultOperation, error)
+	UpdateOperation(context.Context, uuid.UUID, uuid.UUID, string, bool, value.Timestamp) (ResultOperation, error)
 	CompleteOutbox(context.Context, uuid.UUID, value.Timestamp) error
 	CloseDispatch(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) error
 	ConfigOutcome(context.Context, ConfigOutcome) (bool, error)

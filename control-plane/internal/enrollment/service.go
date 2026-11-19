@@ -480,97 +480,107 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}
-	node, err := s.nodeByEndpoint(ctx, request.GetRemoteEndpointId())
-	if errors.Is(err, database.ErrNotFound) {
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
-		return response, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("authorize endpoint: %w", err)
-	}
-	nodeID, status, endpointState := node.ID, node.Status, node.EndpointState
-	if status == "pending" {
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
-		return response, nil
-	}
-	if (status != "active" && status != "offline") || endpointState != "active" || !slices.Equal(nodeID[:], handshake.GetNodeId()) {
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
-		return response, nil
-	}
-	if handshake.GetProtocolMajor() != ProtocolMajor {
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_INCOMPATIBLE_PROTOCOL
-		return response, nil
-	}
-	if handshake.GetProtocolMinor() > ProtocolMinor {
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_UPGRADE_REQUIRED
-		return response, nil
-	}
-	if handshake.GetTime() == nil || handshake.GetTime().CheckValid() != nil || s.now().Sub(handshake.GetTime().AsTime()).Abs() > MaxClockSkew {
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_CLOCK_SKEW
-		return response, nil
-	}
-	if !validCapabilities(handshake.GetCapabilities()) {
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
-		return response, nil
-	}
-	tx, store, err := s.begin(ctx, database.RepeatableRead)
-	if err != nil {
-		return nil, fmt.Errorf("begin session authorization: %w", err)
-	}
-	defer rollback(tx)
-	node, err = store.NodeByEndpoint(ctx, request.GetRemoteEndpointId(), uuid.Nil, enrollmentstore.ForShare)
-	if errors.Is(err, database.ErrNotFound) {
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
-		return response, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("lock session authority: %w", err)
-	}
-	nodeID, status, endpointState = node.ID, node.Status, node.EndpointState
-	authorizationRevision := node.AuthorizationRevision
-	if (status != "active" && status != "offline") || endpointState != "active" || authorizationRevision == 0 || !slices.Equal(nodeID[:], handshake.GetNodeId()) {
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
-		return response, nil
-	}
-	matchingSealingKeys, err := sealingKeysMatch(ctx, store, nodeID, handshake.GetSealingKeys())
-	if err != nil {
-		return nil, fmt.Errorf("verify session sealing keys: %w", err)
-	}
-	legacyReadOnlySealingFallback := len(handshake.GetSealingKeys()) == 0
-	if !matchingSealingKeys && !legacyReadOnlySealingFallback {
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
-		return response, nil
-	}
-	capabilities, err := store.Capabilities(ctx, nodeID, true)
-	if err != nil {
+	// Phase 1: short read-only validation transaction. Releasing this DB
+	// connection before OpenSession prevents a two-connection pool deadlock
+	// when concurrent agent handshakes acquire owner leases and call transportd.
+	var (
+		nodeID                uuid.UUID
+		authorizationRevision uint64
+		negotiated            []string
+		fencingNegotiated     bool
+		earlyResult           agentv1.HandshakeResult
+	)
+	if err := func() error {
+		tx, store, err := s.begin(ctx, database.ReadCommitted)
+		if err != nil {
+			return fmt.Errorf("begin session authorization: %w", err)
+		}
+		defer rollback(tx)
+		node, err := store.NodeByEndpoint(ctx, request.GetRemoteEndpointId(), uuid.Nil, enrollmentstore.Unlocked)
+		if errors.Is(err, database.ErrNotFound) {
+			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("authorize endpoint: %w", err)
+		}
+		nodeID = node.ID
+		status, endpointState := node.Status, node.EndpointState
+		authorizationRevision = node.AuthorizationRevision
+		if status == "pending" {
+			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
+			return nil
+		}
+		if (status != "active" && status != "offline") || endpointState != "active" || authorizationRevision == 0 || !slices.Equal(nodeID[:], handshake.GetNodeId()) {
+			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
+			return nil
+		}
+		if handshake.GetProtocolMajor() != ProtocolMajor {
+			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_INCOMPATIBLE_PROTOCOL
+			return nil
+		}
+		if handshake.GetProtocolMinor() > ProtocolMinor {
+			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_UPGRADE_REQUIRED
+			return nil
+		}
+		if handshake.GetTime() == nil || handshake.GetTime().CheckValid() != nil || s.now().Sub(handshake.GetTime().AsTime()).Abs() > MaxClockSkew {
+			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_CLOCK_SKEW
+			return nil
+		}
+		if !validCapabilities(handshake.GetCapabilities()) {
+			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
+			return nil
+		}
+		matchingSealingKeys, err := sealingKeysMatch(ctx, store, nodeID, handshake.GetSealingKeys())
+		if err != nil {
+			return fmt.Errorf("verify session sealing keys: %w", err)
+		}
+		legacyReadOnlySealingFallback := len(handshake.GetSealingKeys()) == 0
+		if !matchingSealingKeys && !legacyReadOnlySealingFallback {
+			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
+			return nil
+		}
+		capabilities, err := store.Capabilities(ctx, nodeID, true)
+		if err != nil {
+			return err
+		}
+		approved := make(map[string]struct{}, len(capabilities))
+		for _, capability := range capabilities {
+			approved[capability] = struct{}{}
+		}
+		advertised := normalizedCapabilities(handshake.GetCapabilities())
+		negotiated = make([]string, 0, len(advertised))
+		mutationCapable := handshake.GetProtocolMinor() >= ProtocolMinor && !legacyReadOnlySealingFallback
+		for _, capability := range advertised {
+			// The fencing capability is a protocol-level negotiation, never a
+			// per-node business capability: an approval that echoes every
+			// advertised capability must not introduce a second copy of it.
+			if capability == ownersession.FencingCapability {
+				if mutationCapable {
+					fencingNegotiated = true
+				}
+				continue
+			}
+			if _, ok := approved[capability]; ok && (mutationCapable || legacyReadOnlyCapability(capability)) {
+				negotiated = append(negotiated, capability)
+			}
+		}
+		// The fencing capability records only that the endpoint accepts
+		// ConnectionFenceV2 proofs on mutation carriers.
+		if fencingNegotiated {
+			negotiated = append(negotiated, ownersession.FencingCapability)
+		}
+		slices.Sort(negotiated)
+		negotiated = slices.Compact(negotiated)
+		return nil
+	}(); err != nil {
 		return nil, err
 	}
-	approved := map[string]struct{}{}
-	for _, capability := range capabilities {
-		approved[capability] = struct{}{}
+	if earlyResult != agentv1.HandshakeResult_HANDSHAKE_RESULT_UNSPECIFIED {
+		response.Result = earlyResult
+		return response, nil
 	}
-	negotiated := make([]string, 0, len(handshake.GetCapabilities()))
-	for _, capability := range normalizedCapabilities(handshake.GetCapabilities()) {
-		// The fencing capability is a protocol-level negotiation, never a
-		// per-node business capability: an approval that echoes every
-		// advertised capability must not introduce a second copy of it.
-		if capability == ownersession.FencingCapability {
-			continue
-		}
-		mutationCapable := handshake.GetProtocolMinor() >= ProtocolMinor && !legacyReadOnlySealingFallback
-		if _, ok := approved[capability]; ok && (mutationCapable || legacyReadOnlyCapability(capability)) {
-			negotiated = append(negotiated, capability)
-		}
-	}
-	// The fencing capability records only that the endpoint accepts
-	// ConnectionFenceV2 proofs on mutation carriers.
-	fencingNegotiated := handshake.GetProtocolMinor() >= ProtocolMinor && !legacyReadOnlySealingFallback &&
-		slices.Contains(normalizedCapabilities(handshake.GetCapabilities()), ownersession.FencingCapability)
-	if fencingNegotiated {
-		negotiated = append(negotiated, ownersession.FencingCapability)
-	}
-	slices.Sort(negotiated)
-	negotiated = slices.Compact(negotiated)
+
 	response.ProtocolMinor = handshake.GetProtocolMinor()
 	response.NegotiatedCapabilities = negotiated
 	var openedFence *agentv1.ConnectionFenceV2
@@ -583,6 +593,7 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		copy(fixedNode[:], nodeID[:])
 		copy(fixedEndpoint[:], request.GetRemoteEndpointId())
 		now := s.now().UTC()
+		var err error
 		response.SessionGrant, err = s.signer.IssueSessionGrant(fixedNode, fixedEndpoint, authorizationRevision, negotiated, ProtocolMajor, ProtocolMinor, now, now.Add(SessionGrantTTL))
 		if err != nil {
 			return nil, fmt.Errorf("issue session grant: %w", err)
@@ -604,16 +615,57 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 			openedFence = fence
 		}
 	}
+
+	// Phase 2: re-verify authority under FOR SHARE so any concurrent revocation
+	// or capability/revision mutation fails closed and immediately releases the
+	// newly opened owner term before a session grant can be returned.
+	if openedFence != nil || handshake.GetProtocolMinor() >= ProtocolMinor {
+		recheckTx, recheckStore, err := s.begin(ctx, database.ReadCommitted)
+		if err != nil {
+			if openedFence != nil {
+				s.closeOpenedSession(ctx, nodeID, openedFence)
+			}
+			return nil, fmt.Errorf("begin session authority confirmation: %w", err)
+		}
+		defer rollback(recheckTx)
+		current, err := recheckStore.NodeByEndpoint(ctx, request.GetRemoteEndpointId(), uuid.Nil, enrollmentstore.ForShare)
+		if errors.Is(err, database.ErrNotFound) {
+			if openedFence != nil {
+				s.closeOpenedSession(ctx, nodeID, openedFence)
+			}
+			response.SessionGrant = nil
+			response.ConnectionFence = nil
+			response.NegotiatedCapabilities = nil
+			response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
+			return response, nil
+		}
+		if err != nil {
+			if openedFence != nil {
+				s.closeOpenedSession(ctx, nodeID, openedFence)
+			}
+			return nil, fmt.Errorf("confirm session authority: %w", err)
+		}
+		if (current.Status != "active" && current.Status != "offline") || current.EndpointState != "active" || current.AuthorizationRevision != authorizationRevision || current.ID != nodeID {
+			if openedFence != nil {
+				s.closeOpenedSession(ctx, nodeID, openedFence)
+			}
+			response.SessionGrant = nil
+			response.ConnectionFence = nil
+			response.NegotiatedCapabilities = nil
+			response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
+			return response, nil
+		}
+		if err := recheckTx.Commit(ctx); err != nil {
+			// The session was never granted: end the exact owner term so the
+			// lease does not keep renewing behind a failed authorization.
+			if openedFence != nil {
+				s.closeOpenedSession(ctx, nodeID, openedFence)
+			}
+			return nil, fmt.Errorf("commit session authorization: %w", err)
+		}
+	}
 	response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
 	response.MaxMessageSize = min(handshake.GetMaxMessageSize(), MaxMessageSize)
-	if err := tx.Commit(ctx); err != nil {
-		// The session was never granted: end the exact owner term so the
-		// lease does not keep renewing behind a failed authorization.
-		if openedFence != nil {
-			s.closeOpenedSession(ctx, nodeID, openedFence)
-		}
-		return nil, fmt.Errorf("commit session authorization: %w", err)
-	}
 	return response, nil
 }
 
@@ -784,13 +836,4 @@ func (s *Service) begin(ctx context.Context, isolation database.Isolation) (data
 		return nil, nil, err
 	}
 	return tx, store, nil
-}
-
-func (s *Service) nodeByEndpoint(ctx context.Context, endpoint []byte) (enrollmentstore.Node, error) {
-	tx, store, err := s.begin(ctx, database.ReadCommitted)
-	if err != nil {
-		return enrollmentstore.Node{}, err
-	}
-	defer rollback(tx)
-	return store.NodeByEndpoint(ctx, endpoint, uuid.Nil, enrollmentstore.Unlocked)
 }

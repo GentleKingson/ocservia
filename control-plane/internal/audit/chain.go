@@ -456,23 +456,117 @@ func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
 		if err := LockChainTx(ctx, tx, workspaceID); err != nil {
 			return err
 		}
-		verified, err := m.verifyTx(ctx, tx, workspaceID, false)
-		if err != nil {
-			return err
-		}
-		if !verified.Valid || verified.Events == 0 {
-			return errors.New("audit chain is not authenticated")
-		}
 		s, err := auditstore.From(tx)
 		if err != nil {
 			return err
 		}
-		err = s.AddCheckpoint(ctx, uuid.Must(uuid.NewV7()), workspaceID, verified.lastID, verified.lastHash, signCheckpoint(m.checkpointKey, workspaceID, verified.lastID, verified.lastHash))
+		lastID, lastHash, alreadyCheckpointed, err := m.verifyCheckpointDeltaTx(ctx, tx, s, workspaceID)
 		if err != nil {
 			return err
 		}
+		if !alreadyCheckpointed {
+			if err := s.AddCheckpoint(ctx, uuid.Must(uuid.NewV7()), workspaceID, lastID, lastHash, signCheckpoint(m.checkpointKey, workspaceID, lastID, lastHash)); err != nil {
+				return err
+			}
+		}
 		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
 	})
+}
+
+// verifyCheckpointDeltaTx validates only events appended since the latest valid
+// v1 checkpoint so periodic checkpointing runs in O(delta) under the workspace
+// advisory lock instead of rescanning the full audit history. If no valid v1
+// checkpoint anchor exists, it falls back to the full genesis scan in verifyTx.
+func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s auditstore.Store, workspaceID uuid.UUID) (uuid.UUID, []byte, bool, error) {
+	tailID, tailHash, err := s.LatestEvent(ctx, workspaceID)
+	if errors.Is(err, database.ErrNotFound) {
+		return uuid.Nil, nil, false, errors.New("audit chain is not authenticated")
+	}
+	if err != nil {
+		return uuid.Nil, nil, false, err
+	}
+	cpEventID, cpHash, cpSignature, cpOccurredAt, cpAuthVersion, err := s.LatestCheckpoint(ctx, workspaceID)
+	if err != nil && !errors.Is(err, database.ErrNotFound) {
+		return uuid.Nil, nil, false, err
+	}
+	if err == nil && cpAuthVersion == eventAuthVersionV1 && m.validCheckpoint(workspaceID, checkpointRecord{eventID: cpEventID, eventHash: cpHash, signature: cpSignature}) {
+		if cpEventID == tailID && subtle.ConstantTimeCompare(cpHash, tailHash) == 1 {
+			return tailID, tailHash, true, nil
+		}
+		rows, err := s.EventsAfter(ctx, workspaceID, cpOccurredAt, cpEventID)
+		if err != nil {
+			return uuid.Nil, nil, false, err
+		}
+		defer rows.Close()
+		previous := append([]byte(nil), cpHash...)
+		var lastID uuid.UUID
+		var deltaCount int64
+		valid := true
+		for rows.Next() {
+			record := ChainRecord{WorkspaceID: workspaceID}
+			var resourceID *uuid.UUID
+			var storedPrevious, storedHash, eventMAC, compactionMAC []byte
+			var compactedAt value.Timestamp
+			var compactionKeyID *string
+			var authVersion int16
+			var eventKeyID *string
+			var at value.Timestamp
+			var before, after value.JSONB
+			if err := rows.Scan(&record.EventID, &at, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &before, &after, &record.ErrorType, &storedPrevious, &storedHash, &authVersion, &eventKeyID, &eventMAC, &compactedAt, &compactionKeyID, &compactionMAC); err != nil {
+				return uuid.Nil, nil, false, err
+			}
+			record.At, err = at.Time()
+			if err != nil {
+				return uuid.Nil, nil, false, err
+			}
+			record.BeforeSummary, record.AfterSummary = before.Bytes(), after.Bytes()
+			if resourceID != nil {
+				record.ResourceID = *resourceID
+			}
+			payload, err := encodeChainPayload(previous, record)
+			if err != nil {
+				return uuid.Nil, nil, false, err
+			}
+			digest := sha256.Sum256(payload)
+			hashValid := subtle.ConstantTimeCompare(storedHash, digest[:]) == 1
+			if compactedAt.Valid {
+				hashValid = authVersion == eventAuthVersionV1 && m.validCompaction(record, storedPrevious, storedHash, eventMAC, compactedAt, compactionKeyID, compactionMAC)
+			} else if compactionKeyID != nil || len(compactionMAC) != 0 {
+				hashValid = false
+			}
+			if subtle.ConstantTimeCompare(storedPrevious, previous) != 1 || !hashValid {
+				valid = false
+			}
+			if authVersion != eventAuthVersionV1 || eventKeyID == nil {
+				valid = false
+			} else {
+				key, ok := m.eventKeys[*eventKeyID]
+				if !ok || !hmac.Equal(eventMAC, signEvent(key, storedHash)) {
+					valid = false
+				}
+			}
+			previous = append(previous[:0], storedHash...)
+			lastID = record.EventID
+			deltaCount++
+		}
+		if err := rows.Err(); err != nil {
+			return uuid.Nil, nil, false, err
+		}
+		if deltaCount > 0 {
+			if !valid || lastID != tailID || subtle.ConstantTimeCompare(previous, tailHash) != 1 {
+				return uuid.Nil, nil, false, errors.New("audit chain is not authenticated")
+			}
+			return lastID, previous, false, nil
+		}
+	}
+	verified, err := m.verifyTx(ctx, tx, workspaceID, false)
+	if err != nil {
+		return uuid.Nil, nil, false, err
+	}
+	if !verified.Valid || verified.Events == 0 {
+		return uuid.Nil, nil, false, errors.New("audit chain is not authenticated")
+	}
+	return verified.lastID, verified.lastHash, false, nil
 }
 
 func (m *Manager) CheckpointAll(ctx context.Context) error {

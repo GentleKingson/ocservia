@@ -178,19 +178,18 @@ func (s *SchedulerLeaseStore) Put(ctx context.Context, v schedulerlease.State, n
 	return err
 }
 func (s *SchedulerLeaseStore) Assert(ctx context.Context, owner schedulerlease.Owner, epoch int64) error {
-	var until value.Timestamp
-	err := s.tx.QueryRow(ctx, `SELECT lease_until FROM scheduler_leadership WHERE id=1 AND instance_id=$1 AND incarnation=$2 AND epoch=$3 AND lease_until>clock_timestamp() FOR SHARE OF scheduler_leadership`, owner.InstanceID, owner.Incarnation, epoch).Scan(&until)
+	var until, at value.Timestamp
+	err := s.tx.QueryRow(ctx, `SELECT lease_until, clock_timestamp() FROM scheduler_leadership WHERE id=1 AND instance_id=$1 AND incarnation=$2 AND epoch=$3 AND lease_until>clock_timestamp() FOR SHARE OF scheduler_leadership`, owner.InstanceID, owner.Incarnation, epoch).Scan(&until, &at)
 	if errors.Is(err, database.ErrNotFound) {
 		return schedulerlease.ErrLost
 	}
 	if err != nil {
 		return err
 	}
-	at, err := database.WallTime(ctx, s.tx)
-	if err == nil && until.Micros <= at.Micros {
+	if until.Micros <= at.Micros {
 		return schedulerlease.ErrLost
 	}
-	return err
+	return nil
 }
 
 func (t *transaction) TransactionTime(ctx context.Context) (value.Timestamp, error) {
@@ -204,9 +203,22 @@ type invalidLogicalArgument struct{ err error }
 func (a invalidLogicalArgument) Value() (driver.Value, error) { return nil, a.err }
 
 func logicalArguments(args []any) []any {
+	firstLogical := -1
+	for i, arg := range args {
+		switch arg.(type) {
+		case value.JSONB, value.Timestamp, value.TextArray:
+			firstLogical = i
+		}
+		if firstLogical >= 0 {
+			break
+		}
+	}
+	if firstLogical < 0 {
+		return args
+	}
 	result := append([]any(nil), args...)
-	for i, arg := range result {
-		switch v := arg.(type) {
+	for i := firstLogical; i < len(result); i++ {
+		switch v := result[i].(type) {
 		case value.JSONB:
 			if !v.Valid() {
 				result[i] = nil
@@ -254,77 +266,172 @@ func logicalArguments(args []any) []any {
 	return result
 }
 
+const (
+	logicalKindTimestamp uint8 = 1
+	logicalKindJSONB     uint8 = 2
+	logicalKindTextArray uint8 = 3
+)
+
+type logicalSlot struct {
+	destIdx int
+	kind    uint8
+	valIdx  int
+}
+
 // Decode using pgx's native codecs, then publish a logical value only after the
 // entire row scanned successfully. No textual array flattening or time sentinel.
 func scanLogical(scan func(...any) error, dest []any) error {
-	args := append([]any(nil), dest...)
-	finish := make([]func() error, 0)
+	firstLogical := -1
 	for i, dst := range dest {
-		switch dst := dst.(type) {
-		case *value.Timestamp:
-			p := new(pgtype.Timestamptz)
-			args[i] = p
-			finish = append(finish, func() error {
-				v := value.Timestamp{Valid: p.Valid}
-				if p.Valid {
-					switch p.InfinityModifier {
-					case pgtype.NegativeInfinity:
-						v.Micros = value.NegativeInfinity
-					case pgtype.Infinity:
-						v.Micros = value.PositiveInfinity
-					default:
-						var err error
-						v, err = value.FromTime(p.Time)
-						if err != nil {
-							return err
-						}
-					}
-				}
-				*dst = v
-				return nil
-			})
-		case *value.JSONB:
-			p := new([]byte)
-			args[i] = p
-			finish = append(finish, func() error {
-				v, err := value.ParseJSONB(*p)
-				if err == nil {
-					*dst = v
-				}
-				return err
-			})
-		case *value.TextArray:
-			p := new(pgtype.Array[pgtype.Text])
-			args[i] = p
-			finish = append(finish, func() error {
-				v := value.TextArray{Valid: p.Valid}
-				if p.Valid {
-					v.Dimensions = make([]value.Dimension, len(p.Dims))
-					v.Elements = make([]*string, len(p.Elements))
-				}
-				for j, d := range p.Dims {
-					v.Dimensions[j] = value.Dimension{Length: d.Length, LowerBound: d.LowerBound}
-				}
-				for j, s := range p.Elements {
-					if s.Valid {
-						text := s.String
-						v.Elements[j] = &text
-					}
-				}
-				if err := v.Validate(); err != nil {
-					return err
-				}
-				*dst = v
-				return nil
-			})
+		switch dst.(type) {
+		case *value.Timestamp, *value.JSONB, *value.TextArray:
+			firstLogical = i
+		}
+		if firstLogical >= 0 {
+			break
 		}
 	}
+	if firstLogical < 0 {
+		return scan(dest...)
+	}
+
+	var argsBuf [16]any
+	var args []any
+	if len(dest) <= len(argsBuf) {
+		args = argsBuf[:len(dest)]
+	} else {
+		args = make([]any, len(dest))
+	}
+	copy(args, dest)
+
+	var slotsBuf [8]logicalSlot
+	slots := slotsBuf[:0]
+	var tsBuf [8]pgtype.Timestamptz
+	var tsExtra []pgtype.Timestamptz
+	tsCount := 0
+	var jsonBuf [4][]byte
+	var jsonExtra [][]byte
+	jsonCount := 0
+	var arrBuf [4]pgtype.Array[pgtype.Text]
+	var arrExtra []pgtype.Array[pgtype.Text]
+	arrCount := 0
+
+	for i := firstLogical; i < len(dest); i++ {
+		switch dest[i].(type) {
+		case *value.Timestamp:
+			if tsCount < len(tsBuf) {
+				args[i] = &tsBuf[tsCount]
+			} else {
+				tsExtra = append(tsExtra, pgtype.Timestamptz{})
+				args[i] = &tsExtra[len(tsExtra)-1]
+			}
+			slots = append(slots, logicalSlot{destIdx: i, kind: logicalKindTimestamp, valIdx: tsCount})
+			tsCount++
+		case *value.JSONB:
+			if jsonCount < len(jsonBuf) {
+				args[i] = &jsonBuf[jsonCount]
+			} else {
+				jsonExtra = append(jsonExtra, nil)
+				args[i] = &jsonExtra[len(jsonExtra)-1]
+			}
+			slots = append(slots, logicalSlot{destIdx: i, kind: logicalKindJSONB, valIdx: jsonCount})
+			jsonCount++
+		case *value.TextArray:
+			if arrCount < len(arrBuf) {
+				args[i] = &arrBuf[arrCount]
+			} else {
+				arrExtra = append(arrExtra, pgtype.Array[pgtype.Text]{})
+				args[i] = &arrExtra[len(arrExtra)-1]
+			}
+			slots = append(slots, logicalSlot{destIdx: i, kind: logicalKindTextArray, valIdx: arrCount})
+			arrCount++
+		}
+	}
+	// If any extra slice grew and reallocated, re-point args to final backing elements.
+	if len(tsExtra) > 1 || len(jsonExtra) > 1 || len(arrExtra) > 1 {
+		for _, slot := range slots {
+			switch slot.kind {
+			case logicalKindTimestamp:
+				if slot.valIdx >= len(tsBuf) {
+					args[slot.destIdx] = &tsExtra[slot.valIdx-len(tsBuf)]
+				}
+			case logicalKindJSONB:
+				if slot.valIdx >= len(jsonBuf) {
+					args[slot.destIdx] = &jsonExtra[slot.valIdx-len(jsonBuf)]
+				}
+			case logicalKindTextArray:
+				if slot.valIdx >= len(arrBuf) {
+					args[slot.destIdx] = &arrExtra[slot.valIdx-len(arrBuf)]
+				}
+			}
+		}
+	}
+
 	if err := scan(args...); err != nil {
 		return err
 	}
-	for _, f := range finish {
-		if err := f(); err != nil {
-			return err
+	for _, slot := range slots {
+		switch slot.kind {
+		case logicalKindTimestamp:
+			p := &tsBuf[0]
+			if slot.valIdx < len(tsBuf) {
+				p = &tsBuf[slot.valIdx]
+			} else {
+				p = &tsExtra[slot.valIdx-len(tsBuf)]
+			}
+			v := value.Timestamp{Valid: p.Valid}
+			if p.Valid {
+				switch p.InfinityModifier {
+				case pgtype.NegativeInfinity:
+					v.Micros = value.NegativeInfinity
+				case pgtype.Infinity:
+					v.Micros = value.PositiveInfinity
+				default:
+					var err error
+					v, err = value.FromTime(p.Time)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			*dest[slot.destIdx].(*value.Timestamp) = v
+		case logicalKindJSONB:
+			var raw []byte
+			if slot.valIdx < len(jsonBuf) {
+				raw = jsonBuf[slot.valIdx]
+			} else {
+				raw = jsonExtra[slot.valIdx-len(jsonBuf)]
+			}
+			v, err := value.ParseJSONB(raw)
+			if err != nil {
+				return err
+			}
+			*dest[slot.destIdx].(*value.JSONB) = v
+		case logicalKindTextArray:
+			var p *pgtype.Array[pgtype.Text]
+			if slot.valIdx < len(arrBuf) {
+				p = &arrBuf[slot.valIdx]
+			} else {
+				p = &arrExtra[slot.valIdx-len(arrBuf)]
+			}
+			v := value.TextArray{Valid: p.Valid}
+			if p.Valid {
+				v.Dimensions = make([]value.Dimension, len(p.Dims))
+				v.Elements = make([]*string, len(p.Elements))
+			}
+			for j, d := range p.Dims {
+				v.Dimensions[j] = value.Dimension{Length: d.Length, LowerBound: d.LowerBound}
+			}
+			for j, s := range p.Elements {
+				if s.Valid {
+					text := s.String
+					v.Elements[j] = &text
+				}
+			}
+			if err := v.Validate(); err != nil {
+				return err
+			}
+			*dest[slot.destIdx].(*value.TextArray) = v
 		}
 	}
 	return nil

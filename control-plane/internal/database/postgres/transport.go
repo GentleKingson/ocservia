@@ -33,18 +33,25 @@ func (s transportEventStore) InsertSimulation(ctx context.Context, v transportst
 }
 
 func (s transportEventStore) Events(ctx context.Context, workspace, after uuid.UUID, limit int, descending bool) ([]transportstore.Event, error) {
-	var scope, cursor any
-	if workspace != uuid.Nil {
-		scope = workspace
-	}
-	if after != uuid.Nil {
-		cursor = after
-	}
 	comparison, order := ">", "ASC"
 	if descending {
 		comparison, order = "<", "DESC"
 	}
-	rows, err := s.Query(ctx, `SELECT e.event_id::text,e.node_id::text,e.event_type,e.traceparent,e.occurred_at,e.ingest_sequence FROM transport_events e JOIN nodes n ON n.id=e.node_id WHERE ($1::uuid IS NULL OR e.ingest_sequence `+comparison+` (SELECT ingest_sequence FROM transport_events WHERE event_id=$1)) AND ($2::uuid IS NULL OR n.workspace_id=$2) ORDER BY e.ingest_sequence `+order+` LIMIT $3`, cursor, scope, limit)
+	const base = `SELECT e.event_id::text,e.node_id::text,e.event_type,e.traceparent,e.occurred_at,e.ingest_sequence FROM transport_events e JOIN nodes n ON n.id=e.node_id`
+	var (
+		rows database.Rows
+		err  error
+	)
+	switch {
+	case workspace == uuid.Nil && after == uuid.Nil:
+		rows, err = s.Query(ctx, base+` ORDER BY e.ingest_sequence `+order+` LIMIT $1`, limit)
+	case workspace == uuid.Nil:
+		rows, err = s.Query(ctx, base+` WHERE e.ingest_sequence `+comparison+` (SELECT ingest_sequence FROM transport_events WHERE event_id=$1) ORDER BY e.ingest_sequence `+order+` LIMIT $2`, after, limit)
+	case after == uuid.Nil:
+		rows, err = s.Query(ctx, base+` WHERE n.workspace_id=$1 ORDER BY e.ingest_sequence `+order+` LIMIT $2`, workspace, limit)
+	default:
+		rows, err = s.Query(ctx, base+` WHERE e.ingest_sequence `+comparison+` (SELECT ingest_sequence FROM transport_events WHERE event_id=$1) AND n.workspace_id=$2 ORDER BY e.ingest_sequence `+order+` LIMIT $3`, after, workspace, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +165,7 @@ func (s transportIngressStore) ReleaseBusiness(ctx context.Context) error {
 	return err
 }
 func (s transportIngressStore) LockTrust(ctx context.Context, node uuid.UUID, endpoint []byte) (v transportstore.IngressTrust, err error) {
-	err = s.QueryRow(ctx, `SELECT n.workspace_id,n.status,k.state FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND k.endpoint_id=$2 FOR UPDATE OF n,k`, node, endpoint).Scan(&v.WorkspaceID, &v.NodeStatus, &v.EndpointState)
+	err = s.QueryRow(ctx, `SELECT n.workspace_id,n.status,k.state FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND k.endpoint_id=$2 FOR NO KEY UPDATE OF n,k`, node, endpoint).Scan(&v.WorkspaceID, &v.NodeStatus, &v.EndpointState)
 	return
 }
 func (s transportIngressStore) InsertEvent(ctx context.Context, v transportstore.TransportEvent) (bool, error) {
