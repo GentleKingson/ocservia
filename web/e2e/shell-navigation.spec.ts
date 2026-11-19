@@ -1,24 +1,15 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./csp";
+import { installConsoleMocks } from "./fixtures";
 
 const alphaId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614cc3";
 
 test.beforeEach(async ({ page }) => {
-  await page.route("**/api/v1/**", (route) =>
-    route.fulfill({ status: 404, json: {} }),
-  );
-  await page.route("**/api/v1/readyz", (route) => route.fulfill({ json: {} }));
-  await page.route("**/api/v1/workspaces", (route) =>
-    route.fulfill({
-      json: {
-        items: [{ id: alphaId, name: "Alpha", slug: "alpha", version: 1 }],
-      },
-    }),
-  );
-  await page.route("**/api/v1/nodes?**", (route) =>
-    route.fulfill({ json: { items: [], page: { has_more: false } } }),
-  );
+  await installConsoleMocks(page, {
+    workspace: { id: alphaId, name: "Alpha", slug: "alpha" },
+    default404: true,
+  });
 });
 
 async function expectNoPageOverflow(page: Page): Promise<void> {

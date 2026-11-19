@@ -1,6 +1,7 @@
 import type { Page, TestInfo } from "@playwright/test";
 import { join } from "node:path";
 import { expect, test } from "./csp";
+import { installEventSourceStub } from "./fixtures";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614cc3";
@@ -20,17 +21,7 @@ async function mockOverview(page: Page, state: "normal" | "empty" | "error") {
   let unavailable = state === "error";
   const unhandled: string[] = [];
   await page.clock.setFixedTime(fixedTime);
-  // A quiet stream makes REST fixtures deterministic without contacting a
-  // Controller. Timer-driven refresh still runs through the real stores.
-  await page.addInitScript(() => {
-    class QuietEventSource {
-      onopen: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      addEventListener(): void {}
-      close(): void {}
-    }
-    Object.defineProperty(window, "EventSource", { value: QuietEventSource });
-  });
+  await installEventSourceStub(page);
   const nodes = [
     {
       id: nodeId,
