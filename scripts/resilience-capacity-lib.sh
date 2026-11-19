@@ -195,3 +195,45 @@ validate_resource_samples() {
     end
   ' "${samples}" >"${summary}"
 }
+
+validate_resource_slos() {
+  local summary=$1
+  local -A thresholds=(
+    [max_goroutines]="${OCSERVIA_SLO_MAX_GOROUTINES:-}"
+    [max_tokio_tasks]="${OCSERVIA_SLO_MAX_TOKIO_TASKS:-}"
+    [max_control_rss_kib]="${OCSERVIA_SLO_MAX_CONTROL_RSS_KIB:-}"
+    [max_db_acquired]="${OCSERVIA_SLO_MAX_DB_ACQUIRED:-}"
+    [max_sse_sql_queries]="${OCSERVIA_SLO_MAX_SSE_SQL_QUERIES:-}"
+    [max_sse_unhealthy_watchers]="${OCSERVIA_SLO_MAX_SSE_UNHEALTHY_WATCHERS:-}"
+  )
+  local -A env_names=(
+    [max_goroutines]="OCSERVIA_SLO_MAX_GOROUTINES"
+    [max_tokio_tasks]="OCSERVIA_SLO_MAX_TOKIO_TASKS"
+    [max_control_rss_kib]="OCSERVIA_SLO_MAX_CONTROL_RSS_KIB"
+    [max_db_acquired]="OCSERVIA_SLO_MAX_DB_ACQUIRED"
+    [max_sse_sql_queries]="OCSERVIA_SLO_MAX_SSE_SQL_QUERIES"
+    [max_sse_unhealthy_watchers]="OCSERVIA_SLO_MAX_SSE_UNHEALTHY_WATCHERS"
+  )
+  local metric limit actual failures=0
+  for metric in max_goroutines max_tokio_tasks max_control_rss_kib max_db_acquired max_sse_sql_queries max_sse_unhealthy_watchers; do
+    limit="${thresholds[${metric}]}"
+    if [[ -z "${limit}" ]]; then
+      continue
+    fi
+    if [[ ! "${limit}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+      echo "${env_names[${metric}]} must be a non-negative integer" >&2
+      return 2
+    fi
+    if ! actual="$(jq -er --arg m "${metric}" '.[$m] | select(type == "number")' "${summary}")"; then
+      echo "summary ${summary} is missing numeric metric ${metric}" >&2
+      return 1
+    fi
+    if awk -v actual="${actual}" -v limit="${limit}" 'BEGIN { exit !(actual > limit) }'; then
+      echo "resource SLO breached: ${metric}=${actual} exceeds ${env_names[${metric}]}=${limit}" >&2
+      failures=$((failures + 1))
+    fi
+  done
+  if ((failures > 0)); then
+    return 1
+  fi
+}
