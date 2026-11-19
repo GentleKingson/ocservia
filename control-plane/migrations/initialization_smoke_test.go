@@ -35,6 +35,10 @@ func TestDatabaseInitializationSmoke(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT name FROM workspaces WHERE id=$1`, id).Scan(&name); err != nil || name != "initialization smoke" {
 		t.Fatal(name, err)
 	}
+	var rev4Indexes int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND indexname IN ('commands_queued_expiry_idx','operations_node_backlog_idx','operations_workspace_backlog_idx')`).Scan(&rev4Indexes); err != nil || rev4Indexes != 3 {
+		t.Fatalf("missing Revision 4 backlog/expiry partial indexes: count=%d err=%v", rev4Indexes, err)
+	}
 	if err := GrantRuntimePrivileges(ctx, pool, "ocservia_app"); err != nil {
 		t.Fatal(err)
 	}
