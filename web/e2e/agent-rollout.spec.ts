@@ -1,5 +1,6 @@
 import type { Route } from "@playwright/test";
 import { expect, test } from "./csp";
+import { installConsoleMocks } from "./fixtures";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614ee1";
 const canaryNodeId = "019fc0a4-6d92-765c-a8a1-4af556614ee2";
@@ -52,72 +53,15 @@ const node = (id: string, ordinal: number, batch: number, state: string) => ({
 });
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    class EventSourceStub {
-      static readonly CONNECTING = 0;
-      static readonly OPEN = 1;
-      static readonly CLOSED = 2;
-      readonly CONNECTING = 0;
-      readonly OPEN = 1;
-      readonly CLOSED = 2;
-      readonly withCredentials = false;
-      readonly readyState = 1;
-      readonly url: string;
-      onerror: ((event: Event) => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      onopen: ((event: Event) => void) | null = null;
-      constructor(url: string | URL) {
-        this.url = String(url);
-      }
-      addEventListener(): void {}
-      removeEventListener(): void {}
-      dispatchEvent(): boolean {
-        return true;
-      }
-      close(): void {}
-    }
-    Object.defineProperty(window, "EventSource", { value: EventSourceStub });
+  await installConsoleMocks(page, {
+    workspace: { id: workspaceId, name: "Rollout", slug: "rollout" },
+    recommendedAgentVersion: recommended,
+    nodes: [
+      nodeRow(canaryNodeId, "node-a"),
+      nodeRow(batchNodeId, "node-b"),
+      nodeRow(otherNodeId, "node-c"),
+    ],
   });
-  await page.route("**/api/v1/readyz", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: "{}" }),
-  );
-  await page.route("**/api/v1/version", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        version: "dev",
-        commit: "unknown",
-        role: "all",
-        recommended_agent_version: recommended,
-      }),
-    }),
-  );
-  await page.route("**/api/v1/workspaces", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        items: [
-          { id: workspaceId, name: "Rollout", slug: "rollout", version: 1 },
-        ],
-      }),
-    }),
-  );
-  await page.route("**/api/v1/nodes?**", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        items: [
-          nodeRow(canaryNodeId, "node-a"),
-          nodeRow(batchNodeId, "node-b"),
-          nodeRow(otherNodeId, "node-c"),
-        ],
-        page: { has_more: false },
-      }),
-    }),
-  );
 });
 
 async function fulfillRolloutCreate(route: Route): Promise<void> {

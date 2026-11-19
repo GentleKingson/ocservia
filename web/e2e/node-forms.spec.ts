@@ -1,5 +1,6 @@
 import type { Page, Request } from "@playwright/test";
 import { expect, test } from "./csp";
+import { installConsoleMocks } from "./fixtures";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614ea1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614ea2";
@@ -49,29 +50,10 @@ async function openNode(
   page.on("request", (request) => {
     if (request.method() !== "GET") writes.push(request);
   });
-  await page.addInitScript(() => {
-    class EventSourceStub {
-      readonly readyState = 1;
-      onerror = null;
-      onmessage = null;
-      onopen = null;
-      addEventListener(): void {}
-      removeEventListener(): void {}
-      close(): void {}
-    }
-    Object.defineProperty(window, "EventSource", { value: EventSourceStub });
+  await installConsoleMocks(page, {
+    workspace: { id: workspaceId, name: "Forms", slug: "forms" },
+    nodes: [node],
   });
-  await page.route("**/api/v1/readyz", (route) => route.fulfill({ json: {} }));
-  await page.route("**/api/v1/workspaces", (route) =>
-    route.fulfill({
-      json: {
-        items: [{ id: workspaceId, name: "Forms", slug: "forms", version: 1 }],
-      },
-    }),
-  );
-  await page.route("**/api/v1/nodes?**", (route) =>
-    route.fulfill({ json: { items: [node], page: { has_more: false } } }),
-  );
   await page.route(`**/api/v1/nodes/${nodeId}`, (route) =>
     route.fulfill({ json: node }),
   );
