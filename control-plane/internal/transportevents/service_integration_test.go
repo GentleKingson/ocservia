@@ -18,7 +18,9 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -44,9 +46,7 @@ func TestLegacySyntheticPayloadHashMatchesRustGoldenVectors(t *testing.T) {
 		message := test.message
 		envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: message}}
 		hash, err := legacySyntheticPayloadHash(&envelope)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		if hex.EncodeToString(hash[:]) != test.expected {
 			t.Fatalf("hash for %d-byte echo = %x", len(message), hash)
 		}
@@ -79,15 +79,11 @@ func TestDisconnectedEventPreservesUntrustedNodeStatesIntegration(t *testing.T) 
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 
 	workspaceID := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Revoked event test',$2,now(),now())`, workspaceID, "revoked-event-"+workspaceID.String()); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Revoked event test',$2,now(),now())`, workspaceID, "revoked-event-"+workspaceID.String())
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM transport_events WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, workspaceID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM node_endpoint_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, workspaceID)
@@ -97,13 +93,9 @@ func TestDisconnectedEventPreservesUntrustedNodeStatesIntegration(t *testing.T) 
 	for _, initialStatus := range []string{"pending", "revoked"} {
 		nodeID := uuid.Must(uuid.NewV7())
 		endpoint := integrationEndpoint(nodeID)
-		if _, err := pool.Exec(ctx, `INSERT INTO nodes (id,workspace_id,name,status,created_at,updated_at) VALUES ($1,$2,$3,$4,now(),now())`, nodeID, workspaceID, initialStatus+"-node", initialStatus); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Exec(t, ctx, pool, `INSERT INTO nodes (id,workspace_id,name,status,created_at,updated_at) VALUES ($1,$2,$3,$4,now(),now())`, nodeID, workspaceID, initialStatus+"-node", initialStatus)
 		endpointState := initialStatus
-		if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at,revoked_at) VALUES($1,$2,$3,now(),CASE WHEN $3='revoked' THEN now() END)`, nodeID, endpoint[:], endpointState); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Exec(t, ctx, pool, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at,revoked_at) VALUES($1,$2,$3,now(),CASE WHEN $3='revoked' THEN now() END)`, nodeID, endpoint[:], endpointState)
 		if initialStatus == "revoked" {
 			wrongEndpoint := endpoint
 			wrongEndpoint[0] ^= 0xff
@@ -126,9 +118,7 @@ func TestDisconnectedEventPreservesUntrustedNodeStatesIntegration(t *testing.T) 
 			assertEventQuarantined(t, pool, eventID, nodeID, "node_endpoint_not_active")
 		}
 		var status string
-		if err := pool.QueryRow(ctx, `SELECT status FROM nodes WHERE id=$1`, nodeID).Scan(&status); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, pool.QueryRow(ctx, `SELECT status FROM nodes WHERE id=$1`, nodeID).Scan(&status))
 		if status != initialStatus {
 			t.Fatalf("%s node status after disconnect = %q", initialStatus, status)
 		}
@@ -142,21 +132,13 @@ func TestTransportEventsAdvanceNodeRevisionOnlyOnStatusChangeIntegration(t *test
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	endpoint := integrationEndpoint(nodeID)
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Transport revision test',$2,now(),now())`, workspaceID, "transport-revision-"+workspaceID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',7,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:]); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Transport revision test',$2,now(),now())`, workspaceID, "transport-revision-"+workspaceID.String())
+	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',7,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String())
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:])
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM transport_events WHERE node_id=$1`, nodeID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM node_endpoint_keys WHERE node_id=$1`, nodeID)
@@ -181,9 +163,7 @@ func TestTransportEventsAdvanceNodeRevisionOnlyOnStatusChangeIntegration(t *test
 		t.Helper()
 		var status string
 		var version int64
-		if err := pool.QueryRow(ctx, `SELECT status,version FROM nodes WHERE id=$1`, nodeID).Scan(&status, &version); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, pool.QueryRow(ctx, `SELECT status,version FROM nodes WHERE id=$1`, nodeID).Scan(&status, &version))
 		if status != wantStatus || version != wantVersion {
 			t.Fatalf("node status/version = %s/%d, want %s/%d", status, version, wantStatus, wantVersion)
 		}
@@ -202,9 +182,7 @@ func TestTransportEventsAdvanceNodeRevisionOnlyOnStatusChangeIntegration(t *test
 	ingest(transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT)
 	assertNode("active", 9)
 	var eventCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transport_events WHERE node_id=$1`, nodeID).Scan(&eventCount); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM transport_events WHERE node_id=$1`, nodeID).Scan(&eventCount))
 	if eventCount != 6 {
 		t.Fatalf("committed transport events = %d, want 6", eventCount)
 	}
@@ -218,20 +196,12 @@ func TestOfflineTelemetryIngressSharesTheAuthoritativeTrustTransactionIntegratio
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	endpoint := integrationEndpoint(nodeID)
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Ingress transaction test',$2,now(),now())`, workspaceID, "ingress-tx-"+workspaceID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'offline',now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:]); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Ingress transaction test',$2,now(),now())`, workspaceID, "ingress-tx-"+workspaceID.String())
+	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'offline',now(),now())`, nodeID, workspaceID, "node-"+nodeID.String())
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:])
 	t.Cleanup(func() {
 		cleanup := context.Background()
 		_, _ = pool.Exec(cleanup, `DELETE FROM transport_events WHERE node_id=$1`, nodeID)
@@ -253,9 +223,7 @@ func TestOfflineTelemetryIngressSharesTheAuthoritativeTrustTransactionIntegratio
 			OcservJson: []byte(`{}`), SystemJson: []byte(`{}`), PathJson: []byte(`{}`),
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	eventID := uuid.Must(uuid.NewV7())
 	if err := NewBackend(postgres.WrapPool(pool), integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:],
@@ -277,9 +245,7 @@ func TestTelemetryPayloadCannotWriteAnotherNodeIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 
 	workspaceA, workspaceB := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -289,9 +255,7 @@ func TestTelemetryPayloadCannotWriteAnotherNodeIntegration(t *testing.T) {
 		id   uuid.UUID
 		name string
 	}{{workspaceA, "Cross-node A"}, {workspaceB, "Cross-node B"}} {
-		if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,$2,$3,now(),now())`, workspace.id, workspace.name, "cross-node-"+workspace.id.String()); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,$2,$3,now(),now())`, workspace.id, workspace.name, "cross-node-"+workspace.id.String())
 	}
 	for _, node := range []struct {
 		id        uuid.UUID
@@ -299,12 +263,8 @@ func TestTelemetryPayloadCannotWriteAnotherNodeIntegration(t *testing.T) {
 		status    string
 		endpoint  [32]byte
 	}{{nodeA, workspaceA, "active", endpointA}, {nodeB, workspaceB, "offline", endpointB}} {
-		if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,$4,now(),now())`, node.id, node.workspace, "node-"+node.id.String(), node.status); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, node.id, node.endpoint[:]); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,$4,now(),now())`, node.id, node.workspace, "node-"+node.id.String(), node.status)
+		testutil.Exec(t, ctx, pool, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, node.id, node.endpoint[:])
 	}
 	t.Cleanup(func() {
 		cleanup := context.Background()
@@ -338,9 +298,7 @@ func TestTelemetryPayloadCannotWriteAnotherNodeIntegration(t *testing.T) {
 		Samples:        []*agentv1.MetricSample{{SampledAt: timestamppb.New(now), Metric: "session_count", Value: 1}},
 		SecurityEvents: []*agentv1.SecurityObservation{{EventId: securityID[:], ObservedAt: timestamppb.New(now), Severity: "critical", EventType: "forged", DetailJson: []byte(`{}`)}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	eventID := uuid.Must(uuid.NewV7())
 	err = NewBackend(postgres.WrapPool(pool), integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: nodeA[:], EndpointId: endpointA[:],
@@ -354,13 +312,9 @@ func TestTelemetryPayloadCannotWriteAnotherNodeIntegration(t *testing.T) {
 
 	var status string
 	var transportCount, mutatedRows int
-	if err := pool.QueryRow(ctx, `SELECT status FROM nodes WHERE id=$1`, nodeB).Scan(&status); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transport_events WHERE event_id=$1`, eventID).Scan(&transportCount); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT status FROM nodes WHERE id=$1`, nodeB).Scan(&status))
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM transport_events WHERE event_id=$1`, eventID).Scan(&transportCount))
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM telemetry_ingest_batches WHERE node_id=$1) +
 		(SELECT count(*) FROM node_observed_snapshots WHERE node_id=$1) +
 		(SELECT count(*) FROM node_sessions WHERE node_id=$1) +
@@ -368,9 +322,7 @@ func TestTelemetryPayloadCannotWriteAnotherNodeIntegration(t *testing.T) {
 		(SELECT count(*) FROM observed_users WHERE node_id=$1) +
 		(SELECT count(*) FROM observed_groups WHERE node_id=$1) +
 		(SELECT count(*) FROM telemetry_security_events WHERE node_id=$1) +
-		(SELECT count(*) FROM telemetry_samples WHERE node_id=$1)`, nodeB).Scan(&mutatedRows); err != nil {
-		t.Fatal(err)
-	}
+		(SELECT count(*) FROM telemetry_samples WHERE node_id=$1)`, nodeB).Scan(&mutatedRows))
 	if status != "offline" || transportCount != 0 || mutatedRows != 0 {
 		t.Fatalf("cross-node telemetry changed state: status=%s transport=%d rows=%d", status, transportCount, mutatedRows)
 	}
@@ -383,21 +335,13 @@ func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Command result test',$2,now(),now())`, workspaceID, "command-result-"+workspaceID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Command result test',$2,now(),now())`, workspaceID, "command-result-"+workspaceID.String())
+	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String())
 	endpoint := integrationEndpoint(nodeID)
-	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:]); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:])
 	t.Cleanup(func() {
 		for _, statement := range []string{
 			`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
@@ -417,26 +361,14 @@ func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(
 	now := time.Now().UTC()
 	signer := integrationCommandSigner()
 	envelope := agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: idempotencyKey[:], NodeId: nodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Minute)), ExpectedRevision: 1, Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", ActorId: "test", Reason: "Command result ingestion", OperationId: operationID[:], Action: "operation.create", RequiredCapability: "synthetic.echo", DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY, Payload: &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "hello"}}}
-	if err := semanticpayload.PopulateV1(&envelope); err != nil {
-		t.Fatal(err)
-	}
-	if err := signer.Authorize(&envelope); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, semanticpayload.PopulateV1(&envelope))
+	testutil.NoError(t, signer.Authorize(&envelope))
 	envelopeBytes, err := proto.Marshal(&envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,request_id,trace_id,created_at,updated_at,idempotency_key,request_hash,expires_at) VALUES($1,$2,$3,$4,'dispatched','command-result-test','0123456789abcdef0123456789abcdef',now(),now(),'journal-result',$5,$6)`, operationID, workspaceID, nodeID, commandID, make([]byte, 32), now.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,sequence,traceparent,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'dispatched','synthetic_echo',$5,'journal-result',1,1,$6,$7,$8,$8)`, commandID, operationID, workspaceID, nodeID, envelopeBytes, envelope.GetTraceparent(), now.Add(time.Minute), now); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
+	testutil.Exec(t, ctx, pool, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,request_id,trace_id,created_at,updated_at,idempotency_key,request_hash,expires_at) VALUES($1,$2,$3,$4,'dispatched','command-result-test','0123456789abcdef0123456789abcdef',now(),now(),'journal-result',$5,$6)`, operationID, workspaceID, nodeID, commandID, make([]byte, 32), now.Add(time.Minute))
+	testutil.Exec(t, ctx, pool, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,sequence,traceparent,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'dispatched','synthetic_echo',$5,'journal-result',1,1,$6,$7,$8,$8)`, commandID, operationID, workspaceID, nodeID, envelopeBytes, envelope.GetTraceparent(), now.Add(time.Minute), now)
 	payloadHash, err := semanticpayload.HashV1(&envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	ingest := func(state agentv1.CommandResultState, replayed bool) {
 		t.Helper()
 		result := &agentv1.CommandResult{CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], State: state, Result: []byte("hello"), AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now(), Replayed: replayed, SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1}
@@ -445,13 +377,9 @@ func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(
 			result.ErrorCode = "outcome_requires_reconciliation"
 		}
 		payload, err := proto.Marshal(result)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		eventID := uuid.Must(uuid.NewV7())
-		if err := NewBackend(postgres.WrapPool(pool), signer).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: payload}); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, NewBackend(postgres.WrapPool(pool), signer).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: payload}))
 	}
 	ingest(agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN, false)
 	var state string
@@ -460,16 +388,12 @@ func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(
 	}
 	ingest(agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, true)
 	var resultCount int
-	if err := pool.QueryRow(ctx, `SELECT operation.state,count(result.event_id) FROM operations AS operation JOIN commands AS command ON command.operation_id=operation.id JOIN agent_command_results AS result ON result.command_id=command.id WHERE operation.id=$1 GROUP BY operation.state`, operationID).Scan(&state, &resultCount); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT operation.state,count(result.event_id) FROM operations AS operation JOIN commands AS command ON command.operation_id=operation.id JOIN agent_command_results AS result ON result.command_id=command.id WHERE operation.id=$1 GROUP BY operation.state`, operationID).Scan(&state, &resultCount))
 	if state != "succeeded" || resultCount != 2 {
 		t.Fatalf("reconciled state/results = %q/%d", state, resultCount)
 	}
 	var nodeVersion int64
-	if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion))
 	if nodeVersion != 1 {
 		t.Fatalf("command results advanced the node mutation revision to %d", nodeVersion)
 	}
@@ -499,9 +423,7 @@ func newCommandResultFixture(t *testing.T) commandResultFixture {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	operationID, commandID, key := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	messageID := uuid.Must(uuid.NewV7())
@@ -517,36 +439,18 @@ func newCommandResultFixture(t *testing.T) commandResultFixture {
 		DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY,
 		Payload:      &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "hello"}},
 	}
-	if err := semanticpayload.PopulateV1(&envelope); err != nil {
-		t.Fatal(err)
-	}
-	if err := signer.Authorize(&envelope); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, semanticpayload.PopulateV1(&envelope))
+	testutil.NoError(t, signer.Authorize(&envelope))
 	envelopeBytes, err := proto.Marshal(&envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'strict result',$2,$3,$3)`, workspaceID, "strict-result-"+workspaceID.String(), now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,$4,$4)`, nodeID, workspaceID, "node-"+nodeID.String(), now); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'strict result',$2,$3,$3)`, workspaceID, "strict-result-"+workspaceID.String(), now)
+	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,$4,$4)`, nodeID, workspaceID, "node-"+nodeID.String(), now)
 	endpointID := integrationEndpoint(nodeID)
-	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, nodeID, endpointID[:], now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,request_id,trace_id,created_at,updated_at,idempotency_key,request_hash,expires_at) VALUES($1,$2,$3,$4,'dispatched','strict-result','1123456789abcdef0123456789abcdef',$5,$5,'strict-result',$6,$7)`, operationID, workspaceID, nodeID, commandID, now, make([]byte, 32), now.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,sequence,traceparent,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'dispatched','synthetic_echo',$5,'strict-result',1,1,$6,$7,$8,$8)`, commandID, operationID, workspaceID, nodeID, envelopeBytes, traceparent, now.Add(time.Hour), now); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, nodeID, endpointID[:], now)
+	testutil.Exec(t, ctx, pool, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,request_id,trace_id,created_at,updated_at,idempotency_key,request_hash,expires_at) VALUES($1,$2,$3,$4,'dispatched','strict-result','1123456789abcdef0123456789abcdef',$5,$5,'strict-result',$6,$7)`, operationID, workspaceID, nodeID, commandID, now, make([]byte, 32), now.Add(time.Hour))
+	testutil.Exec(t, ctx, pool, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,sequence,traceparent,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'dispatched','synthetic_echo',$5,'strict-result',1,1,$6,$7,$8,$8)`, commandID, operationID, workspaceID, nodeID, envelopeBytes, traceparent, now.Add(time.Hour), now)
 	payloadHash, err := semanticpayload.HashV1(&envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(func() {
 		for _, statement := range []string{
 			`DELETE FROM operation_events WHERE operation_id=$1`,
@@ -592,9 +496,7 @@ func assertEventQuarantined(t *testing.T, pool *pgxpool.Pool, eventID, nodeID uu
 	if cursorID != eventID {
 		t.Fatalf("durable cursor=%s, want quarantined event %s", cursorID, eventID)
 	}
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM transport_events WHERE event_id=$1`, eventID).Scan(&eventCount); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, pool.QueryRow(context.Background(), `SELECT count(*) FROM transport_events WHERE event_id=$1`, eventID).Scan(&eventCount))
 	if eventCount != 0 {
 		t.Fatalf("quarantined event %s reached the business event table", eventID)
 	}
@@ -612,9 +514,7 @@ func (fixture *commandResultFixture) validResult() *agentv1.CommandResult {
 func (fixture *commandResultFixture) ingestResult(t *testing.T, result *agentv1.CommandResult) (uuid.UUID, error) {
 	t.Helper()
 	payload, err := proto.Marshal(result)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	eventID := uuid.Must(uuid.NewV7())
 	err = fixture.service.Ingest(context.Background(), &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
@@ -636,9 +536,7 @@ func TestMalformedCommandResultRollsBackTransactionIntegration(t *testing.T) {
 	assertEventQuarantined(t, fixture.pool, eventID, fixture.nodeID, "invalid_command_result")
 	var transportCount, resultCount, operationEventCount int
 	var operationState, commandState string
-	if err := fixture.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM transport_events WHERE event_id=$1),(SELECT count(*) FROM agent_command_results WHERE command_id=$2),(SELECT count(*) FROM operation_events WHERE operation_id=$3),(SELECT state FROM operations WHERE id=$3),(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationEventCount, &operationState, &commandState); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, fixture.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM transport_events WHERE event_id=$1),(SELECT count(*) FROM agent_command_results WHERE command_id=$2),(SELECT count(*) FROM operation_events WHERE operation_id=$3),(SELECT state FROM operations WHERE id=$3),(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationEventCount, &operationState, &commandState))
 	if transportCount != 0 || resultCount != 0 || operationEventCount != 0 || operationState != "dispatched" || commandState != "dispatched" {
 		t.Fatalf("partial malformed result transaction: transport=%d result=%d operation_events=%d operation=%s command=%s", transportCount, resultCount, operationEventCount, operationState, commandState)
 	}
@@ -657,21 +555,15 @@ func TestStoredCommandHashVersionMustMatchResultIntegration(t *testing.T) {
 			fixture := newCommandResultFixture(t)
 			fixture.envelope.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1
 			v1Hash, err := semanticpayload.HashV1(fixture.envelope)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			fixture.envelope.SemanticPayloadSha256 = v1Hash[:]
 			storedEnvelope, err := proto.Marshal(fixture.envelope)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			if _, err := fixture.pool.Exec(context.Background(), `UPDATE commands SET envelope=$2 WHERE id=$1`, fixture.commandID, storedEnvelope); err != nil {
 				t.Fatal(err)
 			}
 			legacyHash, err := legacySyntheticPayloadHash(fixture.envelope)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			result := &agentv1.CommandResult{
 				CommandId: fixture.commandID[:], IdempotencyKey: fixture.envelope.GetIdempotencyKey(),
 				PayloadSha256: legacyHash[:], State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED,
@@ -754,14 +646,12 @@ func TestInvalidCommandResultStatesAndTimesFailClosedIntegration(t *testing.T) {
 			assertEventQuarantined(t, fixture.pool, eventID, fixture.nodeID, "invalid_command_result")
 			var transportCount, resultCount, operationEventCount int
 			var operationState, commandState string
-			if err := fixture.pool.QueryRow(context.Background(), `SELECT
+			testutil.NoError(t, fixture.pool.QueryRow(context.Background(), `SELECT
 				(SELECT count(*) FROM transport_events WHERE event_id=$1),
 				(SELECT count(*) FROM agent_command_results WHERE command_id=$2),
 				(SELECT count(*) FROM operation_events WHERE operation_id=$3),
 				(SELECT state FROM operations WHERE id=$3),
-				(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationEventCount, &operationState, &commandState); err != nil {
-				t.Fatal(err)
-			}
+				(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationEventCount, &operationState, &commandState))
 			if transportCount != 0 || resultCount != 0 || operationEventCount != 0 || operationState != "dispatched" || commandState != "dispatched" {
 				t.Fatalf("invalid result left partial state: transport=%d results=%d operation_events=%d operation=%s command=%s", transportCount, resultCount, operationEventCount, operationState, commandState)
 			}
@@ -782,9 +672,7 @@ func TestAgentResultCannotRegressAuthorityTimestampsIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var commandUpdatedAt, operationUpdatedAt time.Time
-	if err := fixture.pool.QueryRow(context.Background(), `SELECT command.updated_at,operation.updated_at FROM commands command JOIN operations operation ON operation.id=command.operation_id WHERE command.id=$1`, fixture.commandID).Scan(&commandUpdatedAt, &operationUpdatedAt); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, fixture.pool.QueryRow(context.Background(), `SELECT command.updated_at,operation.updated_at FROM commands command JOIN operations operation ON operation.id=command.operation_id WHERE command.id=$1`, fixture.commandID).Scan(&commandUpdatedAt, &operationUpdatedAt))
 	if commandUpdatedAt.Before(authorityTime) || operationUpdatedAt.Before(authorityTime) {
 		t.Fatalf("authority timestamp regressed: command=%s operation=%s baseline=%s", commandUpdatedAt, operationUpdatedAt, authorityTime)
 	}
@@ -805,9 +693,7 @@ func TestContradictoryTerminalResultRollsBackIntegration(t *testing.T) {
 	assertEventQuarantined(t, fixture.pool, eventID, fixture.nodeID, "invalid_command_result")
 	var transportCount, resultCount int
 	var operationState, commandState string
-	if err := fixture.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM transport_events WHERE event_id=$1),(SELECT count(*) FROM agent_command_results WHERE command_id=$2),(SELECT state FROM operations WHERE id=$3),(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationState, &commandState); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, fixture.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM transport_events WHERE event_id=$1),(SELECT count(*) FROM agent_command_results WHERE command_id=$2),(SELECT state FROM operations WHERE id=$3),(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationState, &commandState))
 	if transportCount != 0 || resultCount != 1 || operationState != "succeeded" || commandState != "succeeded" {
 		t.Fatalf("terminal contradiction left partial state: transport=%d results=%d operation=%s command=%s", transportCount, resultCount, operationState, commandState)
 	}
@@ -817,9 +703,7 @@ func TestUnknownSchedulesExplicitReconcileThenSafeRetryIntegration(t *testing.T)
 	fixture := newCommandResultFixture(t)
 	outboxID := uuid.Must(uuid.NewV7())
 	envelopeBytes, err := proto.Marshal(fixture.envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := fixture.pool.Exec(context.Background(), `INSERT INTO outbox_events(id,command_id,event_type,payload,available_at,published_at,created_at) VALUES($1,$2,'command.dispatch',$3,$4,$4,$4)`, outboxID, fixture.commandID, envelopeBytes, fixture.issuedAt); err != nil {
 		t.Fatal(err)
 	}
@@ -847,13 +731,9 @@ func TestUnknownSchedulesExplicitReconcileThenSafeRetryIntegration(t *testing.T)
 		t.Helper()
 		var payload []byte
 		var unpublished bool
-		if err := fixture.pool.QueryRow(context.Background(), `SELECT payload,published_at IS NULL FROM outbox_events WHERE id=$1`, outboxID).Scan(&payload, &unpublished); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, fixture.pool.QueryRow(context.Background(), `SELECT payload,published_at IS NULL FROM outbox_events WHERE id=$1`, outboxID).Scan(&payload, &unpublished))
 		var envelope agentv1.CommandEnvelope
-		if err := proto.Unmarshal(payload, &envelope); err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, proto.Unmarshal(payload, &envelope))
 		if envelope.GetDeliveryMode() != expected || !unpublished {
 			t.Fatalf("recovery dispatch = %s, unpublished=%v", envelope.GetDeliveryMode(), unpublished)
 		}
@@ -884,9 +764,7 @@ func TestCapacityExceededResultFailsWithoutReconciliationIntegration(t *testing.
 
 	var operationState, commandState, errorCode string
 	var recoveryEvents int
-	if err := fixture.pool.QueryRow(context.Background(), `SELECT (SELECT state FROM operations WHERE id=$1),(SELECT state FROM commands WHERE id=$2),(SELECT error_code FROM agent_command_results WHERE command_id=$2),(SELECT count(*) FROM outbox_events WHERE command_id=$2 AND published_at IS NULL)`, fixture.operationID, fixture.commandID).Scan(&operationState, &commandState, &errorCode, &recoveryEvents); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, fixture.pool.QueryRow(context.Background(), `SELECT (SELECT state FROM operations WHERE id=$1),(SELECT state FROM commands WHERE id=$2),(SELECT error_code FROM agent_command_results WHERE command_id=$2),(SELECT count(*) FROM outbox_events WHERE command_id=$2 AND published_at IS NULL)`, fixture.operationID, fixture.commandID).Scan(&operationState, &commandState, &errorCode, &recoveryEvents))
 	if operationState != "failed" || commandState != "failed" || errorCode != "capacity_exceeded" || recoveryEvents != 0 {
 		t.Fatalf("capacity result operation=%s command=%s error=%s recovery=%d", operationState, commandState, errorCode, recoveryEvents)
 	}
@@ -898,9 +776,7 @@ func TestPrivdUnknownResultsScheduleReconcileOnlyIntegration(t *testing.T) {
 			fixture := newCommandResultFixture(t)
 			outboxID := uuid.Must(uuid.NewV7())
 			envelopeBytes, err := proto.Marshal(fixture.envelope)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			if _, err := fixture.pool.Exec(context.Background(), `INSERT INTO outbox_events(id,command_id,event_type,payload,available_at,published_at,created_at) VALUES($1,$2,'command.dispatch',$3,$4,$4,$4)`, outboxID, fixture.commandID, envelopeBytes, fixture.issuedAt); err != nil {
 				t.Fatal(err)
 			}
@@ -913,13 +789,9 @@ func TestPrivdUnknownResultsScheduleReconcileOnlyIntegration(t *testing.T) {
 			}
 			var payload []byte
 			var unpublished bool
-			if err := fixture.pool.QueryRow(context.Background(), `SELECT payload,published_at IS NULL FROM outbox_events WHERE id=$1`, outboxID).Scan(&payload, &unpublished); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, fixture.pool.QueryRow(context.Background(), `SELECT payload,published_at IS NULL FROM outbox_events WHERE id=$1`, outboxID).Scan(&payload, &unpublished))
 			var recovered agentv1.CommandEnvelope
-			if err := proto.Unmarshal(payload, &recovered); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, proto.Unmarshal(payload, &recovered))
 			if recovered.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY || !unpublished {
 				t.Fatalf("recovery mode=%s unpublished=%v", recovered.GetDeliveryMode(), unpublished)
 			}
@@ -931,13 +803,9 @@ func TestPrivdUnknownResultsScheduleReconcileOnlyIntegration(t *testing.T) {
 func assertCommandAuthorization(t *testing.T, signer *commandauth.Signer, envelope *agentv1.CommandEnvelope) {
 	t.Helper()
 	claims, err := commandauth.ClaimsFromEnvelopeV1(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	canonical, err := commandauth.CanonicalV1(claims)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if !ed25519.Verify(signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) {
 		t.Fatal("recovery command authorization is invalid")
 	}

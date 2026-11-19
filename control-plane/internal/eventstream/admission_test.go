@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 )
 
 func TestAdmissionLimitsAndCleanup(t *testing.T) {
@@ -16,14 +18,10 @@ func TestAdmissionLimitsAndCleanup(t *testing.T) {
 	config.ResourceStreams = 1
 	config.Watchers = 5
 	manager, err := NewManager(config)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	key := AdmissionKey{Identity: "identity-a", Session: "session-a", Workspace: "workspace-a", Resource: "resource-a"}
 	lease, err := manager.Acquire(key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := manager.Acquire(key); !errors.Is(err, ErrResourceLimit) {
 		t.Fatalf("second resource stream error = %v", err)
 	}
@@ -43,24 +41,18 @@ func TestAdmissionGlobalAndIdentityAreIndependent(t *testing.T) {
 	config.ResourceStreams = 3
 	config.Watchers = 3
 	manager, err := NewManager(config)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	var leases []*Lease
 	for index := 0; index < 2; index++ {
 		lease, err := manager.Acquire(AdmissionKey{Identity: "identity-a", Session: fmt.Sprintf("session-%d", index), Workspace: fmt.Sprintf("workspace-%d", index), Resource: fmt.Sprintf("resource-%d", index)})
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		leases = append(leases, lease)
 	}
 	if _, err := manager.Acquire(AdmissionKey{Identity: "identity-a", Session: "session-new", Workspace: "workspace-new", Resource: "resource-new"}); !errors.Is(err, ErrIdentityLimit) {
 		t.Fatalf("identity limit error = %v", err)
 	}
 	third, err := manager.Acquire(AdmissionKey{Identity: "identity-b", Session: "session-b", Workspace: "workspace-b", Resource: "resource-b"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	leases = append(leases, third)
 	if _, err := manager.Acquire(AdmissionKey{Identity: "identity-c", Session: "session-c", Workspace: "workspace-c", Resource: "resource-c"}); !errors.Is(err, ErrGlobalLimit) {
 		t.Fatalf("global limit error = %v", err)
@@ -73,9 +65,7 @@ func TestAdmissionGlobalAndIdentityAreIndependent(t *testing.T) {
 func TestAdmissionConcurrentReleaseDoesNotLeak(t *testing.T) {
 	config := DefaultConfig()
 	manager, err := NewManager(config)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	var wait sync.WaitGroup
 	for index := 0; index < config.GlobalStreams; index++ {
 		key := AdmissionKey{
@@ -83,9 +73,7 @@ func TestAdmissionConcurrentReleaseDoesNotLeak(t *testing.T) {
 			Workspace: fmt.Sprintf("workspace-%d", index), Resource: fmt.Sprintf("resource-%d", index),
 		}
 		lease, err := manager.Acquire(key)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
@@ -108,21 +96,15 @@ func TestWorkspaceAndResourceLimitsAreIndependent(t *testing.T) {
 	config.ResourceStreams = 1
 	config.Watchers = 8
 	manager, err := NewManager(config)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	first, err := manager.Acquire(AdmissionKey{Identity: "identity-a", Session: "session-a", Workspace: "workspace-a", Resource: "operation-a"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer first.Release()
 	if _, err := manager.Acquire(AdmissionKey{Identity: "identity-b", Session: "session-b", Workspace: "workspace-b", Resource: "operation-a"}); !errors.Is(err, ErrResourceLimit) {
 		t.Fatalf("shared operation resource error = %v", err)
 	}
 	second, err := manager.Acquire(AdmissionKey{Identity: "identity-b", Session: "session-b", Workspace: "workspace-a", Resource: "operation-b"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer second.Release()
 	if _, err := manager.Acquire(AdmissionKey{Identity: "identity-c", Session: "session-c", Workspace: "workspace-a", Resource: "operation-c"}); !errors.Is(err, ErrWorkspaceLimit) {
 		t.Fatalf("workspace aggregate error = %v", err)

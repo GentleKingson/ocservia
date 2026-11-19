@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"strings"
 	"testing"
 
@@ -38,9 +39,7 @@ func futurePostgresArtifacts(t *testing.T) (string, []byte, string) {
 	after := fmt.Sprintf("%x", sum)
 	original, err := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
 	before, _ := original.catalog(original.schema.Baseline.Number)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	current, next := original.schema.Baseline.Number, original.schema.Baseline.Number+1
 	schema := strings.Replace(schemaSQL, fmt.Sprintf("-- ocservia:revision=%d", current), fmt.Sprintf("-- ocservia:revision=%d", next), 1)
 	schema = strings.Replace(schema, before, after, 1)
@@ -48,13 +47,9 @@ func futurePostgresArtifacts(t *testing.T) (string, []byte, string) {
 	checkpoint, _ := json.Marshal(schemaartifact.Receipt{Checksum: fmt.Sprintf("%x", sha256.Sum256([]byte(schema))), Steps: 1})
 	upgrade := string(upgradeSQL) + fmt.Sprintf("\n-- ocservia:revision=%d\n-- ocservia:checkpoint=", next) + string(checkpoint) + "\n-- ocservia:step=001:probe\n-- ocservia:metadata={\"catalog_sha256\":\"" + after + "\"}\n" + statement + "-- ocservia:end-step\n-- ocservia:end-revision\n"
 	parsed, err := schemaartifact.Parse([]byte(upgrade), "postgresql")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	history, err := schemaartifact.HistoryChecksum(parsed, next)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	oldHash := fmt.Sprintf("%x", sha256.Sum256([]byte(schema)))
 	schema = strings.Replace(schema, original.schema.HistoryChecksum, history, 1)
 	upgrade = strings.Replace(upgrade, oldHash, fmt.Sprintf("%x", sha256.Sum256([]byte(schema))), 1)
@@ -77,9 +72,7 @@ func postgresDatabaseDigest(t *testing.T, pool *pgxpool.Pool) string {
 func TestPostgreSQLArtifactFreshAndUpgrade(t *testing.T) {
 	ctx := context.Background()
 	original, err := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	current := original.schema.Baseline.Number
 	upgraded := snapshotDatabase(t)
 	if err := Migrate(ctx, upgraded); err != nil {
@@ -108,13 +101,9 @@ func TestPostgreSQLArtifactFreshAndUpgrade(t *testing.T) {
 		}
 	}
 	freshRows, err := readRevisionReceipts(ctx, fresh)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	upgradeRows, err := readRevisionReceipts(ctx, upgraded)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if len(freshRows) != 1 || freshRows[0].revision != current+1 || len(upgradeRows) != 2 || upgradeRows[0].revision != current || upgradeRows[1].revision != current+1 {
 		t.Fatal("incorrect checkpoint/execution receipts", freshRows, upgradeRows)
 	}
@@ -160,13 +149,9 @@ func TestPostgreSQLArtifactRollback(t *testing.T) {
 	// This is a new unpublished failing revision: keep its covered-history
 	// provenance internally consistent so execution reaches the rollback case.
 	a, err := schemaartifact.Parse(upgrade, "postgresql")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	history, err := schemaartifact.HistoryChecksum(a, int64(len(a.Revisions)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	oldSchemaHash := fmt.Sprintf("%x", sha256.Sum256([]byte(schema)))
 	oldParsed, _ := schemaartifact.Parse([]byte(schema), "postgresql")
 	schema = strings.Replace(schema, oldParsed.HistoryChecksum, history, 1)
@@ -217,9 +202,7 @@ func TestPostgreSQLArtifactHistoryMutationNoMutation(t *testing.T) {
 
 func TestPostgreSQLArtifactCatalog(t *testing.T) {
 	a, err := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 3 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != checkpointRef {
 		t.Fatal("major cutover must use the released immutable checkpoint")
 	}

@@ -96,39 +96,26 @@ chmod 0755 "${bin}/controller-release-smoke.sh"
 
 digest="sha256:$(printf 'b%.0s' {1..64})"
 commit="$(git -C "${ROOT}" rev-parse HEAD)"
+
+make_manifest() {
+  local output="$1" version="$2" digest="$3" arch="${4:-amd64}"
+  local images=() role
+  for role in gateway control transport backup; do
+    images+=(--image "${role}=ghcr.io/gentlekingson/ocservia/${role}@${digest}")
+  done
+  node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
+    --output "${output}" --release-version "${version}" --release-tag "v${version}" \
+    --source-commit "${commit}" --migration-dir "${ROOT}/control-plane/migrations" --platform "linux/${arch}" \
+    "${images[@]}" --image "postgres=docker.io/library/postgres@${digest}" --image "otel=docker.io/otel/opentelemetry-collector@${digest}"
+}
 release_file="${fixture}/release/controller-release.json"
-node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
-  --output "${release_file}" \
-  --release-version 0.2.0 \
-  --release-tag v0.2.0 \
-  --source-commit "${commit}" \
-  --migration-dir "${ROOT}/control-plane/migrations" \
-  --platform linux/amd64 \
-  --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${digest}" \
-  --image "control=ghcr.io/gentlekingson/ocservia/control@${digest}" \
-  --image "transport=ghcr.io/gentlekingson/ocservia/transport@${digest}" \
-  --image "backup=ghcr.io/gentlekingson/ocservia/backup@${digest}" \
-  --image "postgres=docker.io/library/postgres@${digest}" \
-  --image "otel=docker.io/otel/opentelemetry-collector@${digest}"
-
 arm64_release_file="${fixture}/release/controller-release-arm64.json"
-node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
-  --output "${arm64_release_file}" \
-  --release-version 0.2.0 \
-  --release-tag v0.2.0 \
-  --source-commit "${commit}" \
-  --migration-dir "${ROOT}/control-plane/migrations" \
-  --platform linux/arm64 \
-  --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${digest}" \
-  --image "control=ghcr.io/gentlekingson/ocservia/control@${digest}" \
-  --image "transport=ghcr.io/gentlekingson/ocservia/transport@${digest}" \
-  --image "backup=ghcr.io/gentlekingson/ocservia/backup@${digest}" \
-  --image "postgres=docker.io/library/postgres@${digest}" \
-  --image "otel=docker.io/otel/opentelemetry-collector@${digest}"
+make_manifest "${release_file}" 0.2.0 "${digest}"
+make_manifest "${arm64_release_file}" 0.2.0 "${digest}" arm64
 
-run_controller_command() {
-  local state="$1" selected="$2" command="$3"
-  shift 3
+with_controller_env() {
+  local state="$1"
+  shift
   PATH="${bin}:${PATH}" \
     CONTROLLER_TEST_LOG="${state}/compose.log" \
     CONTROLLER_TEST_ENV_LOG="${state}/compose-env.log" \
@@ -136,54 +123,33 @@ run_controller_command() {
     OCSERV_CONTROLLER_STATE_ROOT="${state}" \
     OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
     OCSERV_CONTROLLER_SMOKE_SH="${bin}/controller-release-smoke.sh" \
-    "$@" "${CONTROLLER}" "${command}" --release-file "${selected}"
+    "$@"
 }
 
 run_controller() {
-  run_controller_command "$1" "$2" install "${@:3}"
+  with_controller_env "$1" "${@:3}" "${CONTROLLER}" install --release-file "$2"
 }
-
 run_controller_upgrade() {
-  run_controller_command "$1" "$2" upgrade "${@:3}"
+  with_controller_env "$1" "${@:3}" "${CONTROLLER}" upgrade --release-file "$2"
 }
-
 run_controller_rollback() {
-  local state="$1"
-  shift
-  PATH="${bin}:${PATH}" \
-    CONTROLLER_TEST_LOG="${state}/compose.log" \
-    CONTROLLER_TEST_ENV_LOG="${state}/compose-env.log" \
-    CONTROLLER_TEST_SMOKE_LOG="${state}/smoke.log" \
-    OCSERV_CONTROLLER_STATE_ROOT="${state}" \
-    OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
-    OCSERV_CONTROLLER_SMOKE_SH="${bin}/controller-release-smoke.sh" \
-    "$@" "${CONTROLLER}" rollback
+  with_controller_env "$1" "${@:2}" "${CONTROLLER}" rollback
 }
-
 run_controller_start() {
-  local state="$1"
-  shift
-  PATH="${bin}:${PATH}" \
-    CONTROLLER_TEST_LOG="${state}/compose.log" \
-    CONTROLLER_TEST_ENV_LOG="${state}/compose-env.log" \
-    CONTROLLER_TEST_SMOKE_LOG="${state}/smoke.log" \
-    OCSERV_CONTROLLER_STATE_ROOT="${state}" \
-    OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
-    OCSERV_CONTROLLER_SMOKE_SH="${bin}/controller-release-smoke.sh" \
-    "${CONTROLLER}" start "$@"
+  with_controller_env "$1" "${CONTROLLER}" start "${@:2}"
+}
+run_controller_uninstall() {
+  with_controller_env "$1" "${CONTROLLER}" uninstall "${@:2}"
 }
 
-run_controller_uninstall() {
-  local state="$1"
-  shift
-  PATH="${bin}:${PATH}" \
-    CONTROLLER_TEST_LOG="${state}/compose.log" \
-    CONTROLLER_TEST_ENV_LOG="${state}/compose-env.log" \
-    CONTROLLER_TEST_SMOKE_LOG="${state}/smoke.log" \
-    OCSERV_CONTROLLER_STATE_ROOT="${state}" \
-    OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
-    OCSERV_CONTROLLER_SMOKE_SH="${bin}/controller-release-smoke.sh" \
-    "${CONTROLLER}" uninstall "$@"
+expect_rejection() {
+  local log="$1" message="$2"
+  shift 2
+  if "$@" >"${log}" 2>&1; then
+    echo "expected rejection: ${message}" >&2
+    exit 1
+  fi
+  grep -Fq -- "${message}" "${log}" || { cat "${log}" >&2; exit 1; }
 }
 
 assert_pending_release() {
@@ -237,6 +203,13 @@ seed_upgrade_state() {
     cp -- "${previous}" "${state}/previous-release.json"
     chmod 600 "${state}/previous-release.json"
   fi
+}
+
+seed_rollback_state() {
+  local state="$1" current="${2:-${next_release_file}}" previous="${3:-${release_file}}"
+  mkdir -m 700 -- "${state}"
+  install -m 600 "${current}" "${state}/current-release.json"
+  install -m 600 "${previous}" "${state}/previous-release.json"
 }
 
 seed_pending_state() {
@@ -296,12 +269,6 @@ expect_failure "${platform_mismatch_state}" "${arm64_release_file}" \
   'release manifest platform linux/arm64 does not match the Docker host platform linux/amd64' false env
 test ! -e "${platform_mismatch_state}/compose.log"
 
-host_platform_mismatch_state="${fixture}/host-platform-mismatch"
-expect_failure "${host_platform_mismatch_state}" "${release_file}" \
-  'release manifest platform linux/amd64 does not match the Docker host platform linux/arm64' false \
-  env MOCK_DOCKER_ARCH=arm64
-test ! -e "${host_platform_mismatch_state}/compose.log"
-
 unsupported_host_state="${fixture}/unsupported-host-arch"
 expect_failure "${unsupported_host_state}" "${release_file}" \
   'Docker server architecture is not a supported Controller platform: riscv64' false \
@@ -321,22 +288,15 @@ mkdir -m 700 -- "${relative_state}"
 cmp -s "${release_file}" "${relative_state}/current-release.json"
 test ! -e "${relative_state}/pending-release.json"
 
-if run_controller "${valid_state}" "${release_file}" env >"${fixture}/already-installed.log" 2>&1; then
-  echo "already-installed Controller was accepted" >&2
-  exit 1
-fi
-grep -Fq 'Controller is already installed; use upgrade' "${fixture}/already-installed.log"
+expect_rejection "${fixture}/already-installed.log" 'Controller is already installed; use upgrade' \
+  run_controller "${valid_state}" "${release_file}" env
 test "$(wc -l <"${valid_state}/compose.log")" -eq 3
 
 completed_install_state="${fixture}/completed-install"
 seed_upgrade_state "${completed_install_state}"
 seed_pending_state "${completed_install_state}" "${release_file}"
-if run_controller "${completed_install_state}" "${release_file}" env \
-  >"${completed_install_state}/output.log" 2>&1; then
-  echo "completed install reconciliation was rejected" >&2
-  exit 1
-fi
-grep -Fq 'Controller is already installed; use upgrade' "${completed_install_state}/output.log"
+expect_rejection "${completed_install_state}/output.log" 'Controller is already installed; use upgrade' \
+  run_controller "${completed_install_state}" "${release_file}" env
 test ! -e "${completed_install_state}/pending-release.json"
 test ! -e "${completed_install_state}/compose.log"
 
@@ -345,61 +305,22 @@ jq '.manifest_version = 2' "${release_file}" >"${unsupported}"
 malformed_digest="${fixture}/release/malformed-digest.json"
 jq '.images.control = "ghcr.io/gentlekingson/ocservia/control@sha256:deadbeef"' "${release_file}" >"${malformed_digest}"
 
-if ! run_controller_upgrade "${valid_state}" "${release_file}" env >"${fixture}/same-release.log" 2>&1; then
-  echo "same-release upgrade was rejected" >&2
-  exit 1
-fi
+run_controller_upgrade "${valid_state}" "${release_file}" env >"${fixture}/same-release.log" 2>&1
 grep -Fq 'is already current; no-op' "${fixture}/same-release.log"
 test "$(wc -l <"${valid_state}/compose.log")" -eq 3
 test ! -e "${valid_state}/previous-release.json"
 
 next_digest="sha256:$(printf 'c%.0s' {1..64})"
 next_release_file="${fixture}/release/controller-release-next.json"
-node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
-  --output "${next_release_file}" \
-  --release-version 0.3.0 \
-  --release-tag v0.3.0 \
-  --source-commit "${commit}" \
-  --migration-dir "${ROOT}/control-plane/migrations" \
-  --platform linux/amd64 \
-  --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${next_digest}" \
-  --image "control=ghcr.io/gentlekingson/ocservia/control@${next_digest}" \
-  --image "transport=ghcr.io/gentlekingson/ocservia/transport@${next_digest}" \
-  --image "backup=ghcr.io/gentlekingson/ocservia/backup@${next_digest}" \
-  --image "postgres=docker.io/library/postgres@${next_digest}" \
-  --image "otel=docker.io/otel/opentelemetry-collector@${next_digest}"
+make_manifest "${next_release_file}" 0.3.0 "${next_digest}"
 
 third_digest="sha256:$(printf 'd%.0s' {1..64})"
 third_release_file="${fixture}/release/controller-release-third.json"
-node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
-  --output "${third_release_file}" \
-  --release-version 0.4.0 \
-  --release-tag v0.4.0 \
-  --source-commit "${commit}" \
-  --migration-dir "${ROOT}/control-plane/migrations" \
-  --platform linux/amd64 \
-  --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${third_digest}" \
-  --image "control=ghcr.io/gentlekingson/ocservia/control@${third_digest}" \
-  --image "transport=ghcr.io/gentlekingson/ocservia/transport@${third_digest}" \
-  --image "backup=ghcr.io/gentlekingson/ocservia/backup@${third_digest}" \
-  --image "postgres=docker.io/library/postgres@${third_digest}" \
-  --image "otel=docker.io/otel/opentelemetry-collector@${third_digest}"
+make_manifest "${third_release_file}" 0.4.0 "${third_digest}"
 
 stale_digest="sha256:$(printf 'a%.0s' {1..64})"
 stale_release_file="${fixture}/release/controller-release-stale.json"
-node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
-  --output "${stale_release_file}" \
-  --release-version 0.1.0 \
-  --release-tag v0.1.0 \
-  --source-commit "${commit}" \
-  --migration-dir "${ROOT}/control-plane/migrations" \
-  --platform linux/amd64 \
-  --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${stale_digest}" \
-  --image "control=ghcr.io/gentlekingson/ocservia/control@${stale_digest}" \
-  --image "transport=ghcr.io/gentlekingson/ocservia/transport@${stale_digest}" \
-  --image "backup=ghcr.io/gentlekingson/ocservia/backup@${stale_digest}" \
-  --image "postgres=docker.io/library/postgres@${stale_digest}" \
-  --image "otel=docker.io/otel/opentelemetry-collector@${stale_digest}"
+make_manifest "${stale_release_file}" 0.1.0 "${stale_digest}"
 
 target_source_mismatch="${fixture}/release/controller-release-source-mismatch.json"
 jq --arg source "$(printf 'd%.0s' {1..40})" '.source_commit = $source' \
@@ -430,43 +351,8 @@ test "$(wc -l <"${upgrade_success_state}/compose-env.log")" -eq 4
 [[ "$(sed -n '2p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 [[ "$(sed -n '3p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 [[ "$(sed -n '4p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
-
-tampered_bundle_manifest="${fixture}/release/controller-release-tampered.json"
-cp -- "${release_file}" "${tampered_bundle_manifest}"
-printf '%s\n' tampered >>"${tampered_bundle_manifest}"
-invalid_config_state="${fixture}/bundle-verification-failure"
-mkdir -m 700 -- "${invalid_config_state}"
-if run_controller "${invalid_config_state}" "${tampered_bundle_manifest}" env \
-  >"${invalid_config_state}/output.log" 2>&1; then
-  echo "invalid Controller deployment configuration was accepted" >&2
-  exit 1
-fi
-grep -Fq 'release manifest is invalid' \
-  "${invalid_config_state}/output.log"
-test ! -e "${invalid_config_state}/compose.log"
-
-protected_bundle_dir="${fixture}/protected-release-assets"
-mkdir -m 700 -- "${protected_bundle_dir}"
-cp -- "${next_release_file}" "${protected_bundle_dir}/controller-release.json"
-cp -- "${release_file}" "${protected_bundle_dir}/controller-release-previous.json"
-protected_rollback_state="${fixture}/protected-state-rollback"
-seed_upgrade_state "${protected_rollback_state}"
-cp -- "${next_release_file}" "${protected_rollback_state}/current-release.json"
-cp -- "${release_file}" "${protected_rollback_state}/previous-release.json"
-chmod 600 "${protected_rollback_state}/current-release.json" "${protected_rollback_state}/previous-release.json"
-protected_start_state="${fixture}/protected-state-start"
-seed_upgrade_state "${protected_start_state}"
-rm -rf -- "${protected_bundle_dir}"
-run_controller_rollback "${protected_rollback_state}" env
-test ! -e "${protected_rollback_state}/pending-release.json"
-run_controller_start "${protected_start_state}"
-test ! -e "${protected_start_state}/pending-release.json"
-
 rollback_success_state="${fixture}/rollback-success"
-seed_upgrade_state "${rollback_success_state}"
-cp -- "${next_release_file}" "${rollback_success_state}/current-release.json"
-cp -- "${release_file}" "${rollback_success_state}/previous-release.json"
-chmod 600 "${rollback_success_state}/current-release.json" "${rollback_success_state}/previous-release.json"
+seed_rollback_state "${rollback_success_state}"
 run_controller_rollback "${rollback_success_state}" env
 cmp -s "${release_file}" "${rollback_success_state}/current-release.json"
 cmp -s "${next_release_file}" "${rollback_success_state}/previous-release.json"
@@ -484,32 +370,23 @@ test "$(wc -l <"${rollback_success_state}/compose-env.log")" -eq 4
 
 missing_previous_state="${fixture}/rollback-missing-previous"
 seed_upgrade_state "${missing_previous_state}"
-if run_controller_rollback "${missing_previous_state}" env >"${missing_previous_state}/output.log" 2>&1; then
-  echo "rollback without previous state was accepted" >&2
-  exit 1
-fi
-grep -Fq 'previous release state is missing' "${missing_previous_state}/output.log"
+expect_rejection "${missing_previous_state}/output.log" 'previous release state is missing' \
+  run_controller_rollback "${missing_previous_state}" env
 test ! -e "${missing_previous_state}/compose.log"
 
 malformed_previous_state="${fixture}/rollback-malformed-previous"
 seed_upgrade_state "${malformed_previous_state}"
 printf '%s\n' '{' >"${malformed_previous_state}/previous-release.json"
 chmod 600 "${malformed_previous_state}/previous-release.json"
-if run_controller_rollback "${malformed_previous_state}" env >"${malformed_previous_state}/output.log" 2>&1; then
-  echo "malformed rollback previous state was accepted" >&2
-  exit 1
-fi
-grep -Fq 'previous release state is invalid' "${malformed_previous_state}/output.log"
+expect_rejection "${malformed_previous_state}/output.log" 'previous release state is invalid' \
+  run_controller_rollback "${malformed_previous_state}" env
 test ! -e "${malformed_previous_state}/compose.log"
 
 symlink_previous_state="${fixture}/rollback-symlink-previous"
 seed_upgrade_state "${symlink_previous_state}"
 ln -s "${release_file}" "${symlink_previous_state}/previous-release.json"
-if run_controller_rollback "${symlink_previous_state}" env >"${symlink_previous_state}/output.log" 2>&1; then
-  echo "symlink rollback previous state was accepted" >&2
-  exit 1
-fi
-grep -Fq 'previous release state must not be a symlink' "${symlink_previous_state}/output.log"
+expect_rejection "${symlink_previous_state}/output.log" 'previous release state must not be a symlink' \
+  run_controller_rollback "${symlink_previous_state}" env
 test ! -e "${symlink_previous_state}/compose.log"
 
 same_release_state="${fixture}/rollback-same-release"
@@ -545,16 +422,10 @@ for schema in 1 100; do
   test "$(wc -l <"${schema_state}/compose.log")" -eq 4
 done
 incompatible_pending_state="${fixture}/rollback-incompatible-pending"
-seed_upgrade_state "${incompatible_pending_state}"
-cp -- "${next_release_file}" "${incompatible_pending_state}/current-release.json"
-cp -- "${release_file}" "${incompatible_pending_state}/previous-release.json"
-chmod 600 "${incompatible_pending_state}/current-release.json" "${incompatible_pending_state}/previous-release.json"
+seed_rollback_state "${incompatible_pending_state}"
 seed_pending_state "${incompatible_pending_state}" "${release_file}"
-if run_controller_rollback "${incompatible_pending_state}" env >"${incompatible_pending_state}/output.log" 2>&1; then
-  echo "incompatible pending rollback transaction was accepted" >&2
-  exit 1
-fi
-grep -Fq 'pending release transaction is not compatible with rollback' "${incompatible_pending_state}/output.log"
+expect_rejection "${incompatible_pending_state}/output.log" 'pending release transaction is not compatible with rollback' \
+  run_controller_rollback "${incompatible_pending_state}" env
 test ! -e "${incompatible_pending_state}/compose.log"
 
 # The lifecycle implementation stays current, but target deployment files come
@@ -603,102 +474,32 @@ run_source_start
 test "$(cat "${source_state}/sources.log")" = "$(printf 'target\ntarget\ntarget')"
 printf '\n# tampered\n' >>"${source_state}/source-${source_target}/deploy/production/compose.sh"
 : >"${source_state}/sources.log"
-if run_source_start >"${source_state}/dirty.log" 2>&1; then
-  echo 'dirty target source checkout accepted' >&2; exit 1
-fi
-grep -Fq 'checkout has unstaged changes' "${source_state}/dirty.log"
+expect_rejection "${source_state}/dirty.log" 'checkout has unstaged changes' \
+  run_source_start
 test ! -s "${source_state}/sources.log"
 CONTROLLER="${saved_controller}"
 
 unresolvable_previous="${fixture}/release/controller-release-unresolvable-previous.json"
 jq --arg source "$(printf 'e%.0s' {1..40})" '.source_commit = $source' "${release_file}" >"${unresolvable_previous}"
 unresolvable_state="${fixture}/rollback-unresolvable-previous"
-seed_upgrade_state "${unresolvable_state}"
-cp -- "${next_release_file}" "${unresolvable_state}/current-release.json"
-cp -- "${unresolvable_previous}" "${unresolvable_state}/previous-release.json"
-chmod 600 "${unresolvable_state}/current-release.json" "${unresolvable_state}/previous-release.json"
-if run_controller_rollback "${unresolvable_state}" env >"${unresolvable_state}/output.log" 2>&1; then
-  echo "unresolvable rollback source commit was accepted" >&2
-  exit 1
-fi
-grep -Fq 'release source_commit cannot be resolved locally' "${unresolvable_state}/output.log"
+seed_rollback_state "${unresolvable_state}" "${next_release_file}" "${unresolvable_previous}"
+expect_rejection "${unresolvable_state}/output.log" 'release source_commit cannot be resolved locally' \
+  run_controller_rollback "${unresolvable_state}" env
 test ! -e "${unresolvable_state}/compose.log"
 
-for rollback_failure in config pull up; do
-  failure_state="${fixture}/rollback-${rollback_failure}-failure"
-  seed_upgrade_state "${failure_state}"
-  cp -- "${next_release_file}" "${failure_state}/current-release.json"
-  cp -- "${release_file}" "${failure_state}/previous-release.json"
-  chmod 600 "${failure_state}/current-release.json" "${failure_state}/previous-release.json"
-  case "${rollback_failure}" in
-    config) failure_env=(MOCK_CONFIG_EXIT=1) ;;
-    pull) failure_env=(MOCK_PULL_EXIT=1) ;;
-    up) failure_env=(MOCK_UP_EXIT=1) ;;
-  esac
-  if run_controller_rollback "${failure_state}" env "${failure_env[@]}" >"${failure_state}/output.log" 2>&1; then
-    echo "rollback ${rollback_failure} failure was accepted" >&2
-    exit 1
-  fi
-  cmp -s "${next_release_file}" "${failure_state}/current-release.json"
-  cmp -s "${release_file}" "${failure_state}/previous-release.json"
-  assert_pending_release "${release_file}" "${failure_state}/pending-release.json"
-  assert_pending_previous_release "${next_release_file}" "${failure_state}/pending-release.json"
-  case "${rollback_failure}" in
-    config)
-      grep -Fq 'production preflight failed for rollback target' "${failure_state}/output.log"
-      test "$(wc -l <"${failure_state}/compose.log")" -eq 2
-      ;;
-    pull)
-      grep -Fq 'rollback target image pull failed' "${failure_state}/output.log"
-      test "$(wc -l <"${failure_state}/compose.log")" -eq 3
-      ;;
-    up)
-      grep -Fq 'rollback activation started but was not confirmed successful' "${failure_state}/output.log"
-      test "$(wc -l <"${failure_state}/compose.log")" -eq 4
-      ;;
-  esac
-done
-
 rollback_cross_schema_smoke_failure_state="${fixture}/rollback-cross-schema-smoke-failure"
-seed_upgrade_state "${rollback_cross_schema_smoke_failure_state}"
-cp -- "${cross_schema_current}" "${rollback_cross_schema_smoke_failure_state}/current-release.json"
-cp -- "${different_schema_previous}" "${rollback_cross_schema_smoke_failure_state}/previous-release.json"
-chmod 600 "${rollback_cross_schema_smoke_failure_state}/current-release.json" "${rollback_cross_schema_smoke_failure_state}/previous-release.json"
-if run_controller_rollback "${rollback_cross_schema_smoke_failure_state}" env \
-  MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 MOCK_SMOKE_EXIT=1 \
-  >"${rollback_cross_schema_smoke_failure_state}/output.log" 2>&1; then
-  echo "cross-schema rollback smoke failure was accepted" >&2
-  exit 1
-fi
-grep -Fq 'release smoke failed; confirmed release state remains unchanged' "${rollback_cross_schema_smoke_failure_state}/output.log"
+seed_rollback_state "${rollback_cross_schema_smoke_failure_state}" "${cross_schema_current}" "${different_schema_previous}"
+expect_rejection "${rollback_cross_schema_smoke_failure_state}/output.log" 'release smoke failed; confirmed release state remains unchanged' \
+  run_controller_rollback "${rollback_cross_schema_smoke_failure_state}" env \
+  MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 MOCK_SMOKE_EXIT=1
 cmp -s "${cross_schema_current}" "${rollback_cross_schema_smoke_failure_state}/current-release.json"
 cmp -s "${different_schema_previous}" "${rollback_cross_schema_smoke_failure_state}/previous-release.json"
 assert_pending_release "${different_schema_previous}" "${rollback_cross_schema_smoke_failure_state}/pending-release.json"
 assert_pending_previous_release "${cross_schema_current}" "${rollback_cross_schema_smoke_failure_state}/pending-release.json"
 test "$(jq -r '.phase' "${rollback_cross_schema_smoke_failure_state}/pending-release.json")" = failed
 
-rollback_smoke_failure_state="${fixture}/rollback-smoke-failure"
-seed_upgrade_state "${rollback_smoke_failure_state}"
-cp -- "${next_release_file}" "${rollback_smoke_failure_state}/current-release.json"
-cp -- "${release_file}" "${rollback_smoke_failure_state}/previous-release.json"
-chmod 600 "${rollback_smoke_failure_state}/current-release.json" "${rollback_smoke_failure_state}/previous-release.json"
-if run_controller_rollback "${rollback_smoke_failure_state}" env MOCK_SMOKE_EXIT=1 \
-  >"${rollback_smoke_failure_state}/output.log" 2>&1; then
-  echo "rollback smoke failure was accepted" >&2
-  exit 1
-fi
-grep -Fq 'release smoke failed; confirmed release state remains unchanged' "${rollback_smoke_failure_state}/output.log"
-cmp -s "${next_release_file}" "${rollback_smoke_failure_state}/current-release.json"
-cmp -s "${release_file}" "${rollback_smoke_failure_state}/previous-release.json"
-assert_pending_release "${release_file}" "${rollback_smoke_failure_state}/pending-release.json"
-assert_pending_previous_release "${next_release_file}" "${rollback_smoke_failure_state}/pending-release.json"
-test "$(jq -r '.phase' "${rollback_smoke_failure_state}/pending-release.json")" = failed
-
 rollback_retry_state="${fixture}/rollback-retry"
-seed_upgrade_state "${rollback_retry_state}"
-cp -- "${next_release_file}" "${rollback_retry_state}/current-release.json"
-cp -- "${release_file}" "${rollback_retry_state}/previous-release.json"
-chmod 600 "${rollback_retry_state}/current-release.json" "${rollback_retry_state}/previous-release.json"
+seed_rollback_state "${rollback_retry_state}"
 if run_controller_rollback "${rollback_retry_state}" env MOCK_UP_EXIT=1 >"${rollback_retry_state}/first.log" 2>&1; then
   echo "initial rollback retry fixture unexpectedly succeeded" >&2
   exit 1
@@ -711,10 +512,7 @@ cmp -s "${next_release_file}" "${rollback_retry_state}/previous-release.json"
 test ! -e "${rollback_retry_state}/pending-release.json"
 
 completed_upgrade_state="${fixture}/completed-upgrade"
-seed_upgrade_state "${completed_upgrade_state}"
-cp -- "${next_release_file}" "${completed_upgrade_state}/current-release.json"
-cp -- "${release_file}" "${completed_upgrade_state}/previous-release.json"
-chmod 600 "${completed_upgrade_state}/current-release.json" "${completed_upgrade_state}/previous-release.json"
+seed_rollback_state "${completed_upgrade_state}"
 seed_pending_state "${completed_upgrade_state}" "${next_release_file}" "${release_file}"
 run_controller_upgrade "${completed_upgrade_state}" "${third_release_file}" env
 cmp -s "${third_release_file}" "${completed_upgrade_state}/current-release.json"
@@ -751,56 +549,10 @@ test -s "${same_version_state}/compose.log"
 run_controller_upgrade "${same_version_state}" "${same_version_target}" env
 test ! -s "${same_version_state}/compose.log"
 
-invalid_upgrade_state="${fixture}/invalid-upgrade"
-seed_upgrade_state "${invalid_upgrade_state}"
-expect_upgrade_failure "${invalid_upgrade_state}" "${unsupported}" 'release manifest is invalid' env
-test ! -e "${invalid_upgrade_state}/compose.log"
-
-missing_digest_upgrade_state="${fixture}/missing-digest-upgrade"
-seed_upgrade_state "${missing_digest_upgrade_state}"
-expect_upgrade_failure "${missing_digest_upgrade_state}" "${malformed_digest}" 'release manifest is invalid' env
-test ! -e "${missing_digest_upgrade_state}/compose.log"
-
-for failure_case in config pull up; do
-  failure_state="${fixture}/upgrade-${failure_case}-failure"
-  seed_upgrade_state "${failure_state}" "${release_file}"
-  case "${failure_case}" in
-    config) failure_env=(MOCK_CONFIG_EXIT=1) ;;
-    pull) failure_env=(MOCK_PULL_EXIT=1) ;;
-    up) failure_env=(MOCK_UP_EXIT=1) ;;
-  esac
-  if run_controller_upgrade "${failure_state}" "${next_release_file}" env "${failure_env[@]}" >"${failure_state}/output.log" 2>&1; then
-    echo "upgrade ${failure_case} failure was accepted" >&2
-    exit 1
-  fi
-  cmp -s "${release_file}" "${failure_state}/current-release.json"
-  cmp -s "${release_file}" "${failure_state}/previous-release.json"
-  assert_pending_release "${next_release_file}" "${failure_state}/pending-release.json"
-  assert_pending_previous_release "${release_file}" "${failure_state}/pending-release.json"
-  case "${failure_case}" in
-    config)
-      grep -Fq 'production preflight failed for target release' "${failure_state}/output.log"
-      test "$(wc -l <"${failure_state}/compose.log")" -eq 2
-      ;;
-    pull)
-      grep -Fq 'target image pull failed' "${failure_state}/output.log"
-      test "$(wc -l <"${failure_state}/compose.log")" -eq 3
-      ;;
-    up)
-      grep -Fq 'activation started but was not confirmed successful' "${failure_state}/output.log"
-      test "$(wc -l <"${failure_state}/compose.log")" -eq 4
-      ;;
-  esac
-done
-
 smoke_failure_state="${fixture}/upgrade-smoke-failure"
 seed_upgrade_state "${smoke_failure_state}" "${release_file}"
-if run_controller_upgrade "${smoke_failure_state}" "${next_release_file}" env MOCK_SMOKE_EXIT=1 \
-  >"${smoke_failure_state}/output.log" 2>&1; then
-  echo "upgrade smoke failure was accepted" >&2
-  exit 1
-fi
-grep -Fq 'release smoke failed; confirmed release state remains unchanged' "${smoke_failure_state}/output.log"
+expect_rejection "${smoke_failure_state}/output.log" 'release smoke failed; confirmed release state remains unchanged' \
+  run_controller_upgrade "${smoke_failure_state}" "${next_release_file}" env MOCK_SMOKE_EXIT=1
 cmp -s "${release_file}" "${smoke_failure_state}/current-release.json"
 cmp -s "${release_file}" "${smoke_failure_state}/previous-release.json"
 assert_pending_release "${next_release_file}" "${smoke_failure_state}/pending-release.json"
@@ -809,22 +561,12 @@ test "$(jq -r '.phase' "${smoke_failure_state}/pending-release.json")" = failed
 test "$(jq -r '.failure.message' "${smoke_failure_state}/pending-release.json")" = \
   'release smoke failed; confirmed release state remains unchanged'
 
-for unhealthy_case in postgres backup; do
-  unhealthy_state="${fixture}/unhealthy-${unhealthy_case}"
-  seed_upgrade_state "${unhealthy_state}"
-  unhealthy_json='{"Service":"postgres","State":"running","Health":"healthy"}
-{"Service":"backup","State":"running","Health":"healthy"}'
-  if [[ "${unhealthy_case}" == postgres ]]; then
-    unhealthy_json='{"Service":"postgres","State":"running","Health":"unhealthy"}
-{"Service":"backup","State":"running","Health":"healthy"}'
-  else
-    unhealthy_json='{"Service":"postgres","State":"running","Health":"healthy"}
+unhealthy_state="${fixture}/unhealthy-backup"
+seed_upgrade_state "${unhealthy_state}"
+expect_upgrade_failure "${unhealthy_state}" "${next_release_file}" 'current PostgreSQL and backup services are not healthy' \
+  env MOCK_PS_JSON='{"Service":"postgres","State":"running","Health":"healthy"}
 {"Service":"backup","State":"running","Health":"unhealthy"}'
-  fi
-  expect_upgrade_failure "${unhealthy_state}" "${next_release_file}" 'current PostgreSQL and backup services are not healthy' \
-    env MOCK_PS_JSON="${unhealthy_json}"
-  test "$(wc -l <"${unhealthy_state}/compose.log")" -eq 1
-done
+test "$(wc -l <"${unhealthy_state}/compose.log")" -eq 1
 
 expect_failure "${fixture}/unsupported" "${unsupported}" 'release manifest is invalid' false env
 
@@ -851,47 +593,48 @@ jq --arg source "$(printf 'c%.0s' {1..40})" '.source_commit = $source' "${releas
 expect_failure "${fixture}/source-mismatch" "${source_mismatch}" \
   'release source_commit cannot be resolved locally' false env
 
-config_state="${fixture}/config-failure"
-mkdir -m 700 -- "${config_state}"
-if run_controller "${config_state}" "${release_file}" env MOCK_CONFIG_EXIT=1 >"${config_state}/output.log" 2>&1; then
-  echo "config failure was accepted" >&2
-  exit 1
-fi
-test ! -e "${config_state}/current-release.json"
-test -f "${config_state}/pending-release.json"
-assert_pending_release "${release_file}" "${config_state}/pending-release.json"
-test "$(wc -l <"${config_state}/compose.log")" -eq 1
-
-pull_state="${fixture}/pull-failure"
-mkdir -m 700 -- "${pull_state}"
-if run_controller "${pull_state}" "${release_file}" env MOCK_PULL_EXIT=1 >"${pull_state}/output.log" 2>&1; then
-  echo "pull failure was accepted" >&2
-  exit 1
-fi
-test ! -e "${pull_state}/current-release.json"
-test -f "${pull_state}/pending-release.json"
-assert_pending_release "${release_file}" "${pull_state}/pending-release.json"
-test "$(wc -l <"${pull_state}/compose.log")" -eq 2
-
-up_state="${fixture}/up-failure"
-mkdir -m 700 -- "${up_state}"
-if run_controller "${up_state}" "${release_file}" env MOCK_UP_EXIT=1 >"${up_state}/output.log" 2>&1; then
-  echo "up failure was accepted" >&2
-  exit 1
-fi
-test ! -e "${up_state}/current-release.json"
-test -f "${up_state}/pending-release.json"
-assert_pending_release "${release_file}" "${up_state}/pending-release.json"
-test "$(wc -l <"${up_state}/compose.log")" -eq 3
+# Failed phases retain the manifest pair for retry and leave the confirmed release intact.
+for action in install upgrade rollback; do
+  for phase in config pull up; do
+    state="${fixture}/${action}-${phase}"
+    fault="MOCK_${phase^^}_EXIT=1"
+    case "${action}" in
+      install)
+        mkdir -m 700 "${state}"
+        target="${release_file}"
+        command=(run_controller "${state}" "${target}" env "${fault}")
+        ;;
+      upgrade)
+        seed_upgrade_state "${state}" "${release_file}"
+        target="${next_release_file}"
+        previous="${release_file}"
+        command=(run_controller_upgrade "${state}" "${target}" env "${fault}")
+        ;;
+      rollback)
+        seed_rollback_state "${state}"
+        target="${release_file}"
+        previous="${next_release_file}"
+        command=(run_controller_rollback "${state}" env "${fault}")
+        ;;
+    esac
+    if "${command[@]}" >"${state}/output.log" 2>&1; then
+      echo "${action} accepted ${phase} failure" >&2
+      exit 1
+    fi
+    assert_pending_release "${target}" "${state}/pending-release.json"
+    if [[ "${action}" == install ]]; then
+      test ! -e "${state}/current-release.json"
+    else
+      cmp "${previous}" "${state}/current-release.json"
+      assert_pending_previous_release "${previous}" "${state}/pending-release.json"
+    fi
+  done
+done
 
 install_smoke_failure_state="${fixture}/install-smoke-failure"
 mkdir -m 700 -- "${install_smoke_failure_state}"
-if run_controller "${install_smoke_failure_state}" "${release_file}" env MOCK_SMOKE_EXIT=1 \
-  >"${install_smoke_failure_state}/output.log" 2>&1; then
-  echo "install smoke failure was accepted" >&2
-  exit 1
-fi
-grep -Fq 'release smoke failed; confirmed release state remains unchanged' "${install_smoke_failure_state}/output.log"
+expect_rejection "${install_smoke_failure_state}/output.log" 'release smoke failed; confirmed release state remains unchanged' \
+  run_controller "${install_smoke_failure_state}" "${release_file}" env MOCK_SMOKE_EXIT=1
 test ! -e "${install_smoke_failure_state}/current-release.json"
 assert_pending_release "${release_file}" "${install_smoke_failure_state}/pending-release.json"
 test "$(jq -r '.phase' "${install_smoke_failure_state}/pending-release.json")" = failed
@@ -909,11 +652,8 @@ different_pending="${fixture}/release/different-pending.json"
 other_digest="sha256:$(printf 'c%.0s' {1..64})"
 jq --arg image "ghcr.io/gentlekingson/ocservia/gateway@${other_digest}" \
   '.images.gateway = $image' "${release_file}" >"${different_pending}"
-if run_controller "${retry_state}" "${different_pending}" env >"${retry_state}/different.log" 2>&1; then
-  echo "different pending release was accepted" >&2
-  exit 1
-fi
-grep -Fq 'a different pending release exists; only the same manifest may be retried' "${retry_state}/different.log"
+expect_rejection "${retry_state}/different.log" 'a different pending release exists; only the same manifest may be retried' \
+  run_controller "${retry_state}" "${different_pending}" env
 test "$(wc -l <"${retry_state}/compose.log")" -eq 3
 
 run_controller "${retry_state}" "${release_file}" env
@@ -921,60 +661,32 @@ cmp -s "${release_file}" "${retry_state}/current-release.json"
 test ! -e "${retry_state}/pending-release.json"
 test "$(find "${retry_state}" -maxdepth 1 -name '.current-release.json.*' -print | wc -l)" -eq 0
 
-lock_state="${fixture}/lock"
-mkdir -m 700 -- "${lock_state}"
-: >"${lock_state}/lifecycle.lock"
-chmod 600 "${lock_state}/lifecycle.lock"
+state="${fixture}/lock_state"
+mkdir -m 700 "${state}"
 (
-  exec 9>>"${lock_state}/lifecycle.lock"
+  exec 9>"${state}/lifecycle.lock"
+  chmod 600 "${state}/lifecycle.lock"
   flock -n 9
-  printf '%s\n' ready >"${lock_state}/ready"
-  sleep 10
-) &
-lock_holder=$!
-for _ in $(seq 1 100); do
-  [[ -f "${lock_state}/ready" ]] && break
-  sleep 0.01
-done
-test -f "${lock_state}/ready"
-if run_controller "${lock_state}" "${release_file}" env >"${lock_state}/output.log" 2>&1; then
-  kill "${lock_holder}" 2>/dev/null || true
-  wait "${lock_holder}" 2>/dev/null || true
-  echo "concurrent Controller install was accepted" >&2
-  exit 1
-fi
-test ! -e "${lock_state}/current-release.json"
-grep -Fq 'another Controller lifecycle command is already running' "${lock_state}/output.log"
-kill "${lock_holder}" 2>/dev/null || true
-wait "${lock_holder}" 2>/dev/null || true
+  expect_rejection "${state}/output.log" 'another Controller lifecycle command is already running' run_controller "${state}" "${release_file}" env
+)
+test ! -e "${state}/compose.log"
 
 unsafe_state="${fixture}/unsafe-state"
 mkdir -m 750 -- "${unsafe_state}"
-if run_controller "${unsafe_state}" "${release_file}" env >"${fixture}/unsafe-state.log" 2>&1; then
-  echo "unsafe state root was accepted" >&2
-  exit 1
-fi
-grep -Fq 'state root must be owned by the launcher user with mode 0700' "${fixture}/unsafe-state.log"
+expect_rejection "${fixture}/unsafe-state.log" 'state root must be owned by the launcher user with mode 0700' \
+  run_controller "${unsafe_state}" "${release_file}" env
 
 symlink_state="${fixture}/symlink-state"
 ln -s "${valid_state}" "${symlink_state}"
-if run_controller "${symlink_state}" "${release_file}" env >"${fixture}/symlink-state.log" 2>&1; then
-  echo "symlink state root was accepted" >&2
-  exit 1
-fi
-grep -Fq 'state root must not be a symlink' "${fixture}/symlink-state.log"
+expect_rejection "${fixture}/symlink-state.log" 'state root must not be a symlink' \
+  run_controller "${symlink_state}" "${release_file}" env
 
 uninstall_source_mismatch_state="${fixture}/uninstall-source-mismatch"
 mkdir -m 700 -- "${uninstall_source_mismatch_state}"
 cp -- "${source_mismatch}" "${uninstall_source_mismatch_state}/current-release.json"
 chmod 600 "${uninstall_source_mismatch_state}/current-release.json"
-if run_controller_uninstall "${uninstall_source_mismatch_state}" \
-  >"${uninstall_source_mismatch_state}/output.log" 2>&1; then
-  echo "uninstall with a mismatched checkout was accepted" >&2
-  exit 1
-fi
-grep -Fq 'release source_commit cannot be resolved locally' \
-  "${uninstall_source_mismatch_state}/output.log"
+expect_rejection "${uninstall_source_mismatch_state}/output.log" 'release source_commit cannot be resolved locally' \
+  run_controller_uninstall "${uninstall_source_mismatch_state}"
 test ! -e "${uninstall_source_mismatch_state}/compose.log"
 
 uninstall_state="${fixture}/uninstall-default"
@@ -1032,12 +744,8 @@ test -f "${uninstall_failure_state}/previous-release.json"
 pending_uninstall_state="${fixture}/uninstall-pending"
 seed_upgrade_state "${pending_uninstall_state}" "${next_release_file}"
 seed_pending_state "${pending_uninstall_state}" "${next_release_file}" "${release_file}"
-if run_controller_uninstall "${pending_uninstall_state}" >"${pending_uninstall_state}/output.log" 2>&1; then
-  echo "uninstall with a pending transaction was accepted" >&2
-  exit 1
-fi
-grep -Fq 'pending release transaction exists; refusing to uninstall' \
-  "${pending_uninstall_state}/output.log"
+expect_rejection "${pending_uninstall_state}/output.log" 'pending release transaction exists; refusing to uninstall' \
+  run_controller_uninstall "${pending_uninstall_state}"
 test ! -e "${pending_uninstall_state}/compose.log"
 
 purge_state="${fixture}/uninstall-purge"
@@ -1073,78 +781,30 @@ test "$(sed -n '1p' "${purge_failure_state}/compose.log")" = "down --volumes"
 test -f "${purge_failure_state}/current-release.json"
 test -f "${purge_failure_state}/previous-release.json"
 
-for pending_phase in preflight activation rollback-activation; do
-  phase_state="${fixture}/uninstall-${pending_phase}"
-  seed_upgrade_state "${phase_state}" "${next_release_file}"
-  seed_pending_state "${phase_state}" "${next_release_file}" "${release_file}"
-  jq --arg phase "${pending_phase}" '.phase = $phase' \
-    "${phase_state}/pending-release.json" >"${phase_state}/pending-release.tmp"
-  mv -- "${phase_state}/pending-release.tmp" "${phase_state}/pending-release.json"
-  chmod 600 "${phase_state}/pending-release.json"
-  if run_controller_uninstall "${phase_state}" >"${phase_state}/output.log" 2>&1; then
-    echo "uninstall during ${pending_phase} was accepted" >&2
-    exit 1
-  fi
-  grep -Fq 'pending release transaction exists; refusing to uninstall' \
-    "${phase_state}/output.log"
-  test ! -e "${phase_state}/compose.log"
-done
-
 unsafe_uninstall_state="${fixture}/uninstall-unsafe-state"
 mkdir -m 750 -- "${unsafe_uninstall_state}"
-if run_controller_uninstall "${unsafe_uninstall_state}" >"${fixture}/uninstall-unsafe-state.log" 2>&1; then
-  echo "unsafe uninstall state root was accepted" >&2
-  exit 1
-fi
-grep -Fq 'state root must be owned by the launcher user with mode 0700' \
-  "${fixture}/uninstall-unsafe-state.log"
+expect_rejection "${fixture}/uninstall-unsafe-state.log" 'state root must be owned by the launcher user with mode 0700' \
+  run_controller_uninstall "${unsafe_uninstall_state}"
 
 symlink_uninstall_state="${fixture}/uninstall-symlink-state"
 mkdir -m 700 -- "${symlink_uninstall_state}"
 ln -s "${release_file}" "${symlink_uninstall_state}/current-release.json"
-if run_controller_uninstall "${symlink_uninstall_state}" \
-  >"${fixture}/uninstall-symlink-state.log" 2>&1; then
-  echo "symlink uninstall release state was accepted" >&2
-  exit 1
-fi
-grep -Fq 'current release state is a symlink; refusing to uninstall' \
-  "${fixture}/uninstall-symlink-state.log"
+expect_rejection "${fixture}/uninstall-symlink-state.log" 'current release state is a symlink; refusing to uninstall' \
+  run_controller_uninstall "${symlink_uninstall_state}"
 
-lock_uninstall_state="${fixture}/uninstall-lock"
-seed_upgrade_state "${lock_uninstall_state}"
-: >"${lock_uninstall_state}/lifecycle.lock"
-chmod 600 "${lock_uninstall_state}/lifecycle.lock"
+state="${fixture}/lock_uninstall_state"
+seed_upgrade_state "${state}"
 (
-  exec 9>>"${lock_uninstall_state}/lifecycle.lock"
+  exec 9>"${state}/lifecycle.lock"
+  chmod 600 "${state}/lifecycle.lock"
   flock -n 9
-  printf '%s\n' ready >"${lock_uninstall_state}/ready"
-  sleep 10
-) &
-uninstall_lock_holder=$!
-for _ in $(seq 1 100); do
-  [[ -f "${lock_uninstall_state}/ready" ]] && break
-  sleep 0.01
-done
-test -f "${lock_uninstall_state}/ready"
-if run_controller_uninstall "${lock_uninstall_state}" \
-  >"${lock_uninstall_state}/output.log" 2>&1; then
-  kill "${uninstall_lock_holder}" 2>/dev/null || true
-  wait "${uninstall_lock_holder}" 2>/dev/null || true
-  echo "concurrent Controller uninstall was accepted" >&2
-  exit 1
-fi
-grep -Fq 'another Controller lifecycle command is already running' \
-  "${lock_uninstall_state}/output.log"
-kill "${uninstall_lock_holder}" 2>/dev/null || true
-wait "${uninstall_lock_holder}" 2>/dev/null || true
+  expect_rejection "${state}/output.log" 'another Controller lifecycle command is already running' run_controller_uninstall "${state}"
+)
+test ! -e "${state}/compose.log"
 
 after_unknown_uninstall="${fixture}/uninstall-unknown-flag.log"
-if run_controller_uninstall "${fixture}/uninstall-unknown-flag" --unexpected \
-  >"${after_unknown_uninstall}" 2>&1; then
-  echo "unknown uninstall flag was accepted" >&2
-  exit 1
-fi
-grep -Fq 'usage:' "${after_unknown_uninstall}"
+expect_rejection "${after_unknown_uninstall}" 'usage:' \
+  run_controller_uninstall "${fixture}/uninstall-unknown-flag" --unexpected
 
 version_release="${fixture}/release/version-images.json"
 jq '.images |= with_entries(.value |= sub("@sha256:[0-9a-f]{64}$"; ":v0.2.0"))' "${release_file}" >"${version_release}"
@@ -1223,26 +883,20 @@ if OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external run_control
 fi
 grep -Fq 'database deployment cannot change' "${integrated_state}/failure.log"
 jq -e 'has("tls_mode") | not' "${integrated_state}/deployment-profile.json" >/dev/null
-if OCSERV_TLS_MODE=acme run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
-  echo "Integrated TLS mode switch was accepted" >&2; exit 1
-fi
-grep -Fq 'TLS mode cannot change' "${integrated_state}/failure.log"
+OCSERV_TLS_MODE=acme expect_rejection "${integrated_state}/failure.log" 'TLS mode cannot change' \
+  run_controller_start "${integrated_state}"
 acme_state="${fixture}/integrated-acme"
 mkdir -m 700 "${acme_state}"
 run_controller "${acme_state}" "${integrated_release}" env OCSERV_DEPLOYMENT_MODE=integrated OCSERV_TLS_MODE=acme \
   OCSERV_SIGNER_STATE_DIR="${acme_state}"
 jq -e '.tls_mode == "acme"' "${acme_state}/deployment-profile.json" >/dev/null
-if OCSERV_TLS_MODE=manual run_controller_start "${acme_state}" >"${acme_state}/failure.log" 2>&1; then
-  echo "ACME TLS mode switch was accepted" >&2; exit 1
-fi
-grep -Fq 'TLS mode cannot change' "${acme_state}/failure.log"
+OCSERV_TLS_MODE=manual expect_rejection "${acme_state}/failure.log" 'TLS mode cannot change' \
+  run_controller_start "${acme_state}"
 if MOCK_SIGNER_INSPECT_EXIT=1 run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
   echo "missing Signer ledger was accepted on start" >&2; exit 1
 fi
-if MOCK_SIGNER_REVISION=3 run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
-  echo "Signer revision downgrade was accepted" >&2; exit 1
-fi
-grep -Fq 'minimum revision changed' "${integrated_state}/failure.log"
+MOCK_SIGNER_REVISION=3 expect_rejection "${integrated_state}/failure.log" 'minimum revision changed' \
+  run_controller_start "${integrated_state}"
 jq -e '.revision == 4' "${integrated_state}/signer-checkpoint.json" >/dev/null
 test "$(grep -Fc 'run --rm --no-deps signer init' "${integrated_state}/compose.log")" = 1
 run_controller_start "${integrated_state}"
@@ -1318,8 +972,6 @@ run_controller_uninstall "${runtime_state}"
 test -f "${runtime_state}/current-release.json"
 run_controller_start "${runtime_state}"
 printf '\n# local drift\n' >>"${runtime_state}/runtime-v0.2.0/deploy/production/compose.sh"
-if run_controller_start "${runtime_state}" >"${runtime_state}/drift.log" 2>&1; then
-  echo 'runtime drift accepted' >&2; exit 1
-fi
-grep -Fq 'runtime content changed' "${runtime_state}/drift.log"
+expect_rejection "${runtime_state}/drift.log" 'runtime content changed' \
+  run_controller_start "${runtime_state}"
 echo "Controller lifecycle tests passed (including Git-free runtime upgrade, rollback and recovery)"

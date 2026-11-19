@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"testing"
 	"time"
@@ -21,14 +22,10 @@ func testBackend(t *testing.T) *Backend {
 		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
 	}
 	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	cfg.MaxConns = 1
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return WrapPool(pool)
 }
@@ -47,9 +44,7 @@ func TestTransactionCancellationRollbackIntegration(t *testing.T) {
 			}
 			return nil
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 	}
 	err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
 		cancelled, cancel := context.WithCancel(ctx)
@@ -73,9 +68,7 @@ func TestTransactionCancellationRollbackIntegration(t *testing.T) {
 		t.Fatalf("pool after cleanup: %v", err)
 	}
 	tx, err := b.Begin(ctx, database.ReadCommitted)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -166,9 +159,7 @@ func TestLegacyTransactionBridgeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacy, err := b.pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer func() { _ = legacy.Rollback(ctx) }()
 	if _, err := legacy.Exec(ctx, "INSERT INTO legacy_marker VALUES (1)"); err != nil {
 		t.Fatal(err)

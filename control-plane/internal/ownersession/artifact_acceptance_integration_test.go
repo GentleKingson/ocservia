@@ -16,6 +16,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"google.golang.org/grpc"
 )
@@ -77,22 +78,14 @@ func TestManagerGuardSpansArtifactStreamAcceptanceIntegration(t *testing.T) {
 
 	server := &acceptanceTransportServer{requested: make(chan struct{}), accept: make(chan struct{})}
 	workingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	directory, err := os.MkdirTemp(filepath.Join(workingDirectory, "..", ".."), ".os-fetch-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	socketPath := filepath.Join(directory, "transport.sock")
 	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(socketPath, 0o660); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
+	testutil.NoError(t, os.Chmod(socketPath, 0o660))
 	grpcServer := grpc.NewServer()
 	transportv1.RegisterTransportServiceServer(grpcServer, server)
 	go func() { _ = grpcServer.Serve(listener) }()

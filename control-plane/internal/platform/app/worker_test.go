@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,22 +26,16 @@ func (stoppedBackend) Begin(ctx context.Context, _ database.Isolation) (database
 func socketDirectory(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.Abs("../../../..")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	dir, err := os.MkdirTemp(root, ".app-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
 }
 
 func TestWorkerAssembly(t *testing.T) {
 	signer, err := commandauth.NewRandomSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	for _, mode := range []string{"bare", "simulator", "endpoint", "endpoint-and-simulator"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -88,9 +83,7 @@ func TestWorkerPartialStartupClosesTrust(t *testing.T) {
 	life := newLifecycle(ctx, time.Second, quietLogger())
 	cfg := config.Config{ControllerEndpointID: strings.Repeat("ab", 32), TransportSocket: "/unused.sock", TransportTimeout: time.Second, TransportQueue: 8, OwnerLeaseTTL: 30 * time.Second, TrustSocket: filepath.Join(socketDirectory(t), "trust.sock"), TestResultCommitBarrier: "/missing/result-commit-barrier"}
 	signer, err := commandauth.NewRandomSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	_, _, err = startWorker(life, cfg, BuildInfo{}, stoppedBackend{}, signer, nil, quietLogger())
 	if err == nil || !strings.Contains(err.Error(), "configure result commit barrier") {
 		t.Fatalf("expected later construction failure: %v", err)

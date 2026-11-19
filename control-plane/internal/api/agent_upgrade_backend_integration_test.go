@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -42,9 +43,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog, err := releasecatalog.Load(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	f.s = f.newServer(Modules{ReleaseCatalog: catalog})
 	f.s.operations.EnableReleaseCatalog(catalog)
 	path := "/api/v1/nodes/" + node.String() + "/agent-upgrade"

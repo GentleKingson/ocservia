@@ -8,6 +8,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
@@ -16,9 +17,7 @@ func TestPrepareRecoveryEnvelopePreservesLogicalCommand(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	dispatch, sent := recoveryTestDispatch(t, now, time.Minute)
 	var before agentv1.CommandEnvelope
-	if err := proto.Unmarshal(sent, &before); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, proto.Unmarshal(sent, &before))
 	messageID := bytes.Clone(before.GetMessageId())
 	semanticHash := bytes.Clone(before.GetSemanticPayloadSha256())
 
@@ -33,9 +32,7 @@ func TestPrepareRecoveryEnvelopePreservesLogicalCommand(t *testing.T) {
 		t.Fatalf("prepare recovery envelope: %v", err)
 	}
 	var recovered agentv1.CommandEnvelope
-	if err := proto.Unmarshal(encoded, &recovered); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, proto.Unmarshal(encoded, &recovered))
 	if !bytes.Equal(recovered.GetCommandId(), dispatch.CommandID[:]) ||
 		!bytes.Equal(recovered.GetOperationId(), dispatch.OperationID[:]) ||
 		!bytes.Equal(recovered.GetNodeId(), dispatch.NodeID[:]) ||
@@ -81,26 +78,18 @@ func TestValidateSentEnvelopeAllowsOnlyOwnerProofs(t *testing.T) {
 	}
 
 	var changed agentv1.CommandEnvelope
-	if err := proto.Unmarshal(sent, &changed); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, proto.Unmarshal(sent, &changed))
 	changed.GetSyntheticEcho().Message = "changed"
 	changedBytes, err := proto.Marshal(&changed)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := validateSentEnvelope(dispatch, changedBytes); err == nil {
 		t.Fatal("sent envelope changed the semantic payload")
 	}
 
-	if err := proto.Unmarshal(sent, &changed); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, proto.Unmarshal(sent, &changed))
 	changed.FenceBinding.OwnerEpoch++
 	changedBytes, err = proto.Marshal(&changed)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := validateSentEnvelope(dispatch, changedBytes); err == nil {
 		t.Fatal("sent envelope carried mismatched owner proofs")
 	}
@@ -112,9 +101,7 @@ func TestRecoveryExecutionDeadlineAndLegacyAuthority(t *testing.T) {
 		for _, priorMode := range []agentv1.CommandDeliveryMode{agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT} {
 			dispatch, _ := recoveryTestDispatch(t, now, time.Minute)
 			var command agentv1.CommandEnvelope
-			if err := proto.Unmarshal(dispatch.Envelope, &command); err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, proto.Unmarshal(dispatch.Envelope, &command))
 			if legacy {
 				command.ProtocolVersion = commandauth.LegacyProtocolVersion
 			}
@@ -122,9 +109,7 @@ func TestRecoveryExecutionDeadlineAndLegacyAuthority(t *testing.T) {
 			for _, observed := range []time.Time{now.Add(30 * time.Second), now.Add(2 * time.Minute)} {
 				recovered := proto.Clone(&command).(*agentv1.CommandEnvelope)
 				_, _, err := PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observed, testCommandSigner(t))
-				if err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, err)
 				if !proto.Equal(command.GetExpiresAt(), recovered.GetExpiresAt()) {
 					t.Fatal("observation renewed execution authority")
 				}
@@ -148,9 +133,7 @@ func recoveryTestDispatch(t *testing.T, now time.Time, ttl time.Duration) (Dispa
 	}
 	dispatch := Dispatch{CommandID: commandID, OperationID: operationID, NodeID: nodeID, Envelope: base}
 	var envelope agentv1.CommandEnvelope
-	if err := proto.Unmarshal(base, &envelope); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, proto.Unmarshal(base, &envelope))
 	fenceID, connectionID, ownerID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	var node, connection, owner, command [16]byte
 	copy(node[:], nodeID[:])
@@ -175,8 +158,6 @@ func recoveryTestDispatch(t *testing.T, now time.Time, ttl time.Duration) (Dispa
 	}
 	envelope.ConnectionFence, envelope.FenceBinding = fence, binding
 	sent, err := proto.Marshal(&envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return dispatch, sent
 }

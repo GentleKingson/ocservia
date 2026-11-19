@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,14 +50,10 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP baseline',$2,$3,$4)`, id, "baseline-"+id.String(), stamp, stamp)
 	}
 	authn, err := auth.NewBackend(b, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	username, password := "baseline-"+uuid.NewString(), "a unique long HTTP baseline password"
 	identity, err := authn.CreateLocalCredential(ctx, username, password)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, ws, identity, stamp)
 	authorization := Authorization{Authentication: authn}
 	var disabled *telemetry.Service
@@ -234,13 +231,9 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 			t.Fatal(err)
 		}
 		catalog, err := releasecatalog.Load(manifest)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		now, err := value.FromTime(time.Now().UTC())
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$3,'module',$4,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$5)`, ids[0], now, now, uuid.Must(uuid.NewV7()), now)
 		exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, ids[0])
 		configured := telemetry.NewWithRecommendedAgentVersionBackend(b, "2.0.0")

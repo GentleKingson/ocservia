@@ -3,6 +3,7 @@ package operations_test
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"testing"
 	"time"
 
@@ -48,9 +49,7 @@ func TestFencingBackendIntegration(t *testing.T) {
 		t.Run("owner-expired-during-"+action+"-wait", func(t *testing.T) {
 			node := f.node(t)
 			term, err := connectionowner.AcquireBackend(ctx, f.backend, node, identity, uuid.Must(uuid.NewV7()), time.Second)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			locked := lockOwner(t, f, node)
 			defer locked.Rollback(ctx)
 			waiting, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -84,9 +83,7 @@ func TestFencingBackendIntegration(t *testing.T) {
 	t.Run("owner-acquire-clock-after-lock", func(t *testing.T) {
 		node := f.node(t)
 		term, err := connectionowner.AcquireBackend(ctx, f.backend, node, identity, uuid.Must(uuid.NewV7()), time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		locked := lockOwner(t, f, node)
 		defer locked.Rollback(ctx)
 		waiting, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -168,26 +165,16 @@ func TestFencingBackendIntegration(t *testing.T) {
 		for _, assert := range []bool{false, true} {
 			owner := schedulerlease.Owner{InstanceID: uuid.Must(uuid.NewV7()), Incarnation: 1}
 			epoch, err := schedulerlease.Acquire(ctx, f.backend, owner, time.Second)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			locked, err := f.owner.Begin(ctx, database.ReadCommitted)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			defer locked.Rollback(ctx)
 			store, err := schedulerlease.FromTransaction(locked)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			state, err := store.Lock(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			until, err := state.Until.Time()
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			waiting, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			done := make(chan error, 1)
@@ -255,9 +242,7 @@ func TestFencingBackendIntegration(t *testing.T) {
 		fault := &commitFaultBackend{Backend: f.backend, commit: true}
 		fault.armed.Store(true)
 		term, err := connectionowner.AcquireBackend(ctx, fault, node, identity, uuid.Must(uuid.NewV7()), time.Minute)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		fault.armed.Store(true)
 		if _, err := term.RenewBackend(ctx, fault); err != nil {
 			t.Fatal(err)
@@ -275,13 +260,9 @@ func TestFencingBackendIntegration(t *testing.T) {
 		envelope.ConnectionFence = &agentv1.ConnectionFenceV2{FenceId: fenceID[:], NodeId: node[:], OwnerInstanceId: identity.InstanceID[:], OwnerIncarnation: 1, ConnectionId: connection[:], OwnerEpoch: uint64(term.Epoch())}
 		envelope.FenceBinding = &agentv1.FenceBindingV2{FenceId: fenceID[:], NodeId: node[:], OwnerInstanceId: identity.InstanceID[:], OwnerIncarnation: 1, ConnectionId: connection[:], OwnerEpoch: uint64(term.Epoch()), OperationId: d.CommandID[:], OperationKind: agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND}
 		encoded, err := proto.Marshal(&envelope)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		next, err := connectionowner.AcquireBackend(ctx, f.backend, node, identity, uuid.Must(uuid.NewV7()), time.Minute)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		if err := service.MarkSentWithEnvelope(ctx, d, encoded); !errors.Is(err, connectionowner.ErrNotOwner) {
 			t.Fatal("old owner accounted send", err)
 		}
@@ -298,9 +279,7 @@ func TestFencingBackendIntegration(t *testing.T) {
 func lockOwner(t *testing.T, f *outboxFixture, node uuid.UUID) database.Tx {
 	t.Helper()
 	tx, err := f.owner.Begin(context.Background(), database.ReadCommitted)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	var epoch int64
 	if err := tx.QueryRow(context.Background(), `SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=$1 FOR UPDATE`, node[:]).Scan(&epoch); err != nil {
 		tx.Rollback(context.Background())

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -139,9 +140,7 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 		f.s = f.newServer(Modules{ConfigPlans: plans, UserOperations: userOperations, Certificates: service})
 		for _, scope := range []uuid.UUID{f.workspace, other} {
 			ref, err := service.CreateSecretRef(t.Context(), certificates.SecretRefRequest{WorkspaceID: scope, ActorID: f.requester.principal.IdentityID, SessionID: f.requester.principal.SessionID, Provider: configprofile.Provider, KeyPath: plan.NodeID.String() + "/" + strings.Repeat("52", 32) + "/" + strings.Repeat("53", 32) + "/none", Version: "v1", Reason: "route fixture", RequestID: uuid.NewString()})
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			body := fmt.Sprintf(`{"template":{"directives":[{"name":"server-key","secret_ref":{"secret_ref_id":%q}}]}}`, ref.ID)
 			before := counts(t)
 			w := f.call("POST", nodePath+"/config-plans", body, uuid.NewString(), f.requester.cookie, nil)

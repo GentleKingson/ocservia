@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"log/slog"
 	"sync"
@@ -117,9 +118,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		done := make(chan error, 2)
 		for range 2 {
 			worker, err := operations.NewWorker(service, sender, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			go func() { done <- worker.Run(ctx) }()
 		}
 		select {
@@ -157,9 +156,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			ctx := context.Background()
 			service := operations.NewBackend(f.backend, 1, f.signer)
 			created, _, err := service.Create(ctx, outboxRequest(f.node(t)))
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			original := claimOutbox(t, service)
 			var transportAccepted bool
 			if accepted {
@@ -213,9 +210,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		ctx := context.Background()
 		service := operations.NewBackend(f.backend, 1, f.signer)
 		created, _, err := service.Create(ctx, outboxRequest(f.node(t)))
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		d := claimOutbox(t, service)
 		var envelope agentv1.CommandEnvelope
 		if err := proto.Unmarshal(d.Envelope, &envelope); err != nil {
@@ -226,9 +221,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			PayloadSha256: envelope.SemanticPayloadSha256, SemanticPayloadHashVersion: envelope.SemanticPayloadHashVersion,
 			State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, AcceptedAt: at, CompletedAt: at}
 		payload, err := proto.Marshal(result)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		id := uuid.Must(uuid.NewV7())
 		endpoint := sha256.Sum256(d.NodeID[:])
 		event := &transportv1.TransportEvent{EventId: id[:], NodeId: d.NodeID[:], EndpointId: endpoint[:],
@@ -266,9 +259,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			// quiescent (outbox published) or with its recovery outbox pending.
 			seed := func(node uuid.UUID, state string, published bool) uuid.UUID {
 				created, _, err := service.Create(context.Background(), outboxRequest(node))
-				if err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, err)
 				operation := uuid.MustParse(created.ID)
 				if state != "queued" {
 					f.exec(t, `UPDATE operations SET state=$1 WHERE id=$2`, state, operation)
@@ -286,9 +277,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			f, service, seed := newFixture(t)
 			otherWorkspace := uuid.Must(uuid.NewV7())
 			at, err := value.FromTime(time.Now().UTC())
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox other workspace',$2,$3,$4)`, otherWorkspace, otherWorkspace.String(), at, at)
 			node := uuid.Must(uuid.NewV7())
 			f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',$4,$5)`, node, otherWorkspace, node.String(), at, at)
@@ -322,9 +311,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			wg.Wait()
 			close(failures)
 			for err := range failures {
-				if err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, err)
 			}
 			leases := f.count(t, `SELECT count(*) FROM node_command_leases`)
 			if claimed.Load() != 2 || leases != 2 {
@@ -383,9 +370,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 			service := operations.NewBackend(f.backend, 1, f.signer)
 			node := f.node(t)
 			created, _, err := service.Create(ctx, outboxRequest(node))
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			id := uuid.MustParse(created.ID)
 			if source == "certificate-release" {
 				f.exec(t, `UPDATE outbox_events SET available_at=$1`, value.Timestamp{Valid: true, Micros: value.PositiveInfinity})
@@ -444,9 +429,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 			assertUnclaimed()
 			// Store errors propagate from a closed transaction.
 			tx, err := f.backend.Begin(ctx, database.ReadCommitted)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			if err := tx.Rollback(ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -479,9 +462,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 	nodes := []uuid.UUID{f.node(t), f.node(t)}
 	for _, node := range nodes {
 		_, err := connectionowner.AcquireBackend(ctx, f.backend, node, connectionowner.Identity{InstanceID: uuid.Must(uuid.NewV7()), Incarnation: 1}, uuid.Must(uuid.NewV7()), time.Minute)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 	}
 	// Fence rows have independent row locks for a deterministic two-row deadlock rendezvous.
 	ready, proceed := make(chan struct{}, 2), make(chan struct{})

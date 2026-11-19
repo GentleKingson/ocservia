@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,15 +42,11 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	backend, owner := authenticationBackendFixtureWithIsolation(t, true)
 	ctx := context.Background()
 	service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	name := "http-" + uuid.NewString()
 	password := "a long unique authentication test password"
 	id, err := service.CreateLocalCredential(ctx, name, password)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = service.CreateLocalCredential(ctx, name, password); !errors.Is(err, database.ErrUnique) {
 		t.Fatalf("duplicate credential: %v", err)
 	}
@@ -112,16 +109,12 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	}
 	adminName := "admin-" + name
 	adminID, err := service.BootstrapLocalAdmin(ctx, adminName, password, workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = service.BootstrapLocalAdmin(ctx, adminName, password, workspace); !errors.Is(err, auth.ErrLocalInitialized) {
 		t.Fatalf("repeat bootstrap: %v", err)
 	}
 	adminCookie, admin, err := service.AuthenticateLocal(ctx, adminName, password)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if admin.IdentityID != adminID {
 		t.Fatal("wrong bootstrap principal")
 	}

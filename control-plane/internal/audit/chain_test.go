@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
 
@@ -67,31 +68,23 @@ func TestChainPayloadIsUnambiguous(t *testing.T) {
 	second := base
 	second.RequestID, second.Reason = "a", "b|c"
 	firstPayload, err := encodeChainPayload([]byte("previous"), first)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	secondPayload, err := encodeChainPayload([]byte("previous"), second)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if bytes.Equal(firstPayload, secondPayload) {
 		t.Fatal("distinct audit fields produced the same payload")
 	}
 	otherID := first
 	otherID.EventID = uuid.Must(uuid.NewV7())
 	otherPayload, err := encodeChainPayload([]byte("previous"), otherID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if bytes.Equal(firstPayload, otherPayload) {
 		t.Fatal("distinct audit event IDs produced the same payload")
 	}
 	otherTrace := first
 	otherTrace.TraceID = "0123456789abcdef0123456789abcdef"
 	otherPayload, err = encodeChainPayload([]byte("previous"), otherTrace)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if bytes.Equal(firstPayload, otherPayload) {
 		t.Fatal("distinct audit trace IDs produced the same payload")
 	}
@@ -105,9 +98,7 @@ func TestLegacyMigrationFixturePayload(t *testing.T) {
 		ActorType: "controller", ActorID: "legacy", Action: "legacy.event", ResourceType: "workspace",
 		ResourceID: workspaceID, RequestID: "legacy-preflight", Result: "succeeded",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	expected := `{"previous":null,"event_id":"00000000-0000-7000-8000-000000000022","workspace_id":"00000000-0000-7000-8000-000000000021","occurred_at":"2026-08-12T00:00:00Z","actor_type":"controller","actor_id":"legacy","action":"legacy.event","resource_type":"workspace","resource_id":"00000000-0000-7000-8000-000000000021","request_id":"legacy-preflight","trace_id":"","result":"succeeded","reason":""}`
 	if !bytes.Equal(payload, []byte(expected)) {
 		t.Fatalf("legacy fixture payload = %s", payload)

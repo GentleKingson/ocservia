@@ -19,6 +19,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -30,9 +32,7 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	ws, node, secretRef := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	for _, fixture := range []struct {
@@ -46,9 +46,7 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 		{`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,true),($1,$3,true)`, []any{node, configprofile.PlanCapability, configprofile.ApplyCapability}},
 		{`INSERT INTO secret_provider_refs(id,workspace_id,provider,key_path,version,state,created_at,updated_at) VALUES($1,$2,$3,$4,'v1','active',now(),now())`, []any{secretRef, ws, configprofile.Provider, node.String() + "/" + strings.Repeat("42", 32) + "/" + strings.Repeat("43", 32) + "/none"}},
 	} {
-		if _, err := pool.Exec(ctx, fixture.sql, fixture.args...); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Exec(t, ctx, pool, fixture.sql, fixture.args...)
 	}
 	if _, err := attestationtest.InstallKey(ctx, pool, node); err != nil {
 		t.Fatal(err)
@@ -85,17 +83,11 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 		t.Fatalf("create: %d %v %s", w.Code, w.Header(), w.Body)
 	}
 	var plan configplan.Plan
-	if err := json.Unmarshal(w.Body.Bytes(), &plan); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(w.Body.Bytes(), &plan))
 	created, err := plan.CreatedAt.Time()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	expires, err := plan.ExpiresAt.Time()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if plan.ID.Version() != 7 || plan.ID != plan.OperationID || created.Before(before) || created.After(time.Now().UTC()) || expires.Sub(created) != 15*time.Minute {
 		t.Fatalf("generated IDs/times: %+v", plan)
 	}
@@ -133,9 +125,7 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 		"created_at": created.Format(time.RFC3339Nano), "expires_at": expires.Format(time.RFC3339Nano),
 	}
 	var gotMap map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &gotMap); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, json.Unmarshal(w.Body.Bytes(), &gotMap))
 	if !reflect.DeepEqual(gotMap, wantMap) {
 		t.Fatalf("plan: %s\nwant: %#v", w.Body, wantMap)
 	}

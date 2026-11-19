@@ -10,6 +10,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
@@ -29,9 +30,7 @@ func telemetryBackend(t *testing.T) database.Backend {
 		t.Skip("real PostgreSQL required")
 	}
 	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return postgres.WrapPool(pool)
 }
@@ -70,9 +69,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	wireID, instance := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	wire, err := proto.Marshal(&agentv1.TelemetryBatch{BatchId: wireID[:], NodeId: node[:], Sequence: 0, Priority: agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH, Snapshot: &agentv1.ObservedSnapshot{ObservedAt: timestamppb.New(now.Add(-time.Minute)), BootId: "wire", AgentInstanceId: instance[:], AgentVersion: "0.1.0", OcservVersion: "1.3.0", OsRelease: "debian", OcservJson: []byte(`{}`), SystemJson: []byte(`{}`), PathJson: []byte(`{}`)}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	outerFailure := errors.New("authoritative endpoint changed")
 	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
 		if ok, err := service.IngestWireTransaction(ctx, tx, node, wire); err != nil || !ok {
@@ -179,9 +176,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	// A stale snapshot still contributes history, without replacing current sessions.
 	stale := testBatch(node, 2, now.Add(-time.Minute))
 	stale.Sessions = nil
@@ -245,9 +240,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		t.Fatal("owner connection required to seed historical telemetry")
 	}
 	ownerPool, err := pgxpool.New(ctx, ownerDSN)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(ownerPool.Close)
 	historyOwner := postgres.WrapPool(ownerPool)
 	for _, at := range []value.Timestamp{negative, positive} {
@@ -277,9 +270,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		want := positive
 		if status == "offline" {
 			want, err = value.FromTime(service.now())
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 		}
 		if updated != want {
 			t.Fatal("activation/maintenance node clock", updated, want)
@@ -307,9 +298,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	for _, at := range []value.Timestamp{negative, positive} {
 		exec(`UPDATE node_observed_snapshots SET last_heartbeat_at=$1,observed_at=$2 WHERE node_id=$3`, at, at, node)
 		read, err := service.GetNode(ctx, node)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		want := "stale"
 		if at == positive {
 			want = "fresh"

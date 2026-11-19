@@ -1,12 +1,5 @@
-import {
-  createRenderer,
-  h,
-  nextTick,
-  reactive,
-  ref,
-  ssrContextKey,
-  type Component,
-} from "vue";
+import { renderer } from "./renderer";
+import { h, nextTick, reactive, ref, ssrContextKey, type Component } from "vue";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -27,35 +20,12 @@ vi.mock("../src/features/user-policy", async (original) => ({
 
 import UserPolicyDialog from "../src/components/nodes/UserPolicyDialog.vue";
 
-const renderer = createRenderer<object, object>({
-  createElement: () => ({}),
-  createText: () => ({}),
-  createComment: () => ({}),
-  insert: () => {},
-  remove: () => {},
-  setText: () => {},
-  setElementText: () => {},
-  parentNode: () => null,
-  nextSibling: () => null,
-  patchProp: () => {},
-});
-
 interface Dialog {
   policyLoading: boolean;
   policyError: string;
   policyForm: { version: number };
   policyReason: string;
   submitPolicy(): Promise<void>;
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: Error) => void;
-  const promise = new Promise<T>((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
 }
 
 const form = (version: number) => ({
@@ -135,8 +105,8 @@ it("loads on mount and closes after a confirmed save", async () => {
 });
 
 it("ignores a closed dialog's late read in a reopened dialog", async () => {
-  const old = deferred<never>();
-  const fresh = deferred<ReturnType<typeof form>>();
+  const old = Promise.withResolvers<never>();
+  const fresh = Promise.withResolvers<ReturnType<typeof form>>();
   mocks.loadUserPolicy
     .mockReturnValueOnce(old.promise)
     .mockReturnValueOnce(fresh.promise);
@@ -170,7 +140,7 @@ it.each(
     await vi.waitFor(() => {
       expect(dialog.policyLoading).toBe(false);
     });
-    const saved = deferred<ReturnType<typeof form>>();
+    const saved = Promise.withResolvers<ReturnType<typeof form>>();
     mocks.saveUserPolicy.mockReturnValueOnce(saved.promise);
     dialog.policyReason = "save";
     const pending = dialog.submitPolicy();

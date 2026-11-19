@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"slices"
 	"testing"
@@ -37,9 +38,7 @@ func TestCommandResultBeforeMarkSentIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	endpointID := integrationEndpoint(nodeID)
@@ -244,9 +243,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	endpointID := integrationEndpoint(nodeID)
@@ -289,9 +286,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 		t.Fatalf("create synthetic command = %+v, replayed=%v, err=%v", operation, replayed, err)
 	}
 	commandID, err := uuid.Parse(*operation.CommandID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	operationID := uuid.MustParse(operation.ID)
 
 	claimed, err := operationService.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute)
@@ -359,9 +354,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	// authoritative command and operation remain Unknown.
 	rawResultEventID := uuid.Must(uuid.NewV7())
 	rawResultIdempotencyKey, err := uuid.FromBytes(original.GetIdempotencyKey())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := pool.Exec(ctx, `INSERT INTO transport_events
 		(event_id,node_id,event_type,occurred_at,traceparent,payload)
 		VALUES($1,$2,'command_result',now(),$3,$4)`, rawResultEventID, nodeID, reconnectRecoveryTraceparent, []byte("unaccepted terminal evidence")); err != nil {
@@ -527,9 +520,7 @@ func TestCrashedClaimExpiryKeepsLaterCommandDispatchableIntegration(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	endpointID := integrationEndpoint(nodeID)
@@ -726,9 +717,7 @@ func fenceRecoveryDispatch(t *testing.T, signer *commandauth.Signer, endpointID 
 	}
 	envelope.ConnectionFence, envelope.FenceBinding = fence, binding
 	encoded, err := proto.Marshal(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return encoded
 }
 
@@ -749,9 +738,7 @@ func recoveryResultEvent(t *testing.T, nodeID uuid.UUID, endpointID [32]byte, en
 	t.Helper()
 	envelope := decodeRecoveryEnvelope(t, envelopeBytes)
 	payloadHash, err := semanticpayload.HashV2(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	result := &agentv1.CommandResult{
 		CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(),
@@ -763,9 +750,7 @@ func recoveryResultEvent(t *testing.T, nodeID uuid.UUID, endpointID [32]byte, en
 		result.ErrorCode = "outcome_requires_reconciliation"
 	}
 	payload, err := proto.Marshal(result)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	eventID := uuid.Must(uuid.NewV7())
 	return &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpointID[:],

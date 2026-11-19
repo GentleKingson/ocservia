@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"math/big"
 	"net"
@@ -58,9 +59,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	f.run(0, 0, nil, "go", "build", "-buildvcs=false", "-o", f.root+"/ocserv-control", "../../../cmd/ocserv-control")
 	f.run(0, 0, f.environment(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}), f.root+"/ocserv-control", "--migrate-only")
 	owner, err := connection.Open(f.ctx, ownerOptions)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(owner.Close)
 	installSchedulerEvidence(t, f.ctx, owner)
 	f.workspace = uuid.Must(uuid.NewV7()).String()
@@ -77,9 +76,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	}), f.root+"/ocserv-control", "--bootstrap-local-admin")
 
 	controllerPublic, controllerPrivate, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	privateDER, _ := x509.MarshalPKCS8PrivateKey(controllerPrivate)
 	publicDER, _ := x509.MarshalPKIXPublicKey(controllerPublic)
 	f.file("controller/signing.pem", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 65534, 65532, 0600)
@@ -88,9 +85,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		f.file(name+"/verification.pem", pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER}), ids[0], ids[1], 0600)
 	}
 	endpointPublic, endpointPrivate, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	endpointID := hex.EncodeToString(endpointPublic)
 	f.file("transport/identity", endpointPrivate.Seed(), 65532, 65532, 0600)
 	f.startRelays()
@@ -476,9 +471,7 @@ func (f *controllerE2E) requireFencedSession() {
 func e2eAddress(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	address := listener.Addr().String()
 	_ = listener.Close()
 	return address

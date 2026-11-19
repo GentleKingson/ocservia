@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"log/slog"
 	"net/http"
@@ -38,18 +39,14 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(pool.Close)
 	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
 	if ownerURL == "" {
 		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
 	}
 	owner, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(owner.Close)
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap API',$2,now(),now())`, workspaceID, "bootstrap-api-"+workspaceID.String()); err != nil {
@@ -68,9 +65,7 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 		}
 	})
 	signer, err := commandauth.NewRandomSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enrollment.NewBackend(postgres.WrapPool(pool), "", "test", signer)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"bootstrap API test","expected_endpoint_id":"1111111111111111111111111111111111111111111111111111111111111111"}`, workspaceID.String())))
 	request.Header.Set("Content-Type", "application/json")
@@ -170,9 +165,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID, managerID, outsiderID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeA, nodeB, operationID, certificateID, artifactID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -193,9 +186,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	artifactData := []byte("encrypted artifact response")
 	grantSigner := commandauth.NewSignerFromSeed([32]byte{7})
 	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	server := &Server{auth: authn, certificates: certificates.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData}, grantSigner)}
 	manager := auth.Principal{IdentityID: managerID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
 	outsider := auth.Principal{IdentityID: outsiderID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
@@ -287,18 +278,14 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(pool.Close)
 	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
 	if ownerURL == "" {
 		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
 	}
 	owner, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(owner.Close)
 	workspaceID, identityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeID, sessionID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -331,9 +318,7 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 	})
 
 	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	server := &Server{auth: authn, operations: apiOperationService(pool)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
 	request.SetPathValue("node_id", nodeID.String())
@@ -368,9 +353,7 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	// pgx executes one statement per Exec call, so the fixture and cleanup
@@ -413,9 +396,7 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 		SessionTTL:        time.Hour,
 		BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(breakGlassToken),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	config := testHTTPConfig(false)
 	config.BodyLimit = 1024
 	server := newTestServer(t, config, postgres.WrapPool(pool), Modules{Operations: apiOperationService(pool)}, Authorization{Authentication: authService})

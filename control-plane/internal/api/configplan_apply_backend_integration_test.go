@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -61,25 +62,19 @@ func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) app
 		t.Fatalf("restricted runtime required: %q %v", user, err)
 	}
 	authn, err := auth.NewBackend(b, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	signer := commandauth.NewSignerFromSeed([32]byte{4})
 	ops := operations.NewBackend(b, 50, signer)
 	certs := certificates.NewBackend(b, ops, nil, nil, nil, signer)
 	s := newTestServer(t, testHTTPConfig(false), b, Modules{Operations: ops, ConfigPlans: configplan.NewBackend(b, ops), Certificates: certs}, Authorization{Authentication: authn})
 	f := applyHTTPFixture{t: t, b: b, owner: owner, s: s, signer: signer, workspace: uuid.Must(uuid.NewV7())}
 	stamp, err := value.FromTime(time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Apply HTTP',$2,$3,$4)`, f.workspace, f.workspace.String(), stamp, stamp)
 	login := func() applyHTTPActor {
 		name, password := "apply-"+uuid.NewString(), "a unique long Apply HTTP fixture password"
 		id, err := authn.CreateLocalCredential(t.Context(), name, password)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		w := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":%q}`, name, password), authTestOrigin)
 		if w.Code != 204 || len(w.Result().Cookies()) != 1 {
 			t.Fatalf("Local login: %d %s", w.Code, w.Body)
@@ -279,17 +274,13 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		for _, tc := range applyHTTPPathBoundaries(plan.ID.String()) {
 			r, err := http.NewRequest("POST", server.URL+tc.path, strings.NewReader(applyHTTPBody()))
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			r.AddCookie(f.requester.cookie)
 			r.Header.Set("Origin", authTestOrigin)
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("Idempotency-Key", uuid.NewString())
 			response, err := client.Do(r)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			body, err := io.ReadAll(response.Body)
 			response.Body.Close()
 			if err != nil || response.StatusCode != tc.status || response.Header.Get("Location") != tc.location {

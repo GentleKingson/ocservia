@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"strings"
 	"testing"
@@ -31,14 +32,10 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, os.Getenv("OCSERV_TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	owner, err := pgxpool.New(ctx, os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer owner.Close()
 	exec := func(query string, args ...any) {
 		t.Helper()
@@ -62,9 +59,7 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 		exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,$2,true)`, node, capability)
 	}
 	key, err := attestationtest.InstallKey(ctx, pool, node)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	endpoint := sha256.Sum256(node[:])
 	exec(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at)VALUES($1,$2,'active',now())`, node, endpoint[:])
 	signer := commandauth.NewSignerFromSeed([32]byte{4})
@@ -73,9 +68,7 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 	input, oldNode := completeRenderFixture()
 	input.Template.Directives[7].SecretRef.Key = strings.Replace(input.Template.Directives[7].SecretRef.Key, oldNode.String(), node.String(), 1)
 	rendered, err := renderComplete(input, node, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	trace := "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
 	planOperation, _, err := ops.Create(ctx, operations.CreateRequest{
 		NodeID:          node,
@@ -98,9 +91,7 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 			PlanMetadata:      &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}},
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	planID := uuid.MustParse(planOperation.ID)
 	envelope := func(operationID string) *agentv1.CommandEnvelope {
 		t.Helper()
@@ -118,9 +109,7 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 		t.Helper()
 		command := envelope(operationID)
 		payload, err := proto.Marshal(result)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		exec(`UPDATE commands SET state='dispatched' WHERE operation_id=$1`, operationID)
 		exec(`UPDATE operations SET state='dispatched' WHERE id=$1`, operationID)
 		outcome := &agentv1.CommandResult{CommandId: command.CommandId, IdempotencyKey: command.IdempotencyKey, PayloadSha256: command.SemanticPayloadSha256, SemanticPayloadHashVersion: command.SemanticPayloadHashVersion, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: payload, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()}
@@ -128,9 +117,7 @@ func TestCompleteConfigPlanTransactionAndPhysicalResultIntegration(t *testing.T)
 			t.Fatal(err)
 		}
 		encoded, err := proto.Marshal(outcome)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		event := uuid.Must(uuid.NewV7())
 		if err := transportevents.NewBackend(postgres.WrapPool(pool), signer).Ingest(ctx, &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: trace, Payload: encoded}); err != nil {
 			t.Fatal(err)

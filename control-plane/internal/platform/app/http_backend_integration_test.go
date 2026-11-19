@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"net/http"
 	"strings"
@@ -46,14 +47,10 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	seedAuth, err := auth.NewBackend(runtime.Store, auth.Config{LocalEnabled: true, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	username, password := "http-assembly-"+uuid.NewString(), "unique long HTTP assembly fixture password"
 	identity, err := seedAuth.CreateLocalCredential(ctx, username, password)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	workspace, node := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	at, _ := value.FromTime(time.Now().UTC())
 	exec := func(query string, args ...any) {
@@ -109,9 +106,7 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Origin", cfg.PublicOrigin)
 	login, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	login.Body.Close()
 	if login.StatusCode != 204 || len(login.Cookies()) != 1 {
 		t.Fatalf("real Local login: %d", login.StatusCode)
@@ -124,9 +119,7 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 		r.Header.Set("Origin", cfg.PublicOrigin)
 		r.Header.Set("X-Workspace-ID", workspace.String())
 		w, err := client.Do(r)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		return w
 	}
 	for _, path := range []string{"/api/v1/nodes/" + node.String(), "/api/v1/workspaces"} {

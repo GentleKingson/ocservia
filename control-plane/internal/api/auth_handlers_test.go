@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,9 +26,7 @@ func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, httpConfigs
 		pool = &pgxpool.Pool{}
 	}
 	service, err := auth.NewBackend(postgres.WrapPool(pool), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	config := testHTTPConfig(false)
 	if len(httpConfigs) > 0 {
 		config = httpConfigs[0]
@@ -146,9 +145,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
 	}
 	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 
 	s := newAuthHTTPServer(t, pool, true)
@@ -175,9 +172,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 	}
 	cookie := w.Result().Cookies()[0]
 	actor, err := s.auth.Authenticate(context.Background(), cookie)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	record := assertAuthLog(t, logs, "local", "succeeded", "session_created")
 	if record["identity_id"] != actor.IdentityID.String() || record["request_id"] != w.Header().Get("X-Request-ID") {
 		t.Fatal("success correlation differs")

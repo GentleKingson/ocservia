@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,14 +31,10 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Read API',$2,now(),now())`, id, "read-"+id.String())
 	}
 	service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	username, password := "read-"+uuid.NewString(), "a long Controller reader test password"
 	identity, err := service.CreateLocalCredential(ctx, username, password)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	at, _ := value.FromTime(time.Now().UTC())
 	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, workspace, identity, at)
 	config := testHTTPConfig(false)

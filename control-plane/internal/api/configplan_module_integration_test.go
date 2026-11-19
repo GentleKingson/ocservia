@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -206,9 +207,7 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 	refs := []uuid.UUID{}
 	for _, scope := range []uuid.UUID{f.workspace, foreign} {
 		ref, err := certs.CreateSecretRef(t.Context(), certificates.SecretRefRequest{WorkspaceID: scope, ActorID: f.requester.principal.IdentityID, SessionID: f.requester.principal.SessionID, Provider: configprofile.Provider, KeyPath: keyPath, Version: "v1", Reason: "module fixture", RequestID: uuid.NewString()})
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		refs = append(refs, ref.ID)
 	}
 	t.Run("secret-denials-stop-before-create", func(t *testing.T) {
@@ -243,9 +242,7 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 			t.Fatal(err)
 		}
 		claims, err := commandauth.ClaimsFromEnvelopeV1(&envelope)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		canonical, err := commandauth.CanonicalV1(claims)
 		if err != nil || !ed25519.Verify(f.signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) {
 			t.Fatal("command signature", err)

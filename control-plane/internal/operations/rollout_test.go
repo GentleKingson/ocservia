@@ -11,6 +11,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
 
@@ -29,13 +30,9 @@ func rolloutTestCatalog(t *testing.T) *releasecatalog.Catalog {
 		`"},{"version":"1.9.0","architecture":"amd64","package_sha256":"` +
 		hex.EncodeToString(digestA) +
 		`"}]}`
-	if err := os.WriteFile(manifest, []byte(manifestJSON), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, os.WriteFile(manifest, []byte(manifestJSON), 0o600))
 	catalog, err := releasecatalog.Load(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return catalog
 }
 
@@ -64,9 +61,7 @@ func TestSortAndDedupeNodeIDs(t *testing.T) {
 	second := uuid.Must(uuid.NewV7())
 	unsorted := []uuid.UUID{second, first, second, first}
 	sorted, err := sortAndDedupeNodeIDs(unsorted)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if len(sorted) != 2 {
 		t.Fatalf("deduped length = %d, want 2", len(sorted))
 	}
@@ -91,9 +86,7 @@ func TestRolloutNodeEligibility(t *testing.T) {
 	stamp := func(at time.Time) value.Timestamp {
 		t.Helper()
 		v, err := value.FromTime(at)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		return v
 	}
 	base := rolloutNodeObservation{

@@ -1,4 +1,5 @@
-import { createRenderer, nextTick, ssrContextKey } from "vue";
+import { renderer } from "./renderer";
+import { nextTick, ssrContextKey } from "vue";
 import type { BuildInfo, Workspace } from "@ocservia/api-client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
@@ -11,18 +12,6 @@ vi.mock("../src/shared/readiness", () => ({
   useReadinessStore: () => ({ isReady: true }),
 }));
 import SettingsView from "../src/views/SettingsView.vue";
-const renderer = createRenderer<object, object>({
-  createElement: () => ({}),
-  createText: () => ({}),
-  createComment: () => ({}),
-  insert: () => {},
-  remove: () => {},
-  setText: () => {},
-  setElementText: () => {},
-  parentNode: () => null,
-  nextSibling: () => null,
-  patchProp: () => {},
-});
 interface View {
   workspace?: Workspace;
   buildInfo?: BuildInfo;

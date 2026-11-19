@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"log/slog"
 	"slices"
@@ -47,9 +48,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	workspace := uuid.New()
 	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'enrollment',$2,now(),now())`, workspace, workspace.String())
 	signer, err := commandauth.NewRandomSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	s := NewBackend(b, "", "test", signer)
 	endpoint := endpointFixture(101)
 	readOnly := []string{"ocserv.config_fingerprint.read", "ocserv.ip_bans.read", "ocserv.sessions.read", "ocserv.status.read", "ocserv.version.read"}
@@ -160,9 +159,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	manager, err := ownersession.NewManagerBackend(b, signer, &recordingRegistrar{}, 30*time.Second, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	s.ownerSessions = manager
 	handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, AgentVersion: "test", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now(), SealingKeys: enrollmentSealingKeys()}
 	authorize := &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake}
@@ -172,9 +169,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}
 	fence := response.ConnectionFence
 	connection, err := fixed16(fence.GetConnectionId())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := manager.CloseSession(ctx, [16]byte(node), connection, int64(fence.GetOwnerEpoch())); err != nil {
 		t.Fatal(err)
 	}
@@ -183,17 +178,13 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	cancelled, cancel := context.WithCancel(ctx)
 	defer cancel()
 	failingManager, err := ownersession.NewManagerBackend(b, signer, &cancellingRegistrar{cancelled: cancel}, 30*time.Second, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	s.ownerSessions = failingManager
 	if response, err := s.AuthorizeSession(cancelled, authorize); err == nil || response != nil {
 		t.Fatal("cancelled authorization granted", response, err)
 	}
 	successor, err := ownersession.NewManagerBackend(b, signer, &recordingRegistrar{}, 30*time.Second, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	s.ownerSessions = successor
 	response, err = s.AuthorizeSession(ctx, authorize)
 	if err != nil || response.GetConnectionFence() == nil || response.ConnectionFence.OwnerEpoch <= fence.OwnerEpoch {
@@ -204,9 +195,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	defer successor.CloseSession(context.Background(), [16]byte(node), connection, int64(fence.OwnerEpoch))
 	revocation := Revocation{NodeID: node, ActorID: requester.String(), IdentityID: requester, SessionID: session, Reason: "revoke", RequestID: uuid.NewString()}
 	locked, lockedStore, err := s.begin(ctx, database.RepeatableRead)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := lockedStore.NodeByEndpoint(ctx, endpoint, uuid.Nil, enrollmentstore.ForShare); err != nil {
 		rollback(locked)
 		t.Fatal(err)
@@ -253,9 +242,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 
 	bootstrapEndpoint := endpointFixture(102)
 	bootstrap, err := s.CreateBootstrapToken(ctx, BootstrapTokenSpec{ExpectedEndpointID: bootstrapEndpoint, WorkspaceID: workspace, Environment: "test", ActorID: "operator", Reason: "bootstrap", RequestID: uuid.NewString()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	wrongEndpoint := enrollmentRequest(bootstrap.Value, endpointFixture(103))
 	if err := s.ValidateEnrollment(ctx, wrongEndpoint); !errors.Is(err, ErrInvalidToken) {
 		t.Fatal("prebound token validated another endpoint", err)
@@ -270,9 +257,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		t.Fatal("logical bootstrap expiry", err)
 	}
 	bootstrapped, err := s.Enroll(ctx, bootstrapRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	exec(`UPDATE node_bootstrap_tokens SET consumed_at=$1,expires_at=$2 WHERE id=$3`, positive, value.Timestamp{Valid: true, Micros: value.MinTimestamp}, bootstrap.ID)
 	if replay, err := s.Enroll(ctx, bootstrapRequest); err != nil || !bytes.Equal(replay.GetNodeId(), bootstrapped.GetNodeId()) {
 		t.Fatal("bound bootstrap retry with expired token", replay, err)

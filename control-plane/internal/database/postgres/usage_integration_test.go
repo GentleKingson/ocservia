@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"math"
 	"os"
 	"strings"
@@ -30,14 +31,10 @@ func TestUsageTransactionsIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	config, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	config.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	b := WrapPool(pool)
 	seedNode := func(t *testing.T) uuid.UUID {
@@ -96,9 +93,7 @@ func TestUsageTransactionsIntegration(t *testing.T) {
 	stamp := func(at time.Time) value.Timestamp {
 		t.Helper()
 		v, err := value.FromTime(at)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		return v
 	}
 	withStore := func(change func(userstore.UsageStore) error) error {
@@ -160,9 +155,7 @@ func TestUsageTransactionsIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			totals, err := readTotals(context.Background(), node)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			want := 0
 			if micros < stamp(base.ObservedAt).Micros {
 				want = 2
@@ -219,17 +212,13 @@ func TestUsageTransactionsIntegration(t *testing.T) {
 			t.Fatalf("cursor count %d, want %d: %v", count, cursors, err)
 		}
 		totals, err := readTotals(context.Background(), node)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		if len(totals) != len(want) {
 			t.Fatalf("totals: %+v, want %v", totals, want)
 		}
 		for _, total := range totals {
 			start, err := total.Start.Time()
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			key := total.Period + ":" + start.Format("2006-01-02")
 			expected, ok := want[key]
 			if !ok || expected != [2]int64{total.RX, total.TX} {

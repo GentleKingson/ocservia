@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"net"
 	"net/http"
@@ -61,13 +62,9 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 			t.Fatal(err)
 		}
 		_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		commandSigningKeyFile = filepath.Join(dir, "controller-command-signing-key.pem")
 		if err := os.WriteFile(commandSigningKeyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 0o600); err != nil {
 			t.Fatal(err)
@@ -166,14 +163,10 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		}
 	}
 	owner, err := connection.Open(ctx, ownerOptions)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	t.Cleanup(owner.Close)
 	runtime, err := connection.Open(ctx, runtimeOptions)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer runtime.Close()
 	if !smoke {
 		t.Run("cleanup-privilege-repair", func(t *testing.T) {
@@ -256,16 +249,12 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		installSchedulerEvidence(t, ctx, owner)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	address := listener.Addr().String()
 	_ = listener.Close()
 	logPath := filepath.Join(dir, "controller.log")
 	log, err := os.Create(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer log.Close()
 	processArgs := []string(nil)
 	extra := map[string]string{"OCSERV_HTTP_ADDRESS": address}
@@ -329,9 +318,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	}
 	request.Header.Set("Origin", origin)
 	response, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	body, _ := io.ReadAll(response.Body)
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusNoContent || len(response.Cookies()) != 1 {
@@ -341,9 +328,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	request, _ = http.NewRequestWithContext(ctx, "GET", base+"/api/v1/nodes", nil)
 	request.AddCookie(cookie)
 	response, err = client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	body, _ = io.ReadAll(response.Body)
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK || !json.Valid(body) {
@@ -372,9 +357,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		request, _ = http.NewRequestWithContext(ctx, "GET", base+"/api/v1/workspaces", nil)
 		request.AddCookie(cookie)
 		response, err = client.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		body, _ = io.ReadAll(response.Body)
 		_ = response.Body.Close()
 		if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("committed workspace")) {
@@ -421,9 +404,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	_ = rebound.Close()
 	t.Run("HTTP-failure-exit", func(t *testing.T) {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		defer listener.Close()
 		failed := exec.CommandContext(ctx, binary)
 		trustSocket := filepath.Join(socketDirectory(t), "trust.sock")
@@ -446,9 +427,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 func installSchedulerEvidence(t *testing.T, ctx context.Context, owner *connection.Connection) {
 	t.Helper()
 	sql, err := os.ReadFile("../../../../deploy/test-fixtures/scheduler-maintenance.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := owner.Store.Exec(ctx, string(sql)); err != nil {
 		t.Fatal("install PostgreSQL evidence fixture", err)
 	}

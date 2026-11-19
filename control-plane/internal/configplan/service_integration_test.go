@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"strings"
 	"testing"
@@ -37,16 +38,12 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer pool.Close()
 	ownerPool := pool
 	if ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"); ownerURL != "" {
 		ownerPool, err = pgxpool.New(ctx, ownerURL)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		defer ownerPool.Close()
 	}
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -60,9 +57,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	attestationKey, err := attestationtest.InstallKey(ctx, pool, nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	endpointID := sha256.Sum256(append([]byte("ocservia/configplan-integration/"), nodeID[:]...))
 	if _, err = pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpointID[:]); err != nil {
 		t.Fatal(err)
@@ -86,9 +81,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	renderInput, oldNode := completeRenderFixture()
 	renderInput.Template.Directives[7].SecretRef.Key = strings.Replace(renderInput.Template.Directives[7].SecretRef.Key, oldNode.String(), nodeID.String(), 1)
 	rendered, err := renderComplete(renderInput, nodeID, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	secretRefID := renderInput.Template.Directives[7].SecretRef.ID
 	if _, err := pool.Exec(ctx, `INSERT INTO secret_provider_refs(id,workspace_id,provider,key_path,version,state,created_at,updated_at)VALUES($1,$2,$3,$4,$5,'active',now(),now())`, secretRefID, workspaceID, configprofile.Provider, renderInput.Template.Directives[7].SecretRef.Key, renderInput.Template.Directives[7].SecretRef.Version); err != nil {
 		t.Fatal(err)
@@ -197,9 +190,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		materializedHash[index] = 0x43
 	}
 	resultBytes, err := proto.Marshal(&agentv1.ConfigPlanResult{CandidateHash: hash, MaterializedHash: materializedHash, DiffRedacted: safeDiff(candidateRedacted), CurrentUnchanged: true, StagingCleaned: true, CurrentHash: currentHash})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err = pool.Exec(ctx, `UPDATE commands SET state='dispatched',updated_at=now() WHERE id=$1`, commandID); err != nil {
 		t.Fatal(err)
 	}
@@ -217,9 +208,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	encodedPlanResult, err := proto.Marshal(planResult)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
 		OccurredAt: timestamppb.New(completedPlan), Traceparent: request.Traceparent, Payload: encodedPlanResult,
@@ -346,17 +335,11 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	resultBytes, err = proto.Marshal(&agentv1.ConfigApplyResult{CandidateHash: hash, PreviousHash: currentHash, Healthy: false, FailedCritical: true, FailureCode: "rollback_failed"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	payloadHash, err := semanticpayload.HashV2(&applyEnvelope)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	invalidResultBytes, err := proto.Marshal(&agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	invalidEventID := uuid.Must(uuid.NewV7())
 	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: invalidEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: invalidResultBytes}); err != nil {
 		t.Fatalf("ingest invalid configuration evidence for reconciliation: %v", err)
@@ -389,9 +372,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	commandResultBytes, err := proto.Marshal(validResult)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	applyEventID := uuid.Must(uuid.NewV7())
 	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: applyEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: commandResultBytes}); err != nil {
 		t.Fatal(err)
@@ -411,9 +392,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatalf("public critical apply=%+v err=%v", publicApply, err)
 	}
 	replayedResultBytes, err := proto.Marshal(validResult)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	replayEventID := uuid.Must(uuid.NewV7())
 	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: replayEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: replayedResultBytes}); err != nil {
 		t.Fatalf("critical result replay failed: %v", err)
@@ -437,13 +416,9 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal("extended configuration read", extended, err)
 	}
 	encoded, err := json.Marshal(extended.Warnings[:4])
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	got, err := value.ParseJSONB(encoded)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	want, err := value.ParseJSONB([]byte(warnings))
 	if err != nil || !bytes.Equal(got.Bytes(), want.Bytes()) {
 		t.Fatal("stored warnings narrowed", string(encoded), err)

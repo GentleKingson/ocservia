@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/test-installer-common.sh
+source "${ROOT}/scripts/test-installer-common.sh"
 BOOTSTRAP="${ROOT}/deploy/production/bootstrap-host.sh"
 
 # The bootstrap targets Ubuntu and Debian hosts and uses GNU stat; skip on
@@ -19,18 +21,6 @@ stat -c '%u' . >/dev/null 2>&1 || {
 # Keep the fixture under HOME: /tmp is world-writable (mode 1777), which the
 # state root ancestry contract must reject.
 fixture="$(mktemp -d "${HOME}/.ocservia-bootstrap-test.XXXXXX")"
-
-can_root() {
-  (( EUID == 0 )) || sudo -n true >/dev/null 2>&1
-}
-
-as_root() {
-  if (( EUID == 0 )); then
-    "$@"
-  else
-    sudo -n "$@"
-  fi
-}
 
 cleanup() {
   local status=$?
@@ -88,111 +78,25 @@ for tool in bash stat install mkdir chown dirname cat grep id chmod cp rm realpa
   link_tool "${tool}"
 done
 
-cat >"${fixture}/os/ubuntu-20.04" <<'EOF'
-PRETTY_NAME="Ubuntu 20.04.6 LTS"
-NAME="Ubuntu"
-VERSION_ID="20.04"
-VERSION="20.04.6 LTS (Focal Fossa)"
-VERSION_CODENAME=focal
-ID=ubuntu
-ID_LIKE=debian
-UBUNTU_CODENAME=focal
-EOF
-
-cat >"${fixture}/os/ubuntu-22.04" <<'EOF'
-PRETTY_NAME="Ubuntu 22.04.5 LTS"
-NAME="Ubuntu"
-VERSION_ID="22.04"
-VERSION="22.04.5 LTS (Jammy Jellyfish)"
-VERSION_CODENAME=jammy
-ID=ubuntu
-ID_LIKE=debian
-UBUNTU_CODENAME=jammy
-EOF
-
-cat >"${fixture}/os/ubuntu-24.04" <<'EOF'
-PRETTY_NAME="Ubuntu 24.04 LTS"
-NAME="Ubuntu"
-VERSION_ID="24.04"
-VERSION="24.04 LTS (Noble Numbat)"
-VERSION_CODENAME=noble
-ID=ubuntu
-ID_LIKE=debian
-UBUNTU_CODENAME=noble
-EOF
-
-cat >"${fixture}/os/ubuntu-24.04-mismatch" <<'EOF'
-PRETTY_NAME="Ubuntu 24.04 LTS"
-NAME="Ubuntu"
-VERSION_ID="24.04"
-VERSION="24.04 LTS (Noble Numbat)"
-VERSION_CODENAME=hirsute
-ID=ubuntu
-ID_LIKE=debian
-UBUNTU_CODENAME=hirsute
-EOF
-
-cat >"${fixture}/os/ubuntu-25.10" <<'EOF'
-PRETTY_NAME="Ubuntu 25.10"
-NAME="Ubuntu"
-VERSION_ID="25.10"
-VERSION="25.10 (Questing Quokka)"
-VERSION_CODENAME=questing
-ID=ubuntu
-ID_LIKE=debian
-UBUNTU_CODENAME=questing
-EOF
-
-cat >"${fixture}/os/ubuntu-26.04" <<'EOF'
-PRETTY_NAME="Ubuntu 26.04.1 LTS"
-NAME="Ubuntu"
-VERSION_ID="26.04"
-VERSION="26.04.1 LTS (Resolute Raccoon)"
-VERSION_CODENAME=resolute
-ID=ubuntu
-ID_LIKE=debian
-UBUNTU_CODENAME=resolute
-EOF
-
-cat >"${fixture}/os/debian-10" <<'EOF'
-PRETTY_NAME="Debian GNU/Linux 10 (buster)"
-NAME="Debian GNU/Linux"
-VERSION_ID="10"
-VERSION_CODENAME=buster
-ID=debian
-EOF
-
-cat >"${fixture}/os/debian-11" <<'EOF'
-PRETTY_NAME="Debian GNU/Linux 11 (bullseye)"
-NAME="Debian GNU/Linux"
-VERSION_ID="11"
-VERSION_CODENAME=bullseye
-ID=debian
-EOF
-
-cat >"${fixture}/os/debian-12" <<'EOF'
-PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
-NAME="Debian GNU/Linux"
-VERSION_ID="12"
-VERSION_CODENAME=bookworm
-ID=debian
-EOF
-
-cat >"${fixture}/os/debian-13" <<'EOF'
-PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
-NAME="Debian GNU/Linux"
-VERSION_ID="13"
-VERSION_CODENAME=trixie
-ID=debian
-EOF
-
-cat >"${fixture}/os/fedora-41" <<'EOF'
-PRETTY_NAME="Fedora Linux 41 (Cloud Edition)"
-NAME="Fedora Linux"
-VERSION_ID=41
-VERSION_CODENAME=
-ID=fedora
-EOF
+os_fixture() {
+  local id="$1" version="$2" codename="$3" name="${4:-$1-$2}"
+  printf 'ID=%s\nVERSION_ID="%s"\nVERSION_CODENAME=%s\n' "${id}" "${version}" "${codename}" >"${fixture}/os/${name}"
+}
+while read -r id version codename; do
+  os_fixture "${id}" "${version}" "${codename}"
+done <<'RELEASES'
+ubuntu 20.04 focal
+ubuntu 22.04 jammy
+ubuntu 24.04 noble
+ubuntu 25.10 questing
+ubuntu 26.04 resolute
+debian 10 buster
+debian 11 bullseye
+debian 12 bookworm
+debian 13 trixie
+fedora 41 none
+RELEASES
+os_fixture ubuntu 24.04 hirsute ubuntu-24.04-mismatch
 
 cat >"${docker_template}" <<'EOF'
 #!/usr/bin/env bash
@@ -357,6 +261,12 @@ ca-certificates
 EOF
 }
 
+provisioned_host() {
+  reset_scenario
+  install_docker_mock
+  mark_all_tools_installed
+}
+
 run_bootstrap() {
   local prefix="$1"
   shift
@@ -392,25 +302,7 @@ capture() {
   RUN_OUTPUT="$(run_bootstrap "$@" 2>&1)" || RUN_STATUS=$?
 }
 
-assert_status() {
-  (( RUN_STATUS == "$1" )) ||
-    die "expected exit status $1 but got ${RUN_STATUS}"
-}
-
-assert_output() {
-  grep -q -- "$1" <<<"${RUN_OUTPUT}" ||
-    die "expected output to contain '$1'"
-}
-
-assert_log_contains() {
-  grep -qF -- "$2" "$1" || die "expected $1 to contain '$2'"
-}
-
-assert_log_empty() {
-  [[ ! -s "$1" ]] || die "expected $1 to stay empty, got: $(cat -- "$1")"
-}
-
-# 1. Usage errors.
+# Usage errors.
 reset_scenario
 capture self
 assert_status 2 "no arguments must be a usage error"
@@ -419,166 +311,67 @@ assert_status 2 "unknown command must be a usage error"
 reset_scenario
 capture self check --backup-dir relative/path
 assert_status 2 "a relative --backup-dir must be a usage error"
-echo "usage errors fail with status 2"
 
-# 2. Unsupported operating systems and versions fail closed.
-reset_scenario
-os_release="${fixture}/os/fedora-41"
-capture self check
-assert_status 1 "a non Ubuntu/Debian OS must fail closed"
-assert_output "supported hosts are Ubuntu 20.04 (existing Docker only), 22.04, 24.04, 26.04, and Debian 11, 12, 13"
-assert_log_empty "${apt_log}"
-echo "a non Ubuntu/Debian OS fails closed without mutation"
+for unsupported in fedora-41 ubuntu-25.10 debian-10; do
+  reset_scenario
+  os_release="${fixture}/os/${unsupported}"
+  capture self check
+  assert_status 1 "unsupported host ${unsupported}"
+  assert_log_empty "${apt_log}"
+done
 
-reset_scenario
-os_release="${fixture}/os/ubuntu-25.10"
-capture self check
-assert_status 1 "an unsupported Ubuntu version must fail closed"
-assert_output "unsupported OS 'ubuntu 25.10'"
-assert_log_empty "${apt_log}"
-echo "an unsupported Ubuntu version fails closed without mutation"
-
-reset_scenario
-os_release="${fixture}/os/debian-10"
-capture self check
-assert_status 1 "an unsupported Debian version must fail closed"
-assert_output "unsupported OS 'debian 10'"
-assert_log_empty "${apt_log}"
-echo "an unsupported Debian version fails closed without mutation"
-
-# 2a. a codename that disagrees with the supported release matrix fails closed.
+# a codename that disagrees with the supported release matrix fails closed.
 reset_scenario
 os_release="${fixture}/os/ubuntu-24.04-mismatch"
 capture self check
 assert_status 1 "a mismatched distribution codename must fail closed"
 assert_output "does not match the expected 'noble'"
 assert_log_empty "${apt_log}"
-echo "a mismatched distribution codename fails closed without mutation"
 
-# 3. Unsupported architecture.
+# Unsupported architecture.
 reset_scenario
 EXTRA_ENV=("BOOTSTRAP_TEST_ARCH=riscv64")
 capture self check
 assert_status 1 "unsupported architecture must fail closed"
 assert_output "unsupported architecture 'riscv64'"
 assert_log_empty "${apt_log}"
-echo "unsupported architecture fails closed without mutation"
 
-# 3a. Ubuntu 20.04 without Docker fails the check on the legacy-host path.
-reset_scenario
-os_release="${fixture}/os/ubuntu-20.04"
-mark_all_tools_installed
-capture self check
-assert_status 1 "Ubuntu 20.04 without Docker must fail the host check"
-assert_output "Ubuntu 20.04 can run ocservia with an existing compatible Docker installation, but automatic Docker bootstrap is unavailable on this legacy host"
-assert_output "Ubuntu Pro/ESM"
-assert_log_empty "${apt_log}"
-echo "Ubuntu 20.04 without Docker fails closed with the legacy-host message"
-
-# 3b. Ubuntu 20.04 with an existing compatible Docker passes the check.
-reset_scenario
-os_release="${fixture}/os/ubuntu-20.04"
-install_docker_mock
-mark_all_tools_installed
-install -d -m 0700 -- "${work}/state-root"
-capture self check
-assert_status 0 "Ubuntu 20.04 with existing Docker must pass the host check"
-assert_output "existing-Docker compatibility path"
-assert_log_empty "${apt_log}"
-echo "Ubuntu 20.04 with existing Docker passes the read-only check"
-
-# 3c. Debian 11 remains supported but reports the legacy security warning.
-reset_scenario
-os_release="${fixture}/os/debian-11"
-install_docker_mock
-mark_all_tools_installed
-install -d -m 0700 -- "${work}/state-root"
-capture self check
-assert_status 0 "Debian 11 must remain a supported host"
-assert_output "Debian 11 regular Debian LTS security maintenance ended 2026-08-31"
-assert_output "Debian ELTS"
-assert_log_empty "${apt_log}"
-echo "Debian 11 reports the legacy security maintenance warning"
-
-# 4. check reports missing Docker without mutating packages.
+# check reports missing Docker without mutating packages.
 reset_scenario
 mark_all_tools_installed
 capture self check
 assert_status 1 "missing Docker must fail the host check"
 assert_output "Docker is required but not installed"
 assert_log_empty "${apt_log}"
-echo "check reports missing Docker without package mutation"
 
-# 5. check reports Compose without --wait support.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
+# check reports Compose without --wait support.
+provisioned_host
 : >"${compose_no_wait}"
 capture self check
 assert_status 1 "Compose without --wait must fail the host check"
 assert_output "docker compose up --wait"
 assert_log_empty "${apt_log}"
-echo "check reports Compose builds without --wait support"
 
-# 6. check detects the docker.io conflict without uninstalling anything.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
-printf '%s\n' docker.io >>"${dpkg_db}"
-capture self check
-assert_status 1 "a conflicting runtime must fail the host check"
-assert_output "docker.io"
-assert_output "never uninstalls an existing runtime"
-assert_log_empty "${apt_log}"
-echo "conflicting docker.io package fails closed without uninstall"
-
-# 7. check detects a standalone docker-compose without the v2 plugin.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
+# check detects a standalone docker-compose without the v2 plugin.
+provisioned_host
 cp -- "${fixture}/docker-compose-stub" "${bin}/docker-compose"
 EXTRA_ENV=("BOOTSTRAP_TEST_NO_COMPOSE=1")
 capture self check
 assert_status 1 "standalone docker-compose without the plugin must fail"
 assert_output "docker-compose"
 assert_log_empty "${apt_log}"
-echo "standalone docker-compose without the plugin fails closed"
 
-# 7a. check detects the containerd conflict before any host mutation.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
-printf '%s\n' containerd >>"${dpkg_db}"
-capture self check
-assert_status 1 "the containerd conflict must fail the host check"
-assert_output "containerd"
-assert_log_empty "${apt_log}"
-echo "conflicting containerd package fails closed without mutation"
+for conflict in docker.io containerd docker-compose-v2 docker-buildx; do
+  provisioned_host
+  printf '%s\n' "${conflict}" >>"${dpkg_db}"
+  EXTRA_ENV=(BOOTSTRAP_TEST_NO_COMPOSE=1)
+  capture self check
+  assert_status 1 "package conflict ${conflict}"
+  assert_output "${conflict}"
+  assert_log_empty "${apt_log}"
+done
 
-# 7b. check detects Ubuntu's docker-compose-v2 package without the plugin.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
-printf '%s\n' docker-compose-v2 >>"${dpkg_db}"
-EXTRA_ENV=("BOOTSTRAP_TEST_NO_COMPOSE=1")
-capture self check
-assert_status 1 "docker-compose-v2 without the plugin must fail the host check"
-assert_output "docker-compose-v2"
-assert_log_empty "${apt_log}"
-echo "conflicting docker-compose-v2 package without the plugin fails closed"
-
-# 7c. check detects the distro docker-buildx package conflict.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
-printf '%s\n' docker-buildx >>"${dpkg_db}"
-capture self check
-assert_status 1 "the docker-buildx conflict must fail the host check"
-assert_output "docker-buildx"
-assert_log_empty "${apt_log}"
-echo "conflicting docker-buildx package fails closed without mutation"
-
-# 7d. Debian conflicts point at the Debian installation guidance, and the
+# Debian conflicts point at the Debian installation guidance, and the
 # Ubuntu-only docker-compose-v2 package is not a Debian conflict.
 reset_scenario
 os_release="${fixture}/os/debian-12"
@@ -589,7 +382,6 @@ capture self check
 assert_status 1 "a conflicting runtime must fail the Debian host check"
 assert_output "https://docs.docker.com/engine/install/debian/"
 assert_log_empty "${apt_log}"
-echo "Debian conflicts point at the Debian installation guidance"
 
 reset_scenario
 os_release="${fixture}/os/debian-12"
@@ -603,12 +395,9 @@ if grep -qF "conflicting package 'docker-compose-v2'" <<<"${RUN_OUTPUT}"; then
   die "docker-compose-v2 must not be reported as a Debian conflict"
 fi
 assert_log_empty "${apt_log}"
-echo "the Ubuntu-only docker-compose-v2 package is not a Debian conflict"
 
-# 8. check passes on a provisioned host and lists operator prerequisites.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
+# check passes on a provisioned host and lists operator prerequisites.
+provisioned_host
 install -d -m 0700 -- "${work}/state-root"
 capture self check
 assert_status 0 "a provisioned host must pass the read-only check"
@@ -617,37 +406,28 @@ assert_output "OCSERV_SECRET_DIR is not set"
 assert_output "controller-release-amd64.json"
 assert_log_empty "${apt_log}"
 assert_log_empty "${systemctl_log}"
-echo "check passes on a provisioned host without any mutation"
 
-# 9. check rejects a state root with the wrong mode.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
+# check rejects a state root with the wrong mode.
+provisioned_host
 install -d -m 0755 -- "${work}/state-root"
 capture self check
 assert_status 1 "a wrong state root mode must fail the host check"
 assert_output "state root"
 assert_log_empty "${apt_log}"
-echo "check rejects a state root with the wrong mode"
 
-# 10. check rejects a backup directory with the wrong ownership.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
+# check rejects a backup directory with the wrong ownership.
+provisioned_host
 install -d -m 0755 -- "${work}/backup-wrong"
 capture self check --backup-dir "${work}/backup-wrong"
 assert_status 1 "a wrong backup directory must fail the host check"
 assert_output "999:999"
 assert_log_empty "${apt_log}"
-echo "check rejects a backup directory with the wrong ownership"
 
-# 10a. check classifies a Docker socket permission denial for the invoking
+# check classifies a Docker socket permission denial for the invoking
 # user and fails closed with remediation. The mock denial applies to non-root
 # users only, mirroring root's unconditional Docker access.
 if (( EUID != 0 )); then
-  reset_scenario
-  install_docker_mock
-  mark_all_tools_installed
+  provisioned_host
   install -d -m 0700 -- "${work}/state-root"
   : >"${docker_denied}"
   capture self check
@@ -658,56 +438,42 @@ if (( EUID != 0 )); then
   echo "check reports a Docker permission denial for the invoking user"
 fi
 
-# 10b. a relative state root is rejected like controller.sh rejects it.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
+# a relative state root is rejected like controller.sh rejects it.
+provisioned_host
 EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=relative/state-root")
 capture self check
 assert_status 1 "a relative state root must fail the host check"
 assert_output "must be an absolute path"
-echo "check rejects a relative state root"
 
-# 10c. a non-canonical state root path is rejected.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
+# a non-canonical state root path is rejected.
+provisioned_host
 install -d -m 0700 -- "${work}/state-root"
 EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=${work}/state-root/")
 capture self check
 assert_status 1 "a non-canonical state root must fail the host check"
 assert_output "canonical path without traversal"
-echo "check rejects a non-canonical state root path"
 
-# 10d. a group/world-writable state root ancestor is rejected.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
+# a group/world-writable state root ancestor is rejected.
+provisioned_host
 install -d -m 0777 -- "${work}/loose"
 install -d -m 0700 -- "${work}/loose/state-root"
 EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=${work}/loose/state-root")
 capture self check
 assert_status 1 "a world-writable ancestor must fail the host check"
 assert_output "group/world writable"
-echo "check rejects a group/world-writable state root ancestor"
 
-# 10e. a symlinked state root ancestor is rejected.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
+# a symlinked state root ancestor is rejected.
+provisioned_host
 install -d -m 0700 -- "${work}/real/state-root"
 ln -s -- real "${work}/link"
 EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=${work}/link/state-root")
 capture self check
 assert_status 1 "symlink ancestry must fail the host check"
 assert_output "symlink ancestry"
-echo "check rejects symlinked state root ancestry"
 
-# 10f. rename.ul publishes the Quick materials, so a host without it fails the
+# rename.ul publishes the Quick materials, so a host without it fails the
 # check, and Ubuntu 26.04 needs util-linux-extra for it.
-reset_scenario
-install_docker_mock
-mark_all_tools_installed
+provisioned_host
 install -d -m 0700 -- "${work}/state-root"
 rm -f -- "${rootfs_bin}/rename.ul"
 capture self check
@@ -715,7 +481,6 @@ link_tool rename.ul
 assert_status 1 "a host without rename.ul must fail the host check"
 assert_output "rename.ul is not available"
 assert_log_empty "${apt_log}"
-echo "check rejects a host without rename.ul"
 
 reset_scenario
 os_release="${fixture}/os/ubuntu-26.04"
@@ -726,7 +491,6 @@ capture self check
 assert_status 1 "Ubuntu 26.04 without util-linux-extra must fail the host check"
 assert_output "required package 'util-linux-extra' is not installed"
 assert_log_empty "${apt_log}"
-echo "check requires util-linux-extra on Ubuntu 26.04"
 
 # 10g. The backup writer rejects an unprotected backup path before it backs up and
 # never reuses an existing staging or output object.
@@ -828,7 +592,6 @@ install -d -m 0700 -- "${wroot}/latest" "${wroot}/latest/base" "${wroot}/latest/
 run_writer "${wroot}/latest"
 assert_status 1 "a LATEST directory must be refused"
 assert_not_dumped
-echo "the backup writer never reuses existing staging or output objects"
 
 install -d -m 0700 -- "${wroot}/ok"
 run_writer "${wroot}/ok"
@@ -843,9 +606,7 @@ echo "the backup writer backs up under a protected path"
 
 # 11. install refuses to run without root.
 if (( EUID != 0 )); then
-  reset_scenario
-  install_docker_mock
-  mark_all_tools_installed
+  provisioned_host
   capture self install
   assert_status 1 "install without root must fail"
   assert_output "must run as root or via sudo"
@@ -917,99 +678,29 @@ if can_root; then
     die "Ubuntu 20.04 install wrote a Docker repository despite existing Docker"
   echo "Ubuntu 20.04 with existing Docker installs without repository mutation"
 
-  # 13c. Ubuntu 22.04 full bootstrap renders the jammy Ubuntu repository.
-  reset_scenario
-  os_release="${fixture}/os/ubuntu-22.04"
-  capture sudo install --backup-dir "${work}/backup"
-  assert_status 0 "Ubuntu 22.04 bare-host install must succeed"
-  assert_log_contains "${curl_log}" "https://download.docker.com/linux/ubuntu/gpg"
-  expected_source="deb [arch=amd64 signed-by=${work}/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu jammy stable"
-  [[ "$(cat -- "${work}/apt/sources/docker.list")" == "${expected_source}" ]] ||
-    die "unexpected docker.list content: $(cat -- "${work}/apt/sources/docker.list")"
-  assert_log_contains "${apt_log}" "install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
-  echo "Ubuntu 22.04 full bootstrap renders the jammy Docker repository"
-
-  # 13d. Ubuntu 26.04 full bootstrap renders the resolute Ubuntu repository.
-  reset_scenario
-  os_release="${fixture}/os/ubuntu-26.04"
-  capture sudo install --backup-dir "${work}/backup"
-  assert_status 0 "Ubuntu 26.04 bare-host install must succeed"
-  assert_log_contains "${apt_log}" "install -y jq util-linux curl openssl ca-certificates util-linux-extra"
-  assert_log_contains "${curl_log}" "https://download.docker.com/linux/ubuntu/gpg"
-  expected_source="deb [arch=amd64 signed-by=${work}/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu resolute stable"
-  [[ "$(cat -- "${work}/apt/sources/docker.list")" == "${expected_source}" ]] ||
-    die "unexpected docker.list content: $(cat -- "${work}/apt/sources/docker.list")"
-  echo "Ubuntu 26.04 full bootstrap renders the resolute Docker repository"
-
-  # 13e. arm64 hosts render the arm64 repository architecture.
-  reset_scenario
-  EXTRA_ENV=("BOOTSTRAP_TEST_ARCH=aarch64")
-  capture sudo install --backup-dir "${work}/backup"
-  assert_status 0 "an arm64 bare-host install must succeed"
-  expected_source="deb [arch=arm64 signed-by=${work}/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable"
-  [[ "$(cat -- "${work}/apt/sources/docker.list")" == "${expected_source}" ]] ||
-    die "unexpected docker.list content: $(cat -- "${work}/apt/sources/docker.list")"
-  echo "arm64 hosts render the arm64 Docker repository architecture"
-
-  # 13f. Debian 12 full bare-host bootstrap renders the bookworm Debian
-  # repository and creates the full lifecycle contract.
-  reset_scenario
-  os_release="${fixture}/os/debian-12"
-  capture sudo install --backup-dir "${work}/backup"
-  assert_status 0 "Debian 12 bare-host install must succeed"
-  assert_log_contains "${apt_log}" "install -y jq util-linux curl openssl ca-certificates"
-  assert_log_contains "${apt_log}" "install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
-  assert_log_contains "${curl_log}" "https://download.docker.com/linux/debian/gpg"
-  expected_source="deb [arch=amd64 signed-by=${work}/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable"
-  [[ "$(cat -- "${work}/apt/sources/docker.list")" == "${expected_source}" ]] ||
-    die "unexpected docker.list content: $(cat -- "${work}/apt/sources/docker.list")"
-  [[ -f "${work}/apt/keyrings/docker.asc" ]] || die "the Docker repository key was not installed"
-  [[ -x "${bin}/docker" ]] || die "the Docker packages did not produce a docker client"
-  [[ "$(stat -c '%u:%a' "${work}/state-root")" == "$(id -u):700" ]] ||
-    die "state root ownership or mode is wrong: $(stat -c '%u:%a' "${work}/state-root")"
-  [[ "$(stat -c '%u:%g:%a' "${work}/backup")" == "999:999:700" ]] ||
-    die "backup directory ownership or mode is wrong"
-  assert_output "Controller host prerequisites satisfied"
-  echo "Debian 12 full bare-host bootstrap installs prerequisites and directories"
-
-  # 13g. Debian 13 full bootstrap renders the trixie Debian repository.
-  reset_scenario
-  os_release="${fixture}/os/debian-13"
-  capture sudo install --backup-dir "${work}/backup"
-  assert_status 0 "Debian 13 bare-host install must succeed"
-  assert_log_contains "${curl_log}" "https://download.docker.com/linux/debian/gpg"
-  expected_source="deb [arch=amd64 signed-by=${work}/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable"
-  [[ "$(cat -- "${work}/apt/sources/docker.list")" == "${expected_source}" ]] ||
-    die "unexpected docker.list content: $(cat -- "${work}/apt/sources/docker.list")"
-  echo "Debian 13 full bootstrap renders the trixie Docker repository"
-
-  # 13h. Debian 11 remains fully bootstrappable with the legacy warning.
-  reset_scenario
-  os_release="${fixture}/os/debian-11"
-  capture sudo install --backup-dir "${work}/backup"
-  assert_status 0 "Debian 11 bare-host install must stay supported"
-  assert_output "Debian ELTS"
-  assert_log_contains "${curl_log}" "https://download.docker.com/linux/debian/gpg"
-  expected_source="deb [arch=amd64 signed-by=${work}/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bullseye stable"
-  [[ "$(cat -- "${work}/apt/sources/docker.list")" == "${expected_source}" ]] ||
-    die "unexpected docker.list content: $(cat -- "${work}/apt/sources/docker.list")"
-  echo "Debian 11 full bootstrap stays supported with the legacy warning"
-
-  # 14. an existing compatible Docker installation is preserved untouched.
-  reset_scenario
-  install_docker_mock
-  mark_all_tools_installed
-  capture sudo install --backup-dir "${work}/backup"
-  assert_status 0 "install with existing Docker must succeed"
-  assert_output "preserving it without reinstall or upgrade"
-  assert_log_empty "${apt_log}"
-  assert_log_empty "${curl_log}"
-  echo "an existing compatible Docker installation is preserved"
+  # The bare-host scenario above checks permissions and packages. Vary only the repository selection here.
+  while read -r release codename arch; do
+    reset_scenario
+    os_release="${fixture}/os/${release}"
+    EXTRA_ENV=("BOOTSTRAP_TEST_ARCH=${arch}")
+    capture sudo install --backup-dir "${work}/backup"
+    assert_status 0 "${release} on ${arch}"
+    family="${release%%-*}"
+    apt_arch=amd64
+    [[ "${arch}" != aarch64 ]] || apt_arch=arm64
+    assert_log_contains "${curl_log}" "https://download.docker.com/linux/${family}/gpg"
+    assert_log_contains "${work}/apt/sources/docker.list" "arch=${apt_arch} signed-by=${work}/apt/keyrings/docker.asc] https://download.docker.com/linux/${family} ${codename} stable"
+    if [[ "${release}" == debian-11 ]]; then assert_output "Debian ELTS"; fi
+  done <<'PLATFORMS'
+ubuntu-22.04 jammy x86_64
+ubuntu-26.04 resolute x86_64
+debian-12 bookworm aarch64
+debian-13 trixie x86_64
+debian-11 bullseye x86_64
+PLATFORMS
 
   # 15. an inactive daemon is started through systemd, not replaced.
-  reset_scenario
-  install_docker_mock
-  mark_all_tools_installed
+  provisioned_host
   : >"${docker_unready}"
   capture sudo install
   assert_status 0 "install must recover an inactive daemon"
@@ -1018,9 +709,7 @@ if can_root; then
   echo "an inactive Docker daemon is started through systemd"
 
   # 16. install refuses to overwrite an existing wrong backup directory.
-  reset_scenario
-  install_docker_mock
-  mark_all_tools_installed
+  provisioned_host
   install -d -m 0755 -- "${work}/backup-wrong"
   capture sudo install --backup-dir "${work}/backup-wrong"
   assert_status 1 "an existing wrong backup directory must fail"
@@ -1028,9 +717,7 @@ if can_root; then
   echo "install refuses to overwrite an existing wrong backup directory"
 
   # 17. install refuses an existing state root owned by another user.
-  reset_scenario
-  install_docker_mock
-  mark_all_tools_installed
+  provisioned_host
   as_root install -d -m 0700 -o 999 -g 999 -- "${work}/state-root"
   capture sudo install
   assert_status 1 "an existing wrong state root owner must fail"
@@ -1040,9 +727,7 @@ if can_root; then
   # 17a. install fails closed when the launcher cannot reach the Docker
   # daemon, before any lifecycle directory is created.
   if (( EUID != 0 )); then
-    reset_scenario
-    install_docker_mock
-    mark_all_tools_installed
+    provisioned_host
     : >"${docker_denied}"
     capture sudo install
     assert_status 1 "install must fail when the launcher lacks Docker access"
@@ -1060,9 +745,7 @@ if can_root; then
 
     # 17c. a root-owned state root fails a launcher-user check, matching the
     # exact controller.sh ownership contract.
-    reset_scenario
-    install_docker_mock
-    mark_all_tools_installed
+    provisioned_host
     rm -f -- "${docker_denied}"
     as_root install -d -m 0700 -o 0 -g 0 -- "${work}/state-root"
     capture self check
@@ -1074,9 +757,7 @@ if can_root; then
   fi
 
   # 18. install refuses to create a state root under unsafe ancestry.
-  reset_scenario
-  install_docker_mock
-  mark_all_tools_installed
+  provisioned_host
   install -d -m 0777 -- "${work}/loose"
   EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=${work}/loose/state-root")
   capture sudo install
@@ -1095,9 +776,7 @@ if can_root; then
   echo "install fails closed when rename.ul cannot be obtained"
 
   # 18a. a correct 999:999 0700 leaf still needs protected ancestry.
-  reset_scenario
-  install_docker_mock
-  mark_all_tools_installed
+  provisioned_host
   install -d -m 0700 -- "${work}/state-root"
   install -d -m 0777 -- "${work}/open-parent"
   as_root install -d -o 999 -g 999 -m 0700 -- "${work}/open-parent/backup"

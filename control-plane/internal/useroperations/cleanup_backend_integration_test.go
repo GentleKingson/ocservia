@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -233,9 +234,7 @@ func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 		}
 		identity, _ := coordination.NewIdentity()
 		leader, err := coordination.AcquireBackend(t.Context(), f.b, identity, time.Minute)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		f.exec(t, `UPDATE scheduler_leadership SET epoch=epoch+1 WHERE id=1`)
 		if err := f.s.cleanupEnforcement(coordination.WithFence(t.Context(), leader), item, true); !errors.Is(err, coordination.ErrNotLeader) || f.count(t, item) != 1 {
 			t.Fatal("stale fencing delete committed", err)
@@ -271,9 +270,7 @@ func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 		next := f.seed(t, "z_valid", true, false)
 		identity, _ := coordination.NewIdentity()
 		leader, err := coordination.AcquireBackend(t.Context(), f.b, identity, time.Minute)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		ctx := coordination.WithFence(t.Context(), leader)
 		restore := f.revokeDelete(t)
 		if err := f.s.RunOnce(ctx); !errors.Is(err, database.ErrPermission) || f.count(t, old) != 1 {

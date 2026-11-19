@@ -1,4 +1,5 @@
-import { createRenderer, nextTick, ssrContextKey } from "vue";
+import { renderer } from "./renderer";
+import { nextTick, ssrContextKey } from "vue";
 import { ResponseError } from "@ocservia/api-client";
 import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { NodeInstallConfig } from "../src/features/nodes/node-install";
@@ -20,18 +21,6 @@ vi.mock("../src/api/workspace", async (original) => ({
   ...mocks,
 }));
 import NodeInstallDialog from "../src/components/nodes/NodeInstallDialog.vue";
-const renderer = createRenderer<object, object>({
-  createElement: () => ({}),
-  createText: () => ({}),
-  createComment: () => ({}),
-  insert: () => {},
-  remove: () => {},
-  setText: () => {},
-  setElementText: () => {},
-  parentNode: () => null,
-  nextSibling: () => null,
-  patchProp: () => {},
-});
 interface View {
   config: NodeInstallConfig;
   step: number;

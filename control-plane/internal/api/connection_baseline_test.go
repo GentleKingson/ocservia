@@ -16,6 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
 
@@ -100,9 +101,7 @@ func TestHTTPTimeoutAndSSEBaseline(t *testing.T) {
 	r.Header.Set("Last-Event-ID", first.String())
 	r.Header.Set("X-Request-ID", "stream-baseline")
 	stream, err := client.Do(r)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer stream.Body.Close()
 	if stream.StatusCode != 200 || stream.Header.Get("Content-Type") != "text/event-stream" || stream.Header.Get("Cache-Control") != "no-cache" || stream.Header.Get("X-Accel-Buffering") != "no" || stream.Header.Get("X-Request-ID") != "stream-baseline" {
 		t.Fatalf("stream headers: %d %v", stream.StatusCode, stream.Header)
@@ -110,9 +109,7 @@ func TestHTTPTimeoutAndSSEBaseline(t *testing.T) {
 	// Headers have flushed before any event. A normal request now times out;
 	// only afterwards may the watcher emit, proving SSE outlives that deadline.
 	response, err := client.Get(server.URL + "/readyz")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	body, err := io.ReadAll(response.Body)
 	response.Body.Close()
 	if err != nil || response.StatusCode != 503 || response.Header.Get("Content-Type") != "application/problem+json" || string(body) != `{"type":"https://ocservia.dev/problems/timeout","title":"Request timed out","status":503}` {
@@ -121,9 +118,7 @@ func TestHTTPTimeoutAndSSEBaseline(t *testing.T) {
 	close(emit)
 	reader := bufio.NewReader(stream.Body)
 	eventJSON, err := json.Marshal(operationstore.Event{ID: second.String(), OperationID: baselineID, State: "running"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	for _, want := range []string{"id: " + second.String() + "\n", "event: operation\n", "data: " + string(eventJSON) + "\n", "\n"} {
 		line, err := reader.ReadString('\n')
 		if err != nil || line != want {
@@ -133,9 +128,7 @@ func TestHTTPTimeoutAndSSEBaseline(t *testing.T) {
 	stream.Body.Close()
 	// Resume through the query cursor, then close the hub via real Shutdown.
 	resumed, err := client.Get(server.URL + path + "?after=" + second.String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer resumed.Body.Close()
 	if resumed.StatusCode != 200 {
 		t.Fatalf("resume: %d", resumed.StatusCode)
@@ -155,9 +148,7 @@ func TestHTTPTimeoutAndSSEBaseline(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("database handler did not return")
 	}
-	if err := s.Shutdown(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, s.Shutdown(context.Background()))
 	late := httptest.NewRecorder()
 	s.http.Handler.ServeHTTP(late, baselineRequest("GET", path, nil))
 	if late.Code != 503 || late.Body.Len() != 0 {
@@ -199,9 +190,7 @@ func TestHTTPShutdownAdmissionBaseline(t *testing.T) {
 	}
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 	case <-time.After(time.Second):
 		t.Fatal("shutdown did not finish")
 	}

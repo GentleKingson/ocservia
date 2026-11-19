@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
 
@@ -31,9 +32,7 @@ func TestCanceledSubscriptionReclaimsResources(t *testing.T) {
 		<-release // Return success after cancellation to exercise the ownership handoff.
 		return 1, nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	defer func() {
 		select {
@@ -44,9 +43,7 @@ func TestCanceledSubscriptionReclaimsResources(t *testing.T) {
 	}()
 
 	live, err := hub.Subscribe(context.Background(), "workspace", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer live.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -71,9 +68,7 @@ func TestCanceledSubscriptionReclaimsResources(t *testing.T) {
 	close(release)
 	// A normal handoff synchronizes with the watcher after the canceled request.
 	control, err := hub.Subscribe(context.Background(), "workspace", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	control.Close()
 	select {
 	case <-live.Done:
@@ -90,9 +85,7 @@ func TestUnclaimedWatcherReleasesBudget(t *testing.T) {
 	hub, err := NewHub(config, func(context.Context, string, uuid.UUID, int) ([]Event, error) {
 		return nil, nil
 	}, rejectNonNilCursor)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	if _, err := hub.watcher("canceled-before-handoff"); err != nil {
 		t.Fatal(err)
@@ -109,9 +102,7 @@ func TestSubscribersShareOnePollingWatcher(t *testing.T) {
 		queries.Add(1)
 		return nil, nil
 	}, rejectNonNilCursor)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	subscriptions := make([]*Subscription, 0, 100)
 	for index := 0; index < 100; index++ {
@@ -152,18 +143,12 @@ func TestSlowConsumerIsDisconnectedWithoutBlockingPeer(t *testing.T) {
 		}
 		return events, nil
 	}, rejectNonNilCursor)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	slow, err := hub.Subscribe(context.Background(), "scope", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	fast, err := hub.Subscribe(context.Background(), "scope", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer fast.Close()
 	// Drain the initial catch-up and all shared events from the fast peer only.
 	for index := 0; index < 16; index++ {
@@ -205,14 +190,10 @@ func TestDatabaseFailureBacksOffAndCursorRecovers(t *testing.T) {
 		}
 		return []Event{{ID: id, Sequence: 1, Name: "test", Data: []byte("recovered")}}, nil
 	}, rejectNonNilCursor)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	subscription, err := hub.Subscribe(context.Background(), "scope", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer subscription.Close()
 	eventually(t, time.Second, func() bool {
 		snapshot := hub.Snapshot()
@@ -253,16 +234,12 @@ func TestWatcherQueryCountIsIndependentOfSubscriberCount(t *testing.T) {
 				queries.Add(1)
 				return nil, nil
 			}, rejectNonNilCursor)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.NoError(t, err)
 			defer hub.Close()
 			var subscriptions []*Subscription
 			for index := 0; index < subscriberCount; index++ {
 				subscription, err := hub.Subscribe(context.Background(), "scope", uuid.Nil)
-				if err != nil {
-					t.Fatal(err)
-				}
+				testutil.NoError(t, err)
 				subscriptions = append(subscriptions, subscription)
 			}
 			if queries.Load() != 0 {
@@ -290,14 +267,10 @@ func TestTerminalEventDrainsThenClosesAllSubscribers(t *testing.T) {
 		}
 		return []Event{{ID: firstID, Sequence: 1, Name: "operation", Data: []byte("running")}, {ID: terminalID, Sequence: 2, Name: "operation", Data: []byte("succeeded"), Terminal: true}}, nil
 	}, rejectNonNilCursor)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	subscription, err := hub.Subscribe(context.Background(), "operation", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer subscription.Close()
 	var received []Event
 	for event := range subscription.Events {
@@ -321,18 +294,12 @@ func TestWatcherCapacityRejectsRandomScopesAndReclaims(t *testing.T) {
 	config.Watchers = 2
 	config.PollInterval = 100 * time.Millisecond
 	hub, err := NewHub(config, func(context.Context, string, uuid.UUID, int) ([]Event, error) { return nil, nil }, rejectNonNilCursor)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	first, err := hub.Subscribe(context.Background(), "scope-a", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	second, err := hub.Subscribe(context.Background(), "scope-b", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer second.Close()
 	if _, err := hub.Subscribe(context.Background(), "attacker-random-scope", uuid.Nil); !errors.Is(err, ErrWatcherLimit) {
 		t.Fatalf("watcher capacity error = %v", err)
@@ -351,29 +318,19 @@ func TestWatcherBudgetIsSharedAcrossPlatformAndOperationHubs(t *testing.T) {
 	config.Watchers = 2
 	config.PollInterval = 100 * time.Millisecond
 	budget, err := NewWatcherBudget(config.Watchers)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	fetch := func(context.Context, string, uuid.UUID, int) ([]Event, error) { return nil, nil }
 	platform, err := NewHubWithWatcherBudget(config, budget, fetch, rejectNonNilCursor)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer platform.Close()
 	operations, err := NewHubWithWatcherBudget(config, budget, fetch, rejectNonNilCursor)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer operations.Close()
 
 	platformSubscription, err := platform.Subscribe(context.Background(), "workspace-a", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	operationSubscription, err := operations.Subscribe(context.Background(), "operation-a", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer operationSubscription.Close()
 	if _, err := platform.Subscribe(context.Background(), "workspace-b", uuid.Nil); !errors.Is(err, ErrWatcherLimit) {
 		t.Fatalf("mixed hub watcher capacity error = %v", err)
@@ -399,16 +356,12 @@ func TestScopedWatchersPollFairly(t *testing.T) {
 		mu.Unlock()
 		return nil, nil
 	}, rejectNonNilCursor)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	var subscriptions []*Subscription
 	for _, scope := range []string{"workspace-a", "workspace-b", "workspace-c"} {
 		subscription, err := hub.Subscribe(context.Background(), scope, uuid.Nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		subscriptions = append(subscriptions, subscription)
 	}
 	defer func() {
@@ -449,13 +402,9 @@ func TestHubRestartResumesFromDurableCursor(t *testing.T) {
 		return 0, ErrInvalidCursor
 	}
 	firstHub, err := NewHub(config, fetch, resolve)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	firstSubscription, err := firstHub.Subscribe(context.Background(), "workspace", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	select {
 	case event := <-firstSubscription.Events:
 		if event.ID != firstID {
@@ -470,14 +419,10 @@ func TestHubRestartResumesFromDurableCursor(t *testing.T) {
 	events = append(events, Event{ID: secondID, Sequence: 2, Name: "platform", Data: []byte("second")})
 	mu.Unlock()
 	secondHub, err := NewHub(config, fetch, resolve)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer secondHub.Close()
 	secondSubscription, err := secondHub.Subscribe(context.Background(), "workspace", firstID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer secondSubscription.Close()
 	select {
 	case event := <-secondSubscription.Events:
@@ -520,15 +465,11 @@ func TestReconnectReplaysByDurableOrderWhenEventIDsAreNotMonotonic(t *testing.T)
 		return 0, ErrInvalidCursor
 	}
 	hub, err := NewHub(config, fetch, resolve)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 
 	first, err := hub.Subscribe(context.Background(), "workspace", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer first.Close()
 	for _, want := range []uuid.UUID{firstID, secondID} {
 		select {
@@ -542,9 +483,7 @@ func TestReconnectReplaysByDurableOrderWhenEventIDsAreNotMonotonic(t *testing.T)
 	}
 
 	reconnected, err := hub.Subscribe(context.Background(), "workspace", firstID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer reconnected.Close()
 	select {
 	case event := <-reconnected.Events:
@@ -592,14 +531,10 @@ func TestReconnectCatchupAndLiveHandoffDeliversConcurrentCommitExactlyOnce(t *te
 		return 0, ErrInvalidCursor
 	}
 	hub, err := NewHub(config, fetch, resolve)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	initial, err := hub.Subscribe(context.Background(), "workspace", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer initial.Close()
 	select {
 	case <-initial.Events:
@@ -609,9 +544,7 @@ func TestReconnectCatchupAndLiveHandoffDeliversConcurrentCommitExactlyOnce(t *te
 
 	block.Store(true)
 	reconnected, err := hub.Subscribe(context.Background(), "workspace", firstID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer reconnected.Close()
 	select {
 	case <-queryStarted:
@@ -662,14 +595,10 @@ func TestReconnectStormUsesSharedWatcherAndCachedCursor(t *testing.T) {
 		return 0, ErrInvalidCursor
 	}
 	hub, err := NewHub(config, fetch, resolve)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	initial, err := hub.Subscribe(context.Background(), "workspace", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer initial.Close()
 	for range 2 {
 		select {
@@ -682,9 +611,7 @@ func TestReconnectStormUsesSharedWatcherAndCachedCursor(t *testing.T) {
 	subscriptions := make([]*Subscription, 0, 100)
 	for range 100 {
 		subscription, err := hub.Subscribe(context.Background(), "workspace", firstID)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		subscriptions = append(subscriptions, subscription)
 	}
 	defer func() {
@@ -722,9 +649,7 @@ func TestInvalidScopedCursorFailsBeforeWatcherPolling(t *testing.T) {
 	}, func(context.Context, string, uuid.UUID) (uint64, error) {
 		return 0, ErrInvalidCursor
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	foreign := uuid.Must(uuid.NewV7())
 	if _, err := hub.Subscribe(context.Background(), "workspace", foreign); !errors.Is(err, ErrInvalidCursor) {
@@ -767,14 +692,10 @@ func TestReconnectAtLatestAfterIdleCleanupWaitsForNextLiveEvent(t *testing.T) {
 		return 0, ErrInvalidCursor
 	}
 	hub, err := NewHub(config, fetch, resolve)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer hub.Close()
 	initial, err := hub.Subscribe(context.Background(), "workspace", uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	select {
 	case <-initial.Events:
 	case <-time.After(time.Second):
@@ -784,9 +705,7 @@ func TestReconnectAtLatestAfterIdleCleanupWaitsForNextLiveEvent(t *testing.T) {
 	eventually(t, time.Second, func() bool { return hub.Snapshot().Watchers == 0 })
 
 	reconnected, err := hub.Subscribe(context.Background(), "workspace", firstID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer reconnected.Close()
 	select {
 	case duplicate := <-reconnected.Events:

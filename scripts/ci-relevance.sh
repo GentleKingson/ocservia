@@ -93,7 +93,7 @@ classify_path() {
     deploy/lib/install-env.sh|deploy/lib/install-ui.sh|deploy/lib/node-bootstrap.sh|deploy/lib/controller-runtime.sh|deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
     deploy/production/systemd/ocservia-agent-relays.conf|scripts/prepare-bootstrap-release-assets.sh|\
     scripts/release-agent-state-check.sh|scripts/package-agent.sh|scripts/verify-agent-package.sh|\
-    scripts/test-managed-node-install.sh|scripts/test-node-bootstrap.py|scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
+    scripts/test-installer-common.sh|scripts/test-managed-node-install.sh|scripts/test-node-bootstrap.py|scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
     scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py|scripts/test-release-agent-state-check.sh|.gitignore)
       run_installers=true ;;
     .github/workflows/release*.yml|scripts/*release*|scripts/build-agent-binaries.sh|\

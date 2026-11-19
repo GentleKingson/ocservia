@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os"
 	"sync"
 	"testing"
@@ -86,9 +87,7 @@ func TestAuditFailureRejectsBusinessWriteIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := integrationService(t)
 	ctx := context.Background()
 	owner, err := pgxpool.New(ctx, ownerURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer owner.Close()
 	if _, err := owner.Exec(ctx, `CREATE OR REPLACE FUNCTION test_operation_approval_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'injected audit failure'; END;$$; CREATE TRIGGER test_operation_approval_audit_failure BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION test_operation_approval_audit_failure()`); err != nil {
 		t.Fatal(err)
@@ -365,9 +364,7 @@ func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 		t.Fatalf("attempts/state = %d/%s", attempts, state)
 	}
 	metrics, err := service.Metrics(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if metrics.Unpublished != 1 || metrics.Queued != 1 || metrics.Unknown != 1 {
 		t.Fatalf("metrics after dispatch = %+v", metrics)
 	}
@@ -621,9 +618,7 @@ func TestMissingResultReapSkipsOutboxLockedByTerminalResultIntegration(t *testin
 	// Result ingestion takes the outbox lock before advancing the command and
 	// operation. Hold that exact commit window while Reap scans with SKIP LOCKED.
 	resultTx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer func() { _ = resultTx.Rollback(context.Background()) }()
 	var outboxID uuid.UUID
 	if err := resultTx.QueryRow(ctx, `SELECT id FROM outbox_events WHERE command_id=$1 FOR UPDATE`, commandID).Scan(&outboxID); err != nil {
@@ -707,9 +702,7 @@ func assertReconciliationEnvelope(t *testing.T, original, reconciled *agentv1.Co
 func TestBacklogRecoverySupersededExpiryAndUnknownIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := integrationService(t)
 	old, _, err := service.Create(context.Background(), testRequest(nodeID, "old", SyntheticEcho, "old"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	replacement := testRequest(nodeID, "replacement", SyntheticEcho, "new")
 	replacement.SupersedePending = true
 	if _, _, err := service.Create(context.Background(), replacement); err != nil {
@@ -750,9 +743,7 @@ func TestBacklogRecoverySupersededExpiryAndUnknownIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = pool.Exec(context.Background(), `UPDATE commands SET created_at=now()-interval '2 seconds',expires_at=now()-interval '1 second' WHERE workspace_id=$1 AND idempotency_key='expires'`, workspaceID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if err := service.Expire(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -770,9 +761,7 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Operation test',$2,now(),now())`, workspaceID, "operation-"+workspaceID.String()); err != nil {
 		pool.Close()
@@ -833,9 +822,7 @@ func authorizeOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID,
 	if err == nil {
 		_, err = pool.Exec(context.Background(), `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,now())`, workspaceID, request.ActorIdentityID)
 	}
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 }
 
 func testRequest(nodeID uuid.UUID, key string, kind Kind, message string) CreateRequest {

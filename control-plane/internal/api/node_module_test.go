@@ -2,12 +2,9 @@ package api
 
 import (
 	"context"
-	"errors"
-	"net/http/httptest"
-	"sync"
+	"net/http"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
@@ -43,86 +40,15 @@ func (r *observedNodeReader) HistoryFrom(ctx context.Context, id uuid.UUID, metr
 
 type blockedNodeReader struct {
 	NodeReader
-	started  chan context.Context
-	canceled chan error
-	release  chan struct{}
+	*blockedRequest
 }
 
 func (r *blockedNodeReader) GetNode(ctx context.Context, _ uuid.UUID) (telemetry.Node, error) {
-	r.started <- ctx
-	<-ctx.Done()
-	r.canceled <- ctx.Err()
-	<-r.release
-	return telemetry.Node{}, ctx.Err()
+	return telemetry.Node{}, r.wait(ctx)
 }
 
 func TestNodeHTTPContextLifetime(t *testing.T) {
-	for _, cancelRequest := range []bool{false, true} {
-		name := "deadline"
-		if cancelRequest {
-			name = "cancellation"
-		}
-		t.Run(name, func(t *testing.T) {
-			timeout := 30 * time.Millisecond
-			if cancelRequest {
-				timeout = time.Second
-			}
-			reader := &blockedNodeReader{started: make(chan context.Context, 1), canceled: make(chan error, 1), release: make(chan struct{})}
-			var once sync.Once
-			release := func() { once.Do(func() { close(reader.release) }) }
-			config := testHTTPConfig(true)
-			config.BodyLimit, config.RequestTimeout = 1024, timeout
-			s := newTestServer(t, config, nil, Modules{Nodes: reader}, Authorization{})
-			t.Cleanup(release)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			done := make(chan *httptest.ResponseRecorder, 1)
-			go func() {
-				w := httptest.NewRecorder()
-				s.http.Handler.ServeHTTP(w, baselineRequest("GET", "/api/v1/nodes/"+baselineID, nil).WithContext(ctx))
-				done <- w
-			}()
-			select {
-			case got := <-reader.started:
-				if _, ok := got.Deadline(); !ok {
-					t.Fatal("HTTP deadline lost")
-				}
-				if got.Value(requestIDKey{}) != "baseline-request" {
-					t.Fatal("request context lost")
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("reader did not start")
-			}
-			wantErr := context.DeadlineExceeded
-			if cancelRequest {
-				cancel()
-				wantErr = context.Canceled
-			}
-			select {
-			case got := <-reader.canceled:
-				if !errors.Is(got, wantErr) {
-					t.Fatalf("Reader context: %v", got)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("Reader did not observe cancellation")
-			}
-			select {
-			case w := <-done:
-				if w.Code != 503 {
-					t.Fatalf("timeout status: %d", w.Code)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("outer HTTP handler did not return")
-			}
-			shutdown, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Millisecond)
-			defer cancelShutdown()
-			if err := s.Shutdown(shutdown); !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("shutdown forgot node read: %v", err)
-			}
-			release()
-			if err := s.Shutdown(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
+	checkRequestLifetime(t, "", func() *http.Request { return baselineRequest("GET", "/api/v1/nodes/"+baselineID, nil) }, func(b *blockedRequest) Modules {
+		return Modules{Nodes: &blockedNodeReader{blockedRequest: b}}
+	}, Authorization{})
 }

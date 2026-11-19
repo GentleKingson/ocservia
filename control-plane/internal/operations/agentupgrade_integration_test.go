@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -70,9 +71,7 @@ func createScheduledUpgrade(t *testing.T, service *Service, pool *pgxpool.Pool, 
 		t.Fatalf("from_version = %q, %v", fromVersion, err)
 	}
 	operationUUID, err := uuid.Parse(operation.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	return operationUUID
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"os/exec"
 	"strings"
 	"sync"
@@ -26,16 +27,12 @@ func releasedCheckpoint(t *testing.T, pool *pgxpool.Pool) {
 		t.Fatal("missing or moved designated checkpoint tag", err)
 	}
 	sql, err := exec.Command("git", "show", sha+":control-plane/migrations/schema.sql").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if fmt.Sprintf("%x", sha256.Sum256(sql)) != checkpointChecksum {
 		t.Fatal("published PostgreSQL checkpoint checksum changed")
 	}
 	tx, err := pool.Begin(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer rollbackMigration(tx)
 	if _, err := tx.Exec(context.Background(), string(sql)); err != nil {
 		t.Fatal(err)
@@ -85,13 +82,9 @@ func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 		a, err := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		expected, err := a.catalog(a.schema.Baseline.Number)
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 		if err := validateStaticSchema(ctx, pool, expected); err != nil {
 			t.Fatal(err)
 		}
@@ -186,9 +179,7 @@ func TestPostgreSQLCutoverCleanupRollback(t *testing.T) {
 	}
 	a.upgrade.Base.Metadata, _ = json.Marshal(map[string]string{"catalog_sha256": fmt.Sprintf("%x", sha256.Sum256([]byte(catalog)))})
 	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	before := postgresDatabaseDigest(t, pool)
 	err = applyArtifactRevision(ctx, conn, a, *a.upgrade.Transition, true)
 	conn.Release()
@@ -214,14 +205,10 @@ func TestPostgreSQLCutoverConcurrentAndLock(t *testing.T) {
 	wg.Wait()
 	close(results)
 	for err := range results {
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.NoError(t, err)
 	}
 	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockID); err != nil {
 		t.Fatal(err)
 	}
@@ -262,9 +249,7 @@ func TestPostgreSQLSnapshotCatalogReadPermissions(t *testing.T) {
 	ctx := context.Background()
 	pool := snapshotDatabase(t)
 	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.NoError(t, err)
 	defer conn.Release()
 	if _, err := conn.Exec(ctx, "SET ROLE ocservia_app"); err != nil {
 		t.Fatal(err)

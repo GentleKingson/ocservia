@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-python3 "${ROOT}/scripts/test-node-bootstrap.py"
 INSTALL="${INSTALLER_UNDER_TEST:-${ROOT}/deploy/managed-node/install.sh}"
 VERSION="${TEST_RELEASE_VERSION:-0.2.1}"
 scope="${1:-full}"
@@ -10,6 +9,11 @@ case "${scope}" in
   full|release-contracts) [[ $# -le 1 ]] ;;
   *) echo 'usage: test-managed-node-install.sh [full|release-contracts]' >&2; exit 2 ;;
 esac
+# shellcheck source=scripts/test-installer-common.sh
+source "${ROOT}/scripts/test-installer-common.sh"
+if [[ "${scope}" == full ]]; then
+  python3 "${ROOT}/scripts/test-node-bootstrap.py"
+fi
 MOCK_NODE_ID="018f1e11-2222-7333-8444-555555555555"
 
 # The installer fixture asserts file modes with GNU stat and creates runtime command
@@ -33,24 +37,12 @@ umask 022
 
 fixture="$(mktemp -d "${TMPDIR:-${HOME}}/.ocservia-managed-node-test.XXXXXX")"
 
-can_root() {
-  ((EUID == 0)) || sudo -n true >/dev/null 2>&1
-}
-
 # The reduced release run must exercise native version convergence and digest
 # checks, not report success after skipping the privileged scenarios.
 if [[ "${scope}" == release-contracts ]] && ! can_root; then
   echo 'Release contracts require root or passwordless sudo' >&2
   exit 1
 fi
-
-as_root() {
-  if ((EUID == 0)); then
-    "$@"
-  else
-    sudo -n "$@"
-  fi
-}
 
 cleanup() {
   local status=$?
@@ -598,22 +590,6 @@ capture_root() {
   fi
 }
 
-assert_status() {
-  ((RUN_STATUS == "$1")) || die "expected exit status $1 but got ${RUN_STATUS}"
-}
-
-assert_output() {
-  grep -q -- "$1" <<<"${RUN_OUTPUT}" || die "expected output to contain '$1'"
-}
-
-assert_log_contains() {
-  grep -qF -- "$2" "$1" || die "expected $1 to contain '$2'"
-}
-
-assert_log_empty() {
-  [[ ! -s "$1" ]] || die "expected $1 to stay empty, got: $(cat -- "$1")"
-}
-
 scenario() {
   rm -f "${fixture}/preflight-failure" "${logs}/preflight.log"
   reset_state
@@ -683,6 +659,34 @@ CONFIG
 
 install_token() { capture_root --join-token-file "${fixture}/join-token"; }
 resume_token() { capture_root --resume-install --version "v${VERSION}"; }
+check_native_packages() {
+  local architecture
+  for architecture in amd64 arm64; do
+    scenario
+    if [[ "$architecture" == amd64 ]]; then printf x86_64 >"${arch_file}"; else printf aarch64 >"${arch_file}"; fi
+    install_token
+    assert_status 0
+    assert_log_contains "${dpkg_log}" "ocservia-agent_${VERSION}-1_${architecture}.deb"
+  done
+  scenario
+  EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/rocky-9")
+  install_token
+  assert_status 0
+  assert_log_contains "${rpm_log}" "ocservia-agent-${VERSION}-1."
+
+  scenario
+  printf 'before-freeze\n' >"${tamper_after_verify_file}"
+  install_token
+  assert_status 1
+  assert_log_empty "${dpkg_log}"
+  scenario
+  printf 'after-freeze\n' >"${tamper_after_verify_file}"
+  install_token
+  assert_status 0
+  assert_output '^ONLINE$'
+  assert_log_contains "${dpkg_log}" 'ocservia-managed-node-pkg.'
+}
+
 identity_digest() {
   as_root sha256sum "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" \
     "${sysroot}/var/lib/ocservia-agent/identity/controller.endpoint" \
@@ -711,6 +715,12 @@ assert_output '^ONLINE$'
 install_token
 assert_status 0
 [[ "$(identity_digest)" == "$initial_identity" ]] || die "same-token replay changed keys"
+
+if [[ "${scope}" == release-contracts ]]; then
+  check_native_packages
+  echo "Managed node release contracts passed (${VERSION})"
+  exit 0
+fi
 
 # A registered root key must be restored, never regenerated.
 as_root mv "${sysroot}/var/lib/ocservia-privd/attestation.key" "${fixture}/original-attestation"
@@ -789,30 +799,7 @@ resume_token
 assert_status 0
 assert_output '^ONLINE$'
 
-for architecture in amd64 arm64; do
-  scenario
-  if [[ "$architecture" == amd64 ]]; then printf x86_64 >"${arch_file}"; else printf aarch64 >"${arch_file}"; fi
-  install_token
-  assert_status 0
-  assert_log_contains "${dpkg_log}" "ocservia-agent_${VERSION}-1_${architecture}.deb"
-done
-scenario
-EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/rocky-9")
-install_token
-assert_status 0
-assert_log_contains "${rpm_log}" "ocservia-agent-${VERSION}-1."
-
-scenario
-printf 'before-freeze\n' >"${tamper_after_verify_file}"
-install_token
-assert_status 1
-assert_log_empty "${dpkg_log}"
-scenario
-printf 'after-freeze\n' >"${tamper_after_verify_file}"
-install_token
-assert_status 0
-assert_output '^ONLINE$'
-assert_log_contains "${dpkg_log}" 'ocservia-managed-node-pkg.'
+check_native_packages
 
 scenario
 printf 'resource=ocpasswd reason=mode\n' >"${fixture}/preflight-failure"
