@@ -10,7 +10,6 @@ use std::error::Error;
 use std::fmt;
 
 use prost::Message;
-use prost::bytes::{Buf, Bytes};
 use prost::encoding::{DecodeContext, WireType, decode_key, decode_length_delimiter, skip_field};
 
 use crate::generated::ocserv::platform::agent::v1::CommandEnvelope;
@@ -95,7 +94,7 @@ pub fn decode_strict_command_envelope(bytes: &[u8]) -> Result<CommandEnvelope, S
 /// Returns an error for malformed Protobuf, unknown fields at any command
 /// message depth, or a known field with the wrong wire type.
 pub fn validate_strict_command_envelope(bytes: &[u8]) -> Result<(), StrictWireError> {
-    validate_message(Bytes::copy_from_slice(bytes), MessageKind::CommandEnvelope)
+    validate_message(bytes, MessageKind::CommandEnvelope)
 }
 
 #[derive(Clone, Copy)]
@@ -173,8 +172,8 @@ enum FieldKind {
     Nested(MessageKind),
 }
 
-fn validate_message(mut bytes: Bytes, message: MessageKind) -> Result<(), StrictWireError> {
-    while bytes.has_remaining() {
+fn validate_message(mut bytes: &[u8], message: MessageKind) -> Result<(), StrictWireError> {
+    while !bytes.is_empty() {
         let (tag, wire_type) = decode_key(&mut bytes).map_err(StrictWireError::Decode)?;
         let Some(field) = field_kind(message, tag) else {
             return Err(StrictWireError::UnknownField {
@@ -208,12 +207,17 @@ fn validate_message(mut bytes: Bytes, message: MessageKind) -> Result<(), Strict
     Ok(())
 }
 
-fn take_nested(bytes: &mut Bytes, message: &'static str) -> Result<Bytes, StrictWireError> {
+fn take_nested<'a>(
+    bytes: &mut &'a [u8],
+    message: &'static str,
+) -> Result<&'a [u8], StrictWireError> {
     let length = decode_length_delimiter(&mut *bytes).map_err(StrictWireError::Decode)?;
-    if length > bytes.remaining() {
+    if length > bytes.len() {
         return Err(StrictWireError::NestedMessageTruncated { message });
     }
-    Ok(bytes.split_to(length))
+    let (nested, rest) = bytes.split_at(length);
+    *bytes = rest;
+    Ok(nested)
 }
 
 #[allow(clippy::too_many_lines)]

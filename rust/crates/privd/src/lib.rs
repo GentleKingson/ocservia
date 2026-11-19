@@ -2,6 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+mod effect_binding;
+mod receipts;
+mod validation;
+
 use std::fs;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -12,33 +16,29 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 use ocservia_agent_protocol::{
     AgentUpgradeScheduledResult, ErrorKind, PrivdError, PrivdRequest, PrivdResponse,
-    PrivilegedRequestMode, UpgradeOperationResult, UpgradeResultList, privd_request,
-    privd_response, read_frame, write_frame,
+    UpgradeOperationResult, UpgradeResultList, privd_request, privd_response, read_frame,
+    write_frame,
 };
-use ocservia_command_authorization::{
-    ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
-    FenceBindingClaimsV2, VerifiedConnectionFenceV2,
-};
+use ocservia_command_authorization::{CommandAuthorizationV1, ControllerCommandKeyring};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, CommandDeliveryMode,
-    CommandEnvelope, CommandResultState, ConnectionFenceV2, FenceBindingV2, FenceOperationKind,
-    PrivdCertificateReceiptBindingV1, PrivdReceiptVersion, PrivdResultReceiptV1,
-    PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose, SealedSecretVersion,
-    command_envelope,
+    AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, CommandEnvelope,
+    PrivdReceiptVersion, command_envelope,
 };
-use ocservia_ocserv_adapter::{
-    Adapter, ArtifactLeaseIdentity, AuthorizedEffectDecision, AuthorizedEffectIdentity,
-    EffectIdentity,
-};
-use ocservia_privd_attestation::{
-    key_id, requested_subject_digest, sign_receipt, sign_upgrade_result,
-};
+use ocservia_ocserv_adapter::{Adapter, AuthorizedEffectDecision};
+use ocservia_privd_attestation::{key_id, sign_upgrade_result_with_key_id};
 use ocservia_upgrader::{ScheduleOutcome, UpgradeIntent, UpgradeScheduler, UpgradeStoreError};
 use prost::Message as _;
-use sha2::{Digest as _, Sha256};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+
+use self::effect_binding::{
+    adapter_effect, artifact_identity, authorized_effect, deadline_error, decode_cached_response,
+    desired_effect_binding, effect_binding, error, finish_operation, fixed_host_effect,
+    replay_only_response, response_error,
+};
+use self::receipts::{build_result_proof, terminal_result_error_code};
+use self::validation::{ValidatedRequest, validate_request};
 
 const MAX_CONCURRENT_CLIENTS: usize = 4;
 const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(30);
@@ -135,6 +135,7 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), io::Error> {
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+    let attestation_key_id: Arc<str> = Arc::from(key_id(&config.attestation_key.verifying_key()));
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -157,6 +158,7 @@ pub async fn serve(
                 let endpoint_id = config.endpoint_id;
                 let command_keys = config.command_keys.clone();
                 let attestation_key = Arc::clone(&config.attestation_key);
+                let attestation_key_id = Arc::clone(&attestation_key_id);
                 let upgrades = config.upgrades.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
@@ -167,6 +169,7 @@ pub async fn serve(
                         endpoint_id,
                         command_keys,
                         attestation_key,
+                        attestation_key_id,
                         upgrades,
                         adapter,
                     )
@@ -188,6 +191,7 @@ async fn handle_client(
     endpoint_id: [u8; 32],
     command_keys: ControllerCommandKeyring,
     attestation_key: Arc<SigningKey>,
+    attestation_key_id: Arc<str>,
     upgrades: UpgradeScheduler,
     adapter: Adapter,
 ) -> Result<(), io::Error> {
@@ -207,6 +211,7 @@ async fn handle_client(
         &endpoint_id,
         &command_keys,
         &attestation_key,
+        &attestation_key_id,
         &upgrades,
         &adapter,
     )
@@ -217,12 +222,14 @@ async fn handle_client(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_attested(
     request: &PrivdRequest,
     node_id: &[u8; 16],
     endpoint_id: &[u8; 32],
     command_keys: &ControllerCommandKeyring,
-    attestation_key: &SigningKey,
+    attestation_key: &Arc<SigningKey>,
+    attestation_key_id: &Arc<str>,
     upgrades: &UpgradeScheduler,
     adapter: &Adapter,
 ) -> PrivdResponse {
@@ -235,6 +242,7 @@ async fn dispatch_attested(
                     request.operation.clone(),
                     node_id,
                     attestation_key,
+                    attestation_key_id,
                     adapter,
                     upgrades,
                 ),
@@ -254,6 +262,7 @@ async fn dispatch_attested(
                     &accepted_at,
                     node_id,
                     attestation_key,
+                    attestation_key_id,
                     upgrades,
                     adapter,
                 ),
@@ -331,13 +340,15 @@ async fn dispatch(
     command_keys: &ControllerCommandKeyring,
     adapter: &Adapter,
 ) -> PrivdResponse {
-    let key = SigningKey::from_bytes(&[41; 32]);
+    let key = Arc::new(SigningKey::from_bytes(&[41; 32]));
+    let kid: Arc<str> = Arc::from(key_id(&key.verifying_key()));
     dispatch_attested(
         &request,
         node_id,
         &TEST_ENDPOINT_ID,
         command_keys,
         &key,
+        &kid,
         &UpgradeScheduler::disabled(),
         adapter,
     )
@@ -352,616 +363,27 @@ async fn dispatch_upgrade(
     adapter: &Adapter,
     upgrades: &UpgradeScheduler,
 ) -> PrivdResponse {
-    let key = SigningKey::from_bytes(&[41; 32]);
+    let key = Arc::new(SigningKey::from_bytes(&[41; 32]));
+    let kid: Arc<str> = Arc::from(key_id(&key.verifying_key()));
     dispatch_attested(
         &request,
         node_id,
         &TEST_ENDPOINT_ID,
         command_keys,
         &key,
+        &kid,
         upgrades,
         adapter,
     )
     .await
 }
 
-enum ValidatedRequest<'a> {
-    Read,
-    Execute(
-        &'a CommandEnvelope,
-        CommandAuthorizationV1,
-        prost_types::Timestamp,
-    ),
-    Reconcile(&'a CommandEnvelope, CommandAuthorizationV1),
-    ArtifactRead(ArtifactGrantClaimsV1, u64),
-    ArtifactConsume(ArtifactGrantClaimsV1, Vec<u8>, u64, bool),
-}
-
-#[allow(clippy::too_many_lines)]
-fn validate_request<'a>(
-    request: &'a PrivdRequest,
-    node_id: &[u8; 16],
-    endpoint_id: &[u8; 32],
-    command_keys: &ControllerCommandKeyring,
-) -> Result<(Duration, ValidatedRequest<'a>), PrivdError> {
-    let id = Uuid::from_slice(&request.request_id)
-        .map_err(|_| error(ErrorKind::InvalidRequest, "request_id must be UUIDv7"))?;
-    if id.get_version_num() != 7 {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "request_id must be UUIDv7",
-        ));
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?;
-    let now_ms = u64::try_from(now.as_millis())
-        .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?;
-    if request.deadline_unix_ms <= now_ms {
-        return Err(error(
-            ErrorKind::DeadlineExceeded,
-            "request deadline exceeded",
-        ));
-    }
-    let remaining = Duration::from_millis(request.deadline_unix_ms - now_ms);
-    if remaining > MAX_REQUEST_LIFETIME {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "request deadline too far in future",
-        ));
-    }
-    let mode = PrivilegedRequestMode::try_from(request.privileged_mode)
-        .unwrap_or(PrivilegedRequestMode::Unspecified);
-    let validated = if let Some(command) = request.authorization_command.as_ref() {
-        if request.operation.is_some() || mode == PrivilegedRequestMode::Unspecified {
-            return Err(error(
-                ErrorKind::InvalidRequest,
-                "signed command request shape invalid",
-            ));
-        }
-        let now_seconds = i64::try_from(now.as_secs())
-            .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?;
-        let claims = command_keys
-            .verify_command(command, node_id, now_seconds)
-            .map_err(|failure| authorization_error(&failure))?;
-        validate_privileged_payload(command, &claims)?;
-        let delivery = CommandDeliveryMode::try_from(command.delivery_mode)
-            .unwrap_or(CommandDeliveryMode::Unspecified);
-        match (mode, delivery) {
-            (
-                PrivilegedRequestMode::Execute,
-                CommandDeliveryMode::ExecuteOrReplay | CommandDeliveryMode::RetryIfEffectAbsent,
-            ) => {
-                let accepted = request.accepted_at.ok_or_else(|| {
-                    error(
-                        ErrorKind::InvalidRequest,
-                        "journal acceptance timestamp required",
-                    )
-                })?;
-                if accepted.seconds < claims.issued_at_seconds
-                    || accepted.seconds > now_seconds.saturating_add(300)
-                    || !(0..1_000_000_000).contains(&accepted.nanos)
-                {
-                    return Err(error(
-                        ErrorKind::InvalidRequest,
-                        "journal acceptance timestamp invalid",
-                    ));
-                }
-                verify_execution_fence(
-                    command,
-                    &claims,
-                    node_id,
-                    endpoint_id,
-                    command_keys,
-                    now_seconds,
-                    now.subsec_nanos(),
-                )?;
-                ValidatedRequest::Execute(command, claims, accepted)
-            }
-            (PrivilegedRequestMode::Reconcile, CommandDeliveryMode::ReconcileOnly) => {
-                if effect_binding(command, &claims).is_none() {
-                    return Err(error(
-                        ErrorKind::InvalidRequest,
-                        "command does not support privileged reconciliation",
-                    ));
-                }
-                ValidatedRequest::Reconcile(command, claims)
-            }
-            _ => {
-                return Err(error(
-                    ErrorKind::PermissionDenied,
-                    "signed command delivery mode mismatch",
-                ));
-            }
-        }
-    } else {
-        if request.accepted_at.is_some() {
-            return Err(error(
-                ErrorKind::InvalidRequest,
-                "journal acceptance timestamp is only valid for execution",
-            ));
-        }
-        if mode != PrivilegedRequestMode::Unspecified {
-            return Err(error(
-                ErrorKind::PermissionDenied,
-                "Controller command authorization required",
-            ));
-        }
-        if let Some(privd_request::Operation::ArtifactRead(value)) = request.operation.as_ref() {
-            let grant = value
-                .grant
-                .as_ref()
-                .ok_or_else(|| error(ErrorKind::PermissionDenied, "artifact grant required"))?;
-            let artifact_id: [u8; 16] = grant
-                .artifact_id
-                .as_slice()
-                .try_into()
-                .map_err(|_| error(ErrorKind::InvalidRequest, "artifact ID invalid"))?;
-            let claims = command_keys
-                .verify_artifact_grant(
-                    grant,
-                    node_id,
-                    &artifact_id,
-                    "certificate_p12",
-                    grant.max_bytes,
-                    i64::try_from(now.as_secs())
-                        .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
-                )
-                .map_err(|failure| authorization_error(&failure))?;
-            validate_artifact_claims(&claims)?;
-            verify_artifact_fence(
-                value.connection_fence.as_deref(),
-                value.fence_binding.as_deref(),
-                &claims.artifact_id,
-                node_id,
-                endpoint_id,
-                command_keys,
-                i64::try_from(now.as_secs())
-                    .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
-                now.subsec_nanos(),
-            )?;
-            if value.offset > claims.max_bytes {
-                return Err(error(ErrorKind::InvalidRequest, "artifact offset invalid"));
-            }
-            ValidatedRequest::ArtifactRead(claims, value.offset)
-        } else if let Some(privd_request::Operation::ArtifactConsume(value)) =
-            request.operation.as_ref()
-        {
-            let grant = value
-                .grant
-                .as_ref()
-                .ok_or_else(|| error(ErrorKind::PermissionDenied, "artifact grant required"))?;
-            let artifact_id: [u8; 16] = grant
-                .artifact_id
-                .as_slice()
-                .try_into()
-                .map_err(|_| error(ErrorKind::InvalidRequest, "artifact ID invalid"))?;
-            let claims = if value.confirm_only {
-                command_keys.verify_artifact_grant_for_confirmation(
-                    grant,
-                    node_id,
-                    &artifact_id,
-                    "certificate_p12",
-                    grant.max_bytes,
-                    i64::try_from(now.as_secs())
-                        .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
-                )
-            } else {
-                command_keys.verify_artifact_grant(
-                    grant,
-                    node_id,
-                    &artifact_id,
-                    "certificate_p12",
-                    grant.max_bytes,
-                    i64::try_from(now.as_secs())
-                        .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
-                )
-            }
-            .map_err(|failure| authorization_error(&failure))?;
-            validate_artifact_claims(&claims)?;
-            verify_artifact_fence(
-                value.connection_fence.as_deref(),
-                value.fence_binding.as_deref(),
-                &claims.grant_id,
-                node_id,
-                endpoint_id,
-                command_keys,
-                i64::try_from(now.as_secs())
-                    .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
-                now.subsec_nanos(),
-            )?;
-            if value.sha256.len() != 32 || value.size == 0 || value.size > claims.max_bytes {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "artifact consumption evidence invalid",
-                ));
-            }
-            ValidatedRequest::ArtifactConsume(
-                claims,
-                value.sha256.clone(),
-                value.size,
-                value.confirm_only,
-            )
-        } else if !matches!(
-            request.operation,
-            Some(
-                privd_request::Operation::ServiceStatus(_)
-                    | privd_request::Operation::OcservVersion(_)
-                    | privd_request::Operation::SessionList(_)
-                    | privd_request::Operation::IpBanList(_)
-                    | privd_request::Operation::ConfigFingerprint(_)
-                    | privd_request::Operation::UserList(_)
-                    | privd_request::Operation::GroupList(_)
-                    | privd_request::Operation::UpgradeResultList(_)
-            )
-        ) {
-            return Err(error(
-                ErrorKind::PermissionDenied,
-                "Controller command authorization required",
-            ));
-        } else {
-            ValidatedRequest::Read
-        }
-    };
-    Ok((remaining, validated))
-}
-
-fn validate_artifact_claims(claims: &ArtifactGrantClaimsV1) -> Result<(), PrivdError> {
-    if [
-        claims.node_id,
-        claims.artifact_id,
-        claims.certificate_id,
-        claims.operation_id,
-        claims.grant_id,
-    ]
-    .into_iter()
-    .any(|value| Uuid::from_bytes(value).get_version_num() != 7)
-        || claims.certificate_version == 0
-        || claims.max_bytes == 0
-        || claims.max_bytes > 64 * 1024 * 1024
-        || claims.authorized_subject.is_empty()
-        || claims.authorized_subject.len() > 256
-    {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "artifact grant claims invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn artifact_identity(claims: &ArtifactGrantClaimsV1) -> ArtifactLeaseIdentity<'_> {
-    ArtifactLeaseIdentity {
-        artifact_id: &claims.artifact_id,
-        certificate_id: &claims.certificate_id,
-        certificate_version: claims.certificate_version,
-        operation_id: &claims.operation_id,
-        authorized_subject: &claims.authorized_subject,
-        max_bytes: claims.max_bytes,
-        grant_id: &claims.grant_id,
-        expires_at_unix_seconds: claims.expires_at_seconds,
-    }
-}
-
-fn authorization_error(failure: &AuthorizationError) -> PrivdError {
-    error(ErrorKind::PermissionDenied, failure.code())
-}
-
-/// The Agent's own owner-term checks do not survive an Agent compromise, so
-/// root re-verifies the Controller-signed connection fence and its command
-/// binding at its own clock before any new effect.
-///
-/// ponytail: stale authority is bounded by the signed owner lease
-/// (`OCSERV_OWNER_LEASE_TTL`, 30s by default); privd keeps no durable
-/// owner-epoch/revision floor. Add one to the root effect store if a newer
-/// accepted term must revoke an unexpired lease immediately.
-fn verify_execution_fence(
-    command: &CommandEnvelope,
-    claims: &CommandAuthorizationV1,
-    node_id: &[u8; 16],
-    endpoint_id: &[u8; 32],
-    command_keys: &ControllerCommandKeyring,
-    now_seconds: i64,
-    now_nanos: u32,
-) -> Result<(), PrivdError> {
-    let (fence, binding) = verify_fence_carriers(
-        command.connection_fence.as_ref(),
-        command.fence_binding.as_ref(),
-        node_id,
-        endpoint_id,
-        command_keys,
-        now_seconds,
-        now_nanos,
-    )?;
-    if binding.operation_kind != FenceOperationKind::Command as u32
-        || binding.operation_id != claims.command_id
-        || binding.capability != claims.required_capability
-        || claims.expected_revision != fence.authorization_revision
-        || !fence.capabilities.contains(&binding.capability)
-        || !binding.matches_fence(&fence)
-    {
-        return Err(error(
-            ErrorKind::PermissionDenied,
-            "connection fence does not authorize this command",
-        ));
-    }
-    Ok(())
-}
-
-/// Verifies the signed owner term and binding carriers against privd's own
-/// clock, pinned node ID and root-provisioned `EndpointID`.
-fn verify_fence_carriers(
-    fence: Option<&ConnectionFenceV2>,
-    binding: Option<&FenceBindingV2>,
-    node_id: &[u8; 16],
-    endpoint_id: &[u8; 32],
-    command_keys: &ControllerCommandKeyring,
-    now_seconds: i64,
-    now_nanos: u32,
-) -> Result<(VerifiedConnectionFenceV2, FenceBindingClaimsV2), PrivdError> {
-    let (Some(fence), Some(binding)) = (fence, binding) else {
-        return Err(error(
-            ErrorKind::PermissionDenied,
-            "signed connection fence and binding required",
-        ));
-    };
-    let fence = command_keys
-        .verify_connection_fence_v2_at(fence, node_id, endpoint_id, now_seconds, now_nanos)
-        .map_err(|failure| authorization_error(&failure))?;
-    if fence.lease_expired(now_seconds, now_nanos) {
-        return Err(error(
-            ErrorKind::PermissionDenied,
-            "connection-owner lease expired",
-        ));
-    }
-    let binding = command_keys
-        .verify_fence_binding_v2_at(binding, node_id, endpoint_id, now_seconds, now_nanos)
-        .map_err(|failure| authorization_error(&failure))?;
-    Ok((fence, binding))
-}
-
-/// Artifact reads and consumption are not commands, so the Agent's owner-term
-/// check is re-proven here from the same Controller-signed artifact binding the
-/// Agent verified: fetch binds the artifact ID, consumption binds the grant ID.
-/// ponytail: like `Execute`, an old binding stays usable until its signed owner
-/// lease ends; privd keeps no owner-epoch floor. Each read re-checks the one
-/// dispatch fence, which suffices only while a P12 fits one 256 KiB chunk (the
-/// 256 KiB chain cap with an RSA-4096 key yields ~192 KiB). If artifacts can
-/// span chunks, the Controller must refresh the fence during the transfer.
-#[allow(clippy::too_many_arguments)]
-fn verify_artifact_fence(
-    fence: Option<&ConnectionFenceV2>,
-    binding: Option<&FenceBindingV2>,
-    operation_id: &[u8; 16],
-    node_id: &[u8; 16],
-    endpoint_id: &[u8; 32],
-    command_keys: &ControllerCommandKeyring,
-    now_seconds: i64,
-    now_nanos: u32,
-) -> Result<(), PrivdError> {
-    let (fence, binding) = verify_fence_carriers(
-        fence,
-        binding,
-        node_id,
-        endpoint_id,
-        command_keys,
-        now_seconds,
-        now_nanos,
-    )?;
-    if binding.operation_kind != FenceOperationKind::Artifact as u32
-        || binding.operation_id.as_slice() != operation_id
-        || binding.capability != CONNECTION_FENCING_CAPABILITY
-        || !fence.capabilities.contains(&binding.capability)
-        || !binding.matches_fence(&fence)
-    {
-        return Err(error(
-            ErrorKind::PermissionDenied,
-            "connection fence does not authorize this artifact operation",
-        ));
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_lines)]
-fn validate_privileged_payload(
-    command: &CommandEnvelope,
-    claims: &CommandAuthorizationV1,
-) -> Result<(), PrivdError> {
-    for value in [
-        claims.command_id,
-        claims.idempotency_key,
-        claims.node_id,
-        claims.operation_id,
-    ] {
-        if Uuid::from_bytes(value).get_version_num() != 7 {
-            return Err(error(
-                ErrorKind::InvalidRequest,
-                "signed command UUID identity invalid",
-            ));
-        }
-    }
-    match command.payload.as_ref() {
-        Some(
-            command_envelope::Payload::CompleteConfigPlan(_)
-            | command_envelope::Payload::CompleteConfigApply(_),
-        ) => {
-            ocservia_command_authorization::semantic_payload_hash_v2(command)
-                .map_err(|failure| authorization_error(&failure))?;
-        }
-        Some(command_envelope::Payload::SessionDisconnect(payload)) => {
-            validate_session(&payload.session_id, &payload.boot_id)?;
-        }
-        Some(command_envelope::Payload::SessionTerminate(payload)) => {
-            validate_session(&payload.session_id, &payload.boot_id)?;
-        }
-        Some(command_envelope::Payload::IpBanRemove(payload)) => {
-            let canonical = payload
-                .ip
-                .parse::<std::net::IpAddr>()
-                .map_err(|_| error(ErrorKind::InvalidRequest, "IP address invalid"))?
-                .to_string();
-            if canonical != payload.ip {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "IP address must be canonical",
-                ));
-            }
-        }
-        Some(command_envelope::Payload::GroupApply(payload)) => {
-            if payload.members.len() > ocservia_agent_protocol::MAX_MANAGED_RESOURCES
-                || payload.members.windows(2).any(|pair| pair[0] >= pair[1])
-            {
-                return Err(error(ErrorKind::InvalidRequest, "group members invalid"));
-            }
-        }
-        Some(command_envelope::Payload::CertificateCsr(payload)) => {
-            validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
-        }
-        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
-            validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
-            if payload.certificate_version == 0 {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "certificate version invalid",
-                ));
-            }
-        }
-        Some(command_envelope::Payload::CertificateP12(payload)) => {
-            validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
-            validate_uuid(&payload.artifact_id, "artifact ID invalid")?;
-            validate_sealed_secret(
-                payload.sealed_password_v1.as_ref(),
-                SealedSecretPurpose::CertificateP12Password,
-            )?;
-            if !payload.sealed_password.is_empty()
-                || !payload.secret_key_id.is_empty()
-                || payload.certificate_version == 0
-                || payload.artifact_expires_at.is_none()
-            {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "P12 secret binding invalid",
-                ));
-            }
-        }
-        Some(command_envelope::Payload::UserCreate(payload)) => {
-            validate_sealed_secret(
-                payload.sealed_password_v1.as_ref(),
-                SealedSecretPurpose::UserPassword,
-            )?;
-            if !payload.sealed_password.is_empty() || !payload.secret_key_id.is_empty() {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "user secret binding invalid",
-                ));
-            }
-        }
-        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
-            validate_sealed_secret(
-                payload.sealed_password_v1.as_ref(),
-                SealedSecretPurpose::UserPassword,
-            )?;
-            if !payload.sealed_password.is_empty() || !payload.secret_key_id.is_empty() {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "user secret binding invalid",
-                ));
-            }
-        }
-        Some(
-            command_envelope::Payload::ServiceReload(_)
-            | command_envelope::Payload::UserDisable(_)
-            | command_envelope::Payload::UserEnable(_),
-        ) => {}
-        Some(command_envelope::Payload::AgentUpgrade(payload)) => {
-            validate_upgrade_release(payload)?;
-        }
-        _ => {
-            return Err(error(
-                ErrorKind::PermissionDenied,
-                "payload is not a privileged privd command",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_sealed_secret(
-    secret: Option<&ocservia_contracts::generated::ocserv::platform::agent::v1::SealedSecretV1>,
-    purpose: SealedSecretPurpose,
-) -> Result<(), PrivdError> {
-    let secret =
-        secret.ok_or_else(|| error(ErrorKind::InvalidRequest, "sealed secret required"))?;
-    if SealedSecretVersion::try_from(secret.version).ok() != Some(SealedSecretVersion::V1)
-        || SealedSecretPurpose::try_from(secret.purpose).ok() != Some(purpose)
-        || secret.key_id.is_empty()
-        || secret.key_id.len() > 128
-        || secret.ciphertext.len() < 32
-        || secret.ciphertext.len() > 16 * 1024
-    {
-        return Err(error(ErrorKind::InvalidRequest, "sealed secret invalid"));
-    }
-    Ok(())
-}
-
-/// Independently validates the immutable upgrade release identity carried by a
-/// Controller-signed command. Privd never trusts the Agent-side validation and
-/// never executes package installation at this boundary.
-fn validate_upgrade_release(
-    payload: &ocservia_contracts::generated::ocserv::platform::agent::v1::AgentUpgrade,
-) -> Result<(), PrivdError> {
-    if !ocservia_contracts::agent_upgrade::valid_target_version(&payload.target_version) {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "agent upgrade target version invalid",
-        ));
-    }
-    if payload.package_sha256.len() != 32 {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "agent upgrade package digest invalid",
-        ));
-    }
-    if !ocservia_contracts::agent_upgrade::valid_architecture(&payload.architecture) {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "agent upgrade architecture invalid",
-        ));
-    }
-    if ocservia_contracts::agent_upgrade::runtime_architecture()
-        != Some(payload.architecture.as_str())
-    {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "agent upgrade architecture does not match this host",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_session(session_id: &str, boot_id: &str) -> Result<(), PrivdError> {
-    let parsed = session_id
-        .parse::<u64>()
-        .map_err(|_| error(ErrorKind::InvalidRequest, "session ID invalid"))?;
-    if parsed == 0 || parsed.to_string() != session_id || Uuid::parse_str(boot_id).is_err() {
-        return Err(error(ErrorKind::InvalidRequest, "session target invalid"));
-    }
-    Ok(())
-}
-
-fn validate_uuid(value: &[u8], detail: &str) -> Result<(), PrivdError> {
-    let id = Uuid::from_slice(value).map_err(|_| error(ErrorKind::InvalidRequest, detail))?;
-    if id.get_version_num() != 7 {
-        return Err(error(ErrorKind::InvalidRequest, detail));
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_lines)]
 async fn execute_read(
     operation: Option<privd_request::Operation>,
     node_id: &[u8; 16],
-    attestation_key: &SigningKey,
+    attestation_key: &Arc<SigningKey>,
+    attestation_key_id: &Arc<str>,
     adapter: &Adapter,
     upgrades: &UpgradeScheduler,
 ) -> privd_response::Result {
@@ -1021,93 +443,25 @@ async fn execute_read(
                 .await
                 .map(privd_response::Result::GroupList),
         ),
-        privd_request::Operation::UpgradeResultList(_) => (
-            "upgrade_result_list",
-            ocservia_upgrader::read_recent_results(upgrades.operations_root(), 8)
-                .and_then(|results| {
-                    results
-                        .into_iter()
-                        .map(|result| {
-                            let completed_unix_ms = result.completed_unix.checked_mul(1000).ok_or(
-                                UpgradeStoreError::Unsafe(
-                                    "durable result completion time overflows milliseconds",
-                                ),
-                            )?;
-                            let state = match result.state {
-                                ocservia_upgrader::OperationState::Succeeded => {
-                                    AgentUpgradeOutcomeState::Succeeded
-                                }
-                                ocservia_upgrader::OperationState::Failed => {
-                                    AgentUpgradeOutcomeState::Failed
-                                }
-                                ocservia_upgrader::OperationState::RolledBack => {
-                                    AgentUpgradeOutcomeState::RolledBack
-                                }
-                                ocservia_upgrader::OperationState::Accepted
-                                | ocservia_upgrader::OperationState::Running => {
-                                    return Err(UpgradeStoreError::Unsafe(
-                                        "durable result is not terminal",
-                                    ));
-                                }
-                            };
-                            // The signature time, not the historical completion
-                            // time, carries key validity: a key rotated after
-                            // completion may still attest the older result.
-                            let attested_unix_ms = u64::try_from(
-                                SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .map_err(|_| {
-                                        UpgradeStoreError::Unsafe(
-                                            "system clock precedes the unix epoch",
-                                        )
-                                    })?
-                                    .as_millis(),
-                            )
-                            .map_err(|_| {
-                                UpgradeStoreError::Unsafe("attestation time overflows milliseconds")
-                            })?;
-                            let proof = sign_upgrade_result(
-                                AgentUpgradeResultProof {
-                                    version: PrivdReceiptVersion::V1.into(),
-                                    node_id: node_id.to_vec(),
-                                    privd_attestation_key_id: key_id(
-                                        &attestation_key.verifying_key(),
-                                    ),
-                                    operation_id: result.operation_id.as_bytes().to_vec(),
-                                    target_version: result.target_version.clone(),
-                                    package_sha256: result.package_sha256.to_vec(),
-                                    state: state.into(),
-                                    completed_unix_ms,
-                                    result_sha256: result.result_sha256.to_vec(),
-                                    attested_unix_ms,
-                                    signature: Vec::new(),
-                                },
-                                attestation_key,
-                            )
-                            .map_err(|_| {
-                                UpgradeStoreError::Unsafe(
-                                    "durable result proof claims are malformed",
-                                )
-                            })?;
-                            Ok(UpgradeOperationResult {
-                                operation_id: result.operation_id.as_bytes().to_vec(),
-                                state: result.state.as_str().to_owned(),
-                                target_version: result.target_version,
-                                completed_unix_ms,
-                                detail: result.detail,
-                                package_sha256: result.package_sha256.to_vec(),
-                                privileged_result_proof: Some(proof),
-                            })
-                        })
-                        .collect::<Result<Vec<_>, UpgradeStoreError>>()
-                        .map(|results| {
-                            privd_response::Result::UpgradeResultList(UpgradeResultList { results })
-                        })
-                })
-                .map_err(|failure| {
+        privd_request::Operation::UpgradeResultList(_) => {
+            let root = upgrades.operations_root().to_path_buf();
+            let node_id = *node_id;
+            let key = Arc::clone(attestation_key);
+            let key_id_str = Arc::clone(attestation_key_id);
+            let blocking_result = tokio::task::spawn_blocking(move || {
+                read_attested_upgrade_results(&root, &node_id, &key, &key_id_str)
+            })
+            .await
+            .map_err(|join_err| {
+                ocservia_ocserv_adapter::AdapterError::Io(io::Error::other(join_err))
+            })
+            .and_then(|res| {
+                res.map_err(|failure| {
                     ocservia_ocserv_adapter::AdapterError::Io(io::Error::other(failure.to_string()))
-                }),
-        ),
+                })
+            });
+            ("upgrade_result_list", blocking_result)
+        }
         _ => {
             return privd_response::Result::Error(error(
                 ErrorKind::PermissionDenied,
@@ -1118,223 +472,86 @@ async fn execute_read(
     finish_operation(operation_name, result)
 }
 
-struct CommandEffectBinding {
-    effect_kind: &'static str,
-    resource_key: String,
-    effect_revision: u64,
+fn read_attested_upgrade_results(
+    operations_root: &Path,
+    node_id: &[u8; 16],
+    attestation_key: &SigningKey,
+    attestation_key_id: &str,
+) -> Result<privd_response::Result, UpgradeStoreError> {
+    let results = ocservia_upgrader::read_recent_results(operations_root, 8)?;
+    let attested = results
+        .into_iter()
+        .map(|result| {
+            let completed_unix_ms =
+                result
+                    .completed_unix
+                    .checked_mul(1000)
+                    .ok_or(UpgradeStoreError::Unsafe(
+                        "durable result completion time overflows milliseconds",
+                    ))?;
+            let state = match result.state {
+                ocservia_upgrader::OperationState::Succeeded => AgentUpgradeOutcomeState::Succeeded,
+                ocservia_upgrader::OperationState::Failed => AgentUpgradeOutcomeState::Failed,
+                ocservia_upgrader::OperationState::RolledBack => {
+                    AgentUpgradeOutcomeState::RolledBack
+                }
+                ocservia_upgrader::OperationState::Accepted
+                | ocservia_upgrader::OperationState::Running => {
+                    return Err(UpgradeStoreError::Unsafe("durable result is not terminal"));
+                }
+            };
+            // The signature time, not the historical completion
+            // time, carries key validity: a key rotated after
+            // completion may still attest the older result.
+            let attested_unix_ms = u64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| UpgradeStoreError::Unsafe("system clock precedes the unix epoch"))?
+                    .as_millis(),
+            )
+            .map_err(|_| UpgradeStoreError::Unsafe("attestation time overflows milliseconds"))?;
+            let proof = sign_upgrade_result_with_key_id(
+                AgentUpgradeResultProof {
+                    version: PrivdReceiptVersion::V1.into(),
+                    node_id: node_id.to_vec(),
+                    privd_attestation_key_id: attestation_key_id.to_owned(),
+                    operation_id: result.operation_id.as_bytes().to_vec(),
+                    target_version: result.target_version.clone(),
+                    package_sha256: result.package_sha256.to_vec(),
+                    state: state.into(),
+                    completed_unix_ms,
+                    result_sha256: result.result_sha256.to_vec(),
+                    attested_unix_ms,
+                    signature: Vec::new(),
+                },
+                attestation_key,
+                attestation_key_id,
+            )
+            .map_err(|_| UpgradeStoreError::Unsafe("durable result proof claims are malformed"))?;
+            Ok(UpgradeOperationResult {
+                operation_id: result.operation_id.as_bytes().to_vec(),
+                state: result.state.as_str().to_owned(),
+                target_version: result.target_version,
+                completed_unix_ms,
+                detail: result.detail,
+                package_sha256: result.package_sha256.to_vec(),
+                privileged_result_proof: Some(proof),
+            })
+        })
+        .collect::<Result<Vec<_>, UpgradeStoreError>>()?;
+    Ok(privd_response::Result::UpgradeResultList(
+        UpgradeResultList { results: attested },
+    ))
 }
 
-#[allow(clippy::too_many_lines)]
-fn effect_binding(
-    command: &CommandEnvelope,
-    claims: &CommandAuthorizationV1,
-) -> Option<CommandEffectBinding> {
-    let (effect_kind, resource_key, effect_revision) = match command.payload.as_ref()? {
-        command_envelope::Payload::SessionDisconnect(payload) => (
-            "session_disconnect",
-            format!("{}:{}", payload.boot_id, payload.session_id),
-            claims.expected_revision,
-        ),
-        command_envelope::Payload::SessionTerminate(payload) => (
-            "session_terminate",
-            format!("{}:{}", payload.boot_id, payload.session_id),
-            claims.expected_revision,
-        ),
-        command_envelope::Payload::IpBanRemove(payload) => (
-            "ip_ban_remove",
-            payload.ip.clone(),
-            claims.expected_revision,
-        ),
-        command_envelope::Payload::ServiceReload(_) => (
-            "service_reload",
-            "ocserv.service".to_owned(),
-            claims.expected_revision,
-        ),
-        command_envelope::Payload::UserCreate(payload) => (
-            "user_create",
-            payload.username.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::UserDisable(payload) => (
-            "user_disable",
-            payload.username.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::UserEnable(payload) => (
-            "user_enable",
-            payload.username.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::UserPasswordRotate(payload) => (
-            "user_password_rotate",
-            payload.username.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::GroupApply(payload) => (
-            "group_apply",
-            payload.group_name.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::CompleteConfigPlan(payload) => (
-            "config_plan",
-            hex::encode(&payload.candidate_hash),
-            claims.expected_revision,
-        ),
-        command_envelope::Payload::CompleteConfigApply(payload) => (
-            "config_apply",
-            "ocserv.conf".to_owned(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::CertificateCsr(payload) => (
-            "certificate_csr",
-            Uuid::from_slice(&payload.certificate_id).ok()?.to_string(),
-            claims.expected_revision,
-        ),
-        command_envelope::Payload::CertificateRevoke(payload) => (
-            "certificate_revoke",
-            Uuid::from_slice(&payload.certificate_id).ok()?.to_string(),
-            claims.expected_revision,
-        ),
-        command_envelope::Payload::CertificateP12(payload) => (
-            "certificate_p12",
-            format!(
-                "{}:{}",
-                Uuid::from_slice(&payload.certificate_id).ok()?,
-                Uuid::from_slice(&payload.artifact_id).ok()?
-            ),
-            claims.expected_revision,
-        ),
-        command_envelope::Payload::AgentUpgrade(payload) => (
-            "agent_upgrade_prepare",
-            format!(
-                "{}:{}",
-                payload.target_version,
-                hex::encode(&payload.package_sha256)
-            ),
-            claims.expected_revision,
-        ),
-        _ => return None,
-    };
-    Some(CommandEffectBinding {
-        effect_kind,
-        resource_key,
-        effect_revision,
-    })
-}
-
-fn desired_effect_binding(command: &CommandEnvelope) -> Option<CommandEffectBinding> {
-    let (effect_kind, resource_key, effect_revision) = match command.payload.as_ref()? {
-        command_envelope::Payload::UserCreate(payload) => (
-            "user_create",
-            payload.username.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::UserDisable(payload) => (
-            "user_disable",
-            payload.username.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::UserEnable(payload) => (
-            "user_enable",
-            payload.username.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::UserPasswordRotate(payload) => (
-            "user_password_rotate",
-            payload.username.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::GroupApply(payload) => (
-            "group_apply",
-            payload.group_name.clone(),
-            payload.desired_revision,
-        ),
-        command_envelope::Payload::CompleteConfigApply(payload) => (
-            "config_apply",
-            "ocserv.conf".to_owned(),
-            payload.desired_revision,
-        ),
-        _ => return None,
-    };
-    Some(CommandEffectBinding {
-        effect_kind,
-        resource_key,
-        effect_revision,
-    })
-}
-
-fn adapter_effect(claims: &CommandAuthorizationV1) -> EffectIdentity<'_> {
-    EffectIdentity {
-        command_id: &claims.command_id,
-        idempotency_key: &claims.idempotency_key,
-        semantic_payload_sha256: &claims.semantic_payload_sha256,
-        expires_at_unix_seconds: claims.expires_at_seconds,
-    }
-}
-
-fn authorized_effect<'a>(
-    command: &CommandEnvelope,
-    claims: &'a CommandAuthorizationV1,
-    binding: &'a CommandEffectBinding,
-) -> AuthorizedEffectIdentity<'a> {
-    AuthorizedEffectIdentity {
-        node_id: &claims.node_id,
-        command_id: &claims.command_id,
-        operation_id: &claims.operation_id,
-        idempotency_key: &claims.idempotency_key,
-        semantic_payload_sha256: &claims.semantic_payload_sha256,
-        action: &claims.action,
-        authorization_revision: claims.expected_revision,
-        effect_kind: binding.effect_kind,
-        resource_key: &binding.resource_key,
-        effect_revision: binding.effect_revision,
-        expires_at_unix_seconds: claims.expires_at_seconds,
-        retry_if_absent: CommandDeliveryMode::try_from(command.delivery_mode)
-            .is_ok_and(|mode| mode == CommandDeliveryMode::RetryIfEffectAbsent),
-    }
-}
-
-/// Session, ban-removal and reload effects leave no root-verifiable proof that
-/// they did not happen, and the Agent's absence report is unsigned. A retry
-/// grant for them (including one signed before this rule) therefore never
-/// reaches the executor; it can only return an already attested result.
-fn fixed_host_effect(command: &CommandEnvelope) -> bool {
-    matches!(
-        command.payload.as_ref(),
-        Some(
-            command_envelope::Payload::SessionDisconnect(_)
-                | command_envelope::Payload::SessionTerminate(_)
-                | command_envelope::Payload::IpBanRemove(_)
-                | command_envelope::Payload::ServiceReload(_)
-        )
-    )
-}
-
-fn replay_only_response(
-    adapter: &Adapter,
-    identity: AuthorizedEffectIdentity<'_>,
-) -> PrivdResponse {
-    match adapter.replay_authorized_effect(identity) {
-        Ok(Some(encoded)) => decode_cached_response(&encoded),
-        // Missing, pruned or still-prepared evidence cannot prove absence.
-        Ok(None) => response_error(
-            ErrorKind::Unavailable,
-            "authorized effect outcome requires reconciliation",
-        ),
-        Err(failure) => PrivdResponse {
-            request_id: Vec::new(),
-            privileged_result_proof: None,
-            result: Some(privd_response::Result::Error(PrivdError::from(failure))),
-        },
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 async fn execute_command(
     command: &CommandEnvelope,
     claims: &CommandAuthorizationV1,
     accepted_at: &prost_types::Timestamp,
     node_id: &[u8; 16],
     attestation_key: &SigningKey,
+    attestation_key_id: &str,
     upgrades: &UpgradeScheduler,
     adapter: &Adapter,
 ) -> PrivdResponse {
@@ -1384,7 +601,7 @@ async fn execute_command(
         if let Some(command_envelope::Payload::AgentUpgrade(payload)) = command.payload.as_ref() {
             (
                 "agent_upgrade_prepare",
-                schedule_agent_upgrade(payload, claims, upgrades),
+                execute_agent_upgrade(payload, claims, upgrades).await,
             )
         } else {
             execute_signed_payload(command, claims, adapter).await
@@ -1409,6 +626,7 @@ async fn execute_command(
         binding,
         &result,
         attestation_key,
+        attestation_key_id,
     ) else {
         return response_error(ErrorKind::Unavailable, "result attestation unavailable");
     };
@@ -1421,6 +639,19 @@ async fn execute_command(
     if let Err(failure) =
         adapter.complete_authorized_effect(authorized_effect(command, claims, binding), &cached)
     {
+        // Concurrent duplicate AgentUpgrade requests are permitted past Pending
+        // because the immutable intent store is the idempotency authority; if a
+        // racing call already committed the applied receipt, return that
+        // canonical HMAC-verified response instead of failing on differing
+        // receipt completion timestamps.
+        if matches!(
+            command.payload.as_ref(),
+            Some(command_envelope::Payload::AgentUpgrade(_))
+        ) && let Ok(Some(replayed)) =
+            adapter.replay_authorized_effect(authorized_effect(command, claims, binding))
+        {
+            return decode_cached_response(&replayed);
+        }
         return PrivdResponse {
             request_id: Vec::new(),
             privileged_result_proof: None,
@@ -1430,6 +661,33 @@ async fn execute_command(
     response
 }
 
+async fn execute_agent_upgrade(
+    payload: &AgentUpgrade,
+    claims: &CommandAuthorizationV1,
+    upgrades: &UpgradeScheduler,
+) -> Result<privd_response::Result, ocservia_ocserv_adapter::AdapterError> {
+    let payload = payload.clone();
+    let operation_id = claims.operation_id;
+    let command_id = claims.command_id;
+    let semantic_payload_sha256 = claims.semantic_payload_sha256;
+    let upgrades = upgrades.clone();
+    tokio::task::spawn_blocking(move || {
+        schedule_agent_upgrade(
+            &payload,
+            operation_id,
+            command_id,
+            semantic_payload_sha256,
+            &upgrades,
+        )
+    })
+    .await
+    .unwrap_or_else(|join_err| {
+        Err(ocservia_ocserv_adapter::AdapterError::Io(io::Error::other(
+            join_err,
+        )))
+    })
+}
+
 /// The durable self-upgrade preparation boundary. privd independently
 /// verified the Controller-signed release identity, commits the immutable
 /// root-owned intent, starts the fixed upgrader unit, and returns only the
@@ -1437,7 +695,9 @@ async fn execute_command(
 /// normal upgrade cannot destroy the process that owes the command result.
 fn schedule_agent_upgrade(
     payload: &AgentUpgrade,
-    claims: &CommandAuthorizationV1,
+    operation_id: [u8; 16],
+    command_id: [u8; 16],
+    semantic_payload_sha256: [u8; 32],
     upgrades: &UpgradeScheduler,
 ) -> Result<privd_response::Result, ocservia_ocserv_adapter::AdapterError> {
     let package_sha256: [u8; 32] = payload
@@ -1446,18 +706,18 @@ fn schedule_agent_upgrade(
         .try_into()
         .map_err(|_| ocservia_ocserv_adapter::AdapterError::InvalidRequest)?;
     let intent = UpgradeIntent::new(
-        claims.operation_id,
-        claims.command_id,
+        operation_id,
+        command_id,
         &payload.target_version,
         package_sha256,
         &payload.architecture,
-        claims.semantic_payload_sha256,
+        semantic_payload_sha256,
     )
     .map_err(|failure| upgrade_store_error(&failure))?;
     match upgrades.schedule_and_trigger(&intent) {
         Ok(ScheduleOutcome::Scheduled | ScheduleOutcome::AlreadyScheduled) => Ok(
             privd_response::Result::AgentUpgradeScheduled(AgentUpgradeScheduledResult {
-                operation_id: claims.operation_id.to_vec(),
+                operation_id: operation_id.to_vec(),
                 target_version: payload.target_version.clone(),
                 package_sha256: payload.package_sha256.clone(),
             }),
@@ -1690,259 +950,6 @@ async fn reconcile_command(
         request_id: Vec::new(),
         privileged_result_proof: None,
         result: Some(finish_operation("desired_effect_observe", result)),
-    }
-}
-
-fn decode_cached_response(encoded: &[u8]) -> PrivdResponse {
-    match PrivdResponse::decode(encoded) {
-        Ok(response)
-            if response.request_id.is_empty()
-                && response.result.is_some()
-                && response.privileged_result_proof.is_some() =>
-        {
-            response
-        }
-        _ => response_error(
-            ErrorKind::Unavailable,
-            "cached authorized effect result invalid",
-        ),
-    }
-}
-
-fn response_error(kind: ErrorKind, detail: &'static str) -> PrivdResponse {
-    PrivdResponse {
-        request_id: Vec::new(),
-        privileged_result_proof: None,
-        result: Some(privd_response::Result::Error(error(kind, detail))),
-    }
-}
-
-fn build_result_proof(
-    command: &CommandEnvelope,
-    claims: &CommandAuthorizationV1,
-    accepted_at: &prost_types::Timestamp,
-    node_id: &[u8; 16],
-    binding: &CommandEffectBinding,
-    result: &privd_response::Result,
-    key: &SigningKey,
-) -> Result<ocservia_contracts::generated::ocserv::platform::agent::v1::PrivilegedResultProof, ()> {
-    let completed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| ())?;
-    let completed_at = prost_types::Timestamp {
-        seconds: i64::try_from(completed.as_secs()).map_err(|_| ())?,
-        nanos: i32::try_from(completed.subsec_nanos()).map_err(|_| ())?,
-    };
-    let result_bytes = exact_result_bytes(result).ok_or(())?;
-    let mut effect = Sha256::new();
-    effect.update(b"ocservia/privd-root-effect-record/v1\0");
-    effect.update(node_id);
-    effect.update(claims.command_id);
-    effect.update(claims.operation_id);
-    effect.update(claims.idempotency_key);
-    effect.update(binding.effect_kind.as_bytes());
-    effect.update((binding.resource_key.len() as u64).to_be_bytes());
-    effect.update(binding.resource_key.as_bytes());
-    effect.update(binding.effect_revision.to_be_bytes());
-    let effect_record_id = effect.finalize().to_vec();
-    let certificate = certificate_binding(command, result, &effect_record_id)?;
-    let receipt = PrivdResultReceiptV1 {
-        receipt_version: PrivdReceiptVersion::V1.into(),
-        node_id: node_id.to_vec(),
-        privd_attestation_key_id: key_id(&key.verifying_key()),
-        command_id: claims.command_id.to_vec(),
-        operation_id: claims.operation_id.to_vec(),
-        idempotency_key: claims.idempotency_key.to_vec(),
-        semantic_payload_hash_version: i32::try_from(claims.semantic_hash_version)
-            .map_err(|_| ())?,
-        semantic_payload_sha256: claims.semantic_payload_sha256.to_vec(),
-        command_kind: privileged_command_kind(command).ok_or(())?.into(),
-        result_kind: privileged_result_kind(result).ok_or(())?.into(),
-        terminal_state: match result {
-            privd_response::Result::Error(_) => CommandResultState::Failed.into(),
-            _ => CommandResultState::Succeeded.into(),
-        },
-        result_bytes_sha256: Sha256::digest(&result_bytes).to_vec(),
-        error_code_sha256: Sha256::digest(match result {
-            privd_response::Result::Error(error) => {
-                terminal_result_error_code(error).ok_or(())?.as_bytes()
-            }
-            _ => &[],
-        })
-        .to_vec(),
-        effect_record_id,
-        effect_sequence: binding.effect_revision.max(claims.expected_revision).max(1),
-        accepted_at: Some(*accepted_at),
-        completed_at: Some(completed_at),
-        replayed: false,
-        certificate,
-    };
-    sign_receipt(receipt, key).map_err(|_| ())
-}
-
-fn exact_result_bytes(result: &privd_response::Result) -> Option<Vec<u8>> {
-    match result {
-        privd_response::Result::Mutation(value) => Some(value.encode_to_vec()),
-        privd_response::Result::ConfigPlan(value) => Some(value.encode_to_vec()),
-        privd_response::Result::ConfigApply(value) => Some(value.encode_to_vec()),
-        privd_response::Result::CertificateCsr(value) => Some(value.encode_to_vec()),
-        privd_response::Result::CertificateP12(value) => Some(value.encode_to_vec()),
-        privd_response::Result::CertificateRevoke(value) => Some(value.encode_to_vec()),
-        privd_response::Result::AgentUpgradeScheduled(value) => Some(value.encode_to_vec()),
-        privd_response::Result::Error(error) if terminal_result_error_code(error).is_some() => {
-            Some(Vec::new())
-        }
-        _ => None,
-    }
-}
-
-fn privileged_result_kind(result: &privd_response::Result) -> Option<PrivilegedResultKind> {
-    match result {
-        privd_response::Result::Mutation(_) => Some(PrivilegedResultKind::Mutation),
-        privd_response::Result::ConfigPlan(_) => Some(PrivilegedResultKind::ConfigPlan),
-        privd_response::Result::ConfigApply(_) => Some(PrivilegedResultKind::ConfigApply),
-        privd_response::Result::CertificateCsr(_) => Some(PrivilegedResultKind::CertificateCsr),
-        privd_response::Result::CertificateP12(_) => Some(PrivilegedResultKind::CertificateP12),
-        privd_response::Result::CertificateRevoke(_) => {
-            Some(PrivilegedResultKind::CertificateRevoke)
-        }
-        privd_response::Result::AgentUpgradeScheduled(_) => {
-            Some(PrivilegedResultKind::AgentUpgradeScheduled)
-        }
-        privd_response::Result::Error(error) if terminal_result_error_code(error).is_some() => {
-            Some(PrivilegedResultKind::Error)
-        }
-        _ => None,
-    }
-}
-
-fn privileged_command_kind(command: &CommandEnvelope) -> Option<PrivilegedCommandKind> {
-    match command.payload.as_ref()? {
-        command_envelope::Payload::SessionDisconnect(_) => {
-            Some(PrivilegedCommandKind::SessionDisconnect)
-        }
-        command_envelope::Payload::SessionTerminate(_) => {
-            Some(PrivilegedCommandKind::SessionTerminate)
-        }
-        command_envelope::Payload::IpBanRemove(_) => Some(PrivilegedCommandKind::IpBanRemove),
-        command_envelope::Payload::ServiceReload(_) => Some(PrivilegedCommandKind::ServiceReload),
-        command_envelope::Payload::UserCreate(_) => Some(PrivilegedCommandKind::UserCreate),
-        command_envelope::Payload::UserDisable(_) => Some(PrivilegedCommandKind::UserDisable),
-        command_envelope::Payload::UserEnable(_) => Some(PrivilegedCommandKind::UserEnable),
-        command_envelope::Payload::UserPasswordRotate(_) => {
-            Some(PrivilegedCommandKind::UserPasswordRotate)
-        }
-        command_envelope::Payload::GroupApply(_) => Some(PrivilegedCommandKind::GroupApply),
-        command_envelope::Payload::CompleteConfigPlan(_) => Some(PrivilegedCommandKind::ConfigPlan),
-        command_envelope::Payload::CompleteConfigApply(_) => {
-            Some(PrivilegedCommandKind::ConfigApply)
-        }
-        command_envelope::Payload::CertificateCsr(_) => Some(PrivilegedCommandKind::CertificateCsr),
-        command_envelope::Payload::CertificateP12(_) => Some(PrivilegedCommandKind::CertificateP12),
-        command_envelope::Payload::CertificateRevoke(_) => {
-            Some(PrivilegedCommandKind::CertificateRevoke)
-        }
-        command_envelope::Payload::AgentUpgrade(_) => Some(PrivilegedCommandKind::AgentUpgrade),
-        _ => None,
-    }
-}
-
-fn certificate_binding(
-    command: &CommandEnvelope,
-    result: &privd_response::Result,
-    effect_record_id: &[u8],
-) -> Result<Option<PrivdCertificateReceiptBindingV1>, ()> {
-    match (command.payload.as_ref(), result) {
-        (
-            Some(command_envelope::Payload::CertificateCsr(request)),
-            privd_response::Result::CertificateCsr(response),
-        ) => Ok(Some(PrivdCertificateReceiptBindingV1 {
-            certificate_id: request.certificate_id.clone(),
-            csr_der_sha256: Sha256::digest(&response.csr_der).to_vec(),
-            public_key_sha256: response.public_key_sha256.clone(),
-            requested_subject_sha256: requested_subject_digest(request).map_err(|_| ())?.to_vec(),
-            root_effect_record_id: effect_record_id.to_vec(),
-        })),
-        (
-            Some(command_envelope::Payload::CertificateCsr(request)),
-            privd_response::Result::Error(error),
-        ) if terminal_result_error_code(error).is_some() => {
-            Ok(Some(PrivdCertificateReceiptBindingV1 {
-                certificate_id: request.certificate_id.clone(),
-                csr_der_sha256: Vec::new(),
-                public_key_sha256: Vec::new(),
-                requested_subject_sha256: Vec::new(),
-                root_effect_record_id: effect_record_id.to_vec(),
-            }))
-        }
-        (Some(command_envelope::Payload::CertificateP12(request)), _) => {
-            Ok(Some(PrivdCertificateReceiptBindingV1 {
-                certificate_id: request.certificate_id.clone(),
-                csr_der_sha256: Vec::new(),
-                public_key_sha256: Vec::new(),
-                requested_subject_sha256: Vec::new(),
-                root_effect_record_id: effect_record_id.to_vec(),
-            }))
-        }
-        (Some(command_envelope::Payload::CertificateRevoke(request)), _) => {
-            Ok(Some(PrivdCertificateReceiptBindingV1 {
-                certificate_id: request.certificate_id.clone(),
-                csr_der_sha256: Vec::new(),
-                public_key_sha256: Vec::new(),
-                requested_subject_sha256: Vec::new(),
-                root_effect_record_id: effect_record_id.to_vec(),
-            }))
-        }
-        (Some(command_envelope::Payload::CertificateCsr(_)), _) => Err(()),
-        _ => Ok(None),
-    }
-}
-
-fn terminal_result_error_code(error: &PrivdError) -> Option<&'static str> {
-    match ErrorKind::try_from(error.kind).unwrap_or(ErrorKind::Unspecified) {
-        ErrorKind::CapacityExceeded => Some("capacity_exceeded"),
-        ErrorKind::InvalidRequest | ErrorKind::PermissionDenied | ErrorKind::MalformedOutput => {
-            Some("privd_rejected")
-        }
-        _ => None,
-    }
-}
-
-fn finish_operation(
-    operation_name: &str,
-    result: Result<privd_response::Result, ocservia_ocserv_adapter::AdapterError>,
-) -> privd_response::Result {
-    let exit_code = match &result {
-        Err(ocservia_ocserv_adapter::AdapterError::CommandFailed { code }) => *code,
-        _ => None,
-    };
-    let result =
-        result.unwrap_or_else(|failure| privd_response::Result::Error(PrivdError::from(failure)));
-    if let privd_response::Result::Error(mut error) = result {
-        tracing::warn!(
-            operation = operation_name,
-            error_kind = error.kind,
-            exit_code,
-            "privd operation failed"
-        );
-        error.detail = format!("{operation_name}: {}", error.detail);
-        privd_response::Result::Error(error)
-    } else {
-        result
-    }
-}
-
-fn deadline_error() -> privd_response::Result {
-    privd_response::Result::Error(error(
-        ErrorKind::DeadlineExceeded,
-        "request deadline exceeded",
-    ))
-}
-
-fn error(kind: ErrorKind, detail: &str) -> PrivdError {
-    PrivdError {
-        kind: kind.into(),
-        detail: detail.to_owned(),
     }
 }
 

@@ -43,14 +43,31 @@ pub fn init(
 /// fast instead of silently producing no statistics.
 pub fn spawn_runtime_stats_writer(path: std::path::PathBuf) -> Result<(), StatsWriteError> {
     write_runtime_stats(&path)?;
+    let handle = tokio::runtime::Handle::try_current().map_err(StatsWriteError::NoRuntime)?;
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // First tick fires immediately; the synchronous initial write above
+        // already published the startup sample.
+        ticker.tick().await;
         loop {
             ticker.tick().await;
-            if let Err(error) = write_runtime_stats(&path) {
-                tracing::warn!(error = %error, path = %path.display(), "runtime stats writer stopping");
-                return;
+            let alive = handle.metrics().num_alive_tasks();
+            let path_for_io = path.clone();
+            let write_result = tokio::task::spawn_blocking(move || {
+                write_runtime_stats_with_alive(&path_for_io, alive)
+            })
+            .await;
+            match write_result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, path = %path.display(), "runtime stats writer stopping");
+                    return;
+                }
+                Err(join_error) => {
+                    tracing::warn!(error = %join_error, path = %path.display(), "runtime stats writer task failed");
+                    return;
+                }
             }
         }
     });
@@ -61,17 +78,22 @@ fn write_runtime_stats(path: &std::path::Path) -> Result<(), StatsWriteError> {
     let alive = tokio::runtime::Handle::try_current()
         .map(|handle| handle.metrics().num_alive_tasks())
         .map_err(StatsWriteError::NoRuntime)?;
+    write_runtime_stats_with_alive(path, alive)
+}
+
+fn write_runtime_stats_with_alive(
+    path: &std::path::Path,
+    alive: usize,
+) -> Result<(), StatsWriteError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map_err(StatsWriteError::Clock)?;
-    let line = serde_json::json!({
-        "at": u64::try_from(now.as_millis()).unwrap_or(u64::MAX),
-        "tasks_alive": alive,
-    });
+    let at = u64::try_from(now.as_millis()).unwrap_or(u64::MAX);
+    let payload = format!("{{\"at\":{at},\"tasks_alive\":{alive}}}\n");
     let mut temporary = path.to_path_buf().into_os_string();
     temporary.push(".tmp");
     let temporary = std::path::PathBuf::from(temporary);
-    std::fs::write(&temporary, format!("{line}\n")).map_err(|error| StatsWriteError::Write {
+    std::fs::write(&temporary, payload).map_err(|error| StatsWriteError::Write {
         path: path.to_path_buf(),
         source: error,
     })?;

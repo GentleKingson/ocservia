@@ -161,8 +161,23 @@ pub fn sign_receipt(
     receipt: PrivdResultReceiptV1,
     key: &SigningKey,
 ) -> Result<PrivilegedResultProof, ReceiptError> {
+    let expected = key_id(&key.verifying_key());
+    sign_receipt_with_key_id(receipt, key, &expected)
+}
+
+/// Signs a validated canonical receipt using a caller-cached key ID computed
+/// from `key.verifying_key()`.
+///
+/// # Errors
+///
+/// Returns an error for malformed receipt fields or a mismatched key ID.
+pub fn sign_receipt_with_key_id(
+    receipt: PrivdResultReceiptV1,
+    key: &SigningKey,
+    expected_key_id: &str,
+) -> Result<PrivilegedResultProof, ReceiptError> {
     let canonical = canonical_receipt_v1(&receipt)?;
-    if receipt.privd_attestation_key_id != key_id(&key.verifying_key()) {
+    if receipt.privd_attestation_key_id != expected_key_id {
         return Err(ReceiptError::Malformed);
     }
     Ok(PrivilegedResultProof {
@@ -205,12 +220,27 @@ pub fn verify_receipt(
 ///
 /// Returns an error for malformed claims or a mismatched signing key ID.
 pub fn sign_upgrade_result(
+    proof: AgentUpgradeResultProof,
+    key: &SigningKey,
+) -> Result<AgentUpgradeResultProof, ReceiptError> {
+    let expected = key_id(&key.verifying_key());
+    sign_upgrade_result_with_key_id(proof, key, &expected)
+}
+
+/// Signs a root-owned durable upgrade outcome using a caller-cached key ID
+/// computed from `key.verifying_key()`.
+///
+/// # Errors
+///
+/// Returns an error for malformed claims or a mismatched signing key ID.
+pub fn sign_upgrade_result_with_key_id(
     mut proof: AgentUpgradeResultProof,
     key: &SigningKey,
+    expected_key_id: &str,
 ) -> Result<AgentUpgradeResultProof, ReceiptError> {
     proof.signature.clear();
     let canonical = canonical_upgrade_result_v1(&proof)?;
-    if proof.privd_attestation_key_id != key_id(&key.verifying_key()) {
+    if proof.privd_attestation_key_id != expected_key_id {
         return Err(ReceiptError::Malformed);
     }
     proof.signature = key.sign(&canonical).to_bytes().to_vec();
@@ -385,32 +415,52 @@ pub fn requested_subject_digest(request: &CertificateCsr) -> Result<[u8; 32], Re
     if !uuid_v7(&request.certificate_id)
         || request.common_name.is_empty()
         || request.common_name.len() > 253
+        || !request.common_name.is_ascii()
         || !(2048..=8192).contains(&request.key_bits)
         || request.dns_names.len() > 64
     {
         return Err(ReceiptError::Malformed);
     }
-    let mut names = request.dns_names.clone();
-    names.sort();
+    let mut names: Vec<&str> = request.dns_names.iter().map(String::as_str).collect();
+    names.sort_unstable();
     if names.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(ReceiptError::Malformed);
     }
-    let mut encoded = b"ocservia/certificate-requested-subject/v1\0".to_vec();
-    append_bytes(&mut encoded, &request.certificate_id)?;
-    append_string(&mut encoded, &request.common_name)?;
-    encoded.extend_from_slice(&request.key_bits.to_be_bytes());
-    encoded.extend_from_slice(
-        &u32::try_from(names.len())
+    let mut hasher = Sha256::new();
+    hasher.update(b"ocservia/certificate-requested-subject/v1\0");
+    hash_bytes(&mut hasher, &request.certificate_id)?;
+    hash_string(&mut hasher, &request.common_name)?;
+    hasher.update(request.key_bits.to_be_bytes());
+    hasher.update(
+        u32::try_from(names.len())
             .map_err(|_| ReceiptError::Malformed)?
             .to_be_bytes(),
     );
     for name in names {
-        if name.is_empty() || name.len() > 253 || name != name.to_ascii_lowercase() {
+        if name.is_empty()
+            || name.len() > 253
+            || !name.is_ascii()
+            || name.bytes().any(|b| b.is_ascii_uppercase())
+        {
             return Err(ReceiptError::Malformed);
         }
-        append_string(&mut encoded, &name)?;
+        hash_string(&mut hasher, name)?;
     }
-    Ok(Sha256::digest(encoded).into())
+    Ok(hasher.finalize().into())
+}
+
+fn hash_string(hasher: &mut Sha256, value: &str) -> Result<(), ReceiptError> {
+    if value.is_empty() || value.len() > 128 || !value.is_ascii() {
+        return Err(ReceiptError::Malformed);
+    }
+    hash_bytes(hasher, value.as_bytes())
+}
+
+fn hash_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), ReceiptError> {
+    let length = u32::try_from(value.len()).map_err(|_| ReceiptError::Malformed)?;
+    hasher.update(length.to_be_bytes());
+    hasher.update(value);
+    Ok(())
 }
 
 /// Encodes a V1 root key registration independently of Protobuf encoding.

@@ -746,6 +746,11 @@ impl CommandExecutor {
         &self.journal
     }
 
+    #[must_use]
+    pub fn journal_mut(&mut self) -> &mut Journal {
+        &mut self.journal
+    }
+
     /// Observes and persists reconciliation state without executing an effect.
     ///
     /// # Errors
@@ -1008,7 +1013,8 @@ fn validate_command(
     envelope: &CommandEnvelope,
     context: &CommandContext,
 ) -> Result<ValidatedCommand, CommandError> {
-    if envelope.encoded_len() == 0 || envelope.encoded_len() > MAX_COMMAND_BYTES {
+    let encoded_len = envelope.encoded_len();
+    if encoded_len == 0 || encoded_len > MAX_COMMAND_BYTES {
         return Err(CommandError::Rejected("command_size_invalid"));
     }
     if envelope.protocol_version != ocservia_command_authorization::COMMAND_PROTOCOL_VERSION

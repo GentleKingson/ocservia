@@ -2374,3 +2374,118 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         Err(AdapterError::InvalidRequest)
     ));
 }
+
+#[test]
+fn effect_store_concurrent_writers_zero_busy() {
+    let dir = TempDir::new("effect-busy");
+    let resources = dir.effect_resources();
+    let now = effect_now().expect("now");
+    let expires_at = now + 300;
+    let artifact_id = Uuid::now_v7();
+    let cert_id = Uuid::now_v7();
+    let artifact_op = Uuid::now_v7();
+
+    // Initialize the store once before spawning concurrent writers, matching
+    // production startup where privd initializes its state before serving RPCs.
+    {
+        let mut init = EffectStore::open_for_mutation(&resources).expect("init effect store");
+        init.prepare_artifact(
+            artifact_id.as_bytes(),
+            cert_id.as_bytes(),
+            1,
+            artifact_op.as_bytes(),
+            expires_at,
+        )
+        .expect("prepare active artifact");
+        init.register_artifact(
+            artifact_id.as_bytes(),
+            cert_id.as_bytes(),
+            1,
+            artifact_op.as_bytes(),
+            &[0x42; 32],
+            128,
+            expires_at,
+        )
+        .expect("register active artifact");
+    }
+
+    let node_id = Uuid::now_v7();
+    let threads = 4usize;
+    let ops_per_thread = 12usize;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(threads));
+    let mut handles = Vec::with_capacity(threads);
+
+    for worker in 0..threads {
+        let resources = resources.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let mut store = EffectStore::open_for_mutation(&resources)
+                .expect("concurrent open_for_mutation must not hit SQLITE_BUSY");
+            for step in 0..ops_per_thread {
+                let command_id = Uuid::now_v7();
+                let idempotency_key = Uuid::now_v7();
+                let operation_id = Uuid::now_v7();
+                let payload_hash = [u8::try_from(worker * 16 + step).expect("byte"); 32];
+                let resource_key = format!("worker-{worker}/item-{step}");
+                let identity = AuthorizedEffectIdentity {
+                    node_id: node_id.as_bytes(),
+                    command_id: command_id.as_bytes(),
+                    operation_id: operation_id.as_bytes(),
+                    idempotency_key: idempotency_key.as_bytes(),
+                    semantic_payload_sha256: &payload_hash,
+                    action: "service.reload",
+                    authorization_revision: 1,
+                    effect_kind: "service",
+                    resource_key: &resource_key,
+                    effect_revision: u64::try_from(step + 1).expect("rev"),
+                    expires_at_unix_seconds: expires_at,
+                    retry_if_absent: false,
+                };
+                let decision = store
+                    .prepare_authorized(identity)
+                    .expect("prepare_authorized must wait on busy_timeout without SQLITE_BUSY");
+                assert!(matches!(decision, AuthorizedEffectDecision::Execute));
+                let response = format!("ok-{worker}-{step}");
+                store
+                    .complete_authorized(identity, response.as_bytes())
+                    .expect("complete_authorized must succeed under write contention");
+                let replayed = store
+                    .replay_authorized(identity)
+                    .expect("replay_authorized must validate HMAC");
+                assert_eq!(replayed.as_deref(), Some(response.as_bytes()));
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("writer thread must not panic");
+    }
+
+    let mut verify = EffectStore::open_existing(&resources).expect("reopen effect store");
+    let count: i64 = verify
+        .connection
+        .query_row(
+            "SELECT count(*) FROM authorized_effects WHERE state='applied'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count applied effects");
+    assert_eq!(
+        count,
+        i64::try_from(threads * ops_per_thread).expect("expected count")
+    );
+
+    // Non-expired available artifacts must remain untouched by reconcile_artifacts
+    // without dirtying the row or reporting them terminal.
+    let before = query_artifact(&verify.connection, artifact_id.as_bytes())
+        .expect("query before")
+        .expect("artifact present");
+    let terminal = verify.reconcile_artifacts().expect("reconcile_artifacts");
+    assert_eq!(terminal, Vec::<[u8; 16]>::new());
+    let after = query_artifact(&verify.connection, artifact_id.as_bytes())
+        .expect("query after")
+        .expect("artifact still present");
+    assert_eq!(after.state, "available");
+    assert_eq!(after.record_hmac, before.record_hmac);
+}
