@@ -129,12 +129,9 @@ func (s enrollmentStore) Capabilities(ctx context.Context, id uuid.UUID, approve
 	return capabilities, rows.Err()
 }
 
-func (s enrollmentStore) PutCapability(ctx context.Context, id uuid.UUID, capability string, approved bool) error {
-	q := `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,$2,$3)`
-	if approved {
-		q += ` ON CONFLICT(node_id,capability) DO UPDATE SET approved=true`
-	}
-	_, err := s.Exec(ctx, q, id, capability, approved)
+func (s enrollmentStore) InsertCapabilities(ctx context.Context, id uuid.UUID, capabilities, unapproved []string) error {
+	_, err := s.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved)
+		SELECT $1, capability, capability <> ALL($3::text[]) FROM unnest($2::text[]) AS capability`, id, capabilities, unapproved)
 	return err
 }
 

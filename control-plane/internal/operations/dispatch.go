@@ -26,6 +26,10 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		if err != nil {
 			return fmt.Errorf("reserve global dispatch capacity: %w", err)
 		}
+		if available == 0 {
+			claimed = []Dispatch{}
+			return nil
+		}
 		store, err := operationstore.FromTransaction(tx)
 		if err != nil {
 			return err

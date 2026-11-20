@@ -55,7 +55,7 @@ type EnrollmentStore interface {
 	InsertSealingKey(context.Context, uuid.UUID, SealingKey, value.Timestamp) error
 	SealingKeys(context.Context, uuid.UUID) ([]SealingKey, error)
 	Capabilities(context.Context, uuid.UUID, bool) ([]string, error)
-	PutCapability(context.Context, uuid.UUID, string, bool) error
+	InsertCapabilities(ctx context.Context, node uuid.UUID, capabilities, unapproved []string) error
 	Activate(context.Context, uuid.UUID, string, string, value.Timestamp) (uint64, error)
 	Revoke(context.Context, uuid.UUID, value.Timestamp) (uint64, error)
 	EndpointPermitted(context.Context, []byte, bool) (bool, error)
