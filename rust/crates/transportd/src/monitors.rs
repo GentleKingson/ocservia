@@ -228,6 +228,7 @@ impl ProtocolHandler for SessionHandler {
                 return Err(trust_rejection_error(rejection));
             }
         }
+        let audit_fence = Arc::clone(&session.fence);
         self.shared
             .register_session(
                 &self.policy,
@@ -239,6 +240,13 @@ impl ProtocolHandler for SessionHandler {
             .await?;
         let monitors = (
             monitor_paths(self.shared.clone(), node_id.clone(), connection.clone()),
+            monitor_audit(
+                self.shared.clone(),
+                self.trust.clone(),
+                node_id.clone(),
+                connection.clone(),
+                audit_fence,
+            ),
             monitor_telemetry(
                 self.shared.clone(),
                 node_id.clone(),
@@ -304,6 +312,55 @@ fn monitor_owner_lease(
     })
 }
 
+fn monitor_audit(
+    shared: Shared,
+    authority: TrustAuthority,
+    node: Vec<u8>,
+    connection: Connection,
+    fence: Arc<RegisteredFence>,
+) -> tokio::task::JoinHandle<()> {
+    use ocservia_contracts::generated::ocserv::platform::{
+        agent::v1::VpnAuditBatch, transport::v1::StoreVpnAuditRequest,
+    };
+    tokio::spawn(async move {
+        while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+            let _ = tokio::time::timeout(STREAM_TIMEOUT, async {
+                let mut prefix = [0u8; 4];
+                recv.read_exact(&mut prefix)
+                    .await
+                    .map_err(|_| protocol_error("audit length missing"))?;
+                let size = u32::from_be_bytes(prefix) as usize;
+                if size == 0
+                    || size > MAX_HANDSHAKE_BYTES
+                    || !shared.admit_telemetry(&node, size).await
+                {
+                    return Err(protocol_error("audit frame limit exceeded"));
+                }
+                let mut payload = vec![0u8; size];
+                recv.read_exact(&mut payload)
+                    .await
+                    .map_err(|_| protocol_error("incomplete audit frame"))?;
+                let batch = VpnAuditBatch::decode(payload.as_slice())
+                    .map_err(|_| protocol_error("invalid audit frame"))?;
+                if batch.records.is_empty() || batch.records.len() > 32 {
+                    return Err(protocol_error("audit batch limit exceeded"));
+                }
+                let receipt = authority
+                    .store_vpn_audit(StoreVpnAuditRequest {
+                        node_id: node.clone(),
+                        endpoint_id: connection.remote_id().as_bytes().to_vec(),
+                        connection_id: fence.verified.connection_id.to_vec(),
+                        owner_epoch: fence.verified.owner_epoch,
+                        batch: Some(batch),
+                    })
+                    .await?;
+                write_message(&mut send, &receipt).await
+            })
+            .await;
+        }
+    })
+}
+
 fn monitor_telemetry(
     shared: Shared,
     node_id: Vec<u8>,
@@ -311,12 +368,7 @@ fn monitor_telemetry(
     max_message_size: usize,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        loop {
-            let Ok(accepted) = tokio::time::timeout(STREAM_TIMEOUT, connection.accept_uni()).await
-            else {
-                continue;
-            };
-            let Ok(mut recv) = accepted else { break };
+        while let Ok(mut recv) = connection.accept_uni().await {
             let mut length = [0_u8; 4];
             if !matches!(
                 tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut length)).await,

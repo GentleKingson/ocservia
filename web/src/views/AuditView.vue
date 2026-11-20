@@ -8,6 +8,7 @@ import {
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { listAuditEvents, verifyAuditChain } from "../api/events";
+import VpnAuditHistory from "@/features/audit/VpnAuditHistory.vue";
 import {
   getWorkspace,
   workspaceContext,
@@ -412,5 +413,6 @@ onBeforeUnmount(() => {
         </div>
       </template>
     </SectionCard>
+    <VpnAuditHistory />
   </main>
 </template>

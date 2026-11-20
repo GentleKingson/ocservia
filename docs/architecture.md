@@ -233,6 +233,8 @@ The unprivileged Agent sends a bounded, read-only telemetry batch to the Control
 
 Limits, windows, and retention periods are in [Telemetry](reference/stable-contracts.md#telemetry).
 
+On each VPN node, ocserv connection and disconnection hooks and an optional Linux conntrack collector write metadata to a private SQLite queue. The collector associates the original connection tuple with the active VPN lease when the flow opens. This preserves the session identity if ocserv later reassigns the address. Only the optional collector service has the additional `CAP_NET_ADMIN` capability. The Agent batches queued events on its authenticated Iroh connection. The Controller commits them to PostgreSQL before acknowledging them. Web queries use the workspace-scoped audit API. [VPN audit history](reference/stable-contracts.md#vpn-audit-history)
+
 ### Transport
 
 `ocservia-transportd` runs one Iroh endpoint that serves only the enrollment and Agent ALPNs. It exposes a versioned gRPC service to the Go Controller on a Unix socket, so Go packages never import Iroh types. It holds no database client or credentials.

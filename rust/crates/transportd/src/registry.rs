@@ -307,12 +307,14 @@ pub(super) async fn finish_session(
         tokio::task::JoinHandle<()>,
         tokio::task::JoinHandle<()>,
         tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
     ),
     _permit: OwnedSemaphorePermit,
 ) {
     monitors.0.abort();
     monitors.1.abort();
     monitors.2.abort();
+    monitors.3.abort();
     let mut registry = shared.inner.connections.lock().await;
     let finishing = registry
         .get(node_id)

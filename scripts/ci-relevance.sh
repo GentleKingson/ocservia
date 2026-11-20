@@ -96,7 +96,7 @@ classify_path() {
       tools_suite release ;;
 
     # Cross-language fixtures and integration drivers (Go + Rust).
-    testdata/*|scripts/export-node-sealing-keys.py|\
+    testdata/*|scripts/transport-boundary-check.sh|scripts/export-node-sealing-keys.py|\
     scripts/development-simulation-integration.sh|scripts/single-relay-network-smoke.py)
       run_go=true; run_rust=true ;;
 
@@ -113,7 +113,7 @@ classify_path() {
     web/package.json) run_web=true; tools_suite guards ;;
     web/*|scripts/web-check.sh|scripts/e2e.sh) run_web=true ;;
     rust/rust-toolchain.toml) run_rust=true; tools_suite guards ;;
-    rust/*|scripts/rust-check.sh|scripts/agent-boundary-check.sh|scripts/transport-boundary-check.sh|\
+    rust/*|scripts/rust-check.sh|scripts/agent-boundary-check.sh|\
     scripts/check-agent-storage.sh|scripts/native-ocserv-integration.sh)
       run_rust=true ;;
     control-plane/go.mod|go.work*)
@@ -135,7 +135,7 @@ classify_path() {
     scripts/package-agent.sh|scripts/verify-agent-package.sh|\
     scripts/test-installer-common.sh|scripts/test-managed-node-install.sh|scripts/test-node-bootstrap.py|\
     scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
-    scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py)
+    scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py|scripts/test-vpn-audit.py)
       run_installers=true ;;
 
     # Broader release/installer/packaging/deployment paths.

@@ -36,6 +36,7 @@ func replaceObservedGroups(ctx context.Context, tx database.Tx, store telemetrys
 }
 
 func insertObservedSecurity(ctx context.Context, store telemetrystore.Store, batch Batch) error {
+	events := make([]telemetrystore.SecurityEvent, 0, len(batch.Security))
 	for _, e := range batch.Security {
 		stamp, err := value.FromTime(e.ObservedAt)
 		if err != nil {
@@ -48,9 +49,7 @@ func insertObservedSecurity(ctx context.Context, store telemetrystore.Store, bat
 		if !stamp.Valid || stamp.Validate() != nil || !utf8.ValidString(e.Type) || strings.IndexByte(e.Type, 0) >= 0 || utf8.RuneCountInString(e.Type) < 1 || utf8.RuneCountInString(e.Type) > 128 || e.Severity != "info" && e.Severity != "warning" && e.Severity != "critical" || !detail.Valid() || len(detail.Bytes()) == 0 || detail.Bytes()[0] != '{' {
 			return errInvalidState
 		}
-		if err = store.InsertSecurity(ctx, batch.NodeID, telemetrystore.SecurityEvent{ID: e.ID, ObservedAt: stamp, Severity: e.Severity, Type: e.Type, Detail: detail}); err != nil {
-			return err
-		}
+		events = append(events, telemetrystore.SecurityEvent{ID: e.ID, ObservedAt: stamp, Severity: e.Severity, Type: e.Type, Detail: detail})
 	}
-	return nil
+	return store.InsertSecurity(ctx, batch.NodeID, events)
 }

@@ -24,9 +24,12 @@ if [[ -n "${DESTDIR}" && ( "${DESTDIR}" != /* || "${DESTDIR}" == "/" ) ]]; then
 fi
 
 if [[ -z "${DESTDIR}" ]]; then
+  systemctl disable --now ocservia-network-audit.service 2>/dev/null || true
   systemctl disable --now ocservia-agent.service ocservia-privd.service 2>/dev/null || true
   systemctl stop 'ocservia-upgrader@*.service' 2>/dev/null || true
 fi
+# A surviving ocserv configuration may still invoke the fail-open wrapper.
+rm -f "${DESTDIR}${PREFIX}/libexec/ocservia/vpn-audit.py" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-network-audit.service"
 rm -f "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service" \
   "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service" \
   "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-upgrader@.service" \
@@ -45,7 +48,7 @@ fi
 
 if [[ ${PURGE_STATE} == true ]]; then
   rm -rf "${DESTDIR}${STATE_DIR}" "${DESTDIR}/var/lib/ocservia-privd" \
-    "${DESTDIR}${UPGRADE_STATE_DIR}" "${DESTDIR}${SYSCONFDIR}/ocservia-agent"
+    "${DESTDIR}${UPGRADE_STATE_DIR}" "${DESTDIR}/var/lib/ocservia-vpn-audit" "${DESTDIR}${SYSCONFDIR}/ocservia-agent"
   if [[ -z "${DESTDIR}" ]]; then
     userdel ocserv-agent 2>/dev/null || true
     groupdel ocserv-agent 2>/dev/null || true

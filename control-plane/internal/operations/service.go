@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -122,6 +123,7 @@ type QueueMetrics = operationstore.QueueMetrics
 const defaultAgentUpgradeReconcileTimeout = 30 * time.Minute
 
 type Service struct {
+	lastSummary               atomic.Pointer[cachedSummary]
 	backend                   database.Backend
 	now                       func() time.Time
 	commandLimit              int

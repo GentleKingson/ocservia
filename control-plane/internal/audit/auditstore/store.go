@@ -10,7 +10,24 @@ import (
 	"github.com/google/uuid"
 )
 
+type VpnAuditCursor struct {
+	At   time.Time
+	Node uuid.UUID
+	Key  string
+	Kind string
+}
+type VpnAuditFilter struct {
+	After             *VpnAuditCursor
+	Kind, Destination string
+	Workspace         uuid.UUID
+	Node              *uuid.UUID
+	Username          string
+	Since, Until      *time.Time
+	Limit             int
+}
+
 type Store interface {
+	VpnAuditRecords(context.Context, VpnAuditFilter) (database.Rows, error)
 	Lock(context.Context, uuid.UUID) error
 	Clock(context.Context) (time.Time, error)
 	Previous(context.Context, uuid.UUID) ([]byte, error)

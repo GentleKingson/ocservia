@@ -16,6 +16,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 )
 
+func afterTimeout(d time.Duration) func() time.Time {
+	return func() time.Time { return time.Now().Add(d) }
+}
+
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 type schedulerLog struct {
@@ -44,7 +48,7 @@ func (f shutdownFunc) Shutdown(ctx context.Context) error { return f(ctx) }
 
 func TestLifecycleCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	life := newLifecycle(ctx, time.Second, quietLogger())
+	life := newLifecycle(ctx, afterTimeout(time.Second), quietLogger())
 	var order []string
 	for _, name := range []string{"HTTP", "Trust"} {
 		shutdown := shutdownFunc(func(ctx context.Context) error {
@@ -84,7 +88,7 @@ func TestLifecycleFailureDuringCancellation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			life := newLifecycle(ctx, time.Second, quietLogger())
+			life := newLifecycle(ctx, afterTimeout(time.Second), quietLogger())
 			failure := errors.New("component failure")
 			life.start(name, func(ctx context.Context) error { <-ctx.Done(); return failure })
 			life.start("other worker", func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() })
@@ -101,7 +105,7 @@ func TestLifecycleFailureDuringCancellation(t *testing.T) {
 }
 
 func TestLifecycleStartupAndCleanupFailures(t *testing.T) {
-	life := newLifecycle(context.Background(), time.Second, quietLogger())
+	life := newLifecycle(context.Background(), afterTimeout(time.Second), quietLogger())
 	startupErr, cleanupErr := errors.New("construction failed"), errors.New("shutdown failed")
 	trustClosed := false
 	life.http = shutdownFunc(func(context.Context) error { return errors.Join(cleanupErr, context.Canceled) })
@@ -114,7 +118,7 @@ func TestLifecycleStartupAndCleanupFailures(t *testing.T) {
 }
 
 func TestLifecycleWaitIsBounded(t *testing.T) {
-	life := newLifecycle(context.Background(), 20*time.Millisecond, quietLogger())
+	life := newLifecycle(context.Background(), afterTimeout(20*time.Millisecond), quietLogger())
 	release, finished := make(chan struct{}), make(chan struct{})
 	life.start("stalled", func(context.Context) error { <-release; close(finished); return nil })
 	err := life.close(nil)
@@ -131,7 +135,7 @@ func TestLifecycleWaitIsBounded(t *testing.T) {
 
 func TestLifecycleSimultaneousFailures(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	life := newLifecycle(ctx, time.Second, quietLogger())
+	life := newLifecycle(ctx, afterTimeout(time.Second), quietLogger())
 	first, second := errors.New("HTTP failed"), errors.New("worker failed")
 	life.start("HTTP", func(ctx context.Context) error { <-ctx.Done(); return first })
 	life.start("worker", func(ctx context.Context) error { <-ctx.Done(); return errors.Join(second, ctx.Err()) })
@@ -145,7 +149,7 @@ func TestLifecycleSimultaneousFailures(t *testing.T) {
 func TestLifecycleFailureProcessExit(t *testing.T) {
 	if os.Getenv("OCSERV_APP_EXIT_TEST") == "1" {
 		ctx, cancel := context.WithCancel(context.Background())
-		life := newLifecycle(ctx, time.Second, quietLogger())
+		life := newLifecycle(ctx, afterTimeout(time.Second), quietLogger())
 		life.start("worker", func(ctx context.Context) error { <-ctx.Done(); return errors.New("real component failure") })
 		cancel()
 		// Match cmd/ocserv-control's unchanged exit classification.

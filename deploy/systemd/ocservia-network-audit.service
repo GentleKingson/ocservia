@@ -1,0 +1,27 @@
+[Unit]
+Description=Ocservia VPN conntrack audit collector
+After=network.target
+
+[Service]
+User=ocserv-agent
+Group=ocserv-agent
+ExecStart=/usr/libexec/ocservia/vpn-audit.py --conntrack
+Restart=on-failure
+RestartSec=5s
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+InaccessiblePaths=-/etc/ocservia-agent -/var/lib/ocservia-agent -/var/lib/ocservia-privd
+StateDirectory=ocservia-vpn-audit
+StateDirectoryMode=0700
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

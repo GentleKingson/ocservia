@@ -387,6 +387,7 @@ message SessionObservation {
   google.protobuf.Timestamp connected_at = 4;
   uint64 bytes_in = 5;
   uint64 bytes_out = 6;
+  string vpn_ip = 7;
 }
 
 message IpBanObservation {
@@ -798,4 +799,28 @@ message SimulationProbe {
   bool duplicate_event = 3;
   bool return_error = 4;
   bool disconnect_after = 5;
+}
+
+// One immutable node-local event. Times are Unix milliseconds.
+message VpnAuditRecord {
+  string event_id = 1;
+  string event_type = 2;
+  string session_id = 3;
+  string username = 4;
+  string client_ip = 5;
+  string vpn_ip = 6;
+  int64 connected_ms = 7;
+  int64 observed_ms = 8;
+  optional uint64 bytes_in = 9;
+  optional uint64 bytes_out = 10;
+  string destination_ip = 11;
+  optional uint32 destination_port = 12;
+  string protocol = 13;
+  int64 flow_started_ms = 14;
+}
+message VpnAuditBatch {
+  repeated VpnAuditRecord records = 1;
+}
+message VpnAuditReceipt {
+  repeated string event_ids = 1;
 }

@@ -83,6 +83,39 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 		t.Fatalf("workspace isolation: %s %v", w.Body, err)
 	}
 	get("/api/v1/workspaces", uuid.Nil, nil, http.StatusUnauthorized)
+	get("/api/v1/audit/vpn", other, cookie, http.StatusForbidden)
+	get("/api/v1/audit/vpn", workspace, nonAdminCookie, http.StatusForbidden)
+	get("/api/v1/audit/vpn?kind=network&destination_ip=bad", workspace, cookie, http.StatusBadRequest)
+	for _, kind := range []string{"sessions", "network", "observations"} {
+		get("/api/v1/audit/vpn?kind="+kind, workspace, cookie, http.StatusOK)
+	}
+	// Equal timestamps on the same node must survive pagination without repeating or losing rows.
+	auditNode := uuid.New()
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'vpn-reader','offline',now(),now())`, auditNode, workspace)
+	for range 3 {
+		exec(`INSERT INTO vpn_network_history(node_id,event_id,session_id,username,client_ip,vpn_ip,connected_at,observed_at,destination_ip,destination_port,protocol,flow_started_at,bytes_out)
+		 VALUES($1,$2,'42','alice','192.0.2.10','10.0.0.4',$3,$3,'203.0.113.1',443,'tcp',$3,9007199254740993)`, auditNode, uuid.New(), at)
+	}
+	flowURL := "/api/v1/audit/vpn?kind=network&username=alice&destination_ip=203.0.113.1&page_size=2"
+	var flowPage struct {
+		Items []struct {
+			ID    string `json:"event_id"`
+			Bytes string `json:"bytes_out"`
+		} `json:"items"`
+		Next string `json:"next_cursor"`
+	}
+	w = get(flowURL, workspace, cookie, http.StatusOK)
+	testutil.NoError(t, json.Unmarshal(w.Body.Bytes(), &flowPage))
+	if len(flowPage.Items) != 2 || flowPage.Next == "" || flowPage.Items[0].Bytes != "9007199254740993" {
+		t.Fatalf("first flow page %s", w.Body)
+	}
+	first, second := flowPage.Items[0].ID, flowPage.Items[1].ID
+	w = get(flowURL+"&cursor="+flowPage.Next, workspace, cookie, http.StatusOK)
+	flowPage.Next = ""
+	testutil.NoError(t, json.Unmarshal(w.Body.Bytes(), &flowPage))
+	if len(flowPage.Items) != 1 || flowPage.Next != "" || flowPage.Items[0].ID == first || flowPage.Items[0].ID == second {
+		t.Fatalf("second flow page %s", w.Body)
+	}
 	get("/api/v1/audit/events", other, cookie, http.StatusForbidden)
 	get("/api/v1/audit/events?page_size=201", workspace, cookie, http.StatusBadRequest)
 

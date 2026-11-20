@@ -51,9 +51,9 @@ type Snapshot struct {
 }
 
 type Session struct {
-	ID, Username, ClientIP string
-	ConnectedAt            time.Time
-	BytesIn, BytesOut      int64
+	ID, Username, ClientIP, VPNIP string
+	ConnectedAt                   time.Time
+	BytesIn, BytesOut             int64
 }
 
 type User struct {
@@ -123,7 +123,7 @@ type Store interface {
 	MaintainHistory(context.Context, time.Time) error
 
 	ReplaceGroups(context.Context, uuid.UUID, []Group) error
-	InsertSecurity(context.Context, uuid.UUID, SecurityEvent) error
+	InsertSecurity(context.Context, uuid.UUID, []SecurityEvent) error
 }
 
 type BatchMaintainer interface {

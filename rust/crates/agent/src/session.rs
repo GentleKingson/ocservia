@@ -61,6 +61,7 @@ pub(super) struct SessionContext<'a> {
     pub(super) endpoint_id: EndpointId,
     pub(super) privd: &'a PrivdClient,
     pub(super) command_executor: &'a mut CommandExecutor,
+    pub(super) session_cache: crate::telemetry::SessionCache,
     pub(super) boot_id: &'a str,
     pub(super) os_release: &'a str,
     pub(super) agent_instance_id: Uuid,
@@ -246,10 +247,13 @@ async fn connect_once(
         negotiated_capabilities = session_authority.grant().negotiated_capabilities.len(),
         "agent session accepted"
     );
+    let audit_upload = crate::vpn_audit::upload_loop(connection.clone());
+    tokio::pin!(audit_upload);
     let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
     let session_expiry = wait_for_session_expiry(&session_authority);
     tokio::pin!(session_expiry);
     let mut sequence = 0_u64;
+    let mut delivery = None;
     loop {
         tokio::select! {
             _ = connection.closed() => return Ok(()),
@@ -257,11 +261,22 @@ async fn connect_once(
                 expiry?;
                 return Err(invalid("Controller session grant expired").into());
             },
+            () = &mut audit_upload => return Err(invalid("audit transport closed").into()),
             stream = connection.accept_bi() => {
                 let (send, recv) = stream?;
                 handle_command_stream(send, recv, session, &session_authority).await?;
             },
-            _ = heartbeat.tick() => {
+            Some((delivered, result)) = async {
+                Some(delivery.as_mut()?.await)
+            }, if delivery.is_some() => {
+                delivery = None;
+                let delivered: Vec<_> = delivered;
+                session.command_executor.journal_mut().acknowledge_telemetry_batch(&delivered)?;
+                result?;
+                tracing::info!(node_id = %session.node_id, sequence, "agent telemetry delivered");
+            },
+            _ = heartbeat.tick(), if delivery.is_none() => {
+                let sampled=SystemTime::now();
                 let observations=session.privd.snapshot().await?;
                 // Durable upgrade outcome evidence is best-effort: an older
                 // privd without the fixed read simply yields an empty report.
@@ -275,6 +290,7 @@ async fn connect_once(
                 sequence=sequence.saturating_add(1);
                 let drops = session.command_executor.journal().telemetry_drop_counters()?;
                 let batch = build_telemetry(session, sequence, &observations, upgrade_outcomes, &connection, drops)?;
+                crate::vpn_audit::reconcile(session.boot_id.to_owned(), sampled, batch.sessions.clone()).await;
                 let payload = batch.encode_to_vec();
                 let batch_id: [u8; 16] = batch.batch_id.as_slice().try_into().map_err(|_| invalid("telemetry batch ID invalid"))?;
                 let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
@@ -291,24 +307,19 @@ async fn connect_once(
                     .command_executor
                     .journal_mut()
                     .telemetry_pending(32, i64::try_from(now)?)?;
-                let mut delivered = Vec::with_capacity(pending_batches.len());
-                for (pending_id, pending) in pending_batches {
-                    if let Err(error) = send_telemetry(&connection, &pending).await {
-                        if !delivered.is_empty() {
-                            let _ = session
-                                .command_executor
-                                .journal_mut()
-                                .acknowledge_telemetry_batch(&delivered);
+                // The journal owns these batches until acknowledgement. Dropping
+                // this session during a send leaves them available for replay.
+                let connection = &connection;
+                delivery = Some(Box::pin(async move {
+                    let mut delivered = Vec::with_capacity(pending_batches.len());
+                    for (id, payload) in pending_batches {
+                        if let Err(err) = send_telemetry(connection, &payload).await {
+                            return (delivered, Err(err));
                         }
-                        return Err(error);
+                        delivered.push(id);
                     }
-                    delivered.push(pending_id);
-                }
-                session
-                    .command_executor
-                    .journal_mut()
-                    .acknowledge_telemetry_batch(&delivered)?;
-                tracing::info!(node_id = %session.node_id, sequence, "agent telemetry delivered");
+                    (delivered, Ok(()))
+                }));
             },
         }
     }

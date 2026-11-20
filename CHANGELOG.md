@@ -22,6 +22,11 @@ compatibility-policy reset in v1.1.0 described below.
 
 ### Highlights
 
+- Add searchable VPN session history and optional per-node Linux conntrack
+  auditing. The Audit page filters by node, user, time and destination IP
+  for network records, and exports loaded results as JSON. Existing externally
+  managed ocserv configurations need to invoke the packaged session hook.
+  [Node setup](docs/operations/agent-lifecycle.md#vpn-audit-collection)
 - Rebuild the Vue 3 console with shadcn-vue and Tailwind CSS v4, including
   filtered node tables, configuration dialogs, approvals and rollout views.
 - Add Quick installation for a new Integrated host with bundled PostgreSQL,
@@ -41,7 +46,7 @@ compatibility-policy reset in v1.1.0 described below.
   configurations and saved `deployment-profile.json` states fail closed before
   host, container, or volume changes without silent backend switching or data
   deletion, and unverified cross-engine automatic migration is unsupported.
-- Move PostgreSQL database artifacts to epoch 2, revision 2. The sole previous
+- Move PostgreSQL database artifacts to epoch 2, revision 5. The sole previous
   checkpoint is `v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 /
   revision 0. Earlier PostgreSQL databases must reach that checkpoint first;
   the new binary cannot replay the removed migration history. Retain a verified

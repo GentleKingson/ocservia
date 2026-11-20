@@ -35,14 +35,15 @@ def run(*args, check=True):
     return result.stdout
 
 
-def fetch(address, path, context, proxy):
+def fetch(address, path, context, proxy, etag=None):
     with socket.create_connection((address, 8443), timeout=5) as sock:
         if proxy:
             # Integrated trusts PROXY only from Edge; the client here is the
             # network gateway address configured as OCSERV_EDGE_GATEWAY_IP.
             sock.sendall(f"PROXY TCP4 203.0.113.7 {address} 40000 443\r\n".encode())
         with context.wrap_socket(sock, server_hostname=HOST) as tls:
-            tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {HOST}\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n".encode())
+            conditional = f"If-None-Match: {etag}\r\n" if etag else ""
+            tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {HOST}\r\nAccept-Encoding: gzip\r\n{conditional}Connection: close\r\n\r\n".encode())
             data = b""
             while part := tls.recv(65536):
                 data += part
@@ -103,14 +104,17 @@ def main():
                     assert headers.get(header) == [value], (mode, path, header, headers.get(header))
                 assert "content-security-policy-report-only" not in headers, (mode, path)
                 assert "server" not in headers, (mode, path, headers.get("server"))
-            status, headers = fetch(address, asset, context, proxy)
-            assert status == 200 and headers.get("content-encoding") == ["gzip"], (mode, asset, headers)
-            assert headers.get("cache-control") == ["public, max-age=31536000, immutable"], (mode, headers)
-            for path in ("/", "/assets/missing-Abcd1234.js"):
-                status, headers = fetch(address, path, context, proxy)
-                assert status == 200 and headers.get("cache-control") == ["no-cache"], (mode, path, headers)
-                assert "content-encoding" not in headers, (mode, path, headers)
-            print(f"PASS {mode}: security headers, asset caching and compression")
+            for path, policy in ((asset, "public, max-age=31536000, immutable"),
+                                 ("/assets/missing-Ab3dE6gH.js", "no-cache"), ("/", "no-cache")):
+                got, headers = fetch(address, path, context, proxy)
+                assert got == 200 and headers.get("cache-control") == [policy], (mode, path, got, headers)
+                if path == asset:
+                    assert headers.get("content-encoding") == ["gzip"], (mode, path, headers)
+                else:
+                    assert "content-encoding" not in headers, (mode, path, headers)
+                got, _ = fetch(address, path, context, proxy, headers["etag"][0])
+                assert got == 304, (mode, path, got)
+            print(f"PASS {mode}: security headers on static, fallback and 502 responses")
     finally:
         for container in containers:
             run("docker", "rm", "-f", container, check=False)

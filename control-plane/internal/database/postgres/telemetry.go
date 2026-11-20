@@ -155,11 +155,12 @@ func (s telemetryStore) ReplaceSessions(ctx context.Context, node uuid.UUID, obs
 		return err
 	}
 	if len(sessions) == 0 {
-		return nil
+		return s.closeAbsentSessions(ctx, node, observed)
 	}
 	ids := make([]string, len(sessions))
 	usernames := make([]string, len(sessions))
 	ips := make([]string, len(sessions))
+	vpnIPs := make([]string, len(sessions))
 	connectedAt := make([]time.Time, len(sessions))
 	bytesIn := make([]int64, len(sessions))
 	bytesOut := make([]int64, len(sessions))
@@ -167,14 +168,37 @@ func (s telemetryStore) ReplaceSessions(ctx context.Context, node uuid.UUID, obs
 		ids[i] = session.ID
 		usernames[i] = session.Username
 		ips[i] = session.ClientIP
+		vpnIPs[i] = session.VPNIP
 		connectedAt[i] = session.ConnectedAt
 		bytesIn[i] = session.BytesIn
 		bytesOut[i] = session.BytesOut
 	}
-	_, err := s.tx.Exec(ctx, `INSERT INTO node_sessions (node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at)
-		SELECT $1,u.session_id,u.username,u.client_ip::inet,u.connected_at,u.bytes_in,u.bytes_out,$8
-		FROM unnest($2::text[],$3::text[],$4::text[],$5::timestamptz[],$6::bigint[],$7::bigint[]) AS u(session_id,username,client_ip,connected_at,bytes_in,bytes_out)`,
-		node, ids, usernames, ips, connectedAt, bytesIn, bytesOut, observed)
+	_, err := s.tx.Exec(ctx, `INSERT INTO node_sessions (node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at,vpn_ip)
+		SELECT $1,u.session_id,u.username,u.client_ip::inet,u.connected_at,u.bytes_in,u.bytes_out,$8,NULLIF(u.vpn_ip,'')::inet
+		FROM unnest($2::text[],$3::text[],$4::text[],$5::timestamptz[],$6::bigint[],$7::bigint[],$9::text[]) AS u(session_id,username,client_ip,connected_at,bytes_in,bytes_out,vpn_ip)`,
+		node, ids, usernames, ips, connectedAt, bytesIn, bytesOut, observed, vpnIPs)
+	if err != nil {
+		return err
+	}
+	_, err = s.tx.Exec(ctx, `INSERT INTO vpn_session_history
+		(node_id, session_id, username, client_ip, connected_at, last_seen_at, bytes_in, bytes_out,vpn_ip)
+		SELECT node_id, session_id, username, client_ip, connected_at, observed_at, bytes_in, bytes_out,vpn_ip
+		FROM node_sessions WHERE node_id=$1
+        -- Older Agents used the snapshot time as the start on every heartbeat.
+        AND (vpn_ip IS NOT NULL OR connected_at <> observed_at)
+		ON CONFLICT (node_id, session_id, connected_at) DO UPDATE SET
+		last_seen_at=excluded.last_seen_at, absent_at=NULL, client_ip=excluded.client_ip, vpn_ip=COALESCE(excluded.vpn_ip,vpn_session_history.vpn_ip),
+		bytes_in=excluded.bytes_in, bytes_out=excluded.bytes_out`, node)
+	if err != nil {
+		return err
+	}
+	return s.closeAbsentSessions(ctx, node, observed)
+}
+
+// absent_at bounds when the session disappeared. A snapshot cannot establish its exact logout time.
+func (s telemetryStore) closeAbsentSessions(ctx context.Context, node uuid.UUID, observed time.Time) error {
+	_, err := s.tx.Exec(ctx, `UPDATE vpn_session_history SET absent_at=$2
+		WHERE node_id=$1 AND absent_at IS NULL AND last_seen_at<$2`, node, observed)
 	return err
 }
 
@@ -283,8 +307,24 @@ func (s telemetryStore) ReplaceGroups(ctx context.Context, node uuid.UUID, group
 	return nil
 }
 
-func (s telemetryStore) InsertSecurity(ctx context.Context, node uuid.UUID, e telemetrystore.SecurityEvent) error {
-	_, err := s.tx.Exec(ctx, `INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, e.ID, node, e.ObservedAt, e.Severity, e.Type, e.Detail)
+func (s telemetryStore) InsertSecurity(ctx context.Context, node uuid.UUID, events []telemetrystore.SecurityEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	var query strings.Builder
+	query.WriteString("INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail) VALUES ")
+	args := make([]any, 1, 1+5*len(events))
+	args[0] = node
+	for i, e := range events {
+		if i > 0 {
+			query.WriteByte(',')
+		}
+		base := 2 + 5*i
+		fmt.Fprintf(&query, "($%d,$1,$%d,$%d,$%d,$%d)", base, base+1, base+2, base+3, base+4)
+		args = append(args, e.ID, e.ObservedAt, e.Severity, e.Type, e.Detail)
+	}
+	query.WriteString(" ON CONFLICT DO NOTHING")
+	_, err := s.tx.Exec(ctx, query.String(), args...)
 	return err
 }
 
@@ -356,6 +396,9 @@ func (s telemetryStore) MaintainHistory(ctx context.Context, now time.Time) erro
 	if _, err := s.tx.Exec(ctx, `SELECT telemetry_prune_rollups($1)`, now); err != nil {
 		return err
 	}
+	if _, err := s.tx.Exec(ctx, `SELECT prune_vpn_history()`); err != nil {
+		return err
+	}
 	_, err := s.tx.Exec(ctx, `SELECT telemetry_drop_expired_partitions($1)`, now.Add(-14*24*time.Hour))
 	return err
 }
@@ -364,7 +407,7 @@ var _ telemetrystore.Store = telemetryStore{}
 
 func (b *Backend) ValidateTelemetryRuntime(ctx context.Context) error {
 	var safe bool
-	err := b.QueryRow(ctx, `SELECT NOT has_schema_privilege(current_user,'public','CREATE') AND NOT has_table_privilege(current_user,'telemetry_rollups_5m','DELETE,TRUNCATE') AND NOT has_table_privilege(current_user,'telemetry_rollups_1h','DELETE,TRUNCATE') AND has_function_privilege(current_user,'telemetry_prune_rollups(timestamptz)','EXECUTE') AND has_function_privilege(current_user,'telemetry_drop_expired_partitions(timestamptz)','EXECUTE') AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb FROM pg_catalog.pg_roles WHERE rolname=current_user`).Scan(&safe)
+	err := b.QueryRow(ctx, `SELECT NOT has_schema_privilege(current_user,'public','CREATE') AND NOT has_table_privilege(current_user,'telemetry_rollups_5m','DELETE,TRUNCATE') AND NOT has_table_privilege(current_user,'telemetry_rollups_1h','DELETE,TRUNCATE') AND NOT has_table_privilege(current_user,'vpn_network_history','DELETE,TRUNCATE') AND NOT has_table_privilege(current_user,'vpn_session_events','DELETE,TRUNCATE') AND has_function_privilege(current_user,'prune_vpn_history()','EXECUTE') AND has_function_privilege(current_user,'telemetry_prune_rollups(timestamptz)','EXECUTE') AND has_function_privilege(current_user,'telemetry_drop_expired_partitions(timestamptz)','EXECUTE') AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb FROM pg_catalog.pg_roles WHERE rolname=current_user`).Scan(&safe)
 	if err != nil {
 		return err
 	}

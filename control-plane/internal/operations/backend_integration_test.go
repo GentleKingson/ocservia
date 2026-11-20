@@ -27,6 +27,36 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+func TestDashboardSummaryCache(t *testing.T) {
+	f := newOutboxFixture(t)
+	fault := &commitFaultBackend{Backend: f.backend}
+	service := operations.NewBackend(fault, 1, f.signer)
+	ctx := t.Context()
+	if _, _, err := service.Create(ctx, outboxRequest(f.node(t))); err != nil {
+		t.Fatal(err)
+	}
+	check := func(workspace uuid.UUID, want int64) {
+		t.Helper()
+		got, err := service.SummaryInWorkspace(ctx, workspace)
+		if err != nil || got.Active != want {
+			t.Fatalf("summary for %s: %+v, %v", workspace, got, err)
+		}
+	}
+	check(f.workspace, 1)
+	fault.armed.Store(true)
+	check(f.workspace, 1) // A hit avoids the failing transaction.
+	other := uuid.Must(uuid.NewV7())
+	if _, err := service.SummaryInWorkspace(ctx, other); !errors.Is(err, lostCommit) {
+		t.Fatalf("expected a fresh read for another workspace, got %v", err)
+	}
+	check(other, 0) // Retry after the failed query.
+	fault.armed.Store(true)
+	time.Sleep(time.Second)
+	if _, err := service.SummaryInWorkspace(ctx, other); !errors.Is(err, lostCommit) {
+		t.Fatalf("expected a fresh read after expiry, got %v", err)
+	}
+}
+
 func TestOutboxBackendIntegration(t *testing.T) {
 	t.Run("atomic-intent-and-ambiguous-commit", func(t *testing.T) {
 		f := newOutboxFixture(t)

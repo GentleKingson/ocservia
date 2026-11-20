@@ -84,5 +84,7 @@ export * from "./UserPasswordSealedSecretV1";
 export * from "./UserPasswordSealingKey";
 export * from "./UserPolicy";
 export * from "./UserPolicyRequest";
+export * from "./VpnAuditPage";
+export * from "./VpnAuditRecord";
 export * from "./Workspace";
 export * from "./WorkspacePage";

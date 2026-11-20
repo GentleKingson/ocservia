@@ -446,6 +446,8 @@ Local bootstrap marker table. A completed backup job alone is never recovery
 proof without a verified restore. The checks that must pass before cutover are
 listed once in [Database recovery](#database-recovery).
 
+The Controller backup includes VPN audit records committed by the backup point. A recovered node can resend events still queued in its private audit spool. Once the Agent receives a commit receipt it deletes those events locally, so restoring PostgreSQL to an earlier point can leave a gap in VPN history even after all nodes reconnect. Record the restore point and the affected interval when reporting audit coverage. [VPN audit collection](agent-lifecycle.md#vpn-audit-collection)
+
 ### PostgreSQL
 
 The production backup worker runs `scripts/postgres-backup.sh` to take a

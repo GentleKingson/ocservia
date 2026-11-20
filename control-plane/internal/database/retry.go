@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"time"
 )
 
@@ -18,7 +19,8 @@ func WithinRetry(ctx context.Context, backend Backend, isolation Isolation, chan
 		if !retry || attempt == 2 {
 			return err
 		}
-		timer := time.NewTimer(time.Duration(attempt+1) * 10 * time.Millisecond)
+		delay := 10 * time.Millisecond << attempt
+		timer := time.NewTimer(delay + rand.N(delay))
 		select {
 		case <-ctx.Done():
 			timer.Stop()

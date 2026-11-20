@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -170,7 +171,7 @@ func (r *Runner) acquire(ctx context.Context) (*Session, time.Time, error) {
 		select {
 		case <-ctx.Done():
 			return nil, time.Time{}, ctx.Err()
-		case <-time.After(r.retryInterval):
+		case <-time.After(r.retryInterval + rand.N(r.retryInterval/2)):
 		}
 	}
 }

@@ -90,3 +90,57 @@ CREATE INDEX operations_node_backlog_idx ON public.operations USING btree (node_
 CREATE INDEX operations_workspace_backlog_idx ON public.operations USING btree (workspace_id) WHERE (state = ANY (ARRAY['queued'::text, 'offline_pending'::text, 'dispatched'::text, 'accepted'::text, 'running'::text, 'unknown'::text]));
 -- ocservia:end-step
 -- ocservia:end-revision
+-- ocservia:revision=5
+-- ocservia:checkpoint={"checksum":"fef9ae411b86cb145d61ee93e3b468711767f6b274b07dc9ae309e32d544971c","steps":1}
+-- ocservia:step=001:vpn_session_history
+-- ocservia:metadata={"catalog_sha256":"02236adc015c56f8c8cd7e79d687565ea941736cce80e33e21d3f3ee25ca6614"}
+ALTER TABLE public.node_sessions ADD COLUMN vpn_ip inet;
+CREATE TABLE public.vpn_session_history (
+    node_id uuid NOT NULL REFERENCES public.nodes(id) ON DELETE CASCADE,
+    session_id text NOT NULL,
+    connected_at timestamptz NOT NULL,
+    username text NOT NULL,
+    client_ip inet NOT NULL,
+    vpn_ip inet,
+    last_seen_at timestamptz NOT NULL,
+    absent_at timestamptz,
+    bytes_in bigint NOT NULL CHECK (bytes_in >= 0),
+    bytes_out bigint NOT NULL CHECK (bytes_out >= 0),
+    PRIMARY KEY (node_id, session_id, connected_at)
+);
+CREATE INDEX vpn_session_history_open_idx ON public.vpn_session_history(node_id) WHERE absent_at IS NULL;
+CREATE INDEX vpn_session_history_closed_idx ON public.vpn_session_history(absent_at) WHERE absent_at IS NOT NULL;
+CREATE INDEX vpn_session_history_user_time_idx ON public.vpn_session_history(username, connected_at DESC);
+CREATE TABLE public.vpn_session_events (node_id uuid NOT NULL REFERENCES public.nodes(id) ON DELETE CASCADE,
+ event_id uuid NOT NULL, session_id text NOT NULL, username text NOT NULL, client_ip inet NOT NULL,
+ vpn_ip inet NOT NULL, connected_at timestamptz, observed_at timestamptz NOT NULL,
+ bytes_in bigint CHECK(bytes_in>=0), bytes_out bigint CHECK(bytes_out>=0), PRIMARY KEY(node_id,event_id), event_type text NOT NULL CHECK(event_type IN ('connect','disconnect')));
+CREATE TABLE public.vpn_network_history (node_id uuid NOT NULL REFERENCES public.nodes(id) ON DELETE CASCADE,
+ event_id uuid NOT NULL, session_id text NOT NULL, username text NOT NULL, client_ip inet NOT NULL,
+ vpn_ip inet NOT NULL, connected_at timestamptz, observed_at timestamptz NOT NULL,
+ bytes_in bigint CHECK(bytes_in>=0), bytes_out bigint CHECK(bytes_out>=0), PRIMARY KEY(node_id,event_id), destination_ip inet NOT NULL, destination_port integer CHECK(destination_port BETWEEN 0 AND 65535), protocol text NOT NULL, flow_started_at timestamptz NOT NULL);
+CREATE INDEX vpn_session_events_time_idx ON public.vpn_session_events(observed_at DESC);
+CREATE INDEX vpn_network_time_idx ON public.vpn_network_history(observed_at DESC);
+CREATE INDEX vpn_network_destination_time_idx ON public.vpn_network_history(destination_ip,observed_at DESC);
+CREATE INDEX vpn_network_node_time_idx ON public.vpn_network_history(node_id,observed_at DESC,event_id DESC);
+CREATE INDEX vpn_network_user_time_idx ON public.vpn_network_history(username,observed_at DESC);
+CREATE INDEX vpn_session_events_node_time_idx ON public.vpn_session_events(node_id,observed_at DESC,event_id DESC);
+CREATE INDEX vpn_session_events_user_time_idx ON public.vpn_session_events(username,observed_at DESC);
+CREATE INDEX vpn_session_history_node_time_idx ON public.vpn_session_history(node_id,connected_at DESC,session_id DESC);
+CREATE FUNCTION public.prune_vpn_history() RETURNS void
+LANGUAGE sql SECURITY DEFINER SET search_path TO pg_catalog, public AS $$
+ DELETE FROM public.vpn_session_history WHERE (node_id,session_id,connected_at) IN (
+   SELECT node_id,session_id,connected_at FROM public.vpn_session_history
+   WHERE absent_at < statement_timestamp() - interval '90 days'
+   ORDER BY absent_at LIMIT 1024 FOR UPDATE SKIP LOCKED
+ );
+ DELETE FROM public.vpn_network_history WHERE (node_id,event_id) IN (
+   SELECT node_id,event_id FROM public.vpn_network_history WHERE observed_at < statement_timestamp()-interval '30 days'
+   ORDER BY observed_at LIMIT 4096 FOR UPDATE SKIP LOCKED);
+ DELETE FROM public.vpn_session_events WHERE (node_id,event_id) IN (
+   SELECT node_id,event_id FROM public.vpn_session_events WHERE observed_at < statement_timestamp()-interval '90 days'
+   ORDER BY observed_at LIMIT 1024 FOR UPDATE SKIP LOCKED);
+$$;
+REVOKE ALL ON FUNCTION public.prune_vpn_history() FROM PUBLIC;
+-- ocservia:end-step
+-- ocservia:end-revision

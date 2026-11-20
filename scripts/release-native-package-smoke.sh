@@ -304,7 +304,7 @@ assert_upgraded_state() {
   assert_installed_state "${context}" "${expected_version}"
   sudo test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
     || { echo "${context}: upgrade rollback snapshot manifest missing" >&2; exit 1; }
-  sudo test "$(sudo awk 'END { print NR }' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 13 \
+  sudo test "$(sudo awk 'END { print NR }' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 12 \
     || { echo "${context}: upgrade rollback snapshot is incomplete" >&2; exit 1; }
   sudo grep -Fxq "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}" /etc/ocservia-agent/agent.env \
     || { echo "${context}: upgrade lost the configured agent environment" >&2; exit 1; }
@@ -697,7 +697,7 @@ docker exec "${container}" grep -Fq 'RELAY_URL_A=https://relay-one.example.net' 
 docker exec "${container}" test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
   || { echo "rpm upgrade rollback snapshot manifest missing" >&2; exit 1; }
 docker exec "${container}" bash -c \
-  'test "$(awk '\''END { print NR }'\'' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 9' \
+  'test "$(awk '\''END { print NR }'\'' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 12' \
   || { echo "rpm upgrade rollback snapshot is incomplete" >&2; exit 1; }
 docker exec "${container}" grep -Fxq "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}" \
   /etc/ocservia-agent/agent.env \

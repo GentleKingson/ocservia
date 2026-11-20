@@ -80,6 +80,11 @@ assert_eq "integrated nginx cache" edge "${controller_cache_images[*]}"
 assert_flag "integrated nginx" run_installers true
 
 reset_state
+classify_path scripts/transport-boundary-check.sh
+assert_flag "transport boundary" run_go true
+assert_flag "transport boundary" run_rust true
+
+reset_state
 classify_path control-plane/internal/foo.go
 assert_flag "go internal" run_go true
 assert_flag "go internal" run_database true

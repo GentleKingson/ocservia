@@ -62,6 +62,36 @@ struct TestTrustService {
 
 #[tonic::async_trait]
 impl TrustService for TestTrustService {
+    async fn store_vpn_audit(
+        &self,
+        request: Request<
+            ocservia_contracts::generated::ocserv::platform::transport::v1::StoreVpnAuditRequest,
+        >,
+    ) -> Result<
+        Response<ocservia_contracts::generated::ocserv::platform::agent::v1::VpnAuditReceipt>,
+        Status,
+    > {
+        let request = request.into_inner();
+        assert!(
+            self.bindings
+                .iter()
+                .any(|(endpoint, node, _, _)| endpoint.as_bytes()
+                    == request.endpoint_id.as_slice()
+                    && node == &request.node_id)
+        );
+        assert!(request.owner_epoch > 0 && request.connection_id.len() == 16);
+        Ok(Response::new(
+            ocservia_contracts::generated::ocserv::platform::agent::v1::VpnAuditReceipt {
+                event_ids: request
+                    .batch
+                    .unwrap()
+                    .records
+                    .into_iter()
+                    .map(|r| r.event_id)
+                    .collect(),
+            },
+        ))
+    }
     async fn validate_enrollment(
         &self,
         _request: Request<ValidateEnrollmentRequest>,
@@ -1560,6 +1590,9 @@ async fn telemetry_budgets_retention_and_security_priority() {
 
 #[tokio::test]
 async fn router_security_telemetry_stream_stalled_handshake_and_replacement() {
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+        VpnAuditBatch, VpnAuditReceipt, VpnAuditRecord,
+    };
     // Wrong ALPN and unknown agent rejected.
     let s0 = test_service(8);
     let r0 = test_router(
@@ -1621,6 +1654,20 @@ async fn router_security_telemetry_stream_stalled_handshake_and_replacement() {
         .expect("c1");
     send_handshake(&first, &hs).await;
     wait_until_registered(&service, &hs.node_id).await;
+
+    let audit_id = Uuid::now_v7().to_string();
+    let (mut audit_send, mut audit_recv) = first.open_bi().await.unwrap();
+    let audit = VpnAuditBatch {
+        records: vec![VpnAuditRecord {
+            event_id: audit_id.clone(),
+            ..VpnAuditRecord::default()
+        }],
+    };
+    write_frame_bytes(&mut audit_send, &audit.encode_to_vec()).await;
+    audit_send.finish().unwrap();
+    let receipt =
+        VpnAuditReceipt::decode(read_frame_bytes(&mut audit_recv).await.as_slice()).unwrap();
+    assert_eq!(receipt.event_ids, [audit_id]);
 
     let max_name = |p: &str, i: usize| format!("{p}{i:06}{}", "x".repeat(64 - p.len() - 6));
     let batch = TelemetryBatch {

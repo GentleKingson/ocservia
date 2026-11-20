@@ -665,6 +665,9 @@ impl Adapter {
         input: &[u8],
     ) -> Result<ChildOutput, AdapterError> {
         let mut command = Command::new(program);
+        if program == self.resources.occtl {
+            command.env("TZ", "UTC");
+        }
         command
             .args(args)
             .process_group(0)
@@ -1080,7 +1083,34 @@ pub fn parse_sessions(bytes: &[u8]) -> Result<SessionList, AdapterError> {
             .and_then(serde_json::Value::as_str)
             .ok_or(AdapterError::MalformedOutput)
             .and_then(canonical_ip)?;
+        let connected_at = object
+            .get("Connected at")
+            .or_else(|| object.get("Session started at"))
+            .map(|value| {
+                let (date, minute) = value
+                    .as_str()
+                    .and_then(|s| s.split_once(' '))
+                    .ok_or(AdapterError::MalformedOutput)?;
+                format!("{date}T{minute}:00Z")
+                    .parse()
+                    .map_err(|_| AdapterError::MalformedOutput)
+            })
+            .transpose()?;
+        let counter = |key: &str| {
+            object
+                .get(key)
+                .map(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str()?.parse::<u64>().ok())
+                        .filter(|n| i64::try_from(*n).is_ok())
+                        .ok_or(AdapterError::MalformedOutput)
+                })
+                .transpose()
+        };
         sessions.push(Session {
+            connected_at,
+            bytes_in: counter("RX")?,
+            bytes_out: counter("TX")?,
             id,
             username,
             remote_ip,

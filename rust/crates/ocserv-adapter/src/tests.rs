@@ -329,6 +329,13 @@ fn parses_session_ban_user_and_group_fixtures() {
         assert_eq!(parsed_bans.bans.len(), 2);
         assert_eq!(parsed_bans.bans[1].seconds_remaining, None);
     }
+    let parsed = parse_sessions(br#"[{"ID":12,"Username":"alice","Remote IP":"192.0.2.1","IPv4":"10.0.0.2","Connected at":"2026-08-03 10:00","RX":"123","TX":"456"}]"#).unwrap();
+    let item = &parsed.sessions[0];
+    assert_eq!(
+        item.connected_at.unwrap().to_string(),
+        "2026-08-03T10:00:00Z"
+    );
+    assert_eq!((item.bytes_in, item.bytes_out), (Some(123), Some(456)));
     assert!(parse_ip_bans(b"[{\"IP\":\"192.0.2.1\"},]").is_err());
 
     let users = parse_user_file(b"alice:*:$6$secret-hash\nbob:x:!$6$disabled\n").expect("users");

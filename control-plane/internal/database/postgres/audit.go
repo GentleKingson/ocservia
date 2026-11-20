@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
@@ -46,6 +47,44 @@ func (s auditStore) LatestEvent(ctx context.Context, workspace uuid.UUID) (id uu
 	err = s.QueryRow(ctx, `SELECT id,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT 1`, workspace).Scan(&id, &hash)
 	return
 }
+func (s auditStore) VpnAuditRecords(ctx context.Context, q auditstore.VpnAuditFilter) (database.Rows, error) {
+	// Every SQL fragment below is constant. User input is bound separately.
+	var table, detail, at string
+	switch q.Kind {
+	case "observations":
+		table, at = "vpn_session_history", "connected_at"
+		detail = "h.last_seen_at,h.absent_at,'observed'::text,NULL::uuid,NULL::text,NULL::integer,NULL::text,NULL::timestamptz"
+	case "sessions":
+		table, at = "vpn_session_events", "observed_at"
+		detail = "h.observed_at,NULL::timestamptz,h.event_type,h.event_id,NULL::text,NULL::integer,NULL::text,NULL::timestamptz"
+	case "network":
+		table, at = "vpn_network_history", "observed_at"
+		detail = "h.observed_at,NULL::timestamptz,'flow'::text,h.event_id,host(h.destination_ip),h.destination_port,h.protocol,h.flow_started_at"
+	default:
+		return nil, database.ErrUnsupported
+	}
+	query := `SELECT h.node_id,h.session_id,h.username,host(h.client_ip),host(h.vpn_ip),h.connected_at,
+		h.bytes_in::text,h.bytes_out::text,` + detail + ` FROM ` + table + ` h JOIN nodes n ON n.id=h.node_id
+		WHERE n.workspace_id=$1 AND ($2::uuid IS NULL OR h.node_id=$2)
+		AND ($3='' OR h.username=$3) AND ($4::timestamptz IS NULL OR h.` + at + ` >= $4)
+		AND ($5::timestamptz IS NULL OR h.` + at + ` < $5)`
+	key := "event_id"
+	if q.Kind == "observations" {
+		key = "session_id"
+	}
+	args := []any{q.Workspace, q.Node, q.Username, q.Since, q.Until, q.Limit + 1}
+	if q.After != nil {
+		query += " AND (h." + at + ",h.node_id,h." + key + ") < ($7,$8,$9)"
+		args = append(args, q.After.At, q.After.Node, q.After.Key)
+	}
+	if q.Destination != "" {
+		args = append(args, q.Destination)
+		query += " AND h.destination_ip=$" + strconv.Itoa(len(args)) + "::inet"
+	}
+	query += " ORDER BY h." + at + " DESC,h.node_id DESC,h." + key + " DESC LIMIT $6"
+	return s.Query(ctx, query, args...)
+}
+
 func (s auditStore) RecentEvents(ctx context.Context, workspace uuid.UUID, limit int) (database.Rows, error) {
 	return s.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,node_id,request_id,trace_id,command_id,result,reason,error_type,previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT $2`, workspace, limit)
 }

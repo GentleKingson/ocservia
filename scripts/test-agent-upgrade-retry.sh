@@ -15,6 +15,8 @@ case "$(uname -m)" in aarch64) export PACKAGE_ARCH=arm64 ;; x86_64) export PACKA
 openssl genpkey -algorithm ED25519 -out "${work}/controller-command.key" >/dev/null 2>&1
 openssl pkey -in "${work}/controller-command.key" -pubout -out "${work}/public.pem" >/dev/null 2>&1
 lifecycle_files=(
+  'deploy/managed-node/vpn-audit.py:usr/libexec/ocservia/vpn-audit.py:755'
+  'deploy/systemd/ocservia-network-audit.service:usr/lib/systemd/system/ocservia-network-audit.service:644'
   'scripts/verify-agent-package.sh:usr/libexec/ocservia/ocservia-agent-verify:755'
   'deploy/systemd/ocservia-upgrader@.service:usr/lib/systemd/system/ocservia-upgrader@.service:644'
 )
@@ -125,7 +127,7 @@ echo 'Identical-package retry preserves rollback; rollback/re-upgrade still work
 # The expected quartet is independent of the snapshot's manifest. Different
 # package comments above make an omitted restore observable even with stubs.
 assert_lifecycle_matches "${new}"
-test "$(wc -l <"${snapshot}/MANIFEST.sha256")" -eq 9
+test "$(wc -l <"${snapshot}/MANIFEST.sha256")" -eq 12
 cp -a "${snapshot}" "${work}/valid-snapshot"
 restore_snapshot() {
   rm -rf -- "${snapshot}"
@@ -194,7 +196,7 @@ restore_snapshot
 sed -i '1s|  .*|  ../../outside|' "${snapshot}/MANIFEST.sha256"
 assert_rollback_rejected manifest-path 'manifest is malformed'
 restore_snapshot
-rm "${snapshot}/ocservia-agent-relays.previous"
+rm "${snapshot}/"{vpn-audit.py,vpn-session-hook,ocservia-network-audit.service,ocservia-agent-relays}.previous
 printf '[Service]\nExecStart=\nExecStart=/usr/libexec/ocservia/ocservia-agent\n' \
   >"${snapshot}/ocservia-agent-relays.conf.previous"
 fixture_manifest
@@ -207,6 +209,7 @@ for entry in "${lifecycle_files[@]}"; do
   IFS=: read -r source destination mode <<<"${entry}"
   rm -f "${DESTDIR}/${destination}"
 done
+rm "${DESTDIR}/usr/libexec/ocservia/vpn-session-hook"
 "${new}/scripts/upgrade-agent.sh"
 sha256sum "${snapshot}/"* >"${work}/optional-snapshot"
 "${new}/scripts/upgrade-agent.sh"
@@ -220,6 +223,7 @@ mv "${work}/removal-target" "${destination}"
 driver_hash="$(sha256sum "${rollback}")"
 "${rollback}"
 test "$(sha256sum "${rollback}")" = "${driver_hash}"
+cmp /usr/bin/true "${DESTDIR}/usr/libexec/ocservia/vpn-session-hook"
 for entry in "${lifecycle_files[@]}"; do
   IFS=: read -r source destination mode <<<"${entry}"
   test ! -e "${DESTDIR}/${destination}"

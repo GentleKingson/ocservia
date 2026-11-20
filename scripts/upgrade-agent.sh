@@ -60,6 +60,9 @@ validate_verified_package_source() {
     "${ROOT}/scripts/upgrade-agent.sh" \
     "${ROOT}/scripts/rollback-agent.sh" \
     "${ROOT}/scripts/uninstall-agent.sh" \
+    "${ROOT}/deploy/managed-node/vpn-session-hook" \
+    "${ROOT}/deploy/managed-node/vpn-audit.py" \
+    "${ROOT}/deploy/systemd/ocservia-network-audit.service" \
     "${ROOT}/deploy/systemd/agent.env.example" \
     "${ROOT}/deploy/systemd/ocservia-agent.service" \
     "${ROOT}/deploy/systemd/ocservia-privd.service" \
@@ -149,6 +152,9 @@ write_snapshot_manifest() {
     ocservia-agent-relays \
     ocservia-upgrader \
     ocservia-upgrader@.service \
+    vpn-session-hook \
+    vpn-audit.py \
+    ocservia-network-audit.service \
     ocservia-agent-verify; do
     if [[ -f "${directory}/${name}.previous" ]]; then
       entry="${name}.previous"
@@ -354,6 +360,9 @@ installed_upgrader="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader"
 installed_verifier="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify"
 installed_relay_launcher="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-relays"
 installed_rollback="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback"
+installed_hook="${DESTDIR}${PREFIX}/libexec/ocservia/vpn-session-hook"
+installed_collector="${DESTDIR}${PREFIX}/libexec/ocservia/vpn-audit.py"
+installed_network_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-network-audit.service"
 installed_agent_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
 installed_privd_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
 installed_upgrader_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-upgrader@.service"
@@ -408,6 +417,15 @@ if [[ -e "${installed_upgrader_unit}" || -L "${installed_upgrader_unit}" ]]; the
   validate_installed_snapshot_source "${installed_upgrader_unit}" 644
 fi
 
+for installed_file in "${installed_hook}" "${installed_collector}"; do
+  if [[ -e "${installed_file}" || -L "${installed_file}" ]]; then
+    validate_installed_snapshot_source "${installed_file}" 755
+  fi
+done
+if [[ -e "${installed_network_unit}" || -L "${installed_network_unit}" ]]; then
+  validate_installed_snapshot_source "${installed_network_unit}" 644
+fi
+
 # A completed identical retry must not snapshot the candidate over the old
 # release. Compare bytes too: rollback restores files, not installed-commit.
 same_install=true
@@ -431,9 +449,11 @@ fi
 for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
   cmp -s "${ROOT}/rust/target/release/${binary}" "${DESTDIR}${PREFIX}/libexec/ocservia/${binary}" || same_install=false
 done
-for unit in ocservia-agent.service ocservia-privd.service ocservia-upgrader@.service; do
+for unit in ocservia-network-audit.service ocservia-agent.service ocservia-privd.service ocservia-upgrader@.service; do
   cmp -s "${ROOT}/deploy/systemd/${unit}" "${DESTDIR}${PREFIX}/lib/systemd/system/${unit}" || same_install=false
 done
+cmp -s "${ROOT}/deploy/managed-node/vpn-session-hook" "${installed_hook}" || same_install=false
+cmp -s "${ROOT}/deploy/managed-node/vpn-audit.py" "${installed_collector}" || same_install=false
 cmp -s "${ROOT}/scripts/verify-agent-package.sh" "${installed_verifier}" || same_install=false
 cmp -s "${ROOT}/deploy/production/systemd/agent-relays.sh" "${installed_relay_launcher}" || same_install=false
 cmp -s "${ROOT}/scripts/rollback-agent.sh" "${installed_rollback}" || same_install=false
@@ -453,6 +473,7 @@ if [[ "${same_install}" == true ]]; then
   echo "Identical verified Agent package already installed; preserving rollback snapshot"
   if [[ -z "${DESTDIR}" ]]; then
     systemctl try-restart ocservia-privd.service ocservia-agent.service
+    systemctl try-restart ocservia-network-audit.service || true
     flock -u 9
   fi
   exit 0
@@ -481,6 +502,9 @@ fi
 # ponytail: This fixed package-owned set can grow only with matching changes
 # to the independent rollback allowlist and restore policy.
 optional_backups=(
+  vpn-session-hook "${installed_hook}" 0755
+  vpn-audit.py "${installed_collector}" 0755
+  ocservia-network-audit.service "${installed_network_unit}" 0644
   ocservia-upgrader "${installed_upgrader}" 0755
   ocservia-agent-relays "${installed_relay_launcher}" 0755
   ocservia-upgrader@.service "${installed_upgrader_unit}" 0644
@@ -545,5 +569,6 @@ rm -- "${pending_record}"
 sync -f "${DESTDIR}${UPGRADE_STATE_DIR}"
 if [[ -z "${DESTDIR}" ]]; then
   systemctl try-restart ocservia-privd.service ocservia-agent.service
+  systemctl try-restart ocservia-network-audit.service || true
   flock -u 9
 fi
