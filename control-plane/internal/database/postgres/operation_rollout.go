@@ -78,11 +78,7 @@ func (s operationStore) FindRollout(ctx context.Context, workspace uuid.UUID, ke
 }
 
 func (s operationStore) InsertRollout(ctx context.Context, v operationstore.PendingRollout) error {
-	exclusions, err := json.Marshal(v.Excluded)
-	if err != nil {
-		return err
-	}
-	document, err := value.ParseJSONB(exclusions)
+	document, err := value.ParseJSONB(v.Exclusions)
 	if err != nil {
 		return err
 	}

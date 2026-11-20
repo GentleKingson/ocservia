@@ -314,10 +314,8 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 			return nil, fmt.Errorf("record bootstrap password sealing key: %w", err)
 		}
 	}
-	for _, capability := range normalizedCapabilities(request.GetCapabilities()) {
-		if err := store.PutCapability(ctx, nodeID, capability, false); err != nil {
-			return nil, fmt.Errorf("record bootstrap requested capability: %w", err)
-		}
+	if err := store.InsertCapabilities(ctx, nodeID, request.GetCapabilities(), []string{ownersession.FencingCapability, "privd_result_attestation_v1"}); err != nil {
+		return nil, fmt.Errorf("record bootstrap requested capabilities: %w", err)
 	}
 	consumed, err := s.consumeToken(ctx, store, token, nodeID, request.GetEndpointId())
 	if err != nil {
@@ -329,14 +327,6 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	revision, err := store.Activate(ctx, nodeID, "{}", "default", at)
 	if err != nil {
 		return nil, err
-	}
-	for _, capability := range normalizedCapabilities(request.GetCapabilities()) {
-		if capability == ownersession.FencingCapability || capability == "privd_result_attestation_v1" {
-			continue
-		}
-		if err := store.PutCapability(ctx, nodeID, capability, true); err != nil {
-			return nil, err
-		}
 	}
 	const activationReason = "one-time installation token"
 	if err := enqueueTrustConvergence(ctx, tx, nodeID, request.GetEndpointId(), "active", revision, activationReason, now); err != nil {
@@ -467,8 +457,7 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	var (
 		nodeID                uuid.UUID
 		authorizationRevision uint64
-		negotiated            []string
-		fencingNegotiated     bool
+		capabilities          []string
 		earlyResult           agentv1.HandshakeResult
 	)
 	if err := func() error {
@@ -516,44 +505,12 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		if err != nil {
 			return fmt.Errorf("verify session sealing keys: %w", err)
 		}
-		unsealedReadOnlyFallback := len(handshake.GetSealingKeys()) == 0
-		if !matchingSealingKeys && !unsealedReadOnlyFallback {
+		if !matchingSealingKeys && len(handshake.GetSealingKeys()) != 0 {
 			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
 			return nil
 		}
-		capabilities, err := store.Capabilities(ctx, nodeID, true)
-		if err != nil {
-			return err
-		}
-		approved := make(map[string]struct{}, len(capabilities))
-		for _, capability := range capabilities {
-			approved[capability] = struct{}{}
-		}
-		advertised := normalizedCapabilities(handshake.GetCapabilities())
-		negotiated = make([]string, 0, len(advertised))
-		mutationCapable := !unsealedReadOnlyFallback
-		for _, capability := range advertised {
-			// The fencing capability is a protocol-level negotiation, never a
-			// per-node business capability: an approval that echoes every
-			// advertised capability must not introduce a second copy of it.
-			if capability == ownersession.FencingCapability {
-				if mutationCapable {
-					fencingNegotiated = true
-				}
-				continue
-			}
-			if _, ok := approved[capability]; ok && (mutationCapable || legacyReadOnlyCapability(capability)) {
-				negotiated = append(negotiated, capability)
-			}
-		}
-		// The fencing capability records only that the endpoint accepts
-		// ConnectionFenceV2 proofs on mutation carriers.
-		if fencingNegotiated {
-			negotiated = append(negotiated, ownersession.FencingCapability)
-		}
-		slices.Sort(negotiated)
-		negotiated = slices.Compact(negotiated)
-		return nil
+		capabilities, err = store.Capabilities(ctx, nodeID, true)
+		return err
 	}(); err != nil {
 		return nil, err
 	}
@@ -562,6 +519,30 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		return response, nil
 	}
 
+	approved := make(map[string]struct{}, len(capabilities))
+	for _, capability := range capabilities {
+		approved[capability] = struct{}{}
+	}
+	advertised := handshake.GetCapabilities()
+	negotiated := make([]string, 0, len(advertised))
+	mutationCapable := len(handshake.GetSealingKeys()) != 0
+	fencingNegotiated := false
+	for _, capability := range advertised {
+		// The fencing capability is a protocol-level negotiation, never a
+		// per-node business capability: an approval that echoes every
+		// advertised capability must not introduce a second copy of it.
+		if capability == ownersession.FencingCapability {
+			if mutationCapable {
+				fencingNegotiated = true
+				negotiated = append(negotiated, capability)
+			}
+			continue
+		}
+		if _, ok := approved[capability]; ok && (mutationCapable || legacyReadOnlyCapability(capability)) {
+			negotiated = append(negotiated, capability)
+		}
+	}
+	slices.Sort(negotiated)
 	response.ProtocolMinor = handshake.GetProtocolMinor()
 	response.NegotiatedCapabilities = negotiated
 	if s.signer == nil {
@@ -577,7 +558,6 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	if err != nil {
 		return nil, fmt.Errorf("issue session grant: %w", err)
 	}
-	var openedFence *agentv1.ConnectionFenceV2
 	if fencingNegotiated && s.ownerSessions != nil {
 		fence, fenceErr := s.ownerSessions.OpenSession(ctx, fixedNode, fixedEndpoint, authorizationRevision, negotiated)
 		if errors.Is(fenceErr, ownersession.ErrNotOwner) {
@@ -592,7 +572,13 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 			return nil, fmt.Errorf("open owner session: %w", fenceErr)
 		}
 		response.ConnectionFence = fence
-		openedFence = fence
+		// Registered before the authority transaction so rollback releases its
+		// connection before cleanup needs another one.
+		defer func() {
+			if fence != nil && response.Result != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
+				s.closeOpenedSession(ctx, nodeID, fence)
+			}
+		}()
 	}
 
 	// Phase 2: re-verify authority under FOR SHARE so any concurrent revocation
@@ -600,33 +586,14 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	// newly opened owner term before a session grant can be returned.
 	recheckTx, recheckStore, err := s.begin(ctx, database.ReadCommitted)
 	if err != nil {
-		if openedFence != nil {
-			s.closeOpenedSession(ctx, nodeID, openedFence)
-		}
 		return nil, fmt.Errorf("begin session authority confirmation: %w", err)
 	}
 	defer rollback(recheckTx)
 	current, err := recheckStore.NodeByEndpoint(ctx, request.GetRemoteEndpointId(), uuid.Nil, enrollmentstore.ForShare)
-	if errors.Is(err, database.ErrNotFound) {
-		if openedFence != nil {
-			s.closeOpenedSession(ctx, nodeID, openedFence)
-		}
-		response.SessionGrant = nil
-		response.ConnectionFence = nil
-		response.NegotiatedCapabilities = nil
-		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
-		return response, nil
-	}
-	if err != nil {
-		if openedFence != nil {
-			s.closeOpenedSession(ctx, nodeID, openedFence)
-		}
+	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return nil, fmt.Errorf("confirm session authority: %w", err)
 	}
-	if (current.Status != "active" && current.Status != "offline") || current.EndpointState != "active" || current.AuthorizationRevision != authorizationRevision || current.ID != nodeID {
-		if openedFence != nil {
-			s.closeOpenedSession(ctx, nodeID, openedFence)
-		}
+	if err != nil || (current.Status != "active" && current.Status != "offline") || current.EndpointState != "active" || current.AuthorizationRevision != authorizationRevision || current.ID != nodeID {
 		response.SessionGrant = nil
 		response.ConnectionFence = nil
 		response.NegotiatedCapabilities = nil
@@ -636,9 +603,6 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	if err := recheckTx.Commit(ctx); err != nil {
 		// The session was never granted: end the exact owner term so the
 		// lease does not keep renewing behind a failed authorization.
-		if openedFence != nil {
-			s.closeOpenedSession(ctx, nodeID, openedFence)
-		}
 		return nil, fmt.Errorf("commit session authorization: %w", err)
 	}
 	response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED

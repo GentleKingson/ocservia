@@ -258,22 +258,23 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 	csrDigest := digest(der)
 
 	var result issuance
-	var found bool
-	if err := s.db.View(func(tx *bolt.Tx) error {
-		if old := tx.Bucket([]byte("issued")).Get(key); old != nil {
-			if json.Unmarshal(old, &result) != nil {
-				return invalidState
-			}
-			if result.Digest != csrDigest {
-				return statusError(409)
-			}
-			found = true
+	readExisting := func(tx *bolt.Tx) error {
+		old := tx.Bucket([]byte("issued")).Get(key)
+		if old == nil {
+			return nil
+		}
+		if json.Unmarshal(old, &result) != nil {
+			return invalidState
+		}
+		if result.Digest != csrDigest {
+			return statusError(409)
 		}
 		return nil
-	}); err != nil {
+	}
+	if err := s.db.View(readExisting); err != nil {
 		return issuance{}, err
 	}
-	if found {
+	if result.Digest != "" {
 		s.mark("reply")
 		return result, nil
 	}
@@ -282,30 +283,24 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 	if err != nil {
 		return issuance{}, statusError(422)
 	}
-
+	s.mark("prepare")
+	serial := new(big.Int).SetBytes(id[:])
+	chain, err := s.ca.issue(csr, serial)
+	if err != nil {
+		return issuance{}, err
+	}
+	s.mark("signed")
+	candidate := issuance{CSR: der, Digest: csrDigest, Chain: string(chain), Serial: serial.String()}
+	data, err := json.Marshal(candidate)
+	if err != nil {
+		return issuance{}, err
+	}
 	err = s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("issued"))
-		if old := b.Get(key); old != nil {
-			if json.Unmarshal(old, &result) != nil {
-				return invalidState
-			}
-			if result.Digest != csrDigest {
-				return statusError(409)
-			}
-			return nil
-		}
-		s.mark("prepare")
-		serial := new(big.Int).SetBytes(id[:])
-		chain, err := s.ca.issue(csr, serial)
-		if err != nil {
+		// Another request may have committed while the candidate was being signed.
+		if err := readExisting(tx); err != nil || result.Digest != "" {
 			return err
 		}
-		s.mark("signed")
-		result = issuance{CSR: der, Digest: csrDigest, Chain: string(chain), Serial: serial.String()}
-		data, err := json.Marshal(result)
-		if err != nil {
-			return err
-		}
+		result = candidate
 		if err := putRecord(tx, "issued", key, data); err != nil {
 			return err
 		}
@@ -315,10 +310,11 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 		s.mark("commit")
 		return nil
 	})
-	if err == nil {
-		s.mark("reply")
+	if err != nil {
+		return issuance{}, err
 	}
-	return result, err
+	s.mark("reply")
+	return result, nil
 }
 
 func (s *service) revoke(id, serial, reason string) error {

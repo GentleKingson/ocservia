@@ -385,15 +385,11 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
-	var storedExclusions []json.RawMessage
-	if err := json.Unmarshal(exclusionsJSON, &storedExclusions); err != nil {
-		return AgentRollout{}, false, err
-	}
 	auditID, err := uuid.NewV7()
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
-	if err := store.InsertRollout(ctx, operationstore.PendingRollout{Rollout: operationstore.Rollout{ID: rolloutID, WorkspaceID: request.WorkspaceID, TargetVersion: target, BatchSize: request.BatchSize, Reason: reason, RequestHash: requestHash, CreatedBy: request.ActorIdentityID, ActorSession: request.ActorSessionID, Excluded: storedExclusions, CreatedAt: at}, IdempotencyKey: request.IdempotencyKey}); err != nil {
+	if err := store.InsertRollout(ctx, operationstore.PendingRollout{ID: rolloutID, WorkspaceID: request.WorkspaceID, TargetVersion: target, BatchSize: request.BatchSize, Reason: reason, RequestHash: requestHash, CreatedBy: request.ActorIdentityID, ActorSession: request.ActorSessionID, Exclusions: exclusionsJSON, CreatedAt: at, IdempotencyKey: request.IdempotencyKey}); err != nil {
 		return AgentRollout{}, false, fmt.Errorf("insert agent rollout: %w", err)
 	}
 	for ordinal, node := range eligible {
@@ -403,7 +399,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	}
 	summary, _ := json.Marshal(map[string]any{
 		"target_version": target, "batch_size": request.BatchSize, "stop_on_failure": true,
-		"node_count": len(eligible), "node_ids": nodeIDStrings(sorted), "excluded": exclusions,
+		"node_count": len(eligible), "node_ids": nodeIDStrings(sorted), "excluded": json.RawMessage(exclusionsJSON),
 	})
 	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{
 		EventID: auditID, WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID,

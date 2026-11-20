@@ -30,8 +30,12 @@ type RolloutNode struct {
 }
 
 type PendingRollout struct {
-	Rollout
-	IdempotencyKey string
+	ID, WorkspaceID, CreatedBy, ActorSession uuid.UUID
+	TargetVersion, Reason, IdempotencyKey    string
+	BatchSize                                int
+	RequestHash                              []byte
+	Exclusions                               json.RawMessage
+	CreatedAt                                value.Timestamp
 }
 
 type RolloutTerminalNode struct {

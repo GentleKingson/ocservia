@@ -207,7 +207,6 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		return Operation{}, false, err
 	}
 
-	var rolloutObservation *rolloutNodeObservation
 	upgrade, _ := request.Payload.(AgentUpgradePayload)
 	var fromVersion string
 	node, err := intentStore.LockNode(ctx, request.NodeID)
@@ -222,10 +221,11 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		return Operation{}, false, ErrNodeUnavailable
 	}
 	if upgrade.RolloutID != uuid.Nil {
-		rolloutObservation, err = s.lockRolloutObservation(ctx, intentStore, request, upgrade, workspaceID, nodeStatus, now, created)
+		observation, err := s.lockRolloutObservation(ctx, intentStore, request, upgrade, workspaceID, nodeStatus, now, created)
 		if err != nil {
 			return Operation{}, false, err
 		}
+		fromVersion = observation.AgentVersion
 	}
 	if upgrade.RolloutID == uuid.Nil {
 		switch request.Payload.(type) {
@@ -267,21 +267,14 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	if err := validateObservedTarget(ctx, intentStore, request); err != nil {
 		return Operation{}, false, err
 	}
-	if _, ok := request.Payload.(AgentUpgradePayload); ok {
-		var observedVersion string
-		if rolloutObservation != nil {
-			observedVersion = rolloutObservation.AgentVersion
-		} else {
-			observed, err := intentStore.LockAgentObservation(ctx, request.NodeID)
-			if errors.Is(err, database.ErrNotFound) {
-				observedVersion = ""
-			} else if err != nil {
-				return Operation{}, false, fmt.Errorf("read observed agent version: %w", err)
-			} else {
-				observedVersion = observed.AgentVersion
-			}
+	if _, ok := request.Payload.(AgentUpgradePayload); ok && upgrade.RolloutID == uuid.Nil {
+		observed, err := intentStore.LockAgentObservation(ctx, request.NodeID)
+		if err != nil && !errors.Is(err, database.ErrNotFound) {
+			return Operation{}, false, fmt.Errorf("read observed agent version: %w", err)
 		}
-		fromVersion = observedVersion
+		if err == nil {
+			fromVersion = observed.AgentVersion
+		}
 		upgradeActive, err := intentStore.HasActiveUpgrade(ctx, request.NodeID)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("check active agent upgrade: %w", err)
