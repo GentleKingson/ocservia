@@ -42,6 +42,9 @@ mkdir -p -- "${package_root}/rust/target/release" "${package_root}/deploy/system
   "${package_root}/deploy/production/systemd" "${package_root}/scripts"
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-agent" "${ROOT}/rust/target/release/ocservia-privd" \
   "${ROOT}/rust/target/release/ocservia-upgrader" "${package_root}/rust/target/release/"
+mkdir -p -- "${package_root}/deploy/managed-node"
+install -m 0755 -- "${ROOT}/deploy/managed-node/vpn-session-hook" "${ROOT}/deploy/managed-node/vpn-audit.py" "${package_root}/deploy/managed-node/"
+install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-network-audit.service" "${package_root}/deploy/systemd/"
 install -m 0644 -- "${ROOT}/deploy/systemd/agent.env.example" "${ROOT}/deploy/systemd/ocservia-agent.service" \
   "${ROOT}/deploy/systemd/ocservia-privd.service" "${ROOT}/deploy/systemd/ocservia-upgrader@.service" \
   "${package_root}/deploy/systemd/"

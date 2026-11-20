@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 const FIXED_WORKER_CONFIG: &str =
     "run-as-user = ocservia-vpn\nrun-as-group = ocservia-vpn\nuse-occtl = true\n";
+const AUDIT_HOOK: &str = "/usr/libexec/ocservia/vpn-session-hook";
 
 // Ocserv keeps these bindings across HUP; changing their file representation
 // is not proof that the running daemon adopted them.
@@ -51,6 +52,12 @@ fn profile_values(bytes: &[u8]) -> Result<BTreeMap<&str, &str>, AdapterError> {
         let (name, value) = line
             .split_once(" = ")
             .ok_or(AdapterError::InvalidResource)?;
+        if matches!(name, "connect-script" | "disconnect-script") {
+            if value != AUDIT_HOOK || values.insert(name, value).is_some() {
+                return Err(AdapterError::InvalidResource);
+            }
+            continue;
+        }
         if !STARTUP_BINDINGS.contains(&name)
             && ![
                 "cookie-timeout",
@@ -386,6 +393,17 @@ impl Adapter {
         }
         materialized.push_str(FIXED_WORKER_CONFIG);
         redacted.push_str(FIXED_WORKER_CONFIG);
+        if Path::new(AUDIT_HOOK)
+            .try_exists()
+            .map_err(AdapterError::Io)?
+        {
+            // Only publish a fixed hook from the protected package tree.
+            safe_file(Path::new(AUDIT_HOOK), 0o755)?;
+            let hooks =
+                format!("connect-script = {AUDIT_HOOK}\ndisconnect-script = {AUDIT_HOOK}\n");
+            materialized.push_str(&hooks);
+            redacted.push_str(&hooks);
+        }
         Ok(Materialized {
             bytes: materialized.into_bytes(),
             redacted,

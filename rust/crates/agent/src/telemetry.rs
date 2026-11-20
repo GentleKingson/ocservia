@@ -11,9 +11,58 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 };
 use prost::Message;
 use sha2::Digest;
+use std::collections::HashMap;
 use std::io;
 use std::time::SystemTime;
 use uuid::Uuid;
+
+#[derive(Default)]
+pub(super) struct SessionCache {
+    previous: HashMap<(String, String, String), SessionObservation>,
+}
+
+impl SessionCache {
+    fn observe(
+        &mut self,
+        list: &ocservia_agent_protocol::SessionList,
+        now: SystemTime,
+    ) -> Vec<SessionObservation> {
+        let mut next = HashMap::with_capacity(list.sessions.len());
+        let mut sessions = Vec::with_capacity(list.sessions.len());
+        for session in &list.sessions {
+            let key = (
+                session.id.clone(),
+                session.username.clone(),
+                session.vpn_ip.clone(),
+            );
+            let previous = self.previous.get(&key).filter(|prior| {
+                session.connected_at.is_none() || session.connected_at == prior.connected_at
+            });
+            let observation = SessionObservation {
+                session_id: session.id.clone(),
+                username: session.username.clone(),
+                client_ip: session.remote_ip.clone(),
+                vpn_ip: session.vpn_ip.clone(),
+                connected_at: session
+                    .connected_at
+                    .or_else(|| previous.and_then(|p| p.connected_at))
+                    .or_else(|| Some(now.into())),
+                bytes_in: session
+                    .bytes_in
+                    .or_else(|| previous.map(|p| p.bytes_in))
+                    .unwrap_or_default(),
+                bytes_out: session
+                    .bytes_out
+                    .or_else(|| previous.map(|p| p.bytes_out))
+                    .unwrap_or_default(),
+            };
+            next.insert(key, observation.clone());
+            sessions.push(observation);
+        }
+        self.previous = next;
+        sessions
+    }
+}
 
 pub(super) async fn send_telemetry(
     connection: &iroh::endpoint::Connection,
@@ -32,7 +81,7 @@ pub(super) async fn send_telemetry(
 
 #[allow(clippy::too_many_lines)]
 pub(super) fn build_telemetry(
-    session: &SessionContext<'_>,
+    session: &mut SessionContext<'_>,
     sequence: u64,
     observations: &[PrivdResponse],
     upgrade_outcomes: Vec<UpgradeOperationResult>,
@@ -42,7 +91,7 @@ pub(super) fn build_telemetry(
     let now = SystemTime::now();
     let mut service = serde_json::json!({"active_state":"unknown","sub_state":"unknown"});
     let mut version = "unknown".to_owned();
-    let mut sessions = Vec::new();
+    let mut sessions = None;
     let mut ip_bans = Vec::new();
     let mut users = Vec::new();
     let mut groups = Vec::new();
@@ -61,18 +110,7 @@ pub(super) fn build_telemetry(
                 fingerprint = serde_json::json!({"config_sha256":value.sha256,"config_size_bytes":value.size_bytes});
             }
             Some(privd_response::Result::SessionList(value)) => {
-                sessions = value
-                    .sessions
-                    .iter()
-                    .map(|session| SessionObservation {
-                        session_id: session.id.clone(),
-                        username: session.username.clone(),
-                        client_ip: session.remote_ip.clone(),
-                        connected_at: Some(now.into()),
-                        bytes_in: 0,
-                        bytes_out: 0,
-                    })
-                    .collect();
+                sessions = Some(session.session_cache.observe(value, now));
             }
             Some(privd_response::Result::IpBanList(value)) => {
                 ip_bans = value
@@ -139,6 +177,7 @@ pub(super) fn build_telemetry(
             _ => {}
         }
     }
+    let sessions = sessions.ok_or_else(|| invalid("privd session snapshot incomplete"))?;
     if !user_snapshot_complete || !group_snapshot_complete {
         return Err(invalid("privd user/group snapshot incomplete"));
     }
@@ -260,6 +299,30 @@ fn group_observation(group_name: String, members: Vec<String>, revision: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_snapshots_keep_first_seen_and_last_known_counters_until_absent() {
+        let mut cache = SessionCache::default();
+        let start = SystemTime::UNIX_EPOCH;
+        let later = start + std::time::Duration::from_secs(30);
+        let mut list = ocservia_agent_protocol::SessionList {
+            sessions: vec![ocservia_agent_protocol::Session {
+                id: "5".into(),
+                username: "alice".into(),
+                bytes_in: Some(10),
+                ..Default::default()
+            }],
+        };
+        cache.observe(&list, start);
+        list.sessions[0].bytes_in = None;
+        let observed = &cache.observe(&list, later)[0];
+        assert_eq!(observed.connected_at, Some(start.into()));
+        assert_eq!(observed.bytes_in, 10);
+        cache.observe(&ocservia_agent_protocol::SessionList::default(), later);
+        let reused = &cache.observe(&list, later)[0];
+        assert_eq!(reused.connected_at, Some(later.into()));
+        assert_eq!(reused.bytes_in, 0);
+    }
 
     #[test]
     fn group_fingerprint_preserves_member_order_and_empty_membership() {

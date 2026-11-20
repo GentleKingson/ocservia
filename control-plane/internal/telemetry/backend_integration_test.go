@@ -225,6 +225,10 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if insertions != 1 {
 		t.Fatalf("concurrent duplicate inserted %d times", insertions)
 	}
+	var total, closed int
+	if err := backend.QueryRow(ctx, `SELECT count(*), count(absent_at) FROM vpn_session_history WHERE node_id=$1`, node).Scan(&total, &closed); err != nil || total != 2 || closed != 1 {
+		t.Fatalf("session history after retry, stale snapshot and id reuse: total=%d closed=%d err=%v", total, closed, err)
+	}
 	invalid := testBatch(node, 4, now.Add(2*time.Second))
 	invalid.Snapshot.System = json.RawMessage(`{"invalid":"\u0000"}`)
 	if _, err := service.Ingest(ctx, invalid); err == nil {

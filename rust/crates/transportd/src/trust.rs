@@ -6,11 +6,11 @@ use std::time::Instant;
 use iroh::EndpointId;
 use iroh::protocol::AcceptError;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    EnrollRequest, EnrollResponse, SessionHandshake, SessionHandshakeResponse,
+    EnrollRequest, EnrollResponse, SessionHandshake, SessionHandshakeResponse, VpnAuditReceipt,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, ListNodeTrustRequest, NodeTrustState,
-    ValidateEnrollmentRequest, trust_service_client::TrustServiceClient,
+    StoreVpnAuditRequest, ValidateEnrollmentRequest, trust_service_client::TrustServiceClient,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::Response;
@@ -641,6 +641,18 @@ impl TrustAuthority {
             .map_err(|_| protocol_error("enrollment authority timed out"))?
             .map(Response::into_inner)
             .map_err(|_| protocol_error("enrollment rejected"))
+    }
+
+    pub(crate) async fn store_vpn_audit(
+        &self,
+        request: StoreVpnAuditRequest,
+    ) -> Result<VpnAuditReceipt, AcceptError> {
+        self.client
+            .clone()
+            .store_vpn_audit(request)
+            .await
+            .map(Response::into_inner)
+            .map_err(|_| protocol_error("audit storage unavailable"))
     }
 
     pub(crate) async fn authorize(

@@ -51,9 +51,9 @@ type Snapshot struct {
 }
 
 type Session struct {
-	ID, Username, ClientIP string
-	ConnectedAt            time.Time
-	BytesIn, BytesOut      int64
+	ID, Username, ClientIP, VPNIP string
+	ConnectedAt                   time.Time
+	BytesIn, BytesOut             int64
 }
 
 type User struct {

@@ -69,6 +69,9 @@ validate_verified_package_source() {
     "${ROOT}/scripts/rollback-agent.sh" \
     "${ROOT}/scripts/uninstall-agent.sh" \
     "${ROOT}/scripts/verify-agent-package.sh" \
+    "${ROOT}/deploy/managed-node/vpn-audit.py" \
+    "${ROOT}/deploy/managed-node/vpn-session-hook" \
+    "${ROOT}/deploy/systemd/ocservia-network-audit.service" \
     "${ROOT}/deploy/systemd/agent.env.example" \
     "${ROOT}/deploy/systemd/ocservia-agent.service" \
     "${ROOT}/deploy/systemd/ocservia-privd.service" \
@@ -219,6 +222,17 @@ fi
 ensure_root_directory "${DESTDIR}${PREFIX}/libexec/ocservia" root 0 0755
 ensure_root_directory "${DESTDIR}${PREFIX}/lib/systemd/system" root 0 0755
 ensure_agent_state
+audit_dir="${DESTDIR}/var/lib/ocservia-vpn-audit"
+ensure_root_ancestry "$(dirname -- "${audit_dir}")"
+if [[ -e "${audit_dir}" || -L "${audit_dir}" ]]; then
+  [[ -d "${audit_dir}" && ! -L "${audit_dir}" && "$(stat -c '%u:%g:%a' -- "${audit_dir}")" == "${AGENT_UID}:${AGENT_GID}:700" ]] || {
+    echo "existing VPN audit spool has unsafe ownership or mode" >&2
+    exit 1
+  }
+elif [[ -n "${DESTDIR}" ]]; then
+  # On live nodes systemd creates the private spool when either service starts.
+  install -d -m 0700 -o "${agent_owner}" -g "${agent_group}" -- "${audit_dir}"
+fi
 ensure_root_directory "${DESTDIR}${PRIVD_STATE_DIR}" "${agent_group}" "${AGENT_GID}" 0700
 ensure_root_directory "${DESTDIR}${SYSCONFDIR}/ocservia-agent" "${agent_group}" "${AGENT_GID}" 0750
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-agent" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent"
@@ -234,6 +248,12 @@ mv -fT -- "${rollback_staging}" "${rollback_destination}"
 sync -f "$(dirname -- "${rollback_destination}")"
 install -m 0755 -- "${ROOT}/scripts/verify-agent-package.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify"
 install -m 0755 -- "${ROOT}/deploy/production/systemd/agent-relays.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-relays"
+for collector_file in vpn-audit.py vpn-session-hook; do
+  staging_file="$(mktemp -- "${DESTDIR}${PREFIX}/libexec/ocservia/.audit.XXXXXXXX")"
+  install -m 0755 -- "${ROOT}/deploy/managed-node/${collector_file}" "${staging_file}"
+  mv -fT -- "${staging_file}" "${DESTDIR}${PREFIX}/libexec/ocservia/${collector_file}"
+done
+install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-network-audit.service" "${DESTDIR}${PREFIX}/lib/systemd/system/"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-agent.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-privd.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-upgrader@.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-upgrader@.service"

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/vpnaudit"
 	"net"
 	"os"
 	"path/filepath"
@@ -22,9 +24,25 @@ import (
 type Handler struct {
 	transportv1.UnimplementedTrustServiceServer
 	service *enrollment.Service
+	backend database.Backend
 }
 
-func NewHandler(service *enrollment.Service) *Handler { return &Handler{service: service} }
+func NewHandler(service *enrollment.Service, backend database.Backend) *Handler {
+	return &Handler{service: service, backend: backend}
+}
+
+func (h *Handler) StoreVpnAudit(ctx context.Context, r *transportv1.StoreVpnAuditRequest) (*agentv1.VpnAuditReceipt, error) {
+	receipt, err := vpnaudit.Ingest(ctx, h.backend, r)
+	switch {
+	case errors.Is(err, vpnaudit.ErrInvalid):
+		return nil, status.Error(codes.InvalidArgument, "invalid audit records")
+	case errors.Is(err, vpnaudit.ErrInactive), errors.Is(err, database.ErrNotFound):
+		return nil, status.Error(codes.PermissionDenied, "inactive audit connection")
+	case err != nil:
+		return nil, status.Error(codes.Unavailable, "audit storage unavailable")
+	}
+	return receipt, nil
+}
 
 func (h *Handler) CheckEndpoint(ctx context.Context, request *transportv1.CheckEndpointRequest) (*transportv1.CheckEndpointResponse, error) {
 	permitted, err := h.service.CheckEndpoint(ctx, request)

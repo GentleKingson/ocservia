@@ -1,0 +1,5 @@
+#!/bin/sh
+# ocserv treats hook failure as an admission decision.
+# Keep accounting bounded even if storage or the interpreter is unavailable.
+[ -x /usr/libexec/ocservia/vpn-audit.py ] || exit 0
+/usr/bin/timeout -k 0.1s 1s /usr/libexec/ocservia/vpn-audit.py || :

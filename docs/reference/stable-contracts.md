@@ -959,6 +959,20 @@ supply its last seen event ID as a cursor. The request returns `400`
 (`invalid-cursor`) if that event is no longer visible within the caller's
 authorized scope.
 
+### VPN audit history
+
+VPN lifecycle and optional conntrack audit records use a separate Agent-initiated bidirectional Iroh stream after the fenced handshake. A frame contains a four-byte big-endian size and one `VpnAuditBatch` with up to 32 events. Transportd binds the batch to its authenticated peer, node, connection ID and owner epoch. The Controller locks the active endpoint binding and checks the current unexpired owner term inside the PostgreSQL transaction. The reply contains the ordered event IDs from the committed batch. A missing or mismatched reply leaves the local SQLite records available for retry. A node and event ID uniquely identify a stored record within its audit category.
+
+A workspace Admin can query `GET /api/v1/audit/vpn`. Use `X-Workspace-ID` when the principal has access to multiple workspaces. All three sources accept an exact `username`, a `node_id` UUID and an RFC 3339 time range with inclusive `since` and exclusive `until`.
+
+| Query kind | Time used for filtering and ordering | Retention |
+| --- | --- | --- |
+| `sessions` (default) | Time of the ocserv connect or disconnect event | 90 days from the event |
+| `observations` | Session start reported by occtl, or the Agent's first observation when no start time is available | 90 days after the first snapshot reporting the session absent |
+| `network` | Time of the conntrack destroy event. Flow start is returned separately. Accepts an additional exact `destination_ip` filter. | 30 days from the event |
+
+Results are newest first. The API defaults to 100 rows. Set `page_size` from 1 to 200 and pass `next_cursor` as `cursor` with the same filters for the next page. The Web console requests 200 rows at a time and exports the loaded rows as JSON. Byte counters are decimal strings to preserve precision. Maintenance removes expired records in bounded batches. Management events use their own hash chain, verification endpoint and compaction policy.
+
 ### Telemetry upgrade and recovery
 
 Schema setup and upgrades must run through PostgreSQL's owner-only

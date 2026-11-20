@@ -99,6 +99,12 @@ Starting with [`v1.1.0`](https://github.com/GentleKingson/ocservia/releases/tag/
 
 Pin production deployments to official [published releases](https://github.com/GentleKingson/ocservia/releases), and do not run development branches or release candidates in production. The [resilience and capacity harness](docs/development/release-checks.md#resilience-and-capacity) exercises load and fault injection against synthetic agents; you should still validate each target release on your own infrastructure.
 
+## VPN audit history
+
+Open **Audit → VPN audit history** to search the current workspace by node, username and time. Session events show logins and logouts. Session snapshots show the last counters seen by occtl and the first snapshot in which a previously observed session was absent. Network connections additionally support an exact destination IP filter. Each page returns up to 200 matches. **Load older records** continues the same query. **Export results** downloads all loaded rows as JSON with byte counts preserved as decimal strings.
+
+The managed complete configuration enables session hooks when applied. Existing externally managed configurations need to invoke the packaged hooks. Network auditing is opt-in per node and records connection metadata. The Controller retains session events and closed snapshots for 90 days and network records for 30 days. [Node setup and verification](docs/operations/agent-lifecycle.md#vpn-audit-collection) · [Query and retention contract](docs/reference/stable-contracts.md#vpn-audit-history)
+
 ## Security
 
 Administrative commands require cryptographic authorization. Changes are covered by replay protection, a command ledger, and signed receipts. On the node, root execution is restricted to a fixed set of operations.
