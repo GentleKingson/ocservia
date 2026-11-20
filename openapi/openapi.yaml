@@ -1508,6 +1508,10 @@ paths:
         "200":
           description: Matching audit records, newest first, with a cursor for the next page.
           content: { application/json: { schema: { $ref: "#/components/schemas/VpnAuditPage" } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
   /audit/events:
     get:

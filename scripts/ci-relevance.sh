@@ -135,7 +135,7 @@ classify_path() {
     scripts/package-agent.sh|scripts/verify-agent-package.sh|\
     scripts/test-installer-common.sh|scripts/test-managed-node-install.sh|scripts/test-node-bootstrap.py|\
     scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
-    scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py)
+    scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py|scripts/test-vpn-audit.py)
       run_installers=true ;;
 
     # Broader release/installer/packaging/deployment paths.

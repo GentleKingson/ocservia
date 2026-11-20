@@ -22,11 +22,11 @@ class AuditTest(unittest.TestCase):
         flow(db, "boot", cache, "[DESTROY]" + fields, 1400)
         flow(db, "boot", cache, "[DESTROY]" + fields, 1500)
         records = [json.loads(s) for s, in db.execute("SELECT body FROM pending ORDER BY rowid")]
-        self.assertEqual([r["event_type"] for r in records], ["connect","disconnect","connect","flow"])
+        self.assertEqual([r["event_type"] for r in records], ["connect", "disconnect", "connect", "flow"])
         self.assertIsNone(records[1]["bytes_out"])
         self.assertEqual(records[1]["bytes_in"], 0)
         self.assertEqual(records[-1]["username"], "alice")
-        self.assertEqual((records[-1]["bytes_in"],records[-1]["bytes_out"]), (123,456))
+        self.assertEqual((records[-1]["bytes_in"], records[-1]["bytes_out"]), (123, 456))
         self.assertEqual(records[-1]["destination_ip"], "203.0.113.1")
         self.assertNotIn("secret", json.dumps(records))
 

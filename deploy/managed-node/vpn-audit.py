@@ -56,7 +56,7 @@ def session_event(db, boot, env, now):
     if not sid or not sid.isprintable() or len(sid.encode()) > 256 or not user or len(user.encode()) > 128 or not user.isprintable() or not real or not (assigned or v6):
         return
     with db:
-        db.execute("DELETE FROM leases WHERE boot<>? OR (active=0 AND updated_ms<?)", (boot,now-120000))
+        db.execute("DELETE FROM leases WHERE boot<>? OR (active=0 AND updated_ms<?)", (boot, now - 120000))
         if kind == "connect":
             started = now
             db.execute("INSERT OR REPLACE INTO leases VALUES(?,?,?,?,?,?,?,?,?)",
@@ -70,7 +70,7 @@ def session_event(db, boot, env, now):
             if not started and duration is not None:
                 started = max(0, now - duration * 1000)
             db.execute("INSERT OR REPLACE INTO leases VALUES(?,?,?,?,?,?,?,?,?)",
-                       (boot,sid,user,real,assigned,v6,started,now,0))
+                       (boot, sid, user, real, assigned, v6, started, now, 0))
         enqueue(db, dict(event_type=kind, session_id=sid, username=user, client_ip=real,
                          vpn_ip=assigned or v6, connected_ms=started, observed_ms=now,
                          bytes_in=counter(env, "STATS_BYTES_IN"), bytes_out=counter(env, "STATS_BYTES_OUT")))
@@ -104,13 +104,13 @@ def flow_event(db, boot, active, line, now):
         (sid, user, client, connected), began = saved
         if now < began:
             return
-        counts = [counter({"n":v}, "n") for k,v in attrs if k == "bytes"]
+        counts = [counter({"n": v}, "n") for k, v in attrs if k == "bytes"]
         with db:
             enqueue(db, dict(event_type="flow", session_id=sid, username=user, client_ip=client,
-                             vpn_ip=source, destination_ip=dest, destination_port=counter(first,"dport"),
+                             vpn_ip=source, destination_ip=dest, destination_port=counter(first, "dport"),
                              protocol=protocol, connected_ms=connected, flow_started_ms=began,
-                             observed_ms=now, bytes_in=counts[0] if len(counts)==2 else None,
-                             bytes_out=counts[1] if len(counts)==2 else None))
+                             observed_ms=now, bytes_in=counts[0] if len(counts) == 2 else None,
+                             bytes_out=counts[1] if len(counts) == 2 else None))
 
 
 def main():
