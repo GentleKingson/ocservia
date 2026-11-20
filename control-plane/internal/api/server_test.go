@@ -118,6 +118,7 @@ func TestLiveVersionRoutingAndCacheControl(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ path, cache string }{
+		{"/api/v1/version", "private, max-age=60"}, {"/version", "private, max-age=60"},
 		{"/api/v1/nodes", "no-store"}, {"/api/v1/not-a-route", "no-store"}, {"/api/v1/auth/session", "no-store"}, {"/healthz", ""},
 	} {
 		rec = httptest.NewRecorder()
