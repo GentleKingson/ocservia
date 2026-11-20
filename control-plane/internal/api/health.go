@@ -33,6 +33,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "private, max-age=60")
 	// Keep the historical response field without making it a runtime setting.
 	writeJSON(w, http.StatusOK, struct {
 		Version                 string `json:"version"`
