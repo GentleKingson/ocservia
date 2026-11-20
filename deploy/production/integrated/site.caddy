@@ -1,5 +1,8 @@
 # Shared Gateway site body, imported by Caddyfile and Caddyfile.acme.
-encode zstd gzip
+@nonStream not path /api/v1/events/stream /api/v1/operations/*/events
+encode @nonStream zstd gzip {
+	minimum_length 512
+}
 header {
 	Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	X-Content-Type-Options "nosniff"
@@ -27,6 +30,9 @@ route {
 	respond @wrongPort 421
 	handle /api/* {
 		reverse_proxy control-plane:8080 {
+			transport http {
+				keepalive 55s
+			}
 			header_up X-Ocservia-Client-IP {http.request.remote.host}
 		}
 	}

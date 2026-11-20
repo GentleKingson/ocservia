@@ -80,6 +80,7 @@ describe("fleet event stream", () => {
       undefined,
       expect.any(AbortSignal),
       "desc",
+      1,
     );
     expect(FakeEventSource.instances.at(-1)?.url).toBe(
       `/stream?after=${latestEvent}`,

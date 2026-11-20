@@ -25,12 +25,11 @@ function controlledRequest(node: NodeObservedState, reason: string) {
 export async function listOperations(
   cursor?: string,
   signal?: AbortSignal,
+  pageSize = 200,
 ): Promise<OperationPage> {
   const xWorkspaceID = await getWorkspaceId();
   return operations.listOperations(
-    cursor
-      ? { xWorkspaceID, cursor, pageSize: 200 }
-      : { xWorkspaceID, pageSize: 200 },
+    { xWorkspaceID, pageSize, ...(cursor ? { cursor } : {}) },
     requestInit(signal),
   );
 }

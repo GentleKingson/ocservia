@@ -43,7 +43,7 @@ def fetch(address, path, context, proxy, etag=None):
             sock.sendall(f"PROXY TCP4 203.0.113.7 {address} 40000 443\r\n".encode())
         with context.wrap_socket(sock, server_hostname=HOST) as tls:
             conditional = f"If-None-Match: {etag}\r\n" if etag else ""
-            tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {HOST}\r\n{conditional}Connection: close\r\n\r\n".encode())
+            tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {HOST}\r\nAccept-Encoding: gzip\r\n{conditional}Connection: close\r\n\r\n".encode())
             data = b""
             while part := tls.recv(65536):
                 data += part
@@ -67,9 +67,9 @@ def main():
         os.chmod(work / "tls.key", 0o444)
         (work / "srv").mkdir()
         (work / "srv" / "index.html").write_text("<!doctype html><title>headers</title>")
-        assets = work / "srv" / "assets"
-        assets.mkdir()
-        (assets / "index-Ab3dE6gH.js").write_text("export default 1;")
+        asset = "/assets/index-Abcd1234.js"
+        (work / "srv" / "assets").mkdir()
+        (work / "srv" / asset[1:]).write_text("/* gateway asset */" * 100)
         context = ssl.create_default_context(cafile=str(work / "tls.crt"))
         run("docker", "network", "create", "--subnet", SUBNET, "--gateway", CLIENT_GATEWAY, name)
         common = ["-v", f"{work}/tls.crt:/run/secrets/tls_certificate:ro",
@@ -104,10 +104,14 @@ def main():
                     assert headers.get(header) == [value], (mode, path, header, headers.get(header))
                 assert "content-security-policy-report-only" not in headers, (mode, path)
                 assert "server" not in headers, (mode, path, headers.get("server"))
-            for path, policy in (("/assets/index-Ab3dE6gH.js", "public, max-age=31536000, immutable"),
+            for path, policy in ((asset, "public, max-age=31536000, immutable"),
                                  ("/assets/missing-Ab3dE6gH.js", "no-cache"), ("/", "no-cache")):
                 got, headers = fetch(address, path, context, proxy)
                 assert got == 200 and headers.get("cache-control") == [policy], (mode, path, got, headers)
+                if path == asset:
+                    assert headers.get("content-encoding") == ["gzip"], (mode, path, headers)
+                else:
+                    assert "content-encoding" not in headers, (mode, path, headers)
                 got, _ = fetch(address, path, context, proxy, headers["etag"][0])
                 assert got == 304, (mode, path, got)
             print(f"PASS {mode}: security headers on static, fallback and 502 responses")
