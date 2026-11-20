@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
@@ -75,6 +76,29 @@ func TestSubscribersShareOnePollingWatcher(t *testing.T) {
 		sub.Close()
 	}
 	eventually(t, time.Second, func() bool { return hub.Snapshot().Watchers == 0 })
+}
+
+// New subscriptions must not postpone polling for existing subscribers.
+func TestPollDuringSubscriptionChurn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		config := DefaultConfig()
+		var queries atomic.Uint64
+		hub, err := NewHub(config, func(context.Context, string, uuid.UUID, int) ([]Event, error) {
+			queries.Add(1)
+			return nil, nil
+		}, rejectNonNilCursor)
+		testutil.NoError(t, err)
+		defer hub.Close()
+		for range 4 {
+			_, err := hub.Subscribe(t.Context(), "scope", uuid.Nil)
+			testutil.NoError(t, err)
+			time.Sleep(config.PollInterval / 2)
+		}
+		synctest.Wait()
+		if queries.Load() == 0 {
+			t.Fatal("new subscriptions postponed the poll")
+		}
+	})
 }
 
 func TestSlowConsumerDisconnectedWithoutBlockingPeer(t *testing.T) {

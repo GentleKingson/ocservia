@@ -311,12 +311,7 @@ fn monitor_telemetry(
     max_message_size: usize,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        loop {
-            let Ok(accepted) = tokio::time::timeout(STREAM_TIMEOUT, connection.accept_uni()).await
-            else {
-                continue;
-            };
-            let Ok(mut recv) = accepted else { break };
+        while let Ok(mut recv) = connection.accept_uni().await {
             let mut length = [0_u8; 4];
             if !matches!(
                 tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut length)).await,

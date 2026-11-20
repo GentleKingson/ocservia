@@ -327,14 +327,6 @@ func (w *watcher) run() {
 			case <-w.ctx.Done():
 				return
 			}
-			if errors.Is(err, ErrDatabaseBackoff) {
-				continue
-			}
-			if len(w.subscribers) == 0 {
-				poll = resetTimer(timer, w.backoff)
-			} else if err == nil {
-				poll = resetTimer(timer, w.hub.config.PollInterval)
-			}
 		case id := <-w.unsubscribe:
 			if subscriber := w.subscribers[id]; subscriber != nil {
 				delete(w.subscribers, id)
