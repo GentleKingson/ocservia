@@ -34,9 +34,10 @@ services:
       - "0.0.0.0:7842:7842/udp"
     healthcheck:
       test: ["CMD", "relay-healthcheck"]
-      interval: 10s
+      interval: 15s
       timeout: 3s
-      retries: 12
+      retries: 8
+      start_period: 15s
     deploy:
       resources:
         limits:

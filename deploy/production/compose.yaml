@@ -41,6 +41,8 @@ services:
     ports:
       - "${OCSERV_HTTPS_ADDRESS:-0.0.0.0}:443:8443/tcp"
     environment:
+      GOMEMLIMIT: 200MiB
+      GOMAXPROCS: "1"
       OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST:?set OCSERV_PUBLIC_HOST}
     secrets:
       - tls_certificate
@@ -69,6 +71,8 @@ services:
     image: ${OCSERV_CONTROL_IMAGE:?set OCSERV_CONTROL_IMAGE to a digest-pinned image}
     command: ["--migrate-only"]
     environment:
+      GOMEMLIMIT: 200MiB
+      GOMAXPROCS: "1"
       OCSERV_ENVIRONMENT: production
       OCSERV_DATABASE_URL_FILE: /run/secrets/database_owner_url
       OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
@@ -103,6 +107,7 @@ services:
     <<: *service-defaults
     image: ${OCSERV_CONTROL_IMAGE:?set OCSERV_CONTROL_IMAGE to a digest-pinned image}
     environment:
+      GOMEMLIMIT: 800MiB
       OCSERV_ENVIRONMENT: production
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
       OCSERV_AUTH_TRUSTED_PROXY_CIDRS: ${OCSERV_AUTH_TRUSTED_PROXY_CIDRS-${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}/32}
@@ -175,9 +180,10 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/readyz"]
-      interval: 5s
+      interval: 15s
       timeout: 3s
-      retries: 30
+      retries: 10
+      start_period: 15s
     deploy:
       resources:
         limits:
@@ -257,9 +263,10 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "test -S /run/ocserv-platform/transportd.sock"]
-      interval: 5s
+      interval: 15s
       timeout: 3s
-      retries: 30
+      retries: 10
+      start_period: 15s
     deploy:
       resources:
         limits:
@@ -273,6 +280,8 @@ services:
     image: ${OCSERV_OTEL_IMAGE:?set OCSERV_OTEL_IMAGE to a digest-pinned OpenTelemetry Collector image}
     command: ["--config=/etc/otelcol/config.yaml"]
     environment:
+      GOMEMLIMIT: 300MiB
+      GOMAXPROCS: "1"
       OCSERV_OTEL_BACKEND_ENDPOINT: ${OCSERV_OTEL_BACKEND_ENDPOINT:-}
     secrets:
       - otel_client_certificate

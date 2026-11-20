@@ -25,5 +25,5 @@ tar -xf "$work/$archive" -C "$work"
 cp "$ROOT/deploy/production/relay.Cargo.lock" "$work/iroh-relay-$version/Cargo.lock"
 profile=()
 if [[ "${2:-release}" == debug ]]; then profile=(--debug); fi
-cargo install --locked --path "$work/iroh-relay-$version" --features server \
+CARGO_PROFILE_RELEASE_LTO=thin cargo install --locked --path "$work/iroh-relay-$version" --features server \
   --root "$1" "${profile[@]}"
