@@ -1,7 +1,14 @@
-FROM rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3 AS build
+FROM rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3 AS toolchain
 WORKDIR /build
-COPY toolchains.lock ./
-COPY scripts/build-relay.sh scripts/checksums.txt ./scripts/
+FROM toolchain AS inputs
+RUN --mount=type=bind,source=toolchains.lock,target=/tmp/toolchains.lock \
+    --mount=type=bind,source=scripts/checksums.txt,target=/tmp/checksums.txt \
+    mkdir scripts && awk -F= '$1 == "iroh"' /tmp/toolchains.lock > toolchains.lock \
+    && awk '$2 ~ /^iroh-relay-.*\.crate$/' /tmp/checksums.txt > scripts/checksums.txt
+
+FROM toolchain AS build
+COPY --from=inputs /build/ ./
+COPY scripts/build-relay.sh ./scripts/
 COPY deploy/production/relay.Cargo.lock ./deploy/production/
 RUN bash scripts/build-relay.sh /usr/local/cargo
 
