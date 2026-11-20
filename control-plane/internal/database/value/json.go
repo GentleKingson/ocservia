@@ -43,7 +43,8 @@ func parseJSONB(data []byte, budget int64) (JSONB, error) {
 	if !utf8.Valid(data) {
 		return JSONB{}, errInvalidUTF8
 	}
-	p := jsonParser{data: data}
+	// Unescaped tokens share one immutable input until canonical output is written.
+	p := jsonParser{data: string(data)}
 	p.skipSpace()
 	v, err := p.parseValue()
 	if err != nil {
@@ -65,7 +66,7 @@ func parseJSONB(data []byte, budget int64) (JSONB, error) {
 }
 
 type jsonParser struct {
-	data  []byte
+	data  string
 	pos   int
 	depth int
 }
@@ -93,19 +94,19 @@ func (p *jsonParser) parseValue() (any, error) {
 	case '"':
 		return p.parseString()
 	case 't':
-		if p.pos+4 <= len(p.data) && string(p.data[p.pos:p.pos+4]) == "true" {
+		if p.pos+4 <= len(p.data) && p.data[p.pos:p.pos+4] == "true" {
 			p.pos += 4
 			return true, nil
 		}
 		return nil, errInvalidJSON
 	case 'f':
-		if p.pos+5 <= len(p.data) && string(p.data[p.pos:p.pos+5]) == "false" {
+		if p.pos+5 <= len(p.data) && p.data[p.pos:p.pos+5] == "false" {
 			p.pos += 5
 			return false, nil
 		}
 		return nil, errInvalidJSON
 	case 'n':
-		if p.pos+4 <= len(p.data) && string(p.data[p.pos:p.pos+4]) == "null" {
+		if p.pos+4 <= len(p.data) && p.data[p.pos:p.pos+4] == "null" {
 			p.pos += 4
 			return nil, nil
 		}
@@ -213,7 +214,7 @@ func (p *jsonParser) parseString() (string, error) {
 	for p.pos < len(p.data) {
 		c := p.data[p.pos]
 		if c == '"' {
-			s := string(p.data[start:p.pos])
+			s := p.data[start:p.pos]
 			p.pos++
 			return s, nil
 		}
@@ -289,7 +290,7 @@ func (p *jsonParser) parseString() (string, error) {
 	return "", errInvalidJSON
 }
 
-func parseHex4(data []byte, pos int) (uint16, bool) {
+func parseHex4(data string, pos int) (uint16, bool) {
 	if pos+4 > len(data) {
 		return 0, false
 	}
@@ -351,7 +352,7 @@ func (p *jsonParser) parseNumber() (decimalNumber, error) {
 			p.pos++
 		}
 	}
-	return newDecimal(string(p.data[start:p.pos]))
+	return newDecimal(p.data[start:p.pos])
 }
 
 // jsonWriter charges every byte against the remaining output budget before it
@@ -529,7 +530,11 @@ func appendJSON(out *jsonWriter, v any) error {
 		}
 		return out.writeByte(']')
 	case map[string]any:
-		keys := make([]string, 0, len(v))
+		var small [8]string
+		keys := small[:0]
+		if len(v) > cap(keys) {
+			keys = make([]string, 0, len(v))
+		}
 		for key := range v {
 			keys = append(keys, key)
 		}

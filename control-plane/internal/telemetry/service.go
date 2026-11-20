@@ -12,7 +12,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
+	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/google/uuid"
@@ -253,11 +253,11 @@ func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {
 		if err != nil {
 			return err
 		}
-		operations, err := operationstore.FromTransaction(tx)
+		enrollment, err := enrollmentstore.Enrollment(tx)
 		if err != nil {
 			return err
 		}
-		actions, err = nodeActions(ctx, operations, id, stored.Status)
+		actions, err = nodeActions(ctx, enrollment, id, stored.Status)
 		return err
 	})
 	if err != nil {

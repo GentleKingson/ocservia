@@ -7,6 +7,8 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -112,4 +114,32 @@ func BenchmarkValidateWireTelemetry(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkGetNodeActions(b *testing.B) {
+	pool, _ := testfixture.OpenIsolated(b, b, "bench_node")
+	ctx := b.Context()
+	workspace := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Benchmark','benchmark',now(),now())`, workspace); err != nil {
+		b.Fatal(err)
+	}
+	svc := NewBackend(postgres.WrapPool(pool))
+	for _, status := range []string{"active", "revoked"} {
+		b.Run(status, func(b *testing.B) {
+			id := uuid.Must(uuid.NewV7())
+			if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,$3,now(),now())`, id, workspace, status); err != nil {
+				b.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.certificate.issue',true),($1,'ocserv.users.write',false)`, id); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				node, err := svc.GetNode(ctx, id)
+				if err != nil || node.EffectiveActions["certificate.issue"].Allowed != (status == "active") || node.EffectiveActions["user.manage"].Allowed {
+					b.Fatalf("unexpected node actions: %v, %v", node.EffectiveActions, err)
+				}
+			}
+		})
+	}
 }

@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
-	"github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/google/uuid"
 )
 
@@ -15,37 +15,41 @@ type ActionAvailability struct {
 	Reason  string `json:"reason"`
 }
 
-func nodeActions(ctx context.Context, operations store.Store, id uuid.UUID, status string) (map[string]ActionAvailability, error) {
-	capabilities := map[string][]string{
-		"user.manage":                    {"ocserv.users.write"},
-		"group.manage":                   {"ocserv.groups.write"},
-		"config.plan":                    {configprofile.PlanCapability},
-		"config.apply":                   {configprofile.ApplyCapability},
-		"certificate.read":               {},
-		"certificate.issue":              {"ocserv.certificate.issue"},
-		"certificate.revoke":             {"ocserv.certificate.revoke"},
-		"certificate.private_key.export": {"ocserv.certificate.issue"},
-		"service.reload":                 {"ocserv.service.reload"},
+var actionCapabilities = map[string]string{
+	"user.manage":                    "ocserv.users.write",
+	"group.manage":                   "ocserv.groups.write",
+	"config.plan":                    configprofile.PlanCapability,
+	"config.apply":                   configprofile.ApplyCapability,
+	"certificate.read":               "",
+	"certificate.issue":              "ocserv.certificate.issue",
+	"certificate.revoke":             "ocserv.certificate.revoke",
+	"certificate.private_key.export": "ocserv.certificate.issue",
+	"service.reload":                 "ocserv.service.reload",
+}
+
+func nodeActions(ctx context.Context, enrollment store.EnrollmentStore, id uuid.UUID, status string) (map[string]ActionAvailability, error) {
+	available := status == "active" || status == "offline"
+	var approved map[string]bool
+	if available {
+		capabilities, err := enrollment.Capabilities(ctx, id, true)
+		if err != nil {
+			return nil, err
+		}
+		approved = make(map[string]bool, len(capabilities))
+		for _, capability := range capabilities {
+			approved[capability] = true
+		}
 	}
-	result := make(map[string]ActionAvailability, len(capabilities))
-	for action, options := range capabilities {
-		if status != "active" && status != "offline" && len(options) > 0 {
+	result := make(map[string]ActionAvailability, len(actionCapabilities))
+	for action, capability := range actionCapabilities {
+		switch {
+		case capability == "" || approved[capability]:
+			result[action] = ActionAvailability{Allowed: true, Reason: "available"}
+		case !available:
 			result[action] = ActionAvailability{Reason: "node_unavailable"}
-			continue
+		default:
+			result[action] = ActionAvailability{Reason: "missing_capability"}
 		}
-		allowed := len(options) == 0
-		for _, capability := range options {
-			approved, err := operations.HasCapability(ctx, id, capability)
-			if err != nil {
-				return nil, err
-			}
-			allowed = allowed || approved
-		}
-		reason := "missing_capability"
-		if allowed {
-			reason = "available"
-		}
-		result[action] = ActionAvailability{Allowed: allowed, Reason: reason}
 	}
 	return result, nil
 }

@@ -108,22 +108,24 @@ const visibleColumns = computed(() => new Set(listState.value.columns));
 const showColumn = (column: NodeListState["columns"][number]) =>
   visibleColumns.value.has(column);
 
-const heartbeatDisplays = computed(() => {
-  const nowMs = now.value.getTime();
-  const activeLocale = locale.value;
-  const displays = new Map<
-    string,
-    { relative: string | undefined; formatted: string }
-  >();
+const formattedHeartbeats = computed(() => {
+  const formatted = new Map<string, string>();
   for (const node of visibleNodes.value) {
     const value = node.lastHeartbeatAt;
-    if (!value || displays.has(value)) continue;
-    displays.set(value, {
-      relative: relativeTimestamp(value, nowMs, activeLocale),
-      formatted: formatTimestamp(value),
-    });
+    if (value && !formatted.has(value))
+      formatted.set(value, formatTimestamp(value));
   }
-  return displays;
+  return formatted;
+});
+
+const relativeHeartbeats = computed(() => {
+  const nowMs = now.value.getTime();
+  const activeLocale = locale.value;
+  const relative = new Map<string, string | undefined>();
+  for (const value of formattedHeartbeats.value.keys()) {
+    relative.set(value, relativeTimestamp(value, nowMs, activeLocale));
+  }
+  return relative;
 });
 
 const trustBadge: Record<string, string> = {
@@ -532,17 +534,15 @@ async function submitRollout(): Promise<void> {
                   <TableCell class="py-3">
                     <template v-if="node.lastHeartbeatAt">
                       <span class="block">{{
-                        heartbeatDisplays.get(node.lastHeartbeatAt)?.relative ??
-                        heartbeatDisplays.get(node.lastHeartbeatAt)?.formatted
+                        relativeHeartbeats.get(node.lastHeartbeatAt) ??
+                        formattedHeartbeats.get(node.lastHeartbeatAt)
                       }}</span>
                       <time
-                        v-if="
-                          heartbeatDisplays.get(node.lastHeartbeatAt)?.relative
-                        "
+                        v-if="relativeHeartbeats.get(node.lastHeartbeatAt)"
                         class="text-muted-foreground block text-xs"
                         :datetime="node.lastHeartbeatAt"
                         >{{
-                          heartbeatDisplays.get(node.lastHeartbeatAt)?.formatted
+                          formattedHeartbeats.get(node.lastHeartbeatAt)
                         }}</time
                       >
                     </template>
