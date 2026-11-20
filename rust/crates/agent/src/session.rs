@@ -253,6 +253,7 @@ async fn connect_once(
     let session_expiry = wait_for_session_expiry(&session_authority);
     tokio::pin!(session_expiry);
     let mut sequence = 0_u64;
+    let mut delivery = None;
     loop {
         tokio::select! {
             _ = connection.closed() => return Ok(()),
@@ -265,7 +266,16 @@ async fn connect_once(
                 let (send, recv) = stream?;
                 handle_command_stream(send, recv, session, &session_authority).await?;
             },
-            _ = heartbeat.tick() => {
+            Some((delivered, result)) = async {
+                Some(delivery.as_mut()?.await)
+            }, if delivery.is_some() => {
+                delivery = None;
+                let delivered: Vec<_> = delivered;
+                session.command_executor.journal_mut().acknowledge_telemetry_batch(&delivered)?;
+                result?;
+                tracing::info!(node_id = %session.node_id, sequence, "agent telemetry delivered");
+            },
+            _ = heartbeat.tick(), if delivery.is_none() => {
                 let sampled=SystemTime::now();
                 let observations=session.privd.snapshot().await?;
                 // Durable upgrade outcome evidence is best-effort: an older
@@ -297,24 +307,19 @@ async fn connect_once(
                     .command_executor
                     .journal_mut()
                     .telemetry_pending(32, i64::try_from(now)?)?;
-                let mut delivered = Vec::with_capacity(pending_batches.len());
-                for (pending_id, pending) in pending_batches {
-                    if let Err(error) = send_telemetry(&connection, &pending).await {
-                        if !delivered.is_empty() {
-                            let _ = session
-                                .command_executor
-                                .journal_mut()
-                                .acknowledge_telemetry_batch(&delivered);
+                // The journal owns these batches until acknowledgement. Dropping
+                // this session during a send leaves them available for replay.
+                let connection = &connection;
+                delivery = Some(Box::pin(async move {
+                    let mut delivered = Vec::with_capacity(pending_batches.len());
+                    for (id, payload) in pending_batches {
+                        if let Err(err) = send_telemetry(connection, &payload).await {
+                            return (delivered, Err(err));
                         }
-                        return Err(error);
+                        delivered.push(id);
                     }
-                    delivered.push(pending_id);
-                }
-                session
-                    .command_executor
-                    .journal_mut()
-                    .acknowledge_telemetry_batch(&delivered)?;
-                tracing::info!(node_id = %session.node_id, sequence, "agent telemetry delivered");
+                    (delivered, Ok(()))
+                }));
             },
         }
     }

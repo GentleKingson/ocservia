@@ -19,18 +19,18 @@ type runningComponent struct {
 // lifecycle owns only running tasks and listeners, never business services.
 // Assembly and cleanup run on the caller; each task publishes exactly once.
 type lifecycle struct {
-	ctx         context.Context
-	stop        context.CancelFunc
-	timeout     time.Duration
-	logger      *slog.Logger
-	http, trust shutdownServer
-	tasks       []*runningComponent
-	first       chan *runningComponent
+	ctx              context.Context
+	stop             context.CancelFunc
+	shutdownDeadline func() time.Time
+	logger           *slog.Logger
+	http, trust      shutdownServer
+	tasks            []*runningComponent
+	first            chan *runningComponent
 }
 
-func newLifecycle(ctx context.Context, timeout time.Duration, logger *slog.Logger) *lifecycle {
+func newLifecycle(ctx context.Context, shutdownDeadline func() time.Time, logger *slog.Logger) *lifecycle {
 	ctx, stop := context.WithCancel(ctx)
-	return &lifecycle{ctx: ctx, stop: stop, timeout: timeout, logger: logger, first: make(chan *runningComponent, 1)}
+	return &lifecycle{ctx: ctx, stop: stop, shutdownDeadline: shutdownDeadline, logger: logger, first: make(chan *runningComponent, 1)}
 }
 
 func (l *lifecycle) start(name string, run func(context.Context) error) {
@@ -59,7 +59,7 @@ func (l *lifecycle) wait() error {
 
 func (l *lifecycle) close(primary error) error {
 	l.stop()
-	ctx, cancel := context.WithTimeout(context.Background(), l.timeout)
+	ctx, cancel := context.WithDeadline(context.Background(), l.shutdownDeadline())
 	defer cancel()
 	failures := []error{failureCause(primary)}
 	// Close API admission/SSE before Trust, then join all database users.

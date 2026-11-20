@@ -29,7 +29,7 @@ import (
 
 type BuildInfo struct{ Version, Commit string }
 
-func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.Logger) error {
+func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger, accessLogger *slog.Logger, shutdownDeadline func() time.Time) error {
 	if err := validateBootstrapPasswords(cfg); err != nil {
 		return err
 	}
@@ -38,7 +38,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		return err
 	}
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		shutdownCtx, cancel := context.WithDeadline(context.Background(), shutdownDeadline())
 		defer cancel()
 		if err := shutdownTelemetry(shutdownCtx); err != nil {
 			logger.Error("telemetry shutdown failed", "error", err)
@@ -55,11 +55,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	if err != nil || auditManager == nil {
 		return err
 	}
-	return runController(ctx, cfg, build, backend, auditManager, logger)
+	return runController(ctx, cfg, build, backend, auditManager, logger, accessLogger, shutdownDeadline)
 }
 
-func runController(ctx context.Context, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger *slog.Logger) (runErr error) {
-	life := newLifecycle(ctx, cfg.ShutdownTimeout, logger)
+func runController(ctx context.Context, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger, accessLogger *slog.Logger, shutdownDeadline func() time.Time) (runErr error) {
+	life := newLifecycle(ctx, shutdownDeadline, logger)
 	stopPprof := startPprof(cfg.PprofAddress, logger)
 	defer func() {
 		runErr = life.close(runErr)
@@ -163,7 +163,8 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 	})
 
 	modules := api.Modules{
-		Nodes: telemetryService, ConfigPlans: configplan.NewBackend(backend, operationService), UserOperations: userOperationsService, Certificates: certificateService,
+		AccessLogger: accessLogger,
+		Nodes:        telemetryService, ConfigPlans: configplan.NewBackend(backend, operationService), UserOperations: userOperationsService, Certificates: certificateService,
 		Operations: operationService, ReleaseCatalog: releaseCatalog, UserState: userStateService, TransportEvents: eventService,
 	}
 	if cfg.ControllerEndpointID != "" {

@@ -343,6 +343,9 @@ impl Adapter {
                 backups.push((name, entry.path()));
             }
         }
+        if backups.len() <= 10 {
+            return Ok(());
+        }
         backups.sort_by(|left, right| left.0.cmp(&right.0));
         let remove = backups.len().saturating_sub(10);
         for (_, path) in backups.into_iter().take(remove) {
