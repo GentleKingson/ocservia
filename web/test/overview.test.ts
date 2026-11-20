@@ -196,6 +196,7 @@ describe("operational overview", () => {
       undefined,
       expect.any(AbortSignal),
       "desc",
+      50,
     );
     expect(overview.events).toHaveLength(20);
     expect(overview.events[0]?.id).toContain("e00");
@@ -225,6 +226,7 @@ describe("operational overview", () => {
     expect(listOperations).toHaveBeenLastCalledWith(
       undefined,
       expect.any(AbortSignal),
+      20,
     );
     expect(operationSummary).toHaveBeenCalledTimes(2);
     expect(overview.activeOperations).toBe(1);

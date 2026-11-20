@@ -62,7 +62,7 @@ export const useOverviewStore = defineStore("overview", () => {
       // active/unknown totals come from the workspace summary, which stays
       // accurate when the backlog outgrows the page limit.
       const [page, counts] = await Promise.all([
-        listOperations(undefined, request.signal),
+        listOperations(undefined, request.signal, recentOperationWindow),
         operationSummary(request.signal),
       ]);
       if (!isLatest()) return;
@@ -92,7 +92,12 @@ export const useOverviewStore = defineStore("overview", () => {
       if (!isLatest()) return;
       const collected: PlatformEvent[] = [];
       if (!incremental) {
-        const page = await listEvents(undefined, request.signal, "desc");
+        const page = await listEvents(
+          undefined,
+          request.signal,
+          "desc",
+          retainedEventLimit,
+        );
         if (!isLatest()) return;
         collected.push(...[...page.items].reverse());
       } else {

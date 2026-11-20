@@ -42,7 +42,7 @@ def fetch(address, path, context, proxy):
             # network gateway address configured as OCSERV_EDGE_GATEWAY_IP.
             sock.sendall(f"PROXY TCP4 203.0.113.7 {address} 40000 443\r\n".encode())
         with context.wrap_socket(sock, server_hostname=HOST) as tls:
-            tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {HOST}\r\nConnection: close\r\n\r\n".encode())
+            tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {HOST}\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n".encode())
             data = b""
             while part := tls.recv(65536):
                 data += part
@@ -66,6 +66,9 @@ def main():
         os.chmod(work / "tls.key", 0o444)
         (work / "srv").mkdir()
         (work / "srv" / "index.html").write_text("<!doctype html><title>headers</title>")
+        asset = "/assets/index-Abcd1234.js"
+        (work / "srv" / "assets").mkdir()
+        (work / "srv" / asset[1:]).write_text("/* gateway asset */" * 100)
         context = ssl.create_default_context(cafile=str(work / "tls.crt"))
         run("docker", "network", "create", "--subnet", SUBNET, "--gateway", CLIENT_GATEWAY, name)
         common = ["-v", f"{work}/tls.crt:/run/secrets/tls_certificate:ro",
@@ -100,7 +103,14 @@ def main():
                     assert headers.get(header) == [value], (mode, path, header, headers.get(header))
                 assert "content-security-policy-report-only" not in headers, (mode, path)
                 assert "server" not in headers, (mode, path, headers.get("server"))
-            print(f"PASS {mode}: security headers on static, fallback and 502 responses")
+            status, headers = fetch(address, asset, context, proxy)
+            assert status == 200 and headers.get("content-encoding") == ["gzip"], (mode, asset, headers)
+            assert headers.get("cache-control") == ["public, max-age=31536000, immutable"], (mode, headers)
+            for path in ("/", "/assets/missing-Abcd1234.js"):
+                status, headers = fetch(address, path, context, proxy)
+                assert status == 200 and headers.get("cache-control") == ["no-cache"], (mode, path, headers)
+                assert "content-encoding" not in headers, (mode, path, headers)
+            print(f"PASS {mode}: security headers, asset caching and compression")
     finally:
         for container in containers:
             run("docker", "rm", "-f", container, check=False)

@@ -29,12 +29,13 @@ export async function listEvents(
   after?: string,
   signal?: AbortSignal,
   order?: "asc" | "desc",
+  pageSize = 200,
 ): Promise<PlatformEventPage> {
   const xWorkspaceID = await getWorkspaceId();
   return events.listEvents(
     {
       xWorkspaceID,
-      pageSize: 200,
+      pageSize,
       ...(after ? { after } : {}),
       ...(order ? { order } : {}),
     },

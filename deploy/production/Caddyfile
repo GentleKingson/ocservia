@@ -2,6 +2,7 @@
 	admin off
 	auto_https off
 	servers {
+		protocols h1 h2
 		timeouts {
 			read_header 5s
 			read_body 30s
@@ -11,7 +12,10 @@
 
 :8443 {
 	tls /run/secrets/tls_certificate /run/secrets/tls_private_key
-	encode zstd gzip
+	@nonStream not path /api/v1/events/stream /api/v1/operations/*/events
+	encode @nonStream zstd gzip {
+		minimum_length 512
+	}
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
@@ -34,6 +38,9 @@
 	}
 	handle /api/* {
 		reverse_proxy control-plane:8080 {
+			transport http {
+				keepalive 55s
+			}
 			header_up X-Ocservia-Client-IP {http.request.remote.host}
 		}
 	}
@@ -45,6 +52,11 @@
 	}
 	handle {
 		root * /srv
+		@viteAsset {
+			path_regexp ^/assets/[^/]+-[A-Za-z0-9_-]{8}\.[^/]+$
+			file
+		}
+		header @viteAsset Cache-Control "public, max-age=31536000, immutable"
 		# Revalidate every HTML response (including the try_files fallback) so a
 		# redeploy is seen at once: the page names its build's hashed assets.
 		header {

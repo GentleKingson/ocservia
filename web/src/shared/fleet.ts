@@ -196,7 +196,7 @@ export const useFleetStore = defineStore("fleet", () => {
       // A failed lookup falls back to a full replay rather than failing.
       const snapshotCursor = source
         ? undefined
-        : await listEvents(undefined, request.signal, "desc").then(
+        : await listEvents(undefined, request.signal, "desc", 1).then(
             (page) => page.items[0]?.id,
             () => undefined,
           );
