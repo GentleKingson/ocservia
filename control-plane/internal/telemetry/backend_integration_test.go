@@ -84,7 +84,10 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	batch.IPBans = []IPBan{{IP: "2001:db8::20", SecondsRemaining: &seconds}, {IP: "192.0.2.9"}, {IP: "2001:db8::2"}}
 	batch.Users = []User{{Username: "alice", Enabled: true, Revision: 1, Fingerprint: make([]byte, 32)}}
 	batch.Groups = []Group{{Name: "operators", Members: []string{"alice"}, Revision: 1, Fingerprint: make([]byte, 32)}}
-	batch.Security = []SecurityEvent{{ID: uuid.Must(uuid.NewV7()), ObservedAt: now, Severity: "info", Type: "test.ingest", Detail: json.RawMessage(`{"large":1e1000}`)}}
+	batch.Security = []SecurityEvent{
+		{ID: uuid.Must(uuid.NewV7()), ObservedAt: now, Severity: "info", Type: "test.ingest", Detail: json.RawMessage(`{"large":1e1000}`)},
+		{ID: uuid.Must(uuid.NewV7()), ObservedAt: now, Severity: "warning", Type: "test.warning", Detail: json.RawMessage(`{"count":2}`)},
+	}
 	batch.Snapshot.System = json.RawMessage(`{"precise":123456789012345678901234567890,"large":1e1000}`)
 	if inserted, err := service.Ingest(ctx, batch); err != nil || !inserted {
 		t.Fatalf("ingest: %v %v", inserted, err)
@@ -159,13 +162,15 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		if len(groupNames) != 1 || groupNames[0] != "operators" {
 			t.Fatalf("groups: %+v", groupNames)
 		}
-		var detail value.JSONB
-		if err := tx.QueryRow(ctx, `SELECT detail FROM telemetry_security_events WHERE event_id=$1`, batch.Security[0].ID).Scan(&detail); err != nil {
-			return err
-		}
-		expected, _ := value.ParseJSONB(batch.Security[0].Detail)
-		if !bytes.Equal(detail.Bytes(), expected.Bytes()) {
-			t.Fatalf("security detail lost precision: %s", detail.Bytes())
+		for _, event := range batch.Security {
+			var detail value.JSONB
+			if err := tx.QueryRow(ctx, `SELECT detail FROM telemetry_security_events WHERE event_id=$1`, event.ID).Scan(&detail); err != nil {
+				return err
+			}
+			expected, _ := value.ParseJSONB(event.Detail)
+			if !bytes.Equal(detail.Bytes(), expected.Bytes()) {
+				t.Fatalf("security detail lost precision: %s", detail.Bytes())
+			}
 		}
 		since, err := value.FromTime(now.Add(-time.Hour))
 		if err != nil {

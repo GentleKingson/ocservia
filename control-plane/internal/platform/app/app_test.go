@@ -12,7 +12,7 @@ import (
 func TestBootstrapPasswordPolicyBeforeStartup(t *testing.T) {
 	for _, password := range []string{"x", "12345678901234567890", "ocserviapassword"} {
 		// No database or logger: policy rejection must precede startup side effects.
-		err := Run(context.Background(), config.Config{BootstrapLocalAdmin: true, LocalBootstrapPassword: password}, BuildInfo{}, nil)
+		err := Run(context.Background(), config.Config{BootstrapLocalAdmin: true, LocalBootstrapPassword: password}, BuildInfo{}, nil, nil, nil)
 		if !errors.Is(err, auth.ErrPasswordPolicy) {
 			t.Fatalf("bootstrap reached startup before policy rejection: %v", err)
 		}

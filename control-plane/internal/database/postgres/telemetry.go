@@ -307,8 +307,24 @@ func (s telemetryStore) ReplaceGroups(ctx context.Context, node uuid.UUID, group
 	return nil
 }
 
-func (s telemetryStore) InsertSecurity(ctx context.Context, node uuid.UUID, e telemetrystore.SecurityEvent) error {
-	_, err := s.tx.Exec(ctx, `INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, e.ID, node, e.ObservedAt, e.Severity, e.Type, e.Detail)
+func (s telemetryStore) InsertSecurity(ctx context.Context, node uuid.UUID, events []telemetrystore.SecurityEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	var query strings.Builder
+	query.WriteString("INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail) VALUES ")
+	args := make([]any, 1, 1+5*len(events))
+	args[0] = node
+	for i, e := range events {
+		if i > 0 {
+			query.WriteByte(',')
+		}
+		base := 2 + 5*i
+		fmt.Fprintf(&query, "($%d,$1,$%d,$%d,$%d,$%d)", base, base+1, base+2, base+3, base+4)
+		args = append(args, e.ID, e.ObservedAt, e.Severity, e.Type, e.Detail)
+	}
+	query.WriteString(" ON CONFLICT DO NOTHING")
+	_, err := s.tx.Exec(ctx, query.String(), args...)
 	return err
 }
 

@@ -69,7 +69,7 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 		Nodes: telemetry.NewWithRecommendedAgentVersionBackend(runtime.Store, cfg.RecommendedAgentVersion), ConfigPlans: configplan.NewBackend(runtime.Store, ops), UserOperations: useroperations.NewWithConcurrencyBackend(runtime.Store, users, 3),
 		Operations: ops, UserState: users, TransportEvents: transportevents.NewBackend(runtime.Store, signer),
 	}
-	life := newLifecycle(ctx, time.Second, quietLogger())
+	life := newLifecycle(ctx, afterTimeout(time.Second), quietLogger())
 	t.Cleanup(func() {
 		if err := life.close(nil); err != nil {
 			t.Error(err)

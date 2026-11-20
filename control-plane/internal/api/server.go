@@ -41,6 +41,7 @@ type Server struct {
 	backend             database.Backend
 	build               BuildInfo
 	logger              *slog.Logger
+	accessLogger        *slog.Logger
 	bodyLimit           int64
 	requestTimeout      time.Duration
 	devAuth             bool
@@ -92,6 +93,7 @@ type HTTPConfig struct {
 
 // Modules is construction input only. Nil capabilities disable the optional feature, not its routes.
 type Modules struct {
+	AccessLogger    *slog.Logger
 	Nodes           NodeReader
 	ConfigPlans     ConfigPlans
 	UserOperations  UserOperations
@@ -125,8 +127,12 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	if service, ok := modules.UserOperations.(*useroperations.Service); ok && service == nil {
 		modules.UserOperations = nil
 	}
+	if modules.AccessLogger == nil {
+		modules.AccessLogger = logger
+	}
 	s := &Server{
-		backend: backend, build: build, logger: logger, bodyLimit: config.BodyLimit,
+		accessLogger: modules.AccessLogger,
+		backend:      backend, build: build, logger: logger, bodyLimit: config.BodyLimit,
 		requestTimeout: config.RequestTimeout, devAuth: config.DevAuth, devAuthToken: config.DevAuthToken,
 		auth: authorization.Authentication, audit: authorization.Audit,
 		nodes: modules.Nodes, configPlans: modules.ConfigPlans,

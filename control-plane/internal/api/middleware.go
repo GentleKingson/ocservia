@@ -61,7 +61,7 @@ func (s *Server) requestContext(next http.Handler) http.Handler {
 		}
 		r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, requestID))
 		if !authResultRoute(r) {
-			s.logger.InfoContext(r.Context(), "http request", "request_id", requestID, "trace_id", trace.SpanContextFromContext(r.Context()).TraceID().String(), "method", r.Method, "path", r.URL.Path)
+			s.accessLogger.InfoContext(r.Context(), "http request", "request_id", requestID, "trace_id", trace.SpanContextFromContext(r.Context()).TraceID().String(), "method", r.Method, "path", r.URL.Path)
 		}
 		next.ServeHTTP(w, r)
 	})
