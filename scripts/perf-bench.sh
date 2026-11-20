@@ -41,11 +41,11 @@ emit_section() {
   fi
 }
 
-run_go_bench() {
+run_go_bench() (
   local tmpdir
   mkdir -p "${ROOT}/.cache"
   tmpdir="$(mktemp -d "${ROOT}/.cache/go-bench-tmp.XXXXXX")"
-  trap 'rm -rf -- "${tmpdir}"' RETURN
+  trap 'rm -rf -- "${tmpdir}"' EXIT
   export TMPDIR="${tmpdir}"
   (
     cd "${ROOT}/control-plane"
@@ -61,7 +61,7 @@ run_go_bench() {
     cd "${ROOT}/signer"
     go test -run='^$' -bench=. -benchmem -count="${GO_BENCH_COUNT}" -benchtime="${GO_BENCH_TIME}" .
   )
-}
+)
 
 run_rust_bench() {
   (

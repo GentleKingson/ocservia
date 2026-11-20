@@ -62,6 +62,23 @@ func TestJSONBExactDecimalAndValidation(t *testing.T) {
 	}
 }
 
+func TestJSONBObjectKeyOrdering(t *testing.T) {
+	for input, want := range map[string]string{
+		`{"cc":3,"b":2,"a":"first","a":"last"}`:                         `{"a":"last","b":2,"cc":3}`,
+		`{"cc":3,"b":2,"i":9,"h":8,"g":7,"f":6,"e":5,"d":4,"a":"last"}`: `{"a":"last","b":2,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9,"cc":3}`,
+	} {
+		raw := []byte(input)
+		got, err := ParseJSONB(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clear(raw)
+		if string(got.Bytes()) != want {
+			t.Fatalf("got %s, want %s", got.Bytes(), want)
+		}
+	}
+}
+
 func TestJSONBOutputBudgetFailsBeforeExpansion(t *testing.T) {
 	// Each number is individually legal; 3 x 1001 digits + 2 commas + 2 brackets.
 	wide := `[1e1000,1e1000,1e1000]`
