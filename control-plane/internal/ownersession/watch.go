@@ -155,7 +155,6 @@ func sessionInventoryMatches(snapshot sessionTermSnapshot, connection *transport
 // the node-lock -> map-lock order used by the rest of Manager.
 func (m *Manager) snapshotSessionTerms() []sessionTermSnapshot {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	terms := make([]sessionTermSnapshot, 0, len(m.sessions))
 	for _, session := range m.sessions {
 		terms = append(terms, sessionTermSnapshot{
@@ -166,6 +165,7 @@ func (m *Manager) snapshotSessionTerms() []sessionTermSnapshot {
 			openedAt:     session.openedAt,
 		})
 	}
+	m.mu.Unlock()
 	slices.SortFunc(terms, func(left, right sessionTermSnapshot) int {
 		return bytes.Compare(left.nodeID[:], right.nodeID[:])
 	})
