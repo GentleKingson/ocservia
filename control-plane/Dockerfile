@@ -6,8 +6,8 @@ RUN go mod download
 COPY control-plane/ .
 ARG VERSION=dev
 ARG COMMIT=unknown
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/ocserv-control ./cmd/ocserv-control
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ocserv-sealing-export ./cmd/ocserv-sealing-export
+RUN --mount=type=cache,id=ocservia-control-gobuild,target=/root/.cache/go-build CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/ocserv-control ./cmd/ocserv-control
+RUN --mount=type=cache,id=ocservia-control-gobuild,target=/root/.cache/go-build CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ocserv-sealing-export ./cmd/ocserv-sealing-export
 
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime-base
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
