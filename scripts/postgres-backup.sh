@@ -77,7 +77,6 @@ run_backup() {
 
   if [[ -e "${staging}" || -L "${staging}" ]]; then
     echo "backup staging path already exists: ${staging}" >&2
-    rm -f -- "${lock}"
     return 1
   fi
   if [[ -e "${final}" || -L "${final}" ]]; then

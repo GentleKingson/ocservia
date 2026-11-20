@@ -65,16 +65,59 @@ if [[ -e "${ROOT}/CLAUDE.md" ]] && ! awk '/^[[:space:]]*(```|~~~)/ { fence = !fe
   echo "CLAUDE.md must import AGENTS.md with an @AGENTS.md body line" >&2
   exit 1
 fi
-# ponytail: inline relative links and ASCII GitHub heading slugs only (no
-# duplicate-heading suffixes); use a Markdown parser if AGENTS.md needs more.
-while IFS= read -r link; do
-  path="${link%%#*}" anchor=""
-  [[ "${link}" != *#* ]] || anchor="${link#*#}"
-  [[ -f "${ROOT}/${path}" ]] || { echo "AGENTS.md links to a missing file: ${link}" >&2; exit 1; }
-  [[ -z "${anchor}" ]] || awk -v want="${anchor}" '/^#+ / { h = tolower($0); sub(/^#+ /, "", h)
-    gsub(/[^a-z0-9 -]/, "", h); gsub(/ /, "-", h); if (h == want) found = 1 } END { exit !found }' \
-    "${ROOT}/${path}" || { echo "AGENTS.md links to a missing heading: ${link}" >&2; exit 1; }
-done < <(grep -oE '\]\([^)]+\)' "${ROOT}/AGENTS.md" | sed -E 's/^\]\((.*)\)$/\1/' | grep -vE '^[a-z]+:' || true)
+python3 - "${ROOT}" <<'EOF'
+import os, re, subprocess, sys
+
+root = sys.argv[1]
+tracked = subprocess.check_output(["git", "-C", root, "ls-files", "*.md"], text=True).splitlines()
+docs = [f for f in tracked if f in ("README.md", "AGENTS.md", "CLAUDE.md", "SECURITY.md") or f.startswith("docs/")]
+
+def slugify(heading):
+    h = heading.strip().lower()
+    h = re.sub(r"[^a-z0-9 -]", "", h)
+    return h.replace(" ", "-")
+
+headings = {}
+def file_headings(path):
+    if path not in headings:
+        hs = set()
+        in_fence = False
+        with open(os.path.join(root, path), encoding="utf-8") as fh:
+            for line in fh:
+                if re.match(r"^\s*(```|~~~)", line):
+                    in_fence = not in_fence
+                    continue
+                if not in_fence and re.match(r"^#+\s+", line):
+                    hs.add(slugify(re.sub(r"^#+\s+", "", line)))
+        headings[path] = hs
+    return headings[path]
+
+errors = []
+for doc in docs:
+    in_fence = False
+    with open(os.path.join(root, doc), encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            if re.match(r"^\s*(```|~~~)", line):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            for match in re.finditer(r"\]\(([^)]+)\)", line):
+                target = match.group(1)
+                if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target):
+                    continue
+                path_part, _, anchor = target.partition("#")
+                resolved = doc if not path_part else os.path.normpath(os.path.join(os.path.dirname(doc), path_part))
+                if not os.path.exists(os.path.join(root, resolved)):
+                    errors.append(f"{doc}:{lineno} links to missing path: {target}")
+                elif anchor and resolved.endswith(".md") and anchor not in file_headings(resolved):
+                    errors.append(f"{doc}:{lineno} links to missing heading: {target}")
+
+if errors:
+    for err in errors:
+        print(err, file=sys.stderr)
+    sys.exit(1)
+EOF
 
 require_text README.md 'docs/operations/production-deployment.md'
 require_text README.md 'docs/operations/agent-lifecycle.md'

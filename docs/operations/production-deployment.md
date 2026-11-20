@@ -31,7 +31,7 @@ install, upgrade, rollback, and uninstall lifecycles.
 | Controller OS/architecture | Linux `amd64` and `arm64` release artifacts | Host table below |
 | Agent native packages | DEB on Ubuntu 22.04/24.04/26.04 and Debian 12/13, RPM on Rocky Linux 9, `amd64`/`arm64` | [Install a managed node](agent-lifecycle.md#install-a-managed-node), [Agent lifecycle](agent-lifecycle.md), [package validation](../development/release-checks.md) |
 | Databases | PostgreSQL 18.x bundled or external | [Database support](#database-support) |
-| Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, `1.5.0`, and `1.6.0` | See the note below |
+| Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` (`1.6.0` parser fixtures unit-tested) | See the note below |
 | Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated Relay](#dedicated-relay) |
 | Authentication | Local single administrator (`OCSERV_LOCAL_AUTH_ENABLED=true`) | [Production authentication](authentication.md) |
 | Web console browsers | Chrome 111+, Safari 16.4+, Firefox 128+, Chromium 111+ derivatives; CI runs Chromium plus Playwright Firefox and WebKit on the cross-engine specs | [Web validation](../development/release-checks.md#web-validation) |

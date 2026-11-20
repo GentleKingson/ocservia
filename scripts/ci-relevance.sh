@@ -110,13 +110,19 @@ classify_path() {
       run_go=true; run_database=true ;;
 
     # Web, Rust, Go and Signer modules.
+    web/package.json) run_web=true; tools_suite guards ;;
     web/*|scripts/web-check.sh|scripts/e2e.sh) run_web=true ;;
+    rust/rust-toolchain.toml) run_rust=true; tools_suite guards ;;
     rust/*|scripts/rust-check.sh|scripts/agent-boundary-check.sh|scripts/transport-boundary-check.sh|\
     scripts/check-agent-storage.sh|scripts/native-ocserv-integration.sh)
       run_rust=true ;;
-    control-plane/cmd/*|control-plane/migrations/*|control-plane/internal/*|control-plane/go.*|go.work*)
+    control-plane/go.mod|go.work*)
+      run_go=true; run_database=true; tools_suite guards ;;
+    control-plane/cmd/*|control-plane/migrations/*|control-plane/internal/*|control-plane/go.*)
       run_go=true; run_database=true ;;
-    control-plane/*|scripts/go-check.sh|signer/*.go|signer/go.mod|signer/go.sum)
+    signer/go.mod)
+      run_go=true; tools_suite guards ;;
+    control-plane/*|scripts/go-check.sh|signer/*.go|signer/go.sum)
       run_go=true ;;
 
     # Installer-only contracts (avoids running unrelated release contract suites).
@@ -205,8 +211,8 @@ valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$1^{commit}" 2>/d
 
 if [[ "${event}" == workflow_dispatch ]]; then
   reason=workflow_dispatch_basic_checks
-  tools_suite source-style; tools_suite contracts
-  for flag in run_docs run_go run_rust run_web run_web_browser run_database; do printf -v "${flag}" true; done
+  tools_suite guards; tools_suite source-style; tools_suite contracts
+  for flag in run_docs run_go run_rust run_web run_web_browser run_database run_installers; do printf -v "${flag}" true; done
 elif [[ "${event}" != pull_request && "${event}" != push ]]; then
   fail_closed "unsupported_event:${event}"
 elif ! [[ "${base_sha}" =~ ^[0-9a-f]{40}$ && "${head_sha}" =~ ^[0-9a-f]{40}$ ]]; then

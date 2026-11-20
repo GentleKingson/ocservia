@@ -112,6 +112,12 @@ export interface DevelopmentRuntime {
    * @memberof DevelopmentRuntime
    */
   privdAttestationKeyStates: Array<PrivdAttestationKeyStateMetric>;
+  /**
+   *
+   * @type {boolean}
+   * @memberof DevelopmentRuntime
+   */
+  privdAttestationKeyStatesAvailable?: boolean;
 }
 
 /**
@@ -246,6 +252,10 @@ export function DevelopmentRuntimeFromJSONTyped(
     privdAttestationKeyStates: (
       json["privd_attestation_key_states"] as Array<any>
     ).map(PrivdAttestationKeyStateMetricFromJSON),
+    privdAttestationKeyStatesAvailable:
+      json["privd_attestation_key_states_available"] == null
+        ? undefined
+        : json["privd_attestation_key_states_available"],
   };
 }
 
@@ -279,5 +289,7 @@ export function DevelopmentRuntimeToJSONTyped(
     privd_attestation_key_states: (
       value["privdAttestationKeyStates"] as Array<any>
     ).map(PrivdAttestationKeyStateMetricToJSON),
+    privd_attestation_key_states_available:
+      value["privdAttestationKeyStatesAvailable"],
   };
 }

@@ -130,14 +130,7 @@ func validateCreate(r CreateRequest) error {
 			return ErrInvalidRequest
 		}
 	case ConfigApplyPayload:
-		if r.Action != "config.apply" || !hasActorSession(r) || !validConfigCandidate(r.NodeID, p.Candidate, p.CandidateHash, p.PlanRevision, p.CompleteCandidate) || len(p.ExpectedCurrentHash) != sha256.Size || p.DesiredRevision <= p.PlanRevision || p.ApplyMetadata == nil || p.ApplyMetadata.PlanID == uuid.Nil {
-			return ErrInvalidRequest
-		}
-		if p.CompleteCandidate != nil {
-			if len(p.MaterializedHash) != sha256.Size || p.PlanExpiresAt == nil || !p.PlanExpiresAt.IsValid() {
-				return ErrInvalidRequest
-			}
-		} else if len(p.MaterializedHash) != 0 || p.PlanExpiresAt != nil {
+		if r.Action != "config.apply" || !hasActorSession(r) || !validConfigCandidate(r.NodeID, p.Candidate, p.CandidateHash, p.PlanRevision, p.CompleteCandidate) || len(p.ExpectedCurrentHash) != sha256.Size || p.DesiredRevision <= p.PlanRevision || p.ApplyMetadata == nil || p.ApplyMetadata.PlanID == uuid.Nil || len(p.MaterializedHash) != sha256.Size || p.PlanExpiresAt == nil || !p.PlanExpiresAt.IsValid() {
 			return ErrInvalidRequest
 		}
 	case CertificateCSRPayload:
@@ -195,20 +188,15 @@ func validSessionTarget(sessionID, bootID string) bool {
 }
 
 func validConfigCandidate(nodeID uuid.UUID, candidate, hash []byte, revision uint64, complete *agentv1.CompleteConfigCandidate) bool {
-	if len(candidate) == 0 || len(candidate) > 256*1024 || len(hash) != sha256.Size || revision > uint64(^uint64(0)>>1) {
+	if complete == nil || len(candidate) == 0 || len(candidate) > 256*1024 || len(hash) != sha256.Size || revision > uint64(^uint64(0)>>1) {
 		return false
 	}
 	digest := sha256.Sum256(candidate)
 	if !bytes.Equal(digest[:], hash) {
 		return false
 	}
-	if complete != nil {
-		canonical, err := configprofile.Canonical(complete)
-		if err != nil || !bytes.Equal(canonical, candidate) || !bytes.Equal(complete.NodeId, nodeID[:]) || complete.ExpectedRevision != revision {
-			return false
-		}
-	}
-	return true
+	canonical, err := configprofile.Canonical(complete)
+	return err == nil && bytes.Equal(canonical, candidate) && bytes.Equal(complete.NodeId, nodeID[:]) && complete.ExpectedRevision == revision
 }
 
 func sessionTarget(p Payload) (sessionID, bootID string, ok bool) {
@@ -233,15 +221,9 @@ func requestCapability(r CreateRequest) string {
 	case ServiceReloadPayload:
 		return "ocserv.service.reload"
 	case ConfigPlanPayload:
-		if p.CompleteCandidate != nil {
-			return configprofile.PlanCapability
-		}
-		return "ocserv.config.plan"
+		return configprofile.PlanCapability
 	case ConfigApplyPayload:
-		if p.CompleteCandidate != nil {
-			return configprofile.ApplyCapability
-		}
-		return "ocserv.config.apply"
+		return configprofile.ApplyCapability
 	case CertificateCSRPayload, CertificateP12Payload:
 		return "ocserv.certificate.issue"
 	case CertificateRevokePayload:

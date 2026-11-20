@@ -32,7 +32,7 @@ jobs:
               cd rust
               cargo audit
               cargo audit --file ../deploy/production/relay.Cargo.lock
-              cargo deny --locked check advisories
+              cargo deny --locked check advisories bans licenses sources
           - name: npm vulnerabilities
             profile: npm-security
             command: |

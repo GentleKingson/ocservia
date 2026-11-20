@@ -23,7 +23,7 @@ import (
 )
 
 const installEnrollmentPrefix = "obt2_"
-const installTokenPrefix = "oit1_"
+const InstallTokenPrefix = "oit1_"
 
 // InstallationTrust is provisioned at Controller startup, never accepted from an
 // unauthenticated enrollment request. Only the root installer receives it.
@@ -58,7 +58,7 @@ func (s *Service) CreateInstallationToken(ctx context.Context, spec BootstrapTok
 	if _, err := io.ReadFull(s.random, raw); err != nil {
 		return Token{}, err
 	}
-	root := installTokenPrefix + base64.RawURLEncoding.EncodeToString([]byte(s.installation.Origin)) + "." + base64.RawURLEncoding.EncodeToString(raw)
+	root := InstallTokenPrefix + base64.RawURLEncoding.EncodeToString([]byte(s.installation.Origin)) + "." + base64.RawURLEncoding.EncodeToString(raw)
 	child, ok := installationChild(root, s.installation.Origin)
 	if !ok {
 		return Token{}, ErrInvalidRequest
@@ -74,10 +74,10 @@ func (s *Service) CreateInstallationToken(ctx context.Context, spec BootstrapTok
 // Derivation is one-way and domain separated: possession of the Agent's child
 // token never authorizes registration of a root-controlled privd key.
 func installationChild(root, origin string) (string, bool) {
-	if !strings.HasPrefix(root, installTokenPrefix) || len(root) > 2048 {
+	if !strings.HasPrefix(root, InstallTokenPrefix) || len(root) > 2048 {
 		return "", false
 	}
-	parts := strings.Split(strings.TrimPrefix(root, installTokenPrefix), ".")
+	parts := strings.Split(strings.TrimPrefix(root, InstallTokenPrefix), ".")
 	if len(parts) != 2 {
 		return "", false
 	}

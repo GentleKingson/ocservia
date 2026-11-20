@@ -52,7 +52,9 @@ export interface VerifyAuditChainRequest {
 
 export interface WatchEventsRequest {
   xWorkspaceID?: string;
+  workspaceId?: string;
   lastEventID?: string;
+  after?: string;
 }
 
 /**
@@ -273,6 +275,14 @@ export class EventsApi extends runtime.BaseAPI {
     requestParameters: WatchEventsRequest,
   ): Promise<runtime.RequestOpts> {
     const queryParameters: any = {};
+
+    if (requestParameters["workspaceId"] != null) {
+      queryParameters["workspace_id"] = requestParameters["workspaceId"];
+    }
+
+    if (requestParameters["after"] != null) {
+      queryParameters["after"] = requestParameters["after"];
+    }
 
     const headerParameters: runtime.HTTPHeaders = {};
 

@@ -7,7 +7,8 @@ it("sends exactly one scoped POST with the generated JSON content type and body"
     new Response(
       JSON.stringify({
         id: "token-id",
-        token: "obt1_" + "a".repeat(43),
+        token:
+          "oit1_aHR0cHM6Ly9jb250cm9sbGVyLmV4YW1wbGUuY29t." + "a".repeat(43),
         expires_at: "2026-01-01T00:15:00Z",
       }),
       { status: 201 },

@@ -19,8 +19,8 @@ func nodeActions(ctx context.Context, operations store.Store, id uuid.UUID, stat
 	capabilities := map[string][]string{
 		"user.manage":                    {"ocserv.users.write"},
 		"group.manage":                   {"ocserv.groups.write"},
-		"config.plan":                    {"ocserv.config.plan", configprofile.PlanCapability},
-		"config.apply":                   {"ocserv.config.apply", configprofile.ApplyCapability},
+		"config.plan":                    {configprofile.PlanCapability},
+		"config.apply":                   {configprofile.ApplyCapability},
 		"certificate.read":               {},
 		"certificate.issue":              {"ocserv.certificate.issue"},
 		"certificate.revoke":             {"ocserv.certificate.revoke"},

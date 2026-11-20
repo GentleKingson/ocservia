@@ -31,8 +31,6 @@ func TestCreateContractFingerprints(t *testing.T) {
 		{Payload: SessionTerminatePayload{SessionID: "42", BootID: id.String()}},
 		{Payload: IPBanRemovePayload{IP: "192.0.2.1"}},
 		{Payload: ServiceReloadPayload{}},
-		{Payload: ConfigPlanPayload{Candidate: candidate, CandidateHash: digest[:], PlanRevision: 3, OcservVersion: "1.2.3", PlanCapabilities: []string{"ocserv.config.plan"}, PlanMetadata: &ConfigPlanMetadata{TemplateName: "default", CandidateRedacted: "config"}}},
-		{Payload: ConfigApplyPayload{Candidate: candidate, CandidateHash: digest[:], ExpectedCurrentHash: bytes.Repeat([]byte{2}, 32), PlanRevision: 3, DesiredRevision: 4, ApplyMetadata: &ConfigApplyMetadata{PlanID: id}}},
 		{Payload: CertificateCSRPayload{CertificateID: id, CommonName: "node.example.com", DNSNames: []string{"node.example.com"}, KeyBits: 2048}},
 		{Payload: CertificateP12Payload{CertificateID: id, CertificateVersion: 2, CertificateChain: bytes.Repeat([]byte{3}, 64), SealedPassword: &agentv1.SealedSecretV1{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "secret", Ciphertext: bytes.Repeat([]byte{4}, 32)}, ArtifactID: id, ArtifactMetadata: &ArtifactMetadata{TokenSHA256: digest[:], RequestHash: digest[:], ExpiresAt: now.Add(15 * time.Minute)}}},
 		{Payload: CertificateRevokePayload{CertificateID: id, CertificateVersion: 2, RevocationReason: "rotate", HoldDispatch: true}},
@@ -64,7 +62,7 @@ func TestCreateContractFingerprints(t *testing.T) {
 		CreateRequest{Payload: ConfigPlanPayload{Candidate: canonical, CandidateHash: completeHash[:], CompleteCandidate: &complete, PlanRevision: 3, OcservVersion: "1.2.3", PlanCapabilities: []string{configprofile.PlanCapability}, PlanMetadata: &ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: "config"}}},
 		CreateRequest{Payload: ConfigApplyPayload{Candidate: canonical, CandidateHash: completeHash[:], CompleteCandidate: &complete, PlanRevision: 3, ExpectedCurrentHash: bytes.Repeat([]byte{2}, 32), DesiredRevision: 4, MaterializedHash: bytes.Repeat([]byte{3}, 32), PlanExpiresAt: timestamppb.New(now.Add(time.Minute)), ApplyMetadata: &ConfigApplyMetadata{PlanID: id}}},
 	)
-	legacyUpgrade := cases[11]
+	legacyUpgrade := cases[9]
 	legacyPayload := legacyUpgrade.Payload.(AgentUpgradePayload)
 	legacyPayload.upgradeCapability = "ocserv.agent.upgrade.v1"
 	legacyUpgrade.Payload = legacyPayload
@@ -75,8 +73,6 @@ func TestCreateContractFingerprints(t *testing.T) {
 		"session_terminate":     "7029d41bcdbe7a071120e411935a26f5dff87cf7cbb5d4dceb1ee436a4f61604/session_terminate/d332c9b29f33405d0d78f904dc0e565edeacc3ccae2df7eb175d1ae3b684f7fd/c4e3bd0b1f419e53a4179cba354e753fd7d64f1a6bbcc7e4950462fc28a27382babffa964f75b253f2be01812a60b87ae77d9a13533d0b06678b85df70ccc809",
 		"ip_ban_remove":         "df5007521c0bc61b15a4b91d51e1d9aa56eea6878edb4f5c3d2c02943bb6c0f3/ip_ban_remove/416a166b39ae82136774ac97f2cc75fa1d9bd2d3f34e9a01a8cbd50672b48dc2/61c788486029e4ebdb208b12e950ae3969f5f941f9ba7a7cf893369f17789648b491de5ef489c557f7ad46e917f8fa24d3b8a7cd44bc7b6871d8012157275006",
 		"service_reload":        "8dcbf069ce285a721d0bf9d1b2b7c6a1481ebf6f3aaa41d118badb66ff78c3ec/service_reload/bbe6fac771f4e0dbe4ecd65a631c8955f37816081af59f47c70dcbc6d4dbae35/ed69069b835c1ae5e4b7324e3dde19e38a94d9a29c8bf753ab7f46a98feb3ccd18e690ff0273c70fd1095ddfd9ac144263cc2735a20989653047311dad644800",
-		"config_plan":           "98938680fb0679e183acb8609068f73d31998c36393e50e74bd366f2444432e6/config_plan/2831c58be4ee2868514398402c7333055e5088f12fd35d6b1711d9a246ed3b00/2a53ba8026ee49052745976ad94a7134a59ef767fee307016c0e375373416eabea0ed14249773b4dec4a306795b6bd85a644727d449adbffbcd500345a1a4c02",
-		"config_apply":          "ba1019230a66bc7760e9d990ce5d07fbd1e408e7ba4f101b4e303f5ada0e263f/config_apply/55fafc4b8df641561a37f8f12241c5eea5299d10ece06e027688f591e492b5df/73edae02a3b837ae2f6e753425833bd14e833442198e69555e5a686e4c1a8965d8754f8e42694d439ea3fd6b8d9c10c9cb7f5d6b9359c0572d5fd81834abc300",
 		"certificate_csr":       "377d553acba7ed7bec93a5ce067808dc4f8945b461d272ee3a49270bca79229c/certificate_csr/8047784f5f5ccc753712924e6df3ae900ea1546baa3831500a3dcb40715c7003/6ceba27de68c5d5901e4a08d6a7ea1729e34f02582310681d2ec5b80ddcdd03641ca1eaebef58d32e189a67f49e17e555229e48a109d1426b85a927a9de12104",
 		"certificate_p12":       "a11c1749bf407ccc97a4d89ed3e29978e78ac52fe423ba446d00439f6869eb32/certificate_p12/4dcb58827d08a060122fa2dc88766012beb1a2f619139cda955dec3fe1fa6bf8/4597d34aaf731c1f600ec2dc3d5c23e1ec5f918f50caea29917577854b415e1981b100b5de82ed5d0762c06c8406706a7c51ed97855906e7da09ce0133005b07",
 		"certificate_revoke":    "e5539bd2bfc8c889828686ef3956e29fe880347b7db62e95d9cab638a3c0c735/certificate_revoke/a94171cbe3435a671f31a3fc0881430c2c0fe4bca7b1903f8a79c9d879c250eb/838f0ebcdc9ab018e874e84882ce208d1cd779f1b3147ec88fff78d4767ba46243f570890ea817c3570cdf1e385c0df74ffd080a0065c5c8c307414d135afa09",

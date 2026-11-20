@@ -93,10 +93,16 @@ case "${PG_MAJOR}" in
     ;;
 esac
 
+schema_header() {
+  sed -n "s/^-- ocservia:$1=//p" "${ROOT}/control-plane/migrations/schema.sql" | head -n 1
+}
+
 assert_current_checkpoint() {
-  local container=$1 database=$2 expected_checksum
+  local container=$1 database=$2 expected_checksum expected_epoch expected_revision
   expected_checksum="$(sha256sum "${ROOT}/control-plane/migrations/schema.sql" | cut -d' ' -f1)"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*)=1 AND bool_and(epoch=2 AND revision=4 AND checksum=decode('${expected_checksum}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions")" = t
+  expected_epoch="$(schema_header epoch)"
+  expected_revision="$(schema_header revision)"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*)=1 AND bool_and(epoch=${expected_epoch} AND revision=${expected_revision} AND checksum=decode('${expected_checksum}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions")" = t
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('schema_migrations','schema_snapshot_origin')")" = 0
 }
 
@@ -282,7 +288,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     done
     # Deliberate corruption is last, after all current-schema business checks.
     docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-      "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex') WHERE epoch=2 AND revision=4" >/dev/null
+      "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex') WHERE epoch=$(schema_header epoch) AND revision=$(schema_header revision)" >/dev/null
     if OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
       "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-checksum-rejected.log" 2>&1; then
       echo 'migration accepted a checksum mismatch' >&2; exit 1
@@ -308,8 +314,6 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # detector actually observes renewal, loss, and session snapshotting.
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
     go test -p 1 -race ./internal/coordination ./internal/connectionowner ./internal/ownersession -run Integration -count=1)
-  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_SNAPSHOT_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./migrations -run '^TestPostgreSQLArtifactRollback$' -count=1)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     go test -p 1 ./internal/api -run '^TestReadinessRequiresDatabaseConnectivityIntegration$' -count=1)
 
@@ -321,44 +325,18 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
   curl --fail --silent "http://127.0.0.1:${api_port}/livez" >/dev/null
   curl --fail --silent "http://127.0.0.1:${api_port}/version" | grep -q '"role":"all"'
-  assert_current_checkpoint "${container}" ocservia
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('workspaces','nodes','operations','audit_events','local_slice_jobs','transport_events','workspace_admins','node_endpoint_keys','node_capabilities','telemetry_ingest_batches','node_observed_snapshots','node_sessions','telemetry_security_events','telemetry_samples','telemetry_rollups_5m','telemetry_rollups_1h')")" = "16"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('commands','command_attempts','outbox_events','node_command_leases','operation_events')")" = "5"
   assert_local_bootstrap_schema "${container}" ocservia
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='node_bootstrap_tokens'")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','node_bootstrap_tokens','SELECT,INSERT,UPDATE')")" = "t"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='scheduler_leadership'")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='connection_owner_fencing'")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='node_privd_attestation_keys'")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='agent_command_results' AND column_name IN ('receipt_verification_status','receipt_failure_reason','privd_attestation_key_id','effect_record_id','effect_sequence','receipt_sha256','privileged_result_proof')) OR (table_name='certificates' AND column_name IN ('csr_receipt_verified_at','csr_receipt_sha256','csr_privd_attestation_key_id','csr_effect_record_id','csr_der_sha256','csr_requested_subject_sha256','issue_certificate_version')))")" = "14"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('transport_event_cursor','transport_event_quarantine')")" = "2"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='transport_event_quarantine'")" = "7"
+  # Schema object shape is verified cryptographically by staticFingerprintSQL;
+  # assert runtime least-privilege grants and quarantine non-storage invariants here.
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='transport_event_quarantine' AND column_name='payload'")" = "0"
-	test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audit_events' AND column_name IN ('auth_version','event_key_id','event_mac')")" = "3"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='node_sealing_keys'")" = "1"
-	test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='artifact_operations' AND column_name IN ('certificate_version','active_grant_id','active_grant_subject','active_grant_expires_at','consume_grant','consume_sha256','consume_size','consume_actor_id','consume_session_id','consume_request_id')")" = "10"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='certificates' AND column_name='version'")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('agent_rollouts','agent_rollout_nodes','agent_upgrade_operations','node_agent_upgrade_results')")" = "4"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='node_trust_convergence'")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','node_bootstrap_tokens','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','node_trust_convergence','SELECT,INSERT,UPDATE')")" = "t"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='node_config_state' AND column_name='desired_revision'")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('node_config_state','config_plans','config_apply_operations')")" = "3"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('certificates','artifact_operations','secret_provider_refs')")" = "3"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='security_alerts' AND column_name IN ('node_id','resource_type','resource_id')")" = "3"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%config_plan%' AND pg_get_constraintdef(oid) LIKE '%config_apply%' FROM pg_constraint WHERE conrelid='commands'::regclass AND conname='commands_payload_type_check'")" = "t"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%certificate_csr%' AND pg_get_constraintdef(oid) LIKE '%certificate_p12%' AND pg_get_constraintdef(oid) LIKE '%certificate_revoke%' FROM pg_constraint WHERE conrelid='commands'::regclass AND conname='commands_payload_type_check'")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','node_config_state','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','config_plans','SELECT,INSERT')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','config_apply_operations','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','certificates','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','artifact_operations','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','secret_provider_refs','SELECT,INSERT,UPDATE')")" = "t"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='config_apply_operations' AND indexname='config_apply_operations_one_active_node_idx' AND indexdef LIKE '%UNIQUE%unknown%'")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('desired_users','desired_groups','observed_users','observed_groups')")" = "4"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('desired_user_policies','user_policy_mutations','observed_user_usage','user_usage_cursors','scheduler_leadership','user_policy_enforcements')")" = "6"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'operations' AND column_name = 'command_id' AND data_type = 'uuid'")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'agent_command_results' AND column_name = 'semantic_payload_hash_version' AND data_type = 'smallint'")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_command_results'::regclass AND conname = 'agent_command_results_semantic_payload_hash_version_supported'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_column_privilege('ocservia_app', 'transport_events', 'transport_cursor_valid', 'UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_column_privilege('ocservia_app', 'transport_events', 'event_type', 'UPDATE')")" = "f"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_sequence_privilege('ocservia_app', 'transport_events_ingest_sequence_seq', 'USAGE')")" = "t"

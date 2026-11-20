@@ -160,6 +160,10 @@ export interface GetOperationRequest {
   operationId: string;
 }
 
+export interface GetOperationQueueMetricsRequest {
+  xWorkspaceID?: string;
+}
+
 export interface GetOperationSummaryRequest {
   xWorkspaceID?: string;
 }
@@ -229,6 +233,7 @@ export interface UpgradeNodeAgentRequest {
 export interface WatchOperationEventsRequest {
   operationId: string;
   lastEventID?: string;
+  after?: string;
 }
 
 /**
@@ -1110,10 +1115,18 @@ export class OperationsApi extends runtime.BaseAPI {
   /**
    * Creates request options for getOperationQueueMetrics without sending the request
    */
-  async getOperationQueueMetricsRequestOpts(): Promise<runtime.RequestOpts> {
+  async getOperationQueueMetricsRequestOpts(
+    requestParameters: GetOperationQueueMetricsRequest,
+  ): Promise<runtime.RequestOpts> {
     const queryParameters: any = {};
 
     const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
@@ -1138,9 +1151,11 @@ export class OperationsApi extends runtime.BaseAPI {
    * Get transactional outbox and command queue metrics
    */
   async getOperationQueueMetricsRaw(
+    requestParameters: GetOperationQueueMetricsRequest,
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<runtime.ApiResponse<QueueMetrics>> {
-    const requestOptions = await this.getOperationQueueMetricsRequestOpts();
+    const requestOptions =
+      await this.getOperationQueueMetricsRequestOpts(requestParameters);
     const response = await this.request(requestOptions, initOverrides);
 
     return new runtime.JSONApiResponse(response, (jsonValue) =>
@@ -1152,9 +1167,13 @@ export class OperationsApi extends runtime.BaseAPI {
    * Get transactional outbox and command queue metrics
    */
   async getOperationQueueMetrics(
+    requestParameters: GetOperationQueueMetricsRequest = {},
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<QueueMetrics> {
-    const response = await this.getOperationQueueMetricsRaw(initOverrides);
+    const response = await this.getOperationQueueMetricsRaw(
+      requestParameters,
+      initOverrides,
+    );
     return await response.value();
   }
 
@@ -2102,6 +2121,10 @@ export class OperationsApi extends runtime.BaseAPI {
     }
 
     const queryParameters: any = {};
+
+    if (requestParameters["after"] != null) {
+      queryParameters["after"] = requestParameters["after"];
+    }
 
     const headerParameters: runtime.HTTPHeaders = {};
 

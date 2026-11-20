@@ -36,6 +36,7 @@ if [[ "${scope}" != source-style ]]; then
 fi
 if [[ "${scope}" == all ]]; then
   (cd "${ROOT}/control-plane" && go vet ./...)
+  (cd "${ROOT}/signer" && go vet ./...)
   (cd "${ROOT}/rust" && cargo clippy --workspace --all-targets --all-features -- -D warnings)
   (cd "${ROOT}/web" && npm run format:check && npm run lint && npm run typecheck)
 fi

@@ -523,10 +523,9 @@ pub(crate) fn validate_enrollment(
     {
         return Err(protocol_error("endpoint identity mismatch"));
     }
-    let token = request
-        .token
-        .strip_prefix("obt2_")
-        .unwrap_or(&request.token);
+    let Some(token) = request.token.strip_prefix("obt2_") else {
+        return Err(protocol_error("enrollment credential or nonce is invalid"));
+    };
     if token.len() != 43 || request.nonce.len() < 16 || request.nonce.len() > 64 {
         return Err(protocol_error("enrollment credential or nonce is invalid"));
     }

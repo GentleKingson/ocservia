@@ -611,15 +611,13 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 	testutil.NoError(t, err)
 	s := NewBackend(f.b, "", "test", signer)
 	t.Run("expiry-before-consumption-rolls-back", func(t *testing.T) {
-		for i, bootstrap := range []bool{false, true} {
+		for i, unbound := range []bool{false, true} {
 			endpoint := endpointFixture(byte(211 + i))
-			var token Token
-			if bootstrap {
-				token, err = s.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: f.workspace, Environment: "test", ActorID: "operator", Reason: "expiry", RequestID: uuid.NewString()})
-				testutil.NoError(t, err)
-			} else {
-				token = createToken(t, s, f.workspace, endpoint)
+			var expectedEndpoint []byte
+			if !unbound {
+				expectedEndpoint = endpoint
 			}
+			token := createToken(t, s, f.workspace, expectedEndpoint)
 			request := enrollmentRequest(token.Value, endpoint)
 			calls := 0
 			s.now = func() time.Time {
@@ -649,8 +647,7 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 		}
 	})
 	t.Run("bootstrap-concurrent-endpoint-and-revoked-replay", func(t *testing.T) {
-		token, err := s.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: f.workspace, Environment: "test", ActorID: "operator", Reason: "binding", RequestID: uuid.NewString()})
-		testutil.NoError(t, err)
+		token := createToken(t, s, f.workspace, nil)
 		requests := []*agentv1.EnrollRequest{enrollmentRequest(token.Value, endpointFixture(213)), enrollmentRequest(token.Value, endpointFixture(214))}
 		var wg sync.WaitGroup
 		responses := make(chan *agentv1.EnrollResponse, 2)

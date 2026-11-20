@@ -4,16 +4,21 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const testTraceparent = testfixture.Traceparent
@@ -290,10 +295,31 @@ func TestRequestHashBindsAgentUpgradeReleaseIdentity(t *testing.T) {
 
 func TestConfigAndCertificatePayloadValidation(t *testing.T) {
 	id := uuid.Must(uuid.NewV7())
-	candidate := []byte("config")
-	digest := sha256.Sum256(candidate)
-	plan := ConfigPlanPayload{Candidate: candidate, CandidateHash: digest[:], PlanCapabilities: []string{"ocserv.config.plan"}, PlanMetadata: &ConfigPlanMetadata{TemplateName: "default", CandidateRedacted: "config"}}
-	apply := ConfigApplyPayload{Candidate: candidate, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1, ApplyMetadata: &ConfigApplyMetadata{PlanID: id}}
+	fixtureData, err := os.ReadFile("../../../testdata/complete-config-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture map[string]string
+	if err := json.Unmarshal(fixtureData, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	encodedCandidate, err := hex.DecodeString(fixture["candidate_proto"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var complete agentv1.CompleteConfigCandidate
+	if err := proto.Unmarshal(encodedCandidate, &complete); err != nil {
+		t.Fatal(err)
+	}
+	complete.NodeId, complete.ExpectedRevision = id[:], 0
+	canonical, err := configprofile.Canonical(&complete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(canonical)
+	expiry := timestamppb.New(time.Now().UTC().Add(time.Minute))
+	plan := ConfigPlanPayload{CompleteCandidate: &complete, Candidate: canonical, CandidateHash: digest[:], PlanCapabilities: []string{configprofile.PlanCapability}, PlanMetadata: &ConfigPlanMetadata{TemplateName: "default", CandidateRedacted: "config"}}
+	apply := ConfigApplyPayload{CompleteCandidate: &complete, Candidate: canonical, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1, MaterializedHash: digest[:], PlanExpiresAt: expiry, ApplyMetadata: &ConfigApplyMetadata{PlanID: id}}
 	csr := CertificateCSRPayload{CertificateID: id, CommonName: "node.example.test", DNSNames: []string{"node.example.test"}, KeyBits: 2048}
 	p12 := CertificateP12Payload{CertificateID: id, CertificateVersion: 1, CertificateChain: bytes.Repeat([]byte{1}, 64), ArtifactID: id, ArtifactMetadata: &ArtifactMetadata{TokenSHA256: digest[:], RequestHash: digest[:], ExpiresAt: time.Now().UTC().Add(time.Minute)}, SealedPassword: &agentv1.SealedSecretV1{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "secret", Ciphertext: bytes.Repeat([]byte{1}, 32)}}
 	revoke := CertificateRevokePayload{CertificateID: id, CertificateVersion: 1, RevocationReason: "rotate", HoldDispatch: true}
@@ -302,9 +328,9 @@ func TestConfigAndCertificatePayloadValidation(t *testing.T) {
 		valid   Payload
 		invalid Payload
 	}{
-		{"config.plan", plan, ConfigPlanPayload{Candidate: []byte("changed"), CandidateHash: digest[:], PlanCapabilities: plan.PlanCapabilities, PlanMetadata: plan.PlanMetadata}},
-		{"config.apply", apply, ConfigApplyPayload{Candidate: candidate, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1}},
-		{"config.apply", apply, ConfigApplyPayload{Candidate: candidate, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1, ApplyMetadata: apply.ApplyMetadata, MaterializedHash: digest[:]}},
+		{"config.plan", plan, ConfigPlanPayload{Candidate: canonical, CandidateHash: digest[:], PlanCapabilities: plan.PlanCapabilities, PlanMetadata: plan.PlanMetadata}},
+		{"config.apply", apply, ConfigApplyPayload{Candidate: canonical, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1, ApplyMetadata: apply.ApplyMetadata}},
+		{"config.apply", apply, ConfigApplyPayload{CompleteCandidate: &complete, Candidate: canonical, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1, ApplyMetadata: apply.ApplyMetadata}},
 		{"certificate.issue", csr, CertificateCSRPayload{CertificateID: id, CommonName: csr.CommonName, KeyBits: 1024}},
 		{"certificate.private_key.export", p12, CertificateP12Payload{CertificateID: id, CertificateVersion: 1, CertificateChain: p12.CertificateChain, SealedPassword: p12.SealedPassword, ArtifactID: id}},
 		{"certificate.revoke", revoke, CertificateRevokePayload{CertificateID: id, RevocationReason: "rotate"}},

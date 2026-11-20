@@ -843,8 +843,9 @@ fn policy_enrollment_and_rate_unit_invariants() {
 
     // Enrollment request binds authenticated endpoint, token format, and Unicode capability length.
     let key = SecretKey::generate();
+    let body = "a".repeat(43);
     let mut req = EnrollRequest {
-        token: "a".repeat(43),
+        token: format!("obt2_{body}"),
         endpoint_id: key.public().as_bytes().to_vec(),
         agent_version: "test".into(),
         os_release: "test".into(),
@@ -863,14 +864,15 @@ fn policy_enrollment_and_rate_unit_invariants() {
     ocservia_agent_protocol::identity::authorize_enrollment(&mut req, &key).expect("sign");
     assert!(validate_enrollment(&req, key.public()).is_ok());
     for (tok, ok) in [
-        (format!("obt1_{}", req.token), false),
-        (format!("obt2_{}", req.token), true),
-        (format!("oit1_{}", req.token), false),
-        (format!("obt2_{}a", req.token), false),
+        (body.clone(), false),
+        (format!("obt1_{body}"), false),
+        (format!("obt2_{body}"), true),
+        (format!("oit1_{body}"), false),
+        (format!("obt2_{body}a"), false),
     ] {
         let mut r = req.clone();
         r.token = tok;
-        if ok || r.token.starts_with("obt1_") {
+        if ok || r.token.starts_with("obt1_") || r.token == body {
             ocservia_agent_protocol::identity::authorize_enrollment(&mut r, &key).expect("sign");
         }
         assert_eq!(validate_enrollment(&r, key.public()).is_ok(), ok);

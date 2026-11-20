@@ -17,7 +17,7 @@ import (
 )
 
 type bootstrapTokenRequest struct {
-	Installation       bool   `json:"installation"`
+	Installation       *bool  `json:"installation"`
 	ExpectedEndpointID string `json:"expected_endpoint_id"`
 	WorkspaceID        string `json:"workspace_id"`
 	Environment        string `json:"environment"`
@@ -37,6 +37,10 @@ func (s *Server) createNodeBootstrapToken(w http.ResponseWriter, r *http.Request
 	}
 	var body bootstrapTokenRequest
 	if !decodeStrictJSON(w, r, &body) {
+		return
+	}
+	if body.Installation != nil && !*body.Installation {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "installation tokens are required; obt1_ bootstrap tokens are retired")
 		return
 	}
 	workspaceID, err := parseUUIDv7(body.WorkspaceID)
@@ -61,11 +65,7 @@ func (s *Server) createNodeBootstrapToken(w http.ResponseWriter, r *http.Request
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "ttl_seconds must be between 1 and 900")
 		return
 	}
-	create := s.enrollment.CreateBootstrapToken
-	if body.Installation {
-		create = s.enrollment.CreateInstallationToken
-	}
-	token, err := create(r.Context(), enrollment.BootstrapTokenSpec{
+	token, err := s.enrollment.CreateInstallationToken(r.Context(), enrollment.BootstrapTokenSpec{
 		ExpectedEndpointID: endpoint, WorkspaceID: workspaceID, Environment: body.Environment,
 		ExpectedNodeName: body.ExpectedNodeName, TTL: time.Duration(body.TTLSeconds) * time.Second,
 		ActorID: actorID(r), Reason: body.Reason, RequestID: requestID(r),
