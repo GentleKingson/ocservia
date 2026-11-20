@@ -7,7 +7,9 @@ cd "${ROOT}"
 for suite in ${CI_SUITES}; do
   case "${suite}" in
     guards)
-      bash -n scripts/ci-*.sh scripts/required-go-tests.sh scripts/bootstrap.sh
+      for script in scripts/ci-*.sh scripts/required-go-tests.sh scripts/bootstrap.sh; do
+        bash -n "${script}"
+      done
       bash scripts/test-ci-relevance.sh
       bash scripts/test-toolchain-consistency.sh
       bash scripts/check-public-repository.sh
