@@ -23,7 +23,10 @@ encodings match v1. Version 2 adds `CompleteConfigPlan` (129) and
 `CompleteConfigApply` (130), which exist only in v2 and are rejected under v1.
 Their canonical layouts live in the Go `semanticpayload` package and the Rust
 `command-authorization` crate, verified against
-`testdata/complete-config-v1.json`.
+`testdata/complete-config-v1.json`. Note that `CompleteConfigApply` (130)
+retains optional `approval_id` and `approval_request_sha256` presence bytes
+(encoded as `0x00` under the single-Admin authorization boundary) as part of
+its frozen canonical layout.
 
 For `ConfigPlan`, the v2 payload layout appends the expected configuration
 revision:

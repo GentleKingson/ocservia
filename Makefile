@@ -20,7 +20,7 @@ test:
 	./scripts/test.sh
 
 test-go:
-	source ./scripts/env.sh && cd control-plane && go test ./...
+	source ./scripts/env.sh && (cd control-plane && go test ./...) && (cd signer && go test ./...)
 
 test-rust:
 	source ./scripts/env.sh && cd rust && cargo test --workspace --all-features

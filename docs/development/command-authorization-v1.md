@@ -9,8 +9,8 @@ keys to verify the owner-fence carriers before relaying the command bytes.
 an executable command. Command authorization itself stays with the Agent and
 privd.
 
-The Controller signs a command only after finalizing RBAC checks, approval
-consumption, operation identity, required capability, revision, delivery mode,
+The Controller signs a command only after finalizing single-Admin workspace
+authorization, operation identity, required capability, revision, delivery mode,
 and the semantic payload hash. The Controller signs semantic hash v2 for all
 newly issued commands. The Agent, privd, and the Controller result handler also
 accept v1 for historical compatibility. Both the Agent and privd
@@ -170,10 +170,10 @@ command whose revision mismatches the session, whose session has expired, or
 whose required capability was not negotiated. Advancing the authoritative trust
 revision closes any connection still holding an older grant.
 
-Protocol `1.0` handshakes remain read-only: they receive no session grant, can
-negotiate only approved capabilities ending in `.read`, and cannot establish a
-mutation-capable Agent command context. The shared test vector for session
-grants is `testdata/session-grant-v1.json`.
+Protocol `1.0` and grantless handshakes are retired and rejected by the Controller,
+`transportd`, and `Agent`. Every session requires a Controller-signed `SessionGrantV1`
+under protocol `1.1`. The shared test vector for session grants is
+`testdata/session-grant-v1.json`.
 
 ## Provisioning and rotation
 

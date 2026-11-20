@@ -66,6 +66,7 @@ import {
 
 export interface CreateNodeBootstrapTokenRequest {
   nodeBootstrapTokenRequest: NodeBootstrapTokenRequest;
+  xWorkspaceID?: string;
 }
 
 export interface GetNodeBootstrapAttestationChallengeRequest {
@@ -107,6 +108,12 @@ export class EnrollmentApi extends runtime.BaseAPI {
 
     headerParameters["Content-Type"] = "application/json";
 
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
       const tokenString = await token("bearerAuth", []);
@@ -130,7 +137,7 @@ export class EnrollmentApi extends runtime.BaseAPI {
   }
 
   /**
-   * Create a one-time node bootstrap token
+   * Create a one-time node installation token
    */
   async createNodeBootstrapTokenRaw(
     requestParameters: CreateNodeBootstrapTokenRequest,
@@ -146,7 +153,7 @@ export class EnrollmentApi extends runtime.BaseAPI {
   }
 
   /**
-   * Create a one-time node bootstrap token
+   * Create a one-time node installation token
    */
   async createNodeBootstrapToken(
     requestParameters: CreateNodeBootstrapTokenRequest,

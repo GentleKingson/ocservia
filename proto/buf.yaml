@@ -11,3 +11,7 @@ lint:
 breaking:
   use:
     - FILE
+  ignore:
+    # Go Controller and transportd ship from the same release commit; only
+    # external Agent wire contracts under agent/v1 carry cross-version breaking checks.
+    - ocserv/platform/transport/v1

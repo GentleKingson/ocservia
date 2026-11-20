@@ -111,8 +111,8 @@ runs `scripts/lint.sh common` (ShellCheck, Ruff, Buf, OpenAPI lint,
 `check-public-repository.sh`, `docs-check.sh`), the Buf breaking-change check,
 `go-check.sh` in full mode, `rust-check.sh`, the transport and Agent boundary
 checks, `web-check.sh` in full mode, the policy and toolchain self-tests,
-`security-check.sh` (Gitleaks), `license-check.sh`, the generated-code checks,
-and the resilience harness bounds self-test. It does not start database containers or
+`security-check.sh` (Gitleaks), `license-check.sh`, and the generated-code checks.
+It does not start database containers or
 run `make integration`, `make e2e`, the CI router/selector/bootstrap self-tests,
 the installer or release self-tests, or manual acceptance harnesses.
 
@@ -307,7 +307,7 @@ that, prepare only what the entrypoint you run requires:
 | `docs-check.sh` | Git and `jq`; no toolchain or platform self-tests |
 | `go-check.sh race` (also the race part of `full`) | `CGO_ENABLED=1`, a C compiler selected by `go env CC`, linker and C development headers; no Docker requirement |
 | `database-integration.sh` smoke (delegates to `database-postgres-smoke.sh`) | Go, jq, setsid, Python 3, Docker CLI and daemon, and the race prerequisites (cgo, C compiler) |
-| `database-integration.sh` manual regression/full | The smoke set plus Ruby, curl, sha256sum |
+| `database-integration.sh` manual regression/full | The smoke set plus curl, sha256sum |
 
 If a required command is missing, the Docker daemon is unreachable, cgo is
 disabled, or the C toolchain cannot link a test binary, the scripts exit nonzero
@@ -353,10 +353,10 @@ go env GOVERSION GOHOSTOS GOHOSTARCH GOOS GOARCH CGO_ENABLED CC
 ./scripts/bootstrap.sh go-test
 ```
 
-If the host already has Ruby, a working C toolchain for race checks, and Docker,
+If the host already has a working C toolchain for race checks and Docker,
 run the selector and bootstrap profile self-tests, race checks and database smoke
 scripts directly on the host. Otherwise use the isolated container below.
-Passing native bootstrap and ordinary Go checks does not show that Ruby, race or
+Passing native bootstrap and ordinary Go checks does not show that race or
 database prerequisites are present.
 
 #### Isolated ARM64 execution environment
@@ -1072,7 +1072,7 @@ container UID/GID 65532; the node's copy stays owned by its Agent process user.
 Run these scripts only on explicitly authorized test hosts.
 
 1. On the Controller, run `scripts/real-e2e-controller.sh start`. On the node,
-   run `scripts/bootstrap.sh native-packages` (unsupported on Linux ARM64; see
+   run `scripts/bootstrap.sh native-packages` (see
    [Linux ARM64 Go validation](#linux-arm64-go-validation)), source
    `scripts/env.sh`, and run `scripts/real-e2e-node.sh build`.
 2. Copy
@@ -1239,7 +1239,7 @@ bash scripts/test-managed-node-install.sh
 bash scripts/test-controller-install.sh
 bash scripts/test-controller-bootstrap.sh
 bash scripts/test-agent-upgrade-retry.sh
-docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
+docker run --rm -v "$PWD:/source:ro" node:24.18.1-bookworm \
   python3 /source/scripts/test-relay-launchers.py
 ```
 

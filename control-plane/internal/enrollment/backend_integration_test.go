@@ -135,23 +135,28 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		}
 	}
 	t.Run("legacy-capability-policy", func(t *testing.T) {
+		t.Run("grantless-1.0-rejected", func(t *testing.T) {
+			handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: 0, AgentVersion: "compatibility-fixture", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now(), SealingKeys: enrollmentSealingKeys()}
+			response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+			if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_INCOMPATIBLE_PROTOCOL || len(response.GetNegotiatedCapabilities()) != 0 || response.GetSessionGrant() != nil {
+				t.Fatalf("protocol 1.0 authorization = %v, %v; want INCOMPATIBLE_PROTOCOL", response, err)
+			}
+		})
 		for _, test := range []struct {
 			name    string
-			minor   uint32
 			sealing bool
 			want    []string
 		}{
-			{"grantless-1.0", 0, true, readOnly},
-			{"unsealed-1.1", 1, false, readOnly},
-			{"authorized-1.1", 1, true, normalizedCapabilities(capabilities)},
+			{"unsealed-1.1", false, readOnly},
+			{"authorized-1.1", true, normalizedCapabilities(capabilities)},
 		} {
 			t.Run(test.name, func(t *testing.T) {
-				handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: test.minor, AgentVersion: "compatibility-fixture", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now()}
+				handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, AgentVersion: "compatibility-fixture", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now()}
 				if test.sealing {
 					handshake.SealingKeys = enrollmentSealingKeys()
 				}
 				response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
-				if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || !slices.Equal(response.GetNegotiatedCapabilities(), test.want) || (response.GetSessionGrant() != nil) != (test.minor == 1) {
+				if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || !slices.Equal(response.GetNegotiatedCapabilities(), test.want) || response.GetSessionGrant() == nil {
 					t.Fatalf("compatibility authorization = %v, %v; want capabilities %v", response, err, test.want)
 				}
 			})
@@ -241,8 +246,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}
 
 	bootstrapEndpoint := endpointFixture(102)
-	bootstrap, err := s.CreateBootstrapToken(ctx, BootstrapTokenSpec{ExpectedEndpointID: bootstrapEndpoint, WorkspaceID: workspace, Environment: "test", ActorID: "operator", Reason: "bootstrap", RequestID: uuid.NewString()})
-	testutil.NoError(t, err)
+	bootstrap := createToken(t, s, workspace, bootstrapEndpoint)
 	wrongEndpoint := enrollmentRequest(bootstrap.Value, endpointFixture(103))
 	if err := s.ValidateEnrollment(ctx, wrongEndpoint); !errors.Is(err, ErrInvalidToken) {
 		t.Fatal("prebound token validated another endpoint", err)

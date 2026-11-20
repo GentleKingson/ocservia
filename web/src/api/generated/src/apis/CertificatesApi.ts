@@ -88,6 +88,7 @@ export interface CreateCertificateP12Request {
 
 export interface CreateSecretProviderRefRequest {
   secretProviderRefRequest: SecretProviderRefRequest;
+  xWorkspaceID?: string;
 }
 
 export interface DownloadArtifactRequest {
@@ -333,6 +334,12 @@ export class CertificatesApi extends runtime.BaseAPI {
     const headerParameters: runtime.HTTPHeaders = {};
 
     headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;

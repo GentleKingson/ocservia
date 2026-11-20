@@ -219,10 +219,12 @@ The response returns the `oit1_` root token once. `ttl_seconds` can shorten the
 Never place the token in a URL, log, or shared shell history; stage it in a
 protected root-owned file (mode `0600`) when invoking `--join-token-file`.
 
-Existing manual enrollment credentials remain usable through the Agent's
-`--enrollment-token-file` CLI. Keep the original identity directory and exact
-credential when reconciling an uncertain response; the standard installer does
-not load these credentials from install.env.
+The Agent's `--enrollment-token-file` CLI accepts only a derived `obt2_` child
+enrollment credential produced from an `oit1_` installation token (legacy `obt1_`
+tokens and `installation: false` requests are retired and rejected). Keep the
+original identity directory and exact `obt2_` credential when reconciling an
+uncertain response; the standard installer does not load operator-supplied
+credentials from `install.env`.
 
 ### Finish enrollment
 

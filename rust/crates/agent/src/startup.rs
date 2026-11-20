@@ -494,7 +494,9 @@ pub(super) fn read_enrollment_token(path: &Path) -> Result<String, io::Error> {
         .trim_end_matches(['\n', '\r']);
     // The root installation token is never accepted by the Agent. Only its
     // one-way derived obt2_ child may cross this boundary.
-    let encoded = token.strip_prefix("obt2_").unwrap_or(token);
+    let Some(encoded) = token.strip_prefix("obt2_") else {
+        return Err(invalid("enrollment token is invalid"));
+    };
     if encoded.len() != 43
         || !encoded
             .bytes()

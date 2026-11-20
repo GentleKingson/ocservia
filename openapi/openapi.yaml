@@ -152,6 +152,12 @@ paths:
           required: false
           schema:
             $ref: "#/components/schemas/UuidV7"
+        - name: after
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/UuidV7"
+          description: Exclusive event cursor alternative to Last-Event-ID.
       responses:
         "200":
           description: SSE stream whose id field is a durable operation event ID.
@@ -168,6 +174,8 @@ paths:
       operationId: getOperationQueueMetrics
       summary: Get transactional outbox and command queue metrics
       tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
       responses:
         "200":
           description: Current bounded queue metrics.
@@ -224,11 +232,23 @@ paths:
       tags: [events]
       parameters:
         - $ref: "#/components/parameters/WorkspaceId"
+        - name: workspace_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/UuidV7"
+          description: Workspace UUIDv7 query parameter alternative to X-Workspace-ID (required for the development principal).
         - name: Last-Event-ID
           in: header
           required: false
           schema:
             $ref: "#/components/schemas/UuidV7"
+        - name: after
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/UuidV7"
+          description: Exclusive event cursor alternative to Last-Event-ID.
       responses:
         "200":
           description: SSE stream whose id field is a durable platform event ID.
@@ -246,7 +266,7 @@ paths:
     post:
       operationId: createLocalSimulation
       summary: Start a side-effect-free local agent simulation
-      description: Available only when the local simulator is explicitly enabled outside production.
+      description: Available only when the local simulator is explicitly enabled outside production; requires the development principal and a loopback Host header.
       tags: [development]
       security: []
       requestBody:
@@ -268,6 +288,10 @@ paths:
                 $ref: "#/components/schemas/Operation"
         "400":
           $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
         "404":
           $ref: "#/components/responses/Problem"
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
@@ -277,7 +301,7 @@ paths:
     get:
       operationId: getDevelopmentRuntime
       summary: Read bounded runtime counters for local resilience tests
-      description: Available only when the local simulator is explicitly enabled outside production.
+      description: Available only when the local simulator is explicitly enabled outside production; requires the development principal and a loopback Host header.
       tags: [development]
       security: []
       responses:
@@ -287,6 +311,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DevelopmentRuntime"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
         "404":
           $ref: "#/components/responses/Problem"
         default:
@@ -294,8 +322,10 @@ paths:
   /node-bootstrap-tokens:
     post:
       operationId: createNodeBootstrapToken
-      summary: Create a one-time node bootstrap token
+      summary: Create a one-time node installation token
       tags: [enrollment]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
       requestBody:
         required: true
         content:
@@ -1219,6 +1249,8 @@ paths:
       operationId: createSecretProviderRef
       summary: Register opaque external secret metadata without a secret value
       tags: [certificates]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
       requestBody:
         required: true
         content:
@@ -2322,6 +2354,8 @@ components:
           type: array
           maxItems: 3
           items: { $ref: "#/components/schemas/PrivdAttestationKeyStateMetric" }
+        privd_attestation_key_states_available:
+          type: boolean
     PrivdReceiptVerificationMetric:
       type: object
       additionalProperties: false
@@ -2401,8 +2435,8 @@ components:
       properties:
         installation:
           type: boolean
-          default: false
-          description: Return a root-only installation token and automatically provision the node. Omit expected_endpoint_id in this mode; the default uses manual endpoint-bound enrollment.
+          default: true
+          description: Return a root-only oit1_ installation token and automatically provision the node. Legacy obt1_ tokens (installation=false) are retired and rejected.
         workspace_id:
           $ref: "#/components/schemas/UuidV7"
         environment:
@@ -2436,7 +2470,7 @@ components:
           $ref: "#/components/schemas/UuidV7"
         token:
           type: string
-          pattern: "^(obt1_[A-Za-z0-9_-]{43}|oit1_[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]{43})$"
+          pattern: "^oit1_[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]{43}$"
           readOnly: true
         expires_at:
           $ref: "#/components/schemas/UtcDateTime"

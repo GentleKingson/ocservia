@@ -73,7 +73,7 @@ export class DevelopmentApi extends runtime.BaseAPI {
   }
 
   /**
-   * Available only when the local simulator is explicitly enabled outside production.
+   * Available only when the local simulator is explicitly enabled outside production; requires the development principal and a loopback Host header.
    * Start a side-effect-free local agent simulation
    */
   async createLocalSimulationRaw(
@@ -90,7 +90,7 @@ export class DevelopmentApi extends runtime.BaseAPI {
   }
 
   /**
-   * Available only when the local simulator is explicitly enabled outside production.
+   * Available only when the local simulator is explicitly enabled outside production; requires the development principal and a loopback Host header.
    * Start a side-effect-free local agent simulation
    */
   async createLocalSimulation(
@@ -123,7 +123,7 @@ export class DevelopmentApi extends runtime.BaseAPI {
   }
 
   /**
-   * Available only when the local simulator is explicitly enabled outside production.
+   * Available only when the local simulator is explicitly enabled outside production; requires the development principal and a loopback Host header.
    * Read bounded runtime counters for local resilience tests
    */
   async getDevelopmentRuntimeRaw(
@@ -138,7 +138,7 @@ export class DevelopmentApi extends runtime.BaseAPI {
   }
 
   /**
-   * Available only when the local simulator is explicitly enabled outside production.
+   * Available only when the local simulator is explicitly enabled outside production; requires the development principal and a loopback Host header.
    * Read bounded runtime counters for local resilience tests
    */
   async getDevelopmentRuntime(

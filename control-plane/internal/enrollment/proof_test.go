@@ -18,28 +18,40 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestCreateBootstrapTokenValidatesAuthorityMetadata(t *testing.T) {
+func TestCreateInstallationTokenValidatesAuthorityMetadata(t *testing.T) {
 	service := &Service{}
-	_, err := service.CreateBootstrapToken(context.Background(), BootstrapTokenSpec{
+	_, err := service.CreateInstallationToken(context.Background(), BootstrapTokenSpec{
 		WorkspaceID: uuid.Must(uuid.NewV7()),
 		Environment: "production",
 		ActorID:     "operator",
 		RequestID:   uuid.Must(uuid.NewV7()).String(),
 	})
 	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("CreateBootstrapToken without reason error = %v, want ErrInvalidRequest", err)
+		t.Fatalf("CreateInstallationToken without reason error = %v, want ErrInvalidRequest", err)
 	}
 }
 
 func TestBootstrapTokenRejectsMalformedEndpointRestriction(t *testing.T) {
 	service := &Service{}
 	for _, length := range []int{1, 31, 33} {
-		_, err := service.CreateBootstrapToken(context.Background(), BootstrapTokenSpec{
+		_, err := service.CreateInstallationToken(context.Background(), BootstrapTokenSpec{
 			WorkspaceID: uuid.Must(uuid.NewV7()), Environment: "production", ActorID: "operator",
 			RequestID: uuid.NewString(), Reason: "rebind", ExpectedEndpointID: make([]byte, length),
 		})
 		if !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("length %d: %v", length, err)
+		}
+	}
+}
+
+func TestBootstrapTokenDigestAcceptsOnlyObt2(t *testing.T) {
+	validBody := strings.Repeat("A", 43)
+	if _, ok := bootstrapTokenDigest("obt2_" + validBody); !ok {
+		t.Fatal("valid obt2_ token rejected")
+	}
+	for _, invalid := range []string{"obt1_" + validBody, validBody, "oit1_" + validBody, "obt2_short"} {
+		if _, ok := bootstrapTokenDigest(invalid); ok {
+			t.Fatalf("retired or malformed token %q accepted", invalid)
 		}
 	}
 }

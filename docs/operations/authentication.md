@@ -146,7 +146,7 @@ to expire before retrying.
 
 Use the `X-Request-ID` response header to look up the corresponding redacted
 `auth.result.reason_code` entry in
-[Authentication security logs](#authentication-security-logs-r6), and check
+[Authentication security logs](#authentication-security-logs), and check
 `auth.summary` counters as well in case sampling suppressed individual log
 lines. A bare HTTP status code cannot distinguish every failure cause, because
 public error responses intentionally omit whether an account exists. When

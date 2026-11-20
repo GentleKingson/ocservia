@@ -20,7 +20,14 @@ var endpointPrivateKeys sync.Map
 
 func createToken(t *testing.T, service *Service, workspaceID uuid.UUID, endpoint []byte) Token {
 	t.Helper()
-	token, err := service.CreateBootstrapToken(context.Background(), BootstrapTokenSpec{
+	if service.installation.Origin == "" {
+		testutil.NoError(t, service.ConfigureInstallation(InstallationTrust{
+			Origin:     "https://controller.example",
+			RelayURL:   "https://relay.example",
+			RelayToken: "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+		}))
+	}
+	token, err := service.CreateInstallationToken(context.Background(), BootstrapTokenSpec{
 		WorkspaceID:        workspaceID,
 		Environment:        "test",
 		ExpectedEndpointID: endpoint,
@@ -29,6 +36,11 @@ func createToken(t *testing.T, service *Service, workspaceID uuid.UUID, endpoint
 		RequestID:          uuid.Must(uuid.NewV7()).String(),
 	})
 	testutil.NoError(t, err)
+	child, ok := installationChild(token.Value, service.installation.Origin)
+	if !ok {
+		t.Fatalf("derive child enrollment token from %q", token.Value)
+	}
+	token.Value = child
 	return token
 }
 

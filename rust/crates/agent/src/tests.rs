@@ -960,13 +960,12 @@ fn startup_key_enrollment_and_token_requirements() {
     let tok_dir = TempDir::new("enrollment");
     let token = tok_dir.join("enrollment.token");
     let valid = "0".repeat(43);
-    std::fs::write(&token, format!("{valid}\n")).expect("write");
+    let valid_token = format!("obt2_{valid}");
+    std::fs::write(&token, format!("{valid_token}\r\n")).expect("write");
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("mode");
-    for v in [format!("obt2_{valid}"), valid.clone()] {
-        std::fs::write(&token, format!("{v}\r\n")).expect("write");
-        assert_eq!(read_enrollment_token(&token).expect("valid"), v);
-    }
+    assert_eq!(read_enrollment_token(&token).expect("valid"), valid_token);
     for bad in [
+        valid.clone(),
         format!("obt1_{valid}"),
         format!("oit1_{valid}"),
         format!("obt3_{valid}"),

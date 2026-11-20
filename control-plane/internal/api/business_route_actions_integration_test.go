@@ -155,16 +155,16 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 	})
 	t.Run("ordinary-methods-and-adjacent-actions", func(t *testing.T) {
 		before := counts(t)
-		for _, line := range strings.Split(routeBaseline, "\n") {
-			fields := strings.Split(line, "|")
-			_, path := baselineRoutePath(fields[0], fields[1])
+		for pattern, allowed := range openAPIExpectedRoutes(t) {
+			path := materializeOpenAPIPath(pattern)
+			allowHeader := strings.Join(allowed, ", ")
 			for _, method := range []string{"GET", "POST", "PUT", "HEAD", "OPTIONS", "BREW"} {
-				if slices.Contains(strings.Split(fields[2], ", "), method) {
+				if slices.Contains(allowed, method) {
 					continue
 				}
 				w := f.call(method, path, "{", uuid.NewString(), f.requester.cookie, func(r *http.Request) { r.Header.Set("Origin", "https://untrusted.example") })
 				assertBaselineProblem(t, w, path, 405, "method-not-allowed", "Method not allowed", "the requested method is not supported")
-				if w.Header().Get("Allow") != fields[2] || w.Header().Get("WWW-Authenticate") != "" {
+				if w.Header().Get("Allow") != allowHeader || w.Header().Get("WWW-Authenticate") != "" {
 					t.Fatalf("%s %s: method headers %v", method, path, w.Header())
 				}
 			}

@@ -20,7 +20,7 @@ import { mapValues } from "../runtime";
  */
 export interface NodeBootstrapTokenRequest {
   /**
-   * Return a root-only installation token and automatically provision the node. Omit expected_endpoint_id in this mode; the default uses manual endpoint-bound enrollment.
+   * Return a root-only oit1_ installation token and automatically provision the node. Legacy obt1_ tokens (installation=false) are retired and rejected.
    * @type {boolean}
    * @memberof NodeBootstrapTokenRequest
    */

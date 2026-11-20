@@ -619,17 +619,17 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 		payloadType = "service_reload"
 		envelope.Payload = &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}
 	case ConfigPlanPayload:
+		if p.CompleteCandidate == nil {
+			return nil, "", ErrInvalidRequest
+		}
 		payloadType = "config_plan"
-		envelope.Payload = &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{Candidate: p.Candidate, CandidateHash: p.CandidateHash, ExpectedRevision: p.PlanRevision}}
-		if p.CompleteCandidate != nil {
-			envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigPlan{CompleteConfigPlan: &agentv1.CompleteConfigPlan{Candidate: p.CompleteCandidate, CandidateHash: p.CandidateHash}}
-		}
+		envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigPlan{CompleteConfigPlan: &agentv1.CompleteConfigPlan{Candidate: p.CompleteCandidate, CandidateHash: p.CandidateHash}}
 	case ConfigApplyPayload:
-		payloadType = "config_apply"
-		envelope.Payload = &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{Candidate: p.Candidate, CandidateHash: p.CandidateHash, ExpectedCurrentHash: p.ExpectedCurrentHash, DesiredRevision: p.DesiredRevision}}
-		if p.CompleteCandidate != nil {
-			envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{Candidate: p.CompleteCandidate, CandidateHash: p.CandidateHash, ExpectedCurrentHash: p.ExpectedCurrentHash, MaterializedHash: p.MaterializedHash, DesiredRevision: p.DesiredRevision, PlanId: p.ApplyMetadata.PlanID[:], PlanExpiresAt: p.PlanExpiresAt}}
+		if p.CompleteCandidate == nil {
+			return nil, "", ErrInvalidRequest
 		}
+		payloadType = "config_apply"
+		envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{Candidate: p.CompleteCandidate, CandidateHash: p.CandidateHash, ExpectedCurrentHash: p.ExpectedCurrentHash, MaterializedHash: p.MaterializedHash, DesiredRevision: p.DesiredRevision, PlanId: p.ApplyMetadata.PlanID[:], PlanExpiresAt: p.PlanExpiresAt}}
 	case CertificateCSRPayload:
 		payloadType = "certificate_csr"
 		envelope.Payload = &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: p.CertificateID[:], CommonName: p.CommonName, DnsNames: p.DNSNames, KeyBits: p.KeyBits}}

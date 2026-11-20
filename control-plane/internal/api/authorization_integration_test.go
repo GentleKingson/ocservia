@@ -54,7 +54,9 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	})
 	signer, err := commandauth.NewRandomSigner()
 	testutil.NoError(t, err)
-	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enrollment.NewBackend(postgres.WrapPool(pool), "", "test", signer)}
+	enroll := enrollment.NewBackend(postgres.WrapPool(pool), "", "test", signer)
+	testutil.NoError(t, enroll.ConfigureInstallation(enrollment.InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}))
+	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enroll}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"bootstrap API test","expected_endpoint_id":"1111111111111111111111111111111111111111111111111111111111111111"}`, workspaceID.String())))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(context.WithValue(context.WithValue(request.Context(), requestIDKey{}, uuid.Must(uuid.NewV7()).String()), principalKey{}, auth.Principal{Subject: "developer", Issuer: "development", BreakGlass: true}))
@@ -67,14 +69,21 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 		Token string    `json:"token"`
 		ID    uuid.UUID `json:"id"`
 	}
-	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || !strings.HasPrefix(body.Token, enrollment.BootstrapTokenPrefix) {
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || !strings.HasPrefix(body.Token, enrollment.InstallTokenPrefix) {
 		t.Fatalf("bootstrap token response=%q err=%v", body.Token, err)
 	}
 	var endpoint string
 	if err := pool.QueryRow(ctx, `SELECT encode(expected_endpoint_id,'hex') FROM node_bootstrap_tokens WHERE id=$1`, body.ID).Scan(&endpoint); err != nil || endpoint != strings.Repeat("11", 32) {
 		t.Fatalf("endpoint restriction not persisted: %q %v", endpoint, err)
 	}
-
+	retiredReq := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"installation":false,"workspace_id":%q,"environment":"production","reason":"retired obt1 test"}`, workspaceID.String())))
+	retiredReq.Header.Set("Content-Type", "application/json")
+	retiredReq = retiredReq.WithContext(request.Context())
+	retiredResp := httptest.NewRecorder()
+	server.createNodeBootstrapToken(retiredResp, retiredReq)
+	if retiredResp.Code != http.StatusBadRequest {
+		t.Fatalf("installation=false status=%d body=%s, want 400", retiredResp.Code, retiredResp.Body.String())
+	}
 }
 
 func (f certificateArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1, *agentv1.FenceBindingV2) (io.ReadCloser, error) {

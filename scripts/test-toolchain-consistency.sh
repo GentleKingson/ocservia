@@ -28,10 +28,12 @@ expect_equal() {
 go_pin="$(pinned go)"
 rust_pin="$(pinned rust)"
 node_pin="$(pinned node)"
+npm_pin="$(pinned npm)"
 
 expect_equal Go "${go_pin}" "$(declared .tool-versions golang)" ".tool-versions"
 expect_equal Go "${go_pin}" "$(declared go.work go)" "go.work"
 expect_equal Go "${go_pin}" "$(declared control-plane/go.mod go)" "control-plane/go.mod"
+expect_equal Go "${go_pin}" "$(declared signer/go.mod go)" "signer/go.mod"
 
 expect_equal Rust "${rust_pin}" "$(declared .tool-versions rust)" ".tool-versions"
 expect_equal Rust "${rust_pin}" \
@@ -41,3 +43,5 @@ expect_equal Rust "${rust_pin}" \
 expect_equal Node "${node_pin}" "$(declared .tool-versions nodejs)" ".tool-versions"
 expect_equal Node "${node_pin}" "$(head -n 1 "${ROOT}/.nvmrc")" ".nvmrc"
 expect_equal Node "${node_pin}" "$(head -n 1 "${ROOT}/.node-version")" ".node-version"
+expect_equal Node "${node_pin}" "$(jq -r '.engines.node // empty' "${ROOT}/web/package.json")" "web/package.json"
+expect_equal npm "${npm_pin}" "$(jq -r '.engines.npm // empty' "${ROOT}/web/package.json")" "web/package.json"

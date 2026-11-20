@@ -75,7 +75,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - run: scripts/docs-check.sh
+      - run: |
+          scripts/docs-check.sh
+          scripts/check-public-repository.sh
 
   ci-tools:
     needs: ci-relevance
@@ -127,7 +129,9 @@ jobs:
           path: .cache/go-build
           key: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
           restore-keys: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
-      - run: scripts/go-check.sh standard
+      - run: |
+          scripts/go-check.sh standard
+          scripts/transport-boundary-check.sh --go-only
       - name: Save Go modules (main only)
         if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-mod-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -173,7 +177,10 @@ jobs:
           key: basic-iroh-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml', 'rust/vendor/iroh/**') }}
           restore-keys: |
             basic-iroh-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-
-      - run: scripts/rust-check.sh
+      - run: |
+          scripts/rust-check.sh
+          scripts/transport-boundary-check.sh --rust-only
+          scripts/agent-boundary-check.sh
       - name: Vendored iroh security regressions
         # Archive lock graph, not production evidence; see rust/vendor/iroh/OCSERVIA-PROVENANCE.md.
         run: |
@@ -240,9 +247,9 @@ jobs:
           bash scripts/test-controller-lifecycle.sh
           bash scripts/test-production-auth-config.sh
           python3 scripts/test-controller-gateway-headers.py
-          docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
+          docker run --rm -v "$PWD:/source:ro" node:24.18.1-bookworm \
             python3 /source/scripts/test-relay-launchers.py
-          docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
+          docker run --rm --network none -v "$PWD:/source:ro" node:24.18.1-bookworm \
             bash /source/scripts/test-agent-upgrade-retry.sh
 
   web:
@@ -402,6 +409,8 @@ jobs:
             basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
             basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
       - run: |
+          RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-postgres-bundled" \
+            bash scripts/postgres-backup-restore-smoke.sh
           RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-postgres" \
             ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-postgres" \
             bash scripts/external-postgres-backup-restore-smoke.sh
