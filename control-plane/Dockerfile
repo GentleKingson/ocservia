@@ -1,11 +1,11 @@
 FROM golang:1.26.10-bookworm@sha256:fe3da92a5cb2881e4aa75e625cb0b7c50571632fb4cf340cbe53e6ccdcffdd51 AS build
-ARG VERSION=dev
-ARG COMMIT=unknown
 WORKDIR /src
 COPY control-plane/go.mod control-plane/go.sum ./control-plane/
 WORKDIR /src/control-plane
 RUN go mod download
 COPY control-plane/ .
+ARG VERSION=dev
+ARG COMMIT=unknown
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/ocserv-control ./cmd/ocserv-control
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ocserv-sealing-export ./cmd/ocserv-sealing-export
 
