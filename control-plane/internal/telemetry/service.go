@@ -79,6 +79,7 @@ type Session struct {
 	ID          string    `json:"id"`
 	Username    string    `json:"username"`
 	ClientIP    string    `json:"client_ip"`
+	VPNIP       string    `json:"vpn_ip,omitempty"`
 	ConnectedAt time.Time `json:"connected_at"`
 	BytesIn     int64     `json:"bytes_in"`
 	BytesOut    int64     `json:"bytes_out"`

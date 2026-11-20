@@ -2,11 +2,11 @@
 -- ocservia:format=1
 -- ocservia:engine=postgresql
 -- ocservia:epoch=2
--- ocservia:revision=4
--- ocservia:history-sha256=07312c4848d34a44976eec140c47c84010f1ec1c88c0178df8fe664b971df830
+-- ocservia:revision=5
+-- ocservia:history-sha256=0eda454c3f6703a02f08161d06f442334eba8e730940a5b4448bcdecadcc1162
 
 -- ocservia:step=001:baseline
--- ocservia:metadata={"catalog_sha256":"892cda01819ab42b44f5bcbfa5fe0e9fc7f5e644cc658d9f8b214d419d67001a"}
+-- ocservia:metadata={"catalog_sha256":"02236adc015c56f8c8cd7e79d687565ea941736cce80e33e21d3f3ee25ca6614"}
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
 SET LOCAL idle_in_transaction_session_timeout = 0;
@@ -53,6 +53,23 @@ BEGIN
  END IF;
  RAISE EXCEPTION 'audit_events permit only authenticated aged detail compaction';
 END;
+$$;
+
+CREATE FUNCTION public.prune_vpn_history() RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+ DELETE FROM public.vpn_session_history WHERE (node_id,session_id,connected_at) IN (
+   SELECT node_id,session_id,connected_at FROM public.vpn_session_history
+   WHERE absent_at < statement_timestamp() - interval '90 days'
+   ORDER BY absent_at LIMIT 1024 FOR UPDATE SKIP LOCKED
+ );
+ DELETE FROM public.vpn_network_history WHERE (node_id,event_id) IN (
+   SELECT node_id,event_id FROM public.vpn_network_history WHERE observed_at < statement_timestamp()-interval '30 days'
+   ORDER BY observed_at LIMIT 4096 FOR UPDATE SKIP LOCKED);
+ DELETE FROM public.vpn_session_events WHERE (node_id,event_id) IN (
+   SELECT node_id,event_id FROM public.vpn_session_events WHERE observed_at < statement_timestamp()-interval '90 days'
+   ORDER BY observed_at LIMIT 1024 FOR UPDATE SKIP LOCKED);
 $$;
 
 CREATE FUNCTION public.reject_audit_checkpoint_mutation() RETURNS trigger
@@ -875,6 +892,7 @@ CREATE TABLE public.node_sessions (
     bytes_in bigint CONSTRAINT "node_sessions_bytes_in_not_null" NOT NULL,
     bytes_out bigint CONSTRAINT "node_sessions_bytes_out_not_null" NOT NULL,
     observed_at timestamp with time zone CONSTRAINT "node_sessions_observed_at_not_null" NOT NULL,
+    vpn_ip inet,
     CONSTRAINT node_sessions_bytes_in_check CHECK ((bytes_in >= 0)),
     CONSTRAINT node_sessions_bytes_out_check CHECK ((bytes_out >= 0)),
     CONSTRAINT node_sessions_session_id_check CHECK (((length(session_id) >= 1) AND (length(session_id) <= 256))),
@@ -1261,6 +1279,58 @@ CREATE TABLE public.user_usage_cursors (
     CONSTRAINT user_usage_cursors_username_check CHECK ((username ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'::text))
 );
 
+CREATE TABLE public.vpn_network_history (
+    node_id uuid CONSTRAINT "vpn_network_history_node_id_not_null" NOT NULL,
+    event_id uuid CONSTRAINT "vpn_network_history_event_id_not_null" NOT NULL,
+    session_id text CONSTRAINT "vpn_network_history_session_id_not_null" NOT NULL,
+    username text CONSTRAINT "vpn_network_history_username_not_null" NOT NULL,
+    client_ip inet CONSTRAINT "vpn_network_history_client_ip_not_null" NOT NULL,
+    vpn_ip inet CONSTRAINT "vpn_network_history_vpn_ip_not_null" NOT NULL,
+    connected_at timestamp with time zone,
+    observed_at timestamp with time zone CONSTRAINT "vpn_network_history_observed_at_not_null" NOT NULL,
+    bytes_in bigint,
+    bytes_out bigint,
+    destination_ip inet CONSTRAINT "vpn_network_history_destination_ip_not_null" NOT NULL,
+    destination_port integer,
+    protocol text CONSTRAINT "vpn_network_history_protocol_not_null" NOT NULL,
+    flow_started_at timestamp with time zone CONSTRAINT "vpn_network_history_flow_started_at_not_null" NOT NULL,
+    CONSTRAINT vpn_network_history_bytes_in_check CHECK ((bytes_in >= 0)),
+    CONSTRAINT vpn_network_history_bytes_out_check CHECK ((bytes_out >= 0)),
+    CONSTRAINT vpn_network_history_destination_port_check CHECK (((destination_port >= 0) AND (destination_port <= 65535)))
+);
+
+CREATE TABLE public.vpn_session_events (
+    node_id uuid CONSTRAINT "vpn_session_events_node_id_not_null" NOT NULL,
+    event_id uuid CONSTRAINT "vpn_session_events_event_id_not_null" NOT NULL,
+    session_id text CONSTRAINT "vpn_session_events_session_id_not_null" NOT NULL,
+    username text CONSTRAINT "vpn_session_events_username_not_null" NOT NULL,
+    client_ip inet CONSTRAINT "vpn_session_events_client_ip_not_null" NOT NULL,
+    vpn_ip inet CONSTRAINT "vpn_session_events_vpn_ip_not_null" NOT NULL,
+    connected_at timestamp with time zone,
+    observed_at timestamp with time zone CONSTRAINT "vpn_session_events_observed_at_not_null" NOT NULL,
+    bytes_in bigint,
+    bytes_out bigint,
+    event_type text CONSTRAINT "vpn_session_events_event_type_not_null" NOT NULL,
+    CONSTRAINT vpn_session_events_bytes_in_check CHECK ((bytes_in >= 0)),
+    CONSTRAINT vpn_session_events_bytes_out_check CHECK ((bytes_out >= 0)),
+    CONSTRAINT vpn_session_events_event_type_check CHECK ((event_type = ANY (ARRAY['connect'::text, 'disconnect'::text])))
+);
+
+CREATE TABLE public.vpn_session_history (
+    node_id uuid CONSTRAINT "vpn_session_history_node_id_not_null" NOT NULL,
+    session_id text CONSTRAINT "vpn_session_history_session_id_not_null" NOT NULL,
+    connected_at timestamp with time zone CONSTRAINT "vpn_session_history_connected_at_not_null" NOT NULL,
+    username text CONSTRAINT "vpn_session_history_username_not_null" NOT NULL,
+    client_ip inet CONSTRAINT "vpn_session_history_client_ip_not_null" NOT NULL,
+    vpn_ip inet,
+    last_seen_at timestamp with time zone CONSTRAINT "vpn_session_history_last_seen_at_not_null" NOT NULL,
+    absent_at timestamp with time zone,
+    bytes_in bigint CONSTRAINT "vpn_session_history_bytes_in_not_null" NOT NULL,
+    bytes_out bigint CONSTRAINT "vpn_session_history_bytes_out_not_null" NOT NULL,
+    CONSTRAINT vpn_session_history_bytes_in_check CHECK ((bytes_in >= 0)),
+    CONSTRAINT vpn_session_history_bytes_out_check CHECK ((bytes_out >= 0))
+);
+
 CREATE TABLE public.workspace_admins (
     workspace_id uuid CONSTRAINT "workspace_admins_workspace_id_not_null" NOT NULL,
     identity_id uuid CONSTRAINT "workspace_admins_identity_id_not_null" NOT NULL,
@@ -1538,6 +1608,15 @@ ALTER TABLE ONLY public.user_policy_mutations
 ALTER TABLE ONLY public.user_usage_cursors
     ADD CONSTRAINT user_usage_cursors_pkey PRIMARY KEY (node_id, session_id, connected_at);
 
+ALTER TABLE ONLY public.vpn_network_history
+    ADD CONSTRAINT vpn_network_history_pkey PRIMARY KEY (node_id, event_id);
+
+ALTER TABLE ONLY public.vpn_session_events
+    ADD CONSTRAINT vpn_session_events_pkey PRIMARY KEY (node_id, event_id);
+
+ALTER TABLE ONLY public.vpn_session_history
+    ADD CONSTRAINT vpn_session_history_pkey PRIMARY KEY (node_id, session_id, connected_at);
+
 ALTER TABLE ONLY public.workspace_admins
     ADD CONSTRAINT workspace_admins_pkey PRIMARY KEY (workspace_id, identity_id);
 
@@ -1638,6 +1717,28 @@ CREATE INDEX telemetry_samples_default_query_idx ON public.telemetry_samples_def
 CREATE INDEX telemetry_security_node_time_idx ON public.telemetry_security_events USING btree (node_id, observed_at DESC);
 
 CREATE INDEX transport_event_quarantine_node_time_idx ON public.transport_event_quarantine USING btree (node_id, observed_at DESC);
+
+CREATE INDEX vpn_network_destination_time_idx ON public.vpn_network_history USING btree (destination_ip, observed_at DESC);
+
+CREATE INDEX vpn_network_node_time_idx ON public.vpn_network_history USING btree (node_id, observed_at DESC, event_id DESC);
+
+CREATE INDEX vpn_network_time_idx ON public.vpn_network_history USING btree (observed_at DESC);
+
+CREATE INDEX vpn_network_user_time_idx ON public.vpn_network_history USING btree (username, observed_at DESC);
+
+CREATE INDEX vpn_session_events_node_time_idx ON public.vpn_session_events USING btree (node_id, observed_at DESC, event_id DESC);
+
+CREATE INDEX vpn_session_events_time_idx ON public.vpn_session_events USING btree (observed_at DESC);
+
+CREATE INDEX vpn_session_events_user_time_idx ON public.vpn_session_events USING btree (username, observed_at DESC);
+
+CREATE INDEX vpn_session_history_closed_idx ON public.vpn_session_history USING btree (absent_at) WHERE (absent_at IS NOT NULL);
+
+CREATE INDEX vpn_session_history_node_time_idx ON public.vpn_session_history USING btree (node_id, connected_at DESC, session_id DESC);
+
+CREATE INDEX vpn_session_history_open_idx ON public.vpn_session_history USING btree (node_id) WHERE (absent_at IS NULL);
+
+CREATE INDEX vpn_session_history_user_time_idx ON public.vpn_session_history USING btree (username, connected_at DESC);
 
 ALTER INDEX public.telemetry_samples_pkey ATTACH PARTITION public.telemetry_samples_default_pkey;
 
@@ -1898,6 +1999,15 @@ ALTER TABLE ONLY public.user_policy_mutations
 ALTER TABLE ONLY public.user_usage_cursors
     ADD CONSTRAINT user_usage_cursors_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.vpn_network_history
+    ADD CONSTRAINT vpn_network_history_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.vpn_session_events
+    ADD CONSTRAINT vpn_session_events_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.vpn_session_history
+    ADD CONSTRAINT vpn_session_history_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY public.workspace_admins
     ADD CONSTRAINT workspace_admins_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(id) ON DELETE RESTRICT;
 
@@ -1907,6 +2017,8 @@ ALTER TABLE ONLY public.workspace_admins
 REVOKE ALL ON FUNCTION public.audit_compact_detail(p_id uuid, p_hash bytea, p_key text, p_mac bytea, p_at timestamp with time zone) FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION public.check_audit_compaction() FROM PUBLIC;
+
+REVOKE ALL ON FUNCTION public.prune_vpn_history() FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION public.reject_audit_checkpoint_mutation() FROM PUBLIC;
 

@@ -263,6 +263,34 @@ and verifies readiness with the Controller. Missing or substituted enrolled
 material fails closed. After an upgrade or rollback, do not run an older
 release installer; a package-version mismatch stops before enrollment.
 
+### VPN audit collection
+
+The Agent reports occtl session observations on its normal heartbeat. For login and logout events, the managed complete configuration sets the two ocserv hooks when applied with the packaged wrapper installed. A package upgrade alone leaves an existing ocserv configuration in place. For an externally maintained configuration, add these directives or call the wrapper from your existing scripts, preserving their admission logic. Apply the change through your usual ocserv configuration procedure.
+
+```ini
+connect-script = /usr/libexec/ocservia/vpn-session-hook
+disconnect-script = /usr/libexec/ocservia/vpn-session-hook
+```
+
+The wrapper bounds the collector's execution time and returns success to ocserv if accounting fails. The Python 3 collector drops root privileges before writing to SQLite. To verify collection, connect and disconnect a test VPN user, then search **Audit → VPN audit history → Session events** by username and node ID. Check the source IP, assigned VPN IP and logout counters. **Session snapshots** shows occtl observations. The first snapshot that reports a session absent gives an upper bound on when it ended.
+
+Network collection is disabled by default. Install the distribution package providing `/usr/sbin/conntrack` (`conntrack` on Debian or Ubuntu). To collect byte counts, enable the kernel's `net.netfilter.nf_conntrack_acct` setting before test connections open. Check the setting and start the optional service on the VPN node:
+
+```bash
+sysctl net.netfilter.nf_conntrack_acct
+sudo systemctl enable --now ocservia-network-audit.service
+systemctl status ocservia-network-audit.service
+```
+
+From a connected VPN client, open and close a connection to a known destination routed through the tunnel. Search **Network connections** for the destination IP after conntrack emits its destroy event. Kernel flow expiry can follow application closure. Byte counts cover the original and reply directions and can be unavailable. Flows already open when the collector starts, flows missing a lifecycle event, ambiguous VPN address mappings and flows beyond the 65,536-entry tracking limit can leave gaps. To turn off network collection, run `sudo systemctl disable --now ocservia-network-audit.service`.
+
+Systemd creates the private directory `/var/lib/ocservia-vpn-audit` when either service starts. The collector initializes `events.sqlite` there. During a Controller outage, the Agent retains pending events for retry. A full 64 MiB queue or a failed hook can leave gaps while VPN service continues. For missing events, check free space on that filesystem and inspect the node logs:
+
+```bash
+sudo journalctl -u ocservia-agent.service -u ocservia-network-audit.service --since "30 minutes ago"
+sudo journalctl --grep='VPN audit collection failed' --since "30 minutes ago"
+```
+
 ## Revoke a node
 
 An authorized Admin revokes a node directly, including a pending node:
@@ -343,7 +371,7 @@ sudo rpm -Uvh "$RELEASE_DIR/$AGENT_PACKAGE"
 
 Before changing backups, binaries, systemd units, or services, `upgrade-agent.sh` runs a strict preflight against the existing trust configuration. It verifies that `agent.env` contains a single absolute `CONTROLLER_COMMAND_VERIFICATION_KEY_FILE` and that the referenced Ed25519 public key satisfies the combined Agent and privd requirements for file type, ownership, mode, link count, symlinks, size, and directory ancestry. The shared key must be independently provisioned as `root:ocserv-agent` mode `0440` or `0640` beneath root-controlled ancestry; an Agent-owned legacy key is rejected and never promoted into a root trust anchor. The preflight also requires two distinct enrolled sealing key IDs and public-key fingerprints, derives each fingerprint from its root-owned private key, and rejects missing, reused, mismatched, symlinked, or unsafe key files. A legacy two-line `agent.env` or an invalid key therefore halts the upgrade with provisioning instructions before installing an Agent that would fail to restart. These checks enforce current trust requirements regardless of the source software version.
 
-Once the preflight passes, the script saves one matched snapshot under the root-only `/var/lib/ocservia-upgrade/upgrade-backup` hierarchy covering the previous Agent and privd binaries, both base systemd units, the production relay drop-in and launcher, the durable upgrader binary and unit, and the verifier. Keeping this directory outside privd's systemd-managed `StateDirectory` prevents service startup from rewriting rollback evidence ownership. A root-owned manifest binds the exact 9 snapshot digests, and rollback rejects unsafe ancestry, symlinks, hard links, ownership, modes, or file replacement. Optional files carry explicit `.previous` or `.absent` records that tell rollback whether to restore or remove the installed file. Upgrading to a different package overwrites the previous snapshot, leaving only the most recent pre-upgrade state available for restoration. Reinstalling an identical verified package keeps the existing snapshot intact and restarts the running services.
+Once the preflight passes, the script saves one matched snapshot under the root-only `/var/lib/ocservia-upgrade/upgrade-backup` hierarchy covering the previous Agent and privd binaries, both base systemd units, the production relay drop-in and launcher, the durable upgrader binary and unit, the verifier, the VPN session wrapper, the audit collector and the network audit unit. Keeping this directory outside privd's systemd-managed `StateDirectory` prevents service startup from rewriting rollback evidence ownership. A root-owned manifest binds the 12 snapshot digests, and rollback rejects unsafe ancestry, symlinks, hard links, ownership, modes, or file replacement. Optional files carry explicit `.previous` or `.absent` records that tell rollback whether to restore or remove the installed file. Upgrading to a different package overwrites the previous snapshot, leaving only the most recent pre-upgrade state available for restoration. Reinstalling an identical verified package keeps the existing snapshot intact and restarts the running services.
 
 Before modifying package-owned files, the upgrade script persists the complete snapshot, atomically publishes the verified standalone rollback driver, and records the verified target digest in `/var/lib/ocservia-upgrade/installing-package`. If an upgrade is interrupted, a subsequent direct or native-package retry refuses to overwrite the existing snapshot; run the verified rollback first to restore the host, then retry the package operation. A matching completed retry clears a stale `installing-package` record only after verifying the installation commit, every package-owned file, and the rollback snapshot, while rollback clears the record only after all restores and removals are synced across filesystems. Neither path alters Controller binding authority or reverses database migrations.
 
@@ -366,7 +394,7 @@ Before you begin:
 - Place the node in a controlled recovery window.
 - Confirm that the root-only upgrade snapshot at `/var/lib/ocservia-upgrade/upgrade-backup` is present and unmodified.
 - Reconcile any Controller operation affected by the outage. Running rollback stops the Agent, `privd`, and active upgrader units, and marks every non-terminal (`accepted` or `running`) local upgrade operation `rolled_back` so it cannot be re-applied afterwards.
-- Ensure the snapshot is complete with all 9 recorded entries (`ocservia-agent.previous`, `ocservia-privd.previous`, `ocservia-agent.service.previous`, `ocservia-privd.service.previous`, plus `.previous`/`.absent` entries for `ocservia-agent-relays.conf`, `ocservia-agent-relays`, `ocservia-upgrader`, `ocservia-upgrader@.service`, and `ocservia-agent-verify`). A mutating rollback refuses incomplete snapshots before stopping services, because missing records do not prove that the prior files were absent on disk. Recovering from an incomplete snapshot requires either a complete trusted matched snapshot or an independently reviewed manual restoration of the missing artifacts; no force or skip flag is provided.
+- Check the manifest format. Current snapshots contain 12 entries. Four are required (Agent and privd binaries and base units). Eight record prior presence or absence for the Relay drop-in and launcher, upgrader binary and unit, verifier, `vpn-session-hook`, `vpn-audit.py` and `ocservia-network-audit.service`. The current driver also accepts complete legacy 9-entry snapshots for restoration. Legacy 8-entry snapshots support verification only.
 - To validate the snapshot before changing anything on disk, run `sudo /usr/libexec/ocservia/ocservia-agent-rollback --verify-only`.
 
 To roll back the complete matched snapshot, run:
@@ -375,7 +403,7 @@ To roll back the complete matched snapshot, run:
 sudo /usr/libexec/ocservia/ocservia-agent-rollback
 ```
 
-The rollback command validates the complete snapshot and target destinations before stopping services. It restores binaries and units together (including the production relay drop-in and launcher state), reloads systemd, and starts privd before the Agent unconditionally, even if those services were stopped before rollback began. The command clears any pending `installing-package` record. The standalone rollback driver itself remains on disk so it can finish executing and re-read the snapshot if invoked again. Restoring binaries without their matching units is unsupported because the CLI and local wire contract can change together; never restore one binary on its own.
+The rollback command validates the complete snapshot and target destinations before stopping services. It restores binaries and units together (including the production relay drop-in and launcher state), reloads systemd, and starts privd before the Agent unconditionally, even if those services were stopped before rollback began. When a current snapshot records that the network collector unit was absent, rollback disables and removes it. If the session wrapper was absent, rollback installs a success-only executable at its path so a running ocserv can still invoke its configured hook. The local audit queue survives rollback. The command clears any pending `installing-package` record. The standalone rollback driver itself remains on disk so it can finish executing and re-read the snapshot if invoked again. Restoring binaries without their matching units is unsupported because the CLI and local wire contract can change together; never restore one binary on its own.
 
 The verifier and rollback script do not infer a software version from a missing Relay launcher or reject a snapshot on that basis alone. Any launcher referenced by a service unit must still exist on disk, and all snapshot integrity, trust, and configuration checks continue to apply. Operator configuration, node identity, and persistent state are preserved without silent conversion or reset. Removing the version check does not guarantee that the restored binary will work with the current configuration or on-disk data, and older scripts already installed on the host keep their original behavior.
 
@@ -437,9 +465,9 @@ Rollout state persists across Controller restarts and console sessions. Viewing,
 
 ## Remove a node package
 
-Package removal (`dpkg -r`, `rpm -e`) runs the verified `uninstall-agent.sh`, which disables and stops the Agent and privd units and removes the binaries and units (including the production Relay launcher) while preserving identity, state, and configuration. The Controller then shows the node offline. Neither `dpkg --purge` nor the package manager triggers the state purge; only `uninstall-agent.sh --purge-state` does so.
+Package removal (`dpkg -r`, `rpm -e`) runs the verified `uninstall-agent.sh`, which disables and stops the Agent, privd and optional network collector units. It removes the collector, units and production Relay launcher. The session wrapper stays in place for ocserv configurations that reference it. Identity, configuration and the pending audit queue survive ordinary removal. The Controller then shows the node offline. Neither `dpkg --purge` nor the package manager triggers the state purge; only `uninstall-agent.sh --purge-state` does so.
 
-Passing `--purge-state` is irreversible and should only be done after revoking the node identity on the Controller (see [Revoke a node](#revoke-a-node)) and archiving required audit material. It deletes the Agent and privd state directories, `/var/lib/ocservia-upgrade` (including the rollback snapshot, preventing any subsequent rollback), and `/etc/ocservia-agent` (`agent.env`, keys, and relay token), and then removes the `ocserv-agent` user and group. Purging local state does not update the Controller, so revoke the node record there separately.
+Passing `--purge-state` is irreversible and should only be done after revoking the node identity on the Controller (see [Revoke a node](#revoke-a-node)) and archiving required audit material. It deletes the Agent and privd state directories, the VPN audit spool (including events awaiting upload), `/var/lib/ocservia-upgrade` (including the rollback snapshot, preventing any subsequent rollback), and `/etc/ocservia-agent` (`agent.env`, keys, and relay token), and then removes the `ocserv-agent` user and group. Purging local state does not update the Controller, so revoke the node record there separately.
 
 ## Diagnostics
 

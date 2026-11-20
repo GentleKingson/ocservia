@@ -102,6 +102,7 @@ func (s *Server) registerCertificateRoutes(routes *methodRegistrar, compat *http
 }
 
 func (s *Server) registerAuthorizationRoutes(routes *methodRegistrar) {
+	routes.HandleFunc("GET /api/v1/audit/vpn", s.requireOperationAuth(s.listVpnAuditRecords))
 	routes.HandleFunc("GET /api/v1/audit/events", s.requireOperationAuth(s.listAuditEvents))
 	routes.HandleFunc("POST /api/v1/audit:verify", s.requireOperationAuth(s.verifyAudit))
 	routes.HandleFunc("GET /api/v1/workspaces", s.requireOperationAuth(s.listWorkspaces))

@@ -1489,6 +1489,26 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/WorkspacePage" } } }
         "401": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
+  /audit/vpn:
+    get:
+      operationId: listVpnAuditRecords
+      summary: Query workspace VPN lifecycle events, reconciled snapshots or network flows
+      tags: [events]
+      parameters:
+        - { $ref: "#/components/parameters/WorkspaceId" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { in: query, name: cursor, schema: { type: string, maxLength: 2048 } }
+        - { in: query, name: kind, schema: { type: string, enum: [sessions, observations, network], default: sessions } }
+        - { in: query, name: destination_ip, schema: { type: string } }
+        - { in: query, name: username, schema: { type: string, maxLength: 128 } }
+        - { in: query, name: node_id, schema: { type: string, format: uuid } }
+        - { in: query, name: since, schema: { type: string, format: date-time } }
+        - { in: query, name: until, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: Matching audit records, newest first, with a cursor for the next page.
+          content: { application/json: { schema: { $ref: "#/components/schemas/VpnAuditPage" } } }
+        default: { $ref: "#/components/responses/Problem" }
   /audit/events:
     get:
       operationId: listAuditEvents
@@ -2756,6 +2776,32 @@ components:
         error_type: { type: [string, "null"] }
         previous_event_hash: { type: string }
         event_hash: { type: string }
+    VpnAuditPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/VpnAuditRecord" } }
+        next_cursor: { type: string }
+    VpnAuditRecord:
+      type: object
+      required: [node_id, session_id, username, client_ip, last_seen_at, event_type]
+      properties:
+        event_type: { type: string }
+        event_id: { type: string, format: uuid }
+        destination_ip: { type: string }
+        destination_port: { type: integer }
+        protocol: { type: string }
+        flow_started_at: { type: string, format: date-time }
+        node_id: { type: string, format: uuid }
+        session_id: { type: string }
+        username: { type: string }
+        client_ip: { type: string }
+        vpn_ip: { type: string }
+        connected_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        absent_at: { type: string, format: date-time }
+        bytes_in: { type: string, pattern: "^[0-9]+$" }
+        bytes_out: { type: string, pattern: "^[0-9]+$" }
     AuditEventPage:
       type: object
       additionalProperties: false

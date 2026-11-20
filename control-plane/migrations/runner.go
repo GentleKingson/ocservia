@@ -127,8 +127,9 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		"GRANT SELECT, INSERT ON transport_event_quarantine TO " + identifier,
 		"GRANT USAGE ON SEQUENCE transport_events_ingest_sequence_seq TO " + identifier,
 		"GRANT USAGE ON SEQUENCE operation_events_sequence_seq TO " + identifier,
+		"GRANT SELECT, INSERT ON vpn_session_events, vpn_network_history TO " + identifier,
 		"GRANT SELECT, INSERT ON telemetry_ingest_batches TO " + identifier,
-		"GRANT SELECT, INSERT, UPDATE ON node_observed_snapshots, node_sessions TO " + identifier,
+		"GRANT SELECT, INSERT, UPDATE ON node_observed_snapshots, node_sessions, vpn_session_history TO " + identifier,
 		"GRANT DELETE ON node_sessions TO " + identifier,
 		"GRANT SELECT, INSERT, DELETE ON node_ip_bans TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON desired_users, desired_groups TO " + identifier,
@@ -153,6 +154,7 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		// A column write privilege permits locking reads; the trigger still rejects runtime writes.
 		"GRANT UPDATE(event_hash) ON audit_events TO " + identifier,
 		"GRANT EXECUTE ON FUNCTION audit_compact_detail(uuid,bytea,text,bytea,timestamptz) TO " + identifier,
+		"GRANT EXECUTE ON FUNCTION prune_vpn_history() TO " + identifier,
 		"GRANT EXECUTE ON FUNCTION security_compact_details(timestamptz) TO " + identifier,
 	}
 	for _, statement := range statements {

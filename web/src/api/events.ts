@@ -4,6 +4,7 @@ import {
   AuditVerificationFromJSON,
   type AuditVerification,
   type AuditEventPage,
+  type ListVpnAuditRecordsRequest,
   type PlatformEventPage,
 } from "@ocservia/api-client";
 import { configuration, devAuthToken, requestInit } from "./transport";
@@ -90,4 +91,11 @@ export async function verifyAuditChain(
     throw new Error("Invalid audit verification response");
   }
   return value as AuditVerification;
+}
+
+export function listVpnAuditRecords(
+  query: ListVpnAuditRecordsRequest,
+  signal: AbortSignal,
+) {
+  return events.listVpnAuditRecords(query, requestInit(signal));
 }

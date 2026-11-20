@@ -5,6 +5,7 @@ mod startup;
 mod telemetry;
 #[cfg(test)]
 mod tests;
+mod vpn_audit;
 use crate::session::{SessionContext, agent_endpoint_factory, supervise_controller_sessions};
 use crate::startup::{
     invalid, load_controller_command_keys, load_relay_tls_roots, parse_args,
@@ -86,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         endpoint_id: identity.endpoint_id(),
         privd: &privd,
         command_executor: &mut command_executor,
+        session_cache: telemetry::SessionCache::default(),
         boot_id: &boot_id,
         os_release: &os_release,
         agent_instance_id,

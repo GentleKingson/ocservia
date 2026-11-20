@@ -2953,6 +2953,7 @@ type SessionObservation struct {
 	ConnectedAt   *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=connected_at,json=connectedAt,proto3" json:"connected_at,omitempty"`
 	BytesIn       uint64                 `protobuf:"varint,5,opt,name=bytes_in,json=bytesIn,proto3" json:"bytes_in,omitempty"`
 	BytesOut      uint64                 `protobuf:"varint,6,opt,name=bytes_out,json=bytesOut,proto3" json:"bytes_out,omitempty"`
+	VpnIp         string                 `protobuf:"bytes,7,opt,name=vpn_ip,json=vpnIp,proto3" json:"vpn_ip,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3027,6 +3028,13 @@ func (x *SessionObservation) GetBytesOut() uint64 {
 		return x.BytesOut
 	}
 	return 0
+}
+
+func (x *SessionObservation) GetVpnIp() string {
+	if x != nil {
+		return x.VpnIp
+	}
+	return ""
 }
 
 type IpBanObservation struct {
@@ -6604,6 +6612,243 @@ func (x *SimulationProbe) GetDisconnectAfter() bool {
 	return false
 }
 
+// One immutable node-local event. Times are Unix milliseconds.
+type VpnAuditRecord struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	EventId         string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	EventType       string                 `protobuf:"bytes,2,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	SessionId       string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Username        string                 `protobuf:"bytes,4,opt,name=username,proto3" json:"username,omitempty"`
+	ClientIp        string                 `protobuf:"bytes,5,opt,name=client_ip,json=clientIp,proto3" json:"client_ip,omitempty"`
+	VpnIp           string                 `protobuf:"bytes,6,opt,name=vpn_ip,json=vpnIp,proto3" json:"vpn_ip,omitempty"`
+	ConnectedMs     int64                  `protobuf:"varint,7,opt,name=connected_ms,json=connectedMs,proto3" json:"connected_ms,omitempty"`
+	ObservedMs      int64                  `protobuf:"varint,8,opt,name=observed_ms,json=observedMs,proto3" json:"observed_ms,omitempty"`
+	BytesIn         *uint64                `protobuf:"varint,9,opt,name=bytes_in,json=bytesIn,proto3,oneof" json:"bytes_in,omitempty"`
+	BytesOut        *uint64                `protobuf:"varint,10,opt,name=bytes_out,json=bytesOut,proto3,oneof" json:"bytes_out,omitempty"`
+	DestinationIp   string                 `protobuf:"bytes,11,opt,name=destination_ip,json=destinationIp,proto3" json:"destination_ip,omitempty"`
+	DestinationPort *uint32                `protobuf:"varint,12,opt,name=destination_port,json=destinationPort,proto3,oneof" json:"destination_port,omitempty"`
+	Protocol        string                 `protobuf:"bytes,13,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	FlowStartedMs   int64                  `protobuf:"varint,14,opt,name=flow_started_ms,json=flowStartedMs,proto3" json:"flow_started_ms,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *VpnAuditRecord) Reset() {
+	*x = VpnAuditRecord{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[63]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VpnAuditRecord) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VpnAuditRecord) ProtoMessage() {}
+
+func (x *VpnAuditRecord) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[63]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VpnAuditRecord.ProtoReflect.Descriptor instead.
+func (*VpnAuditRecord) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{63}
+}
+
+func (x *VpnAuditRecord) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *VpnAuditRecord) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *VpnAuditRecord) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *VpnAuditRecord) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *VpnAuditRecord) GetClientIp() string {
+	if x != nil {
+		return x.ClientIp
+	}
+	return ""
+}
+
+func (x *VpnAuditRecord) GetVpnIp() string {
+	if x != nil {
+		return x.VpnIp
+	}
+	return ""
+}
+
+func (x *VpnAuditRecord) GetConnectedMs() int64 {
+	if x != nil {
+		return x.ConnectedMs
+	}
+	return 0
+}
+
+func (x *VpnAuditRecord) GetObservedMs() int64 {
+	if x != nil {
+		return x.ObservedMs
+	}
+	return 0
+}
+
+func (x *VpnAuditRecord) GetBytesIn() uint64 {
+	if x != nil && x.BytesIn != nil {
+		return *x.BytesIn
+	}
+	return 0
+}
+
+func (x *VpnAuditRecord) GetBytesOut() uint64 {
+	if x != nil && x.BytesOut != nil {
+		return *x.BytesOut
+	}
+	return 0
+}
+
+func (x *VpnAuditRecord) GetDestinationIp() string {
+	if x != nil {
+		return x.DestinationIp
+	}
+	return ""
+}
+
+func (x *VpnAuditRecord) GetDestinationPort() uint32 {
+	if x != nil && x.DestinationPort != nil {
+		return *x.DestinationPort
+	}
+	return 0
+}
+
+func (x *VpnAuditRecord) GetProtocol() string {
+	if x != nil {
+		return x.Protocol
+	}
+	return ""
+}
+
+func (x *VpnAuditRecord) GetFlowStartedMs() int64 {
+	if x != nil {
+		return x.FlowStartedMs
+	}
+	return 0
+}
+
+type VpnAuditBatch struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Records       []*VpnAuditRecord      `protobuf:"bytes,1,rep,name=records,proto3" json:"records,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VpnAuditBatch) Reset() {
+	*x = VpnAuditBatch{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[64]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VpnAuditBatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VpnAuditBatch) ProtoMessage() {}
+
+func (x *VpnAuditBatch) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[64]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VpnAuditBatch.ProtoReflect.Descriptor instead.
+func (*VpnAuditBatch) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{64}
+}
+
+func (x *VpnAuditBatch) GetRecords() []*VpnAuditRecord {
+	if x != nil {
+		return x.Records
+	}
+	return nil
+}
+
+type VpnAuditReceipt struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventIds      []string               `protobuf:"bytes,1,rep,name=event_ids,json=eventIds,proto3" json:"event_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VpnAuditReceipt) Reset() {
+	*x = VpnAuditReceipt{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[65]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VpnAuditReceipt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VpnAuditReceipt) ProtoMessage() {}
+
+func (x *VpnAuditReceipt) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[65]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VpnAuditReceipt.ProtoReflect.Descriptor instead.
+func (*VpnAuditReceipt) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{65}
+}
+
+func (x *VpnAuditReceipt) GetEventIds() []string {
+	if x != nil {
+		return x.EventIds
+	}
+	return nil
+}
+
 var File_ocserv_platform_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
@@ -6825,7 +7070,7 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\adropped\x18\n" +
 	" \x01(\v2/.ocserv.platform.agent.v1.TelemetryDropCountersR\adropped\x12[\n" +
 	"\x0fupgrade_results\x18\v \x03(\v22.ocserv.platform.agent.v1.AgentUpgradeResultReportR\x0eupgradeResults\x12\"\n" +
-	"\farchitecture\x18\f \x01(\tR\farchitecture\"\xe3\x01\n" +
+	"\farchitecture\x18\f \x01(\tR\farchitecture\"\xfa\x01\n" +
 	"\x12SessionObservation\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1a\n" +
@@ -6833,7 +7078,8 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\tclient_ip\x18\x03 \x01(\tR\bclientIp\x12=\n" +
 	"\fconnected_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\vconnectedAt\x12\x19\n" +
 	"\bbytes_in\x18\x05 \x01(\x04R\abytesIn\x12\x1b\n" +
-	"\tbytes_out\x18\x06 \x01(\x04R\bbytesOut\"j\n" +
+	"\tbytes_out\x18\x06 \x01(\x04R\bbytesOut\x12\x15\n" +
+	"\x06vpn_ip\x18\a \x01(\tR\x05vpnIp\"j\n" +
 	"\x10IpBanObservation\x12\x0e\n" +
 	"\x02ip\x18\x01 \x01(\tR\x02ip\x120\n" +
 	"\x11seconds_remaining\x18\x02 \x01(\x04H\x00R\x10secondsRemaining\x88\x01\x01B\x14\n" +
@@ -7139,7 +7385,34 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\fdelay_millis\x18\x02 \x01(\rR\vdelayMillis\x12'\n" +
 	"\x0fduplicate_event\x18\x03 \x01(\bR\x0eduplicateEvent\x12!\n" +
 	"\freturn_error\x18\x04 \x01(\bR\vreturnError\x12)\n" +
-	"\x10disconnect_after\x18\x05 \x01(\bR\x0fdisconnectAfter*\xb5\x02\n" +
+	"\x10disconnect_after\x18\x05 \x01(\bR\x0fdisconnectAfter\"\x8a\x04\n" +
+	"\x0eVpnAuditRecord\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x02 \x01(\tR\teventType\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\x12\x1a\n" +
+	"\busername\x18\x04 \x01(\tR\busername\x12\x1b\n" +
+	"\tclient_ip\x18\x05 \x01(\tR\bclientIp\x12\x15\n" +
+	"\x06vpn_ip\x18\x06 \x01(\tR\x05vpnIp\x12!\n" +
+	"\fconnected_ms\x18\a \x01(\x03R\vconnectedMs\x12\x1f\n" +
+	"\vobserved_ms\x18\b \x01(\x03R\n" +
+	"observedMs\x12\x1e\n" +
+	"\bbytes_in\x18\t \x01(\x04H\x00R\abytesIn\x88\x01\x01\x12 \n" +
+	"\tbytes_out\x18\n" +
+	" \x01(\x04H\x01R\bbytesOut\x88\x01\x01\x12%\n" +
+	"\x0edestination_ip\x18\v \x01(\tR\rdestinationIp\x12.\n" +
+	"\x10destination_port\x18\f \x01(\rH\x02R\x0fdestinationPort\x88\x01\x01\x12\x1a\n" +
+	"\bprotocol\x18\r \x01(\tR\bprotocol\x12&\n" +
+	"\x0fflow_started_ms\x18\x0e \x01(\x03R\rflowStartedMsB\v\n" +
+	"\t_bytes_inB\f\n" +
+	"\n" +
+	"_bytes_outB\x13\n" +
+	"\x11_destination_port\"S\n" +
+	"\rVpnAuditBatch\x12B\n" +
+	"\arecords\x18\x01 \x03(\v2(.ocserv.platform.agent.v1.VpnAuditRecordR\arecords\".\n" +
+	"\x0fVpnAuditReceipt\x12\x1b\n" +
+	"\tevent_ids\x18\x01 \x03(\tR\beventIds*\xb5\x02\n" +
 	"\x0fHandshakeResult\x12 \n" +
 	"\x1cHANDSHAKE_RESULT_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19HANDSHAKE_RESULT_ACCEPTED\x10\x01\x12%\n" +
@@ -7252,7 +7525,7 @@ func file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 17)
-var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 63)
+var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 66)
 var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(HandshakeResult)(0),                     // 0: ocserv.platform.agent.v1.HandshakeResult
 	(SealedSecretVersion)(0),                 // 1: ocserv.platform.agent.v1.SealedSecretVersion
@@ -7334,14 +7607,17 @@ var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(*SyntheticNoop)(nil),                    // 77: ocserv.platform.agent.v1.SyntheticNoop
 	(*SyntheticEcho)(nil),                    // 78: ocserv.platform.agent.v1.SyntheticEcho
 	(*SimulationProbe)(nil),                  // 79: ocserv.platform.agent.v1.SimulationProbe
-	(*timestamppb.Timestamp)(nil),            // 80: google.protobuf.Timestamp
+	(*VpnAuditRecord)(nil),                   // 80: ocserv.platform.agent.v1.VpnAuditRecord
+	(*VpnAuditBatch)(nil),                    // 81: ocserv.platform.agent.v1.VpnAuditBatch
+	(*VpnAuditReceipt)(nil),                  // 82: ocserv.platform.agent.v1.VpnAuditReceipt
+	(*timestamppb.Timestamp)(nil),            // 83: google.protobuf.Timestamp
 }
 var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
-	80,  // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
+	83,  // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
 	18,  // 1: ocserv.platform.agent.v1.EnrollRequest.proof:type_name -> ocserv.platform.agent.v1.EnrollmentProofV1
 	21,  // 2: ocserv.platform.agent.v1.EnrollRequest.sealing_keys:type_name -> ocserv.platform.agent.v1.SealingKeyDescriptorV1
 	0,   // 3: ocserv.platform.agent.v1.EnrollResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
-	80,  // 4: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
+	83,  // 4: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
 	21,  // 5: ocserv.platform.agent.v1.SessionHandshake.sealing_keys:type_name -> ocserv.platform.agent.v1.SealingKeyDescriptorV1
 	1,   // 6: ocserv.platform.agent.v1.SealingKeyDescriptorV1.version:type_name -> ocserv.platform.agent.v1.SealedSecretVersion
 	2,   // 7: ocserv.platform.agent.v1.SealingKeyDescriptorV1.purpose:type_name -> ocserv.platform.agent.v1.SealedSecretPurpose
@@ -7351,21 +7627,21 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	24,  // 11: ocserv.platform.agent.v1.SessionHandshakeResponse.session_grant:type_name -> ocserv.platform.agent.v1.SessionGrantV1
 	25,  // 12: ocserv.platform.agent.v1.SessionHandshakeResponse.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
 	3,   // 13: ocserv.platform.agent.v1.SessionGrantV1.version:type_name -> ocserv.platform.agent.v1.SessionGrantVersion
-	80,  // 14: ocserv.platform.agent.v1.SessionGrantV1.issued_at:type_name -> google.protobuf.Timestamp
-	80,  // 15: ocserv.platform.agent.v1.SessionGrantV1.expires_at:type_name -> google.protobuf.Timestamp
+	83,  // 14: ocserv.platform.agent.v1.SessionGrantV1.issued_at:type_name -> google.protobuf.Timestamp
+	83,  // 15: ocserv.platform.agent.v1.SessionGrantV1.expires_at:type_name -> google.protobuf.Timestamp
 	4,   // 16: ocserv.platform.agent.v1.ConnectionFenceV2.signature_version:type_name -> ocserv.platform.agent.v1.FenceSignatureVersion
-	80,  // 17: ocserv.platform.agent.v1.ConnectionFenceV2.lease_until:type_name -> google.protobuf.Timestamp
-	80,  // 18: ocserv.platform.agent.v1.ConnectionFenceV2.issued_at:type_name -> google.protobuf.Timestamp
-	80,  // 19: ocserv.platform.agent.v1.ConnectionFenceV2.expires_at:type_name -> google.protobuf.Timestamp
+	83,  // 17: ocserv.platform.agent.v1.ConnectionFenceV2.lease_until:type_name -> google.protobuf.Timestamp
+	83,  // 18: ocserv.platform.agent.v1.ConnectionFenceV2.issued_at:type_name -> google.protobuf.Timestamp
+	83,  // 19: ocserv.platform.agent.v1.ConnectionFenceV2.expires_at:type_name -> google.protobuf.Timestamp
 	4,   // 20: ocserv.platform.agent.v1.FenceBindingV2.signature_version:type_name -> ocserv.platform.agent.v1.FenceSignatureVersion
 	5,   // 21: ocserv.platform.agent.v1.FenceBindingV2.operation_kind:type_name -> ocserv.platform.agent.v1.FenceOperationKind
-	80,  // 22: ocserv.platform.agent.v1.FenceBindingV2.issued_at:type_name -> google.protobuf.Timestamp
-	80,  // 23: ocserv.platform.agent.v1.FenceBindingV2.expires_at:type_name -> google.protobuf.Timestamp
+	83,  // 22: ocserv.platform.agent.v1.FenceBindingV2.issued_at:type_name -> google.protobuf.Timestamp
+	83,  // 23: ocserv.platform.agent.v1.FenceBindingV2.expires_at:type_name -> google.protobuf.Timestamp
 	6,   // 24: ocserv.platform.agent.v1.AgentEvent.type:type_name -> ocserv.platform.agent.v1.AgentEventType
 	10,  // 25: ocserv.platform.agent.v1.CommandAuthorizationProof.version:type_name -> ocserv.platform.agent.v1.CommandAuthorizationVersion
 	7,   // 26: ocserv.platform.agent.v1.CommandResult.state:type_name -> ocserv.platform.agent.v1.CommandResultState
-	80,  // 27: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
-	80,  // 28: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
+	83,  // 27: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
+	83,  // 28: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
 	9,   // 29: ocserv.platform.agent.v1.CommandResult.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
 	30,  // 30: ocserv.platform.agent.v1.CommandResult.privileged_result_proof:type_name -> ocserv.platform.agent.v1.PrivilegedResultProof
 	11,  // 31: ocserv.platform.agent.v1.PrivilegedResultProof.version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
@@ -7375,16 +7651,16 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	12,  // 35: ocserv.platform.agent.v1.PrivdResultReceiptV1.command_kind:type_name -> ocserv.platform.agent.v1.PrivilegedCommandKind
 	13,  // 36: ocserv.platform.agent.v1.PrivdResultReceiptV1.result_kind:type_name -> ocserv.platform.agent.v1.PrivilegedResultKind
 	7,   // 37: ocserv.platform.agent.v1.PrivdResultReceiptV1.terminal_state:type_name -> ocserv.platform.agent.v1.CommandResultState
-	80,  // 38: ocserv.platform.agent.v1.PrivdResultReceiptV1.accepted_at:type_name -> google.protobuf.Timestamp
-	80,  // 39: ocserv.platform.agent.v1.PrivdResultReceiptV1.completed_at:type_name -> google.protobuf.Timestamp
+	83,  // 38: ocserv.platform.agent.v1.PrivdResultReceiptV1.accepted_at:type_name -> google.protobuf.Timestamp
+	83,  // 39: ocserv.platform.agent.v1.PrivdResultReceiptV1.completed_at:type_name -> google.protobuf.Timestamp
 	32,  // 40: ocserv.platform.agent.v1.PrivdResultReceiptV1.certificate:type_name -> ocserv.platform.agent.v1.PrivdCertificateReceiptBindingV1
 	11,  // 41: ocserv.platform.agent.v1.PrivdAttestationRegistrationV1.version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
-	80,  // 42: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
+	83,  // 42: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
 	34,  // 43: ocserv.platform.agent.v1.ObservedSnapshot.dropped:type_name -> ocserv.platform.agent.v1.TelemetryDropCounters
 	70,  // 44: ocserv.platform.agent.v1.ObservedSnapshot.upgrade_results:type_name -> ocserv.platform.agent.v1.AgentUpgradeResultReport
-	80,  // 45: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
-	80,  // 46: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
-	80,  // 47: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
+	83,  // 45: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
+	83,  // 46: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
+	83,  // 47: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
 	14,  // 48: ocserv.platform.agent.v1.TelemetryBatch.priority:type_name -> ocserv.platform.agent.v1.TelemetryPriority
 	35,  // 49: ocserv.platform.agent.v1.TelemetryBatch.snapshot:type_name -> ocserv.platform.agent.v1.ObservedSnapshot
 	36,  // 50: ocserv.platform.agent.v1.TelemetryBatch.sessions:type_name -> ocserv.platform.agent.v1.SessionObservation
@@ -7393,8 +7669,8 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	37,  // 53: ocserv.platform.agent.v1.TelemetryBatch.ip_bans:type_name -> ocserv.platform.agent.v1.IpBanObservation
 	41,  // 54: ocserv.platform.agent.v1.TelemetryBatch.users:type_name -> ocserv.platform.agent.v1.UserObservation
 	42,  // 55: ocserv.platform.agent.v1.TelemetryBatch.groups:type_name -> ocserv.platform.agent.v1.GroupObservation
-	80,  // 56: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
-	80,  // 57: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
+	83,  // 56: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	83,  // 57: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
 	44,  // 58: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
 	47,  // 59: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
 	48,  // 60: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
@@ -7426,9 +7702,9 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	55,  // 86: ocserv.platform.agent.v1.CompleteConfigCandidate.directives:type_name -> ocserv.platform.agent.v1.CompleteConfigDirective
 	56,  // 87: ocserv.platform.agent.v1.CompleteConfigPlan.candidate:type_name -> ocserv.platform.agent.v1.CompleteConfigCandidate
 	56,  // 88: ocserv.platform.agent.v1.CompleteConfigApply.candidate:type_name -> ocserv.platform.agent.v1.CompleteConfigCandidate
-	80,  // 89: ocserv.platform.agent.v1.CompleteConfigApply.plan_expires_at:type_name -> google.protobuf.Timestamp
+	83,  // 89: ocserv.platform.agent.v1.CompleteConfigApply.plan_expires_at:type_name -> google.protobuf.Timestamp
 	22,  // 90: ocserv.platform.agent.v1.CertificateP12.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
-	80,  // 91: ocserv.platform.agent.v1.CertificateP12.artifact_expires_at:type_name -> google.protobuf.Timestamp
+	83,  // 91: ocserv.platform.agent.v1.CertificateP12.artifact_expires_at:type_name -> google.protobuf.Timestamp
 	11,  // 92: ocserv.platform.agent.v1.AgentUpgradeResultProof.version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
 	15,  // 93: ocserv.platform.agent.v1.AgentUpgradeResultProof.state:type_name -> ocserv.platform.agent.v1.AgentUpgradeOutcomeState
 	15,  // 94: ocserv.platform.agent.v1.AgentUpgradeResultReport.state:type_name -> ocserv.platform.agent.v1.AgentUpgradeOutcomeState
@@ -7440,13 +7716,14 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	25,  // 100: ocserv.platform.agent.v1.ArtifactConsumeRequest.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
 	26,  // 101: ocserv.platform.agent.v1.ArtifactConsumeRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
 	16,  // 102: ocserv.platform.agent.v1.ArtifactGrantV1.version:type_name -> ocserv.platform.agent.v1.ArtifactGrantVersion
-	80,  // 103: ocserv.platform.agent.v1.ArtifactGrantV1.issued_at:type_name -> google.protobuf.Timestamp
-	80,  // 104: ocserv.platform.agent.v1.ArtifactGrantV1.expires_at:type_name -> google.protobuf.Timestamp
-	105, // [105:105] is the sub-list for method output_type
-	105, // [105:105] is the sub-list for method input_type
-	105, // [105:105] is the sub-list for extension type_name
-	105, // [105:105] is the sub-list for extension extendee
-	0,   // [0:105] is the sub-list for field type_name
+	83,  // 103: ocserv.platform.agent.v1.ArtifactGrantV1.issued_at:type_name -> google.protobuf.Timestamp
+	83,  // 104: ocserv.platform.agent.v1.ArtifactGrantV1.expires_at:type_name -> google.protobuf.Timestamp
+	80,  // 105: ocserv.platform.agent.v1.VpnAuditBatch.records:type_name -> ocserv.platform.agent.v1.VpnAuditRecord
+	106, // [106:106] is the sub-list for method output_type
+	106, // [106:106] is the sub-list for method input_type
+	106, // [106:106] is the sub-list for extension type_name
+	106, // [106:106] is the sub-list for extension extendee
+	0,   // [0:106] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_agent_v1_agent_proto_init() }
@@ -7481,13 +7758,14 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 		(*CompleteConfigDirective_Literal)(nil),
 		(*CompleteConfigDirective_Tls)(nil),
 	}
+	file_ocserv_platform_agent_v1_agent_proto_msgTypes[63].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ocserv_platform_agent_v1_agent_proto_rawDesc), len(file_ocserv_platform_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      17,
-			NumMessages:   63,
+			NumMessages:   66,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -391,6 +391,15 @@ pub struct Session {
     /// Assigned VPN IP address.
     #[prost(string, tag = "4")]
     pub vpn_ip: String,
+    /// UTC start time when supplied by occtl.
+    #[prost(message, optional, tag = "5")]
+    pub connected_at: Option<prost_types::Timestamp>,
+    /// Cumulative interface receive bytes.
+    #[prost(uint64, optional, tag = "6")]
+    pub bytes_in: Option<u64>,
+    /// Cumulative interface transmit bytes.
+    #[prost(uint64, optional, tag = "7")]
+    pub bytes_out: Option<u64>,
 }
 
 /// Stable list of sessions.

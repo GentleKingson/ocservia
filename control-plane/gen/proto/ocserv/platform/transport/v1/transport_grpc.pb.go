@@ -475,6 +475,7 @@ var TransportService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	TrustService_StoreVpnAudit_FullMethodName      = "/ocserv.platform.transport.v1.TrustService/StoreVpnAudit"
 	TrustService_ListNodeTrust_FullMethodName      = "/ocserv.platform.transport.v1.TrustService/ListNodeTrust"
 	TrustService_CheckEndpoint_FullMethodName      = "/ocserv.platform.transport.v1.TrustService/CheckEndpoint"
 	TrustService_ValidateEnrollment_FullMethodName = "/ocserv.platform.transport.v1.TrustService/ValidateEnrollment"
@@ -485,9 +486,8 @@ const (
 // TrustServiceClient is the client API for TrustService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-//
-// TrustService is implemented by the Go control plane on a private UDS.
 type TrustServiceClient interface {
+	StoreVpnAudit(ctx context.Context, in *StoreVpnAuditRequest, opts ...grpc.CallOption) (*v1.VpnAuditReceipt, error)
 	ListNodeTrust(ctx context.Context, in *ListNodeTrustRequest, opts ...grpc.CallOption) (*ListNodeTrustResponse, error)
 	CheckEndpoint(ctx context.Context, in *CheckEndpointRequest, opts ...grpc.CallOption) (*CheckEndpointResponse, error)
 	ValidateEnrollment(ctx context.Context, in *ValidateEnrollmentRequest, opts ...grpc.CallOption) (*ValidateEnrollmentResponse, error)
@@ -501,6 +501,16 @@ type trustServiceClient struct {
 
 func NewTrustServiceClient(cc grpc.ClientConnInterface) TrustServiceClient {
 	return &trustServiceClient{cc}
+}
+
+func (c *trustServiceClient) StoreVpnAudit(ctx context.Context, in *StoreVpnAuditRequest, opts ...grpc.CallOption) (*v1.VpnAuditReceipt, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.VpnAuditReceipt)
+	err := c.cc.Invoke(ctx, TrustService_StoreVpnAudit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *trustServiceClient) ListNodeTrust(ctx context.Context, in *ListNodeTrustRequest, opts ...grpc.CallOption) (*ListNodeTrustResponse, error) {
@@ -556,9 +566,8 @@ func (c *trustServiceClient) AuthorizeSession(ctx context.Context, in *Authorize
 // TrustServiceServer is the server API for TrustService service.
 // All implementations must embed UnimplementedTrustServiceServer
 // for forward compatibility.
-//
-// TrustService is implemented by the Go control plane on a private UDS.
 type TrustServiceServer interface {
+	StoreVpnAudit(context.Context, *StoreVpnAuditRequest) (*v1.VpnAuditReceipt, error)
 	ListNodeTrust(context.Context, *ListNodeTrustRequest) (*ListNodeTrustResponse, error)
 	CheckEndpoint(context.Context, *CheckEndpointRequest) (*CheckEndpointResponse, error)
 	ValidateEnrollment(context.Context, *ValidateEnrollmentRequest) (*ValidateEnrollmentResponse, error)
@@ -574,6 +583,9 @@ type TrustServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedTrustServiceServer struct{}
 
+func (UnimplementedTrustServiceServer) StoreVpnAudit(context.Context, *StoreVpnAuditRequest) (*v1.VpnAuditReceipt, error) {
+	return nil, status.Error(codes.Unimplemented, "method StoreVpnAudit not implemented")
+}
 func (UnimplementedTrustServiceServer) ListNodeTrust(context.Context, *ListNodeTrustRequest) (*ListNodeTrustResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListNodeTrust not implemented")
 }
@@ -608,6 +620,24 @@ func RegisterTrustServiceServer(s grpc.ServiceRegistrar, srv TrustServiceServer)
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&TrustService_ServiceDesc, srv)
+}
+
+func _TrustService_StoreVpnAudit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StoreVpnAuditRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TrustServiceServer).StoreVpnAudit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TrustService_StoreVpnAudit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TrustServiceServer).StoreVpnAudit(ctx, req.(*StoreVpnAuditRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _TrustService_ListNodeTrust_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -707,6 +737,10 @@ var TrustService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "ocserv.platform.transport.v1.TrustService",
 	HandlerType: (*TrustServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "StoreVpnAudit",
+			Handler:    _TrustService_StoreVpnAudit_Handler,
+		},
 		{
 			MethodName: "ListNodeTrust",
 			Handler:    _TrustService_ListNodeTrust_Handler,

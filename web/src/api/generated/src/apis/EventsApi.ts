@@ -33,6 +33,11 @@ import {
   ProblemFromJSON,
   ProblemToJSON,
 } from "../models/Problem";
+import {
+  type VpnAuditPage,
+  VpnAuditPageFromJSON,
+  VpnAuditPageToJSON,
+} from "../models/VpnAuditPage";
 
 export interface ListAuditEventsRequest {
   xWorkspaceID?: string;
@@ -44,6 +49,18 @@ export interface ListEventsRequest {
   after?: string;
   order?: ListEventsOrderEnum;
   pageSize?: number;
+}
+
+export interface ListVpnAuditRecordsRequest {
+  xWorkspaceID?: string;
+  pageSize?: number;
+  cursor?: string;
+  kind?: ListVpnAuditRecordsKindEnum;
+  destinationIp?: string;
+  username?: string;
+  nodeId?: string;
+  since?: Date;
+  until?: Date;
 }
 
 export interface VerifyAuditChainRequest {
@@ -204,6 +221,107 @@ export class EventsApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for listVpnAuditRecords without sending the request
+   */
+  async listVpnAuditRecordsRequestOpts(
+    requestParameters: ListVpnAuditRecordsRequest,
+  ): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    if (requestParameters["pageSize"] != null) {
+      queryParameters["page_size"] = requestParameters["pageSize"];
+    }
+
+    if (requestParameters["cursor"] != null) {
+      queryParameters["cursor"] = requestParameters["cursor"];
+    }
+
+    if (requestParameters["kind"] != null) {
+      queryParameters["kind"] = requestParameters["kind"];
+    }
+
+    if (requestParameters["destinationIp"] != null) {
+      queryParameters["destination_ip"] = requestParameters["destinationIp"];
+    }
+
+    if (requestParameters["username"] != null) {
+      queryParameters["username"] = requestParameters["username"];
+    }
+
+    if (requestParameters["nodeId"] != null) {
+      queryParameters["node_id"] = requestParameters["nodeId"];
+    }
+
+    if (requestParameters["since"] != null) {
+      queryParameters["since"] = (
+        requestParameters["since"] as any
+      ).toISOString();
+    }
+
+    if (requestParameters["until"] != null) {
+      queryParameters["until"] = (
+        requestParameters["until"] as any
+      ).toISOString();
+    }
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/audit/vpn`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Query workspace VPN lifecycle events, reconciled snapshots or network flows
+   */
+  async listVpnAuditRecordsRaw(
+    requestParameters: ListVpnAuditRecordsRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<VpnAuditPage>> {
+    const requestOptions =
+      await this.listVpnAuditRecordsRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      VpnAuditPageFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Query workspace VPN lifecycle events, reconciled snapshots or network flows
+   */
+  async listVpnAuditRecords(
+    requestParameters: ListVpnAuditRecordsRequest = {},
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<VpnAuditPage> {
+    const response = await this.listVpnAuditRecordsRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
    * Creates request options for verifyAuditChain without sending the request
    */
   async verifyAuditChainRequestOpts(
@@ -358,3 +476,13 @@ export const ListEventsOrderEnum = {
 } as const;
 export type ListEventsOrderEnum =
   (typeof ListEventsOrderEnum)[keyof typeof ListEventsOrderEnum];
+/**
+ * @export
+ */
+export const ListVpnAuditRecordsKindEnum = {
+  Sessions: "sessions",
+  Observations: "observations",
+  Network: "network",
+} as const;
+export type ListVpnAuditRecordsKindEnum =
+  (typeof ListVpnAuditRecordsKindEnum)[keyof typeof ListVpnAuditRecordsKindEnum];

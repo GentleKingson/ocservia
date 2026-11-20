@@ -510,7 +510,7 @@ backup_dir="${rootfs}/var/lib/ocservia-upgrade/upgrade-backup"
 test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
-test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 9
+test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 12
 sudo test -f "${backup_dir}/ocservia-agent-relays.absent"
 # The fresh package install already placed the durable runner set, so the
 # matched snapshot must carry it as concrete rollback sources.

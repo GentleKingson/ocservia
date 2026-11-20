@@ -142,6 +142,7 @@ func decodeWire(payload []byte) (Batch, error) {
 				ID:          item.GetSessionId(),
 				Username:    item.GetUsername(),
 				ClientIP:    item.GetClientIp(),
+				VPNIP:       item.GetVpnIp(),
 				ConnectedAt: item.GetConnectedAt().AsTime(),
 				BytesIn:     int64(item.GetBytesIn()),
 				BytesOut:    int64(item.GetBytesOut()),
@@ -280,7 +281,7 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 
 		sessions := make([]telemetrystore.Session, 0, len(batch.Sessions))
 		for _, v := range batch.Sessions {
-			sessions = append(sessions, telemetrystore.Session{ID: v.ID, Username: v.Username, ClientIP: v.ClientIP, ConnectedAt: v.ConnectedAt, BytesIn: v.BytesIn, BytesOut: v.BytesOut})
+			sessions = append(sessions, telemetrystore.Session{ID: v.ID, Username: v.Username, ClientIP: v.ClientIP, VPNIP: v.VPNIP, ConnectedAt: v.ConnectedAt, BytesIn: v.BytesIn, BytesOut: v.BytesOut})
 		}
 		if err := store.ReplaceSessions(ctx, batch.NodeID, snap.ObservedAt, sessions); err != nil {
 			return false, err
@@ -460,7 +461,7 @@ func validateBatch(batch Batch, now time.Time) error {
 	if len(batch.Sessions) > 0 {
 		sessionIDs := make(map[string]struct{}, len(batch.Sessions))
 		for _, session := range batch.Sessions {
-			if !value.ValidText(session.ID, 256) || !validObservedName(session.Username) || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
+			if !value.ValidText(session.ID, 256) || !validObservedName(session.Username) || net.ParseIP(session.ClientIP) == nil || (session.VPNIP != "" && net.ParseIP(session.VPNIP) == nil) || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
 				return errors.New("session observation is invalid")
 			}
 			if !insertUnique(sessionIDs, session.ID) {

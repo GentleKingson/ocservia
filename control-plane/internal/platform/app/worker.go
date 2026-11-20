@@ -45,7 +45,7 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		// the exact owner term behind the connection instead of letting a
 		// live process keep renewing a session whose connection is gone.
 		life.start("watch owner transport", func(ctx context.Context) error { return ownerSessions.WatchTransport(ctx, workerTransport) })
-		trust, err := trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.NewWithOwnerSessionsBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner, ownerSessions)), cfg.TransportUID)
+		trust, err := trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.NewWithOwnerSessionsBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner, ownerSessions), backend), cfg.TransportUID)
 		if err != nil {
 			cleanup()
 			return nil, nil, func() {}, fmt.Errorf("configure trust server: %w", err)

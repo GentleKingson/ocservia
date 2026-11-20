@@ -130,8 +130,8 @@ if [[ "${verify_only}" != true ]]; then
 fi
 validate_file "${manifest}" 600
 snapshot_entries="$(wc -l <"${manifest}")"
-if [[ "${snapshot_entries}" -ne 8 && "${snapshot_entries}" -ne 9 ]] || \
-  awk 'length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^(ocservia-agent\.previous|ocservia-privd\.previous|ocservia-agent\.service\.previous|ocservia-privd\.service\.previous|ocservia-agent-relays\.conf\.(previous|absent)|ocservia-agent-relays\.(previous|absent)|ocservia-upgrader\.(previous|absent)|ocservia-upgrader@\.service\.(previous|absent)|ocservia-agent-verify\.(previous|absent))$/ || NF != 2 || seen[$2]++ { bad=1 } END { exit bad ? 0 : 1 }' "${manifest}"; then
+if [[ "${snapshot_entries}" -ne 8 && "${snapshot_entries}" -ne 9 && "${snapshot_entries}" -ne 12 ]] || \
+  awk 'length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^(ocservia-agent\.previous|ocservia-privd\.previous|ocservia-agent\.service\.previous|ocservia-privd\.service\.previous|ocservia-agent-relays\.conf\.(previous|absent)|ocservia-agent-relays\.(previous|absent)|ocservia-upgrader\.(previous|absent)|ocservia-upgrader@\.service\.(previous|absent)|(ocservia-agent-verify|vpn-audit\.py|vpn-session-hook|ocservia-network-audit\.service)\.(previous|absent))$/ || NF != 2 || seen[$2]++ { bad=1 } END { exit bad ? 0 : 1 }' "${manifest}"; then
   rollback_error "rollback snapshot manifest is malformed"
 fi
 
@@ -179,6 +179,15 @@ upgrader_unit_backup="${resolved_backup}"
 resolve_optional_backup ocservia-agent-verify 755
 verifier_backup="${resolved_backup}"
 
+if [[ "${snapshot_entries}" -eq 12 ]]; then
+  resolve_optional_backup vpn-audit.py 755
+  collector_backup="${resolved_backup}"
+  resolve_optional_backup vpn-session-hook 755
+  hook_backup="${resolved_backup}"
+  resolve_optional_backup ocservia-network-audit.service 644
+  network_unit_backup="${resolved_backup}"
+fi
+
 # Eight-entry snapshots predate the optional-Relay launcher. Do not infer
 # single-Relay support from a version number or silently change relays.env.
 relay_launcher_backup=""
@@ -214,6 +223,11 @@ if [[ "${snapshot_entries}" -lt 9 ]]; then
 fi
 relay_directory="${systemd}/ocservia-agent.service.d"
 relay_directory_missing=false
+if [[ "${snapshot_entries}" -eq 12 ]]; then
+  validate_destination "${libexec}/vpn-session-hook" 755
+  validate_destination "${libexec}/vpn-audit.py" 755
+  validate_destination "${systemd}/ocservia-network-audit.service" 644
+fi
 validate_destination "${libexec}/ocservia-agent" 755
 validate_destination "${libexec}/ocservia-privd" 755
 validate_destination "${libexec}/ocservia-agent-relays" 755
@@ -265,6 +279,9 @@ mark_operations_rolled_back() {
 
 
 if [[ -z "${DESTDIR}" ]]; then
+  if [[ "${snapshot_entries}" -eq 12 && -z "${network_unit_backup:-}" && -f "${systemd}/ocservia-network-audit.service" ]]; then
+    systemctl disable --now ocservia-network-audit.service
+  fi
   systemctl stop 'ocservia-upgrader@*.service' 2>/dev/null || true
   systemctl stop ocservia-agent.service ocservia-privd.service
 fi
@@ -288,6 +305,14 @@ optional_restores=(
   "${upgrader_unit_backup}" "${systemd}/ocservia-upgrader@.service" 644
   "${verifier_backup}" "${libexec}/ocservia-agent-verify" 755
 )
+if [[ "${snapshot_entries}" -eq 12 ]]; then
+  # A running ocserv may still reference the hook after a downgrade.
+  optional_restores+=(
+    "${hook_backup:-/usr/bin/true}" "${libexec}/vpn-session-hook" 755
+    "${collector_backup}" "${libexec}/vpn-audit.py" 755
+    "${network_unit_backup}" "${systemd}/ocservia-network-audit.service" 644
+  )
+fi
 for ((entry = 0; entry < ${#optional_restores[@]}; entry += 3)); do
   backup="${optional_restores[entry]}"
   destination="${optional_restores[entry + 1]}"
@@ -319,6 +344,9 @@ if [[ -z "${DESTDIR}" ]]; then
   systemctl daemon-reload
   systemctl start ocservia-privd.service
   systemctl start ocservia-agent.service
+  if [[ -n "${network_unit_backup:-}" ]]; then
+    systemctl try-restart ocservia-network-audit.service || true
+  fi
   flock -u 9
 fi
 echo "Agent, privd, and systemd units restored from one verified matched rollback snapshot"
