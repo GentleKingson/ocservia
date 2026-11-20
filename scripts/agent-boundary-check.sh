@@ -35,6 +35,8 @@ privd_exec="$(awk '/^ExecStart=/ { sub(/^ExecStart=/, ""); print }' "${ROOT}/dep
   echo "privd ExecStart must launch /usr/libexec/ocservia/ocservia-privd" >&2
   exit 1
 }
+# Match literal systemd variable references in the unit file.
+# shellcheck disable=SC2016
 for required_flag in \
   '--agent-uid $AGENT_UID' \
   '--node-id $NODE_ID' \
