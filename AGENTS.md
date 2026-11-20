@@ -1,42 +1,46 @@
 # ocservia 项目指引
 
-仓库通用规则在本文件维护，`CLAUDE.md` 通过 `@AGENTS.md` 导入。查询、分析和审阅默认只读。实施前查看工作树差异并保留已有修改，沿调用路径在负责该行为的模块做最小改动。丢弃已有工作、破坏性操作，以及推送、创建或合并 PR、打标签、发布和部署，都须有明确授权。
+`CLAUDE.md` 通过 `@AGENTS.md` 导入本文件；个人本机偏好放 `~/.codex/AGENTS.md`，勿向仓库提交 `AGENTS.override.md`。
+
+- **边界与自治**：查询、分析与审阅默认只读。修改前检查工作树并保留已有改动，在所属模块复用既有抽象做最小改动并保持调用方依赖行为。授权内自主推进至验证闭环；丢弃已有工作、破坏性/不可逆操作，以及推送、创建或合并 PR、打标签、发布和部署，均须明确授权。
+- **并行子代理**：跨模块只读调研、多系统根因追踪或独立维度审阅可按需并行使用 subagents；代码写入与 `make generate` 保持串行，避免工作区冲突。
 
 ## 从哪里改
 
-| 位置 | 职责 |
+| 位置 | 职责边界 |
 | --- | --- |
-| `control-plane/internal/` | Go Controller。领域服务负责业务不变量和事务，`control-plane/internal/platform/app` 负责装配。 |
-| `signer/` | 独立的签发服务，持有签发密钥和证书账本。 |
-| `rust/crates/` | `transportd` 负责控制面传输，`agent` 负责节点会话和命令日志，`privd` 执行受限特权操作，`upgrader` 负责软件包升级。 |
-| `web/src/` | Vue 控制台、工作区状态和 API 适配层。 |
-| `proto/`、`openapi/openapi.yaml` | 协议字段的权威来源。 |
-| `deploy/`、`scripts/` | 安装与部署配置、构建和验证脚本。 |
+| `control-plane/internal/` | Go Controller：领域包负责业务不变量与事务，`platform/app` 负责装配（领域包不反向导入）。 |
+| `signer/` | 独立签发服务，持有签发密钥与证书账本（仅 HTTPS 通信）。 |
+| `rust/crates/` | `transportd` 控制面传输，`agent` 节点会话与命令日志，`privd` 受限特权操作，`upgrader` 软件包升级。 |
+| `web/src/` | Vue 控制台、工作区状态与手写 `api/*.ts` 适配层。 |
+| `proto/`、`openapi/openapi.yaml` | 协议唯一权威源；禁手改 `control-plane/gen/proto`、`rust/crates/contracts/src/generated`、`web/src/api/generated`。 |
 
-跨模块改动先查[职责与调用方向](docs/architecture.md#ownership-and-task-navigation)。
+部署配置与脚本位于 `deploy/`、`scripts/`；跨模块改动先查[职责与调用方向](docs/architecture.md#ownership-and-task-navigation)。
 
 ## 改动必须保留的边界
 
-以下为必须长期保持的硬契约（外部协议、业务不变量、安全边界与持久化格式）；Go/Rust/Web 内部包与目录拆分、未导出函数名、内部路由注册细节、以及同版本配对的私有 IPC（`proto/ocserv/platform/transport/v1` 与 `rust/crates/agent-protocol`）均允许在保留上述边界的前提下自由重构：
+守住以下外部协议、业务不变量、安全与持久化硬契约的前提下，内部包拆分、未导出符号、路由装配及同版本私有 IPC（`proto/ocserv/platform/transport/v1`、`rust/crates/agent-protocol`）可自由重构：
 
-- **部署与存储范围**：生产仅支持单 Controller、一个 PostgreSQL 18.x 数据库、一个 Signer 和一个专用 Relay。部署拓扑以[生产支持范围](docs/operations/production-deployment.md#support-scope)为准。
-- **三层独立鉴权与进程隔离**：HTTP 入口检查调用者会话与 `Origin`，领域服务在事务内复验身份、归属与状态，节点独立验证命令签名、`SessionGrantV1` 和连接所有权 fence。保持 Go 不依赖 Iroh、`transportd` 无数据库依赖、`privd` 无网络/数据库/通用 Shell 表面；修改一层时须保留其他层校验。
-- **命令语义与加密转录**：命令已接受或已派发均不证明执行成功；结果为 `unknown` 时先按原命令 ID `RECONCILE_ONLY` 对账，保留 Agent journal 与已签名 `privd` 回执。命令签名与语义哈希必须使用各版本冻结的规范化字节输入，绝不改用 Protobuf 序列化字节。[命令与恢复](docs/reference/stable-contracts.md#commands-and-recovery)
-- **数据库迁移与权限**：`control-plane/migrations/` 仅保留 `schema.sql`（空库初始化）和 `upgrade.sql`（从固定 `v1.2.0` 检查点前向升级）。迁移由 owner 通过 `--migrate-only` 串行执行并校验来源、内容与历史回执；Controller 运行期仅使用受限角色。[数据库契约](docs/reference/stable-contracts.md#database)
+- **部署与存储范围**：生产仅支持单 Controller、一个 PostgreSQL 18.x 数据库、一个 Signer 和一个专用 Relay。[生产支持范围](docs/operations/production-deployment.md#support-scope)
+- **三层独立鉴权与隔离**：HTTP 入口校验会话与 `Origin`，领域服务事务内复验身份、归属与状态，节点独立验证命令签名、`SessionGrantV1` 与连接所有权 fence。保持 Go 无 Iroh、`transportd` 无数据库、`privd` 无网络/数据库/通用 Shell 表面；改一层须保留其余层校验。
+- **命令语义与加密转录**：已接受或已派发均不证明执行成功；`unknown` 先按原命令 ID `RECONCILE_ONLY` 对账，保留 Agent journal 与已签名 `privd` 回执。命令签名与语义哈希须用各版本冻结的规范化字节输入，禁用 Protobuf 序列化字节。[命令与恢复](docs/reference/stable-contracts.md#commands-and-recovery)
+- **数据库迁移与权限**：`control-plane/migrations/` 仅留 `schema.sql`（空库初始化）和 `upgrade.sql`（自 `v1.2.0` 检查点前向升级）。owner 经 `--migrate-only` 串行迁移并校验来源、内容与历史回执；Controller 运行期仅用受限角色。[数据库契约](docs/reference/stable-contracts.md#database)
 
-## 怎样验证
+## 验证与交付
 
-从仓库根目录选择覆盖变更的最小检查，在获准且具备依赖的隔离环境中运行。缺少工具链时按宿主和任务选择 bootstrap profile，例如 Go 检查用 `scripts/bootstrap.sh go-test`。[验证指引](docs/development/release-checks.md#choose-the-validation-scope)
-
-直接运行 `go`、`cargo` 或 `npm` 前，在仓库根目录的 **Bash** 会话中执行 `source scripts/env.sh`，再进入目标模块。
+从仓库根目录在获准隔离环境中运行最小覆盖检查；缺工具链执行 `scripts/bootstrap.sh <profile>`（如 `go-test`），直接运行 `go`、`cargo`、`npm` 前先在根目录 **Bash** 执行 `source scripts/env.sh`。[验证指引](docs/development/release-checks.md#choose-the-validation-scope)
 
 | 变更 | 验证入口 |
 | --- | --- |
-| 文档或代理指令 | `make docs-check`、`make policy-check`、`git diff --check`（自动校验全仓 Markdown 相对链接与锚点）。 |
-| Go（Controller 和 Signer） | `scripts/go-check.sh standard`、`scripts/transport-boundary-check.sh --go-only` |
+| 文档或代理配置 | `make docs-check`、`make policy-check`、`git diff --check` |
+| Go（Controller、Signer） | `scripts/go-check.sh standard`、`scripts/transport-boundary-check.sh --go-only` |
 | Rust | `make rust-check`、`scripts/transport-boundary-check.sh --rust-only`、`scripts/agent-boundary-check.sh` |
-| Web | `scripts/web-check.sh basic` |
+| Web | `scripts/web-check.sh basic`；视觉或交互改动按实际展示尺寸核验目标交互（如 `make e2e`） |
+| 协议 | 确认生成目录无未提交改动后 `make generate` 并审阅差异；干净提交上跑 `make generated-clean`（`buf breaking` 仅约束外部 `agent/v1`，私有 `transport/v1` 已解绑）。[契约与生成](docs/reference/stable-contracts.md#schema-sources-and-generation) |
 
-修改协议时编辑源文件。`make generate` 会重建 `control-plane/gen/proto`、`rust/crates/contracts/src/generated` 和 `web/src/api/generated`。先检查这三个目录的未提交工作，再生成并审阅差异。在已提交的干净候选上运行 `make generated-clean` 验证可重复生成；`buf breaking` 仅对外部 `agent/v1` 施加 `FILE` 级跨版本检查，同版本私有 IPC `transport/v1` 已解绑。[契约与生成](docs/reference/stable-contracts.md#schema-sources-and-generation)
+- **共享资源与收尾**：共享宿主机时节制并发构建与测试数，重任务按需独占运行；收尾前停止本次启动的后台进程，仅删除本次创建的临时文件。
+- **完成与发布门禁**：行为变更须留能检出回归的检查（优先复用现有测试）。最终回复须自包含且不含内部简写，列出关键改动、实际检查与结果及未验证项。PR `Basic CI Result` 与发布 `Release Check` 以候选 SHA 为准，RC 三虚拟机验收证据须与标签 SHA 核对并经人工确认。[发布策略](docs/development/release-checks.md#release-policy)
 
-交付时列出实际运行的检查、结果和未验证项。行为变更须有能检出回归的检查。PR 的 `Basic CI Result` 以候选 SHA 的运行结果为准。发布须有对应 SHA 的 Release Check，RC 的三台虚拟机验收证据还须与标签 SHA 核对并由人工确认。[发布策略](docs/development/release-checks.md#release-policy)
+## Code Review Rules
+
+- 重点拦截破坏上述四项硬边界、跨事务/崩溃恢复窗口或命令幂等对账的变更；仅报告有明确触发路径与实际影响的缺陷或验证缺口，格式、lint 与生成一致性交由 CI 裁决。

@@ -59,21 +59,22 @@ make policy-check
 git diff --check
 ```
 
-Check any modified links and heading anchors manually as well, since
-`docs-check` is not a general link checker. Newly created public files also
-need manual inspection until they are added to the candidate index; keep
-local-only notes out of that index and leave the user's git staging state
+Check external URLs, HTML `<a id>` anchors, and untracked public files manually
+as well: `scripts/docs-check.sh` scans tracked files only. Keep local-only
+notes out of the candidate index and leave the user's git staging state
 untouched.
 
-`scripts/docs-check.sh` scans tracked files only. It rejects CRLF line endings,
-requires every tracked Markdown file to be non-empty, restricts shared
-`.claude/settings.json` to audited keys, checks a few bootstrap text rules
-(including the absence of pipe-to-shell install examples in the entry pages), and checks that
-`AGENTS.md` exists, `CLAUDE.md` imports it, and relative links and heading
-anchors inside `AGENTS.md` resolve. It does not check links or anchors in other
-files, SQL syntax, authentication modes, database support claims, or other prose
-facts. `make policy-check` separately rejects tracked local implementation-control
-paths and private disclosures. In Basic CI, the `docs` job runs `docs-check.sh`
+`scripts/docs-check.sh` rejects CRLF line endings, requires every tracked
+Markdown file to be non-empty, restricts shared `.claude/settings.json` to
+audited keys, checks bootstrap text rules (including the absence of
+pipe-to-shell install examples in the entry pages), and verifies that
+`AGENTS.md` exists, `CLAUDE.md` imports it, and relative Markdown links and
+ASCII GitHub heading anchors resolve across `README.md`, `AGENTS.md`,
+`CLAUDE.md`, `SECURITY.md`, and `docs/*.md`. It does not check external URLs,
+duplicate-heading suffixes, SQL syntax, authentication modes, database support
+claims, or other prose facts. `make policy-check` separately rejects tracked
+local implementation-control paths (including `AGENTS.override.md`) and private
+disclosures. In Basic CI, the `docs` job runs `docs-check.sh`
 alone. Validate executable command examples in the docs in an authorized
 isolated environment.
 
@@ -90,16 +91,16 @@ The local development stack is started as described in the
 [README](../../README.md).
 
 For day-to-day work inside a single module, use `make test-go`,
-`make test-rust`, or `make test-web`. `make test-go` runs `go test ./...` inside
-`control-plane` alone, without `signer`, `gofmt`, `go vet`, `-count=1` or race
+`make test-rust`, or `make test-web`. `make test-go` runs `go test ./...` in
+`control-plane` and `signer` without `gofmt`, `go vet`, `-count=1` or race
 runs. `make go-check` (`scripts/go-check.sh`, default mode `full`) covers both
 `control-plane` and `signer` with `gofmt`, `go vet`, `go test -count=1`, and
 (except in `standard` mode) `go test -race`, using a private `TMPDIR` under
 `.cache/` because the signer store refuses state directories beneath a group-
 or world-writable parent such as `/tmp`. Basic CI invokes
 `go-check.sh standard`. The top-level `make test` (`scripts/test.sh`) runs
-`control-plane` Go tests, Rust workspace tests, and Web `npm test` without
-`signer`, linters, or race runs. For Rust, `make rust-check` runs
+`control-plane` and `signer` Go tests, Rust workspace tests, and Web `npm test`
+without linters or race runs. For Rust, `make rust-check` runs
 `cargo fmt --check`, Clippy with `-D warnings`, and workspace tests. Web checks
 are in [Web validation](#web-validation).
 
