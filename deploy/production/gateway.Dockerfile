@@ -7,16 +7,13 @@ COPY web/ ./
 RUN npm run build
 
 FROM caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e AS runtime
-RUN apk upgrade --no-cache brotli-libs curl libcurl zlib
+# The upstream image has no caddy account. Seed ACME volume ownership and
+# remove the file capability so Caddy can start with all capabilities dropped.
+RUN apk upgrade --no-cache brotli-libs curl libcurl zlib \
+    && addgroup -S -g 65532 caddy && adduser -S -D -H -u 65532 -G caddy caddy \
+    && install -d -o caddy -g caddy -m 0700 /var/lib/caddy-acme \
+    && setcap -r /usr/bin/caddy
 COPY deploy/production/Caddyfile /etc/caddy/Caddyfile
 COPY --from=web-build /src/web/dist /srv
-# The pinned upstream image runs as root and ships no caddy account, so the
-# runtime user referenced below must exist before it can resolve at start.
-RUN addgroup -S -g 65532 caddy && adduser -S -D -H -u 65532 -G caddy caddy
-# Integrated ACME storage; a new named volume copies this ownership.
-RUN install -d -o caddy -g caddy -m 0700 /var/lib/caddy-acme
-# Port 8443 needs no file capability; the upstream capability prevents exec
-# when production drops all capabilities.
-RUN setcap -r /usr/bin/caddy
 USER caddy:caddy
 EXPOSE 8443
