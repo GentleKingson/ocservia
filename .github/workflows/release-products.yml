@@ -27,10 +27,11 @@ env:
   CARGO_INCREMENTAL: "0"
 jobs:
   build-agent-packages:
-    name: Build & Smoke Agent Packages (${{ inputs.arch }})
+    name: Build Agent Packages (${{ inputs.arch }})
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       manifest_sha256: ${{ steps.identity.outputs.sha256 }}
+      version: ${{ steps.package-version.outputs.version }}
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     steps:
@@ -54,6 +55,7 @@ jobs:
           key: release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
           restore-keys: release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
       - name: Resolve package version & source epoch
+        id: package-version
         env:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
           INPUT_VERSION: ${{ inputs.version }}
@@ -76,28 +78,13 @@ jobs:
             echo "version=${version}"
             echo "source_date_epoch=$(git log -1 --format=%ct)"
           } >>"${GITHUB_ENV}"
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
       - name: Build native Agent / privd / upgrader and packages
         id: build-packages
         run: |
           VERSION="${version}" PACKAGE_ARCH="${{ inputs.arch }}" \
             OUTPUT_DIR="${RUNNER_TEMP}/packages" \
             SOURCE_DATE_EPOCH="${source_date_epoch}" bash scripts/build-release-agent.sh
-      - name: Validate native package lifecycle (${{ inputs.arch }})
-        id: smoke-packages
-        env:
-          RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
-          PRODUCTS_DIR: ${{ runner.temp }}/packages
-          VERSION: ${{ env.version }}
-        run: scripts/release-native-package-smoke.sh
-      - name: Validate RC to final package lifecycle (${{ inputs.arch }})
-        if: github.event_name == 'workflow_dispatch' && contains(inputs.version, '-rc.')
-        env:
-          RUN_ID: rc-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rc-lifecycle
-          RC_LIFECYCLE: 'true'
-          STUB_BINARIES: 'false'
-        run: scripts/release-native-package-smoke.sh
       - name: Save Rocky Agent compilation cache
         if: ${{ success() && steps.agent-target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -123,6 +110,43 @@ jobs:
           path: ${{ runner.temp }}/packages/*
           retention-days: 7
           if-no-files-found: error
+  smoke-agent-packages:
+    name: Smoke Agent Packages (${{ inputs.arch }})
+    needs: build-agent-packages
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: native-packages
+      - name: Download immutable package set for smoke
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
+        with:
+          artifact-ids: ${{ needs.build-agent-packages.outputs.artifact_id }}
+          path: ${{ runner.temp }}/packages
+          merge-multiple: true
+      - name: Validate native package lifecycle (${{ inputs.arch }})
+        id: smoke-packages
+        env:
+          RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
+          PRODUCTS_DIR: ${{ runner.temp }}/packages
+          VERSION: ${{ needs.build-agent-packages.outputs.version }}
+        run: scripts/release-native-package-smoke.sh
+      - name: Validate RC to final package lifecycle (${{ inputs.arch }})
+        if: github.event_name == 'workflow_dispatch' && contains(inputs.version, '-rc.')
+        env:
+          RUN_ID: rc-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rc-lifecycle
+          RC_LIFECYCLE: 'true'
+          STUB_BINARIES: 'false'
+        run: scripts/release-native-package-smoke.sh
       - name: Upload native smoke diagnostics
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
