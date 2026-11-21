@@ -1,5 +1,8 @@
 services:
   signer:
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     image: ${OCSERV_SIGNER_IMAGE:?set a digest-pinned Signer image}
     restart: unless-stopped
     read_only: true

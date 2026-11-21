@@ -2,6 +2,9 @@
 # Requires Compose >= 2.24.4 (!override); controller.sh owns lifecycle admission.
 services:
   edge:
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     image: ${OCSERV_EDGE_IMAGE:?set a digest-pinned Edge image}
     restart: unless-stopped
     read_only: true

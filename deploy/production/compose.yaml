@@ -1,6 +1,9 @@
 name: ocservia-production
 
 x-service-defaults: &service-defaults
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
   restart: unless-stopped
   read_only: true
   cap_drop: [ALL]
