@@ -2,6 +2,7 @@ use super::super::{Digest, Sha256};
 use super::artifacts::ArtifactRecord;
 use super::authorized::AuthorizedEffectRecord;
 use super::desired::ValidatedEffectIdentity;
+use super::owner_fence::OwnerFenceRecord;
 
 struct HmacSha256 {
     inner: Sha256,
@@ -51,6 +52,18 @@ pub(crate) fn authenticate_store_identity(key: &[u8; 32], store_id: &[u8; 16]) -
     let mut mac = HmacSha256::new(key);
     mac.update(b"ocservia.effect-store-identity.v1\0");
     mac.update(store_id);
+    mac.finalize()
+}
+
+pub(crate) fn authenticate_owner_fence_record(
+    key: &[u8; 32],
+    record: &OwnerFenceRecord,
+) -> [u8; 32] {
+    let mut mac = HmacSha256::new(key);
+    mac.update(b"ocservia.owner-epoch-floor.v1\0");
+    mac.update(&record.node_id);
+    mac.update(&record.endpoint_id);
+    mac.update(&record.owner_epoch.to_be_bytes());
     mac.finalize()
 }
 

@@ -22,10 +22,11 @@ pub(crate) enum ValidatedRequest<'a> {
         &'a CommandEnvelope,
         CommandAuthorizationV1,
         prost_types::Timestamp,
+        u64,
     ),
     Reconcile(&'a CommandEnvelope, CommandAuthorizationV1),
-    ArtifactRead(ArtifactGrantClaimsV1, u64),
-    ArtifactConsume(ArtifactGrantClaimsV1, Vec<u8>, u64, bool),
+    ArtifactRead(ArtifactGrantClaimsV1, u64, u64),
+    ArtifactConsume(ArtifactGrantClaimsV1, Vec<u8>, u64, bool, u64),
 }
 
 #[allow(clippy::too_many_lines)]
@@ -98,7 +99,7 @@ pub(crate) fn validate_request<'a>(
                         "journal acceptance timestamp invalid",
                     ));
                 }
-                verify_execution_fence(
+                let owner_epoch = verify_execution_fence(
                     command,
                     &claims,
                     node_id,
@@ -107,7 +108,7 @@ pub(crate) fn validate_request<'a>(
                     now_seconds,
                     now.subsec_nanos(),
                 )?;
-                ValidatedRequest::Execute(command, claims, accepted)
+                ValidatedRequest::Execute(command, claims, accepted, owner_epoch)
             }
             (PrivilegedRequestMode::Reconcile, CommandDeliveryMode::ReconcileOnly) => {
                 if effect_binding(command, &claims).is_none() {
@@ -161,7 +162,7 @@ pub(crate) fn validate_request<'a>(
                 )
                 .map_err(|failure| authorization_error(&failure))?;
             validate_artifact_claims(&claims)?;
-            verify_artifact_fence(
+            let owner_epoch = verify_artifact_fence(
                 value.connection_fence.as_deref(),
                 value.fence_binding.as_deref(),
                 &claims.artifact_id,
@@ -174,7 +175,7 @@ pub(crate) fn validate_request<'a>(
             if value.offset > claims.max_bytes {
                 return Err(error(ErrorKind::InvalidRequest, "artifact offset invalid"));
             }
-            ValidatedRequest::ArtifactRead(claims, value.offset)
+            ValidatedRequest::ArtifactRead(claims, value.offset, owner_epoch)
         } else if let Some(privd_request::Operation::ArtifactConsume(value)) =
             request.operation.as_ref()
         {
@@ -210,7 +211,7 @@ pub(crate) fn validate_request<'a>(
             }
             .map_err(|failure| authorization_error(&failure))?;
             validate_artifact_claims(&claims)?;
-            verify_artifact_fence(
+            let owner_epoch = verify_artifact_fence(
                 value.connection_fence.as_deref(),
                 value.fence_binding.as_deref(),
                 &claims.grant_id,
@@ -231,6 +232,7 @@ pub(crate) fn validate_request<'a>(
                 value.sha256.clone(),
                 value.size,
                 value.confirm_only,
+                owner_epoch,
             )
         } else if !matches!(
             request.operation,
@@ -287,11 +289,6 @@ fn authorization_error(failure: &AuthorizationError) -> PrivdError {
 /// The Agent's own owner-term checks do not survive an Agent compromise, so
 /// root re-verifies the Controller-signed connection fence and its command
 /// binding at its own clock before any new effect.
-///
-/// ponytail: stale authority is bounded by the signed owner lease
-/// (`OCSERV_OWNER_LEASE_TTL`, 30s by default); privd keeps no durable
-/// owner-epoch/revision floor. Add one to the root effect store if a newer
-/// accepted term must revoke an unexpired lease immediately.
 fn verify_execution_fence(
     command: &CommandEnvelope,
     claims: &CommandAuthorizationV1,
@@ -300,7 +297,7 @@ fn verify_execution_fence(
     command_keys: &ControllerCommandKeyring,
     now_seconds: i64,
     now_nanos: u32,
-) -> Result<(), PrivdError> {
+) -> Result<u64, PrivdError> {
     let (fence, binding) = verify_fence_carriers(
         command.connection_fence.as_ref(),
         command.fence_binding.as_ref(),
@@ -322,7 +319,7 @@ fn verify_execution_fence(
             "connection fence does not authorize this command",
         ));
     }
-    Ok(())
+    Ok(fence.owner_epoch)
 }
 
 /// Verifies the signed owner term and binding carriers against privd's own
@@ -360,11 +357,10 @@ fn verify_fence_carriers(
 /// Artifact reads and consumption are not commands, so the Agent's owner-term
 /// check is re-proven here from the same Controller-signed artifact binding the
 /// Agent verified: fetch binds the artifact ID, consumption binds the grant ID.
-/// ponytail: like `Execute`, an old binding stays usable until its signed owner
-/// lease ends; privd keeps no owner-epoch floor. Each read re-checks the one
-/// dispatch fence, which suffices only while a P12 fits one 256 KiB chunk (the
-/// 256 KiB chain cap with an RSA-4096 key yields ~192 KiB). If artifacts can
-/// span chunks, the Controller must refresh the fence during the transfer.
+/// Each read re-checks the one dispatch fence, which suffices only while a P12
+/// fits one 256 KiB chunk (the 256 KiB chain cap with an RSA-4096 key yields
+/// ~192 KiB). If artifacts can span chunks, the Controller must refresh the
+/// fence during the transfer.
 #[allow(clippy::too_many_arguments)]
 fn verify_artifact_fence(
     fence: Option<&ConnectionFenceV2>,
@@ -375,7 +371,7 @@ fn verify_artifact_fence(
     command_keys: &ControllerCommandKeyring,
     now_seconds: i64,
     now_nanos: u32,
-) -> Result<(), PrivdError> {
+) -> Result<u64, PrivdError> {
     let (fence, binding) = verify_fence_carriers(
         fence,
         binding,
@@ -396,7 +392,7 @@ fn verify_artifact_fence(
             "connection fence does not authorize this artifact operation",
         ));
     }
-    Ok(())
+    Ok(fence.owner_epoch)
 }
 
 #[allow(clippy::too_many_lines)]

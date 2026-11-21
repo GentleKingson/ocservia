@@ -15,6 +15,15 @@ use super::*;
 const TEST_COMMAND_ID: [u8; 16] = [1, 2, 3, 4, 5, 6, 0x70, 8, 0x80, 10, 11, 12, 13, 14, 15, 16];
 const TEST_IDEMPOTENCY_KEY: [u8; 16] = [16, 15, 14, 13, 12, 11, 0x70, 9, 0x80, 7, 6, 5, 4, 3, 2, 1];
 const TEST_PAYLOAD_HASH: [u8; 32] = [9; 32];
+const TEST_ENDPOINT_ID: [u8; 32] = [7; 32];
+
+fn test_owner_fence(node_id: &[u8; 16], owner_epoch: u64) -> OwnerFenceIdentity<'_> {
+    OwnerFenceIdentity {
+        node_id,
+        endpoint_id: &TEST_ENDPOINT_ID,
+        owner_epoch,
+    }
+}
 
 pub(super) fn test_effect() -> EffectIdentity<'static> {
     EffectIdentity {
@@ -1047,7 +1056,9 @@ fn authorized_effect_store_prunes_only_authenticated_expired_successes() {
         retry_if_absent: false,
     };
     assert_eq!(
-        store.prepare_authorized(auth(0)).expect("p0"),
+        store
+            .prepare_authorized(auth(0), test_owner_fence(&node_id, 1))
+            .expect("p0"),
         AuthorizedEffectDecision::Execute
     );
     store.complete_authorized(auth(0), b"result").expect("c0");
@@ -1074,7 +1085,7 @@ fn authorized_effect_store_prunes_only_authenticated_expired_successes() {
         ..auth(0)
     };
     assert!(matches!(
-        store.prepare_authorized(expired_id),
+        store.prepare_authorized(expired_id, test_owner_fence(&node_id, 1)),
         Err(AdapterError::InvalidRequest)
     ));
     assert_eq!(
@@ -1082,7 +1093,9 @@ fn authorized_effect_store_prunes_only_authenticated_expired_successes() {
         Some(b"result".to_vec())
     );
     assert_eq!(
-        store.prepare_authorized(auth(1)).expect("p1"),
+        store
+            .prepare_authorized(auth(1), test_owner_fence(&node_id, 1))
+            .expect("p1"),
         AuthorizedEffectDecision::Execute
     );
     assert!(
@@ -1877,6 +1890,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
             max_bytes,
             grant_id: grant.as_bytes(),
             expires_at_unix_seconds: exp,
+            owner_fence: test_owner_fence(&TEST_COMMAND_ID, 1),
         }
     }
 
@@ -2188,6 +2202,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
     let rec_lease = ArtifactLeaseIdentity {
         grant_id: rec_grant.as_bytes(),
         expires_at_unix_seconds: effect_now().expect("now") + 300,
+        owner_fence: test_owner_fence(&TEST_COMMAND_ID, 2),
         ..lease
     };
     assert!(
@@ -2205,6 +2220,30 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         .artifact_consume(rec_lease, &int_res.artifact_sha256, int_res.artifact_size)
         .await
         .expect("idempotent");
+    let stale_lease = ArtifactLeaseIdentity {
+        owner_fence: test_owner_fence(&TEST_COMMAND_ID, 1),
+        ..rec_lease
+    };
+    assert!(matches!(
+        restarted.artifact_read(stale_lease, 0).await,
+        Err(AdapterError::StaleOwnerEpoch)
+    ));
+    assert!(matches!(
+        restarted
+            .artifact_consume(stale_lease, &int_res.artifact_sha256, int_res.artifact_size)
+            .await,
+        Err(AdapterError::StaleOwnerEpoch)
+    ));
+    assert!(matches!(
+        restarted
+            .artifact_confirm_consumed(
+                stale_lease,
+                &int_res.artifact_sha256,
+                int_res.artifact_size,
+            )
+            .await,
+        Err(AdapterError::StaleOwnerEpoch)
+    ));
     let elapsed = effect_now().expect("now") - 1;
     drop(expire_artifact_grant(&resources, &int_art, elapsed));
     let expired_lease = ArtifactLeaseIdentity {
@@ -2278,15 +2317,18 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         .expect("leased");
     let rev_grant = Uuid::now_v7();
     let rev_subj = Uuid::now_v7().to_string();
-    let rev_lease = lease_for(
-        &cert_id,
-        &leased_art,
-        &leased_op,
-        &rev_subj,
-        leased_res.artifact_size,
-        &rev_grant,
-        effect_now().expect("now") + 300,
-    );
+    let rev_lease = ArtifactLeaseIdentity {
+        owner_fence: rec_lease.owner_fence,
+        ..lease_for(
+            &cert_id,
+            &leased_art,
+            &leased_op,
+            &rev_subj,
+            leased_res.artifact_size,
+            &rev_grant,
+            effect_now().expect("now") + 300,
+        )
+    };
     adapter
         .artifact_read(rev_lease, 0)
         .await
@@ -2415,7 +2457,7 @@ fn effect_store_concurrent_writers_zero_busy() {
                     retry_if_absent: false,
                 };
                 let decision = store
-                    .prepare_authorized(identity)
+                    .prepare_authorized(identity, test_owner_fence(node_id.as_bytes(), 1))
                     .expect("prepare_authorized must wait on busy_timeout without SQLITE_BUSY");
                 assert!(matches!(decision, AuthorizedEffectDecision::Execute));
                 let response = format!("ok-{worker}-{step}");
