@@ -129,4 +129,13 @@ if run_qualify "$head_sha" "$head_sha" '[{"workflow_runs":[]}]'; then
   exit 1
 fi
 
+# Pre-workspace phases (e.g. signer_prepare, integrated_entry) must not require workspace ID.
+env -u OCSERVIA_BUSINESS_TEST_WORKSPACE_ID \
+  OCSERVIA_BUSINESS_TEST_WORK_DIR="$work" ARTIFACT_DIR="$work" \
+  PYTHONPATH="$ROOT/scripts" python3 -c '
+import release_business_runtime as rt
+env = rt.environment()
+assert env.work.is_dir() and env.evidence.is_dir()
+'
+
 echo 'Release package supply-chain guards passed'
