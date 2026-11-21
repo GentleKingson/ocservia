@@ -76,18 +76,22 @@ jq -e --arg dir "${OCSERV_SECRET_DIR}" '
   all(.services[].environment // {} | keys[]; endswith("_PASSWORD") | not)
 ' "${work}/mode-1.json" >/dev/null
 
-# Exact RC image tags must survive both the input and rendered Compose checks.
-OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_GATEWAY_IMAGE=example.invalid/gateway:v1.2.0-rc.1 \
+# Version tags must fail before Compose can resolve mutable registry state.
+if OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_GATEWAY_IMAGE=example.invalid/gateway:v1.2.0-rc.1 \
   OCSERV_CONTROL_IMAGE=example.invalid/control:v1.2.0-rc.1 \
-  "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/rc-compose.json"
-jq -e '.services.gateway.image == "example.invalid/gateway:v1.2.0-rc.1" and
-  .services["control-plane"].image == "example.invalid/control:v1.2.0-rc.1"' "${work}/rc-compose.json" >/dev/null
+  "${ROOT}/deploy/production/compose.sh" config --quiet >"${work}/tagged-image.log" 2>&1; then
+  echo "version-tagged image accepted" >&2; exit 1
+fi
 # The standalone Relay has its own owner-only credential, unlike the
 # Controller/transportd credential shared through their private group.
 mkdir -m 700 "${work}/standalone-relay-secrets"
 cp "${OCSERV_SECRET_DIR}/tls.crt" "${OCSERV_SECRET_DIR}/tls.key" "${work}/standalone-relay-secrets/"
 "${owner[@]}" install -o 65532 -g 65532 -m 400 "${OCSERV_SECRET_DIR}/relay-access-token" "${work}/standalone-relay-secrets/relay-access-token"
-OCSERV_RELAY_IMAGE=example.invalid/relay:v1.2.0-rc.1 OCSERV_RELAY_SECRET_DIR="${work}/standalone-relay-secrets" \
+if OCSERV_RELAY_IMAGE=example.invalid/relay:v1.2.0-rc.1 OCSERV_RELAY_SECRET_DIR="${work}/standalone-relay-secrets" \
+  "${ROOT}/deploy/production/relay/compose.sh" config --quiet >"${work}/tagged-relay.log" 2>&1; then
+  echo "version-tagged Relay image accepted" >&2; exit 1
+fi
+OCSERV_RELAY_IMAGE="${image}" OCSERV_RELAY_SECRET_DIR="${work}/standalone-relay-secrets" \
   "${ROOT}/deploy/production/relay/compose.sh" config --quiet
 for invalid in v1.2.0-rc.0 v1.2.0-rc.01 v1.2.0-beta.1 v1.2.0-rc.1+build; do
   if OCSERV_CONTROL_IMAGE="example.invalid/control:${invalid}" \
@@ -163,10 +167,11 @@ for name in tls.crt tls.key; do
   cp "${OCSERV_SECRET_DIR}/${name}" "${OCSERV_RELAY_SECRET_DIR}/${name}"
 done
 "${owner[@]}" install -o 65532 -g 65532 -m 400 "${OCSERV_SECRET_DIR}/relay-access-token" "${OCSERV_RELAY_SECRET_DIR}/relay-access-token"
-OCSERV_RELAY_IMAGE=ghcr.io/gentlekingson/ocservia/relay:v0.2.0 "${ROOT}/deploy/production/relay/compose.sh" config --quiet
+OCSERV_RELAY_IMAGE="${image}" "${ROOT}/deploy/production/relay/compose.sh" config --quiet
+expect_failure env OCSERV_RELAY_IMAGE=ghcr.io/gentlekingson/ocservia/relay:v0.2.0 "${ROOT}/deploy/production/relay/compose.sh" config --quiet
 expect_failure env OCSERV_RELAY_IMAGE=relay:latest "${ROOT}/deploy/production/relay/compose.sh" config --quiet
-# The merged Integrated model also consumes ordinary version tags.
-export OCSERV_EDGE_IMAGE=example.invalid/edge:v0.2.0 OCSERV_RELAY_IMAGE=example.invalid/relay:v0.2.0 OCSERV_SIGNER_IMAGE=example.invalid/signer:v0.2.0
+# The merged Integrated model preserves digest-pinned references.
+export OCSERV_EDGE_IMAGE="${image}" OCSERV_RELAY_IMAGE="${image}" OCSERV_SIGNER_IMAGE="${image}"
 for name in issuer-chain.pem issuer-key.pem tls-cert.pem tls-key.pem api-token tls-ca.pem; do
   cp "${OCSERV_SECRET_DIR}/certificate-signer-token" "${OCSERV_SIGNER_SECRET_DIR}/${name}"
   "${owner[@]}" chown 65532:65532 "${OCSERV_SIGNER_SECRET_DIR}/${name}"
@@ -194,8 +199,7 @@ expect_failure env OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=exte
 expect_failure env OCSERV_RELAY_PUBLIC_HOST=controller.example.com "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_AUTH_TRUSTED_PROXY_CIDRS= "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_CERTIFICATE_SIGNER_URL=https://elsewhere.test/sign "${ROOT}/deploy/production/compose.sh" config --quiet
-OCSERV_SIGNER_IMAGE=example.invalid/signer:v1.2.0-rc.1 \
-  OCSERV_BACKUP_IMAGE=example.invalid/backup:v1.2.0-rc.1 \
+OCSERV_SIGNER_IMAGE="${image}" OCSERV_BACKUP_IMAGE="${image}" \
   "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_SIGNER_IMAGE=signer:latest "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure "${ROOT}/deploy/production/compose.sh" up --build

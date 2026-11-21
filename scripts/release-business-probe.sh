@@ -295,6 +295,7 @@ if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
 fi
 docker run -d --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 args=()
+initial_args=()
 roles=(gateway control transport backup)
 manifest_options=()
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
@@ -305,8 +306,18 @@ for name in "${roles[@]}"; do
   target="${registry_prefix}/${name}:${registry_tag}"
   docker tag "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}" "${target}"
   docker push "${target}"
-  args+=(--image "${name}=${target}")
-  export "OCSERV_${name^^}_IMAGE=${target}"
+  ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${target}" |
+    grep "^${registry_prefix}/${name}@sha256:")"
+  args+=(--image "${name}=${ref}")
+  export "OCSERV_${name^^}_IMAGE=${ref}"
+  if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true && "$BUSINESS_PROFILE" == extended ]]; then
+    initial_target="${registry_prefix}/initial-${name}:${registry_tag}"
+    docker tag "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}" "${initial_target}"
+    docker push "${initial_target}"
+    initial_ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${initial_target}" |
+      grep "^${registry_prefix}/initial-${name}@sha256:")"
+    initial_args+=(--image "${name}=${initial_ref}")
+  fi
 done
 export OCSERVIA_BUSINESS_TEST_RELAY_IMAGE="${OCSERV_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}"
 export OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE="${OCSERV_SIGNER_IMAGE:-$OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE}"
@@ -321,15 +332,13 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${mani
   "${manifest_options[@]}" "${args[@]}" --image "postgres=${OCSERV_POSTGRES_IMAGE}" --image "otel=${OCSERV_OTEL_IMAGE}"
 next_stage controller_install
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true && "$BUSINESS_PROFILE" == extended ]]; then
-  # Exercise a real configuration upgrade between two reference forms for
-  # these same built images. This is not historical binary compatibility.
+  # Exercise a real configuration upgrade between two digest-pinned
+  # repositories for the same built images. This is not historical compatibility.
   initial_config="${work}/initial-deployment.json"
-  cp "$manifest" "$initial_config"
-  for name in "${roles[@]}"; do
-    ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${registry_prefix}/$name:$registry_tag" | grep "^${registry_prefix}/$name@sha256:")"
-    jq --arg name "$name" --arg ref "$ref" '.images[$name] = $ref' "$initial_config" >"${work}/initial-next.json"
-    mv "${work}/initial-next.json" "$initial_config"
-  done
+  node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${initial_config}" \
+    --release-version "${VERSION}" --release-tag "v${VERSION}" --source-commit "${SOURCE_COMMIT}" \
+    --migration-dir "${ROOT}/control-plane/migrations" --platform "linux/${CONTROLLER_ARCH}" \
+    "${manifest_options[@]}" "${initial_args[@]}" --image "postgres=${OCSERV_POSTGRES_IMAGE}" --image "otel=${OCSERV_OTEL_IMAGE}"
   "${ROOT}/deploy/production/controller.sh" install --release-file "$initial_config"
   python3 "$ROOT/scripts/release-integrated-acceptance.py" rejected_upgrade
   "${ROOT}/deploy/production/controller.sh" upgrade --release-file "$manifest"

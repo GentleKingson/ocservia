@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -16,6 +17,15 @@ from urllib.request import Request, urlopen
 ROLES = ('gateway', 'control', 'transport', 'backup', 'edge', 'relay', 'signer')
 ARCHES = ('amd64', 'arm64')
 PREFIX = 'ghcr.io/gentlekingson/ocservia'
+ROOT = Path(__file__).resolve().parent.parent
+GENERATOR = ROOT / 'scripts/generate-controller-release-manifest.mjs'
+MIGRATIONS = ROOT / 'control-plane/migrations'
+PINNED_IMAGES = {
+    'postgres': 'docker.io/library/postgres@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af',
+    'otel': 'docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23',
+}
+MANIFEST_ASSETS = ('controller-release.json', 'controller-release-amd64.json',
+                   'controller-release-arm64.json')
 ACCEPT = ', '.join(('application/vnd.oci.image.index.v1+json',
                     'application/vnd.docker.distribution.manifest.list.v2+json',
                     'application/vnd.oci.image.manifest.v1+json',
@@ -43,10 +53,12 @@ def api(path, *args):
     return json.loads(command('gh', 'api', path, *args))
 
 
-def asset_files(version, directory):
+def asset_files(version, directory, include_manifests=True):
     names = {'install-controller', 'install-node', 'install.env.example',
-             f'controller-runtime-v{version}.tar.gz', f'controller-runtime-v{version}.tar.gz.sha256', 'controller-bootstrap.sh', 'managed-node-bootstrap.sh',
-             'controller-release.json', 'controller-release-amd64.json', 'controller-release-arm64.json'}
+             f'controller-runtime-v{version}.tar.gz', f'controller-runtime-v{version}.tar.gz.sha256',
+             'controller-bootstrap.sh', 'managed-node-bootstrap.sh'}
+    if include_manifests:
+        names.update(MANIFEST_ASSETS)
     for arch, rpm_arch in (('amd64', 'x86_64'), ('arm64', 'aarch64')):
         archive = f'ocservia-agent-{version}-linux-{arch}.tar.gz'
         names.update((archive, archive + '.sha256', f'ocservia-agent_{version}-1_{arch}.deb',
@@ -168,15 +180,45 @@ def verify_images(expected):
         require(current is not None and current[0] == expected_digest, f'Published image changed: {name}:{tag}')
 
 
-def finish(repo, version, sha, files, images):
+def generate_release_manifests(version, sha, directory, image_digests):
+    require(set(image_digests) == set(ROLES), 'Missing verified release image digest')
+    image_args = []
+    expected_images = {}
+    for name in ROLES:
+        digest_value = image_digests[name]
+        require(re.fullmatch(r'sha256:[0-9a-f]{64}', digest_value) is not None,
+                f'Invalid verified release image digest: {name}')
+        expected_images[name] = f'{PREFIX}/{name}@{digest_value}'
+        image_args.extend(('--image', f'{name}={expected_images[name]}'))
+    for name, reference in PINNED_IMAGES.items():
+        expected_images[name] = reference
+        image_args.extend(('--image', f'{name}={reference}'))
+    for arch in ARCHES:
+        output = directory / f'controller-release-{arch}.json'
+        require(not output.exists(), f'Release manifest already exists: {output.name}')
+        command('node', str(GENERATOR), '--output', str(output), '--manifest-version', '2',
+                '--release-version', version, '--release-tag', 'v' + version,
+                '--source-commit', sha, '--platform', f'linux/{arch}',
+                '--migration-dir', str(MIGRATIONS), *image_args)
+        generated = json.loads(output.read_text())
+        require(generated.get('platform') == f'linux/{arch}'
+                and generated.get('images') == expected_images,
+                f'Generated release manifest does not bind verified digests: {arch}')
+    require(not (directory / 'controller-release.json').exists(),
+            'Release manifest already exists: controller-release.json')
+    shutil.copyfile(directory / 'controller-release-amd64.json',
+                    directory / 'controller-release.json')
+
+
+def finish(repo, version, sha, assets, images):
     tag = 'v' + version
     prerelease = '-rc.' in version
+    asset_files(version, assets, include_manifests=False)
     release_id = draft(repo, tag, sha, prerelease)
-    command('gh', 'release', 'upload', tag, *(str(path) for path in files))
-    verify_assets(repo, release_id, files)
     command('docker', 'login', 'ghcr.io', '-u', os.environ['GITHUB_ACTOR'], '--password-stdin',
             input=os.environ['GH_TOKEN'])
     expected = {}
+    image_digests = {}
     for name in ROLES:
         children = {}
         for arch in ARCHES:
@@ -196,15 +238,22 @@ def finish(repo, version, sha, files, images):
         command('docker', 'buildx', 'imagetools', 'create', '--tag', f'{PREFIX}/{name}:{tag}',
                 *(f'{PREFIX}/{name}@{children[arch]}' for arch in ARCHES))
         index = manifest(name, tag)
-        descriptors = index[1].get('manifests', []) if index else []
+        require(index is not None, f'Missing multi-arch index: {name}')
+        descriptors = index[1].get('manifests', [])
         require(len(descriptors) == 2 and
                 {(d['platform']['os'], d['platform']['architecture'], d['digest']) for d in descriptors}
                 == {('linux', arch, children[arch]) for arch in ARCHES}, f'Invalid multi-arch index: {name}')
         expected[name, tag] = index[0]
-    # Recheck all boundaries immediately before making the Release public.
+        image_digests[name] = index[0]
+    # Bind release assets only after the complete published index set is stable.
     verify_images(expected)
+    generate_release_manifests(version, sha, assets, image_digests)
+    files = asset_files(version, assets)
+    command('gh', 'release', 'upload', tag, *(str(path) for path in files))
+    verify_assets(repo, release_id, files)
     require(draft(repo, tag, sha, prerelease) == release_id, 'Draft identity changed')
     verify_assets(repo, release_id, files)
+    verify_images(expected)
     require(api(f'repos/{repo}/commits/refs/tags/{tag}')['sha'] == sha, 'Release tag moved during publication')
     command('gh', 'api', f'repos/{repo}/releases/{release_id}', '--method', 'PATCH',
             '-F', 'draft=false', '-f', f'make_latest={"false" if prerelease else "true"}')
@@ -229,14 +278,15 @@ def main():
         print(previous_rc(os.environ['GH_REPO'], version))
         return
     root = Path(os.environ['RUNNER_TEMP'])
-    files = asset_files(version, root / 'assets')
     if phase == 'check-assets':
+        asset_files(version, root / 'assets', include_manifests=False)
         return
     repo = os.environ['GH_REPO']
     if phase == 'preflight':
+        asset_files(version, root / 'assets', include_manifests=False)
         preflight(repo, 'v' + version, root / 'images')
     elif phase == 'finish':
-        finish(repo, version, os.environ['GITHUB_SHA'], files, root / 'images')
+        finish(repo, version, os.environ['GITHUB_SHA'], root / 'assets', root / 'images')
     else:
         raise RuntimeError('Unknown publication phase')
 

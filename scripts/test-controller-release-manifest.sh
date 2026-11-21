@@ -93,8 +93,7 @@ version_image_args=("${image_args[@]}")
 for ((index = 1; index < ${#version_image_args[@]}; index += 2)); do
   version_image_args[index]="${version_image_args[index]/@${digest}/:v0.2.0}"
 done
-node "${GENERATOR}" --output "${fixture}/version-images.json" "${common_args[@]}" "${version_image_args[@]}"
-jq -e 'all(.images[]; endswith(":v0.2.0"))' "${fixture}/version-images.json" >/dev/null
+assert_rejected version-images "${common_args[@]}" "${version_image_args[@]}"
 
 mutable_image_args=("${image_args[@]}")
 mutable_image_args[1]="gateway=ghcr.io/gentlekingson/ocservia/gateway:latest"
@@ -115,17 +114,13 @@ assert_rejected release-tag "${bad_tag_args[@]}" "${image_args[@]}"
 rc_args=("${common_args[@]}")
 rc_args[1]=0.2.0-rc.1
 rc_args[3]=v0.2.0-rc.1
-rc_images=("${version_image_args[@]}")
-for ((index = 1; index < ${#rc_images[@]}; index += 2)); do
-  rc_images[index]="${rc_images[index]}-rc.1"
-done
-node "${GENERATOR}" --output "${fixture}/rc.json" "${rc_args[@]}" "${rc_images[@]}"
+node "${GENERATOR}" --output "${fixture}/rc.json" "${rc_args[@]}" "${image_args[@]}"
 jq -e '.release_version == "0.2.0-rc.1" and .release_tag == "v0.2.0-rc.1" and
-  all(.images[]; endswith(":v0.2.0-rc.1"))' "${fixture}/rc.json" >/dev/null
+  all(.images[]; test("@sha256:[0-9a-f]{64}$"))' "${fixture}/rc.json" >/dev/null
 for invalid in 0.2.0-rc.0 0.2.0-rc.01 0.2.0-rc1 0.2.0-beta.1 0.2.0+build 0.2.0-rc.1+build; do
   rc_args[1]="${invalid}"
   rc_args[3]="v${invalid}"
-  assert_rejected "${invalid}" "${rc_args[@]}" "${rc_images[@]}"
+  assert_rejected "${invalid}" "${rc_args[@]}" "${image_args[@]}"
 done
 
 echo "Controller deployment configuration tests passed"

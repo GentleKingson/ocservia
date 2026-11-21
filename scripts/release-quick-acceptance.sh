@@ -62,29 +62,35 @@ test -s "${IMAGES_DIR}/product-identity.json"
 stage=publish
 docker run -d --restart unless-stopped --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 manifest_args=(--image "postgres=${POSTGRES_IMAGE}" --image "otel=${OTEL_IMAGE}")
+upgrade_args=(--image "postgres=${POSTGRES_IMAGE}" --image "otel=${OTEL_IMAGE}")
 roles=(gateway control transport backup edge relay signer)
 for name in "${roles[@]}"; do
+  source="ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}"
   docker load -i "${IMAGES_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
-  [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}")" == "linux/${CONTROLLER_ARCH}" ]]
-  docker tag "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}" "localhost:5000/${name}:v${VERSION}"
+  [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${source}")" == "linux/${CONTROLLER_ARCH}" ]]
+  docker tag "${source}" "localhost:5000/${name}:v${VERSION}"
   docker push "localhost:5000/${name}:v${VERSION}"
-  manifest_args+=(--image "${name}=localhost:5000/${name}:v${VERSION}")
+  ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "localhost:5000/${name}:v${VERSION}" |
+    grep "^localhost:5000/${name}@sha256:")"
+  manifest_args+=(--image "${name}=${ref}")
+  docker tag "${source}" "localhost:5000/upgrade-${name}:v${VERSION}"
+  docker push "localhost:5000/upgrade-${name}:v${VERSION}"
+  upgrade_ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "localhost:5000/upgrade-${name}:v${VERSION}" |
+    grep "^localhost:5000/upgrade-${name}@sha256:")"
+  upgrade_args+=(--image "${name}=${upgrade_ref}")
 done
 manifest="${work}/controller-release-${CONTROLLER_ARCH}.json"
 node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${manifest}" \
   --release-version "${VERSION}" --release-tag "v${VERSION}" --source-commit "${SOURCE_COMMIT}" \
   --migration-dir "${ROOT}/control-plane/migrations" --platform "linux/${CONTROLLER_ARCH}" \
   --manifest-version 2 "${manifest_args[@]}"
-# The upgrade target names the same images by digest, a real configuration
-# change between two reference forms (as in the Business probe).
+# The upgrade target names the same images through a second digest-pinned
+# repository, preserving a real configuration transition without mutable tags.
 upgrade_manifest="${work}/controller-release-digests.json"
-cp -- "${manifest}" "${upgrade_manifest}"
-for name in "${roles[@]}"; do
-  ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "localhost:5000/${name}:v${VERSION}" |
-    grep "^localhost:5000/${name}@sha256:")"
-  jq --arg name "${name}" --arg ref "${ref}" '.images[$name] = $ref' "${upgrade_manifest}" >"${work}/next.json"
-  mv -- "${work}/next.json" "${upgrade_manifest}"
-done
+node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${upgrade_manifest}" \
+  --release-version "${VERSION}" --release-tag "v${VERSION}" --source-commit "${SOURCE_COMMIT}" \
+  --migration-dir "${ROOT}/control-plane/migrations" --platform "linux/${CONTROLLER_ARCH}" \
+  --manifest-version 2 "${upgrade_args[@]}"
 
 stage=pebble
 # Pebble runs on the host network: Controller containers reach its directory

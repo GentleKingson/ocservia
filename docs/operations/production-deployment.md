@@ -853,7 +853,7 @@ support. `install` runs these steps in order:
 4. Runs the guarded Compose preflight.
 5. Atomically records the target and lifecycle phase in `pending-release.json`
    before activation.
-6. Pulls the version-tagged or SHA-256 image references.
+6. Pulls the manifest's SHA-256 image references.
 7. Starts the dependency graph with `up -d --wait`.
 8. Runs `deploy/production/controller-release-smoke.sh`, which checks Compose
    health, probes the public HTTPS `/api/v1/readyz` and `/api/v1/version`
@@ -951,10 +951,10 @@ per-architecture filenames and protected local file rules while adding
 and `signer`), for nine roles in total. Integrated deployments require v2 (see
 [Integrated configuration](#integrated-configuration)), and v2 selects the
 manifest-bound `backup` image reference directly from the manifest
-configuration. Across both schemas, seven first-party GHCR images use explicit
-`vX.Y.Z` tags, while PostgreSQL and OpenTelemetry retain pinned third-party
-references. All nine image references must carry explicit version tags or
-SHA-256 digests.
+configuration. Across both schemas, every first-party GHCR image and the pinned
+PostgreSQL and OpenTelemetry dependencies use SHA-256 digest references. GHCR
+version tags remain publication aliases, but release manifests never depend on
+their mutable resolution.
 
 Manifest validation rejects unknown fields, unrecognized roles or state
 versions, missing required roles, invalid SemVer, platform, or source revisions,
@@ -1648,10 +1648,10 @@ manifest:
 
 - All six core image variables (`OCSERV_GATEWAY_IMAGE`, `OCSERV_CONTROL_IMAGE`,
   `OCSERV_TRANSPORT_IMAGE`, `OCSERV_BACKUP_IMAGE`, `OCSERV_POSTGRES_IMAGE`, and
-  `OCSERV_OTEL_IMAGE`) must be exported as version-tagged (`:vX.Y.Z` or
-  `:vX.Y.Z-rc.N`) or `@sha256:` references taken from the release manifest in
-  use. The same applies to `OCSERV_EDGE_IMAGE`, `OCSERV_RELAY_IMAGE`, and
-  `OCSERV_SIGNER_IMAGE` for Integrated. Never substitute an unreviewed tag.
+  `OCSERV_OTEL_IMAGE`) must be exported as `@sha256:` references taken from the
+  release manifest in use. The same applies to `OCSERV_EDGE_IMAGE`,
+  `OCSERV_RELAY_IMAGE`, and `OCSERV_SIGNER_IMAGE` for Integrated. Version tags,
+  including the release's readable alias, are rejected by production launchers.
 - Both the protected secret directory and the backup directory must satisfy
   their ownership and mode contracts (see [Production secrets](#production-secrets)),
   and all required PKI, Controller EndpointID, and relay settings must be

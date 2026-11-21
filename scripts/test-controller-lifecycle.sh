@@ -180,7 +180,7 @@ expect_failure() {
 rc_release="${fixture}/release/rc.json"
 rc_images=()
 for role in gateway control transport backup postgres otel; do
-  rc_images+=(--image "${role}=registry.test/${role}:v0.2.0-rc.1")
+  rc_images+=(--image "${role}=registry.test/${role}@${digest}")
 done
 node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
   --output "${rc_release}" --release-version 0.2.0-rc.1 --release-tag v0.2.0-rc.1 \
@@ -808,10 +808,7 @@ expect_rejection "${after_unknown_uninstall}" 'usage:' \
 
 version_release="${fixture}/release/version-images.json"
 jq '.images |= with_entries(.value |= sub("@sha256:[0-9a-f]{64}$"; ":v0.2.0"))' "${release_file}" >"${version_release}"
-version_state="${fixture}/version-images"
-mkdir -m 700 "${version_state}"
-run_controller "${version_state}" "${version_release}" env
-cmp -s "${version_release}" "${version_state}/current-release.json"
+expect_failure "${fixture}/version-images" "${version_release}" 'release manifest is invalid' false env
 
 integrated_release="${fixture}/release/integrated.json"
 jq --arg ref "registry.test/image@${digest}" '.manifest_version = 2 | .signer_state_version = 1 |
