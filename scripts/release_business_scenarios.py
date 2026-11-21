@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release Check business smoke and shared cross-VM acceptance scenarios."""
+"""Release Check business smoke acceptance scenarios."""
 import base64
 import hashlib
 import http.client
@@ -439,19 +439,81 @@ def agent_stack_recovery():
     record('resilience_agent')
 
 
-def smoke_relay_recovery(ping):
+def native_service_pids():
+    pids = {}
+    for service in ('ocserv', 'ocservia-agent', 'ocservia-privd'):
+        pid = int(run('systemctl', 'show', service, '-p', 'MainPID', '--value').strip())
+        assert pid > 0, f'{service} MainPID must be positive'
+        pids[service] = pid
+    return pids
+
+
+def smoke_relay_recovery(ping, outage_settle_seconds=10):
     single_relay_argv()
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
+    prefix = 'nodes/' + node
     before = owner()
+    identity = identity_digest()
+    pids = native_service_pids()
+    effects = node_side_effects()
     relay = os.environ['OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER']
+    body = {'reason': 'Relay outage offline queue recovery', 'ttl_seconds': 300}
+    key = secrets.token_hex(16)
+    operation = None
+    headers = None
     try:
         run('docker', 'stop', relay)
-        wait_for_relay_outage(os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])
+        wait_for_relay_outage(node)
+        wait_for('node offline during Relay outage', lambda: api(prefix)['connection_state'] == 'offline')
+        for _ in range(3):
+            headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(prefix)["version"]}"'}
+            candidate = api(prefix + '/service:reload', body, headers=headers, status=(202, 409))
+            if 'id' in candidate:
+                operation = candidate
+                break
+            assert candidate['type'] == 'https://ocservia.dev/problems/stale-revision'
+        assert operation is not None and 'id' in operation
+        if outage_settle_seconds > 0:
+            time.sleep(outage_settle_seconds)
+        command = operation['command_id']
+        assert api('operations/' + operation['id'])['state'] == 'queued'
+        assert sql(f"SELECT count(*) FROM outbox_events WHERE command_id='{command}' AND published_at IS NULL;") == '1'
+        assert sql(f"SELECT count(*) FROM command_attempts WHERE command_id='{command}' AND state='sent';") == '0'
+        assert node_side_effects() == effects
+        assert ping(), 'existing VPN session dropped during Relay outage'
+        assert identity_digest() == identity
+        assert native_service_pids() == pids
     finally:
         run('docker', 'start', relay)
-    wait_for('fresh Agent session after Relay recovery', lambda: fresh_owner(before))
-    authorized_reload('Relay reconnect business')
+    after = wait_for('fresh Agent session after Relay recovery', lambda: fresh_owner(before), seconds=90)
+    settled = wait_for('queued operation after Relay recovery', lambda: completed(operation))
+    command = settled['command_id']
+    snapshot = cross_check(settled)
+    assert snapshot['database_state'] == 'succeeded'
+    assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
+    assert snapshot['root_count_state_response'] == '1|applied|1'
+    assert sql(f"SELECT count(*) FROM outbox_events WHERE command_id='{command}' AND published_at IS NOT NULL;") == '1'
+    assert int(sql(f"SELECT count(*) FROM command_attempts WHERE command_id='{command}' AND state='sent';")) >= 1
+    assert sql(f"SELECT count(*) FROM audit_events WHERE command_id='{command}';") != '0'
+    wait_for('native reload after Relay recovery', lambda: node_side_effects()['reloads'] == effects['reloads'] + 1, seconds=15)
+    after_effects = node_side_effects()
+    assert after_effects['journal'] == effects['journal'] + 1
+    assert after_effects['privd'] == effects['privd'] + 1
+    assert after_effects['reloads'] == effects['reloads'] + 1
+    assert after_effects['files'] == effects['files']
+    replay = api(prefix + '/service:reload', body, headers=headers, status=202)
+    assert replay['id'] == settled['id'] and replay['command_id'] == command
+    assert node_side_effects() == after_effects
+    assert identity_digest() == identity
+    assert native_service_pids() == pids
     wait_for('VPN after Relay recovery', ping, 40)
-    record('resilience_relay')
+    record('resilience_relay',
+           operation_id=settled['id'],
+           command_id=command,
+           before_epoch=before['owner_epoch'],
+           after_epoch=after['owner_epoch'],
+           offline_queued_zero_side_effects=True,
+           idempotent_replay=True)
 
 
 def resilience():

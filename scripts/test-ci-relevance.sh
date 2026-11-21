@@ -51,7 +51,7 @@ for path in unknown-top/probe.txt proto/buf.yaml openapi/openapi.yaml toolchains
   for flag in "${flags[@]}"; do
     assert_flag "${path}" "${flag}" true
   done
-  assert_eq "${path} ci_suites" "guards release cross-vm source-style contracts" "${ci_suites[*]}"
+  assert_eq "${path} ci_suites" "guards release source-style contracts" "${ci_suites[*]}"
   assert_eq "${path} controller_cache_images" "gateway control transport backup edge relay signer" "${controller_cache_images[*]}"
 done
 
@@ -103,8 +103,9 @@ assert_eq "ci.yml ci_suites" guards "${ci_suites[*]}"
 assert_flag ci.yml run_go false
 
 reset_state
-classify_path .github/actions/real-e2e-step/action.yml
-assert_eq "real-e2e action ci_suites" cross-vm "${ci_suites[*]}"
+classify_path scripts/release_business_scenarios.py
+assert_eq "release business scenarios ci_suites" "release source-style" "${ci_suites[*]}"
+assert_flag "release business scenarios" run_installers true
 
 # 4. End-to-end CLI checks (workflow_dispatch and fail-closed git error handling).
 out_file="$(mktemp)"

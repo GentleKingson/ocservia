@@ -46,7 +46,7 @@ fail_closed() {
   local flag
   reason="$1"
   for flag in "${flags[@]}"; do printf -v "${flag}" true; done
-  for flag in guards release cross-vm source-style contracts; do tools_suite "${flag}"; done
+  for flag in guards release source-style contracts; do tools_suite "${flag}"; done
   select_controller_images "${controller_images[@]}"
 }
 
@@ -63,7 +63,7 @@ classify_path() {
 
     # CI tooling, guards, contracts and style runners.
     scripts/ci-tools-check.sh)
-      for suite in guards release cross-vm source-style contracts; do tools_suite "${suite}"; done ;;
+      for suite in guards release source-style contracts; do tools_suite "${suite}"; done ;;
     scripts/ci-go-cache-key.sh) run_go=true; tools_suite guards ;;
     .github/workflows/ci.yml|.github/workflows/security.yml|\
     .tool-versions|.nvmrc|.node-version|Makefile|\
@@ -77,12 +77,8 @@ classify_path() {
     scripts/lint.sh) tools_suite source-style; tools_suite contracts ;;
     scripts/format.sh) run_go=true; run_rust=true; run_web=true; tools_suite contracts ;;
 
-    # Cross-VM offline syntax check only; credentialed three-VM run stays manual.
-    .github/workflows/real-e2e.yml|.github/actions/real-e2e-*/*|deploy/real-e2e/*|scripts/real-e2e-*)
-      tools_suite cross-vm ;;
-    # Also imported by real-e2e-business.py.
     scripts/release_business_runtime.py|scripts/release_business_scenarios.py)
-      tools_suite release; tools_suite cross-vm; run_installers=true ;;
+      tools_suite release; run_installers=true ;;
 
     # Release, build-cache, secret-scan and manual acceptance contract suites.
     scripts/build-relay.sh) run_rust=true; tools_suite release ;;

@@ -78,7 +78,7 @@ The installer securely retrieves configuration, installs the package, registers 
 | [Agent lifecycle](docs/operations/agent-lifecycle.md) | Node installation, enrollment, upgrade, rollback, and removal. |
 | [Authentication](docs/operations/authentication.md) | Single Local admin authentication, bootstrap, and session operations. |
 | [Incident recovery](docs/operations/incident-recovery.md) | Database and Signer backup and restore, Unknown command reconciliation, and credential recovery. |
-| [Validation and release](docs/development/release-checks.md) | Checks for each kind of change, CI layers, three-VM acceptance, and the release process. |
+| [Validation and release](docs/development/release-checks.md) | Checks for each kind of change, CI layers, business acceptance, and the release process. |
 
 The frozen wire formats for signed commands are specified in [command authorization v1](docs/development/command-authorization-v1.md), [command semantic hash v1](docs/development/command-semantic-hash-v1.md), and [command semantic hash v2](docs/development/command-semantic-hash-v2.md). HTTP endpoints and fields are defined in [`openapi/openapi.yaml`](openapi/openapi.yaml), and Protobuf messages in [`proto/`](proto/).
 

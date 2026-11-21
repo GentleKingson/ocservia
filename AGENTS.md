@@ -39,7 +39,7 @@
 | 协议 | 确认生成目录无未提交改动后 `make generate` 并审阅差异；干净提交上跑 `make generated-clean`（`buf breaking` 仅约束外部 `agent/v1`，私有 `transport/v1` 已解绑）。[契约与生成](docs/reference/stable-contracts.md#schema-sources-and-generation) |
 
 - **共享资源与收尾**：共享宿主机时节制并发构建与测试数，重任务按需独占运行；收尾前停止本次启动的后台进程，仅删除本次创建的临时文件。
-- **完成与发布门禁**：行为变更须留能检出回归的检查（优先复用现有测试）。最终回复须自包含且不含内部简写，列出关键改动、实际检查与结果及未验证项。PR `Basic CI Result` 与发布 `Release Check` 以候选 SHA 为准，RC 三虚拟机验收证据须与标签 SHA 核对并经人工确认。[发布策略](docs/development/release-checks.md#release-policy)
+- **完成与发布门禁**：行为变更须留能检出回归的检查（优先复用现有测试）。最终回复须自包含且不含内部简写，列出关键改动、实际检查与结果及未验证项。PR `Basic CI Result` 与发布 `Release Check` 以候选 SHA 为准，正式发布须在 `Release Check` 通过后经人工确认打标。[发布策略](docs/development/release-checks.md#release-policy)
 
 ## Code Review Rules
 
