@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
@@ -47,6 +48,9 @@ func (s *Service) CreateSecretRef(ctx context.Context, request SecretRefRequest)
 		if err != nil {
 			return err
 		}
+		if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorID, request.SessionID, request.WorkspaceID); err != nil {
+			return err
+		}
 		if err := store.InsertSecretReference(ctx, v); err != nil {
 			return err
 		}
@@ -67,6 +71,13 @@ func (s *Service) RotateSecretRef(ctx context.Context, id uuid.UUID, request Sec
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.FromTransaction(tx)
 		if err != nil {
+			return err
+		}
+		workspaceID, err := store.SecretReferenceResource(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorID, request.SessionID, workspaceID); err != nil {
 			return err
 		}
 		now := s.now()
