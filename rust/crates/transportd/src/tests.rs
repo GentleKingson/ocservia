@@ -1627,14 +1627,19 @@ async fn router_security_telemetry_stream_stalled_handshake_and_replacement() {
     let agent_key = SecretKey::generate();
     let hs = handshake(&agent_key);
     let service = test_service(8);
-    let router = test_router(
+    let router = build_router_with_direct(
         SecretKey::generate(),
         RelayMode::Disabled,
-        identity_policy(&agent_key, &hs),
+        // The Controller has committed the endpoint, but transportd has
+        // neither a local binding nor an owner fence for its first session.
+        IdentityPolicy::default(),
         test_trust_for_key(&agent_key, &hs, None).await,
         &service,
+        true,
+        Vec::new(),
     )
-    .await;
+    .await
+    .expect("build router without the new endpoint in the startup snapshot");
     let client = Endpoint::builder(presets::Minimal)
         .secret_key(agent_key.clone())
         .relay_mode(RelayMode::Disabled)

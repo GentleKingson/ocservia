@@ -2,10 +2,9 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use super::{
-    AGENT_ALPN, AcceptError, AfterHandshakeOutcome, Arc, Connection, ENROLL_ALPN, EndpointHooks,
+    AGENT_ALPN, AcceptError, AfterHandshakeOutcome, Connection, ENROLL_ALPN, EndpointHooks,
     EndpointId, IdentityPolicy, MAX_AGENT_CONNECTIONS, MAX_ATTEMPTS_PER_MINUTE,
-    MAX_ENROLLMENT_CONNECTIONS, Mutex, TrustAuthority, TrustBudgetSet, TrustClass, VarInt,
-    protocol_error,
+    MAX_ENROLLMENT_CONNECTIONS, Mutex, TrustAuthority, TrustClass, VarInt, protocol_error,
 };
 
 #[derive(Debug)]
@@ -13,7 +12,7 @@ pub(super) struct SecurityHook {
     policy: IdentityPolicy,
     agent_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
     enrollment_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
-    budgets: Arc<TrustBudgetSet>,
+    trust: TrustAuthority,
 }
 
 impl SecurityHook {
@@ -22,7 +21,7 @@ impl SecurityHook {
             policy,
             agent_attempts: Mutex::new(HashMap::new()),
             enrollment_attempts: Mutex::new(HashMap::new()),
-            budgets: Arc::clone(&trust.budgets),
+            trust: trust.clone(),
         }
     }
 }
@@ -91,12 +90,11 @@ impl EndpointHooks for SecurityHook {
         if alpn != ENROLL_ALPN && alpn != AGENT_ALPN {
             return reject(0x100, b"unsupported protocol");
         }
-        if self.policy.revoked(endpoint)
-            || (alpn == AGENT_ALPN && !self.policy.permits(endpoint, alpn))
-        {
+        if self.policy.revoked(endpoint) {
             return reject(0x101, b"endpoint not permitted");
         }
-        let (attempts, identity_capacity) = if alpn == ENROLL_ALPN {
+        let needs_check = alpn == AGENT_ALPN && !self.policy.permits(endpoint, alpn);
+        let (attempts, identity_capacity) = if alpn == ENROLL_ALPN || needs_check {
             (&self.enrollment_attempts, MAX_ENROLLMENT_CONNECTIONS)
         } else {
             (&self.agent_attempts, MAX_AGENT_CONNECTIONS)
@@ -106,12 +104,29 @@ impl EndpointHooks for SecurityHook {
             return reject(0x103, b"connection rate exceeded");
         }
         drop(attempts);
+        // A newly enrolled Agent needs its first session before its owner
+        // fence can authorize a policy update. Check Controller trust under
+        // the low-priority budget, then use the normal session authorization.
+        if needs_check {
+            return match self
+                .trust
+                .check_agent_endpoint(endpoint, TrustClass::UnknownEnrollmentPreAuth)
+                .await
+            {
+                Ok(true) if !self.policy.revoked(endpoint) => AfterHandshakeOutcome::Accept,
+                Ok(_) => reject(0x101, b"endpoint not permitted"),
+                Err(AttemptRejection::Capacity) => {
+                    reject(0x102, b"connection class capacity reached")
+                }
+                Err(AttemptRejection::Rate) => reject(0x103, b"connection class rate exceeded"),
+            };
+        }
         let class = if alpn == ENROLL_ALPN {
             TrustClass::UnknownEnrollmentPreAuth
         } else {
             TrustClass::KnownAgentHandshake
         };
-        let _budget = match self.budgets.acquire(class).await {
+        let _budget = match self.trust.budgets.acquire(class).await {
             Ok(permit) => permit,
             Err(AttemptRejection::Capacity) => {
                 return reject(0x102, b"connection class capacity reached");

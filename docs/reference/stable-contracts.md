@@ -752,10 +752,12 @@ In the normal database-backed lifecycle, `ocservia-transportd` starts with
 IDs are 32-byte lowercase hexadecimal public keys and node IDs are UUIDv7
 values). Under this configuration, the Iroh connection hook admits known Agent
 `EndpointID`s from a bounded authoritative snapshot and keeps the Agent ALPN
-fail-closed until the initial snapshot synchronization completes. Unknown
-enrollment `EndpointID`s are constrained by a dedicated local pre-auth class
-that never triggers a Controller database query before application-layer frame
-validation.
+fail-closed until the initial snapshot synchronization completes. On a snapshot
+miss, an Agent must pass a Controller trust check under the pre-auth budget
+before normal session authorization. This allows the first session after
+enrollment to establish its owner fence. Enrollment connections use the same
+budget for local admission and query the Controller only after application-layer
+frame validation.
 
 Both sides of the trust socket verify peer and filesystem identity. The trust
 client checks the socket file and server UID, and the Controller trust server

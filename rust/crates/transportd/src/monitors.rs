@@ -23,7 +23,7 @@ use crate::fence::{
     validate_uuid,
 };
 use crate::registry::finish_session;
-use crate::trust::{IdentityPolicy, TrustAuthority};
+use crate::trust::{IdentityPolicy, TrustAuthority, TrustClass};
 use crate::{
     MAX_FRAME_BYTES, MAX_HANDSHAKE_BYTES, MAX_STREAMS, PROTOCOL_MAJOR, PROTOCOL_MINOR,
     STREAM_TIMEOUT, Shared,
@@ -215,7 +215,11 @@ impl ProtocolHandler for SessionHandler {
         let metadata = metadata(&session, &connection).await;
         let node_id = metadata.node_id.clone();
         let registration_token = self.shared.registration_token(&node_id).await;
-        match self.trust.recheck_agent(connection.remote_id()).await {
+        match self
+            .trust
+            .check_agent_endpoint(connection.remote_id(), TrustClass::AgentRegistrationRecheck)
+            .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 connection.close(VarInt::from_u32(0x101), b"session trust changed");
