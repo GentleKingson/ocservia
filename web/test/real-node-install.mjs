@@ -181,9 +181,7 @@ async function main() {
         .digest("hex") + "\n",
       { mode: 0o600 },
     );
-    await page
-      .getByRole("button", { name: "Cancel", exact: true })
-      .click();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
     check((await tokenField.count()) === 0 && posts.length === 1);
     const evidence = path.join(
       process.env.RUNNER_TEMP,
