@@ -2,6 +2,9 @@ name: ocservia-relay
 
 services:
   relay:
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     image: ${OCSERV_RELAY_IMAGE:?set OCSERV_RELAY_IMAGE to a digest-pinned image}
     restart: unless-stopped
     read_only: true
