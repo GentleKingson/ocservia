@@ -350,29 +350,33 @@ func PublicKeyID(publicKey []byte) string {
 }
 
 func RequestedSubjectDigest(request *agentv1.CertificateCsr) ([]byte, error) {
-	if request == nil || !validUUIDv7(request.GetCertificateId()) || request.GetCommonName() == "" || len(request.GetCommonName()) > 253 || request.GetKeyBits() < 2048 || request.GetKeyBits() > 8192 || len(request.GetDnsNames()) > 64 {
+	if request == nil || !validUUIDv7(request.GetCertificateId()) || request.GetCommonName() == "" || len(request.GetCommonName()) > 253 || !asciiString(request.GetCommonName()) || request.GetKeyBits() < 2048 || request.GetKeyBits() > 8192 || len(request.GetDnsNames()) > 64 {
 		return nil, errors.New("certificate requested subject is malformed")
 	}
 	names := slices.Clone(request.GetDnsNames())
 	slices.Sort(names)
-	for index := 1; index < len(names); index++ {
-		if names[index] == names[index-1] {
-			return nil, errors.New("certificate requested subject is malformed")
-		}
-	}
 	output := []byte("ocservia/certificate-requested-subject/v1\x00")
 	output = appendBytes(output, request.GetCertificateId())
 	output = appendBytes(output, []byte(request.GetCommonName()))
 	output = appendU32(output, request.GetKeyBits())
 	output = appendU32(output, uint32(len(names)))
 	for _, name := range names {
-		if name == "" || len(name) > 253 || name != strings.ToLower(name) {
+		if name == "" || len(name) > 253 || !asciiString(name) {
 			return nil, errors.New("certificate requested subject is malformed")
 		}
 		output = appendBytes(output, []byte(name))
 	}
 	digest := sha256.Sum256(output)
 	return digest[:], nil
+}
+
+func asciiString(value string) bool {
+	for index := 0; index < len(value); index++ {
+		if value[index] > 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func receiptClaimsMatch(nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult, receipt *agentv1.PrivdResultReceiptV1) bool {

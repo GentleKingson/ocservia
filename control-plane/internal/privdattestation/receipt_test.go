@@ -42,6 +42,23 @@ func TestCanonicalReceiptV1MatchesRustGoldenVector(t *testing.T) {
 	}
 }
 
+func TestRequestedSubjectDigestAcceptsFullDNSSubjectRange(t *testing.T) {
+	longName := string(bytes.Repeat([]byte{'a'}, 63)) + "." + string(bytes.Repeat([]byte{'b'}, 63)) + "." + string(bytes.Repeat([]byte{'c'}, 63)) + "." + string(bytes.Repeat([]byte{'d'}, 61))
+	if len(longName) != 253 {
+		t.Fatalf("long DNS name length = %d", len(longName))
+	}
+	uppercase := "VPN.Example.Test"
+	request := &agentv1.CertificateCsr{
+		CertificateId: mustHex(t, "018f2a3b4c5d70008000000000000001"),
+		CommonName:    longName,
+		DnsNames:     []string{uppercase, longName, uppercase},
+		KeyBits:      4096,
+	}
+	if _, err := RequestedSubjectDigest(request); err != nil {
+		t.Fatalf("supported certificate subject rejected: %v", err)
+	}
+}
+
 func TestPrivilegedReceiptVerificationRejectsTamperingAndUntrustedKeys(t *testing.T) {
 	nodeID, envelope, result, trustedKey := receiptVerificationFixture(t)
 	trustedLookup := lookupFor(trustedKey.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil)

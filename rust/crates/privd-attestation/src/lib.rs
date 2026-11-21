@@ -414,13 +414,10 @@ pub fn requested_subject_digest(request: &CertificateCsr) -> Result<[u8; 32], Re
     }
     let mut names: Vec<&str> = request.dns_names.iter().map(String::as_str).collect();
     names.sort_unstable();
-    if names.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(ReceiptError::Malformed);
-    }
     let mut hasher = Sha256::new();
     hasher.update(b"ocservia/certificate-requested-subject/v1\0");
     hash_bytes(&mut hasher, &request.certificate_id)?;
-    hash_string(&mut hasher, &request.common_name)?;
+    hash_bytes(&mut hasher, request.common_name.as_bytes())?;
     hasher.update(request.key_bits.to_be_bytes());
     hasher.update(
         u32::try_from(names.len())
@@ -428,23 +425,12 @@ pub fn requested_subject_digest(request: &CertificateCsr) -> Result<[u8; 32], Re
             .to_be_bytes(),
     );
     for name in names {
-        if name.is_empty()
-            || name.len() > 253
-            || !name.is_ascii()
-            || name.bytes().any(|b| b.is_ascii_uppercase())
-        {
+        if name.is_empty() || name.len() > 253 || !name.is_ascii() {
             return Err(ReceiptError::Malformed);
         }
-        hash_string(&mut hasher, name)?;
+        hash_bytes(&mut hasher, name.as_bytes())?;
     }
     Ok(hasher.finalize().into())
-}
-
-fn hash_string(hasher: &mut Sha256, value: &str) -> Result<(), ReceiptError> {
-    if value.is_empty() || value.len() > 128 || !value.is_ascii() {
-        return Err(ReceiptError::Malformed);
-    }
-    hash_bytes(hasher, value.as_bytes())
 }
 
 fn hash_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), ReceiptError> {
@@ -661,6 +647,27 @@ mod tests {
     use super::*;
     use prost_types::Timestamp;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn requested_subject_digest_accepts_full_dns_subject_range() {
+        let long_name = [
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61),
+        ]
+        .join(".");
+        assert_eq!(long_name.len(), 253);
+        let uppercase = "VPN.Example.Test".to_owned();
+        let request = CertificateCsr {
+            certificate_id: hex::decode("018f2a3b4c5d70008000000000000001").expect("id"),
+            common_name: long_name.clone(),
+            dns_names: vec![uppercase.clone(), long_name, uppercase],
+            key_bits: 4096,
+        };
+
+        assert!(requested_subject_digest(&request).is_ok());
+    }
 
     fn fixture() -> (PrivdResultReceiptV1, SigningKey) {
         let key = SigningKey::from_bytes(&[7; 32]);

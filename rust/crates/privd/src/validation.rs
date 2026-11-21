@@ -11,6 +11,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     CommandDeliveryMode, CommandEnvelope, ConnectionFenceV2, FenceBindingV2, FenceOperationKind,
     SealedSecretPurpose, SealedSecretVersion, SemanticPayloadHashVersion, command_envelope,
 };
+use ocservia_privd_attestation::requested_subject_digest;
 use uuid::Uuid;
 
 use crate::effect_binding::{effect_binding, error};
@@ -459,6 +460,12 @@ fn validate_privileged_payload(
         }
         Some(command_envelope::Payload::CertificateCsr(payload)) => {
             validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
+            requested_subject_digest(payload).map_err(|_| {
+                error(
+                    ErrorKind::InvalidRequest,
+                    "certificate requested subject invalid",
+                )
+            })?;
         }
         Some(command_envelope::Payload::CertificateRevoke(payload)) => {
             validate_uuid(&payload.certificate_id, "certificate ID invalid")?;

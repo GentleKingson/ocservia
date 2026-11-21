@@ -18,12 +18,12 @@ use ocservia_command_authorization::{
 };
 use ocservia_contracts::config_profile;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, ArtifactGrantV1, ArtifactGrantVersion, CertificateP12, CommandDeliveryMode,
-    CommandResultState, CompleteConfigApply, CompleteConfigCandidate, CompleteConfigDirective,
-    ConnectionFenceV2, FenceBindingV2, FenceOperationKind, IpBanRemove, NodeLocalTlsReference,
-    PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose, SealedSecretV1,
-    SealedSecretVersion, ServiceReload, SessionDisconnect, SessionTerminate, UserCreate,
-    command_envelope, complete_config_directive,
+    AgentUpgrade, ArtifactGrantV1, ArtifactGrantVersion, CertificateCsr, CertificateP12,
+    CommandDeliveryMode, CommandResultState, CompleteConfigApply, CompleteConfigCandidate,
+    CompleteConfigDirective, ConnectionFenceV2, FenceBindingV2, FenceOperationKind, IpBanRemove,
+    NodeLocalTlsReference, PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose,
+    SealedSecretV1, SealedSecretVersion, ServiceReload, SessionDisconnect, SessionTerminate,
+    UserCreate, command_envelope, complete_config_directive,
 };
 use ocservia_ocserv_adapter::{FixedResources, Limits};
 use ocservia_test_support::{
@@ -467,6 +467,34 @@ async fn signed_effect_executes_once_replays_after_restart_and_fails_on_receipt_
     .await;
     assert_requires_reconciliation(&failed);
     assert_eq!(fs::read_to_string(&fault_fx.counter).expect("counter"), "x");
+}
+
+#[tokio::test]
+async fn unattestable_csr_is_rejected_before_effect_reservation() {
+    let signing = SigningKey::from_bytes(&[44; 32]);
+    let keys = keyring(&signing);
+    let node_id = *Uuid::now_v7().as_bytes();
+    let now = unix_seconds();
+    let fx = PrivdFixture::new();
+    let certificate_id = Uuid::now_v7();
+    let command = signed_command(
+        &signing,
+        node_id,
+        now,
+        now + 60,
+        "certificate.issue",
+        "ocserv.certificate.issue",
+        command_envelope::Payload::CertificateCsr(CertificateCsr {
+            certificate_id: certificate_id.as_bytes().to_vec(),
+            common_name: "a".repeat(254),
+            dns_names: Vec::new(),
+            key_bits: 2048,
+        }),
+    );
+
+    let rejected = dispatch(command_request(command), &node_id, &keys, &fx.adapter).await;
+    assert_error_kind(&rejected, ErrorKind::InvalidRequest);
+    assert!(!fx.dir.join("effects.sqlite3").exists());
 }
 
 #[tokio::test]
