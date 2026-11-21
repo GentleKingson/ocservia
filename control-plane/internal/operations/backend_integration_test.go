@@ -15,6 +15,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -26,6 +27,21 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestCreateRejectsRevokedBrowserSession(t *testing.T) {
+	f := newOutboxFixture(t)
+	service := operations.NewBackend(f.backend, 1, f.signer)
+	request := outboxRequest(f.node(t))
+	f.exec(t, `UPDATE auth_sessions SET revoked_at=now() WHERE id=$1`, outboxSessionID)
+	if _, _, err := service.Create(t.Context(), request); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatal("revoked session operation", err)
+	}
+	for _, table := range []string{"operations", "commands", "outbox_events", "audit_events"} {
+		if n := f.count(t, "SELECT count(*) FROM "+table); n != 0 {
+			t.Fatal("revoked session persisted operation state", table, n)
+		}
+	}
+}
 
 func TestDashboardSummaryCache(t *testing.T) {
 	f := newOutboxFixture(t)

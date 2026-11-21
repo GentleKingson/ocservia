@@ -17,13 +17,13 @@ type recordingUserMutator struct {
 	err      error
 }
 
-func (r *recordingUserMutator) Mutate(ctx context.Context, request userstate.MutationRequest) (operations.Operation, bool, error) {
+func (r *recordingUserMutator) MutatePolicyEnforcement(ctx context.Context, request userstate.MutationRequest) (operations.Operation, bool, error) {
 	r.contexts = append(r.contexts, ctx)
 	r.requests = append(r.requests, request)
 	if r.err != nil {
 		return operations.Operation{}, false, r.err
 	}
-	return r.delegate.Mutate(ctx, request)
+	return r.delegate.MutatePolicyEnforcement(ctx, request)
 }
 
 func (r *recordingUserMutator) assertLast(t *testing.T, ctx context.Context, count int, want userstate.MutationRequest) {

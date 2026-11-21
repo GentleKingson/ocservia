@@ -30,6 +30,11 @@ type outboxFixture struct {
 	signer         *commandauth.Signer
 }
 
+var (
+	outboxIdentityID = uuid.MustParse("019aaf00-0000-7000-8000-000000000001")
+	outboxSessionID  = uuid.MustParse("019aaf00-0000-7000-8000-000000000002")
+)
+
 // Each workflow owns a disposable database. Business calls use the restricted
 // runtime account; only provisioning and deliberate fault injection use owner.
 func newOutboxFixture(t *testing.T) *outboxFixture {
@@ -43,6 +48,9 @@ func newOutboxFixture(t *testing.T) *outboxFixture {
 	at, err := value.FromTime(time.Now().UTC())
 	testutil.NoError(t, err)
 	f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox transaction test',$2,$3,$4)`, f.workspace, f.workspace.String(), at, at)
+	f.exec(t, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'outbox-test',$2,$3,$3)`, outboxIdentityID, outboxIdentityID.String(), at)
+	f.exec(t, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, f.workspace, outboxIdentityID, at)
+	f.exec(t, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',$3)`, outboxSessionID, outboxIdentityID, at)
 	return f
 }
 
@@ -74,7 +82,7 @@ func (f *outboxFixture) node(t *testing.T) uuid.UUID {
 }
 
 func outboxRequest(node uuid.UUID) operations.CreateRequest {
-	return operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1, TTL: time.Hour, RequestID: uuid.NewString(), Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01", Payload: operations.SyntheticEchoPayload{Message: "Outbox transaction test"}}
+	return operations.CreateRequest{NodeID: node, IdempotencyKey: uuid.NewString(), ExpectedVersion: 1, ActorID: outboxIdentityID.String(), ActorIdentityID: outboxIdentityID, ActorSessionID: outboxSessionID, Action: "operation.create", Reason: "outbox transaction test", TTL: time.Hour, RequestID: uuid.NewString(), Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01", Payload: operations.SyntheticEchoPayload{Message: "Outbox transaction test"}}
 }
 
 var lostCommit = errors.New("injected lost commit acknowledgement")

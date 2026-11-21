@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
@@ -85,7 +86,7 @@ type PolicyRequest struct {
 type UsageSample = userstore.UsageSample
 
 type userMutator interface {
-	Mutate(context.Context, userstate.MutationRequest) (operations.Operation, bool, error)
+	MutatePolicyEnforcement(context.Context, userstate.MutationRequest) (operations.Operation, bool, error)
 }
 
 var _ userMutator = (*userstate.Service)(nil)
@@ -130,6 +131,9 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 		if errors.Is(err, database.ErrNotFound) {
 			return Policy{}, false, ErrNotFound
 		}
+		return Policy{}, false, err
+	}
+	if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, workspaceID); err != nil {
 		return Policy{}, false, err
 	}
 	receipt, err := store.Mutation(ctx, workspaceID, request.IdempotencyKey)
@@ -315,7 +319,7 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 			processed++
 			continue
 		}
-		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserEnable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: stableTraceparent(key)})
+		op, _, mutateErr := s.users.MutatePolicyEnforcement(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserEnable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: stableTraceparent(key)})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil
@@ -422,7 +426,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 			processed++
 			continue
 		}
-		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserDisable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: key, Traceparent: trace})
+		op, _, mutateErr := s.users.MutatePolicyEnforcement(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserDisable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: key, Traceparent: trace})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil
