@@ -45,27 +45,35 @@ require('id: upload' in build_job and
         'the package builder must expose the immutable upload by exact artifact ID')
 require('needs: build-agent-packages' in smoke_job,
         'the package smoke job must wait for the immutable package upload')
-require('actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333' in smoke_job and
-        'artifact-ids: ${{ needs.build-agent-packages.outputs.artifact_id }}' in smoke_job,
-        'the package smoke job must download the exact immutable build artifact')
-require(smoke_job.index('artifact-ids:') < smoke_job.index('scripts/release-native-package-smoke.sh'),
+require('uses: ./.github/actions/download-release-product' in smoke_job and
+        'artifact-id: ${{ needs.build-agent-packages.outputs.artifact_id }}' in smoke_job and
+        'manifest-sha256: ${{ needs.build-agent-packages.outputs.manifest_sha256 }}' in smoke_job,
+        'the package smoke job must download and verify the exact immutable build artifact')
+require(smoke_job.index('artifact-id:') < smoke_job.index('scripts/release-native-package-smoke.sh'),
         'the package smoke job must download its disposable copy before lifecycle smoke')
 require('version: ${{ steps.package-version.outputs.version }}' in build_job and
         'PRODUCTS_DIR: ${{ runner.temp }}/packages' in smoke_job and
         'VERSION: ${{ needs.build-agent-packages.outputs.version }}' in smoke_job,
         'candidate smoke must preserve the resolved version and downloaded package inputs')
 require(smoke_job.count('scripts/release-native-package-smoke.sh') == 2 and
-        "RC_LIFECYCLE: 'true'" in smoke_job,
-        'the isolated job must preserve candidate and RC lifecycle coverage')
+        "RC_LIFECYCLE: 'true'" in smoke_job and
+        'if: inputs.run_rc_lifecycle' in smoke_job,
+        'the isolated job must preserve candidate and explicit RC lifecycle coverage')
 require('python3 scripts/publish-release.py qualify' in prepare_job and
         'python3 scripts/publish-release.py qualify' in publish_job,
         'release workflow must enforce Release Check qualification both fail-fast in prepare and before publish')
 require('needs: [prepare, build-amd64, build-arm64]' in assets_job and
+        'uses: ./.github/actions/download-release-product' in assets_job and
         'needs.build-amd64.outputs.agent_packages_artifact_id' in assets_job and
-        'needs.build-arm64.outputs.agent_packages_artifact_id' in assets_job,
-        'release assets must consume exact artifacts only after both reusable workflows pass')
-require('needs: [prepare, build-amd64, build-arm64, assets]' in publish_job,
-        'publication must continue to require successful package smoke and asset assembly')
+        'needs.build-arm64.outputs.agent_packages_artifact_id' in assets_job and
+        'needs.build-amd64.outputs.agent_packages_manifest_sha256' in assets_job and
+        'needs.build-arm64.outputs.agent_packages_manifest_sha256' in assets_job,
+        'release assets must download and verify exact agent artifacts only after both reusable workflows pass')
+require('needs: [prepare, build-amd64, build-arm64, assets]' in publish_job and
+        'uses: ./.github/actions/download-release-product' in publish_job and
+        'needs.build-amd64.outputs.controller_images_manifest_sha256' in publish_job and
+        'needs.build-arm64.outputs.controller_images_manifest_sha256' in publish_job,
+        'publication must verify controller image identities and require successful package smoke and asset assembly')
 
 require(not (root / '.github/workflows/release-business-diagnostic.yml').exists(),
         'redundant release-business-diagnostic.yml workflow must stay retired')

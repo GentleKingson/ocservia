@@ -576,7 +576,7 @@ assert_status 1 "an existing staging directory must be refused"
 assert_not_dumped
 [[ "$(cat -- "${wroot}/staging/base/.20260101T000000Z-writer-test.tmp/sentinel")" == keep ]] ||
   die "an existing staging directory was reused or removed"
-[[ ! -e "${wroot}/staging/.backup.lock" ]] || die "a refused backup left its lock"
+flock -n "${wroot}/staging/.backup.lock" true || die "a refused backup held its lock"
 install -d -m 0700 -- "${wroot}/staging-link" "${wroot}/staging-link/base"
 ln -s -- "${wroot}/link-target" "${wroot}/staging-link/base/.20260101T000000Z-writer-test.tmp"
 run_writer "${wroot}/staging-link"

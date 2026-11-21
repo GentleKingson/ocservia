@@ -17,6 +17,7 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
       actions: read
@@ -59,12 +60,14 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: amd64
+      run_rc_lifecycle: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.outputs.is_prerelease == 'true' }}
   build-arm64:
     needs: prepare
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: arm64
+      run_rc_lifecycle: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.outputs.is_prerelease == 'true' }}
   assets:
     needs: [prepare, build-amd64, build-arm64]
     outputs:
@@ -75,20 +78,33 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
+      - name: Download and verify amd64 Agent packages
+        uses: ./.github/actions/download-release-product
         with:
-          artifact-ids: ${{ needs.build-amd64.outputs.agent_packages_artifact_id || 'missing' }},${{ needs.build-arm64.outputs.agent_packages_artifact_id || 'missing' }}
-          path: ${{ runner.temp }}/assets
-          merge-multiple: true
-      - uses: ./.github/actions/setup-tools
+          artifact-id: ${{ needs.build-amd64.outputs.agent_packages_artifact_id }}
+          manifest-sha256: ${{ needs.build-amd64.outputs.agent_packages_manifest_sha256 }}
+          kind: agent
+          version: ${{ needs.prepare.outputs.version }}
+          arch: amd64
+          path: ${{ runner.temp }}/agent-amd64
+      - name: Download and verify arm64 Agent packages
+        uses: ./.github/actions/download-release-product
         with:
-          profiles: npm-security
+          artifact-id: ${{ needs.build-arm64.outputs.agent_packages_artifact_id }}
+          manifest-sha256: ${{ needs.build-arm64.outputs.agent_packages_manifest_sha256 }}
+          kind: agent
+          version: ${{ needs.prepare.outputs.version }}
+          arch: arm64
+          path: ${{ runner.temp }}/agent-arm64
       - name: Prepare bootstrap and package assets
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           ASSET_DIR: ${{ runner.temp }}/assets
         run: |
-          source scripts/env.sh
+          mkdir -p "$ASSET_DIR"
+          for arch in amd64 arm64; do
+            find "$RUNNER_TEMP/agent-$arch" -maxdepth 1 -type f ! -name 'product-identity.json' -exec mv -- {} "$ASSET_DIR/" +
+          done
           scripts/prepare-bootstrap-release-assets.sh "$ASSET_DIR" "v$VERSION"
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends rpm cpio
@@ -121,6 +137,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: node
       - name: Require successful Release Check for the tag commit
         id: qualify-release
         env:
@@ -128,11 +148,30 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: python3 scripts/publish-release.py qualify
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
+      - name: Download and verify amd64 Controller images
+        uses: ./.github/actions/download-release-product
         with:
-          artifact-ids: ${{ needs.build-amd64.outputs.controller_images_artifact_id || 'missing' }},${{ needs.build-arm64.outputs.controller_images_artifact_id || 'missing' }}
-          path: ${{ runner.temp }}/images
-          merge-multiple: true
+          artifact-id: ${{ needs.build-amd64.outputs.controller_images_artifact_id }}
+          manifest-sha256: ${{ needs.build-amd64.outputs.controller_images_manifest_sha256 }}
+          kind: controller
+          version: ${{ needs.prepare.outputs.version }}
+          arch: amd64
+          path: ${{ runner.temp }}/images-amd64
+      - name: Download and verify arm64 Controller images
+        uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ needs.build-arm64.outputs.controller_images_artifact_id }}
+          manifest-sha256: ${{ needs.build-arm64.outputs.controller_images_manifest_sha256 }}
+          kind: controller
+          version: ${{ needs.prepare.outputs.version }}
+          arch: arm64
+          path: ${{ runner.temp }}/images-arm64
+      - name: Stage verified Controller image archives
+        run: |
+          mkdir -p "$RUNNER_TEMP/images"
+          for arch in amd64 arm64; do
+            mv -- "$RUNNER_TEMP/images-$arch"/*.tar "$RUNNER_TEMP/images/"
+          done
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
         with:
           artifact-ids: ${{ needs.assets.outputs.artifact_id || 'missing' }}
@@ -195,4 +234,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.prepare.outputs.version }}
-        run: python3 scripts/publish-release.py finish
+        run: |
+          source scripts/env.sh
+          python3 scripts/publish-release.py finish

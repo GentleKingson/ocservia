@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|source-style|contracts|secret-scan|go-test|go-security|native-packages|package-tools|image-security|rust-basic|rust-security|web|npm-security]" >&2
+  echo "usage: $0 [all|source-style|contracts|secret-scan|go-test|go-security|native-packages|image-security|rust-basic|rust-security|node|web|npm-security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | source-style | contracts | secret-scan | go-test | go-security | native-packages | package-tools | image-security | rust-basic | rust-security | web | npm-security) ;;
+  all | source-style | contracts | secret-scan | go-test | go-security | native-packages | image-security | rust-basic | rust-security | node | web | npm-security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -104,10 +104,8 @@ case "${platform}" in
     protoc_platform="osx-aarch_64"
     gitleaks_platform="darwin_arm64"
     oasdiff_platform="darwin_all"
-    staticcheck_platform="darwin_arm64"
     cargo_audit_platform="aarch64-apple-darwin"
     cargo_deny_platform="aarch64-apple-darwin"
-    sccache_platform="aarch64-apple-darwin"
     nfpm_platform="Darwin_arm64"
     syft_platform="darwin_arm64"
     grype_platform="darwin_arm64"
@@ -121,10 +119,8 @@ case "${platform}" in
     protoc_platform="linux-x86_64"
     gitleaks_platform="linux_x64"
     oasdiff_platform="linux_amd64"
-    staticcheck_platform="linux_amd64"
     cargo_audit_platform="x86_64-unknown-linux-gnu"
     cargo_deny_platform="x86_64-unknown-linux-musl"
-    sccache_platform="x86_64-unknown-linux-musl"
     nfpm_platform="Linux_x86_64"
     syft_platform="linux_amd64"
     grype_platform="linux_amd64"
@@ -137,9 +133,9 @@ case "${platform}" in
     syft_platform="linux_arm64"
     grype_platform="linux_arm64"
     case "${PROFILE}" in
-      go-test | rust-basic | native-packages | package-tools | image-security | npm-security) ;;
+      go-test | rust-basic | native-packages | image-security | node | npm-security) ;;
       *)
-        echo "unsupported bootstrap platform/profile: ${platform}/${PROFILE}; artifact mappings exist only for Go, Node/npm, rustup, nfpm, syft and grype (no quality tools or sccache)" >&2
+        echo "unsupported bootstrap platform/profile: ${platform}/${PROFILE}; artifact mappings exist only for Go, Node/npm, rustup, nfpm, syft and grype (no quality tools)" >&2
         exit 1
         ;;
     esac
@@ -319,18 +315,6 @@ install_oasdiff() {
   [[ "$(oasdiff --version)" == *"$(version oasdiff)"* ]]
 }
 
-install_staticcheck() {
-  local artifact archive
-  artifact="staticcheck_${staticcheck_platform}.tar.gz"
-  if ! version_output_contains "$(version staticcheck)" "${TOOLS}/bin/staticcheck" \
-    "${TOOLS}/bin/staticcheck" -version; then
-    archive="$(download "https://github.com/dominikh/go-tools/releases/download/$(version staticcheck)/${artifact}" "${artifact}")"
-    tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/bin" staticcheck/staticcheck
-    chmod 0755 "${TOOLS}/bin/staticcheck"
-  fi
-  [[ "$(staticcheck -version)" == *"$(version staticcheck)"* ]]
-}
-
 install_govulncheck() {
   if ! version_output_contains "v$(version govulncheck)" "${TOOLS}/bin/govulncheck" \
     "${TOOLS}/bin/govulncheck" -version; then
@@ -366,19 +350,6 @@ install_cargo_deny() {
   [[ "$(cargo deny --version)" == *"$(version cargo_deny)"* ]]
 }
 
-install_sccache() {
-  local artifact archive directory
-  artifact="sccache-v$(version sccache)-${sccache_platform}.tar.gz"
-  directory="${artifact%.tar.gz}"
-  if ! version_output_contains "$(version sccache)" "${TOOLS}/bin/sccache" \
-    "${TOOLS}/bin/sccache" --version; then
-    archive="$(download "https://github.com/mozilla/sccache/releases/download/v$(version sccache)/${artifact}" "${artifact}")"
-    tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/bin" "${directory}/sccache"
-    chmod 0755 "${TOOLS}/bin/sccache"
-  fi
-  [[ "$(sccache --version)" == *"$(version sccache)"* ]]
-}
-
 install_nfpm() {
   local artifact archive
   artifact="nfpm_$(version nfpm)_${nfpm_platform}.tar.gz"
@@ -400,7 +371,6 @@ install_contract_tools() {
 }
 
 install_go_quality_tools() {
-  install_staticcheck
   install_govulncheck
 }
 
@@ -446,7 +416,6 @@ case "${PROFILE}" in
     install_gitleaks
     install_go_quality_tools
     install_rust_quality_tools
-    install_sccache
     verify_java
     verify_host_command jq
     verify_host_command shellcheck
@@ -491,13 +460,13 @@ case "${PROFILE}" in
     install_rust
     install_nfpm
     ;;
-  package-tools)
-    install_nfpm
-    ;;
   image-security)
     install_syft
     install_grype
     verify_host_command jq
+    ;;
+  node)
+    install_node
     ;;
   web)
     install_node

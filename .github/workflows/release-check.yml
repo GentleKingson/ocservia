@@ -62,7 +62,6 @@ jobs:
     with:
       version: '0.0.0'
       arch: amd64
-      acceptance_identity: true
 
   products-arm64:
     needs: prepare
@@ -70,7 +69,6 @@ jobs:
     with:
       version: '0.0.0'
       arch: arm64
-      acceptance_identity: true
 
   business:
     name: Business Smoke (amd64)
@@ -209,6 +207,7 @@ jobs:
     needs: [prepare, full-ci, security, products-amd64, products-arm64, business, quick]
     if: always()
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}

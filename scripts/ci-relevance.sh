@@ -69,7 +69,7 @@ classify_path() {
     .tool-versions|.nvmrc|.node-version|Makefile|\
     scripts/ci-*|scripts/*required-go-tests*|scripts/go-test-environment.sh|\
     scripts/test-ci-relevance.sh|scripts/test-toolchain-consistency.sh|\
-    scripts/check-public-repository.sh|\
+    scripts/test-workflow-contracts.py|scripts/check-public-repository.sh|\
     scripts/license-check.sh|scripts/test.sh|scripts/verify.sh)
       tools_suite guards ;;
     scripts/generate.sh|scripts/generated-clean.sh|scripts/check-breaking.sh)
@@ -82,8 +82,9 @@ classify_path() {
 
     # Release, build-cache, secret-scan and manual acceptance contract suites.
     scripts/build-relay.sh) run_rust=true; tools_suite release ;;
+    .github/actions/build-cache-credentials/*|.github/actions/download-release-product/*)
+      tools_suite guards; tools_suite release ;;
     .dockerignore|.gitleaksignore|.github/release.yml|\
-    .github/actions/build-cache-credentials/*|.github/actions/download-release-product/*|\
     rust/agent-build.Dockerfile|rust/transportd.Dockerfile|\
     scripts/buildx-cache.sh|\
     scripts/security-check.sh|scripts/secret-scan.toml|scripts/test-secret-scan-config-runtime.sh|\
@@ -131,11 +132,14 @@ classify_path() {
     scripts/package-agent.sh|scripts/verify-agent-package.sh|\
     scripts/test-installer-common.sh|scripts/test-managed-node-install.sh|scripts/test-node-bootstrap.py|\
     scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
+    scripts/test-controller-host-bootstrap.sh|scripts/test-controller-lifecycle.sh|\
     scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py|scripts/test-vpn-audit.py)
       run_installers=true ;;
 
     # Broader release/installer/packaging/deployment paths.
-    .github/workflows/release*.yml|install.env.example|\
+    .github/workflows/release*.yml)
+      tools_suite guards; tools_suite release; run_installers=true ;;
+    install.env.example|\
     scripts/*release*|scripts/*controller*|scripts/*agent-upgrade*|\
     scripts/build-agent-binaries.sh|scripts/install-agent.sh|scripts/upgrade-agent.sh|\
     scripts/rollback-agent.sh|scripts/uninstall-agent.sh|scripts/agent-package-smoke.sh|\
@@ -157,7 +161,9 @@ classify_path() {
 
   # Orthogonal checks independent of each file's primary behavior suite.
   case "${path}" in
-    scripts/*.sh|scripts/*.py|deploy/*.sh|deploy/bootstrap/install-controller|deploy/bootstrap/install-node|deploy/database-e2e/systemctl)
+    scripts/*.sh|scripts/*.py|deploy/*.sh|deploy/*.py|\
+    deploy/bootstrap/install-controller|deploy/bootstrap/install-node|\
+    deploy/database-e2e/systemctl|deploy/managed-node/vpn-session-hook)
       tools_suite source-style ;;
   esac
   case "${path}" in
@@ -203,6 +209,20 @@ classify_path() {
   esac
 }
 
+resolve_ci_tools_profiles() {
+  local -a profiles=()
+  local suites=" ${ci_suites[*]:-} "
+  if [[ "${suites}" == *" source-style "* ]]; then profiles+=(source-style); fi
+  if [[ "${suites}" == *" contracts "* ]]; then
+    profiles+=(contracts)
+  elif [[ "${suites}" == *" release "* ]]; then
+    # release contracts invoke node scripts without requiring full OpenAPI/Buf tooling.
+    profiles+=(node)
+  fi
+  ci_tools_profiles="${profiles[*]:-}"
+  ci_tools_cache_label="${ci_tools_profiles// /-}"
+}
+
 valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$1^{commit}" 2>/dev/null; }
 
 if [[ "${event}" == workflow_dispatch ]]; then
@@ -240,12 +260,18 @@ else
   fi
 fi
 
+ci_tools_profiles=''
+ci_tools_cache_label=''
+resolve_ci_tools_profiles
+
 {
   printf 'profile=%s\n' "${profile}"
   printf 'database_scope=%s\n' "${database_scope}"
   printf 'reason=%s\n' "${reason}"
   printf 'changed_count=%s\n' "${#changed[@]}"
   printf 'ci_suites=%s\n' "${ci_suites[*]}"
+  printf 'ci_tools_profiles=%s\n' "${ci_tools_profiles}"
+  printf 'ci_tools_cache_label=%s\n' "${ci_tools_cache_label}"
   printf 'controller_cache_images=%s\n' "${controller_cache_images[*]}"
   for flag in "${flags[@]}"; do printf '%s=%s\n' "${flag}" "${!flag}"; done
 } >>"${output}"

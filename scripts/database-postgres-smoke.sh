@@ -6,6 +6,7 @@ source "${ROOT}/scripts/go-test-environment.sh"
 require_test_commands go jq setsid python3
 require_test_docker
 require_go_race
+bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
 case "${DATABASE_TEST_SCOPE:-smoke}" in
   smoke) ;;
   *) echo 'PostgreSQL smoke requires smoke scope' >&2; exit 2 ;;

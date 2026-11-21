@@ -13,10 +13,12 @@ if (($# == 1)); then
   skip_rust=true
 fi
 
-(cd "${ROOT}/control-plane" && \
-  go run github.com/google/go-licenses/v2@v2.0.1 check ./... \
-    --ignore=github.com/GentleKingson/ocservia/control-plane \
-    --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT)
+for module in control-plane signer; do
+  (cd "${ROOT}/${module}" && \
+    GOWORK=off go run github.com/google/go-licenses/v2@v2.0.1 check ./... \
+      --ignore="github.com/GentleKingson/ocservia/${module}" \
+      --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT)
+done
 
 if [[ "${skip_rust}" != true ]]; then
   (cd "${ROOT}/rust" && cargo deny check licenses)

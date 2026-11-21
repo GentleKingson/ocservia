@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import tomllib
 
@@ -18,7 +19,7 @@ for relative in ("deploy/production/relay/relay.toml", "deploy/test-fixtures/rel
 agent = Path("/usr/libexec/ocservia/ocservia-agent")
 transport = Path("/usr/local/bin/ocservia-transportd")
 assert not agent.exists() and not transport.exists(), "refusing to replace installed binaries"
-recorder = "#!/usr/bin/python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n"
+recorder = f"#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n"
 ca_paths = [Path("/etc/ocservia-agent/relay-ca.pem"), Path("/run/secrets/relay_ca")]
 assert all(not path.exists() and not path.is_symlink() for path in ca_paths)
 created_ca_dirs = []
