@@ -2,19 +2,16 @@ name: Setup pinned repository tools
 description: Restore and cache pinned bootstrap tools (and optional npm cache) and run scripts/bootstrap.sh.
 inputs:
   profiles:
-    description: Space-separated scripts/bootstrap.sh profile names (or cache label when skip-bootstrap is true)
+    description: Space-separated scripts/bootstrap.sh profile names
     required: true
   cache-label:
-    description: Optional cache key label override (defaults to profiles with spaces replaced by hyphens)
+    description: Optional cache key label override (defaults to profiles)
     default: ''
   key-suffix:
     description: Optional extra cache key suffix (e.g. Cargo.lock hash when .tools/cargo caches crates)
     default: ''
   cache-npm:
     description: Whether to also cache .cache/npm keyed on web lockfiles
-    default: 'false'
-  skip-bootstrap:
-    description: Restore/save the tool cache without invoking scripts/bootstrap.sh
     default: 'false'
 runs:
   using: composite
@@ -37,7 +34,6 @@ runs:
         restore-keys: |
           npm-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}-
     - name: Bootstrap pinned tools (${{ inputs.profiles }})
-      if: inputs.skip-bootstrap != 'true'
       shell: bash
       env:
         BOOTSTRAP_PROFILES: ${{ inputs.profiles }}

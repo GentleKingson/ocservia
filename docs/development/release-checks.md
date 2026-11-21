@@ -73,8 +73,8 @@ ASCII GitHub heading anchors resolve across `README.md`, `AGENTS.md`,
 duplicate-heading suffixes, SQL syntax, authentication modes, database support
 claims, or other prose facts. `make policy-check` separately rejects tracked
 local implementation-control paths (including `AGENTS.override.md`) and private
-disclosures. In Basic CI, the `docs` job runs `docs-check.sh`
-alone. Validate executable command examples in the docs in an authorized
+disclosures. In Basic CI, the `docs` job runs `docs-check.sh` and
+`check-public-repository.sh`. Validate executable command examples in the docs in an authorized
 isolated environment.
 
 For a new workspace, run the supported bootstrap profile that matches your
@@ -97,7 +97,7 @@ runs. `make go-check` (`scripts/go-check.sh`, default mode `full`) covers both
 (except in `standard` mode) `go test -race`, using a private `TMPDIR` under
 `.cache/` because the signer store refuses state directories beneath a group-
 or world-writable parent such as `/tmp`. Basic CI invokes
-`go-check.sh standard`. The top-level `make test` (`scripts/test.sh`) runs
+`go-check.sh standard` in Quick runs and `go-check.sh full` in Full runs. The top-level `make test` (`scripts/test.sh`) runs
 `control-plane` and `signer` Go tests, Rust workspace tests, and Web `npm test`
 without linters or race runs. For Rust, `make rust-check` runs
 `cargo fmt --check`, Clippy with `-D warnings`, and workspace tests. Web checks
@@ -273,9 +273,9 @@ request size limits and disabled bindings.
 
 `scripts/bootstrap.sh` installs pinned repository tools without managing host
 OS packages. On Linux `aarch64` it supports the profiles `go-test`,
-`rust-basic`, `native-packages`, `package-tools`, `image-security` and
-`npm-security`; any other profile (such as `all`, `native`, Web, quality or
-combined security) fails up front because sccache and quality-tool binary
+`rust-basic`, `native-packages`, `image-security`, `node` and
+`npm-security`; any other profile (such as `all`, Web, quality or
+combined security) fails up front because quality-tool binary
 mappings are not provided for that architecture. Linux AMD64 and Darwin ARM64
 keep their full mappings. The ARM64 Go procedure below validates neither those
 platforms nor Rust acceptance.
@@ -432,11 +432,11 @@ The workflow file defines the matrices. The jobs and what they own:
 
 | Job | Responsibility |
 | --- | --- |
-| `docs` | `scripts/docs-check.sh` only |
-| `ci-tools` | Selected CI guard, release and cross-VM self-tests, source style and contract suites via `scripts/ci-tools-check.sh` |
-| `go` | `go-check.sh standard` for `control-plane` and `signer` |
+| `docs` | `scripts/docs-check.sh` and `scripts/check-public-repository.sh` |
+| `ci-tools` | Selected CI guard (including workflow contract checks), release, source style and contract suites via `scripts/ci-tools-check.sh` |
+| `go` | `go-check.sh standard` in Quick runs and `go-check.sh full` (including `-race`) in Full runs for `control-plane` and `signer` |
 | `rust` | `rust-check.sh` plus the vendored iroh security regressions; Full also runs the focused vendored iroh patch tests against the lock in [`rust/vendor/iroh/OCSERVIA-PROVENANCE.md`](../../rust/vendor/iroh/OCSERVIA-PROVENANCE.md) |
-| `installers` | Installer and Relay-launcher contract self-tests |
+| `installers` | Installer (including host bootstrap) and Relay-launcher contract self-tests |
 | `web` | `web-check.sh basic`; no browser installation |
 | `web-browser` | Stubbed production-build browser regressions through `web/test/run-auth-browser.mjs` inside the version-matched Playwright container image (`PLAYWRIGHT_WORKERS=4`); Full also serves the build through the Standalone and Integrated gateways with CSP enforcement checks. A missing browser or non-declared skip fails the job |
 | `database-smoke` | PostgreSQL 18.x; Quick runs smoke, Full runs full database acceptance; both enforce the SQL artifact window and snapshot equivalence (see [SQL artifact acceptance](#sql-artifact-acceptance)) |
@@ -485,9 +485,10 @@ analysis and is the source of the exact rule order. In outline:
   select the release contract suite and/or installer self-tests. Manual-acceptance
   harnesses (`scripts/resilience-*`, `scripts/security-acceptance-*`) are
   checked for syntax/contracts but not executed in Basic CI.
-- `ci.yml`, `security.yml`, `scripts/ci-*`, the required-test selectors,
-  `test-ci-relevance.sh`, `test-toolchain-consistency.sh` and public-repository
-  guards select the CI guard suite.
+- `ci.yml`, `security.yml`, `release*.yml`, `scripts/ci-*`, the required-test
+  selectors, `test-ci-relevance.sh`, `test-toolchain-consistency.sh`,
+  `test-workflow-contracts.py` and public-repository guards select the CI guard
+  suite.
 - `proto/*`, `openapi/*`, `control-plane/gen/*`, `scripts/bootstrap.sh`,
   `env.sh`, `checksums.txt`, `toolchains.lock`, `.github/actions/setup-tools/*`
   and any unknown path enable all Basic flags and every CI suite at Quick scope.
@@ -501,8 +502,8 @@ build-cache Action with the same ESLint and Prettier configuration. The
 `contracts` suite runs Buf/Redocly lint, breaking checks and a clean regeneration
 in that order, when schemas, templates, generated outputs or generation tools
 change. These suites run in the dedicated `ci-tools` job so they run in
-parallel with `go` and only bootstrap `source-style` or `contracts` tools when
-selected; ordinary documentation does not install their toolchains.
+parallel with `go` and only bootstrap `source-style`, `contracts` or `node`
+tools when selected; ordinary documentation does not install their toolchains.
 
 Contract comparison uses the PR merge-base or the push event before SHA. Manual
 Basic CI requires an explicit `contract_base_ref` naming an existing commit
@@ -550,36 +551,41 @@ Check on main. Its read-only scan jobs use pinned bootstrap profiles and no
 production secrets: full-history `scripts/security-check.sh` (including its
 Gitleaks rule regression check); `govulncheck ./...` in both Go modules;
 `cargo audit` against `rust/Cargo.lock` and `deploy/production/relay.Cargo.lock`
-with `cargo deny check advisories` across the Rust workspace; and
-`npm audit --package-lock-only` against `web/package-lock.json`, including
-development dependencies. Any scan failure fails the workflow and blocks Release
-Check when called from it. `release.yml` neither invokes nor queries
-`security.yml`, so tag publication relies on the operator verifying a passing
-Release Check first. A pass reflects only what those scanners and their current
-advisory databases detect in the repository tree, not the security of a deployed
-environment.
+with `cargo deny --locked check advisories bans licenses sources` across the
+Rust workspace; `npm audit --package-lock-only` against `web/package-lock.json`,
+including development dependencies; and `scripts/license-check.sh --skip-rust`
+for Go (`control-plane` and `signer`) and Web dependency licenses. Any scan
+failure fails the workflow and blocks Release Check when called from it.
+`release.yml` neither invokes nor queries `security.yml`, so tag publication
+relies on the operator verifying a passing Release Check first. A pass reflects
+only what those scanners and their current advisory databases detect in the
+repository tree, not the security of a deployed environment.
 
 ### Caches
 
 Go jobs keep module and build caches next to locked bootstrap downloads. Only
-passing pushes on main write cache entries; pull requests and manual runs
-restore only, and a restored build cache never skips real database tests.
-Bootstrap downloads and `.tools` are managed through
+passing pushes on main write cache entries; pull requests, Security scans and
+manual runs restore only, and a restored build cache never skips real database
+tests. Bootstrap downloads and `.tools` are managed through
 [`.github/actions/setup-tools`](../../.github/actions/setup-tools/action.yml)
 and keyed by profile, OS, architecture and tool/bootstrap identity (with an
 optional `Cargo.lock` suffix and base toolchain fallback when `.tools/cargo`
-caches crates). Web CI, `contracts` checks and the npm Security scan cache
-`.cache/npm` instead of `node_modules`, and Web jobs still run `npm ci`. Rust
-jobs restore `rust/target/debug` and `rust/vendor/iroh/target/debug` with
+caches crates). Web CI, `contracts` checks and the license scan cache
+`.cache/npm` instead of `node_modules`, and Web jobs still run `npm ci`; the
+lockfile-only `npm audit` job skips `.cache/npm`. Rust jobs restore
+`rust/target/debug` and `rust/vendor/iroh/target/debug` with
 `CARGO_INCREMENTAL=0` and save them only on passing pushes to main, falling
 back to the matching Rust toolchain prefix when manifests or lockfiles change.
-Image builds use per-image, per-architecture BuildKit GitHub Actions caches. No
-workflow caches runtime state or credentials, and build caches are never
-accepted release products or qualification evidence. Release Controller jobs
-cache image-security scanner binaries but never the vulnerability database:
-each run fetches fresh advisory data and fails if the feed is unavailable or
-invalid. Image scans inspect the built image archives before smoke tests and
-registry uploads; Business diagnostic runs do not scan images.
+Native Agent release builds save their isolated Rocky compilation cache only on
+`main`, and `smoke-agent-packages` restores it read-only when running
+`RC_LIFECYCLE=true`. Image builds use per-image, per-architecture BuildKit
+GitHub Actions caches. No workflow caches runtime state or credentials, and
+build caches are never accepted release products or qualification evidence.
+Release Controller jobs cache image-security scanner binaries but never the
+vulnerability database: each run fetches fresh advisory data and fails if the
+feed is unavailable or invalid. Image scans inspect the built image archives
+before smoke tests and registry uploads; Business diagnostic runs do not scan
+images.
 
 ### Manual deep checks and reproduction
 
@@ -728,9 +734,13 @@ the root paths:
 bash scripts/test-managed-node-install.sh
 bash scripts/test-controller-install.sh
 bash scripts/test-controller-bootstrap.sh
-bash scripts/test-agent-upgrade-retry.sh
-docker run --rm -v "$PWD:/source:ro" node:24.18.1-bookworm \
+bash scripts/test-controller-host-bootstrap.sh
+docker run --rm --network none -v "$PWD:/source:ro" \
+  python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df \
   python3 /source/scripts/test-relay-launchers.py
+docker run --rm --network none -v "$PWD:/source:ro" \
+  python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df \
+  bash /source/scripts/test-agent-upgrade-retry.sh
 ```
 
 The node installer has one token pipeline for the hidden prompt, protected

@@ -12,6 +12,7 @@ for suite in ${CI_SUITES}; do
       done
       bash scripts/test-ci-relevance.sh
       bash scripts/test-toolchain-consistency.sh
+      python3 scripts/test-workflow-contracts.py
       bash scripts/check-public-repository.sh
       ;;
     release)

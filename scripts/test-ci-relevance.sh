@@ -8,6 +8,8 @@ cd "${ROOT}"
 flags=()
 reason=''
 ci_suites=()
+ci_tools_profiles=''
+ci_tools_cache_label=''
 controller_cache_images=()
 
 # Load the classifier tables and helpers without running the git-diff entrypoint.
@@ -18,6 +20,8 @@ reset_state() {
   for flag in "${flags[@]}"; do printf -v "${flag}" false; done
   reason=recognized_paths
   ci_suites=()
+  ci_tools_profiles=''
+  ci_tools_cache_label=''
   controller_cache_images=()
 }
 
@@ -98,14 +102,40 @@ assert_flag "go test" run_controller_cache false
 
 reset_state
 classify_path .github/workflows/ci.yml
+resolve_ci_tools_profiles
 assert_flag ci.yml run_ci_tools true
 assert_eq "ci.yml ci_suites" guards "${ci_suites[*]}"
+assert_eq "ci.yml ci_tools_profiles" "" "${ci_tools_profiles}"
 assert_flag ci.yml run_go false
 
 reset_state
+classify_path .github/workflows/release.yml
+resolve_ci_tools_profiles
+assert_eq "release.yml ci_suites" "guards release" "${ci_suites[*]}"
+assert_eq "release.yml ci_tools_profiles" "node" "${ci_tools_profiles}"
+assert_eq "release.yml ci_tools_cache_label" "node" "${ci_tools_cache_label}"
+
+reset_state
 classify_path scripts/release_business_scenarios.py
+resolve_ci_tools_profiles
 assert_eq "release business scenarios ci_suites" "release source-style" "${ci_suites[*]}"
+assert_eq "release business scenarios profiles" "source-style node" "${ci_tools_profiles}"
+assert_eq "release business scenarios label" "source-style-node" "${ci_tools_cache_label}"
 assert_flag "release business scenarios" run_installers true
+
+# Every shell/Python source scanned by scripts/lint.sh source-style must trigger source-style.
+while IFS= read -r -d '' path; do
+  [[ -f "${path}" ]] || continue
+  IFS= read -r shebang <"${path}" || true
+  if [[ "${path}" == *.py ]] || [[ "${shebang}" =~ ^\#!.*(/|[[:space:]])(ba)?sh([[:space:]]|$) ]]; then
+    reset_state
+    classify_path "${path}"
+    case " ${ci_suites[*]:-} " in
+      *" source-style "*) ;;
+      *) die "linted source file ${path} did not select source-style (got '${ci_suites[*]:-}')" ;;
+    esac
+  fi
+done < <(git ls-files -z -- scripts deploy)
 
 # 4. End-to-end CLI checks (workflow_dispatch and fail-closed git error handling).
 out_file="$(mktemp)"
@@ -122,6 +152,8 @@ bash scripts/ci-relevance.sh workflow_dispatch "${head_sha}" "${head_sha}" "${ou
 assert_eq "dispatch full profile" full "$(read_out profile)"
 assert_eq "dispatch full database_scope" full "$(read_out database_scope)"
 assert_eq "dispatch full ci_suites" "guards release source-style contracts" "$(read_out ci_suites)"
+assert_eq "dispatch full ci_tools_profiles" "source-style contracts" "$(read_out ci_tools_profiles)"
+assert_eq "dispatch full ci_tools_cache_label" "source-style-contracts" "$(read_out ci_tools_cache_label)"
 assert_eq "dispatch full run_installers" true "$(read_out run_installers)"
 assert_eq "dispatch full run_controller_cache" false "$(read_out run_controller_cache)"
 

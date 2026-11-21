@@ -3,13 +3,14 @@ on:
   workflow_call:
     inputs:
       version:
+        description: Plain SemVer release version without a leading v
         type: string
         required: true
       arch:
         type: string
         required: true
-      acceptance_identity:
-        description: Bind artifacts for Release Check consumers; ordinary Release asset inventory stays unchanged
+      run_rc_lifecycle:
+        description: Also exercise synthetic RC -> RC -> final package lifecycle in smoke-agent-packages
         type: boolean
         default: false
     outputs:
@@ -42,6 +43,7 @@ jobs:
       - uses: ./.github/actions/setup-tools
         with:
           profiles: native-packages
+          key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
       - name: Resolve isolated Agent target cache
         id: agent-target
         run: |
@@ -52,48 +54,36 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ steps.agent-target.outputs.path }}
-          key: release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: release-agent-target-v1-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
-      - name: Resolve package version & source epoch
+          key: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock', 'rust/vendor/**') }}-${{ github.sha }}
+          restore-keys: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock', 'rust/vendor/**') }}-
+      - name: Validate package version & source epoch
         id: package-version
         env:
-          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          version=""
-          if [[ -n "${RELEASE_TAG}" ]]; then
-            if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]; then
-              echo "refusing to build release packages for non-SemVer tag ${RELEASE_TAG}" >&2
-              exit 1
-            fi
-            version="${RELEASE_TAG#v}"
-          else
-            version="${INPUT_VERSION}"
-            if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]; then
-              echo "dispatch version must be plain SemVer without a leading v, got ${version}" >&2
-              exit 1
-            fi
+          if [[ ! "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]; then
+            echo "version must be plain SemVer without a leading v, got ${INPUT_VERSION}" >&2
+            exit 1
           fi
           {
-            echo "version=${version}"
+            echo "version=${INPUT_VERSION}"
             echo "source_date_epoch=$(git log -1 --format=%ct)"
           } >>"${GITHUB_ENV}"
-          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+          echo "version=${INPUT_VERSION}" >>"${GITHUB_OUTPUT}"
       - name: Build native Agent / privd / upgrader and packages
         id: build-packages
         run: |
           VERSION="${version}" PACKAGE_ARCH="${{ inputs.arch }}" \
             OUTPUT_DIR="${RUNNER_TEMP}/packages" \
             SOURCE_DATE_EPOCH="${source_date_epoch}" bash scripts/build-release-agent.sh
-      - name: Save Rocky Agent compilation cache
-        if: ${{ success() && steps.agent-target-cache.outputs.cache-hit != 'true' }}
+      - name: Save Rocky Agent compilation cache (main only)
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.agent-target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ steps.agent-target.outputs.path }}
           key: ${{ steps.agent-target-cache.outputs.cache-primary-key }}
       - name: Bind agent product identity and digests
         id: identity
-        if: inputs.acceptance_identity
         env:
           PRODUCT_VERSION: ${{ env.version }}
           PRODUCT_ARCH: ${{ inputs.arch }}
@@ -123,15 +113,32 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-tools
-        if: github.event_name == 'workflow_dispatch' && contains(inputs.version, '-rc.')
+        if: inputs.run_rc_lifecycle
         with:
           profiles: native-packages
-      - name: Download immutable package set for smoke
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
+          key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
+      - name: Resolve isolated Agent target cache
+        id: agent-target
+        if: inputs.run_rc_lifecycle
+        run: |
+          builder_hash="$(sha256sum rust/agent-build.Dockerfile | cut -c1-16)"
+          echo "path=rust/target/agent-${{ inputs.arch }}-${builder_hash}" >>"${GITHUB_OUTPUT}"
+      - name: Restore Rocky Agent compilation cache
+        if: inputs.run_rc_lifecycle
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          artifact-ids: ${{ needs.build-agent-packages.outputs.artifact_id }}
+          path: ${{ steps.agent-target.outputs.path }}
+          key: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock', 'rust/vendor/**') }}-${{ github.sha }}
+          restore-keys: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock', 'rust/vendor/**') }}-
+      - name: Download and verify immutable package set for smoke
+        uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ needs.build-agent-packages.outputs.artifact_id }}
+          manifest-sha256: ${{ needs.build-agent-packages.outputs.manifest_sha256 }}
+          kind: agent
+          version: ${{ needs.build-agent-packages.outputs.version }}
+          arch: ${{ inputs.arch }}
           path: ${{ runner.temp }}/packages
-          merge-multiple: true
       - name: Validate native package lifecycle (${{ inputs.arch }})
         id: smoke-packages
         env:
@@ -141,7 +148,7 @@ jobs:
           VERSION: ${{ needs.build-agent-packages.outputs.version }}
         run: scripts/release-native-package-smoke.sh
       - name: Validate RC to final package lifecycle (${{ inputs.arch }})
-        if: github.event_name == 'workflow_dispatch' && contains(inputs.version, '-rc.')
+        if: inputs.run_rc_lifecycle
         env:
           RUN_ID: rc-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rc-lifecycle
@@ -173,28 +180,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Resolve release identity
+      - name: Validate release identity
         env:
-          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          set -euo pipefail
-          if [[ -n "${RELEASE_TAG}" ]]; then
-            if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]; then
-              echo "refusing to build Controller images for non-SemVer tag ${RELEASE_TAG}" >&2
-              exit 1
-            fi
-            version="${RELEASE_TAG#v}"
-          else
-            version="${INPUT_VERSION}"
-            if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]; then
-              echo "dispatch version must be plain SemVer without a leading v, got ${version}" >&2
-              exit 1
-            fi
+          if [[ ! "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]; then
+            echo "version must be plain SemVer without a leading v, got ${INPUT_VERSION}" >&2
+            exit 1
           fi
           source_commit="$(git rev-parse HEAD)"
           {
-            echo "version=${version}"
+            echo "version=${INPUT_VERSION}"
             echo "source_commit=${source_commit}"
           } >>"${GITHUB_ENV}"
       - name: Relay optional BuildKit cache credentials
@@ -236,7 +232,6 @@ jobs:
         run: scripts/release-controller-image-smoke.sh
       - name: Bind controller product identity and digests
         id: identity
-        if: inputs.acceptance_identity
         env:
           PRODUCT_VERSION: ${{ env.version }}
           PRODUCT_ARCH: ${{ inputs.arch }}

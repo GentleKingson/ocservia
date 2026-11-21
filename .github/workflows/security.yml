@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: security-${{ github.event_name == 'workflow_call' && github.run_id || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   scan:
     name: ${{ matrix.name }}
@@ -23,6 +27,7 @@ jobs:
             command: scripts/security-check.sh
           - name: Go vulnerabilities
             profile: go-security
+            restore_go_mod: true
             command: |
               (cd control-plane && govulncheck ./...)
               (cd signer && govulncheck ./...)
@@ -37,6 +42,12 @@ jobs:
             profile: npm-security
             command: |
               (cd web && npm audit --package-lock-only --ignore-scripts)
+          - name: Go & Web licenses
+            profile: go-test web
+            cache_label: go-test-web
+            cache_npm: true
+            restore_go_mod: true
+            command: scripts/license-check.sh --skip-rust
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -45,8 +56,19 @@ jobs:
       - uses: ./.github/actions/setup-tools
         with:
           profiles: ${{ matrix.profile }}
+          cache-label: ${{ matrix.cache_label || matrix.profile }}
           key-suffix: ${{ matrix.profile == 'rust-security' && format('-{0}', hashFiles('rust/Cargo.lock')) || '' }}
-          cache-npm: ${{ matrix.profile == 'npm-security' && 'true' || 'false' }}
+          cache-npm: ${{ matrix.cache_npm && 'true' || 'false' }}
+      - name: Compute Go module cache key
+        id: go-cache-key
+        if: matrix.restore_go_mod == true
+        run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
+      - name: Restore Go module cache
+        if: matrix.restore_go_mod == true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-mod
+          key: basic-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-key.outputs.identity }}
       - name: Scan
         shell: bash
         run: |
