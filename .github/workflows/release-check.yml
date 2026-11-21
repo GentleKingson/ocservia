@@ -3,99 +3,215 @@ on:
   workflow_dispatch:
     inputs:
       contract_base_ref:
-        description: Prior commit or tag; must differ from this candidate
+        description: Optional prior commit or tag; defaults to the latest release tag before HEAD (or HEAD~1)
         type: string
-        required: true
+        required: false
+        default: ''
 permissions:
   contents: read
 concurrency:
   group: release-check-${{ github.run_id }}
   cancel-in-progress: false
 jobs:
-  main:
+  prepare:
+    name: Prepare Release Check
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      contract_base_ref: ${{ steps.resolve.outputs.contract_base_ref }}
     steps:
-      - run: test "$GITHUB_REF" = refs/heads/main
+      - name: Require main branch
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve contract baseline
+        id: resolve
+        env:
+          INPUT_BASE: ${{ inputs.contract_base_ref }}
+        run: |
+          if [[ -n "$INPUT_BASE" ]]; then
+            base="$INPUT_BASE"
+          else
+            base="$(git describe --tags --abbrev=0 --match 'v*.*.*' 'HEAD~1' 2>/dev/null || git rev-parse 'HEAD~1')"
+          fi
+          base_sha="$(git rev-parse --verify --end-of-options "${base}^{commit}")"
+          head_sha="$(git rev-parse HEAD)"
+          if [[ "$base_sha" == "$head_sha" ]]; then
+            echo "contract_base_ref (${base}) must differ from HEAD (${head_sha})" >&2
+            exit 1
+          fi
+          echo "contract_base_ref=${base}" >>"$GITHUB_OUTPUT"
+          printf 'Contract baseline: %s (%s)\n' "$base" "$base_sha" >>"$GITHUB_STEP_SUMMARY"
+
   full-ci:
-    needs: main
+    needs: prepare
     uses: ./.github/workflows/ci.yml
     with:
       profile: full
-      contract_base_ref: ${{ inputs.contract_base_ref }}
+      contract_base_ref: ${{ needs.prepare.outputs.contract_base_ref }}
+
   security:
-    needs: main
+    needs: prepare
     uses: ./.github/workflows/security.yml
+
   products-amd64:
-    needs: main
+    needs: prepare
     uses: ./.github/workflows/release-products.yml
     with:
       version: '0.0.0'
       arch: amd64
       acceptance_identity: true
+
   products-arm64:
-    needs: main
+    needs: prepare
     uses: ./.github/workflows/release-products.yml
     with:
       version: '0.0.0'
       arch: arm64
       acceptance_identity: true
+
   business:
-    needs: [products-amd64, products-arm64]
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    uses: ./.github/workflows/release-business-diagnostic.yml
-    with:
-      arch: ${{ matrix.arch }}
-      version: '0.0.0'
-      profile: smoke
-      production_signer: true
-      run-resilience: true
-      use_products: true
-      agent_packages_artifact_id: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.agent_packages_artifact_id || needs.products-amd64.outputs.agent_packages_artifact_id }}
-      controller_images_artifact_id: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.controller_images_artifact_id || needs.products-amd64.outputs.controller_images_artifact_id }}
-      agent_packages_manifest_sha256: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.agent_packages_manifest_sha256 || needs.products-amd64.outputs.agent_packages_manifest_sha256 }}
-      controller_images_manifest_sha256: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.controller_images_manifest_sha256 || needs.products-amd64.outputs.controller_images_manifest_sha256 }}
-  quick:
-    name: Quick Install (Pebble ACME, ${{ matrix.arch }})
-    needs: [products-amd64, products-arm64]
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    name: Business Smoke (amd64)
+    needs: products-amd64
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      VERSION: '0.0.0'
+      CONTROLLER_ARCH: amd64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/download-release-product
         with:
-          artifact-id: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.controller_images_artifact_id || needs.products-amd64.outputs.controller_images_artifact_id }}
-          manifest-sha256: ${{ matrix.arch == 'arm64' && needs.products-arm64.outputs.controller_images_manifest_sha256 || needs.products-amd64.outputs.controller_images_manifest_sha256 }}
+          artifact-id: ${{ needs.products-amd64.outputs.agent_packages_artifact_id }}
+          manifest-sha256: ${{ needs.products-amd64.outputs.agent_packages_manifest_sha256 }}
+          kind: agent
+          version: '0.0.0'
+          arch: amd64
+          path: ${{ runner.temp }}/business-packages
+      - uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ needs.products-amd64.outputs.controller_images_artifact_id }}
+          manifest-sha256: ${{ needs.products-amd64.outputs.controller_images_manifest_sha256 }}
           kind: controller
           version: '0.0.0'
-          arch: ${{ matrix.arch }}
+          arch: amd64
+          path: ${{ runner.temp }}/business-controller-images
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: npm-security
+          cache-npm: 'true'
+      - name: Exercise Integrated Business Smoke with candidate products
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/business-diagnostics
+          PRODUCTS_DIR: ${{ runner.temp }}/business-packages
+          IMAGES_DIR: ${{ runner.temp }}/business-controller-images
+        run: |
+          sudo --preserve-env=ARTIFACT_DIR,VERSION,GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_ENVIRONMENT,RUNNER_ARCH,CONTROLLER_ARCH,PRODUCTS_DIR,IMAGES_DIR \
+            bash scripts/release-business-probe.sh
+      - name: Return task-owned diagnostics and caches to the runner
+        if: always()
+        run: |
+          for path in "$RUNNER_TEMP/business-diagnostics" .cache .tools; do
+            if [[ -d "$path" && ! -L "$path" ]]; then
+              sudo chown -R -- "$(id -u):$(id -g)" "$path"
+            fi
+          done
+      - name: Summarize business timings and sanitized failures
+        if: always()
+        env:
+          DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
+        run: |
+          if [[ -f "$DIAGNOSTICS/result.json" ]]; then
+            jq '{probe_status,last_stage,exit_code,timings,resilience_scenarios}' "$DIAGNOSTICS/result.json"
+          fi
+          if [[ -f "$DIAGNOSTICS/api-checkpoints.jsonl" ]]; then
+            jq -c 'select(.name == "real_vpn_relay_recovery" or .name == "resilience_relay") | {name,time,status}' "$DIAGNOSTICS/api-checkpoints.jsonl"
+          fi
+          if [[ -f "$DIAGNOSTICS/probe.log" ]]; then
+            grep -E '^(RuntimeError:|AssertionError|probe failed at line)' "$DIAGNOSTICS/probe.log" || true
+          fi
+      - name: Require completed business and recovery scenarios
+        env:
+          DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
+        run: |
+          test -s "$DIAGNOSTICS/probe.log"
+          if grep -rIEq '(obt2_[A-Za-z0-9_-]{43}|oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43})' "$DIAGNOSTICS"; then
+            echo 'diagnostics contain a node bootstrap token' >&2
+            exit 1
+          fi
+          jq -e '
+            . as $result |
+            .profile == "smoke" and .terminal == "revocation" and
+            .probe_status == "PASS" and .exit_code == 0 and
+            (.timings | type == "array" and length > 0) and
+            ([
+              "integrated_entry_and_internal_tls",
+              "production_signer_active_binding",
+              "bootstrap_token_enrollment_and_rerun_identity",
+              "real_browser_subset",
+              "config_apply_and_vpn_user",
+              "real_vpn_after_config_apply",
+              "real_node_revocation_and_disconnect"
+            ] - .passed_checkpoints | length) == 0 and
+            .resilience_requested == true and
+            .resilience_result == "PASS" and
+            .planned_topology.native_systemd_node == true and
+            (.resilience_scenarios | type == "array") and
+            all(["controller", "agent", "database", "relay"][];
+              . as $name |
+              ([$result.resilience_scenarios[] | select(.name == "resilience_" + $name)] | length == 1 and .[0].status == "PASS"))
+          ' "$DIAGNOSTICS/result.json" >/dev/null
+          jq -se 'any(.[]; .name == "production_signer_password_sealed" and .status == "PASS")' \
+            "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
+      - name: Preserve business timings and sanitized diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: business-smoke-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/business-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+
+  quick:
+    name: Quick Install (Pebble ACME, amd64)
+    needs: products-amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ needs.products-amd64.outputs.controller_images_artifact_id }}
+          manifest-sha256: ${{ needs.products-amd64.outputs.controller_images_manifest_sha256 }}
+          kind: controller
+          version: '0.0.0'
+          arch: amd64
           path: ${{ runner.temp }}/quick-controller-images
       - name: Quick install, rerun, upgrade and rollback against Pebble
         env:
           VERSION: '0.0.0'
           IMAGES_DIR: ${{ runner.temp }}/quick-controller-images
-          CONTROLLER_ARCH: ${{ matrix.arch }}
+          CONTROLLER_ARCH: amd64
         run: |
           sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,IMAGES_DIR \
             bash scripts/release-quick-acceptance.sh
+
   result:
     name: Release Check Result
-    needs: [main, full-ci, security, products-amd64, products-arm64, business, quick]
+    needs: [prepare, full-ci, security, products-amd64, products-arm64, business, quick]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          if jq -e 'keys == ["business","full-ci","main","products-amd64","products-arm64","quick","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
+          if jq -e 'keys == ["business","full-ci","prepare","products-amd64","products-arm64","quick","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
             echo PASS >>"$GITHUB_STEP_SUMMARY"
           else
             echo FAIL >>"$GITHUB_STEP_SUMMARY"

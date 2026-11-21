@@ -83,7 +83,7 @@ printf 'published_installer_contracts=PASS (fault injection)\n' >>"${ARTIFACT_DI
 
 # The existing smoke executes the actual downloaded native binaries/packages,
 # including installation and corrupt embedded-payload rejection. No rebuilds.
-PRODUCTS_DIR="${work}" VERSION="${version}" STUB_BINARIES=false RC_LIFECYCLE=false \
+PRODUCTS_DIR="${work}" VERSION="${version}" RC_LIFECYCLE=false \
   ARTIFACT_DIR="${ARTIFACT_DIR}/native-smoke" \
   bash "${ROOT}/scripts/release-native-package-smoke.sh" \
   >"${ARTIFACT_DIR}/native-package-smoke.log" 2>&1

@@ -11,12 +11,6 @@ trap report_error_line ERR
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
-# STUB_BINARIES=true packages fabricated --version-only stubs instead of real
-# release binaries. The scriptlets never execute the binaries, so the dpkg/rpm
-# lifecycle semantics are identical; PR CI uses this mode to exercise the
-# scriptlet matrix without a release build, while the release workflow always
-# runs the default real-binary mode.
-STUB_BINARIES="${STUB_BINARIES:-false}"
 PRODUCTS_DIR="${PRODUCTS_DIR:-}"
 old_version=1.0.0
 new_version=1.0.1
@@ -34,7 +28,7 @@ case "${RC_LIFECYCLE}" in
 esac
 rpm_upgrade_args=(-Uvh)
 if [[ -n "${PRODUCTS_DIR}" ]]; then
-  [[ "${STUB_BINARIES}" == false && "${VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] || {
+  [[ "${VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] || {
     echo "package lifecycle requires real packages and their VERSION" >&2
     exit 2
   }
@@ -42,13 +36,6 @@ if [[ -n "${PRODUCTS_DIR}" ]]; then
   new_version="${VERSION}"
   rpm_upgrade_args+=(--replacepkgs)
 fi
-case "${STUB_BINARIES}" in
-  true | false) ;;
-  *)
-    echo "STUB_BINARIES must be true or false" >&2
-    exit 2
-    ;;
-esac
 if [[ "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
   echo "RUN_ID contains unsafe characters" >&2
   exit 2
@@ -134,17 +121,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-write_stub_binaries() {
-  local version="$1" binary
-  mkdir -p "${ROOT}/rust/target/release"
-  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
-    # shellcheck disable=SC2016
-    printf '#!/usr/bin/env bash\nif [[ "${1:-}" == --version ]]; then echo "%s %s"; exit 0; fi\nexit 0\n' \
-      "${binary}" "${version}" >"${ROOT}/rust/target/release/${binary}"
-    chmod 0755 "${ROOT}/rust/target/release/${binary}"
-  done
-}
-
 openssl genpkey -algorithm ED25519 -out "${work}/controller-command.key" >/dev/null 2>&1
 openssl pkey -in "${work}/controller-command.key" -pubout \
   -out "${work}/controller-command.pub.pem" >/dev/null 2>&1
@@ -161,12 +137,8 @@ build_packages() {
   local version="$1"
   # Each package version embeds its own release identity: the packaged
   # binaries must report exactly the package version they ship.
-  if [[ "${STUB_BINARIES}" == true ]]; then
-    write_stub_binaries "${version}"
-  else
-    VERSION="${version}" PACKAGE_ARCH="${PACKAGE_ARCH}" bash "${ROOT}/scripts/build-agent-binaries.sh"
-    check_native_binaries "${ROOT}/rust/target/release" "${version}"
-  fi
+  VERSION="${version}" PACKAGE_ARCH="${PACKAGE_ARCH}" bash "${ROOT}/scripts/build-agent-binaries.sh"
+  check_native_binaries "${ROOT}/rust/target/release" "${version}"
   sha256sum "${ROOT}/rust/target/release/ocservia-agent" | awk '{print $1}' \
     >"${work}/binary-sha-${version}"
   OUTPUT_DIR="${pkg_dir}" VERSION="${version}" \

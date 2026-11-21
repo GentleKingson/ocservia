@@ -81,7 +81,7 @@ classify_path() {
     .github/workflows/real-e2e.yml|.github/actions/real-e2e-*/*|deploy/real-e2e/*|scripts/real-e2e-*)
       tools_suite cross-vm ;;
     # Also imported by real-e2e-business.py.
-    scripts/release-business-api.py|scripts/release_business_runtime.py|scripts/release_business_scenarios.py)
+    scripts/release_business_runtime.py|scripts/release_business_scenarios.py)
       tools_suite release; tools_suite cross-vm; run_installers=true ;;
 
     # Release, build-cache, secret-scan and manual acceptance contract suites.
@@ -211,7 +211,7 @@ valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$1^{commit}" 2>/d
 
 if [[ "${event}" == workflow_dispatch ]]; then
   reason=workflow_dispatch_basic_checks
-  tools_suite guards; tools_suite source-style; tools_suite contracts
+  tools_suite guards; tools_suite release; tools_suite source-style; tools_suite contracts
   for flag in run_docs run_go run_rust run_web run_web_browser run_database run_installers; do printf -v "${flag}" true; done
 elif [[ "${event}" != pull_request && "${event}" != push ]]; then
   fail_closed "unsupported_event:${event}"

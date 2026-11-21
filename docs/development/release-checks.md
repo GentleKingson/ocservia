@@ -15,13 +15,13 @@ a result from one layer never stands in for another:
 - Basic CI (required check `Basic CI Result`) checks the changed units of one
   pull request or `main` commit.
 - Release Check qualifies one exact merged `main` commit for release, with
-  native builds, image security scans, package smoke, Business Smoke and Quick
-  Install on both architectures.
-- Real three-VM acceptance and the manual Business integration profile exercise
-  native services, a real browser and a hosted multi-VM topology that none of
-  the layers above start.
-- The Release workflow rebuilds from the tag and publishes only after its gates
-  pass.
+  Full CI, Security, dual-arch (`amd64` and `arm64`) native builds, image
+  security scans, and package/image smoke, plus primary-arch (`amd64`)
+  Integrated Business Smoke and Pebble ACME Quick Install.
+- Real three-VM acceptance exercises native services and a hosted multi-VM
+  topology that none of the layers above start.
+- The Release workflow verifies the tag's Release Check qualification up front,
+  rebuilds from the tag, and publishes only after its gates pass.
 
 ## Entry-point compatibility
 
@@ -49,7 +49,7 @@ Validation converges onto four explicit tiers:
 | Unit | Fast in-memory domain, protocol, UI, and CI-guard contract checks | `scripts/go-check.sh standard`, `make rust-check`, `scripts/web-check.sh basic`, `scripts/ci-tools-check.sh` |
 | Key Integration | Live PostgreSQL 18 schema/snapshot/API checks, native ocserv adapter integration, and Controller/Agent lifecycle suites | `scripts/database-postgres-snapshot.sh check`, `scripts/database-postgres-smoke.sh`, `DATABASE_TEST_SCOPE=full PG_MAJOR=18 scripts/database-integration.sh`, `scripts/native-ocserv-integration.sh` |
 | Security Regressions | Single-admin workspace boundary, authentication/session, fencing/outbox regressions, secret scanning, and dependency/image vulnerability gates | `regression-*` groups in `scripts/required-go-tests.txt`, `scripts/security-check.sh`, `security.yml`, `release-products.yml` |
-| Release E2E Acceptance | Playwright browser suite, Integrated Business Smoke with single-instance recovery, Pebble ACME Quick Install, and cross-VM private business | `scripts/web-check.sh full` / `make e2e`, `release-check.yml`, `release-business-diagnostic.yml`, `real-e2e.yml` |
+| Release E2E Acceptance | Playwright browser suite, Integrated Business Smoke with single-instance recovery, Pebble ACME Quick Install, and cross-VM private business | `scripts/web-check.sh full` / `make e2e`, `release-check.yml`, `real-e2e.yml` |
 
 When a change only touches documentation, run the focused checks:
 
@@ -509,9 +509,11 @@ parallel with `go` and only bootstrap `source-style` or `contracts` tools when
 selected; ordinary documentation does not install their toolchains.
 
 Contract comparison uses the PR merge-base or the push event before SHA. Manual
-Basic CI and Release Check require an explicit `contract_base_ref` naming an
-existing commit different from the candidate; Release Check forwards it to
-Full CI. A missing, unresolvable or self baseline fails. `generated-clean.sh`
+Basic CI requires an explicit `contract_base_ref` naming an existing commit
+different from the candidate. Release Check accepts an optional
+`contract_base_ref` and defaults to the latest `v*.*.*` tag reachable before
+`HEAD` (falling back to `HEAD~1`), forwarding the resolved baseline to Full CI.
+A missing, unresolvable or self baseline fails. `generated-clean.sh`
 requires a clean committed candidate before regenerating and rejects changed or
 untracked outputs. `--skip-generate` only compares with HEAD (including staged
 changes); it does not prove reproducible generation.
@@ -523,16 +525,17 @@ unresolvable, from an unsupported event, or contains an unrecognized path, the
 router fails closed by enabling every Basic flag and CI tool suite while keeping
 the Quick profile. Path routing never escalates Quick to Full.
 
-Manual dispatches bypass path routing: `docs`, `ci-tools` (`source-style` and
-`contracts`), `go`, `rust`, `web`, `web-browser` and database jobs always run.
-Installer self-tests and Controller cache refresh stay off. A manual Full run
-executes the full PostgreSQL database suite and `database-recovery-full`; a
-manual Quick run executes the PostgreSQL smoke leg. Controller cache refresh
-runs only on pushes to main when routing sets `run_controller_cache`. It
-refreshes the union of the changed images' Dockerfile inputs on both native
-architectures, selects all images for shared build machinery and unknown paths,
-falls back to all images on an empty selection, and rejects invalid image names
-before Docker runs. Product builds always build all images.
+Manual dispatches bypass path routing: `docs`, `ci-tools` (`guards`, `release`,
+`source-style` and `contracts`), `go`, `rust`, `web`, `web-browser`,
+`installers` and database jobs always run. Controller cache refresh stays off.
+A manual Full run executes the full PostgreSQL database suite and
+`database-recovery-full`; a manual Quick run executes the PostgreSQL smoke leg.
+Controller cache refresh runs only on pushes to main when routing sets
+`run_controller_cache`. It refreshes the union of the changed images' Dockerfile
+inputs on both native architectures, selects all images for shared build
+machinery and unknown paths, falls back to all images on an empty selection, and
+rejects invalid image names before Docker runs. Product builds always build all
+images.
 
 ### Workflows
 
@@ -540,9 +543,9 @@ before Docker runs. Product builds always build all images.
 | --- | --- |
 | `ci.yml` | PR/main Quick; manual Quick/Full; called by Release Check as Full |
 | `security.yml` | Weekly/manual scans; reusable, and called by Release Check (not by `release.yml`) |
-| `release-check.yml` | Manual main Full CI, Security, Release products build/image-security/smoke, Integrated Business Smoke with single-instance recovery, and Quick Install (Pebble ACME), each on native amd64 and arm64 |
-| `release.yml` | Tag build/image-security/smoke/publish; manual build-only dry-run |
-| `release-products.yml`, `release-business-diagnostic.yml` | Reusable native product build/smoke and Integrated Business Smoke workflows called by `release-check.yml` and `release.yml` |
+| `release-check.yml` | Manual main Full CI, Security, dual-arch (`amd64`/`arm64`) Release products build/image-security/smoke, and primary-arch (`amd64`) Integrated Business Smoke with single-instance recovery and Quick Install (Pebble ACME) |
+| `release.yml` | Tag fail-fast Release Check qualification, dual-arch build/image-security/smoke/publish; manual build-only dry-run |
+| `release-products.yml` | Reusable native product build, image scan, and package/image smoke workflow called by `release-check.yml` and `release.yml` |
 | `real-e2e.yml` | Manual three-hosted-VM enrollment and private business over an ephemeral Tailscale network and a temporary dedicated HTTPS Relay; the schedule is locked off, and unauthorized refs and missing infrastructure fail closed; outside Basic CI and Release Check |
 
 ### Security checks
@@ -640,231 +643,63 @@ per-job timings.
 
 ## Business validation
 
-Business Smoke runs the real Controller, native systemd Agent/privd/ocserv
-services, one Local Admin browser sign-in, Workspace selection, VPN
-user creation, direct reload and ConfigPlan apply, and an OpenConnect
-VPN session. It runs on one disposable native runner (`arch=amd64` or `arm64`;
-Release Check runs both) with one Controller and one dedicated Relay, and every
-production binary, service, Relay and VPN path runs without mocks.
-`production_signer=true` (the default in `release-check.yml` / `release-business-diagnostic.yml`)
-enables production Signer sealing and internal TLS; `false` selects the
-standalone topology without them. Smoke also provisions a separate API-created
-VPN user and, with `production_signer=true`, verifies that the production Signer
-seals its password.
+Integrated Business Smoke runs directly inside [`release-check.yml`](../../.github/workflows/release-check.yml)
+on the primary native `amd64` runner after `products-amd64` finishes (never
+blocked by `products-arm64`). It exercises the real Controller, production
+Signer sealing and internal TLS, dedicated Relay, native systemd
+Agent/`privd`/`ocserv` services, one Local Admin browser sign-in, Workspace
+isolation, VPN user creation, direct reload, ConfigPlan apply, an OpenConnect
+VPN session with ICMP, four single-instance recovery scenarios, and terminal
+real-node revocation. Every production binary, service, Relay and VPN path runs
+without mocks.
 
-The `extended` business profile adds PKI/P12 issuance and revocation
-(including browser flows), rollback and deeper fault recovery. Before the VPN and
-recovery stages it applies the node configuration once through the browser and
-checks the native file hash against the operation receipts. Both profiles require
-`real_browser_subset`, and a missing browser checkpoint fails the run. The
-browser runner captures Content Security Policy violations from the page (the
-gateway enforces CSP without a report endpoint) into `browser-csp.json`.
-Acceptance fails on any page violation or console CSP error outside the final
-positive control, if the collector misses that control, or if the control is
-reported without being enforced.
-
-To run the business harness locally on a disposable Ubuntu 24.04 systemd host or VM:
-
-```bash
-VERSION=0.0.0 BUSINESS_PROFILE=extended PRODUCTION_SIGNER_ACCEPTANCE=true \
-  BUSINESS_RUN_RESILIENCE=true bash scripts/release-business-probe.sh
-```
-
-In `release-check.yml`, `arch` (`amd64` and `arm64`) runs the native `smoke`
-profile with `production_signer=true` and `run-resilience=true`.
-`ocserv_package=distribution` keeps the runner's Ubuntu ocserv;
-`ocserv_package=backport-1.5.0` installs the pinned, SHA256-checked
-[ocserv-backport](https://github.com/GentleKingson/ocserv-backport/releases/tag/1.5.0-2)
-1.5.0 package and also requires the session terminate checkpoints.
-Diagnostic runs never publish releases, push to GHCR or read production Secrets,
-and do not substitute for Release Check.
+The driver ([`scripts/release-business-probe.sh`](../../scripts/release-business-probe.sh),
+paired with [`scripts/release_business_scenarios.py`](../../scripts/release_business_scenarios.py),
+[`scripts/release-business-browser.mjs`](../../scripts/release-business-browser.mjs),
+and [`scripts/release-common.sh`](../../scripts/release-common.sh)) consumes
+the exact verified `amd64` Agent package and Controller image artifacts produced
+by `release-products.yml`, loads and pushes the candidate images to a loopback
+registry, and installs through `controller.sh install --release-file` with
+standard v2 JSON configuration. It never publishes releases, pushes to GHCR, or
+reads production Secrets.
 
 ### Evidence and limits
 
-The driver builds native packages and container images from the candidate tree,
-pushes images to a loopback registry and runs
-`controller.sh install --release-file` with standard JSON configuration. With the
-production Signer, Integrated configuration upgrades and rollbacks test digest
-and version-tag references against those local images, not compatibility across
-historical releases. Package scriptlets validate the embedded archive checksum in
-root-owned staging, and token installation through Controller-confirmed `ONLINE` runs
-through the shipped installer.
+`real_browser_subset` runs Playwright Chromium against the built gateway and
+Controller API without route mocks, transport simulators or TLS bypasses, and
+captures Content Security Policy violations into `browser-csp.json` (failing on
+any unexpected violation or missed positive control). Both `smoke_user` and
+browser flows exercise the single Local Admin identity, exact request replay,
+changed-intent idempotency conflicts, production Signer password sealing, and
+durable cross-checks across the API, database, Agent SQLite journal and `privd`
+receipts.
 
-After the direct Admin positive ConfigPlan apply, both profiles bring up an
-OpenConnect tunnel and verify end-to-end ICMP. The extended profile then submits a
-reviewed revision built to fail during ocserv reload, confirms the node restores
-the previous files byte for byte, and establishes a fresh tunnel with working
-ICMP. This tests automatic rollback of a failed apply, not an operator-initiated
-rollback of an active revision. Its final stage builds the next patch version of
-the Agent package, places it in the node's root-owned upgrade spool, recreates the
-Controller with a diagnostics-only Compose override that mounts a release catalog
-(absent from the shipped launcher), and drives a browser-initiated, direct Admin
-one-node canary rollout. The rollout completes without any approval queue, leaves
-the installed binaries and the live Agent reporting the target version, and
-records zero unexpected CSP violations. Stage durations go to `timings.json`; no
-duration target is a release gate.
-
-GitHub Actions job status is the pass/fail authority. `result.json` records the
-selected scope (`smoke` or `extended`, never full release
-acceptance), the diagnostic schema version, overall outcome, stage timings and
-completed checkpoints, with `operator_mode=single_admin`. The Admin performs
-management operations directly; workspace-scoped denials are exercised by an
-unauthorized non-admin identity. Exact request replay must recover the
-same operation, changed intent with the same idempotency key must fail, and
-native receipts and effects must agree with the recorded operation.
-Checkpoints are written only after their assertions succeed, and unreached
-phases stay NOT RUN. Across retries, keep failed runs, the original run and
-attempt numbers, and the exact candidate SHA. The harness records these limits
-and never scores them as PASS:
-
-- Local artifacts leave the public GitHub Release download endpoint untested;
-  Bootstrap launcher download/failure fixtures and Release build-only smoke cover it.
-- The private Relay CA is provisioned through the documented protected public CA
-  files, and the shipped Compose overlay and native launcher enable the existing
-  strict-TLS flag unpatched. Both Smoke and Extended profiles enroll via
-  `POST /api/v1/node-bootstrap-tokens` (`installation: true` `oit1_` -> `obt2_`),
-  passing `--non-interactive --join-token-file` to the managed-node installer.
-  The harness checks that the Controller persisted only the child token digest,
-  bound it to the Agent's EndpointID, activated the node immediately, registered
-  the root `privd` attestation key via `/api/v1/node-bootstrap/{attestation,register}`,
-  and that subsequent installer reruns preserve the node ID and identity files.
-- The initial Local bootstrap creates one single workspace Admin. The browser uses
-  that identity without devAuth or injected sessions, and direct database writes are
-  limited to initial workspace provisioning before Local bootstrap. The suite
-  checks anonymous access, non-admin `403`/`404` denials, request binding and
-  idempotency conflicts. No second login or approval queue authorizes management
-  operations.
-- Extended exercises real Signer OpenSSL CSR verification, signing, public-key
-  sealing and revocation acknowledgements over authenticated TLS, plus
-  certificate checks across node restarts and single-use P12 downloads.
-  The exported P12 bundle authenticates against a second native `ocserv`; after
-  the Controller revokes the certificate, the harness exports and verifies a
-  fresh CRL, places it atomically and sends `SIGHUP`. Acceptance requires
-  `ocserv` to reject the revoked certificate, report an incremented CRL number
-  and still authenticate an unrevoked control certificate. This shows the
-  explicit operator CRL refresh workflow, not scheduled distribution, OCSP or
-  active session termination. `crl-acceptance.json` is kept with the API,
-  root-receipt, browser and business logs, and a missing file or failed
-  assertion blocks acceptance. The task-controlled Signer CA fixture does not
-  certify third-party CA or HSM integrations.
-- A real browser drives the built gateway and Controller API without route mocks,
-  transport simulators or TLS bypasses. Unexecuted phases stay NOT RUN, and only
-  recorded runtime checkpoints count as evidence for a candidate commit.
-- Smoke recovery verifies readiness, fresh Controller and Agent sessions,
-  preserved node identity and working operations after reconnection; manual
-  integration adds outage queue semantics and durable receipt checks. They give
-  no high availability, Relay redundancy or RTO/RPO guarantee. The OpenConnect
-  client runs in an isolated network namespace on the same runner, with
-  synthetic traffic on one machine.
-- After Relay recovery, manual integration drives the Controller's session and
-  IP-ban operations against real `occtl` state. A disconnect removes the live
-  session; wrong passwords get the client banned under ocserv's default ban
-  score, so even the valid password fails; the Controller removes the ban and the
-  valid password authenticates again. The distribution ocserv predates
-  `occtl terminate` (added in 1.4.2), so the default run does not exercise
-  terminate. With the 1.5.0 backport, a cookie from `--authenticate` must still
-  authenticate a replaying client after the first client is killed without
-  logging off, the replaying client must not reconnect after a Controller
-  terminate, and a fresh client replaying the cookie is rejected while a new
-  password authentication establishes a session. Both checkpoints are required,
-  and a terminate ending `unknown` fails the run.
-- By default both profiles end with a terminal revocation of the real node (in
-  Extended, after the rollout). Anonymous, role-less and foreign-Origin
-  requests are rejected while the node stays active. Direct Admin
-  revocation must return 200, meaning the request itself applied the revoked
-  trust and the connection close. It passes only after all of the following
-  hold:
-  - the node and its endpoint key read revoked;
-  - the request settled the revoked trust convergence task at that revision;
-  - no owner lease remains;
-  - the node reads offline while the same Agent process stays up and logs the
-    ended Controller connection.
-
-  A new reload request against the revoked node then creates no operation and leaves privd effects, the
-  Agent journal, ocserv reloads and node files unchanged. A 503 (synchronization
-  left to the background worker) or a timeout fails the run.
-
-In the offline-Relay scenario, the harness first proves the queued command was
-never transmitted while the Relay was down, then requires the original operation
-to finish with exactly one additional native ocserv reload once the same Relay
-returns. An EXPECTED-UNKNOWN classification cannot turn a failure here into a
-pass. For other interrupted operations with uncertain effects, the system relies
-on read-only reconciliation, then an explicit safe retry once absence of effect
-is confirmed.
-
-`result.json` also records `resilience_requested`, `resilience_result` and
-per-scenario checkpoints. With recovery enabled, acceptance requires one PASS for
-each of four scenarios: the Controller stack (which in Smoke includes
-transport), the Agent/privd stack, bundled PostgreSQL and the sole Relay.
-External PostgreSQL deployments have no Business-level recovery scenario.
-Missing fields or checkpoints, cancellation, test failures and unexpected skips
-block acceptance; runs without recovery record SKIPPED.
+GitHub Actions job status is the pass/fail authority. `result.json` records
+`scope="business-smoke"`, `profile="smoke"`, `terminal="revocation"`,
+`operator_mode="single_admin"`, stage timings, passed checkpoints, and the four
+required recovery checkpoints (`resilience_controller`, `resilience_agent`,
+`resilience_database`, `resilience_relay`). Terminal revocation verifies
+rejected anonymous/foreign-Origin requests, synchronous HTTP 200 trust
+convergence and connection close, owner lease invalidation, offline status while
+the same Agent PID stays up, and rejected post-revocation reloads with zero new
+`privd` side effects.
 
 Sanitized diagnostic artifacts keep the environment inventory, stage timings and
-exit status for seven days on passing and failing runs; manual integration adds
-API, database, Agent journal and root receipt observations. Keep logs private
-until redaction completes, and never upload the workspace secret directory,
-session cookies, raw database dumps or password files. Cleanup removes only
-task-created containers, the client network namespace, builder state and the
-private working directory. Native package installation mutates the disposable
-hosted runner itself, so never apply this cleanup to a shared machine.
+exit status for seven days on passing and failing runs. Logs stay private until
+exact-value redaction completes, and bootstrap tokens (`oit1_`/`obt2_`), session
+cookies, raw database dumps and password files are rejected from diagnostics.
+Cleanup tears down containers, the `business-test-client` network namespace,
+temporary iptables rules and the private working directory. Native package
+installation mutates the disposable hosted runner itself, so never run the probe
+on a shared machine.
 
 A passing positive ConfigPlan apply requires native execution of the
 [complete configuration contract](../reference/stable-contracts.md#configuration-and-node-tls),
 and recovery validation must respect the
 [matched-release recovery boundary](../reference/stable-contracts.md#matched-release-recovery-boundary).
-When a check fails, rerun the owning suite with its complete check set and
-shared fault timeline on the current candidate commit; earlier candidates cannot
-fill in missing acceptance or establish cross-version safety. Passing Business
-validation does not certify native package distribution or high availability.
-
-### Manual package removal terminal
-
-The native business harness accepts `BUSINESS_TERMINAL=uninstall` as an
-opt-in alternative to the default `revocation` terminal. Under `smoke`,
-it reuses bootstrap installation enrollment, Online convergence, browser
-configuration apply and the real VPN before removing the package. It adds no
-Basic CI or Release Check E2E requirement and changes no production lifecycle behavior.
-
-```sh
-VERSION=0.0.0 BUSINESS_PROFILE=smoke BUSINESS_TERMINAL=uninstall \
-  PRODUCTION_SIGNER_ACCEPTANCE=true BUSINESS_RUN_RESILIENCE=false \
-  bash scripts/release-business-probe.sh
-```
-
-The terminal needs a disposable Ubuntu 24.04 systemd runner of the selected
-architecture. It records NodeID, EndpointID, protected identity/configuration
-file digests, active native units and process IDs, ocserv PID/start time, and the
-Controller trust revision and owner session before running
-`apt-get remove -y ocservia-agent`. It never substitutes revocation or a
-separate service stop for the DEB transaction. Evidence includes
-`package-removal.log` and separate `package_removal`, `agent_offline`,
-`identity_preserved` and `ocserv_unaffected` API checkpoints; the last also
-requires a fresh authenticated OpenConnect tunnel with working ICMP.
-
-Offline follows `telemetry.OfflineAfter` (90 seconds since the last heartbeat),
-independently of the default 30-second owner lease. The test allows 180 seconds
-for Offline, then 60 seconds for lease expiration, then observes 32 more seconds
-with no new owner epoch, running Agent component, active unit or timer,
-authorization revision or endpoint-key change, identity or configuration change,
-privileged effect, or ocserv restart or reload. It also checks removed payloads
-and `/proc` executables, including unlinked running binaries. An API error,
-removal failure, stale online state, live owner, unexpected trust
-revision/revocation or incomplete evidence fails the run; process exit alone
-cannot pass it.
-
-The lifecycle interpretation follows [Debian Policy section 6.5](https://www.debian.org/doc/debian-policy/ch-maintainerscripts.html#summary-of-ways-maintainer-scripts-are-called),
-[dpkg remove/purge](https://manpages.debian.org/bookworm/dpkg/dpkg.1.en.html) and
-[systemctl disable/stop](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html).
-DEB removal calls `prerm remove`; upgrades call `prerm upgrade` and do not enter
-this path. `disable --now` also stops the units; disabling alone does not. The
-repository's preremove delegates removal to the verified archive's uninstaller
-without `--purge-state`, preserving identity, state and configuration. dpkg purge
-removes conffiles and runs a package postrm if present; it does not imply the
-repository's explicit `--purge-state`. The Controller also persists
-`nodes.status=offline` on disconnect or telemetry maintenance and exposes it as
-API `trust_status`; this transition is normal as long as the endpoint key stays
-active and the authorization revision is unchanged.
+Passing Business Smoke on `amd64` combined with native `amd64`/`arm64` package
+and image smoke does not certify cross-host high availability, historical
+cross-release upgrades, or third-party CA/HSM integrations.
 
 ## Real three-VM acceptance
 
@@ -1482,61 +1317,67 @@ Every release qualifies through a passing CI run along this pipeline:
 
 ```text
 PR -> Basic CI -> merge main
-   -> manual Release Check
-      - Full CI
+   -> manual Release Check (contract_base_ref optional; defaults to latest tag or HEAD~1)
+      - Full CI (including release CI contract suite)
       - Security
       - amd64 and arm64 Release products: build + Controller image security
         + package/image smoke (same reusable workflow as Release)
-      - amd64 and arm64 Business Smoke + four finite single-instance recoveries
-      - amd64 and arm64 Quick Install against a Pebble ACME directory
+      - amd64 Business Smoke + four finite single-instance recoveries (needs products-amd64)
+      - amd64 Quick Install against a Pebble ACME directory (needs products-amd64)
    -> PASS -> operator version confirmation -> vX.Y.Z-rc.N or vX.Y.Z tag
    -> Release
+      - fail-fast require a successful Release Check for the exact tag/build SHA
       - amd64 build + Controller image security + install/image smoke
       - arm64 build + Controller image security + install/image smoke
-      - require a successful Release Check for the exact tag/build SHA
-      - publish Agent assets and Controller GHCR images only after these gates pass
+      - re-verify Release Check qualification and publish Agent assets & GHCR images
 ```
 
 On pull requests, `Basic CI Result` remains the required check. Once changes
 merge to `main`, an operator triggers Release Check manually via
-`workflow_dispatch` with the required `contract_base_ref`. Every required job must pass; a failure, cancellation or
-unexpected skip blocks qualification. Each run executes from scratch, without
-inheriting earlier results or nominating a persistent candidate. Full CI inside
-Release Check is the Basic CI Full profile (see [Basic CI](#basic-ci)), not
-comprehensive acceptance. In Release Check, each native architecture builds its
-Agent packages and Controller images once in `release-products.yml`. Image
-scanning, native image smoke and the package lifecycle gate finish before the
-products are uploaded. Business consumes those Agent packages and images;
-Quick Install consumes the same Controller image artifacts for Pebble ACME,
-reruns, upgrades and rollbacks. Both select exact artifact IDs returned by the
-producer, then verify the producer's identity-manifest SHA-256, candidate commit,
-version, architecture, complete file inventory and every file's SHA-256 before
-use. Missing or mismatched products fail without rebuilding. Explicit per-arch
-producer jobs avoid ambiguous matrix outputs, and failed-job reruns keep the
-successful producer's exact IDs rather than reconstructing artifact names from
-the new run attempt. Manual Business diagnostics still build candidate
-artifacts locally and install from a loopback registry on disposable native
-runners of the selected architecture; they do not publish GHCR images.
+`workflow_dispatch` (with `contract_base_ref` optional; when omitted, `prepare`
+resolves the latest `v*.*.*` tag reachable before `HEAD`, or `HEAD~1`). Every
+required job must pass; a failure, cancellation or unexpected skip blocks
+qualification. Each run executes from scratch, without inheriting earlier
+results or nominating a persistent candidate. Full CI inside Release Check is
+the Basic CI Full profile (see [Basic CI](#basic-ci)), not comprehensive
+acceptance. In Release Check, each native architecture builds its Agent
+packages and Controller images once in `release-products.yml`. Image scanning,
+native image smoke and the package lifecycle gate finish before the products
+are uploaded. On primary architecture `amd64`, Business Smoke and Quick Install
+depend only on `products-amd64` (so `arm64` build time never delays them).
+Business Smoke consumes the verified `amd64` Agent packages and Controller
+images; Quick Install consumes the same `amd64` Controller image artifacts for
+Pebble ACME, reruns, upgrades and rollbacks. Both select exact artifact IDs
+returned by the producer, then verify the producer's identity-manifest SHA-256,
+candidate commit, version, architecture, complete file inventory and every
+file's SHA-256 before use. Missing or mismatched products fail without
+rebuilding. Explicit per-arch producer jobs avoid ambiguous matrix outputs, and
+failed-job reruns keep the successful producer's exact IDs rather than
+reconstructing artifact names from the new run attempt.
 
 Once Release Check succeeds on the target commit, the operator confirms the
-version and pushes the version tag. The tag-triggered Release workflow builds
-from the tag, scans the built Controller image archives on both native
-architectures, and runs install and image smoke before publishing. Image scans
-gate on findings except entries approved in
+version and pushes the version tag. On tag push, the Release workflow's
+`prepare` job first calls `scripts/publish-release.py qualify` to fail fast if
+the tag does not match the build SHA or lacks a passing latest `Release Check`
+on `main`. Only after that gate passes does it build from the tag, scan the
+built Controller image archives on both native architectures, and run install
+and image smoke before publishing. Image scans gate on findings except entries
+approved in
 [`deploy/production/image-scan-exemptions.json`](../../deploy/production/image-scan-exemptions.json),
 each with a review deadline; an entry past its deadline fails the gate again.
 
 Inside the `release-publishing` environment, before any image or Release write,
-`publish` verifies that the current tag resolves to the build SHA and queries
-`release-check.yml` runs for that exact SHA on `main`, triggered by
-`workflow_dispatch`. The latest run must be completed successfully. Missing,
-failed, cancelled or unfinished qualification and API errors block publication,
-including reruns, and an older PASS cannot override a newer unsuccessful run. The
-accepted run URL and SHA are recorded in the job summary. Build-only dispatches
-are exempt, and Release does not rerun Full CI, Security or Business acceptance.
-Only the tag-triggered `publish` job receives `contents: write`,
-`packages: write` and access to the `release-publishing` environment, which is an
-approval and protection boundary without GitHub Deployment records.
+`publish` re-runs `scripts/publish-release.py qualify` to confirm that the tag
+still resolves to the build SHA and the latest `workflow_dispatch`
+`release-check.yml` run for that exact SHA on `main` is still completed
+successfully. Missing, failed, cancelled or unfinished qualification and API
+errors block publication, including reruns, and an older PASS cannot override a
+newer unsuccessful run. The accepted run URL and SHA are recorded in the job
+summary. Build-only dispatches are exempt, and Release does not rerun Full CI,
+Security or Business acceptance. Only the tag-triggered `publish` job receives
+`contents: write`, `packages: write` and access to the `release-publishing`
+environment, which is an approval and protection boundary without GitHub
+Deployment records.
 
 Three-VM acceptance is independent of this automated gate. For the next RC, the
 operator must record its run or evidence reference and verified source SHA
@@ -1591,11 +1432,10 @@ RPM. Package validation has three separate scopes:
      scripts/release-native-package-smoke.sh
    ```
 
-   `STUB_BINARIES=false` exercises real compiled binaries; `STUB_BINARIES=true`
-   is reserved for fast scriptlet checks in PR CI. The fixed `1.2.0` sequence
-   verifies DEB and RPM `~rc.N` version sorting, upgrade and rollback state
-   snapshots, and package scriptlet transitions. Relabeling one source tree does
-   not prove cross-release binary upgrade compatibility.
+   It always builds and exercises real compiled binaries. The fixed `1.2.0`
+   sequence verifies DEB and RPM `~rc.N` version sorting, upgrade and rollback
+   state snapshots, and package scriptlet transitions. Relabeling one source
+   tree does not prove cross-release binary upgrade compatibility.
 2. Current candidate product build and install smoke: in
    [`release-products.yml`](../../.github/workflows/release-products.yml),
    `PRODUCTS_DIR` and `VERSION` feed the candidate packages built for `VERSION`
@@ -1775,14 +1615,14 @@ gap.
 
 | Behavior | Owner |
 | --- | --- |
-| Native `oit1_` -> `obt2_` bootstrap installation and online node, browser Admin login/Workspace/user creation/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke (`release-business-diagnostic.yml`), amd64 and arm64 with the same checkpoint gate |
-| Controller/transport, Agent/privd, bundled PostgreSQL and sole Relay recovery (external PostgreSQL has no Business-level recovery) | Business Smoke with `run-resilience=true` |
-| Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Business Smoke and extended business harness |
-| Native session disconnect and IP-ban removal; CSR, issue, one-use P12, revoke and persistence (including browser checks); offline queue and exact root effects; one-node browser canary rollout to a locally built next Agent version | Extended business harness (`BUSINESS_PROFILE=extended`) |
-| DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on amd64/arm64 | Native package build/install smoke (Release Check and Release) |
+| Native `oit1_` -> `obt2_` bootstrap installation and online node, browser Admin login/Workspace/user creation/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke (`release-check.yml`, `amd64`) |
+| Controller/transport, Agent/privd, bundled PostgreSQL and sole Relay recovery (external PostgreSQL has no Business-level recovery) | Integrated Business Smoke (`release-check.yml`, `amd64`) |
+| Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Integrated Business Smoke (`release-check.yml`, `amd64`) |
+| Pebble ACME Quick Install, credential and root-CA custody, idempotent rerun, bootstrap resume, and `controller.sh` upgrade/rollback/upgrade | Quick Install (`release-check.yml`, `amd64`) |
+| DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on `amd64`/`arm64` | Native package build/install smoke (Release Check and Release) |
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products (Release Check and Release) |
 | Source/dependency vulnerabilities and repository secrets, within the [tool scope](#security-checks) | Security |
-| Tagged-source build and GitHub/GHCR publication | Release |
+| Fail-fast qualification, tagged-source build and GitHub/GHCR publication | Release |
 | Three-VM enrollment, private business and dedicated Relay recovery on separate hosted VMs | `real-e2e.yml` (see [Real three-VM acceptance](#real-three-vm-acceptance)) |
 
 Business and Quick Install workflows first require the runner, kernel, dpkg and
