@@ -115,7 +115,7 @@ jobs:
       - name: Return task-owned diagnostics and caches to the runner
         if: always()
         run: |
-          for path in "$RUNNER_TEMP/business-diagnostics" .cache .tools; do
+          for path in "$RUNNER_TEMP/business-diagnostics" .cache .tools web/node_modules; do
             if [[ -d "$path" && ! -L "$path" ]]; then
               sudo chown -R -- "$(id -u):$(id -g)" "$path"
             fi
