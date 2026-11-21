@@ -177,6 +177,7 @@ pub struct FixedResources {
     effect_store_key: PathBuf,
     certificate_key_dir: PathBuf,
     config_tls_root: PathBuf,
+    audit_hook: PathBuf,
 }
 
 impl Default for FixedResources {
@@ -198,6 +199,7 @@ impl Default for FixedResources {
             effect_store_key: PathBuf::from("/var/lib/ocservia-privd/desired-effects.key"),
             certificate_key_dir: PathBuf::from("/var/lib/ocservia-privd/certificates"),
             config_tls_root: PathBuf::from("/etc/ocservia-agent/config-tls"),
+            audit_hook: PathBuf::from("/usr/libexec/ocservia/vpn-session-hook"),
         }
     }
 }
