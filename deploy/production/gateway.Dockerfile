@@ -10,6 +10,7 @@ FROM caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00
 # The upstream image has no caddy account. Seed ACME volume ownership and
 # remove the file capability so Caddy can start with all capabilities dropped.
 RUN apk upgrade --no-cache brotli-libs curl libcurl zlib \
+    && apk add --no-cache --upgrade 'musl>=1.2.5-r24' 'musl-utils>=1.2.5-r24' \
     && addgroup -S -g 65532 caddy && adduser -S -D -H -u 65532 -G caddy caddy \
     && install -d -o caddy -g caddy -m 0700 /var/lib/caddy-acme \
     && setcap -r /usr/bin/caddy

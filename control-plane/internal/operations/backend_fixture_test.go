@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
+	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
@@ -128,6 +129,9 @@ func (t *commitFaultTx) WallTime(ctx context.Context) (value.Timestamp, error) {
 }
 func (t *commitFaultTx) TransactionTime(ctx context.Context) (value.Timestamp, error) {
 	return database.TransactionTime(ctx, t.Tx)
+}
+func (t *commitFaultTx) AuthenticationStore() authstore.Store {
+	return t.Tx.(authstore.Provider).AuthenticationStore()
 }
 func (t *commitFaultTx) OperationStore() operationstore.Store {
 	s, _ := operationstore.FromTransaction(t.Tx)

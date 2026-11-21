@@ -18,3 +18,8 @@ ce7e5d6354ccf987f6c3866d4bd7fbf66badc4a3:control-plane/internal/certificates/ser
 60aaad4d885e82c644f96f1723a697f80921bb9f:scripts/generate-g6-test-fixtures.mjs:generic-api-key:719
 60aaad4d885e82c644f96f1723a697f80921bb9f:testdata/g6/artifacts/command-trace.jsonl:generic-api-key:2403
 ba274ab1e1e1715ff33d30954f14d7c9c972c984:control-plane/internal/database/semantictest/text.go:generic-api-key:24
+# Historical PostgreSQL regex fixture with a deliberately invalid value.
+d8d3ad2a51ba400d774d7d7b2bd203c9f9453439:control-plane/internal/database/postgres/text_integration_test.go:generic-api-key:23
+# Historical browser and unit fixtures assembled from repeated characters.
+7c8c6c177f71c1ba61a1f7a7d2de677335ce8b1a:web/e2e/node-install.spec.ts:generic-api-key:5
+7c8c6c177f71c1ba61a1f7a7d2de677335ce8b1a:web/test/node-install-dialog.test.ts:generic-api-key:51

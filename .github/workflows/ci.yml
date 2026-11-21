@@ -411,6 +411,7 @@ jobs:
             basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
       - run: |
           RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-postgres-bundled" \
+            ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-postgres/bundled" \
             bash scripts/postgres-backup-restore-smoke.sh
           RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-postgres" \
             ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-postgres" \

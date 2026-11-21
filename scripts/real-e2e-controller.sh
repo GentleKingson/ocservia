@@ -67,13 +67,18 @@ runner_instance_id() {
 }
 
 start_controller() {
-  local endpoint
+  local endpoint observed
   mkdir -p "${STATE}" "${SECRETS}" "${TLS_DIR}" "${WORK}/private" "${OUTBOX}/controller-ready" "${ARTIFACT_DIR}"
   chmod 0700 "${WORK}"
   chmod 0755 "${SECRETS}" "${TLS_DIR}"
   openssl genpkey -algorithm ED25519 -out "${SECRETS}/command.key.pem"
   openssl pkey -in "${SECRETS}/command.key.pem" -outform DER | tail -c 32 >"${SECRETS}/controller.key"
   openssl pkey -in "${SECRETS}/command.key.pem" -pubout -out "${OUTBOX}/controller-ready/command.pub.pem"
+  # The Iroh key file contains this Ed25519 seed. Derive its EndpointID
+  # before starting either service so transportd can connect to Controller trust.
+  endpoint="$(openssl pkey -pubin -in "${OUTBOX}/controller-ready/command.pub.pem" -outform DER \
+    | tail -c 32 | od -An -v -tx1 | tr -d ' \n')"
+  require_endpoint "${endpoint}"
   sudo install -m 0440 "${OUTBOX}/controller-ready/command.pub.pem" "${SECRETS}/command.pub.pem"
   sudo chown 0:65532 "${SECRETS}/command.pub.pem"
   openssl rand -hex 32 >"${SECRETS}/session-key"
@@ -103,9 +108,6 @@ start_controller() {
   sudo chmod 0440 "${REAL_E2E_RELAY_DIR}/token"
   chmod 0755 "${REAL_E2E_RELAY_DIR}"
   chmod 0444 "${REAL_E2E_RELAY_DIR}/ca.pem"
-  OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})"
-  export OCSERV_CONTROLLER_ENDPOINT_ID
-
   if [[ "${NODE_INSTALL_E2E:-false}" == true ]]; then
     bash "${ROOT}/scripts/bootstrap.sh" web
     # shellcheck source=scripts/env.sh
@@ -122,17 +124,6 @@ WEB
   compose build controller-key-init migrate gateway
   compose up --detach controller-key-init transport-runtime-init postgres
   compose run --rm migrate
-  compose --profile bootstrap up --detach transport-endpoint-bootstrap
-  for _ in {1..60}; do
-    endpoint="$(compose logs --no-color transport-endpoint-bootstrap 2>/dev/null \
-      | sed -n 's/.*"endpoint_id":"\([0-9a-f]\{64\}\)".*/\1/p' | tail -1)"
-    [[ -n "${endpoint}" ]] && break
-    sleep 1
-  done
-  require_endpoint "${endpoint:-}"
-  compose --profile bootstrap stop transport-endpoint-bootstrap
-  compose --profile bootstrap rm --force transport-endpoint-bootstrap
-
   export OCSERV_CONTROLLER_ENDPOINT_ID="${endpoint}"
   printf '%s\n' "${endpoint}" >"${STATE}/controller-endpoint-id"
   compose up --detach control-plane
@@ -145,11 +136,12 @@ WEB
   compose exec -T control-plane test -S /run/ocserv-trust/control-plane.sock
   compose up --detach transportd
   for _ in {1..60}; do
-    if compose exec -T transportd test -S /run/ocserv-platform/transportd.sock; then
-      break
-    fi
+    observed="$(compose logs --no-color transportd \
+      | sed -n 's/.*"endpoint_id":"\([0-9a-f]\{64\}\)".*/\1/p' | tail -1)"
+    [[ -n "${observed}" ]] && break
     sleep 1
   done
+  [[ "${observed}" == "${endpoint}" ]]
   compose exec -T transportd test -S /run/ocserv-platform/transportd.sock
   if [[ -f "${REAL_E2E_RELAY_DIR}/compose.json" ]]; then
     compose exec -T transportd /usr/local/bin/ocservia-relay-network-probe \
@@ -279,7 +271,7 @@ cleanup_controller() {
     REAL_E2E_RELAY_DIR="${REAL_E2E_RELAY_DIR}" \
     REAL_E2E_BUSINESS_DIR="${SECRETS}" REAL_E2E_TLS_DIR="${TLS_DIR}" docker compose \
     --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" \
-    --profile bootstrap down --volumes --remove-orphans --rmi local || status=$?
+    down --volumes --remove-orphans --rmi local || status=$?
   rm -rf -- "${WORK}" "${RUNNER_TEMP:-/tmp}/real-e2e-agent-endpoint" \
     "${RUNNER_TEMP:-/tmp}/real-e2e-enrollment-result" || status=$?
   return "${status}"

@@ -313,6 +313,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			at, err := value.FromTime(time.Now().UTC())
 			testutil.NoError(t, err)
 			f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox other workspace',$2,$3,$4)`, otherWorkspace, otherWorkspace.String(), at, at)
+			f.exec(t, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, otherWorkspace, outboxIdentityID, at)
 			node := uuid.Must(uuid.NewV7())
 			f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',$4,$5)`, node, otherWorkspace, node.String(), at, at)
 			endpoint := sha256.Sum256(node[:])

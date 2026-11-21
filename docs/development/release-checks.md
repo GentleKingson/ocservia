@@ -984,8 +984,9 @@ public DNS or public Relay is used, so the run does not exercise public Relay
 discovery. Its readiness artifact holds only the URL, Tailnet IP, public CA and
 fingerprint, source SHA, run ID, attempt and boot ID, and peers reject stale,
 mixed-source, same-VM or malformed readiness. Peers map the fixed hostname
-locally, and a test-only Compose overlay maps it inside transportd and endpoint
-bootstrap; production Compose networks are unchanged.
+locally, and a test-only Compose overlay maps it inside transportd. The fixture
+derives the Controller EndpointID from its local Ed25519 public key before
+startup and checks it against the running transportd.
 
 The Relay job checks its container and verified HTTPS health until both full peer
 jobs complete, outside the controlled recovery interval. Failed peers fail
