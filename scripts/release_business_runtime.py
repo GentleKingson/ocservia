@@ -17,9 +17,12 @@ class BusinessEnvironment:
     def __init__(self):
         self.work = Path(os.environ['OCSERVIA_BUSINESS_TEST_WORK_DIR'])
         self.evidence = Path(os.environ['ARTIFACT_DIR'])
-        self.workspace = os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID']
         self.origin = os.environ.get('OCSERV_CONTROLLER_PUBLIC_URL', 'https://localhost')
         self.clients = {}
+
+    @cached_property
+    def workspace(self):
+        return os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID']
 
     @cached_property
     def tls_context(self):

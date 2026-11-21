@@ -43,6 +43,7 @@ CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
 [[ "${CONTROLLER_ARCH}" == amd64 || "${CONTROLLER_ARCH}" == arm64 ]]
 export PACKAGE_ARCH="${CONTROLLER_ARCH}" CONTROLLER_ARCH
 export DEPLOYMENT_CONFIG_DIR="${work}/bundle"
+export OCSERVIA_BUSINESS_TEST_WORKSPACE_ID=00000000-0000-7000-8000-000000000071
 export OCSERV_SECRET_DIR="${work}/secrets" OCSERV_BACKUP_DIR="${work}/backup"
 export OCSERV_CONTROLLER_STATE_ROOT="${work}/state"
 export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_AUDIT_EVENT_KEY_ID=business-test OCSERV_BACKUP_INTERVAL_SECONDS=86400
@@ -227,7 +228,6 @@ record controller_lifecycle
 scenario integrated_entry
 record integrated_entry_and_internal_tls
 
-export OCSERVIA_BUSINESS_TEST_WORKSPACE_ID=00000000-0000-7000-8000-000000000071
 compose exec -T postgres psql -XAt -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <<SQL
 INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES
  ('${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}','Business Test','business-test',now(),now()),
