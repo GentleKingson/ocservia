@@ -24,7 +24,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, CommandEnvelope,
     PrivdReceiptVersion, command_envelope,
 };
-use ocservia_ocserv_adapter::{Adapter, AuthorizedEffectDecision};
+use ocservia_ocserv_adapter::{Adapter, AdapterError, AuthorizedEffectDecision};
 use ocservia_privd_attestation::{key_id, sign_upgrade_result_with_key_id};
 use ocservia_upgrader::{ScheduleOutcome, UpgradeIntent, UpgradeScheduler, UpgradeStoreError};
 use prost::Message as _;
@@ -235,24 +235,19 @@ async fn dispatch_attested(
 ) -> PrivdResponse {
     let request_id = request.request_id.clone();
     let result = match validate_request(request, node_id, endpoint_id, command_keys) {
-        Ok((deadline, ValidatedRequest::Read)) => {
-            match tokio::time::timeout(
-                deadline,
-                execute_read(
-                    request.operation.clone(),
-                    node_id,
-                    attestation_key,
-                    attestation_key_id,
-                    adapter,
-                    upgrades,
-                ),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => deadline_error(),
-            }
-        }
+        Ok((deadline, ValidatedRequest::Read)) => tokio::time::timeout(
+            deadline,
+            execute_read(
+                request.operation.clone(),
+                node_id,
+                attestation_key,
+                attestation_key_id,
+                adapter,
+                upgrades,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| deadline_error()),
         Ok((deadline, ValidatedRequest::Execute(command, claims, accepted_at, owner_epoch))) => {
             match tokio::time::timeout(
                 deadline,
@@ -517,11 +512,7 @@ async fn execute_command(
 ) -> PrivdResponse {
     let owner_fence = owner_fence(node_id, endpoint_id, owner_epoch);
     if let Err(failure) = adapter.accept_owner_fence(owner_fence) {
-        return PrivdResponse {
-            request_id: Vec::new(),
-            privileged_result_proof: None,
-            result: Some(privd_response::Result::Error(PrivdError::from(failure))),
-        };
+        return adapter_error_response(failure);
     }
     let binding = effect_binding(command, claims);
     if let Some(binding) = binding.as_ref() {
@@ -556,13 +547,7 @@ async fn execute_command(
                     "authorized effect outcome requires reconciliation",
                 );
             }
-            Err(failure) => {
-                return PrivdResponse {
-                    request_id: Vec::new(),
-                    privileged_result_proof: None,
-                    result: Some(privd_response::Result::Error(PrivdError::from(failure))),
-                };
-            }
+            Err(failure) => return adapter_error_response(failure),
         }
     }
     let (operation_name, result) =
@@ -620,13 +605,17 @@ async fn execute_command(
         {
             return decode_cached_response(&replayed);
         }
-        return PrivdResponse {
-            request_id: Vec::new(),
-            privileged_result_proof: None,
-            result: Some(privd_response::Result::Error(PrivdError::from(failure))),
-        };
+        return adapter_error_response(failure);
     }
     response
+}
+
+fn adapter_error_response(failure: AdapterError) -> PrivdResponse {
+    PrivdResponse {
+        request_id: Vec::new(),
+        privileged_result_proof: None,
+        result: Some(privd_response::Result::Error(PrivdError::from(failure))),
+    }
 }
 
 async fn execute_agent_upgrade(
