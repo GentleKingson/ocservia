@@ -208,9 +208,9 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	recovered := mutate(request(UserCreate, "alice", 1))
 	assertEnvelope(recovered, 0, 1)
 	// Failed fencing rolls back desired rows, supersession, outbox and audit.
-	identity, err := coordination.NewIdentity()
+	schedulerIdentity, err := coordination.NewIdentity()
 	testutil.NoError(t, err)
-	leader, err := coordination.AcquireBackend(ctx, b, identity, time.Minute)
+	leader, err := coordination.AcquireBackend(ctx, b, schedulerIdentity, time.Minute)
 	testutil.NoError(t, err)
 	fenced := coordination.WithFence(ctx, leader)
 	fencedRequest := request(GroupApply, "fenced", 0)
