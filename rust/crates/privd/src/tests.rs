@@ -539,9 +539,7 @@ async fn newer_owner_epoch_persists_and_rejects_stale_root_effects() {
         )
         .await,
     );
-    assert_permission_denied(
-        &dispatch(command_request(stale), &node_id, &keys, &restarted).await,
-    );
+    assert_permission_denied(&dispatch(command_request(stale), &node_id, &keys, &restarted).await);
     assert_eq!(fs::read_to_string(&fx.counter).expect("counter"), "x");
 
     let current = with_owner_epoch(

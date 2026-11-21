@@ -34,8 +34,8 @@ use uuid::Uuid;
 
 use self::effect_binding::{
     adapter_effect, artifact_identity, authorized_effect, deadline_error, decode_cached_response,
-    desired_effect_binding, effect_binding, error, finish_operation, fixed_host_effect, owner_fence,
-    replay_only_response, response_error,
+    desired_effect_binding, effect_binding, error, finish_operation, fixed_host_effect,
+    owner_fence, replay_only_response, response_error,
 };
 use self::receipts::{build_result_proof, terminal_result_error_code};
 use self::validation::{ValidatedRequest, validate_request};
@@ -315,9 +315,7 @@ async fn dispatch_attested(
                         .artifact_confirm_consumed(identity, &digest, size)
                         .await
                 } else {
-                    adapter
-                        .artifact_consume(identity, &digest, size)
-                        .await
+                    adapter.artifact_consume(identity, &digest, size).await
                 }
             })
             .await

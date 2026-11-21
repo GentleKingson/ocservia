@@ -464,8 +464,7 @@ impl Adapter {
         identity: AuthorizedEffectIdentity<'_>,
         owner_fence: OwnerFenceIdentity<'_>,
     ) -> Result<AuthorizedEffectDecision, AdapterError> {
-        EffectStore::open_for_mutation(&self.resources)?
-            .prepare_authorized(identity, owner_fence)
+        EffectStore::open_for_mutation(&self.resources)?.prepare_authorized(identity, owner_fence)
     }
 
     /// Durably accepts a root-verified connection-owner term before any
