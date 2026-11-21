@@ -175,6 +175,7 @@ def integrated_entry():
     assert tls_get(control_name, '/api/v1/version', 'wrong.invalid')[0] == 421
     for server_name in (None, 'unknown.invalid'):
         unverified = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        unverified.minimum_version = ssl.TLSVersion.TLSv1_2
         unverified.check_hostname = False
         unverified.verify_mode = ssl.CERT_NONE
         try:
