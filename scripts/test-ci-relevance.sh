@@ -120,7 +120,7 @@ head_sha="$(git rev-parse HEAD)"
 bash scripts/ci-relevance.sh workflow_dispatch "${head_sha}" "${head_sha}" "${out_file}" full
 assert_eq "dispatch full profile" full "$(read_out profile)"
 assert_eq "dispatch full database_scope" full "$(read_out database_scope)"
-assert_eq "dispatch full ci_suites" "guards source-style contracts" "$(read_out ci_suites)"
+assert_eq "dispatch full ci_suites" "guards release source-style contracts" "$(read_out ci_suites)"
 assert_eq "dispatch full run_installers" true "$(read_out run_installers)"
 assert_eq "dispatch full run_controller_cache" false "$(read_out run_controller_cache)"
 

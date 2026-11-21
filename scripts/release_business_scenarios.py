@@ -1,21 +1,217 @@
-"""Business acceptance scenarios shared by release drivers."""
+#!/usr/bin/env python3
+"""Release Check business smoke and shared cross-VM acceptance scenarios."""
 import base64
 import hashlib
+import http.client
 import json
 import os
-import re
+from pathlib import Path
 import secrets
+import socket
+import ssl
 import subprocess
+import sys
 import time
 import urllib.error
-import uuid
 
 from release_business_runtime import ROOT, api, client, environment, record, run, sql, wait_for
+
+COMPOSE = str(ROOT / 'deploy/production/compose.sh')
+
+
+def _signer_state():
+    return environment().work / 'production-signer'
+
+
+def _signer_admin(*args):
+    state = _signer_state()
+    return run('docker', 'run', '--rm', '--read-only', '--cap-drop=ALL',
+               '--security-opt=no-new-privileges:true',
+               '-v', f'{state}/secrets:/run/secrets:ro',
+               '-v', f'{state}/input:/input:ro',
+               '-v', f'{state}/data:/var/lib/ocservia-signer',
+               os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE'], *args)
+
+
+def _signer_health():
+    container = os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER']
+    for _ in range(30):
+        result = subprocess.run(['docker', 'exec', container, '/ocserv-signer', 'health',
+                                 '--url', 'https://signer:9443/healthz'],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode == 0:
+            return
+        time.sleep(1)
+    raise RuntimeError('production Signer did not become healthy')
+
+
+def signer_prepare():
+    work = environment().work
+    private = work / 'private'
+    state = _signer_state()
+    state.mkdir(mode=0o700)
+    for folder in ('secrets', 'input', 'data'):
+        run('sudo', 'install', '-d', '-o', '65532', '-g', '65532', '-m', '700', str(state / folder))
+    run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '7',
+        '-subj', '/CN=signer-offline-root', '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:1',
+        '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
+        '-keyout', str(private / 'signer-root.key'), '-out', str(work / 'signer-root.pem'))
+    run('openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=signer-online-issuer',
+        '-keyout', str(private / 'issuer-key.pem'), '-out', str(work / 'issuer.csr'))
+    (work / 'issuer.ext').write_text('basicConstraints=critical,CA:TRUE,pathlen:0\n'
+                                     'keyUsage=critical,keyCertSign,cRLSign\n'
+                                     'subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n')
+    run('openssl', 'x509', '-req', '-in', str(work / 'issuer.csr'), '-days', '3',
+        '-CA', str(work / 'signer-root.pem'), '-CAkey', str(private / 'signer-root.key'),
+        '-set_serial', '2', '-extfile', str(work / 'issuer.ext'), '-out', str(work / 'issuer.pem'))
+    (work / 'issuer-chain.pem').write_bytes((work / 'issuer.pem').read_bytes() +
+                                            (work / 'signer-root.pem').read_bytes())
+    run('openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=signer',
+        '-keyout', str(private / 'signer-tls.key'), '-out', str(work / 'signer-tls.csr'))
+    (work / 'signer-tls.ext').write_text('subjectAltName=DNS:signer\nextendedKeyUsage=serverAuth\n')
+    run('openssl', 'x509', '-req', '-days', '1', '-in', str(work / 'signer-tls.csr'),
+        '-CA', str(work / 'ca.crt'), '-CAkey', str(private / 'ca.key'), '-CAcreateserial',
+        '-extfile', str(work / 'signer-tls.ext'), '-out', str(work / 'signer-tls.crt'))
+    sources = {
+        'issuer-chain.pem': work / 'issuer-chain.pem',
+        'issuer-key.pem': private / 'issuer-key.pem',
+        'tls-cert.pem': work / 'signer-tls.crt',
+        'tls-key.pem': private / 'signer-tls.key',
+        'api-token': private / 'certificate-signer-token',
+        'tls-ca.pem': work / 'ca.crt',
+    }
+    for name, source in sources.items():
+        mode = '444' if name == 'tls-ca.pem' else '400'
+        run('sudo', 'install', '-o', '65532', '-g', '65532', '-m', mode, str(source), str(state / 'secrets' / name))
+
+
+def signer_import():
+    work = environment().work
+    private = work / 'private'
+    state = _signer_state()
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
+    endpoint = os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID']
+    container = os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER']
+    dsn = private / 'export-dsn'
+    run('sudo', 'install', '-o', '65534', '-g', '65532', '-m', '400', str(work / 'secrets/database-app-url'), str(dsn))
+    try:
+        approved = subprocess.run([
+            'docker', 'run', '--rm', '--read-only', '--cap-drop=ALL',
+            '--security-opt=no-new-privileges:true', '--network', 'ocservia-production_database',
+            '-v', f'{dsn}:/run/export-dsn:ro', '--entrypoint', '/usr/local/bin/ocserv-sealing-export',
+            os.environ['OCSERV_CONTROL_IMAGE'], '--database-url-file', '/run/export-dsn', '--bundled-postgres',
+            '--workspace', os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'], '--node', node, '--endpoint', endpoint,
+        ], capture_output=True, check=True).stdout
+    finally:
+        run('sudo', 'rm', '--', str(dsn))
+    public = subprocess.run([
+        'sudo', 'python3', str(ROOT / 'scripts/export-node-sealing-keys.py'), '--node', node,
+        '--endpoint', endpoint, '--user-key', '/etc/ocservia-agent/user-password-seal-private.pem',
+        '--user-key-id', 'business-test-user-seal', '--p12-key', '/etc/ocservia-agent/p12-password-seal-private.pem',
+        '--p12-key-id', 'business-test-p12-seal',
+    ], capture_output=True, check=True).stdout
+    for name, data in (('approved.json', approved), ('public.json', public)):
+        source = work / name
+        source.write_bytes(data)
+        run('sudo', 'install', '-o', '65532', '-g', '65532', '-m', '400', str(source), str(state / 'input' / name))
+    run('docker', 'stop', container)
+    try:
+        _signer_admin('import', '--approved', '/input/approved.json', '--public', '/input/public.json',
+                      '--workspace', os.environ['OCSERVIA_BUSINESS_TEST_WORKSPACE_ID'],
+                      '--node', node, '--endpoint', endpoint)
+    finally:
+        run('docker', 'start', container)
+    _signer_health()
+
+
+def signer_seal(payload):
+    work = environment().work
+    private = work / 'private'
+    container = os.environ['OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER']
+    (private / 'signer-request').write_bytes(payload)
+    token = (private / 'certificate-signer-token').read_text().strip()
+    (private / 'signer-curl.conf').write_text('header = "Authorization: Bearer ' + token + '"\n')
+    pid = run('docker', 'inspect', '--format', '{{.State.Pid}}', container).strip()
+    result = json.loads(run(
+        'sudo', 'nsenter', '--target', pid, '--net', 'curl', '--fail', '--silent', '--show-error',
+        '--cacert', str(work / 'ca.crt'), '--config', str(private / 'signer-curl.conf'),
+        '-H', 'Content-Type: application/octet-stream',
+        '-H', 'X-Ocservia-Node-ID: ' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'],
+        '-H', 'X-Ocservia-Seal-Purpose: user_password',
+        '--data-binary', '@' + str(private / 'signer-request'),
+        '--resolve', 'signer:9443:127.0.0.1', 'https://signer:9443/sign/seal',
+    ))
+    return {'version': result['version'], 'purpose': result['purpose'],
+            'key_id': result['key_id'], 'ciphertext': result['sealed']}
+
+
+def integrated_entry():
+    env = environment()
+    work = env.work
+    config = json.loads(run(COMPOSE, 'config', '--format', 'json'))
+    ports = sorted((name, str(port['published']), port['protocol'])
+                   for name, service in config['services'].items() for port in service.get('ports', []))
+    assert ports == [('edge', '443', 'tcp'), ('relay', '7842', 'udp')], ports
+    manifest = json.loads((Path(os.environ['DEPLOYMENT_CONFIG_DIR']) /
+                           f"controller-release-{os.environ['CONTROLLER_ARCH']}.json").read_text())
+    allowed = set(manifest['images'].values())
+    for service in config['services'].values():
+        assert 'build' not in service and service['image'] in allowed
+
+    def tls_get(name, path, host=None):
+        with socket.create_connection((name, 443), timeout=10) as sock:
+            with env.tls_context.wrap_socket(sock, server_hostname=name) as tls:
+                fingerprint = hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
+                tls.sendall(f'GET {path} HTTP/1.1\r\nHost: {host or name}\r\nConnection: close\r\n\r\n'.encode())
+                response = http.client.HTTPResponse(tls)
+                response.begin()
+                return response.status, response.read(), fingerprint
+
+    control_name, relay_name = os.environ['OCSERV_PUBLIC_HOST'], os.environ['OCSERV_RELAY_PUBLIC_HOST']
+    status, body, control_cert = tls_get(control_name, '/api/v1/version')
+    assert status == 200 and json.loads(body)['commit'] == os.environ['SOURCE_COMMIT']
+    status, _, relay_cert = tls_get(relay_name, '/healthz')
+    assert status == 200 and control_cert != relay_cert
+    assert tls_get(control_name, '/api/v1/version', 'wrong.invalid')[0] == 421
+    for server_name in (None, 'unknown.invalid'):
+        unverified = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        unverified.minimum_version = ssl.TLSVersion.TLSv1_2
+        unverified.check_hostname = False
+        unverified.verify_mode = ssl.CERT_NONE
+        try:
+            with socket.create_connection((control_name, 443), timeout=8) as sock:
+                with unverified.wrap_socket(sock, server_hostname=server_name):
+                    raise AssertionError('unknown or missing SNI accepted')
+        except (ssl.SSLError, ConnectionResetError):
+            pass
+
+    signer = json.loads(run('docker', 'inspect', run(COMPOSE, 'ps', '-q', 'signer').strip()))[0]
+    control = json.loads(run('docker', 'inspect', run(COMPOSE, 'ps', '-q', 'control-plane').strip()))[0]
+    assert not signer['HostConfig']['PortBindings']
+    address = signer['NetworkSettings']['Networks']['ocservia-production_signer']['IPAddress']
+    network = json.loads(run('docker', 'network', 'inspect', 'ocservia-production_signer'))[0]
+    assert network['Internal']
+    probe = ['nsenter', '--target', str(control['State']['Pid']), '--net', 'curl', '--fail',
+             '--silent', '--show-error', '--max-time', '8', '--noproxy', '*']
+    subprocess.run([*probe, '--cacert', str(work / 'ca.crt'), '--resolve', f'signer:9443:{address}',
+                    'https://signer:9443/healthz'], check=True, capture_output=True)
+    wrong_ca = work / 'untrusted-ca.crt'
+    (work / 'empty-trust').mkdir(exist_ok=True)
+    if not wrong_ca.exists():
+        run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+            '-subj', '/CN=untrusted-acceptance-ca', '-keyout', str(work / 'untrusted-ca.key'), '-out', str(wrong_ca))
+    assert subprocess.run([*probe, '--cacert', str(wrong_ca), '--capath', str(work / 'empty-trust'),
+                           '--resolve', f'signer:9443:{address}', 'https://signer:9443/healthz'],
+                          capture_output=True, check=False).returncode == 60
+    assert subprocess.run([*probe, '--cacert', str(work / 'ca.crt'), '--resolve', f'wrong.invalid:9443:{address}',
+                           'https://wrong.invalid:9443/healthz'],
+                          capture_output=True, check=False).returncode == 60
+    record('entry_tls_and_topology', ports=ports, controller_certificate_sha256=control_cert,
+           relay_certificate_sha256=relay_cert)
 
 
 def wait_for_relay_outage(node):
     # Stopping Relay does not immediately invalidate a buffered QUIC session.
-    # This case queues offline work, not an uncertain in-flight reload.
     wait_for('single Relay owner lease invalidation', lambda: sql(
         "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
         f"WHERE node_id=decode('{node.replace('-', '')}','hex') "
@@ -39,7 +235,7 @@ def local():
 
 
 def transport_ready():
-    container = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'transportd').strip()
+    container = run(COMPOSE, 'ps', '-q', 'transportd').strip()
     assert container
 
     def healthy():
@@ -50,15 +246,6 @@ def transport_ready():
 
     wait_for('transport health after Controller readiness', healthy)
     record('auth_transport_ready', container_id=container)
-
-
-def trust_controller():
-    container = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'control-plane').strip()
-    pid = run('docker', 'inspect', '--format', '{{.State.Pid}}', container).strip()
-    run('docker', 'exec', '--user', '0', '-i', container, 'sh', '-c',
-        'cat > /tmp/ocservia-business-test-ca.crt; chmod 444 /tmp/ocservia-business-test-ca.crt', data=(environment().work / 'ca.crt').read_bytes())
-    run('sudo', 'nsenter', '--target', pid, '--mount', '--root', '--wd=/',
-        'mount', '--bind', '/tmp/ocservia-business-test-ca.crt', '/etc/ssl/certs/ca-certificates.crt')
 
 
 def bootstrap_token():
@@ -109,123 +296,21 @@ def cross_check(operation):
                 'database_state': sql(f"SELECT state FROM operations WHERE id='{operation['id']}';"),
                 'journal_count_state_error_receipt': journal, 'root_count_state_response': root_effect}
     snapshot['operation'] = json.loads(sql("SELECT row_to_json(s) FROM (SELECT id,state,version,created_at,updated_at,completed_at "
-                                          f"FROM operations WHERE id='{operation['id']}') s;"))
+                                           f"FROM operations WHERE id='{operation['id']}') s;"))
     snapshot['outbox'] = json.loads(sql("SELECT coalesce(json_agg(s),'[]') FROM (SELECT id,attempts,last_error,published_at,available_at "
-                                       f"FROM outbox_events WHERE command_id='{operation['command_id']}') s;"))
+                                        f"FROM outbox_events WHERE command_id='{operation['command_id']}') s;"))
     snapshot['attempts'] = json.loads(sql("SELECT coalesce(json_agg(s),'[]') FROM (SELECT attempt_number,state,started_at,finished_at,error_code "
-                                         f"FROM command_attempts WHERE command_id='{operation['command_id']}' ORDER BY attempt_number) s;"))
+                                          f"FROM command_attempts WHERE command_id='{operation['command_id']}' ORDER BY attempt_number) s;"))
     snapshot['journal'] = json.loads(run('sudo', 'sqlite3', '-readonly', '-json', '/var/lib/ocservia-agent/agent.db',
-                                        "SELECT hex(command_id) command_id,hex(payload_sha256) semantic_hash,payload_hash_version,state,error_code,"
-                                        "accepted_at,updated_at,hex(privileged_result_proof) receipt_hex FROM command_journal "
-                                        f"WHERE hex(command_id)=upper('{command}');") or '[]')
+                                         "SELECT hex(command_id) command_id,hex(payload_sha256) semantic_hash,payload_hash_version,state,error_code,"
+                                         "accepted_at,updated_at,hex(privileged_result_proof) receipt_hex FROM command_journal "
+                                         f"WHERE hex(command_id)=upper('{command}');") or '[]')
     snapshot['root'] = json.loads(run('sudo', 'sqlite3', '-readonly', '-json', '/var/lib/ocservia-privd/desired-effects.sqlite3',
-                                     "SELECT hex(command_id) command_id,hex(payload_sha256) semantic_hash,state,authorization_revision,"
-                                     "effect_kind,resource_key,effect_revision,delivery_mode,updated_at,length(response) response_bytes "
-                                     f"FROM authorized_effects WHERE hex(command_id)=upper('{command}');") or '[]')
+                                      "SELECT hex(command_id) command_id,hex(payload_sha256) semantic_hash,state,authorization_revision,"
+                                      "effect_kind,resource_key,effect_revision,delivery_mode,updated_at,length(response) response_bytes "
+                                      f"FROM authorized_effects WHERE hex(command_id)=upper('{command}');") or '[]')
     (environment().evidence / ('cross-check-' + operation['id'] + '.json')).write_text(json.dumps(snapshot))
     return snapshot
-
-
-def certificate():
-    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    node_path = 'nodes/' + node
-
-    def restart_node():
-        def owner():
-            return json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
-                                  "owner_epoch,lease_until FROM connection_owner_fencing "
-                                  f"WHERE node_id=decode('{node.replace('-', '')}','hex')) s;"))
-        before = owner()
-        run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
-        # A cached online flag can still describe the process we just stopped.
-
-        def fresh_session():
-            current = owner()
-            return current if (current and current['owner_epoch'] > before['owner_epoch'] and
-                               current['connection_id'] != before['connection_id'] and
-                               api(node_path)['connection_state'] == 'online') else None
-        after = wait_for('new fenced session after node restart', fresh_session)
-        record('certificate_restart_new_owner', before=before, after=after)
-
-    wait_for('online before PKI', lambda: api(node_path)['connection_state'] == 'online')
-    body = {'expected_version': api(node_path)['version'], 'common_name': 'business-test-client',
-            'dns_names': ['client.example.test'], 'key_bits': 2048, 'reason': 'Business test: node-local CSR'}
-    headers = {'Idempotency-Key': secrets.token_hex(16)}
-    cert = api(node_path + '/certificates', body, headers=headers, status=202)
-    assert api(node_path + '/certificates', body, headers=headers, status=202)['id'] == cert['id']
-    cert_path = 'certificates/' + cert['id']
-    operation_ids = [cert['operation_id']]
-    wait_for('root CSR', lambda: api(cert_path)['state'] == 'csr_ready')
-    cross_check(api('operations/' + operation_ids[-1]))
-    record('certificate_csr_ready', certificate_id=cert['id'], operation_id=operation_ids[-1])
-    key_path = '/var/lib/ocservia-privd/certificates/' + cert['id'] + '.key.pem'
-    key_stat = run('sudo', 'stat', '-c', '%u:%g:%a:%h', key_path).strip()
-    assert key_stat.split(':')[0] == '0' and key_stat.split(':')[2:] == ['600', '1']
-    # Compare only a public-key digest; never export the unwrapped node key.
-    public_before = run('sudo', 'openssl', 'pkey', '-in', key_path, '-pubout')
-    restart_node()
-    assert public_before == run('sudo', 'openssl', 'pkey', '-in', key_path, '-pubout')
-    cert = api(cert_path + ':issue', {'reason': 'Business test: signed CSR'})
-    assert cert['state'] == 'issued'
-    record('certificate_issued', certificate_id=cert['id'], version=cert['version'])
-    # The one-day fixture leaf enters expiring through normal maintenance.
-    # Export its current revision, not the already superseded issued revision.
-    cert = wait_for('short-lived certificate maintenance',
-                    lambda: (value if (value := api(cert_path))['state'] == 'expiring' else None))
-    record('certificate_expiring_revision', certificate_id=cert['id'], version=cert['version'])
-    reason = 'Business test: one-use P12 export'
-    artifact = str(uuid.UUID(int=(int(time.time() * 1000) << 80) | (7 << 76) |
-                            (secrets.randbits(12) << 64) | (2 << 62) | secrets.randbits(62)))
-    grant = api(cert_path + ':p12', {'expected_version': api(node_path)['version'],
-                                   'certificate_version': cert['version'], 'artifact_request_id': artifact,
-                                   'reason': reason}, headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
-    operation_ids.append(grant['operation']['id'])
-    # Credentials stay in the private redaction input, never in the artifact.
-    (environment().work / 'private/p12-grant').write_text(json.dumps(grant))
-    (environment().work / 'private/p12-password').write_text(grant['password'])
-    (environment().work / 'private/p12-token').write_text(grant['download_token'])
-    wait_for('P12 root export', lambda: api('operations/' + operation_ids[-1])['state'] == 'succeeded')
-    cross_check(api('operations/' + operation_ids[-1]))
-    record('certificate_p12_ready', certificate_id=cert['id'], operation_id=operation_ids[-1])
-    restart_node()
-    download_headers = {'X-Artifact-Token': grant['download_token']}
-
-    def artifact_state():
-        return json.loads(sql("SELECT row_to_json(s) FROM (SELECT a.id,a.state,a.certificate_version,a.content_size,"
-                              "a.expires_at,a.consumed_at,c.state certificate_state,c.version current_certificate_version "
-                              "FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id "
-                              f"WHERE a.id='{grant['artifact_id']}') s;"))
-    download_evidence = {'before': artifact_state()}
-    try:
-        blob = api('artifacts/' + grant['artifact_id'], headers=download_headers, raw=True)
-    finally:
-        download_evidence['after'] = artifact_state()
-        (environment().evidence / 'p12-download-state.json').write_text(json.dumps(download_evidence))
-    (environment().work / 'private/download.p12').write_bytes(blob)
-    run('openssl', 'pkcs12', '-in', str(environment().work / 'private/download.p12'),
-        '-passin', 'file:' + str(environment().work / 'private/p12-password'), '-noout')
-    api('artifacts/' + grant['artifact_id'], headers=download_headers, status=403, raw=True)
-    if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
-        subprocess.run(['python3', str(ROOT / 'scripts/release-production-signer.py'), 'before'], check=True)
-    reason = 'Business test: revoke issued certificate'
-    revoked = api(cert_path + ':revoke', {'expected_version': api(node_path)['version'],
-                                        'certificate_version': cert['version'],
-                                        'reason': reason}, headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
-    wait_for('certificate revoked', lambda: api(cert_path)['state'] == 'revoked')
-    if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
-        subprocess.run(['python3', str(ROOT / 'scripts/release-production-signer.py'), 'after'], check=True)
-    else:
-        assert (environment().work / 'signer-revoked').read_text() == cert['id']
-    assert run('sudo', 'test', '!', '-e', key_path) == ''
-    # Revoke returns its operation, unlike the CSR certificate resource.
-    operation_ids.append(revoked['id'])
-    for operation_id in operation_ids:
-        snapshot = cross_check(api('operations/' + operation_id))
-        assert snapshot['database_state'] == 'succeeded'
-        assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
-        assert snapshot['root_count_state_response'] == '1|applied|1'
-    record('certificate_csr_issue_p12_one_use_revoke_restart', certificate_id=cert['id'],
-           operation_ids=operation_ids, node_key_stat=key_stat)
 
 
 def browser_prepare():
@@ -242,7 +327,7 @@ def config_prepare():
                                 capture_output=True, check=True).stdout
     binding = node + '/' + hashlib.sha256(certificate).hexdigest() + '/' + hashlib.sha256(public_der).hexdigest() + '/none'
     reference = api('secret-provider-refs', {'provider': 'node-local-tls-v1', 'key_path': binding,
-                                            'version': 'v1', 'reason': 'Business test: operator-provisioned TLS'}, status=201)
+                                             'version': 'v1', 'reason': 'Business test: operator-provisioned TLS'}, status=201)
     output = json.loads(run('sudo', 'bash', str(ROOT / 'deploy/managed-node/provision-config-tls.sh'),
                             node, reference['id'], 'v1', '/etc/ocserv/business-test.crt', '/etc/ocserv/business-test.key'))
     assert output['key'] == binding and output['secret_ref_id'] == reference['id']
@@ -261,8 +346,7 @@ def smoke_user():
     password = secrets.token_hex(24)
     (environment().work / 'private/smoke-vpn-password').write_text(password)
     if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
-        sealed = json.loads(run('python3', str(ROOT / 'scripts/release-production-signer.py'), 'seal',
-                                data=password.encode()))
+        sealed = signer_seal(password.encode())
         record('production_signer_password_sealed')
     else:
         encrypted = subprocess.run(['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(environment().work / 'user.pub.pem'),
@@ -271,7 +355,7 @@ def smoke_user():
         sealed = {'version': 1, 'purpose': 'user_password', 'key_id': 'business-test-user-seal',
                   'ciphertext': base64.b64encode(encrypted).decode()}
     operation = api(f'nodes/{node}/users', {'name': 'business-test-smoke-user', 'sealed_password': sealed,
-                                           'reason': 'Business test: Release Business Smoke'},
+                                            'reason': 'Business test: Release Business Smoke'},
                     headers={'Idempotency-Key': secrets.token_hex(16), 'If-Match': '"revision-0"'}, status=202)
 
     def user_ready():
@@ -282,62 +366,6 @@ def smoke_user():
 
     wait_for('smoke VPN user', user_ready)
     record('smoke_vpn_user_ready', operation_id=operation['id'])
-
-
-def configuration():
-    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    prefix = 'nodes/' + node
-    browser = json.loads((environment().evidence / 'browser-checkpoints.json').read_text())
-    entry = next(item for item in browser if item['name'] == 'browser_complete_config_apply')
-    applied = api('operations/' + entry['operation']['id'])
-    assert applied['state'] == 'succeeded' and applied['config_apply_state'] == 'succeeded'
-    physical_before = run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0]
-    assert physical_before == entry['materialized_hash']
-    assert api(prefix)['config_revision'] == 1
-    # An approved new revision deliberately fails its native reload. The old
-    # config's real HUP still works, so rollback must restore exact bytes.
-    reference = json.loads((environment().work / 'config-reference.json').read_text())['id']
-    values = {'auth': 'plain[passwd=/etc/ocserv/ocpasswd]', 'cookie-timeout': '300', 'device': 'vpns',
-              'dns': '1.1.1.1', 'ipv4-network': '10.208.0.0/24', 'max-clients': '129',
-              'max-same-clients': '2', 'socket-file': '/run/ocserv.socket', 'tcp-port': '44443', 'udp-port': '0'}
-    directives = [{'name': name, 'value': value} for name, value in values.items()]
-    directives += [{'name': name, 'secret_ref': {'secret_ref_id': reference}} for name in ('server-cert', 'server-key')]
-    changed_port = [{**item, 'value': '44444'} if item['name'] == 'tcp-port' else item for item in directives]
-    rejected = api(prefix + '/config-plans', {'expected_revision': 1, 'template': {'name': 'reject-startup-change', 'directives': changed_port},
-                                            'ttl_seconds': 900, 'reason': 'Business test: nonreloadable directive rejection'},
-                   headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
-    wait_for('reject nonreloadable change', lambda: api('operations/' + rejected['operation_id'])['state'] == 'failed')
-    assert api('config-plans/' + rejected['id'])['validation'] == 'failed'
-    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
-    assert api(prefix)['config_revision'] == 1
-    record('complete_config_startup_binding_rejected', plan_id=rejected['id'], unchanged_hash=physical_before)
-    planned = api(prefix + '/config-plans', {'expected_revision': 1, 'template': {'name': 'complete-rollback', 'directives': directives},
-                                           'ttl_seconds': 900, 'reason': 'Business test: native rollback'},
-                  headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
-    plan = wait_for('complete rollback plan', lambda: (value if (value := api('config-plans/' + planned['id']))['state'] == 'succeeded' else None))
-    assert plan['validation'] == 'valid' and plan['materialized_hash'] != physical_before
-    script = environment().work / 'reject-new-config-reload'
-    script.write_text('#!/bin/sh\nif grep -qx "max-clients = 129" /etc/ocserv/ocserv.conf; then exit 9; fi\nexec /bin/kill -HUP "$1"\n')
-    dropin = environment().work / 'config-reload-fault.conf'
-    dropin.write_text('[Service]\nExecReload=\nExecReload=/usr/local/sbin/ocservia-business-test-config-reload $MAINPID\n')
-    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '700', str(script), '/usr/local/sbin/ocservia-business-test-config-reload')
-    run('sudo', 'mkdir', '-p', '/etc/systemd/system/ocserv.service.d')
-    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '644', str(dropin), '/etc/systemd/system/ocserv.service.d/business-test-config-reload.conf')
-    try:
-        run('sudo', 'systemctl', 'daemon-reload')
-        operation = api('config-plans/' + plan['id'] + '/apply', {'reason': 'Business test: native rollback'},
-                        headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
-        result = wait_for('exact configuration rollback', lambda: (value if (value := api('operations/' + operation['id'])).get('config_apply_state') == 'rolled_back' else None))
-        assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
-        assert api(prefix)['config_revision'] == 1
-        snapshot = cross_check(operation)
-        assert snapshot['root_count_state_response'] == '1|applied|1'
-        record('complete_config_native_rollback', operation_id=operation['id'], state=result['config_apply_state'], restored_hash=physical_before)
-    finally:
-        run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/business-test-config-reload.conf', '/usr/local/sbin/ocservia-business-test-config-reload')
-        run('sudo', 'systemctl', 'daemon-reload')
-    agent_privd_recovery([applied, operation], physical_before)
-    record('complete_config_durable_restart', materialized_hash=physical_before, config_revision=1)
 
 
 def owner():
@@ -361,65 +389,41 @@ def ready():
         return False
 
 
-def confirmed_config():
-    if os.environ.get('BUSINESS_PROFILE', 'smoke') == 'smoke':
-        entry = json.loads((environment().work / 'smoke-applied.json').read_text())
-        operation_id = entry['operation_id']
-    else:
-        browser = json.loads((environment().evidence / 'browser-checkpoints.json').read_text())
-        entry = next(item for item in browser if item['name'] == 'browser_complete_config_apply')
-        operation_id = entry['operation']['id']
-    operation = api('operations/' + operation_id)
-    assert operation['state'] == 'succeeded' and operation['config_apply_state'] == 'succeeded'
-    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == entry['materialized_hash']
-    return operation, entry['materialized_hash']
-
-
-def check_confirmed(operations, config_hash):
-    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == config_hash
-    for operation in operations:
-        current = api('operations/' + operation['id'])
-        assert current['id'] == operation['id'] and current['command_id'] == operation['command_id']
-        snapshot = cross_check(operation)
-        assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
-        assert snapshot['root_count_state_response'] == '1|applied|1'
-
-
 def identity_digest():
     return run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
                '/var/lib/ocservia-agent/identity/controller.endpoint')
 
 
-def agent_privd_recovery(operations, config_hash):
-    identity = identity_digest()
-    for service in ('ocservia-agent', 'ocservia-privd'):
-        before = owner()
-        run('sudo', 'systemctl', 'restart', service)
-        # Requires=privd also restarts Agent; active privd alone is not recovery.
-        wait_for('fresh Agent session after ' + service, lambda: fresh_owner(before))
-        wait_for(service + ' active', lambda: run('systemctl', 'show', service, '-p', 'ActiveState', '--value').strip() == 'active')
-        check_confirmed(operations, config_hash)
-        assert identity_digest() == identity
-    record('resilience_agent')
+def completed(operation):
+    result = api('operations/' + operation['id'])
+    (environment().evidence / ('operation-' + operation['id'] + '.json')).write_text(json.dumps(result))
+    if result['state'] in ('failed', 'expired', 'cancelled'):
+        raise RuntimeError(f"operation {operation['id']} reached {result['state']}")
+    return result if result['state'] == 'succeeded' else None
 
 
 def authorized_reload(name):
     node = 'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    deep = os.environ.get('BUSINESS_PROFILE') == 'extended'
-    if deep:
-        before = run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
     key = secrets.token_hex(16)
     body = {'reason': name, 'ttl_seconds': 300}
     headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(node)["version"]}"'}
     operation = api(node + '/service:reload', body, headers=headers, status=202)
     wait_for(name, lambda: completed(operation))
-    if not deep:
-        return operation
-    verify_completed_operations([operation])
-    replay = api(node + '/service:reload', body, headers=headers, status=202)
-    assert replay['id'] == operation['id'] and replay['command_id'] == operation['command_id']
-    assert run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service') == before + 1
     return operation
+
+
+def single_relay_argv():
+    observed = api('nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])
+    pid = run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip()
+    agent_argv = run('sudo', 'cat', f'/proc/{int(pid)}/cmdline').rstrip('\0').split('\0')
+    transport_argv = run('docker', 'exec', os.environ['OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER'], 'sh', '-c',
+                         'for exe in /proc/[0-9]*/exe; do '
+                         'if [ "$(readlink "$exe")" = /usr/local/bin/ocservia-transportd ]; then '
+                         'cat "${exe%/exe}/cmdline"; fi; done').rstrip('\0').split('\0')
+    for argv in (agent_argv, transport_argv):
+        assert [argv[i + 1] for i, arg in enumerate(argv) if arg == '--relay-url'] == [os.environ['OCSERV_RELAY_URL_A']]
+        assert argv[argv.index('--relay-mode') + 1] == 'custom'
+    assert observed['path']['mode'] == 'relay'
 
 
 def agent_stack_recovery():
@@ -451,11 +455,8 @@ def smoke_relay_recovery(ping):
 
 
 def resilience():
-    if os.environ.get('BUSINESS_PROFILE') == 'extended':
-        deep_resilience()
-        return
     before = owner()
-    run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'control-plane', 'transportd')
+    run(COMPOSE, 'restart', 'control-plane', 'transportd')
     wait_for('Controller stack readiness', ready)
     transport_ready()
     wait_for('fresh Controller stack session', lambda: fresh_owner(before))
@@ -463,66 +464,17 @@ def resilience():
     record('resilience_controller')
     agent_stack_recovery()
     try:
-        run(str(ROOT / 'deploy/production/compose.sh'), 'stop', 'postgres')
+        run(COMPOSE, 'stop', 'postgres')
         outage = api('readyz', role='anonymous', status=503)
         assert outage['type'] == 'https://ocservia.dev/problems/database-unavailable'
     finally:
-        run(str(ROOT / 'deploy/production/compose.sh'), 'start', 'postgres')
+        run(COMPOSE, 'start', 'postgres')
     wait_for('database readiness recovered', ready)
     wait_for('Agent online after database recovery', lambda: api(
         'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])['connection_state'] == 'online')
     authorized_reload('database reconnect business')
     record('resilience_database', backend='postgres')
     vpn_smoke('relay_recovery', relay_recovery=True)
-
-
-def deep_resilience():
-    operation, config_hash = confirmed_config()
-    operations = [operation]
-    identity = identity_digest()
-    check_confirmed(operations, config_hash)
-    before = owner()
-    run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'control-plane')
-    wait_for('Controller readiness', ready)
-    trust_controller()
-    wait_for('fresh Controller owner session', lambda: fresh_owner(before))
-    check_confirmed(operations, config_hash)
-    operations.append(authorized_reload('Controller restart recovery'))
-    record('resilience_controller', operation_id=operation['id'])
-
-    checkpoints = [json.loads(line)['name'] for line in (environment().evidence / 'api-checkpoints.jsonl').read_text().splitlines()]
-    assert 'resilience_agent' in checkpoints and 'resilience_relay' in checkpoints
-    before = owner()
-    run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'transportd')
-    transport_ready()
-    wait_for('fresh transport session', lambda: fresh_owner(before))
-    check_confirmed(operations, config_hash)
-    operations.append(authorized_reload('transport restart recovery'))
-    record('deep_transport_recovery')
-
-    # The original Controller and its pool stay running throughout the outage.
-    key = secrets.token_hex(16)
-    node = 'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(node)["version"]}"'}
-    try:
-        run(str(ROOT / 'deploy/production/compose.sh'), 'stop', 'postgres')
-        outage = api('readyz', role='anonymous', status=503)
-        assert outage['type'] == 'https://ocservia.dev/problems/database-unavailable'
-        try:
-            # One attempt only. An uncertain response never triggers a new mutation.
-            api(node + '/service:reload', {'reason': 'database outage', 'ttl_seconds': 300},
-                headers=headers, status=(401, 500, 503, 504))
-        except (urllib.error.URLError, TimeoutError):
-            pass
-    finally:
-        run(str(ROOT / 'deploy/production/compose.sh'), 'start', 'postgres')
-    wait_for('original database and pool ready', ready)
-    assert sql(f"SELECT count(*) FROM operations WHERE workspace_id='{environment().workspace}' AND idempotency_key='{key}';") == '0'
-    check_confirmed(operations, config_hash)
-    operations.append(authorized_reload('database pool recovery'))
-    record('resilience_database', backend='postgres', uncommitted_intent_not_accepted=True)
-    assert identity_digest() == identity
-    check_confirmed(operations, config_hash)
 
 
 def assert_browser_csp(entries, evidence):
@@ -537,15 +489,11 @@ def browser_verify():
     required = {'browser_user_mutation', 'browser_direct_admin_reload',
                 'browser_idempotency_rejects_changed_intent',
                 'browser_complete_config_apply', 'browser_login_workspace_forbidden_refresh', 'browser_csp'}
-    if os.environ.get('BUSINESS_PROFILE', 'smoke') == 'extended':
-        required |= {'browser_certificate_csr', 'browser_certificate_issue_export_one_use',
-                     'browser_certificate_revoke'}
     for name in required:
         assert sum(entry['name'] == name for entry in entries) == 1, 'missing or duplicate browser checkpoint: ' + name
     assert next(entry for entry in entries if entry['name'] == 'browser_login_workspace_forbidden_refresh')['status'] == 'PASS'
     assert_browser_csp(entries, 'browser-csp.json')
-    operation_checks = {'browser_user_mutation', 'browser_direct_admin_reload', 'browser_complete_config_apply',
-                        'browser_certificate_csr', 'browser_certificate_issue_export_one_use', 'browser_certificate_revoke'}
+    operation_checks = {'browser_user_mutation', 'browser_direct_admin_reload', 'browser_complete_config_apply'}
     for entry in entries:
         operation_id = entry.get('operation_id') or entry.get('operation', {}).get('id')
         if entry['name'] in operation_checks:
@@ -563,159 +511,17 @@ def browser_verify():
     assert api('config-plans/' + applied['plan_id'])['materialized_hash'] == applied['materialized_hash']
     assert api(f"nodes/{os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']}")['config_revision'] == 1
     assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == applied['materialized_hash']
-    if os.environ.get('BUSINESS_PROFILE', 'smoke') == 'smoke':
-        (environment().work / 'smoke-applied.json').write_text(json.dumps({
-            'operation_id': operation_id, 'materialized_hash': applied['materialized_hash']}))
     record('browser_operations_durable_cross_check')
 
 
-def rollout_ready():
-    # The Controller was recreated with the release catalog: restore the test CA
-    # trust and wait until the node is offered for the rolling upgrade.
-    wait_for('Controller readiness', ready)
-    trust_controller()
-    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    wait_for('rollout-eligible node', lambda: api('nodes/' + node).get('agent_upgrade_eligible') is True, seconds=300)
-    assert api('nodes/' + node)['recommended_agent_version'] == os.environ['ROLLOUT_VERSION']
-
-
-def rollout_verify():
-    entries = json.loads((environment().evidence / 'browser-rollout-checkpoints.json').read_text())
-    for name in ('browser_agent_rollout', 'browser_csp'):
-        assert sum(entry['name'] == name for entry in entries) == 1, 'missing or duplicate rollout checkpoint: ' + name
-    assert_browser_csp(entries, 'browser-rollout-csp.json')
-    node, target = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'], os.environ['ROLLOUT_VERSION']
-    created = next(entry for entry in entries if entry['name'] == 'browser_agent_rollout')['rollout']
-    rollout = api('agent-rollouts/' + created['id'])
-    assert rollout['state'] == 'succeeded' and rollout['target_version'] == target
-    assert rollout['stop_on_failure'] is True
-    assert [(item['node_id'], item['batch'], item['state']) for item in rollout['nodes']] == [(node, 0, 'succeeded')]
-    wait_for('upgraded Agent online', lambda: (value if (value := api('nodes/' + node))['connection_state'] == 'online'
-                                                and value['agent_version'] == target else None))
-    for binary in ('ocservia-agent', 'ocservia-privd', 'ocservia-upgrader'):
-        assert run('/usr/libexec/ocservia/' + binary, '--version').split() == [binary, target]
-    record('agent_rollout_canary_succeeded', rollout_id=rollout['id'], operation_id=rollout['nodes'][0].get('operation_id'),
-           from_version=os.environ['VERSION'], target_version=target)
-
-
 def node_side_effects():
-    reloads = run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
-    return {'root_effects': run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-privd/desired-effects.sqlite3',
-                                'SELECT count(*) FROM authorized_effects;').strip(),
-            'agent_journal': run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-agent/agent.db',
-                                 'SELECT count(*) FROM command_journal;').strip(),
-            'ocserv_reloads': reloads,
-            'native_files': run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf', '/etc/ocserv/ocpasswd')}
-
-
-def uninstall_identity():
-    # Hash protected files without exporting their contents (including sealing keys).
-    return run('sudo', 'find', '/var/lib/ocservia-agent/identity', '/etc/ocservia-agent',
-               '-type', 'f', '-exec', 'sha256sum', '{}', '+').splitlines()
-
-
-def uninstall_native():
-    listing = run('systemctl', 'list-units', '--all', '--no-pager', '--plain', '--no-legend', 'ocservia-*')
-    units = [dict(zip(('unit', 'load', 'active', 'sub'), line.split()[:4]))
-             for line in listing.splitlines() if line.strip()]
-    # /proc also finds an unlinked running ELF, which package file checks miss.
-    processes = json.loads(run('sudo', 'python3', '-c', r"""
-import json, pathlib
-found = []
-for entry in pathlib.Path('/proc').iterdir():
-    if not entry.name.isdigit():
-        continue
-    try:
-        exe = str((entry / 'exe').readlink())
-        argv = (entry / 'cmdline').read_bytes().split(b'\0')
-    except FileNotFoundError:
-        continue
-    if exe.startswith('/usr/libexec/ocservia/') or any(a.startswith(b'/usr/libexec/ocservia/') for a in argv):
-        found.append(entry.name)
-print(json.dumps(found))
-"""))
-    return {'units': units, 'processes': processes}
-
-
-def assert_uninstalled(native, paths):
-    assert not native['processes'], 'Agent/privd/upgrader process remains'
-    assert all(unit['active'] == 'inactive' for unit in native['units']), 'Agent unit or timer remains'
-    for path in paths:
-        assert run('sudo', 'test', '!', '-e', path) == '', 'package payload remains: ' + path
-
-
-def uninstall():
-    # Only the disposable Business environment may call this terminal phase.
-    run('bash', str(ROOT / 'scripts/release-business-environment.sh'))
-    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    prefix = 'nodes/' + node
-    before = api(prefix)
-    assert before['trust_status'] == 'active' and before['connection_state'] == 'online'
-    owner_before = owner()
-    assert owner_before
-    expired_query = ("SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
-                     f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND lease_until>clock_timestamp());")
-    assert sql(expired_query) == 'f', 'missing live owner before removal'
-    identity = sorted(uninstall_identity())
-    assert any('/identity/endpoint.key' in line for line in identity)
-    assert any('/identity/controller.endpoint' in line for line in identity)
-    effects = node_side_effects()
-    ocserv = run('systemctl', 'show', 'ocserv', '-p', 'MainPID', '-p', 'ExecMainStartTimestampMonotonic', '-p', 'ActiveState')
-    assert 'ActiveState=active' in ocserv and 'MainPID=0\n' not in ocserv
-    native_before = uninstall_native()
-    assert native_before['processes']
-    for unit in ('ocservia-agent.service', 'ocservia-privd.service'):
-        assert any(row['unit'] == unit and row['active'] == 'active' for row in native_before['units'])
-    trust_query = ("SELECT status||'|'||authorization_revision FROM nodes WHERE id='" + node + "';")
-    trust = sql(trust_query)
-    endpoint_query = f"SELECT encode(endpoint_id,'hex')||'|'||state FROM node_endpoint_keys WHERE node_id='{node}' ORDER BY endpoint_id;"
-    endpoint_trust = sql(endpoint_query)
-    authorization_revision = trust.split('|')[1]
-    assert trust.startswith('active|') and endpoint_trust == os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID'] + '|active'
-    assert run('dpkg-query', '-W', '-f=${Status}', 'ocservia-agent') == 'install ok installed'
-    payload = run('dpkg-query', '-L', 'ocservia-agent').splitlines()
-    paths = [path for path in payload if path.startswith(('/usr/libexec/ocservia/', '/usr/share/ocservia-agent/'))
-             and run('sudo', 'find', path, '-maxdepth', '0', '-type', 'f').strip()]
-    assert paths
-    paths += ['/usr/libexec/ocservia', '/usr/lib/systemd/system/ocservia-agent.service',
-              '/usr/lib/systemd/system/ocservia-privd.service', '/usr/lib/systemd/system/ocservia-upgrader@.service']
-    record('uninstall_before', node_id=node, endpoint_id=os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID'], identity=identity,
-           owner=owner_before, trust=trust, endpoint_trust=endpoint_trust, ocserv=ocserv, native=native_before)
-    # No purge, autoremove, revocation or preliminary systemctl stop.
-    output = run('sudo', 'apt-get', 'remove', '-y', 'ocservia-agent')
-    (environment().evidence / 'package-removal.log').write_text(output)
-    status = subprocess.run(['dpkg-query', '-W', '-f=${Status}', 'ocservia-agent'], capture_output=True, check=False)
-    assert status.returncode in (0, 1)
-    assert status.stdout.decode() in ('', 'deinstall ok config-files', 'unknown ok not-installed')
-    assert_uninstalled(uninstall_native(), paths)
-    record('package_removal', package_status=status.stdout.decode(), removed_paths=paths)
-    # telemetry.OfflineAfter=90s; default OwnerLeaseTTL=30s. 180s allows
-    # the final shutdown heartbeat and polling slack without changing either.
-    wait_for('uninstalled Agent offline', lambda: api(prefix)['connection_state'] == 'offline', seconds=180)
-    wait_for('uninstalled owner lease expired', lambda: sql(expired_query) == 't', seconds=60)
-    # Observe a further whole owner lease: no late restart, lease or root effect.
-    for _ in range(16):
-        assert sql(expired_query) == 't', 'owner lease became live again'
-        assert api(prefix)['connection_state'] == 'offline'
-        # The existing ingress/telemetry contract persists nodes.status=offline
-        # and exposes it as trust_status. Admission stays active via the endpoint
-        # key; neither offline transition is a revocation or authority revision.
-        assert api(prefix)['trust_status'] in ('active', 'offline')
-        current_status, current_revision = sql(trust_query).split('|')
-        assert current_status in ('active', 'offline') and current_revision == authorization_revision
-        assert sql(endpoint_query) == endpoint_trust
-        assert sorted(uninstall_identity()) == identity, 'identity/configuration changed'
-        assert_uninstalled(uninstall_native(), paths)
-        assert node_side_effects() == effects, 'new privileged effect after removal'
-        assert run('systemctl', 'show', 'ocserv', '-p', 'MainPID', '-p', 'ExecMainStartTimestampMonotonic', '-p', 'ActiveState') == ocserv
-        assert sql("SELECT count(*) FROM connection_owner_fencing "
-                   f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND owner_epoch>{int(owner_before['owner_epoch'])};") == '0'
-        time.sleep(2)
-    record('agent_offline', node_id=node, owner_lease_expired=True, observation_seconds=32)
-    record('identity_preserved', identity=identity, trust_before=trust, trust_after=sql(trust_query),
-           endpoint_trust=endpoint_trust, authorization_revision=int(authorization_revision))
-    vpn_smoke('after_uninstall')
-    record('ocserv_unaffected', service=ocserv, side_effects=effects)
+    return {
+        'journal': int(run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-agent/agent.db', 'SELECT count(*) FROM command_journal;').strip()),
+        'privd': int(run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-privd/desired-effects.sqlite3',
+                         'SELECT count(*) FROM authorized_effects;').strip()),
+        'reloads': run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service'),
+        'files': run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf', '/etc/ocserv/ocpasswd').strip(),
+    }
 
 
 def revocation():
@@ -766,387 +572,11 @@ def revocation():
     record('revoked_node_old_authority_without_privd_effect', side_effects=effects)
 
 
-def completed(operation):
-    result = api('operations/' + operation['id'])
-    (environment().evidence / ('operation-' + operation['id'] + '.json')).write_text(json.dumps(result))
-    if result['state'] in ('failed', 'expired', 'cancelled'):
-        raise RuntimeError(f"operation {operation['id']} reached {result['state']}")
-    return result if result['state'] == 'succeeded' else None
-
-
-def verify_completed_operations(operations):
-    for operation in operations:
-        snapshot = cross_check(operation)
-        assert snapshot['database_state'] == 'succeeded'
-        assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
-        assert snapshot['root_count_state_response'] == '1|applied|1'
-    record('api_database_agent_journal_root_receipt', operation_ids=[op['id'] for op in operations])
-
-
-def single_relay_argv():
-    observed = api('nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])
-    pid = run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip()
-    agent_argv = run('sudo', 'cat', f'/proc/{int(pid)}/cmdline').rstrip('\0').split('\0')
-    transport_argv = run('docker', 'exec', os.environ['OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER'], 'sh', '-c',
-                         'for exe in /proc/[0-9]*/exe; do '
-                         'if [ "$(readlink "$exe")" = /usr/local/bin/ocservia-transportd ]; then '
-                         'cat "${exe%/exe}/cmdline"; fi; done').rstrip('\0').split('\0')
-    for argv in (agent_argv, transport_argv):
-        assert [argv[i + 1] for i, arg in enumerate(argv) if arg == '--relay-url'] == [os.environ['RELAY_URL_A']]
-        assert argv[argv.index('--relay-mode') + 1] == 'custom'
-    record('node_online_single_relay_argv', agent_version=observed['agent_version'], relay=os.environ['RELAY_URL_A'])
-
-
-def single_relay_recovery(ping, native_session, operations):
-    single_relay_argv()
-    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    prefix = 'nodes/' + node
-    live_session = native_session()
-    ocserv_started = run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
-    identity_before = run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
-                          '/var/lib/ocservia-agent/identity/controller.endpoint')
-    started_before = run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
-    (environment().evidence / 'identity-before-fault.json').write_text(json.dumps({
-        'agent_endpoint': os.environ['OCSERVIA_BUSINESS_TEST_AGENT_ENDPOINT_ID'], 'controller_endpoint': os.environ['OCSERV_CONTROLLER_ENDPOINT_ID'],
-        'identity_file_digests': identity_before, 'agent_start_monotonic': started_before.strip(),
-        'ocserv_start_monotonic': ocserv_started.strip(), 'native_session_id': live_session}))
-    control = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'control-plane').strip()
-    try:
-        run('docker', 'pause', control)
-        for _ in range(3):
-            assert ping()
-            assert native_session() == live_session
-        record('controller_pause_preserves_live_vpn', native_session_id=live_session)
-    finally:
-        run('docker', 'unpause', control)
-    relay = os.environ['OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER']
-
-    def reload_count():
-        return run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
-
-    reloads_before = reload_count()
-    record('reload_before_fault', native_reload_count=reloads_before)
-    try:
-        run('docker', 'stop', relay)
-        wait_for_relay_outage(node)
-        for _ in range(3):
-            assert ping()
-            assert native_session() == live_session
-        # Retain the single-relay fixture's non-idempotent reload assertion;
-        # never substitute an invisible duplicate enable or force Unknown green.
-        key = secrets.token_hex(16)
-        body = {'reason': 'Business test: isolated validation', 'ttl_seconds': 300}
-        for _ in range(3):
-            revision = api(prefix)['version']
-            headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{revision}"'}
-            pending = api(prefix + '/service:reload', body, headers=headers, status=(202, 409))
-            if 'id' in pending:
-                break
-            assert pending.get('type') == 'https://ocservia.dev/problems/stale-revision'
-        assert 'id' in pending
-        time.sleep(10)
-        assert api('operations/' + pending['id'])['state'] != 'succeeded'
-        queued = cross_check(pending)
-        assert queued['journal'] == [] and queued['root'] == []
-        assert queued['outbox'] and all(row['published_at'] is None for row in queued['outbox'])
-        assert all(row['state'] != 'sent' for row in queued['attempts'])
-        (environment().evidence / 'recovery-queued.json').write_text(json.dumps(queued))
-        record('single_relay_outage_preserves_live_vpn_and_queues_operation')
-    finally:
-        run('docker', 'start', relay)
-    try:
-        wait_for('same operation after relay recovery', lambda: completed(pending))
-    finally:
-        # Query-only diagnostics also survive Unknown. Never retry a mutation
-        # or invent a receipt to make the strict recovery assertion green.
-        recovery_snapshot = cross_check(pending)
-        recovery_snapshot['node'] = api(prefix)
-        recovery_snapshot['owner'] = json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
-                                                   "owner_epoch,lease_until,updated_at FROM connection_owner_fencing "
-                                                   f"WHERE node_id=decode('{node.replace('-', '')}','hex')) s;"))
-        recovery_snapshot['native_reload_count'] = reload_count()
-        (environment().evidence / 'recovery-final.json').write_text(json.dumps(recovery_snapshot))
-    assert identity_before == run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
-                                  '/var/lib/ocservia-agent/identity/controller.endpoint')
-    assert started_before == run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
-    assert ping()
-    assert native_session() == live_session
-    assert ocserv_started == run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
-    assert api(prefix)['connection_state'] == 'online'
-    record('single_relay_restored_same_identity_and_live_vpn', native_session_id=live_session,
-           operation_state=recovery_snapshot['database_state'], native_reload_delta=reload_count() - reloads_before)
-    replay = api(prefix + '/service:reload', body, headers=headers, status=202)
-    assert replay['id'] == pending['id'] and replay['command_id'] == pending['command_id']
-    # Reusing a request key with changed intent must never create another effect.
-    denied = api(prefix + '/service:reload', {**body, 'reason': 'Business test: changed replay intent'},
-                 headers=headers, status=409)
-    assert denied['type'] == 'https://ocservia.dev/problems/idempotency-conflict'
-    record('idempotency_rejects_changed_intent', operation_id=pending['id'])
-    operations.append(pending)
-    time.sleep(3)
-    assert reload_count() == reloads_before + 1
-    record('single_relay_recovery_identity_and_idempotent_replay', operation_id=pending['id'],
-           native_reload_delta=1, native_session_id=live_session)
-    verify_completed_operations(operations)
-    record('resilience_relay', operation_id=pending['id'], native_reload_delta=1)
-
-
-def native_bans():
-    return [row['IP'] for row in json.loads(run('sudo', 'occtl', '--json', 'show', 'ip', 'bans'))]
-
-
-def ocserv_version():
-    result = subprocess.run(['ocserv', '--version'], capture_output=True, check=True)
-    match = re.search(rb'^(?:ocserv|OpenConnect VPN Server) (\d+)\.(\d+)\.(\d+)', result.stdout + result.stderr, re.M)
-    return tuple(int(part) for part in match.groups())
-
-
-def issued_cookie(result):
-    match = re.search(rb"^COOKIE='([^']+)'$", result.stdout, re.M)
-    return match.group(1).decode() if result.returncode == 0 and match else None
-
-
-def cookie_client(cookie, log):
-    client = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'openconnect', '--non-inter',
-                               '--protocol=anyconnect', '--cookie-on-stdin', '--cafile', str(environment().work / 'ca.crt'),
-                               '--script', str(environment().work / 'vpn-script'), 'https://10.207.0.1:44443'],
-                              stdin=subprocess.PIPE, stdout=log, stderr=log)
-    client.stdin.write((cookie + '\n').encode())
-    client.stdin.close()
-    return client
-
-
-def session_and_ban_controls(mutation, native_ids, attempt, password):
-    """Controller session/IP-ban operations must leave real occtl effects."""
-    prefix = 'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    client_ip = '10.207.0.2'
-
-    def observed(native_id):
-        node = api(prefix)
-        listed = any(row.get('id') == native_id for row in api(prefix + '/sessions').get('items', []))
-        return node['boot_id'] if listed and node.get('boot_id') else None
-
-    def control(action, native_id):
-        boot = wait_for(f'Controller observes session {native_id}', lambda: observed(native_id))
-        operation, _ = mutation(f'sessions/{native_id}:{action}', {'boot_id': boot}, api(prefix)['version'])
-        return operation
-
-    def stop_clients():
-        subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'pkill', '-INT', '-x', 'openconnect'],
-                       capture_output=True, check=False)
-        wait_for('VPN clients stopped', lambda: not native_ids(), 30)
-
-    live = native_ids()
-    assert len(live) == 1
-    operation = control('disconnect', live[0])
-    wait_for('native session disconnect', lambda: live[0] not in native_ids(), 60)
-    record('session_disconnect_native_effect', operation_id=operation['id'], native_session_id=live[0])
-
-    stop_clients()
-    # ponytail: ocserv < 1.4.2 (the distribution 1.2.4) has no `occtl terminate`,
-    # so the Agent never negotiates it there; only the pinned backport runs this.
-    if ocserv_version() >= (1, 4, 2):
-        cookie = issued_cookie(attempt(password))
-        assert cookie
-        with (environment().work / 'private' / 'openconnect-cookie.log').open('ab') as log:
-            client = cookie_client(cookie, log)
-            try:
-                first = wait_for('cookie VPN session', lambda: native_ids() if len(native_ids()) == 1 else None, 60)[0]
-                # Control: a client that dies without logging off leaves its cookie
-                # valid, so a replay authenticates. (A server disconnect already
-                # invalidates cookies on 1.5.0 unless persistent-cookies is set.)
-                subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'pkill', '-KILL', '-x', 'openconnect'],
-                               capture_output=True, check=False)
-                wait_for('killed cookie client session ends', lambda: first not in native_ids(), 60)
-                client = cookie_client(cookie, log)
-                second = wait_for('cookie replay before terminate',
-                                  lambda: next(iter(native_ids()), None) if len(native_ids()) == 1 and client.poll() is None else None, 60)
-                record('session_cookie_replay_control', native_session_ids=[first, second])
-                operation = control('terminate', second)
-                # Terminate invalidates the cookie, so that client cannot reconnect.
-                wait_for('terminated cookie client exits', lambda: client.poll() is not None, 90)
-                assert not native_ids()
-                replay = cookie_client(cookie, log)
-                try:
-                    code = replay.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    code = None
-                assert code not in (None, 0) and not native_ids(), 'terminated cookie still authenticates'
-                fresh_cookie = issued_cookie(attempt(password))
-                assert fresh_cookie
-                fresh = cookie_client(fresh_cookie, log)
-                wait_for('fresh authentication after terminate', lambda: len(native_ids()) == 1 and fresh.poll() is None, 60)
-            finally:
-                stop_clients()
-        record('session_terminate_native_effect', operation_id=operation['id'], native_session_id=second)
-    wrong = secrets.token_hex(24)
-    for _ in range(15):
-        if client_ip in native_bans():
-            break
-        result = attempt(wrong)
-        assert result.returncode != 0 and b'COOKIE=' not in result.stdout
-    assert client_ip in native_bans()
-    # A banned source cannot authenticate even with the valid password.
-    result = attempt(password)
-    assert result.returncode != 0 and b'COOKIE=' not in result.stdout
-    wait_for('Controller observes IP ban',
-             lambda: any(row.get('ip') == client_ip for row in api(prefix + '/ip-bans').get('items', [])))
-    assert client_ip in native_bans()
-    operation, _ = mutation(f'ip-bans/{client_ip}:remove', {}, api(prefix)['version'])
-    assert client_ip not in native_bans()
-    result = attempt(password)
-    assert result.returncode == 0 and b'COOKIE=' in result.stdout
-    record('ip_ban_remove_native_effect', operation_id=operation['id'], ip=client_ip)
-
-
-def business():
-    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
-    prefix = f'nodes/{node}'
-    wait_for('online node', lambda: api(prefix).get('connection_state') == 'online')
-    observed = api(prefix)
-    assert observed['agent_version'] == os.environ['VERSION']
-    single_relay_argv()
-    pid = run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip()
-    privd_pid = run('systemctl', 'show', 'ocservia-privd', '-p', 'MainPID', '--value').strip()
-    process = dict(line.split(':', 1) for line in run('sudo', 'cat', f'/proc/{int(privd_pid)}/status').splitlines())
-    agent_group = run('id', '-g', 'ocserv-agent').strip()
-    assert process['Uid'].split() == ['0'] * 4
-    assert process['Gid'].split() == [agent_group] * 4
-    assert set(process['Groups'].split()) == {'0', agent_group}
-    assert int(process['CapEff'].strip(), 16) == 2  # CAP_DAC_OVERRIDE only.
-    agent_process = dict(line.split(':', 1) for line in run('sudo', 'cat', f'/proc/{int(pid)}/status').splitlines())
-    assert '0' not in agent_process['Uid'].split() + agent_process['Groups'].split()
-    assert int(agent_process['CapEff'].strip(), 16) == 0
-    socket_stat = run('sudo', 'stat', '-c', '%u:%g:%a', '/run/ocserv-platform/privd.sock').strip()
-    assert socket_stat == '0:' + agent_group + ':660'
-    record('native_privd_permissions', privd={key: process[key].split() for key in ('Uid', 'Gid', 'Groups', 'CapEff')},
-           agent={key: agent_process[key].split() for key in ('Uid', 'Gid', 'Groups', 'CapEff')}, socket=socket_stat)
-    operations = []
-
-    def mutation(path, body, revision, method='POST', key=None, extra_headers=None):
-        headers = {'Idempotency-Key': key or secrets.token_hex(16), 'If-Match': f'"revision-{revision}"'}
-        headers.update(extra_headers or {})
-        operation = api(prefix + '/' + path, {**body, 'reason': 'Business test: isolated validation'},
-                        status=202, headers=headers, method=method)
-        try:
-            wait_for('operation ' + operation['id'], lambda: completed(operation))
-        finally:
-            command = operation['command_id'].replace('-', '')
-            journal = run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-agent/agent.db',
-                          "SELECT state,error_code,length(privileged_result_proof)>0 FROM command_journal "
-                          f"WHERE hex(command_id)=upper('{command}');").strip()
-            (environment().evidence / ('journal-' + operation['id'] + '.txt')).write_text(journal + '\n')
-        operations.append(operation)
-        return operation, headers
-
-    def sealed(password):
-        if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
-            return json.loads(run('python3', str(ROOT / 'scripts/release-production-signer.py'), 'seal',
-                                  data=password.encode()))
-        encrypted = subprocess.run(['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(environment().work / 'user.pub.pem'),
-                                    '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
-                                   input=password.encode(), capture_output=True, check=True).stdout
-        return {'version': 1, 'purpose': 'user_password', 'key_id': 'business-test-user-seal',
-                'ciphertext': base64.b64encode(encrypted).decode()}
-
-    def user_revision():
-        state = api(prefix + '/user-group-state')
-        return next(item['desired_version'] for item in state['items'] if item['kind'] == 'user' and item['name'] == 'business-test-vpn-user')
-
-    def attempt(password):
-        return subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'timeout', '20', 'openconnect',
-                               '--authenticate', '--non-inter', '--protocol=anyconnect', '--user=business-test-vpn-user',
-                               '--passwd-on-stdin', '--cafile', str(environment().work / 'ca.crt'), 'https://10.207.0.1:44443'],
-                              input=(password + '\n').encode(), capture_output=True)
-
-    def authenticate(password, success):
-        result = attempt(password)
-        if success:
-            assert result.returncode == 0 and b'COOKIE=' in result.stdout
-        else:
-            assert result.returncode not in (0, 124, 137)
-            assert any(word in result.stderr.lower() for word in (b'authentication', b'cookie', b'password', b'401'))
-
-    password1, password2 = secrets.token_hex(24), secrets.token_hex(24)
-    (environment().work / 'private' / 'vpn-password-1').write_text(password1)
-    (environment().work / 'private' / 'vpn-password-2').write_text(password2)
-    operation, headers = mutation('users', {'name': 'business-test-vpn-user', 'sealed_password': sealed(password1)}, 0)
-    authenticate(password1, True)
-    api(prefix + '/users', {'name': 'business-test-vpn-user', 'password': password1, 'reason': 'Business test: reject plaintext'},
-        headers={'Idempotency-Key': secrets.token_hex(16), 'If-Match': '"revision-0"'}, status=400)
-    record('user_create_real_vpn_auth_and_plaintext_rejection', operation_id=operation['id'])
-    mutation('groups/business-test-staff', {'members': ['business-test-vpn-user']}, 0, method='PUT')
-    group = run('sudo', 'awk', '-F:', '$1 == "business-test-vpn-user" {print $2}', '/etc/ocserv/ocpasswd').strip()
-    assert 'business-test-staff' in group.split(',')
-    record('group_authoritative_state')
-    mutation('users/business-test-vpn-user:rotate-password', {'sealed_password': sealed(password2)}, user_revision())
-    authenticate(password1, False)
-    authenticate(password2, True)
-    record('vpn_password_rotation')
-    mutation('users/business-test-vpn-user:disable', {}, user_revision())
-    authenticate(password2, False)
-    mutation('users/business-test-vpn-user:enable', {}, user_revision())
-    authenticate(password2, True)
-    record('vpn_disable_restore')
-    password_stat = run('sudo', 'stat', '-c', '%u:%g:%a:%h', '/etc/ocserv/ocpasswd').strip()
-    assert password_stat == '0:0:600:1'
-    record('password_file_ownership', stat=password_stat)
-    verify_completed_operations(operations)
-    audit = api('audit/events?page_size=200')['items']
-    assert audit
-    audit_ids = ','.join("'" + item['id'] + "'" for item in audit)
-    assert int(sql(f"SELECT count(*) FROM audit_events WHERE workspace_id='{environment().workspace}' AND id IN ({audit_ids});")) == len(audit)
-    record('audit_api_database_readback', event_ids=[item['id'] for item in audit])
-    # The network namespace confines tunnel addresses/routes to the test client.
-    client_log = (environment().work / 'private' / 'openconnect.log').open('wb')
-    vpn = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'openconnect', '--non-inter',
-                            '--protocol=anyconnect', '--user=business-test-vpn-user', '--passwd-on-stdin',
-                            '--cafile', str(environment().work / 'ca.crt'), '--script', str(environment().work / 'vpn-script'),
-                            'https://10.207.0.1:44443'], stdin=subprocess.PIPE, stdout=client_log, stderr=client_log)
-    vpn.stdin.write((password2 + '\n').encode())
-    vpn.stdin.close()
-
-    def ping():
-        result = subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'ping', '-c', '2', '-W', '2', '10.208.0.1'],
-                                capture_output=True)
-        return result.returncode == 0 and vpn.poll() is None
-
-    wait_for('real VPN ICMP', ping, 40)
-
-    def native_ids():
-        rows = json.loads(run('sudo', 'occtl', '--json', 'show', 'users'))
-        return [str(row['ID']) for row in rows if row['Username'] == 'business-test-vpn-user']
-
-    def native_session():
-        return native_ids()[0]
-
-    # Confirm native readiness; recovery captures its own comparison baseline.
-    native_session()
-    run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
-    session = wait_for('Controller session telemetry', lambda: api(prefix + '/sessions').get('items'))
-    assert any(row.get('username') == 'business-test-vpn-user' for row in session)
-    api(prefix + '/ip-bans')
-    record('live_vpn_session_and_bans_read', session_count=len(session))
-    try:
-        single_relay_recovery(ping, native_session, operations)
-        controlled = len(operations)
-        session_and_ban_controls(mutation, native_ids, attempt, password2)
-        verify_completed_operations(operations[controlled:])
-    finally:
-        # The controls already stop the client, so pkill may find nothing.
-        subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'pkill', '-INT', '-x', 'openconnect'],
-                       capture_output=True, check=False)
-        vpn.wait(timeout=15)
-        client_log.close()
-
-
 def vpn_smoke(phase, relay_recovery=False):
-    smoke = os.environ.get('BUSINESS_PROFILE', 'smoke') == 'smoke'
-    password = (environment().work / 'private' / ('smoke-vpn-password' if smoke else 'browser-vpn-password')).read_text().strip()
-    username = 'business-test-smoke-user' if smoke else 'business-test-browser-user'
+    password = (environment().work / 'private/smoke-vpn-password').read_text().strip()
     with (environment().work / 'private' / f'openconnect-{phase}.log').open('wb') as log:
         vpn = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'openconnect', '--non-inter',
-                                '--protocol=anyconnect', '--user=' + username, '--passwd-on-stdin',
+                                '--protocol=anyconnect', '--user=business-test-smoke-user', '--passwd-on-stdin',
                                 '--cafile', str(environment().work / 'ca.crt'), '--script', str(environment().work / 'vpn-script'),
                                 'https://10.207.0.1:44443'], stdin=subprocess.PIPE, stdout=log, stderr=log)
         try:
@@ -1167,3 +597,27 @@ def vpn_smoke(phase, relay_recovery=False):
             subprocess.run(['sudo', 'ip', 'netns', 'exec', 'business-test-client', 'pkill', '-INT', '-x', 'openconnect'],
                            capture_output=True, check=False)
             vpn.wait(timeout=15)
+
+
+PHASES = {
+    'signer_prepare': signer_prepare,
+    'signer_import': signer_import,
+    'integrated_entry': integrated_entry,
+    'local': local,
+    'transport_ready': transport_ready,
+    'bootstrap_token': bootstrap_token,
+    'bootstrap_verify': bootstrap_verify,
+    'config_prepare': config_prepare,
+    'browser_prepare': browser_prepare,
+    'browser_verify': browser_verify,
+    'smoke_user': smoke_user,
+    'vpn_after_config_apply': lambda: vpn_smoke('after_config_apply'),
+    'resilience': resilience,
+    'revocation': revocation,
+}
+
+if __name__ == '__main__':
+    phase = sys.argv[1] if len(sys.argv) > 1 else ''
+    if phase not in PHASES:
+        raise SystemExit('unknown phase')
+    PHASES[phase]()

@@ -8,6 +8,9 @@
 # keeping material and certificates.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/release-common.sh disable=SC1091
+source "${ROOT}/scripts/release-common.sh"
+
 : "${VERSION:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" "${IMAGES_DIR:?}"
 SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD)"
 CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
@@ -21,14 +24,12 @@ unset SUDO_USER
 umask 077
 
 PEBBLE_IMAGE=ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199
-POSTGRES_IMAGE=docker.io/library/postgres@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
-OTEL_IMAGE=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23
 CREDENTIALS_DIR=/root/ocservia-initial-credentials
 # controller.sh refuses a release file under a group/world-writable ancestor
 # such as /tmp, so the work directory lives under root-only /root.
 work="$(mktemp -d /root/quick-acceptance.XXXXXX)"
-export BUILDX_BUILDER="quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-registry="${BUILDX_BUILDER}-registry" pebble="${BUILDX_BUILDER}-pebble"
+run_prefix="quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+registry="${run_prefix}-registry" pebble="${run_prefix}-pebble"
 gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
 controller="controller.${gateway}.sslip.io" relay="relay.${gateway}.sslip.io"
 host_trust=/usr/local/share/ca-certificates/ocservia-quick-acceptance-pebble.crt
@@ -56,41 +57,18 @@ pass() { echo "PASS: $1"; }
 # errexit ignores negated commands, so absence is asserted explicitly.
 absent() { if grep -qF -- "$@"; then echo "unexpected: $1" >&2; return 1; fi; }
 
-bash "${ROOT}/scripts/release-upgrade-native.sh" "${CONTROLLER_ARCH}"
+release_verify_native_runner "${CONTROLLER_ARCH}" >/dev/null
 test -s "${IMAGES_DIR}/product-identity.json"
 
 stage=publish
 docker run -d --restart unless-stopped --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
-manifest_args=(--image "postgres=${POSTGRES_IMAGE}" --image "otel=${OTEL_IMAGE}")
-upgrade_args=(--image "postgres=${POSTGRES_IMAGE}" --image "otel=${OTEL_IMAGE}")
-roles=(gateway control transport backup edge relay signer)
-for name in "${roles[@]}"; do
-  source="ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}"
-  docker load -i "${IMAGES_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
-  [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${source}")" == "linux/${CONTROLLER_ARCH}" ]]
-  docker tag "${source}" "localhost:5000/${name}:v${VERSION}"
-  docker push "localhost:5000/${name}:v${VERSION}"
-  ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "localhost:5000/${name}:v${VERSION}" |
-    grep "^localhost:5000/${name}@sha256:")"
-  manifest_args+=(--image "${name}=${ref}")
-  docker tag "${source}" "localhost:5000/upgrade-${name}:v${VERSION}"
-  docker push "localhost:5000/upgrade-${name}:v${VERSION}"
-  upgrade_ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "localhost:5000/upgrade-${name}:v${VERSION}" |
-    grep "^localhost:5000/upgrade-${name}@sha256:")"
-  upgrade_args+=(--image "${name}=${upgrade_ref}")
-done
+release_load_controller_images "${IMAGES_DIR}" "${VERSION}" "${CONTROLLER_ARCH}"
 manifest="${work}/controller-release-${CONTROLLER_ARCH}.json"
-node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${manifest}" \
-  --release-version "${VERSION}" --release-tag "v${VERSION}" --source-commit "${SOURCE_COMMIT}" \
-  --migration-dir "${ROOT}/control-plane/migrations" --platform "linux/${CONTROLLER_ARCH}" \
-  --manifest-version 2 "${manifest_args[@]}"
+release_publish_local_manifest "${ROOT}" "localhost:5000" "" "${VERSION}" "${CONTROLLER_ARCH}" "${SOURCE_COMMIT}" "${manifest}"
 # The upgrade target names the same images through a second digest-pinned
 # repository, preserving a real configuration transition without mutable tags.
 upgrade_manifest="${work}/controller-release-digests.json"
-node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${upgrade_manifest}" \
-  --release-version "${VERSION}" --release-tag "v${VERSION}" --source-commit "${SOURCE_COMMIT}" \
-  --migration-dir "${ROOT}/control-plane/migrations" --platform "linux/${CONTROLLER_ARCH}" \
-  --manifest-version 2 "${upgrade_args[@]}"
+release_publish_local_manifest "${ROOT}" "localhost:5000" "upgrade-" "${VERSION}" "${CONTROLLER_ARCH}" "${SOURCE_COMMIT}" "${upgrade_manifest}"
 
 stage=pebble
 # Pebble runs on the host network: Controller containers reach its directory

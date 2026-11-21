@@ -476,7 +476,7 @@ jobs:
               $routing[.] == "true" or $routing[.] == "false") and
             (if $routing.profile == "full" then
               all(["run_docs", "run_go", "run_rust", "run_web", "run_web_browser", "run_database", "run_ci_tools", "run_installers"][]; $routing[.] == "true") and
-              ($routing.ci_suites | split(" ") | index("guards") != null and index("source-style") != null and index("contracts") != null)
+              ($routing.ci_suites | split(" ") | index("guards") != null and index("release") != null and index("source-style") != null and index("contracts") != null)
             else true end) and
             all([
               ["docs", "run_docs"],

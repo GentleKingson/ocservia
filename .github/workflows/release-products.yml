@@ -123,6 +123,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-tools
+        if: github.event_name == 'workflow_dispatch' && contains(inputs.version, '-rc.')
         with:
           profiles: native-packages
       - name: Download immutable package set for smoke
@@ -145,7 +146,6 @@ jobs:
           RUN_ID: rc-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rc-lifecycle
           RC_LIFECYCLE: 'true'
-          STUB_BINARIES: 'false'
         run: scripts/release-native-package-smoke.sh
       - name: Upload native smoke diagnostics
         if: always()

@@ -269,10 +269,41 @@ def finish(repo, version, sha, assets, images):
         summary.write(f'Published immutable Release {tag} at {sha}: {len(files)} assets, {len(expected)} verified image tags.\n')
 
 
+def qualify(repo, tag, sha):
+    source_commit = command('git', 'rev-parse', 'HEAD')
+    tag_commit = api(f'repos/{repo}/commits/refs/tags/{tag}')['sha']
+    require(source_commit == sha and tag_commit == source_commit,
+            'Release tag no longer matches the build commit')
+    pages = api(
+        f'repos/{repo}/actions/workflows/release-check.yml/runs'
+        f'?head_sha={source_commit}&branch=main&event=workflow_dispatch&per_page=100',
+        '--paginate', '--slurp',
+    )
+    runs = [run for page in pages for run in page.get('workflow_runs', [])]
+    # A newer failed or unfinished qualification must not reuse an older PASS.
+    latest = max(runs, key=lambda run: run['run_number']) if runs else None
+    require(
+        latest is not None
+        and latest.get('head_sha') == source_commit
+        and latest.get('head_branch') == 'main'
+        and latest.get('event') == 'workflow_dispatch'
+        and latest.get('status') == 'completed'
+        and latest.get('conclusion') == 'success',
+        f'No successful latest Release Check on main for {source_commit}',
+    )
+    summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
+    if summary_path:
+        with open(summary_path, 'a') as summary:
+            summary.write(f"Release Check: {latest['html_url']} (SHA: {source_commit})\n")
+
+
 def main():
     phase = sys.argv[1]
     version = os.environ['VERSION']
     require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?', version), 'Invalid version')
+    if phase == 'qualify':
+        qualify(os.environ['GH_REPO'], 'v' + version, os.environ['GITHUB_SHA'])
+        return
     if phase == 'previous-rc':
         require('-rc.' in version and int(version.rsplit('.', 1)[1]) > 1, 'Expected RC number greater than one')
         print(previous_rc(os.environ['GH_REPO'], version))

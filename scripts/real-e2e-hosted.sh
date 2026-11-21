@@ -45,7 +45,7 @@ pathlib.Path(sys.argv[2]).write_text(json.dumps({
     'build_locations': [{'file': name, 'line': int(line)} for name, line in sorted(set(re.findall(
         r'\b(gateway\.dockerfile|transportd\.dockerfile|dockerfile):([0-9]+)\b', log)))],
     'python_locations': [{'file': name, 'line': int(line)} for name, line in re.findall(
-        r'file "[^"\n]*/scripts/(real-e2e-business\.py|release-business-api\.py|release_business_runtime\.py|release_business_scenarios\.py|real-e2e-native-business\.py)", line ([0-9]+)', log)],
+        r'file "[^"\n]*/scripts/(real-e2e-business\.py|release_business_runtime\.py|release_business_scenarios\.py|real-e2e-native-business\.py)", line ([0-9]+)', log)],
     'wait_timeouts': [name for name in ('native agent online with fresh heartbeat',
                                        'cross-vm configuration plan', 'cross-vm configuration apply',
                                        'single relay owner lease invalidation', 'node offline during relay outage',

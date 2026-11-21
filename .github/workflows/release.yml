@@ -17,6 +17,9 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
@@ -38,6 +41,18 @@ jobs:
           [[ "$version" =~ -rc[.][1-9][0-9]*$ ]] && is_prerelease=true
           echo "is_prerelease=$is_prerelease" >>"$GITHUB_OUTPUT"
           echo "version=$version" >>"$GITHUB_OUTPUT"
+      - if: github.event_name == 'push'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require successful Release Check before building
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python3 scripts/publish-release.py qualify
   build-amd64:
     needs: prepare
     uses: ./.github/workflows/release-products.yml
@@ -111,26 +126,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          source_commit="$(git rev-parse HEAD)"
-          tag_commit="$(gh api "repos/$GH_REPO/commits/refs/tags/$GITHUB_REF_NAME" --jq '.sha')"
-          if [[ "$source_commit" != "$GITHUB_SHA" || "$tag_commit" != "$source_commit" ]]; then
-            echo 'Release tag no longer matches the build commit' >&2
-            exit 1
-          fi
-          runs="$(gh api --paginate --slurp \
-            "repos/$GH_REPO/actions/workflows/release-check.yml/runs?head_sha=$source_commit&branch=main&event=workflow_dispatch&per_page=100")"
-          # A newer failed or unfinished qualification must not reuse an older PASS.
-          qualification="$(jq -ce --arg sha "$source_commit" '
-            [.[].workflow_runs[]] | max_by(.run_number) |
-            select(.head_sha == $sha and .head_branch == "main" and
-              .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success")
-          ' <<<"$runs")" || {
-            echo "No successful latest Release Check on main for $source_commit" >&2
-            exit 1
-          }
-          printf 'Release Check: %s (SHA: %s)\n' \
-            "$(jq -r '.html_url' <<<"$qualification")" "$source_commit" >>"$GITHUB_STEP_SUMMARY"
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 scripts/publish-release.py qualify
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
         with:
           artifact-ids: ${{ needs.build-amd64.outputs.controller_images_artifact_id || 'missing' }},${{ needs.build-arm64.outputs.controller_images_artifact_id || 'missing' }}

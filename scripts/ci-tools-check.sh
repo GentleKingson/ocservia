@@ -16,7 +16,7 @@ for suite in ${CI_SUITES}; do
       ;;
     release)
       node scripts/test-release-upgrade.mjs
-      bash -n scripts/release-quick-acceptance.sh
+      bash -n scripts/release-common.sh scripts/release-business-probe.sh scripts/release-quick-acceptance.sh
       bash scripts/test-controller-release-manifest.sh
       bash scripts/test-release-image-security.sh
       bash scripts/test-release-package-security.sh
