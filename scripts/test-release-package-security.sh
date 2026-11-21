@@ -138,4 +138,70 @@ env = rt.environment()
 assert env.work.is_dir() and env.evidence.is_dir()
 '
 
+# smoke_relay_recovery must enforce offline zero-side-effects, exactly-once recovery, and idempotent replay.
+OCSERVIA_BUSINESS_TEST_WORK_DIR="$work" ARTIFACT_DIR="$work" \
+  OCSERVIA_BUSINESS_TEST_NODE_ID="00000000-0000-7000-8000-000000000001" \
+  OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER="relay-test" \
+  PYTHONPATH="$ROOT/scripts" python3 -c '
+import json
+from pathlib import Path
+import release_business_scenarios as sc
+
+state = {"relay_up": True, "epoch": 2, "conn": "aa" * 16, "reloads": 1, "journal": 3, "privd": 3, "published": False, "op_state": "queued"}
+recorded = []
+
+sc.single_relay_argv = lambda: None
+sc.owner = lambda: {"connection_id": state["conn"], "owner_epoch": state["epoch"]}
+sc.identity_digest = lambda: "id-digest"
+sc.native_service_pids = lambda: {"ocserv": 10, "ocservia-agent": 20, "ocservia-privd": 30}
+sc.node_side_effects = lambda: {"journal": state["journal"], "privd": state["privd"], "reloads": state["reloads"], "files": "same"}
+sc.wait_for_relay_outage = lambda node: None
+
+def fake_run(*args, **kwargs):
+    if args == ("docker", "stop", "relay-test"):
+        state["relay_up"] = False
+    elif args == ("docker", "start", "relay-test"):
+        state["relay_up"] = True
+        state["epoch"] += 1
+        state["conn"] = "bb" * 16
+        state["published"] = True
+        state["op_state"] = "succeeded"
+        state["journal"] += 1
+        state["privd"] += 1
+        state["reloads"] += 1
+    return ""
+
+def fake_api(path, body=None, *, status=200, headers=None, **kwargs):
+    if path.startswith("nodes/") and body is None:
+        return {"connection_state": "online" if state["relay_up"] else "offline", "version": 4}
+    if path.endswith("/service:reload"):
+        return {"id": "op-1", "command_id": "cmd-1", "state": state["op_state"]}
+    if path == "operations/op-1":
+        return {"id": "op-1", "command_id": "cmd-1", "state": state["op_state"]}
+    raise AssertionError(path)
+
+def fake_sql(query):
+    if "published_at IS NULL" in query:
+        return "0" if state["published"] else "1"
+    if "published_at IS NOT NULL" in query:
+        return "1" if state["published"] else "0"
+    if "command_attempts" in query:
+        return "1" if state["published"] else "0"
+    if "audit_events" in query:
+        return "1"
+    raise AssertionError(query)
+
+sc.run = fake_run
+sc.api = fake_api
+sc.sql = fake_sql
+sc.cross_check = lambda op: {"database_state": "succeeded", "journal_count_state_error_receipt": "1|succeeded||1", "root_count_state_response": "1|applied|1"}
+sc.record = lambda name, **kw: recorded.append((name, kw))
+
+sc.smoke_relay_recovery(lambda: True, outage_settle_seconds=0)
+assert len(recorded) == 1 and recorded[0][0] == "resilience_relay"
+assert recorded[0][1]["offline_queued_zero_side_effects"] is True
+assert recorded[0][1]["idempotent_replay"] is True
+assert recorded[0][1]["after_epoch"] > recorded[0][1]["before_epoch"]
+'
+
 echo 'Release package supply-chain guards passed'

@@ -17,9 +17,8 @@ a result from one layer never stands in for another:
 - Release Check qualifies one exact merged `main` commit for release, with
   Full CI, Security, dual-arch (`amd64` and `arm64`) native builds, image
   security scans, and package/image smoke, plus primary-arch (`amd64`)
-  Integrated Business Smoke and Pebble ACME Quick Install.
-- Real three-VM acceptance exercises native services and a hosted multi-VM
-  topology that none of the layers above start.
+  Integrated Business Smoke (including UDP-isolated sole-Relay offline-queue
+  recovery) and Pebble ACME Quick Install.
 - The Release workflow verifies the tag's Release Check qualification up front,
   rebuilds from the tag, and publishes only after its gates pass.
 
@@ -49,7 +48,7 @@ Validation converges onto four explicit tiers:
 | Unit | Fast in-memory domain, protocol, UI, and CI-guard contract checks | `scripts/go-check.sh standard`, `make rust-check`, `scripts/web-check.sh basic`, `scripts/ci-tools-check.sh` |
 | Key Integration | Live PostgreSQL 18 schema/snapshot/API checks, native ocserv adapter integration, and Controller/Agent lifecycle suites | `scripts/database-postgres-snapshot.sh check`, `scripts/database-postgres-smoke.sh`, `DATABASE_TEST_SCOPE=full PG_MAJOR=18 scripts/database-integration.sh`, `scripts/native-ocserv-integration.sh` |
 | Security Regressions | Single-admin workspace boundary, authentication/session, fencing/outbox regressions, secret scanning, and dependency/image vulnerability gates | `regression-*` groups in `scripts/required-go-tests.txt`, `scripts/security-check.sh`, `security.yml`, `release-products.yml` |
-| Release E2E Acceptance | Playwright browser suite, Integrated Business Smoke with single-instance recovery, Pebble ACME Quick Install, and cross-VM private business | `scripts/web-check.sh full` / `make e2e`, `release-check.yml`, `real-e2e.yml` |
+| Release E2E Acceptance | Playwright browser suite, Integrated Business Smoke with single-instance & sole-Relay offline-queue recovery, and Pebble ACME Quick Install | `scripts/web-check.sh full` / `make e2e`, `release-check.yml` |
 
 When a change only touches documentation, run the focused checks:
 
@@ -141,9 +140,9 @@ Pick the entry point that matches the behavior under test:
   Agent, `privd`, Relay, and ocserv in one container (no systemd PID 1, no
   managed-node installer). It is manual and outside CI; native systemd behavior
   belongs to [Business validation](#business-validation).
-- Multi-host and release qualification: [Real three-VM acceptance](#real-three-vm-acceptance)
-  (module tests and browser fixtures do not replace it),
-  [Business validation](#business-validation), and [Release policy](#release-policy).
+- Release qualification: [Business validation](#business-validation) and
+  [Release policy](#release-policy) (module tests and browser fixtures do not
+  replace them).
 
 The database-backed Go groups over the Controller services and HTTP layer are
 `backend-policy-config`, `backend-policy-useroperations`, `backend-policy-api`,
@@ -483,12 +482,9 @@ analysis and is the source of the exact rule order. In outline:
   the database scripts select `go` plus PostgreSQL database smoke.
 - Installer, release, package, Controller and Agent-upgrade scripts, release
   workflows and `deploy/{package,systemd,bootstrap,managed-node,production}`
-  select the release contract suite and/or installer self-tests.
-- Cross-VM files (`real-e2e.yml`, `.github/actions/real-e2e-*/*`,
-  `deploy/real-e2e/*`, `scripts/real-e2e-*`) select the `cross-vm` suite
-  (`make real-e2e-check`). The credentialed three-VM run is never started, and
-  the manual-acceptance harnesses (`scripts/resilience-*`,
-  `scripts/security-acceptance-*`) are checked but not run.
+  select the release contract suite and/or installer self-tests. Manual-acceptance
+  harnesses (`scripts/resilience-*`, `scripts/security-acceptance-*`) are
+  checked for syntax/contracts but not executed in Basic CI.
 - `ci.yml`, `security.yml`, `scripts/ci-*`, the required-test selectors,
   `test-ci-relevance.sh`, `test-toolchain-consistency.sh` and public-repository
   guards select the CI guard suite.
@@ -546,7 +542,6 @@ images.
 | `release-check.yml` | Manual main Full CI, Security, dual-arch (`amd64`/`arm64`) Release products build/image-security/smoke, and primary-arch (`amd64`) Integrated Business Smoke with single-instance recovery and Quick Install (Pebble ACME) |
 | `release.yml` | Tag fail-fast Release Check qualification, dual-arch build/image-security/smoke/publish; manual build-only dry-run |
 | `release-products.yml` | Reusable native product build, image scan, and package/image smoke workflow called by `release-check.yml` and `release.yml` |
-| `real-e2e.yml` | Manual three-hosted-VM enrollment and private business over an ephemeral Tailscale network and a temporary dedicated HTTPS Relay; the schedule is locked off, and unauthorized refs and missing infrastructure fail closed; outside Basic CI and Release Check |
 
 ### Security checks
 
@@ -602,10 +597,9 @@ Invoking the database scripts without a scope defaults to `full`; CI passes
 `smoke` for Quick and `full` for Full, and the `regression` scope is manual.
 Local browser checks need a separate Playwright Chromium install, plus
 `firefox`/`webkit` for those projects. Disaster recovery, race and
-fault-injection suites stay manual with no scheduled workflow. Capacity runs,
-native security acceptance and cross-VM enrollment also stay outside Basic CI,
-because they need dedicated resources, systemd/privd/PKI fixtures or separate
-VMs:
+fault-injection suites stay manual with no scheduled workflow. Capacity runs and
+native security acceptance also stay outside Basic CI,
+because they need dedicated resources or systemd/privd/PKI fixtures:
 
 - `make resilience-smoke` and `make resilience-full` invoke `scripts/resilience-capacity.sh`
   (see [Resilience and capacity](#resilience-and-capacity)).
@@ -616,10 +610,6 @@ VMs:
   sandbox, attestation keys, certificate lifecycle and package upgrade/rollback.
   Results use `SSE_CAPACITY_ACCEPTANCE` and `PRIVD_ACCEPTANCE`, with
   `sse-capacity-summary.json` and `privd-summary.txt` respectively.
-- `scripts/real-e2e-controller.sh`, `scripts/real-e2e-node.sh`,
-  `scripts/real-e2e-artifact.sh` and `deploy/real-e2e` support manual
-  two-machine enrollment and the hosted `real-e2e.yml` (see
-  [Real three-VM acceptance](#real-three-vm-acceptance)).
 
 To reproduce the Go unit checks, Quick database smoke and the Full-only
 PostgreSQL backup/restore smoke scripts, run these against the candidate commit
@@ -701,341 +691,6 @@ Passing Business Smoke on `amd64` combined with native `amd64`/`arm64` package
 and image smoke does not certify cross-host high availability, historical
 cross-release upgrades, or third-party CA/HSM integrations.
 
-## Real three-VM acceptance
-
-The hosted fixture ([`real-e2e.yml`](../../.github/workflows/real-e2e.yml),
-workflow name Cross-VM Private Business) runs three independent Ubuntu 24.04 VMs:
-Controller with PostgreSQL and transportd, the real Agent, and one disposable
-iroh HTTPS Relay. It reuses the locked Relay Dockerfile and enrollment protocol;
-production Relay configuration and the default transportd image target are
-unchanged.
-
-Three-VM acceptance is proven only by an authorized run on the exact merged main
-SHA that succeeds, after the administrator setup below. Local contracts, Basic CI
-and CodeQL do not prove native three-VM business behavior, and there is no
-Release Check gate for it.
-
-### One-time administrator setup
-
-1. Use a dedicated test Tailnet without Tailnet Lock (the pinned Action's WIF
-   mode does not support Tailnet Lock). Create `tag:ocservia-ci-peer` and
-   `tag:ocservia-ci-relay`, owned only by authorized administrators. Configure
-   two separate OIDC federated identities, with writable `auth_keys` scope and
-   only their respective tag. No persistent auth key or OAuth secret is needed.
-2. For both identities, use issuer
-   `https://token.actions.githubusercontent.com`, and the exact subject:
-   `repo:GentleKingson@72605370/ocservia@1319465232:environment:cross-vm-test-relay`.
-   The repository's OIDC customization API currently reports `use_default=true`,
-   `use_immutable_subject=true` and the ID-bearing prefix above. Recheck this
-   before installation. The Environment replaces the branch suffix in default
-   `sub`; the subject alone does not constrain the branch.
-   Add exact custom claim rules:
-
-   | Claim | Required value |
-   |---|---|
-   | `repository` | `GentleKingson/ocservia` |
-   | `repository_id` | `1319465232` |
-   | `repository_owner_id` | `72605370` |
-   | `ref` | `refs/heads/main` |
-   | `workflow_ref` | `GentleKingson/ocservia/.github/workflows/real-e2e.yml@refs/heads/main` |
-   | `environment` | `cross-vm-test-relay` |
-   | `runner_environment` | `github-hosted` |
-
-   Use each identity's generated audience exactly. Do not use a wildcard subject,
-   repository, ref, workflow or audience. The local pre-join guard also compares
-   workflow SHA to the checked-out SHA and rejects a different reusable callee.
-   First qualification uses direct `workflow_dispatch`; callers with another
-   `workflow_ref` are intentionally rejected by this identity policy.
-3. Apply the following grant to the test Tailnet policy:
-
-   ```json
-   {
-     "tagOwners": {
-       "tag:ocservia-ci-peer": ["autogroup:admin"],
-       "tag:ocservia-ci-relay": ["autogroup:admin"]
-     },
-     "grants": [{
-       "src": ["tag:ocservia-ci-peer"],
-       "dst": ["tag:ocservia-ci-relay"],
-       "ip": ["tcp:3443"]
-     }]
-   }
-   ```
-
-   Review the entire effective policy, including existing ACLs and grants:
-   rules are additive. Remove overlapping allow-all, wildcard, group, tag or
-   address-range rules that allow peer-to-peer, relay-to-peer, other Relay ports
-   or access to unrelated devices. Do not merely append this grant to the default
-   allow-all policy. Use Tailscale policy tests to require peer → relay TCP 3443
-   and reject peer → peer, relay → peer and peer → relay TCP 22/443/8080 and UDP
-   7842. Do not grant routes, exit nodes, SSH or Funnel. Existing networks must
-   not be silently broadened or disrupted; use the isolated test Tailnet.
-4. Preserve GitHub Environment `cross-vm-test-relay` with only branch `main`
-   allowed, no tag patterns. Do not relax its protection rules. Keep the existing
-   `CROSS_VM_RELAY_TOKEN` secret only there (32 to 512 non-whitespace bytes); never
-   put it in variables or artifacts. The old URL/CA secrets are no longer read
-   by this workflow; removal can wait until no older/manual consumers need them.
-5. Set these Environment variables, not secrets: `TS_PEER_CLIENT_ID`,
-   `TS_PEER_AUDIENCE`, `TS_RELAY_CLIENT_ID`, `TS_RELAY_AUDIENCE`. Only after the
-   above effective-policy/identity review, set `TS_POLICY_REVIEWED=true` there.
-   This is an administrator attestation, not an independent API policy audit.
-   Missing configuration fails preflight with `BLOCKED_INFRA` before any join.
-6. Keep the schedule disabled. The workflow defines no schedule trigger and its
-   admission job hardcodes the schedule input to `false`, so an inaccessible or
-   stale variable such as `CROSS_VM_SCHEDULE_ENABLED` cannot enable an
-   unqualified topology. Do not connect a schedule during initial acceptance;
-   that needs a separate change after the first real success. Keep Release
-   Check unchanged.
-
-No administrator Tailnet API credential is passed to CI, so CI cannot
-independently enumerate all policy rules or confirm server-side device deletion.
-Do not label either as API-verified. If stronger deletion evidence is needed, an
-administrator can inspect the three run-scoped hostnames in the device API before
-and after the run without adding credentials to this workflow.
-
-### Hosted execution and evidence
-
-After review and explicit merge authorization, record the merged SHA and run:
-
-```sh
-gh workflow run real-e2e.yml --ref main
-```
-
-Check that the run's `head_sha` equals that recorded SHA. The graph is
-`admission → preflight → relay/controller/node → verdict`. Admission is
-uncredentialed and checks repository, main ref, defining workflow ref/SHA and
-event before checkout. All three role jobs use the protected Environment and
-job-local `id-token: write`. The Tailscale Action is pinned by SHA in the
-workflow; it requests ephemeral, preapproved nodes with in-memory state, and no
-long-lived Tailscale key is supplied.
-
-Two kinds of connectivity are kept separate. The Tailnet is only the underlay
-between the VMs. The application path is an iroh connection through a temporary
-dedicated HTTPS Relay on its own VM, authenticated with `CROSS_VM_RELAY_TOKEN`.
-That Relay generates a one-day CA and a DNS-SAN leaf certificate for
-`relay.ocservia.test`, disables QUIC discovery in its disposable configuration,
-and publishes only its Tailnet IPv4 TCP 3443. No public port, external VPS,
-public DNS or public Relay is used, so the run does not exercise public Relay
-discovery. Its readiness artifact holds only the URL, Tailnet IP, public CA and
-fingerprint, source SHA, run ID, attempt and boot ID, and peers reject stale,
-mixed-source, same-VM or malformed readiness. Peers map the fixed hostname
-locally, and a test-only Compose overlay maps it inside transportd. The fixture
-derives the Controller EndpointID from its local Ed25519 public key before
-startup and checks it against the running transportd.
-
-The Relay job checks its container and verified HTTPS health until both full peer
-jobs complete, outside the controlled recovery interval. Failed peers fail
-qualification, and waits have deadlines. The Controller's transportd container
-uses an opt-in image target containing the existing iroh probe; its real
-authenticated connection and typed wrong-token denial must pass before
-controller-ready is published. The Agent checks the correct CA and token,
-requires curl error 60 for an unrelated CA (timeouts and DNS errors fail), and
-requires typed `ServerDeniedAuth` for the wrong token before real enrollment.
-TLS and hostname verification stay enabled everywhere.
-
-The OAEP exchange, real Agent enrollment and Controller database assertions
-remain: active UUIDv7 node, EndpointID, workspace/environment, and consumed
-derived `obt2_` token -> node binding. Controller and Agent compare distinct boot IDs, source/run
-identity, common Relay metadata and a third distinct Relay boot ID. Those boot
-IDs and the authenticated Relay connection are the application Relay evidence.
-A compact post-traffic Tailscale peer observation records `CurAddr`, `Relay`,
-`PeerRelay` and `Active`; an absent path is unknown, not proof of direct traffic.
-Tailscale transport (direct, DERP or peer relay) is separate from application
-iroh Relay use, and `tailscale ping` is not enrollment evidence. The Controller
-and node register the root attestation key during the installation handshake
-before confirming native startup, because registration advances authorization
-and the first Agent session must negotiate that revision before business commands are queued.
-
-Cleanup steps run with `always()`: Controller services/volumes/networks, Agent
-native units/package/process/build/private files, Relay container/image/TLS/token
-files, local hosts mapping, Tailscale logout, daemon shutdown and in-memory
-credentials. Explicit cleanup failures fail their job even though the upstream
-Action's post hook only warns, and that hook may warn about an explicitly stopped
-daemon; the checked cleanup step owns the result. Runner cancellation or loss
-remains best effort. Tailscale expects ephemeral server removal, but the run
-always reports `SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED`.
-
-Verdict deletes all run-attempt rendezvous artifact kinds, re-lists them and
-requires zero remaining. Allowlisted evidence artifacts remain for seven days.
-Any failed, cancelled, unexpectedly skipped, timed-out or cleanup-failed
-dependency prevents PASS, and a disabled schedule reports NOT_RUN, never PASS.
-The final positive markers are valid only for the exact successful run:
-
-```text
-CROSS_VM_ENROLLMENT=PASS
-CLEANUP=PASS
-CROSS_VM_PRIVATE_BUSINESS=PASS
-DEDICATED_RELAY_RECOVERY=PASS
-CROSS_WAN_PUBLIC_INGRESS=NOT_TESTED
-SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED
-```
-
-Record run ID and attempt, SHA, the three boot IDs, TLS/token positive and
-negative results, DB binding, path observation, the effective-policy review
-basis, and artifact versus local/server cleanup. Report wall time and summed job
-seconds from the Jobs API, with runner minutes separate from billed minutes.
-
-Local checks (no Tailnet credentials or actual joins):
-
-```sh
-make real-e2e-check
-actionlint .github/workflows/real-e2e.yml
-shellcheck -x scripts/real-e2e-{hosted,controller,node,artifact,relay-host}.sh
-```
-
-`make real-e2e-check` only runs `bash -n` on the real-E2E scripts; it executes no
-test, starts no VM, container or Agent, and does not verify enrollment. The
-repository does not bundle `actionlint`. Design references:
-[Tailscale Action](https://github.com/tailscale/github-action),
-[workload identity federation](https://tailscale.com/docs/features/workload-identity-federation),
-[additive Grants/ACL behavior](https://tailscale.com/docs/reference/grants-vs-acls),
-[GitHub OIDC claims and immutable subjects](https://docs.github.com/en/actions/reference/security/oidc).
-
-### Manual execution
-
-Before starting, export a unique `RUN_ID` (letters, digits, dots, underscores
-and hyphens) and an absolute, private `RUNNER_TEMP` directory on each VM. On the
-Controller VM, also export a unique, Docker-compatible `COMPOSE_PROJECT`. Reuse
-the same values across every phase through cleanup, and set `ARTIFACT_DIR` to
-write diagnostics outside the default location under `RUNNER_TEMP`.
-
-On each VM, supply `REAL_E2E_RELAY_URL`, `REAL_E2E_RELAY_CA` and
-`REAL_E2E_RELAY_TOKEN` from protected local configuration, then run
-`python3 scripts/real-e2e-relay.py "$RUNNER_TEMP/ocservia-real-e2e-<role>-$RUN_ID/relay"`,
-replacing `<role>` with `controller` or `node`. This creates a new private
-directory and refuses to replace an existing one. Unset the input variables
-afterward. Controller startup uses sudo only to assign its copied token to
-container UID/GID 65532; the node's copy stays owned by its Agent process user.
-Run these scripts only on explicitly authorized test hosts.
-
-1. On the Controller, run `scripts/real-e2e-controller.sh start`. On the node,
-   run `scripts/bootstrap.sh native-packages` (see
-   [Linux ARM64 Go validation](#linux-arm64-go-validation)), source
-   `scripts/env.sh`, and run `scripts/real-e2e-node.sh build`.
-2. Copy
-   `${RUNNER_TEMP}/ocservia-real-e2e-controller-${RUN_ID}/outbox/controller-ready`
-   from the Controller to the node, then run
-   `scripts/real-e2e-node.sh prepare CONTROLLER_DIR` against the received copy.
-3. Copy
-   `${RUNNER_TEMP}/ocservia-real-e2e-node-${RUN_ID}/outbox/agent-endpoint`
-   from the node to the Controller and run
-   `scripts/real-e2e-controller.sh issue-token AGENT_ENDPOINT_DIR`.
-4. Copy the Controller's `outbox/enrollment-token` directory to the node and run
-   `scripts/real-e2e-node.sh enroll TOKEN_DIR` before the ten-minute token TTL
-   elapses.
-5. Copy the node's `outbox/enrollment-result` directory back to the Controller,
-   then run `scripts/real-e2e-controller.sh verify-enrollment RESULT_DIR` to
-   confirm the active UUIDv7 node record and its EndpointID binding.
-6. Run `scripts/real-e2e-controller.sh authority AGENT_ENDPOINT_DIR`; copy its
-   `outbox/business-authority` to the node and run
-   `scripts/real-e2e-node.sh activate AUTHORITY_DIR`.
-7. Copy the node's `outbox/business-node-ready` to the Controller; run
-   `scripts/real-e2e-controller.sh register-privd NODE_READY_DIR`. Copy its
-   `outbox/business-authority-registered` to the node and run
-   `scripts/real-e2e-node.sh start-native REGISTERED_DIR`. Then run
-   `scripts/real-e2e-controller.sh business NODE_READY_DIR AGENT_ENDPOINT_DIR`.
-   Copy its `outbox/business-controller-done` to the node and run
-   `scripts/real-e2e-node.sh verify-business DONE_DIR`.
-8. Copy the node's `outbox/business-node-result` to the Controller; run
-   `scripts/real-e2e-controller.sh verify-business RESULT_DIR`. Only this
-   reconciliation proves the native business checkpoint.
-9. Run the `diagnostics` phase and then the `cleanup` phase of the local script
-   on each VM, including after a failed run, and delete any directories copied
-   between the machines. Keep the enrollment token, private keys and unredacted
-   logs private.
-
-Each `outbox` path is relative to that role's working directory under
-`RUNNER_TEMP`; the directory arguments point to the copies on the receiving VM.
-Transfer them over a secure channel such as SSH or SCP. The scripts do not
-automate file exchange, artifact uploads, retention or workflow cleanup.
-`scripts/real-e2e-artifact.sh` serves GitHub Actions artifact operations only;
-its download mode needs a live run with `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`,
-`GITHUB_REPOSITORY`, `GITHUB_API_URL` and `GITHUB_TOKEN`, so the manual
-procedure does not use it.
-
-### Scope and recovery profile
-
-This profile checks enrollment and private business across separate VMs with a
-persistent Agent identity, native Agent/privd/ocserv units, one local
-Admin identity, privileged config and reload operations, and
-an OpenConnect client in a local network namespace. Only after B01-B05
-reconciliation does the hosted workflow start R01-R05:
-
-- Capture the actual Relay path, single custom Relay arguments, native process
-  and identity baselines, and the existing VPN session. Agent-owned outbound UDP
-  except DNS is rejected with IPv4/IPv6 rules; Tailscale's daemon is unaffected.
-- Stop the sole Relay container. Require verified HTTPS unreachability, owner
-  lease invalidation and offline telemetry before submitting one direct Admin reload.
-- Keep the Relay stopped until the Controller proves an unpublished Outbox and no
-  sent attempt, and the Node proves no Journal/root execution, no reload,
-  unchanged identity/processes and a working original VPN session.
-- Start the same container, require a new connection ID and higher owner epoch
-  within a 90-second observation window, and complete the same operation.
-- Reconcile Controller DB, Agent Journal, privd receipt and exactly one native
-  reload, including an idempotent API replay, and preserve the original VPN
-  session, identity and native process starts. A stopped Relay is restored before
-  cleanup even on failure; task UDP rules and the VPN client are removed by Node
-  cleanup.
-
-The observation window is a test bound, not a production RTO. All B and R
-evidence must come from one exact main SHA, run and attempt. The VPN session is
-local to the Agent VM, so this profile does not prove WAN ingress, production
-Signer acceptance or production failure domains.
-
-### Nodes installation wizard acceptance
-
-On reviewed, merged `main`, manually dispatch `real-e2e.yml` with the Boolean
-`node-install` input set to `true` (default `false`; reusable invocations keep
-their behavior and admission restrictions) and record the run's `head_sha`, since
-main can advance between inspection and dispatch. GitHub requires a dispatched
-workflow to exist on the default branch, and the
-[`inputs` context preserves Boolean types](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs).
-The protected Environment, main-only workflow/OIDC checks and Tailnet Grants
-still apply; do not run the candidate from a PR ref or bypass review. The
-operator steps of the wizard are in
-[Install a managed node](../operations/agent-lifecycle.md#install-a-managed-node).
-
-The Controller builds the current Web and mounts its output read-only at `/srv`
-in the existing loopback HTTPS gateway (production Caddy is unchanged) with a
-disposable certificate that the browser accepts. Playwright uses a disposable
-browser context to log in as the temporary Admin, verifies the authorized
-Workspace (the fixture has one, shown as text; multiple-Workspace selection stays
-covered by the Web regressions), fills the install dialog and reads its
-secret-free `install.env`. The configuration travels in the controller-ready
-artifact. The Agent validates its exact literal fields and paths, uses the packaged
-Agent offline identity preparation and fixture-owned sealing-key provisioning,
-and verifies persistent identity files and stopped Agent/privd before
-publishing its endpoint. The Controller uses the same UI configuration to create
-one installation token;
-a durable attempt marker and no retry loop prevent replay after failed or unknown
-issuance. The request must carry the matching Workspace header and body,
-`installation=true`, TTL 900 and no `expected_endpoint_id`. The OAEP exchange
-carries the `oit1_` token, and a mode-0600 source feeds the native installer through
-`--join-token-file`. The installer securely obtains configuration, registers and
-activates the node, registers its privd attestation key and starts the services
-without a second identity or manual confirmation. It must return `ONLINE`, retain
-the prepared identity files and EndpointID, and remove temporary token material.
-Controller evidence checks the consumed, identity-bound enrollment derived from
-the installation token, active node and registered privd key. This fixture uses
-local same-SHA release inputs; it does not prove public release downloads.
-
-Single Admin authorization, request binding, native startup,
-business checks and Relay recovery remain mandatory, and this mode also records
-active, online, fresh telemetry with a heartbeat no older than 120 seconds.
-Browser execution uses the library API without screenshots, traces, videos,
-storage-state files or a test reporter, and errors expose only a fixed message.
-Tokens, cookies and keys stay out of the allowlisted evidence and rendezvous
-artifacts (except the encrypted token). All VM, Tailnet and artifact cleanup must
-succeed before the verdict emits `NODE_INSTALL_E2E=PASS`.
-
-Release boundary: the same checked-out SHA supplies a locally built v0.0.0
-native package, preinstalled before the production installer runs, and the UI
-Release field and installer version are v0.0.0. This exercises real
-configuration, installation convergence and registration, not published asset
-retrieval: `RELEASE_ASSET_DOWNLOAD=NOT_TESTED`. Local contract tests and Basic CI
-are not three-VM acceptance, and `SERVER_DEVICE_DELETION=NOT_INDEPENDENTLY_VERIFIED`
-still applies.
-
 ## Single Relay validation
 
 Production installers and launch entry points admit one dedicated Relay (see
@@ -1062,9 +717,7 @@ behavior of the transport library. The transport crate keeps generic
 multi-member and fenced-supervisor tests, but production installers and launch
 entry points admit only one Relay, so these tests certify neither multi-Relay
 deployments nor failover, and they do not validate an authenticated dedicated
-Relay deployment. The hosted [three-VM run](#hosted-execution-and-evidence) does
-start a temporary token-authenticated dedicated HTTPS Relay, but that is a test
-topology reached over a Tailnet, not an installed production Relay.
+Relay deployment.
 
 To check the installer contracts, use a disposable Linux container with Bash,
 Node, sudo, jq and Python, and run the scripts as an unprivileged user with
@@ -1082,10 +735,8 @@ docker run --rm -v "$PWD:/source:ro" node:24.18.1-bookworm \
 
 The node installer has one token pipeline for the hidden prompt, protected
 file and retained bootstrap state. The configuration questionnaire, install.env
-allowlist and manual installer branch are retired. Business fixtures already
-use installation tokens; the three-VM fixture prepares its existing identity
-with the Agent offline CLI and provisions fixture sealing keys directly before
-running the same token installer. Manual uncertain-response recovery remains
+allowlist and manual installer branch are retired. Business Smoke exercises the
+production token installer directly. Manual uncertain-response recovery remains
 in the Agent CLI procedures; none of these checks resets identities or keys.
 
 
@@ -1130,22 +781,20 @@ reproduce it.
 
 ### Real Agent chain
 
-End-to-end single-node recovery runs in the Business Smoke and Integration
-environment through the Release Diagnostics workflow with `run-resilience=true`
-(see [Resilience and capacity](#resilience-and-capacity) and
-[Business validation](#business-validation)). In Smoke, the sole-Relay recovery
-scenario (R4) stops and restarts the Relay and requires a fresh Agent session, an
-authorized reload and VPN traffic.
-
-The manual integration profile adds the offline-queue scenario. While the Relay is
-stopped, it confirms the node depends on that Relay, waits for the prior owner
-lease to expire, and verifies that an authorized offline command produces no
-published outbox record, transmission attempt, Agent journal entry or root side
-effect. Once the same Relay restarts, the queued operation must finish with one
-Agent journal entry, a verified root receipt and one additional native reload.
-Replaying the API idempotency key must return the existing operation and command
-without another reload, and a queued command that fails here cannot be accepted
-as expected Unknown.
+End-to-end single-node recovery runs in `Business Smoke (amd64)` inside
+`release-check.yml` (see [Resilience and capacity](#resilience-and-capacity) and
+[Business validation](#business-validation)). With non-DNS outbound UDP blocked
+for `ocserv-agent` (IPv4 and IPv6), the sole-Relay recovery scenario stops the
+sole Relay container, waits for owner lease invalidation and offline telemetry,
+submits an authorized reload while offline, and verifies that the command stays
+`queued` with an unpublished outbox record, zero sent attempts, zero new Agent
+journal entries, zero new `privd` effects, zero new native reloads, unchanged
+service PIDs/identity and an uninterrupted VPN tunnel. Once the same Relay
+restarts, it requires a new connection ID and higher owner epoch within 90
+seconds, verifies the queued operation finishes with one Agent journal entry, a
+verified root receipt, one published outbox event, an audit record and exactly
+one additional native reload, and confirms that replaying the API idempotency
+key returns the existing operation and command without another reload.
 
 ### Package lifecycle and cleanup
 
@@ -1379,12 +1028,6 @@ Security or Business acceptance. Only the tag-triggered `publish` job receives
 environment, which is an approval and protection boundary without GitHub
 Deployment records.
 
-Three-VM acceptance is independent of this automated gate. For the next RC, the
-operator must record its run or evidence reference and verified source SHA
-alongside Release Check and the tag commit, and confirm all three SHAs match
-before approving publication. Whether to make it a hard gate waits until the real
-acceptance runs are stable.
-
 Published release artifacts are Agent archives, plain archive checksums, DEB and
 RPM packages, Controller container images, minimal Controller runtime bundles
 with published checksums, and the version-stamped bootstrap files consumed by
@@ -1606,24 +1249,20 @@ publishing assets (`latest`, branch names and `0.0.0` are rejected).
 
 This verifies published downloads and native package installation. Installer
 fault injection uses mocked host commands and is labeled separately; it does not
-repeat browser enrollment, automatic Controller activation or live Relay connectivity. The
-three-VM wizard run's `RELEASE_ASSET_DOWNLOAD=NOT_TESTED` stays accurate for its
-local same-SHA `v0.0.0` inputs, and only a successful published-RC verification closes the
-gap.
+repeat browser enrollment, automatic Controller activation or live Relay connectivity.
 
 ### Existing checks
 
 | Behavior | Owner |
 | --- | --- |
 | Native `oit1_` -> `obt2_` bootstrap installation and online node, browser Admin login/Workspace/user creation/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke (`release-check.yml`, `amd64`) |
-| Controller/transport, Agent/privd, bundled PostgreSQL and sole Relay recovery (external PostgreSQL has no Business-level recovery) | Integrated Business Smoke (`release-check.yml`, `amd64`) |
+| Controller/transport, Agent/privd, bundled PostgreSQL and UDP-isolated sole-Relay offline-queue/exactly-once/idempotent-replay recovery (external PostgreSQL has no Business-level recovery) | Integrated Business Smoke (`release-check.yml`, `amd64`) |
 | Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Integrated Business Smoke (`release-check.yml`, `amd64`) |
 | Pebble ACME Quick Install, credential and root-CA custody, idempotent rerun, bootstrap resume, and `controller.sh` upgrade/rollback/upgrade | Quick Install (`release-check.yml`, `amd64`) |
 | DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on `amd64`/`arm64` | Native package build/install smoke (Release Check and Release) |
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products (Release Check and Release) |
 | Source/dependency vulnerabilities and repository secrets, within the [tool scope](#security-checks) | Security |
 | Fail-fast qualification, tagged-source build and GitHub/GHCR publication | Release |
-| Three-VM enrollment, private business and dedicated Relay recovery on separate hosted VMs | `real-e2e.yml` (see [Real three-VM acceptance](#real-three-vm-acceptance)) |
 
 Business and Quick Install workflows first require the runner, kernel, dpkg and
 Docker architectures to match and check every loaded Controller image's platform.

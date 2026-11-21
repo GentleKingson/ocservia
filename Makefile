@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 
 .DEFAULT_GOAL := test
 
-.PHONY: bootstrap generate format lint test test-go test-rust test-web verify docs-check generated-clean policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e resilience-smoke resilience-full real-e2e-check
+.PHONY: bootstrap generate format lint test test-go test-rust test-web verify docs-check generated-clean policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e resilience-smoke resilience-full
 
 bootstrap:
 	./scripts/bootstrap.sh all
@@ -45,9 +45,6 @@ resilience-smoke:
 
 resilience-full:
 	OCSERVIA_RESILIENCE_PROFILE=full ./scripts/resilience-capacity.sh
-
-real-e2e-check:
-	@for script in ./scripts/real-e2e-{controller,node,artifact,hosted,relay-host}.sh; do bash -n "$$script" || exit; done
 
 rust-check:
 	./scripts/rust-check.sh

@@ -22,9 +22,6 @@ for suite in ${CI_SUITES}; do
       bash scripts/test-release-package-security.sh
       bash scripts/test-controller-quick-materials.sh
       ;;
-    cross-vm)
-      make real-e2e-check
-      ;;
     source-style)
       bash scripts/lint.sh source-style
       ;;

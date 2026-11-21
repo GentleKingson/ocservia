@@ -167,6 +167,8 @@ jobs:
           ' "$DIAGNOSTICS/result.json" >/dev/null
           jq -se 'any(.[]; .name == "production_signer_password_sealed" and .status == "PASS")' \
             "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
+          jq -se 'any(.[]; .name == "resilience_relay" and .status == "PASS" and .offline_queued_zero_side_effects == true and .idempotent_replay == true)' \
+            "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
       - name: Preserve business timings and sanitized diagnostics
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
