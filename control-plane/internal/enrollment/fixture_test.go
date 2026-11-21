@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
@@ -27,11 +28,14 @@ func createToken(t *testing.T, service *Service, workspaceID uuid.UUID, endpoint
 			RelayToken: "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
 		}))
 	}
+	identity, session := bootstrapActor(t, service, workspaceID)
 	token, err := service.CreateInstallationToken(context.Background(), BootstrapTokenSpec{
 		WorkspaceID:        workspaceID,
 		Environment:        "test",
 		ExpectedEndpointID: endpoint,
-		ActorID:            "integration",
+		ActorID:            identity.String(),
+		ActorIdentityID:    identity,
+		ActorSessionID:     session,
 		Reason:             "test enrollment",
 		RequestID:          uuid.Must(uuid.NewV7()).String(),
 	})
@@ -42,6 +46,26 @@ func createToken(t *testing.T, service *Service, workspaceID uuid.UUID, endpoint
 	}
 	token.Value = child
 	return token
+}
+
+func bootstrapActor(t *testing.T, service *Service, workspaceID uuid.UUID) (uuid.UUID, uuid.UUID) {
+	t.Helper()
+	identity, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	now := time.Now().UTC()
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,$3,$3)`, []any{identity, identity.String(), now}},
+		{`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, []any{workspaceID, identity, now}},
+		{`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,$3,$4)`, []any{session, identity, now.Add(time.Hour), now}},
+	}
+	for _, statement := range statements {
+		if _, err := service.backend.Exec(context.Background(), statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return identity, session
 }
 
 func enrollmentRequest(token string, endpoint []byte) *agentv1.EnrollRequest {

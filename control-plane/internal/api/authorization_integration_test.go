@@ -32,12 +32,31 @@ import (
 
 type certificateArtifactFixture struct{ data []byte }
 
+type pausedRequestBody struct {
+	reader  io.Reader
+	started chan struct{}
+	resume  <-chan struct{}
+	paused  bool
+}
+
+func (b *pausedRequestBody) Read(p []byte) (int, error) {
+	if !b.paused {
+		b.paused = true
+		close(b.started)
+		<-b.resume
+	}
+	return b.reader.Read(p)
+}
+
 func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := testfixture.OpenRuntimePool(t)
 	owner := testfixture.OpenOwnerPool(t)
-	workspaceID := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap API',$2,now(),now())`, workspaceID, "bootstrap-api-"+workspaceID.String()); err != nil {
+	workspaceID, identityID, sessionID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap API',$2,now(),now());
+		INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($3,'integration',$4,now(),now());
+		INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($5,$3,now()+interval '1 hour',now());
+		INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$3,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "bootstrap-api-"+workspaceID.String(), identityID, identityID.String(), sessionID); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -45,9 +64,12 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 			ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only;
 			DELETE FROM audit_events WHERE workspace_id=$1;
 			DELETE FROM node_bootstrap_tokens WHERE workspace_id=$1;
+			DELETE FROM workspace_admins WHERE workspace_id=$1;
+			DELETE FROM auth_sessions WHERE id=$2;
+			DELETE FROM identities WHERE id=$3;
 			DELETE FROM workspaces WHERE id=$1;
 			ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only;
-			COMMIT`, pgx.QueryExecModeSimpleProtocol, workspaceID)
+			COMMIT`, pgx.QueryExecModeSimpleProtocol, workspaceID, sessionID, identityID)
 		if err != nil {
 			t.Errorf("cleanup node bootstrap token fixture: %v", err)
 		}
@@ -56,10 +78,14 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	testutil.NoError(t, err)
 	enroll := enrollment.NewBackend(postgres.WrapPool(pool), "", "test", signer)
 	testutil.NoError(t, enroll.ConfigureInstallation(enrollment.InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}))
-	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enroll}
+	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), enrollment: enroll}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"bootstrap API test","expected_endpoint_id":"1111111111111111111111111111111111111111111111111111111111111111"}`, workspaceID.String())))
 	request.Header.Set("Content-Type", "application/json")
-	request = request.WithContext(context.WithValue(context.WithValue(request.Context(), requestIDKey{}, uuid.Must(uuid.NewV7()).String()), principalKey{}, auth.Principal{Subject: "developer", Issuer: "development", BreakGlass: true}))
+	principal := auth.Principal{IdentityID: identityID, SessionID: sessionID, Subject: identityID.String(), Issuer: "integration"}
+	requestContext := context.WithValue(request.Context(), requestIDKey{}, uuid.Must(uuid.NewV7()).String())
+	requestContext = context.WithValue(requestContext, principalKey{}, principal)
+	requestContext = context.WithValue(requestContext, workspaceKey{}, workspaceID)
+	request = request.WithContext(requestContext)
 	response := httptest.NewRecorder()
 	server.createNodeBootstrapToken(response, request)
 	if response.Code != http.StatusCreated || response.Header().Get("Cache-Control") != "no-store" {
@@ -76,6 +102,10 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT encode(expected_endpoint_id,'hex') FROM node_bootstrap_tokens WHERE id=$1`, body.ID).Scan(&endpoint); err != nil || endpoint != strings.Repeat("11", 32) {
 		t.Fatalf("endpoint restriction not persisted: %q %v", endpoint, err)
 	}
+	var auditSession uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT source_session_id FROM audit_events WHERE workspace_id=$1 AND action='node_bootstrap_token.create'`, workspaceID).Scan(&auditSession); err != nil || auditSession != sessionID {
+		t.Fatalf("bootstrap token audit session=%s want %s: %v", auditSession, sessionID, err)
+	}
 	retiredReq := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"installation":false,"workspace_id":%q,"environment":"production","reason":"retired obt1 test"}`, workspaceID.String())))
 	retiredReq.Header.Set("Content-Type", "application/json")
 	retiredReq = retiredReq.WithContext(request.Context())
@@ -83,6 +113,82 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	server.createNodeBootstrapToken(retiredResp, retiredReq)
 	if retiredResp.Code != http.StatusBadRequest {
 		t.Fatalf("installation=false status=%d body=%s, want 400", retiredResp.Code, retiredResp.Body.String())
+	}
+}
+
+func TestNodeBootstrapTokenRevalidatesSessionAfterBodyRead(t *testing.T) {
+	ctx := context.Background()
+	runtimePool, _ := testfixture.OpenIsolated(t, t, "bootstrap_session_race")
+	backend := postgres.WrapPool(runtimePool)
+	workspaceID := uuid.Must(uuid.NewV7())
+	if _, err := runtimePool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap session race',$2,now(),now())`, workspaceID, "bootstrap-session-race-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	authn, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	testutil.NoError(t, err)
+	const username = "bootstrap-race-admin"
+	const password = "unique bootstrap session race administrator password"
+	_, err = authn.BootstrapLocalAdmin(ctx, username, password, workspaceID)
+	testutil.NoError(t, err)
+	cookie, actor, err := authn.AuthenticateLocal(ctx, username, password)
+	testutil.NoError(t, err)
+	signer, err := commandauth.NewRandomSigner()
+	testutil.NoError(t, err)
+	enroll := enrollment.NewBackend(backend, "", "test", signer)
+	testutil.NoError(t, enroll.ConfigureInstallation(enrollment.InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}))
+	server := newTestServer(t, testHTTPConfig(false), backend, Modules{Enrollment: enroll}, Authorization{Authentication: authn})
+	body := fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"session revocation race"}`, workspaceID.String())
+	started, resume := make(chan struct{}), make(chan struct{})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", &pausedRequestBody{reader: strings.NewReader(body), started: started, resume: resume})
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", authTestOrigin)
+	request.Header.Set("X-Workspace-ID", workspaceID.String())
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.http.Handler.ServeHTTP(response, request)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(resume)
+		t.Fatal("bootstrap handler did not reach the paused request body")
+	}
+	if err := authn.Logout(ctx, actor); err != nil {
+		close(resume)
+		t.Fatal(err)
+	}
+	close(resume)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("bootstrap handler did not finish after the request body resumed")
+	}
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("revoked-session bootstrap status=%d body=%s", response.Code, response.Body.String())
+	}
+	var tokens, audits int
+	if err := runtimePool.QueryRow(ctx, `SELECT (SELECT count(*) FROM node_bootstrap_tokens WHERE workspace_id=$1),(SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND action='node_bootstrap_token.create')`, workspaceID).Scan(&tokens, &audits); err != nil || tokens != 0 || audits != 0 {
+		t.Fatalf("revoked-session bootstrap committed tokens=%d audits=%d err=%v", tokens, audits, err)
+	}
+
+	freshCookie, freshActor, err := authn.AuthenticateLocal(ctx, username, password)
+	testutil.NoError(t, err)
+	legitimate := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(body))
+	legitimate.Header.Set("Content-Type", "application/json")
+	legitimate.Header.Set("Origin", authTestOrigin)
+	legitimate.Header.Set("X-Workspace-ID", workspaceID.String())
+	legitimate.AddCookie(freshCookie)
+	legitimateResponse := httptest.NewRecorder()
+	server.http.Handler.ServeHTTP(legitimateResponse, legitimate)
+	if legitimateResponse.Code != http.StatusCreated {
+		t.Fatalf("active-session bootstrap status=%d body=%s", legitimateResponse.Code, legitimateResponse.Body.String())
+	}
+	var auditSession uuid.UUID
+	if err := runtimePool.QueryRow(ctx, `SELECT (SELECT count(*) FROM node_bootstrap_tokens WHERE workspace_id=$1),(SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND action='node_bootstrap_token.create'),(SELECT source_session_id FROM audit_events WHERE workspace_id=$1 AND action='node_bootstrap_token.create')`, workspaceID).Scan(&tokens, &audits, &auditSession); err != nil || tokens != 1 || audits != 1 || auditSession != freshActor.SessionID {
+		t.Fatalf("active-session bootstrap tokens=%d audits=%d session=%s want %s err=%v", tokens, audits, auditSession, freshActor.SessionID, err)
 	}
 }
 

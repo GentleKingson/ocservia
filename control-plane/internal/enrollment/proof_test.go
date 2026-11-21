@@ -13,35 +13,63 @@ import (
 	"testing"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestCreateInstallationTokenValidatesAuthorityMetadata(t *testing.T) {
-	service := &Service{}
-	_, err := service.CreateInstallationToken(context.Background(), BootstrapTokenSpec{
-		WorkspaceID: uuid.Must(uuid.NewV7()),
-		Environment: "production",
-		ActorID:     "operator",
-		RequestID:   uuid.Must(uuid.NewV7()).String(),
-	})
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("CreateInstallationToken without reason error = %v, want ErrInvalidRequest", err)
+	service := installationValidationService(t)
+	identity, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	valid := BootstrapTokenSpec{
+		WorkspaceID:     uuid.Must(uuid.NewV7()),
+		Environment:     "production",
+		ActorID:         identity.String(),
+		ActorIdentityID: identity,
+		ActorSessionID:  session,
+		Reason:          "install node",
+		RequestID:       uuid.Must(uuid.NewV7()).String(),
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*BootstrapTokenSpec)
+	}{
+		{name: "missing reason", mutate: func(spec *BootstrapTokenSpec) { spec.Reason = "" }},
+		{name: "missing identity", mutate: func(spec *BootstrapTokenSpec) { spec.ActorIdentityID = uuid.Nil }},
+		{name: "missing session", mutate: func(spec *BootstrapTokenSpec) { spec.ActorSessionID = uuid.Nil }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spec := valid
+			test.mutate(&spec)
+			if _, err := service.CreateInstallationToken(context.Background(), spec); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("CreateInstallationToken error = %v, want ErrInvalidRequest", err)
+			}
+		})
 	}
 }
 
 func TestBootstrapTokenRejectsMalformedEndpointRestriction(t *testing.T) {
-	service := &Service{}
+	service := installationValidationService(t)
+	identity, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	for _, length := range []int{1, 31, 33} {
 		_, err := service.CreateInstallationToken(context.Background(), BootstrapTokenSpec{
-			WorkspaceID: uuid.Must(uuid.NewV7()), Environment: "production", ActorID: "operator",
+			WorkspaceID: uuid.Must(uuid.NewV7()), Environment: "production", ActorID: identity.String(), ActorIdentityID: identity, ActorSessionID: session,
 			RequestID: uuid.NewString(), Reason: "rebind", ExpectedEndpointID: make([]byte, length),
 		})
 		if !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("length %d: %v", length, err)
 		}
 	}
+}
+
+func installationValidationService(t *testing.T) *Service {
+	t.Helper()
+	service := NewBackend(nil, "", "test", commandauth.NewSignerFromSeed([32]byte{1}))
+	if err := service.ConfigureInstallation(InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}); err != nil {
+		t.Fatal(err)
+	}
+	return service
 }
 
 func TestBootstrapTokenDigestAcceptsOnlyObt2(t *testing.T) {
