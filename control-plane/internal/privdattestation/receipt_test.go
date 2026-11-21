@@ -51,8 +51,8 @@ func TestRequestedSubjectDigestAcceptsFullDNSSubjectRange(t *testing.T) {
 	request := &agentv1.CertificateCsr{
 		CertificateId: mustHex(t, "018f2a3b4c5d70008000000000000001"),
 		CommonName:    longName,
-		DnsNames:     []string{uppercase, longName, uppercase},
-		KeyBits:      4096,
+		DnsNames:      []string{uppercase, longName, uppercase},
+		KeyBits:       4096,
 	}
 	if _, err := RequestedSubjectDigest(request); err != nil {
 		t.Fatalf("supported certificate subject rejected: %v", err)
