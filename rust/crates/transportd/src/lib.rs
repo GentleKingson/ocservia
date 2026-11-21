@@ -72,11 +72,13 @@ use prost::Message;
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
+use trust::PolicyUpdateDisposition;
+#[cfg(test)]
+use trust::TrustBudgetSet;
 pub use trust::{
     IdentityPolicy, TrustAuthority, TrustBudgetConfig, TrustClass, TrustClassLimit,
     TrustMetricsSnapshot,
 };
-use trust::{PolicyUpdateDisposition, TrustBudgetSet};
 
 #[cfg(test)]
 use std::collections::VecDeque;

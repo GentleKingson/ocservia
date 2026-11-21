@@ -28,7 +28,7 @@ pub enum TrustClass {
     AgentAuthorization,
     /// High-priority live recheck immediately before connection registration.
     AgentRegistrationRecheck,
-    /// Small local-only admission for an unknown enrollment `EndpointID`.
+    /// Low-priority admission and authoritative checks for endpoints missing locally.
     UnknownEnrollmentPreAuth,
     /// Transactional completion after the bounded first frame's authority check.
     EnrollmentCompletion,
@@ -581,14 +581,12 @@ impl TrustAuthority {
             .map_err(|_| protocol_error("initial trust snapshot invalid"))
     }
 
-    pub(crate) async fn recheck_agent(
+    pub(crate) async fn check_agent_endpoint(
         &self,
         endpoint: EndpointId,
+        class: TrustClass,
     ) -> Result<bool, AttemptRejection> {
-        let _permit = self
-            .budgets
-            .acquire(TrustClass::AgentRegistrationRecheck)
-            .await?;
+        let _permit = self.budgets.acquire(class).await?;
         let mut client = self.client.clone();
         Ok(tokio::time::timeout(
             HANDSHAKE_TIMEOUT,

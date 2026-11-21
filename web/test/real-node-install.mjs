@@ -182,7 +182,7 @@ async function main() {
       { mode: 0o600 },
     );
     await page
-      .getByRole("button", { name: "Close dialog", exact: true })
+      .getByRole("button", { name: "Cancel", exact: true })
       .click();
     check((await tokenField.count()) === 0 && posts.length === 1);
     const evidence = path.join(

@@ -74,13 +74,31 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 			requestTemplate.Directives[index].SecretRef = &SecretRef{ID: secretRefID}
 		}
 	}
-	request := CreateRequest{NodeID: nodeID, ExpectedRevision: 0, Template: requestTemplate, TTL: 15 * time.Minute, IdempotencyKey: "config-plan-create", ActorID: "developer", RequestID: "config-plan-create-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Reason: "integration plan"}
+	requesterID, requesterSessionID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1::uuid,'test','config-apply-'||$1::text,now(),now())`, requesterID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,now()+interval '1 hour',now())`, requesterSessionID, requesterID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,now()-interval '1 minute')`, workspaceID, requesterID); err != nil {
+		t.Fatal(err)
+	}
+	request := CreateRequest{NodeID: nodeID, ExpectedRevision: 0, Template: requestTemplate, TTL: 15 * time.Minute, IdempotencyKey: "config-plan-create", ActorID: requesterID.String(), ActorIdentityID: requesterID, ActorSessionID: requesterSessionID, RequestID: "config-plan-create-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Reason: "integration plan"}
 	failing := request
 	failing.IdempotencyKey = "config-plan-atomic-failure"
-	failing.ActorIdentityID = uuid.Must(uuid.NewV7())
-	if _, _, err := service.Create(ctx, failing); err == nil {
-		t.Fatal("missing created_by identity did not fail plan persistence")
-	}
+	t.Run("create-rollback", func(t *testing.T) {
+		if _, err := ownerPool.Exec(ctx, `ALTER TABLE config_plans ADD CONSTRAINT test_config_plan_insert_failure CHECK (workspace_id <> '`+workspaceID.String()+`') NOT VALID`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_, err := ownerPool.Exec(context.Background(), `ALTER TABLE config_plans DROP CONSTRAINT test_config_plan_insert_failure`)
+			testutil.NoError(t, err)
+		})
+		if _, _, err := service.Create(ctx, failing); err == nil || !strings.Contains(err.Error(), "test_config_plan_insert_failure") {
+			t.Fatalf("plan persistence error = %v", err)
+		}
+	})
 	var orphaned int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM operations WHERE workspace_id=$1 AND idempotency_key=$2`, workspaceID, failing.IdempotencyKey).Scan(&orphaned); err != nil || orphaned != 0 {
 		t.Fatalf("atomic failure left %d operation rows: %v", orphaned, err)
@@ -115,6 +133,8 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		RequestID:       request.RequestID,
 		Traceparent:     request.Traceparent,
 		ActorID:         request.ActorID,
+		ActorIdentityID: requesterID,
+		ActorSessionID:  requesterSessionID,
 		Action:          "config.plan",
 		Reason:          request.Reason,
 		Payload: operations.ConfigPlanPayload{
@@ -123,7 +143,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 			CandidateHash:     rendered.Hash[:],
 			OcservVersion:     "1.2.4",
 			PlanCapabilities:  []string{configprofile.PlanCapability},
-			PlanMetadata:      &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}},
+			PlanMetadata:      &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}, CreatedBy: requesterID},
 		},
 	}
 	creator.assertLast(t, ctx, 3, wantCreate)
@@ -192,16 +212,6 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	validated, err := service.Get(ctx, plan.ID)
 	if err != nil || validated.Validation != "valid" || !validated.CurrentUnchanged || !validated.StagingCleaned {
 		t.Fatalf("validated plan=%+v err=%v", validated, err)
-	}
-	requesterID, requesterSessionID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1::uuid,'test','config-apply-'||$1::text,now(),now())`, requesterID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,now()+interval '1 hour',now())`, requesterSessionID, requesterID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,now()-interval '1 minute')`, workspaceID, requesterID); err != nil {
-		t.Fatal(err)
 	}
 	applyRequest := ApplyRequest{PlanID: plan.ID, IdempotencyKey: "config-plan-apply", ActorID: requesterID.String(), ActorIdentityID: requesterID, ActorSessionID: requesterSessionID, RequestID: "config-plan-apply-request", Traceparent: request.Traceparent, Reason: "apply validated plan"}
 	creator.err = fmt.Errorf("creator: %w", operations.ErrStaleRevision)
