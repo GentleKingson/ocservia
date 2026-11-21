@@ -627,7 +627,7 @@ impl Adapter {
         size: u64,
     ) -> Result<MutationResult, AdapterError> {
         let _guard = self.certificate_artifact_lock.lock().await;
-        let consumed = EffectStore::open_existing(&self.resources)?
+        let consumed = EffectStore::open_for_mutation(&self.resources)?
             .confirm_artifact_consumed(identity, sha256, size)?;
         Ok(MutationResult { applied: consumed })
     }

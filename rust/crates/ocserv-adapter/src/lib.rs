@@ -374,6 +374,16 @@ pub struct AuthorizedEffectIdentity<'a> {
     pub retry_if_absent: bool,
 }
 
+/// Root-verified connection-owner term attached to a privileged operation.
+/// The node and endpoint are pinned by privd rather than trusted from Agent
+/// input.
+#[derive(Clone, Copy, Debug)]
+pub struct OwnerFenceIdentity<'a> {
+    pub node_id: &'a [u8],
+    pub endpoint_id: &'a [u8],
+    pub owner_epoch: u64,
+}
+
 /// Exact, independently verified Controller grant identity used by the
 /// root-owned artifact lifecycle store.
 #[derive(Clone, Copy, Debug)]
@@ -386,6 +396,7 @@ pub struct ArtifactLeaseIdentity<'a> {
     pub max_bytes: u64,
     pub grant_id: &'a [u8],
     pub expires_at_unix_seconds: i64,
+    pub owner_fence: OwnerFenceIdentity<'a>,
 }
 
 /// Durable command-level idempotency decision returned before a root effect.
@@ -451,8 +462,42 @@ impl Adapter {
     pub fn prepare_authorized_effect(
         &self,
         identity: AuthorizedEffectIdentity<'_>,
+        owner_fence: OwnerFenceIdentity<'_>,
     ) -> Result<AuthorizedEffectDecision, AdapterError> {
-        EffectStore::open_for_mutation(&self.resources)?.prepare_authorized(identity)
+        EffectStore::open_for_mutation(&self.resources)?
+            .prepare_authorized(identity, owner_fence)
+    }
+
+    /// Durably accepts a root-verified connection-owner term before any
+    /// operation-specific decision. Effect and artifact methods recheck the
+    /// same floor in their own state transactions to close concurrent races.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed or stale terms and unavailable or unauthenticated
+    /// effect-store state.
+    pub fn accept_owner_fence(
+        &self,
+        owner_fence: OwnerFenceIdentity<'_>,
+    ) -> Result<(), AdapterError> {
+        EffectStore::open_for_mutation(&self.resources)?.accept_owner_fence(owner_fence)
+    }
+
+    /// Reads an exact authenticated terminal response only after atomically
+    /// accepting the signed connection-owner term. It never creates or retries
+    /// a privileged effect.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale owner terms, identity conflicts, corrupted records, and
+    /// unavailable storage.
+    pub fn replay_authorized_effect_after_fence(
+        &self,
+        identity: AuthorizedEffectIdentity<'_>,
+        owner_fence: OwnerFenceIdentity<'_>,
+    ) -> Result<Option<Vec<u8>>, AdapterError> {
+        EffectStore::open_for_mutation(&self.resources)?
+            .replay_authorized_after_fence(identity, owner_fence)
     }
 
     /// Persists the bounded successful response for exact replay without a
@@ -879,6 +924,8 @@ pub enum AdapterError {
     },
     /// An operation argument was not in its canonical typed form.
     InvalidRequest,
+    /// A signed connection-owner term is older than the durable root floor.
+    StaleOwnerEpoch,
     /// A session identifier belongs to a prior host boot.
     StaleBoot,
     /// Fixed local resource was unavailable.
@@ -940,6 +987,7 @@ impl std::fmt::Display for AdapterError {
                 Ok(())
             }
             Self::InvalidRequest => write!(formatter, "fixed operation argument invalid"),
+            Self::StaleOwnerEpoch => write!(formatter, "connection-owner term is stale"),
             Self::StaleBoot => write!(formatter, "session boot identity is stale"),
             Self::Unavailable => write!(formatter, "fixed local resource unavailable"),
             Self::DeadlineExceeded => write!(formatter, "fixed read operation timed out"),
@@ -970,6 +1018,7 @@ impl From<AdapterError> for PrivdError {
             | AdapterError::MalformedOutput
             | AdapterError::ResourceMetadata { .. }
             | AdapterError::UserFileFormat { .. } => ErrorKind::MalformedOutput,
+            AdapterError::StaleOwnerEpoch => ErrorKind::PermissionDenied,
             AdapterError::InvalidRequest | AdapterError::StaleBoot => ErrorKind::InvalidRequest,
             AdapterError::Unavailable | AdapterError::Io(_) | AdapterError::ResourceIo { .. } => {
                 ErrorKind::Unavailable

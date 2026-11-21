@@ -3,6 +3,7 @@ use super::super::{
     TransactionBehavior, Uuid, params,
 };
 use super::hmac::authenticate_artifact_record;
+use super::owner_fence::{ValidatedOwnerFence, enforce_owner_fence, validate_owner_fence};
 use super::{EffectStore, effect_now, fixed_blob, sqlite_io};
 
 #[derive(Debug)]
@@ -32,6 +33,7 @@ struct ValidatedArtifactIdentity<'a> {
     max_bytes: u64,
     grant_id: &'a [u8; 16],
     expires_at: i64,
+    owner_fence: ValidatedOwnerFence<'a>,
 }
 
 impl EffectStore {
@@ -203,6 +205,7 @@ impl EffectStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_io)?;
+        enforce_owner_fence(&transaction, &self.hmac_key, identity.owner_fence, now)?;
         let mut record = query_artifact(&transaction, identity.artifact_id)?
             .ok_or(AdapterError::InvalidRequest)?;
         validate_artifact_record(&self.hmac_key, &record)?;
@@ -259,6 +262,8 @@ impl EffectStore {
     ) -> Result<(), AdapterError> {
         let now = effect_now()?;
         let identity = validate_artifact_identity(identity, now)?;
+        // `lease_artifact` admitted this same read before bytes were exposed;
+        // a later takeover must not leave its durable offset behind.
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -308,6 +313,7 @@ impl EffectStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_io)?;
+        enforce_owner_fence(&transaction, &self.hmac_key, identity.owner_fence, now)?;
         let mut record = query_artifact(&transaction, identity.artifact_id)?
             .ok_or(AdapterError::InvalidRequest)?;
         validate_artifact_record(&self.hmac_key, &record)?;
@@ -342,16 +348,22 @@ impl EffectStore {
     }
 
     pub(crate) fn confirm_artifact_consumed(
-        &self,
+        &mut self,
         identity: ArtifactLeaseIdentity<'_>,
         content_sha256: &[u8],
         content_size: u64,
     ) -> Result<bool, AdapterError> {
+        let now = effect_now()?;
         let identity = validate_artifact_identity_for_confirmation(identity)?;
         let digest: [u8; 32] = content_sha256
             .try_into()
             .map_err(|_| AdapterError::InvalidRequest)?;
-        let record = query_artifact(&self.connection, identity.artifact_id)?
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        enforce_owner_fence(&transaction, &self.hmac_key, identity.owner_fence, now)?;
+        let record = query_artifact(&transaction, identity.artifact_id)?
             .ok_or(AdapterError::InvalidRequest)?;
         validate_artifact_record(&self.hmac_key, &record)?;
         let same_artifact = record.certificate_id == *identity.certificate_id
@@ -366,12 +378,14 @@ impl EffectStore {
             && record.active_subject == identity.authorized_subject
             && record.grant_expires_at == Some(identity.expires_at)
             && record.active_offset == record.content_size;
-        match record.state {
+        let consumed = match record.state {
             "consumed" if exact_grant => Ok(true),
             "leased" if exact_grant => Ok(false),
             "available" | "expired" | "revoked" => Ok(false),
             _ => Err(AdapterError::InvalidRequest),
-        }
+        }?;
+        transaction.commit().map_err(sqlite_io)?;
+        Ok(consumed)
     }
 
     pub(crate) fn revoke_certificate_artifacts(
@@ -508,6 +522,7 @@ fn validate_artifact_identity_for_confirmation(
         .grant_id
         .try_into()
         .map_err(|_| AdapterError::InvalidRequest)?;
+    let owner_fence = validate_owner_fence(identity.owner_fence)?;
     if [artifact_id, certificate_id, operation_id, grant_id]
         .into_iter()
         .any(|value| Uuid::from_bytes(*value).get_version_num() != 7)
@@ -529,6 +544,7 @@ fn validate_artifact_identity_for_confirmation(
         max_bytes: identity.max_bytes,
         grant_id,
         expires_at: identity.expires_at_unix_seconds,
+        owner_fence,
     })
 }
 

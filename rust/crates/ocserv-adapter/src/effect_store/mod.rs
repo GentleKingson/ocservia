@@ -2,6 +2,7 @@ mod artifacts;
 mod authorized;
 mod desired;
 mod hmac;
+mod owner_fence;
 
 use super::{
     AdapterError, Connection, EFFECT_STORE_KEY_BYTES, FixedResources, OpenFlags, OpenOptionsExt,
@@ -134,6 +135,7 @@ impl EffectStore {
         store.migrate_schema()?;
         store.ensure_authorized_schema()?;
         store.ensure_artifact_schema()?;
+        store.ensure_owner_fence_schema()?;
         store.validate_identity()?;
         Ok(store)
     }
@@ -232,6 +234,21 @@ impl EffectStore {
                  ) STRICT;
                  CREATE INDEX IF NOT EXISTS certificate_artifacts_certificate_idx
                    ON certificate_artifacts(certificate_id);",
+            )
+            .map_err(sqlite_io)
+    }
+
+    fn ensure_owner_fence_schema(&self) -> Result<(), AdapterError> {
+        self.connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS owner_epoch_floors (
+                   node_id BLOB NOT NULL CHECK(length(node_id)=16),
+                   endpoint_id BLOB NOT NULL CHECK(length(endpoint_id)=32),
+                   owner_epoch INTEGER NOT NULL CHECK(owner_epoch > 0),
+                   record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
+                   updated_at INTEGER NOT NULL,
+                   PRIMARY KEY(node_id, endpoint_id)
+                 ) STRICT;",
             )
             .map_err(sqlite_io)
     }

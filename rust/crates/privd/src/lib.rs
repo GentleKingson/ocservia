@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use self::effect_binding::{
     adapter_effect, artifact_identity, authorized_effect, deadline_error, decode_cached_response,
-    desired_effect_binding, effect_binding, error, finish_operation, fixed_host_effect,
+    desired_effect_binding, effect_binding, error, finish_operation, fixed_host_effect, owner_fence,
     replay_only_response, response_error,
 };
 use self::receipts::{build_result_proof, terminal_result_error_code};
@@ -253,7 +253,7 @@ async fn dispatch_attested(
                 Err(_) => deadline_error(),
             }
         }
-        Ok((deadline, ValidatedRequest::Execute(command, claims, accepted_at))) => {
+        Ok((deadline, ValidatedRequest::Execute(command, claims, accepted_at, owner_epoch))) => {
             match tokio::time::timeout(
                 deadline,
                 execute_command(
@@ -261,6 +261,8 @@ async fn dispatch_attested(
                     &claims,
                     &accepted_at,
                     node_id,
+                    endpoint_id,
+                    owner_epoch,
                     attestation_key,
                     attestation_key_id,
                     upgrades,
@@ -286,11 +288,12 @@ async fn dispatch_attested(
                 Err(_) => deadline_error(),
             }
         }
-        Ok((deadline, ValidatedRequest::ArtifactRead(claims, offset))) => {
-            match tokio::time::timeout(
-                deadline,
-                adapter.artifact_read(artifact_identity(&claims), offset),
-            )
+        Ok((deadline, ValidatedRequest::ArtifactRead(claims, offset, owner_epoch))) => {
+            match tokio::time::timeout(deadline, async {
+                let identity = artifact_identity(&claims, node_id, endpoint_id, owner_epoch);
+                adapter.accept_owner_fence(identity.owner_fence)?;
+                adapter.artifact_read(identity, offset).await
+            })
             .await
             {
                 Ok(result) => finish_operation(
@@ -300,15 +303,20 @@ async fn dispatch_attested(
                 Err(_) => deadline_error(),
             }
         }
-        Ok((deadline, ValidatedRequest::ArtifactConsume(claims, digest, size, confirm_only))) => {
+        Ok((
+            deadline,
+            ValidatedRequest::ArtifactConsume(claims, digest, size, confirm_only, owner_epoch),
+        )) => {
             match tokio::time::timeout(deadline, async {
+                let identity = artifact_identity(&claims, node_id, endpoint_id, owner_epoch);
+                adapter.accept_owner_fence(identity.owner_fence)?;
                 if confirm_only {
                     adapter
-                        .artifact_confirm_consumed(artifact_identity(&claims), &digest, size)
+                        .artifact_confirm_consumed(identity, &digest, size)
                         .await
                 } else {
                     adapter
-                        .artifact_consume(artifact_identity(&claims), &digest, size)
+                        .artifact_consume(identity, &digest, size)
                         .await
                 }
             })
@@ -502,11 +510,21 @@ async fn execute_command(
     claims: &CommandAuthorizationV1,
     accepted_at: &prost_types::Timestamp,
     node_id: &[u8; 16],
+    endpoint_id: &[u8; 32],
+    owner_epoch: u64,
     attestation_key: &SigningKey,
     attestation_key_id: &str,
     upgrades: &UpgradeScheduler,
     adapter: &Adapter,
 ) -> PrivdResponse {
+    let owner_fence = owner_fence(node_id, endpoint_id, owner_epoch);
+    if let Err(failure) = adapter.accept_owner_fence(owner_fence) {
+        return PrivdResponse {
+            request_id: Vec::new(),
+            privileged_result_proof: None,
+            result: Some(privd_response::Result::Error(PrivdError::from(failure))),
+        };
+    }
     let binding = effect_binding(command, claims);
     if let Some(binding) = binding.as_ref() {
         let identity = authorized_effect(command, claims, binding);
@@ -516,9 +534,9 @@ async fn execute_command(
                 || command.protocol_version
                     == ocservia_command_authorization::LEGACY_COMMAND_PROTOCOL_VERSION)
         {
-            return replay_only_response(adapter, identity);
+            return replay_only_response(adapter, identity, owner_fence);
         }
-        match adapter.prepare_authorized_effect(identity) {
+        match adapter.prepare_authorized_effect(identity, owner_fence) {
             Ok(AuthorizedEffectDecision::Execute) => {}
             Ok(AuthorizedEffectDecision::Replay(encoded)) => {
                 return decode_cached_response(&encoded);
