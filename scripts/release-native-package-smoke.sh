@@ -566,9 +566,18 @@ sudo groupdel ocserv-agent 2>/dev/null || true
 sudo systemctl daemon-reload
 
 # The stock rockylinux:9 image ships without systemd; build a one-off image
-# that can run scriptlets exactly as a real systemd host would.
-docker build --tag "${container_image}" - >"${ARTIFACT_DIR}/rpm-image-build.log" 2>&1 <<'DOCKERFILE'
-FROM rockylinux:9
+# that can run scriptlets exactly as a real systemd host would. Reuse the
+# reviewed immutable base from the Agent builder instead of resolving a tag.
+rocky_image="$(awk 'NR == 1 && $1 == "FROM" && NF == 2 { print $2 }' \
+  "${ROOT}/rust/agent-build.Dockerfile")"
+if [[ ! "${rocky_image}" =~ ^rockylinux:9@sha256:[0-9a-f]{64}$ ]]; then
+  echo 'Agent builder must start from a digest-pinned Rocky Linux 9 image' >&2
+  exit 1
+fi
+docker build --build-arg "ROCKY_IMAGE=${rocky_image}" --tag "${container_image}" - \
+  >"${ARTIFACT_DIR}/rpm-image-build.log" 2>&1 <<'DOCKERFILE'
+ARG ROCKY_IMAGE
+FROM ${ROCKY_IMAGE}
 RUN dnf install -y systemd openssl && dnf clean all
 DOCKERFILE
 docker run --privileged --detach --name "${container}" \

@@ -19,6 +19,7 @@ for suite in ${CI_SUITES}; do
       bash -n scripts/release-quick-acceptance.sh
       bash scripts/test-controller-release-manifest.sh
       bash scripts/test-release-image-security.sh
+      bash scripts/test-release-package-security.sh
       bash scripts/test-controller-quick-materials.sh
       ;;
     cross-vm)

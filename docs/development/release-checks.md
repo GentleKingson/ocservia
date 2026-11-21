@@ -1601,7 +1601,11 @@ RPM. Package validation has three separate scopes:
    into `scripts/release-native-package-smoke.sh` on native `amd64` and `arm64`
    runners, checking ELF architecture identity, fresh installation, same-version
    reinstall and upgrade, rollback, package removal, state preservation and
-   rejection of corrupted archives.
+   rejection of corrupted archives. The build job uploads the package
+   artifact before a separate smoke job downloads that exact immutable artifact
+   ID. Release consumers wait for the smoke job but download the original
+   artifact, so the privileged RPM systemd helper can affect only its disposable
+   copy.
 3. Cross-historical-release compatibility is outside the promises of the
    [version policy](../operations/production-deployment.md#version-policy) and
    not certified by either smoke check.
