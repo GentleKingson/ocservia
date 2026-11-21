@@ -354,7 +354,7 @@ Type=simple
 ExecStart=
 ExecStart=/bin/sleep infinity
 ReadWritePaths=/var/lib/ocservia-upgrade
-ExecStartPost=+${systemd_probe} ${unit}-start
+ExecStartPost=+/bin/bash ${systemd_probe} ${unit}-start
 EOF
   sudo install -m 0644 "${work}/native-service.conf" "/run/systemd/system/ocservia-${unit}.service.d/90-native-lifecycle.conf"
 done
@@ -375,7 +375,7 @@ driver_hash="$(sudo sha256sum /usr/libexec/ocservia/ocservia-agent-rollback)"
 sudo sha256sum -c "${work}/native-old.sha256"
 [[ "$(sudo sha256sum /usr/libexec/ocservia/ocservia-agent-rollback)" == "${driver_hash}" ]]
 [[ "$(sudo cat /var/lib/ocservia-upgrade/native-order.log)" == $'privd-start\nagent-start' ]]
-[[ "$(sudo systemctl show -p Description --value 'ocservia-upgrader@.service')" == "Native old upgrader" ]]
+[[ "$(sudo systemctl show -p Description --value 'ocservia-upgrader@native-smoke.service')" == "Native old upgrader" ]]
 { sudo cat /var/lib/ocservia-upgrade/native-order.log; } >"${ARTIFACT_DIR}/deb-rollback-systemd-order.log"
 
 reset_native_start_limits

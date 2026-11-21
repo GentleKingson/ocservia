@@ -63,12 +63,14 @@ compatibility-policy reset in v1.1.0 described below.
 
 ### Security
 
+- Update bundled SQLite and rustix for RUSTSEC-2026-0459 and
+  RUSTSEC-2026-0486.
 - Update rustls to 0.23.46 in the Rust workspace and independent Relay build
   for RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and
   RUSTSEC-2026-0349.
 - Enforce Content Security Policy in Standalone and Integrated gateways,
   including gateway error responses.
-- Update Go to 1.26.10, Controller `x/net` to v0.60.0 and affected Vue,
+- Update Go to 1.26.11, Controller `x/net` to v0.60.0 and affected Vue,
   source-map and Vite dependencies for published advisories. Go vulnerability
   scanning now covers both Controller and Signer modules.
 - Update the PostgreSQL backup image's libsasl2 packages and pin the Web

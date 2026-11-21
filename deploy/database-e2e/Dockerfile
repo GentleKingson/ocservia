@@ -2,7 +2,7 @@ ARG WORKFLOW_TOOLS=workflow-tools
 FROM ocservia-database-e2e-agent:e2e AS agent
 FROM ocservia-database-e2e-transport:e2e AS transport
 FROM ocservia-database-e2e-relay:e2e AS relay
-FROM golang:1.26.10-trixie@sha256:7202554ed358a37f41c44e4910ae29bbc5ef0715f289ac637218adbb0ca132dd AS workflow-tools
+FROM golang:1.26.11-trixie@sha256:cff05dd6b81c901f2e8249eb6f91c69a60451d0f12c26bfef08e476a85b32d4d AS workflow-tools
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ocserv openconnect openssl sqlite3 python3 util-linux \

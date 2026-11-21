@@ -41,8 +41,7 @@ for value in re.findall(r'^native_online=(\{[^\n]+\})$', log, re.M):
 pathlib.Path(sys.argv[2]).write_text(json.dumps({
     'exit_code': int(sys.argv[3]),
     'signals': [name for name, values in patterns.items() if any(value in log for value in values)],
-    'build_targets': [name for name in ('controller-key-init', 'migrate', 'gateway', 'transportd',
-                                       'transport-endpoint-bootstrap') if f'target {name}:' in log],
+    'build_targets': [name for name in ('controller-key-init', 'migrate', 'gateway', 'transportd') if f'target {name}:' in log],
     'build_locations': [{'file': name, 'line': int(line)} for name, line in sorted(set(re.findall(
         r'\b(gateway\.dockerfile|transportd\.dockerfile|dockerfile):([0-9]+)\b', log)))],
     'python_locations': [{'file': name, 'line': int(line)} for name, line in re.findall(
@@ -101,9 +100,8 @@ case "${1:-}" in
     if [[ "$ROLE" == controller ]]; then
       python3 - "$WORK/relay/compose.json" "$ip" <<'OVERLAY'
 import json, sys
-services = {name: {'extra_hosts': ['relay.ocservia.test:' + sys.argv[2]]}
-            for name in ('transportd', 'transport-endpoint-bootstrap')}
-services['transportd']['build'] = {'target': 'real-e2e-probe'}
+services = {'transportd': {'extra_hosts': ['relay.ocservia.test:' + sys.argv[2]],
+                          'build': {'target': 'real-e2e-probe'}}}
 open(sys.argv[1], 'w').write(json.dumps({'services': services}))
 OVERLAY
     fi

@@ -87,48 +87,6 @@ services:
       postgres:
         condition: service_healthy
 
-  transport-endpoint-bootstrap:
-    <<: *service-defaults
-    profiles: [bootstrap]
-    build:
-      context: ../..
-      dockerfile: rust/transportd.Dockerfile
-    command:
-      - --socket
-      - /run/ocserv-platform/bootstrap.sock
-      - --key-file
-      - /run/ocservia-secrets/controller.key
-      - --control-plane-uid
-      - "65534"
-      - --control-plane-gid
-      - "65532"
-      - --relay-mode
-      - custom
-      - --relay-url
-      - ${REAL_E2E_RELAY_URL:?set REAL_E2E_RELAY_URL}
-      - --relay-token-file
-      - /run/real-e2e-relay/token
-      - --relay-ca-file
-      - /run/real-e2e-relay/ca.pem
-    volumes:
-      - ${REAL_E2E_RELAY_DIR:?set REAL_E2E_RELAY_DIR}:/run/real-e2e-relay:ro
-      - type: volume
-        source: transport-runtime
-        target: /run/ocserv-platform
-        volume:
-          nocopy: true
-      - type: volume
-        source: controller-secrets
-        target: /run/ocservia-secrets
-        read_only: true
-        volume:
-          nocopy: true
-    depends_on:
-      controller-key-init:
-        condition: service_completed_successfully
-      transport-runtime-init:
-        condition: service_completed_successfully
-
   control-plane:
     <<: *service-defaults
     build:
