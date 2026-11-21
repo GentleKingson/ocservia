@@ -53,6 +53,8 @@ type BootstrapTokenSpec struct {
 	ExpectedNodeName   string
 	TTL                time.Duration
 	ActorID            string
+	ActorIdentityID    uuid.UUID
+	ActorSessionID     uuid.UUID
 	Reason             string
 	RequestID          string
 }
@@ -100,7 +102,7 @@ func NewWithOwnerSessionsBackend(backend database.Backend, controllerEndpointID,
 }
 
 func (s *Service) createBootstrapToken(ctx context.Context, spec BootstrapTokenSpec, encoded string) (Token, error) {
-	if encoded == "" || (len(spec.ExpectedEndpointID) != 0 && len(spec.ExpectedEndpointID) != 32) || spec.WorkspaceID == uuid.Nil || !validShort(spec.Environment, 64) || (spec.ExpectedNodeName != "" && !validShort(spec.ExpectedNodeName, 128)) || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
+	if encoded == "" || (len(spec.ExpectedEndpointID) != 0 && len(spec.ExpectedEndpointID) != 32) || spec.WorkspaceID == uuid.Nil || spec.ActorIdentityID == uuid.Nil || spec.ActorSessionID == uuid.Nil || !validShort(spec.Environment, 64) || (spec.ExpectedNodeName != "" && !validShort(spec.ExpectedNodeName, 128)) || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
 		return Token{}, ErrInvalidRequest
 	}
 	ttl := spec.TTL
@@ -137,11 +139,14 @@ func (s *Service) createBootstrapToken(ctx context.Context, spec BootstrapTokenS
 	if !workspaceExists {
 		return Token{}, ErrNotFound
 	}
+	if err := auth.AuthorizeMutationTx(ctx, tx, spec.ActorIdentityID, spec.ActorSessionID, spec.WorkspaceID); err != nil {
+		return Token{}, err
+	}
 	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, ExpectedEndpoint: spec.ExpectedEndpointID, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: at})
 	if err != nil {
 		return Token{}, fmt.Errorf("insert node bootstrap token: %w", err)
 	}
-	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: spec.WorkspaceID, ActorType: "user", ActorID: spec.ActorID, Action: "node_bootstrap_token.create", ResourceType: "node_bootstrap_token", ResourceID: token.ID, RequestID: spec.RequestID, Reason: spec.Reason, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: spec.WorkspaceID, ActorType: "user", ActorID: spec.ActorID, SessionID: &spec.ActorSessionID, Action: "node_bootstrap_token.create", ResourceType: "node_bootstrap_token", ResourceID: token.ID, RequestID: spec.RequestID, Reason: spec.Reason, At: now}); err != nil {
 		return Token{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

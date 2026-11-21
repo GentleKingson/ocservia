@@ -60,9 +60,10 @@ func TestInstallationBackendIntegration(t *testing.T) {
 	testutil.NoError(t, s.ConfigureInstallation(InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}))
 	now := time.Now().UTC()
 	s.now = func() time.Time { return now }
+	identity, session := bootstrapActor(t, s, f.workspace)
 	makeToken := func() Token {
 		t.Helper()
-		token, err := s.CreateInstallationToken(ctx, BootstrapTokenSpec{WorkspaceID: f.workspace, Environment: "test", TTL: time.Minute, ActorID: "admin", Reason: "install", RequestID: uuid.NewString()})
+		token, err := s.CreateInstallationToken(ctx, BootstrapTokenSpec{WorkspaceID: f.workspace, Environment: "test", TTL: time.Minute, ActorID: identity.String(), ActorIdentityID: identity, ActorSessionID: session, Reason: "install", RequestID: uuid.NewString()})
 		testutil.NoError(t, err)
 		return token
 	}

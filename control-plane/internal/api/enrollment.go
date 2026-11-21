@@ -65,10 +65,12 @@ func (s *Server) createNodeBootstrapToken(w http.ResponseWriter, r *http.Request
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "ttl_seconds must be between 1 and 900")
 		return
 	}
+	actor := principal(r)
 	token, err := s.enrollment.CreateInstallationToken(r.Context(), enrollment.BootstrapTokenSpec{
 		ExpectedEndpointID: endpoint, WorkspaceID: workspaceID, Environment: body.Environment,
 		ExpectedNodeName: body.ExpectedNodeName, TTL: time.Duration(body.TTLSeconds) * time.Second,
-		ActorID: actorID(r), Reason: body.Reason, RequestID: requestID(r),
+		ActorID: actorID(r), ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID,
+		Reason: body.Reason, RequestID: requestID(r),
 	})
 	if err != nil {
 		s.writeEnrollmentError(w, r, err)
