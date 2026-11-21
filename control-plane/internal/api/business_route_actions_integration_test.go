@@ -139,8 +139,14 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 		service := certificates.NewBackend(f.b, f.s.operations, nil, nil, nil, f.signer)
 		f.s = f.newServer(Modules{ConfigPlans: plans, UserOperations: userOperations, Certificates: service})
 		for _, scope := range []uuid.UUID{f.workspace, other} {
+			if scope == other {
+				f.bindWorkspaceAdmin(f.requester, other)
+			}
 			ref, err := service.CreateSecretRef(t.Context(), certificates.SecretRefRequest{WorkspaceID: scope, ActorID: f.requester.principal.IdentityID, SessionID: f.requester.principal.SessionID, Provider: configprofile.Provider, KeyPath: plan.NodeID.String() + "/" + strings.Repeat("52", 32) + "/" + strings.Repeat("53", 32) + "/none", Version: "v1", Reason: "route fixture", RequestID: uuid.NewString()})
 			testutil.NoError(t, err)
+			if scope == other {
+				f.exec(`DELETE FROM workspace_admins WHERE identity_id=$1 AND workspace_id=$2`, f.requester.principal.IdentityID, other)
+			}
 			body := fmt.Sprintf(`{"template":{"directives":[{"name":"server-key","secret_ref":{"secret_ref_id":%q}}]}}`, ref.ID)
 			before := counts(t)
 			w := f.call("POST", nodePath+"/config-plans", body, uuid.NewString(), f.requester.cookie, nil)
