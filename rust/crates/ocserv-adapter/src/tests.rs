@@ -2317,15 +2317,18 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         .expect("leased");
     let rev_grant = Uuid::now_v7();
     let rev_subj = Uuid::now_v7().to_string();
-    let rev_lease = lease_for(
-        &cert_id,
-        &leased_art,
-        &leased_op,
-        &rev_subj,
-        leased_res.artifact_size,
-        &rev_grant,
-        effect_now().expect("now") + 300,
-    );
+    let rev_lease = ArtifactLeaseIdentity {
+        owner_fence: rec_lease.owner_fence,
+        ..lease_for(
+            &cert_id,
+            &leased_art,
+            &leased_op,
+            &rev_subj,
+            leased_res.artifact_size,
+            &rev_grant,
+            effect_now().expect("now") + 300,
+        )
+    };
     adapter
         .artifact_read(rev_lease, 0)
         .await
