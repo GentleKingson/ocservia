@@ -55,7 +55,11 @@ impl Adapter {
             return Err(AdapterError::Unavailable);
         }
         if complete {
-            complete_config::validate_reload_bindings(&before_bytes, candidate)?;
+            complete_config::validate_reload_bindings(
+                &before_bytes,
+                candidate,
+                &self.resources.audit_hook,
+            )?;
         }
         let mut effect_store = EffectStore::open_for_mutation(&self.resources)?;
         let preparation = effect_store.prepare(

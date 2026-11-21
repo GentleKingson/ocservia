@@ -22,7 +22,6 @@ use uuid::Uuid;
 
 const FIXED_WORKER_CONFIG: &str =
     "run-as-user = ocservia-vpn\nrun-as-group = ocservia-vpn\nuse-occtl = true\n";
-const AUDIT_HOOK: &str = "/usr/libexec/ocservia/vpn-session-hook";
 
 // Ocserv keeps these bindings across HUP; changing their file representation
 // is not proof that the running daemon adopted them.
@@ -38,7 +37,10 @@ const STARTUP_BINDINGS: &[&str] = &[
     "ca-cert",
 ];
 
-fn profile_values(bytes: &[u8]) -> Result<BTreeMap<&str, &str>, AdapterError> {
+fn profile_values<'a>(
+    bytes: &'a [u8],
+    audit_hook: &str,
+) -> Result<BTreeMap<&'a str, &'a str>, AdapterError> {
     let text = std::str::from_utf8(bytes).map_err(|_| AdapterError::InvalidResource)?;
     if text.contains(['\r', '\0']) || bytes.len() > super::MAX_CONFIG_PLAN_BYTES {
         return Err(AdapterError::InvalidResource);
@@ -53,7 +55,7 @@ fn profile_values(bytes: &[u8]) -> Result<BTreeMap<&str, &str>, AdapterError> {
             .split_once(" = ")
             .ok_or(AdapterError::InvalidResource)?;
         if matches!(name, "connect-script" | "disconnect-script") {
-            if value != AUDIT_HOOK || values.insert(name, value).is_some() {
+            if value != audit_hook || values.insert(name, value).is_some() {
                 return Err(AdapterError::InvalidResource);
             }
             continue;
@@ -83,9 +85,11 @@ fn profile_values(bytes: &[u8]) -> Result<BTreeMap<&str, &str>, AdapterError> {
 pub(super) fn validate_reload_bindings(
     current: &[u8],
     candidate: &[u8],
+    audit_hook: &Path,
 ) -> Result<(), AdapterError> {
-    let current = profile_values(current)?;
-    let candidate = profile_values(candidate)?;
+    let audit_hook = audit_hook.to_str().ok_or(AdapterError::InvalidResource)?;
+    let current = profile_values(current, audit_hook)?;
+    let candidate = profile_values(candidate, audit_hook)?;
     if STARTUP_BINDINGS
         .iter()
         .any(|name| current.get(name) != candidate.get(name))
@@ -393,16 +397,23 @@ impl Adapter {
         }
         materialized.push_str(FIXED_WORKER_CONFIG);
         redacted.push_str(FIXED_WORKER_CONFIG);
-        if Path::new(AUDIT_HOOK)
+        if self
+            .resources
+            .audit_hook
             .try_exists()
             .map_err(AdapterError::Io)?
         {
             // Only publish a fixed hook from the protected package tree.
-            safe_file(Path::new(AUDIT_HOOK), 0o755)?;
-            let hooks =
-                format!("connect-script = {AUDIT_HOOK}\ndisconnect-script = {AUDIT_HOOK}\n");
+            // Keep redacted aligned with the Controller's logical candidate
+            // diff; materialized_hash still binds the exact on-disk bytes.
+            safe_file(&self.resources.audit_hook, 0o755)?;
+            let hook = self
+                .resources
+                .audit_hook
+                .to_str()
+                .ok_or(AdapterError::InvalidResource)?;
+            let hooks = format!("connect-script = {hook}\ndisconnect-script = {hook}\n");
             materialized.push_str(&hooks);
-            redacted.push_str(&hooks);
         }
         Ok(Materialized {
             bytes: materialized.into_bytes(),
@@ -437,6 +448,7 @@ impl Adapter {
                 .await
                 .map_err(AdapterError::Io)?,
             &materialized.bytes,
+            &self.resources.audit_hook,
         )?;
         let parent = self
             .resources
@@ -1128,5 +1140,49 @@ mod tests {
         assert!(outcome.healthy && !outcome.rolled_back);
         assert_eq!(outcome.candidate_hash, apply.candidate_hash);
         assert_eq!(outcome.observed_hash, apply.materialized_hash);
+    }
+
+    #[tokio::test]
+    async fn complete_profile_materializes_audit_hook_without_breaking_redacted_diff() {
+        let mut fixture = Fixture::new();
+        let baseline = fixture
+            .adapter
+            .complete_config_plan(&fixture.plan)
+            .await
+            .expect("baseline plan without hook");
+        let hook = fixture.directory.join("vpn-session-hook");
+        write(&hook, b"#!/bin/sh\nexit 0\n", 0o755);
+        fixture.adapter.resources.audit_hook = hook.clone();
+
+        let with_hook = fixture
+            .adapter
+            .complete_config_plan(&fixture.plan)
+            .await
+            .expect("plan with hook");
+        assert_eq!(with_hook.diff_redacted, baseline.diff_redacted);
+        assert!(!with_hook.diff_redacted.contains("connect-script"));
+        assert!(!with_hook.diff_redacted.contains("disconnect-script"));
+        assert_ne!(with_hook.materialized_hash, baseline.materialized_hash);
+
+        let mut apply = CompleteConfigApply {
+            candidate: fixture.plan.candidate.clone(),
+            candidate_hash: fixture.plan.candidate_hash.clone(),
+            expected_current_hash: with_hook.current_hash,
+            materialized_hash: with_hook.materialized_hash,
+            desired_revision: 1,
+            plan_id: Uuid::now_v7().as_bytes().to_vec(),
+            plan_expires_at: None,
+        };
+        apply.plan_expires_at.get_or_insert_default().seconds = i64::MAX;
+        let outcome = fixture
+            .adapter
+            .complete_config_apply(&apply, super::super::tests::test_effect())
+            .await
+            .expect("apply with hook");
+        assert!(outcome.healthy && !outcome.rolled_back);
+        assert_eq!(outcome.observed_hash, apply.materialized_hash);
+        let written = std::fs::read_to_string(&fixture.adapter.resources.config).expect("config");
+        assert!(written.contains(&format!("connect-script = {}\n", hook.display())));
+        assert!(written.contains(&format!("disconnect-script = {}\n", hook.display())));
     }
 }
