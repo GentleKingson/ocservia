@@ -71,6 +71,7 @@ def main():
         (work / "srv" / "assets").mkdir()
         (work / "srv" / asset[1:]).write_text("/* gateway asset */" * 100)
         context = ssl.create_default_context(cafile=str(work / "tls.crt"))
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         run("docker", "network", "create", "--subnet", SUBNET, "--gateway", CLIENT_GATEWAY, name)
         common = ["-v", f"{work}/tls.crt:/run/secrets/tls_certificate:ro",
                   "-v", f"{work}/tls.key:/run/secrets/tls_private_key:ro",
