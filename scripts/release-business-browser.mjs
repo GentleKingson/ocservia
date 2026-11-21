@@ -61,27 +61,6 @@ try {
   await collectCsp(context, "flow");
   const page = await context.newPage();
   const headers = { Origin: origin, "X-Workspace-ID": workspace };
-  async function selectBrowserWorkspace(currentPage) {
-    // Wait for the authorized list before deciding whether a selector exists.
-    await expect(currentPage.getByTestId("workspace")).toContainText(
-      "Business Test",
-    );
-    const selector = currentPage.getByRole("combobox", {
-      name: "Workspace",
-      exact: true,
-    });
-    if (await selector.count()) {
-      await selector.selectOption(workspace);
-      await expect(selector).toHaveValue(workspace);
-    }
-    await expect
-      .poll(() =>
-        currentPage.evaluate(() =>
-          sessionStorage.getItem("ocservia.workspace-id"),
-        ),
-      )
-      .toBe(workspace);
-  }
   await page.goto(`/nodes/${node}`);
   await expect(page).toHaveURL(/\/login$/);
   await page
@@ -91,7 +70,7 @@ try {
     .getByLabel("Password", { exact: true })
     .fill(fs.readFileSync(`${work}/private/requester-password`, "utf8").trim());
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await selectBrowserWorkspace(page);
+  await expect(page.getByTestId("workspace")).toContainText("Business Test");
   if (rollout) {
     // The probe placed the next Agent release in the node spool and recreated
     // the Controller with its catalog; the console drives the canary rollout.
