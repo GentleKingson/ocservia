@@ -8,6 +8,9 @@ services:
     security_opt: [no-new-privileges:true]
     init: true
     command: [serve]
+    environment:
+      GOMEMLIMIT: 200MiB
+      GOMAXPROCS: "1"
     volumes:
       - type: bind
         source: ${OCSERV_SIGNER_STATE_DIR:?set Signer state directory}
@@ -21,9 +24,10 @@ services:
     networks: [signer]
     healthcheck:
       test: [CMD, /ocserv-signer, health, --url, "https://signer:9443/healthz"]
-      interval: 5s
+      interval: 15s
       timeout: 3s
-      retries: 30
+      retries: 10
+      start_period: 15s
     deploy:
       resources:
         limits: {cpus: "1.0", memory: 256M, pids: 64}
