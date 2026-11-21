@@ -243,7 +243,7 @@ validate_manifest_file() {
       ($manifest.platform | IN("linux/amd64", "linux/arm64")) and
       ($manifest.database_migration | migration_identity) and
       ($manifest.images | type == "object" and
-        all(.[]; matches("^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$")))
+        all(.[]; matches("^[^[:space:]@]+@sha256:[0-9a-f]{64}$")))
     end
   '
   jq -e -s "${manifest_filter}" "${path}" >/dev/null ||

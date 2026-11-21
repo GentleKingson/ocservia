@@ -13,8 +13,7 @@ const imageNames = [
 ];
 const integratedImageNames = ["edge", "relay", "signer"];
 const supportedPlatforms = ["linux/amd64", "linux/arm64"];
-const imageReferencePattern =
-  /^[^\s@]+(?:@sha256:[0-9a-f]{64}|:v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?)$/;
+const imageReferencePattern = /^[^\s@]+@sha256:[0-9a-f]{64}$/;
 const semverPattern = /^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$/;
 const commitPattern = /^[0-9a-f]{40}$/;
 
@@ -161,7 +160,7 @@ for (const name of requiredImages) {
   if (!values.images.has(name)) fail(`missing production image: ${name}`);
   const ref = values.images.get(name);
   if (!imageReferencePattern.test(ref))
-    fail(`${name} must be a version-tagged or sha256 image reference`);
+    fail(`${name} must be a sha256 image reference`);
 }
 
 const manifest = {

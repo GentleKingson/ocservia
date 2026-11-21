@@ -15,8 +15,7 @@ require_asset() {
   }
 }
 for asset in install-controller install-node install.env.example controller-bootstrap.sh managed-node-bootstrap.sh \
-  "controller-runtime-v$VERSION.tar.gz" "controller-runtime-v$VERSION.tar.gz.sha256" \
-  controller-release-amd64.json controller-release-arm64.json controller-release.json; do
+  "controller-runtime-v$VERSION.tar.gz" "controller-runtime-v$VERSION.tar.gz.sha256"; do
   require_asset "$asset"
 done
 # Stage-1 now embeds shared helpers and all four scripts carry the exact tag.
@@ -68,9 +67,5 @@ for arch in amd64 arm64; do
     cmp "$payload/$archive.sha256" "$ASSET_DIR/$archive.sha256"
     cmp "$payload/verify-agent-package.sh" "$ROOT/scripts/verify-agent-package.sh"
   done
-  jq -e --arg version "$VERSION" --arg platform "linux/$arch" \
-    '.release_version == $version and .release_tag == ("v"+$version) and .platform == $platform and (.images | type == "object")' \
-    "$ASSET_DIR/controller-release-$arch.json" >/dev/null
  done
-cmp "$ASSET_DIR/controller-release.json" "$ASSET_DIR/controller-release-amd64.json"
 echo "Release package set PASS"

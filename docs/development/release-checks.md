@@ -1624,16 +1624,14 @@ exact-version GHCR tag blocks it. No asset upload uses `--clobber`, and a rerun
 never replaces an existing version. After the same-SHA Release Check gate and
 both native product builds, publication:
 
-1. Requires all expected assets and image archives. Lists all GitHub Releases,
+1. Requires all expected pre-publication assets and image archives. Lists all GitHub Releases,
    including drafts, and probes every GHCR version tag (each image role has
    `vVERSION`, `vVERSION-amd64` and `vVERSION-arm64`). Only an explicit registry
    `404 MANIFEST_UNKNOWN` means an absent tag; authentication, rate-limit,
    transport, malformed-response and server errors fail closed.
 2. Creates a new Draft with generated notes and the exact build SHA. Note cleanup
    happens while the Release is still a draft.
-3. Uploads without replacement and verifies the remote asset inventory, uploaded
-   state, size and GitHub-provided SHA-256 against every local file.
-4. Rechecks each image tag immediately before writing it. Verifies each pushed
+3. Rechecks each image tag immediately before writing it. Verifies each pushed
    image's configuration digest against the scanned archive's loaded image ID,
    then builds the version index from those registry digests and requires both
    `linux/amd64` and `linux/arm64` entries. A Docker push reporting `unknown blob`
@@ -1642,12 +1640,18 @@ both native product builds, publication:
    or registry lookup error stops publication. Other push errors are not
    retried. Failed commands retain both output streams, and the job records the
    Docker, storage-driver and Buildx versions.
+4. Writes the verified multi-architecture index digests into both platform
+   manifests, rejects every tag-only image reference, then uploads all assets
+   without replacement and verifies their inventory, size, state and
+   GitHub-provided SHA-256 digest.
 5. Rechecks assets, all image tag digests, draft identity and the Git tag SHA,
    then publishes the Draft. Success requires a published immutable Release,
    complete verified assets, unchanged image digests and RC exclusion from
    Latest.
 
-The per-ref Actions concurrency group serializes same-tag runs without
+The readable GHCR version tags remain aliases for operators, but immutable
+release assets select images only through the recorded OCI index digests. The
+per-ref Actions concurrency group serializes same-tag runs without
 cancelling an active publication. GHCR has no atomic create-only tag operation in
 this flow: the checks protect this workflow's writes but cannot stop an
 independent writer racing the check or changing tags later, so restrict package

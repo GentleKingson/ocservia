@@ -68,31 +68,17 @@ jobs:
       - uses: ./.github/actions/setup-tools
         with:
           profiles: npm-security
-      - name: Prepare ordinary deployment configuration and bootstrap assets
+      - name: Prepare bootstrap and package assets
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           ASSET_DIR: ${{ runner.temp }}/assets
         run: |
           source scripts/env.sh
           scripts/prepare-bootstrap-release-assets.sh "$ASSET_DIR" "v$VERSION"
-          source_commit="$(git rev-parse HEAD)"
-          for arch in amd64 arm64; do
-            args=()
-            for name in gateway control transport backup edge relay signer; do
-              args+=(--image "$name=ghcr.io/gentlekingson/ocservia/$name:v$VERSION")
-            done
-            node scripts/generate-controller-release-manifest.mjs \
-              --output "$ASSET_DIR/controller-release-$arch.json" --manifest-version 2 \
-              --release-version "$VERSION" --release-tag "v$VERSION" --source-commit "$source_commit" \
-              --platform "linux/$arch" "${args[@]}" \
-              --image postgres=docker.io/library/postgres@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af \
-              --image otel=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23
-          done
-          cp "$ASSET_DIR/controller-release-amd64.json" "$ASSET_DIR/controller-release.json"
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends rpm cpio
           scripts/validate-release-packages.sh
-      - name: Check complete Release asset inventory
+      - name: Check pre-publication asset inventory
         id: check-assets
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
