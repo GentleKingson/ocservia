@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
 )
@@ -164,6 +165,8 @@ func pathUUIDv7(value string) (uuid.UUID, bool) {
 
 func (s *Server) writeUserStateError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, auth.ErrForbidden):
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, userstate.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the desired state request failed validation")
 	case errors.Is(err, userstate.ErrCapacityExceeded):

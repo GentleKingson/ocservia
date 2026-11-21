@@ -20,6 +20,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
@@ -588,6 +589,29 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	rotated, err := service.RotateSecretRef(ctx, secretRef.ID, SecretRefRequest{ActorID: requesterID, SessionID: requesterSession, Version: "version-2", Reason: "rotate external reference", RequestID: "secret-rotate"})
 	if err != nil || rotated.Version != "version-2" || rotated.RotatedAt == nil {
 		t.Fatalf("rotated ref=%+v err=%v", rotated, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at=now() WHERE id=$1`, requesterSession); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateSecretRef(ctx, SecretRefRequest{WorkspaceID: workspaceID, ActorID: requesterID, SessionID: requesterSession, Provider: "vault", KeyPath: "production/ocserv/denied", Version: "version-1", Reason: "reject revoked session", RequestID: "secret-create-denied"}); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("revoked secret create err=%v", err)
+	}
+	if _, err := service.RotateSecretRef(ctx, secretRef.ID, SecretRefRequest{ActorID: requesterID, SessionID: requesterSession, Version: "version-3", Reason: "reject revoked session", RequestID: "secret-rotate-denied"}); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("revoked secret rotate err=%v", err)
+	}
+	var deniedRefs int
+	var retainedVersion string
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM secret_provider_refs WHERE workspace_id=$1 AND key_path='production/ocserv/denied'`, workspaceID).Scan(&deniedRefs); err != nil || deniedRefs != 0 {
+		t.Fatalf("revoked secret create rows=%d err=%v", deniedRefs, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT version FROM secret_provider_refs WHERE id=$1`, secretRef.ID).Scan(&retainedVersion); err != nil || retainedVersion != "version-2" {
+		t.Fatalf("revoked secret rotate version=%q err=%v", retainedVersion, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND request_id IN ('secret-create-denied','secret-rotate-denied')`, workspaceID).Scan(&deniedRefs); err != nil || deniedRefs != 0 {
+		t.Fatalf("revoked secret audit rows=%d err=%v", deniedRefs, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at=NULL WHERE id=$1`, requesterSession); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE certificates SET not_after=now()-interval '1 second' WHERE id=$1`, certificate.ID); err != nil {
 		t.Fatal(err)

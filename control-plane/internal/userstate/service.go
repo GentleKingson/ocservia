@@ -15,6 +15,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
@@ -120,6 +121,20 @@ func commitFenced(ctx context.Context, tx database.Tx) error {
 }
 
 func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operations.Operation, bool, error) {
+	return s.mutate(ctx, request, true)
+}
+
+// MutatePolicyEnforcement is the scheduler-only entry point for policy-driven
+// enable and disable commands. Browser mutations must use Mutate so a missing
+// session can never become an implicit trusted-principal bypass.
+func (s *Service) MutatePolicyEnforcement(ctx context.Context, request MutationRequest) (operations.Operation, bool, error) {
+	if request.ActorID != "scheduler" || request.ActorIdentityID != uuid.Nil || request.ActorSessionID != uuid.Nil || (request.Kind != UserEnable && request.Kind != UserDisable) {
+		return operations.Operation{}, false, ErrInvalidRequest
+	}
+	return s.mutate(ctx, request, false)
+}
+
+func (s *Service) mutate(ctx context.Context, request MutationRequest, authorizeSession bool) (operations.Operation, bool, error) {
 	if err := validateMutation(request); err != nil {
 		return operations.Operation{}, false, err
 	}
@@ -149,6 +164,11 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 		return operations.Operation{}, false, ErrNodeUnavailable
 	}
 	workspaceID := node.WorkspaceID
+	if authorizeSession {
+		if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, workspaceID); err != nil {
+			return operations.Operation{}, false, err
+		}
+	}
 	if request.SealedPassword != nil {
 		registered, err := users.HasSealingKey(ctx, request.NodeID, request.SealedPassword.Version, request.SealedPassword.KeyID)
 		if err != nil {

@@ -15,6 +15,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -58,9 +59,12 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	row := func(query string, args ...any) database.Row {
 		return b.QueryRow(ctx, query, args...)
 	}
-	workspace, node := uuid.New(), uuid.New()
+	workspace, node, identity, session := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'desired',$2,now(),now())`, workspace, workspace.String())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'desired','offline',now(),now())`, node, workspace)
+	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'userstate-test',$2,now(),now())`, identity, identity.String())
+	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,now())`, workspace, identity)
+	exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,now()+interval '1 hour',now())`, session, identity)
 	for _, capability := range []string{"ocserv.users.write", "ocserv.groups.write"} {
 		exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,$2,true)`, node, capability)
 	}
@@ -68,7 +72,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	signer := testfixture.CommandSigner(2)
 	s := NewWithSignerBackend(b, signer)
 	request := func(kind MutationKind, name string, version int64) MutationRequest {
-		r := MutationRequest{NodeID: node, Kind: kind, Name: name, ExpectedVersion: version, Members: []string{}, IdempotencyKey: uuid.NewString(), TTL: time.Hour, ActorID: "operator", Reason: "Database backend desired state", RequestID: uuid.NewString(), Traceparent: testTraceparent}
+		r := MutationRequest{NodeID: node, ActorIdentityID: identity, ActorSessionID: session, Kind: kind, Name: name, ExpectedVersion: version, Members: []string{}, IdempotencyKey: uuid.NewString(), TTL: time.Hour, ActorID: "operator", Reason: "Database backend desired state", RequestID: uuid.NewString(), Traceparent: testTraceparent}
 		if kind == UserCreate || kind == UserPasswordRotate {
 			r.SealedPassword = &SealedSecret{Version: 1, Purpose: "user_password", KeyID: "key", Ciphertext: bytes.Repeat([]byte{1}, 32)}
 		}
@@ -123,6 +127,23 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	if _, _, err := s.Mutate(ctx, changed); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatal("reused key", err)
 	}
+	denied := request(GroupApply, "revoked-session", 0)
+	denied.Members = []string{"alice"}
+	exec(`UPDATE auth_sessions SET revoked_at=now() WHERE id=$1`, session)
+	if _, _, err := s.Mutate(ctx, denied); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatal("revoked session mutation", err)
+	}
+	var deniedRows int
+	if err := row(`SELECT count(*) FROM desired_groups WHERE node_id=$1 AND group_name=$2`, node, denied.Name).Scan(&deniedRows); err != nil || deniedRows != 0 {
+		t.Fatal("revoked session changed desired state", deniedRows, err)
+	}
+	if err := row(`SELECT count(*) FROM operations WHERE workspace_id=$1 AND idempotency_key=$2`, workspace, denied.IdempotencyKey).Scan(&deniedRows); err != nil || deniedRows != 0 {
+		t.Fatal("revoked session enqueued operation", deniedRows, err)
+	}
+	if err := row(`SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND request_id=$2`, workspace, denied.RequestID).Scan(&deniedRows); err != nil || deniedRows != 0 {
+		t.Fatal("revoked session appended audit", deniedRows, err)
+	}
+	exec(`UPDATE auth_sessions SET revoked_at=NULL WHERE id=$1`, session)
 	secondRequest := request(GroupApply, "staff", 1)
 	secondRequest.Members = []string{"carol"}
 	second := mutate(secondRequest)
@@ -187,9 +208,9 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	recovered := mutate(request(UserCreate, "alice", 1))
 	assertEnvelope(recovered, 0, 1)
 	// Failed fencing rolls back desired rows, supersession, outbox and audit.
-	identity, err := coordination.NewIdentity()
+	schedulerIdentity, err := coordination.NewIdentity()
 	testutil.NoError(t, err)
-	leader, err := coordination.AcquireBackend(ctx, b, identity, time.Minute)
+	leader, err := coordination.AcquireBackend(ctx, b, schedulerIdentity, time.Minute)
 	testutil.NoError(t, err)
 	fenced := coordination.WithFence(ctx, leader)
 	fencedRequest := request(GroupApply, "fenced", 0)

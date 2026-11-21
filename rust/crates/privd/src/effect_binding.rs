@@ -4,7 +4,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     CommandDeliveryMode, CommandEnvelope, command_envelope,
 };
 use ocservia_ocserv_adapter::{
-    Adapter, ArtifactLeaseIdentity, AuthorizedEffectIdentity, EffectIdentity,
+    Adapter, ArtifactLeaseIdentity, AuthorizedEffectIdentity, EffectIdentity, OwnerFenceIdentity,
 };
 use prost::Message as _;
 use uuid::Uuid;
@@ -185,7 +185,24 @@ pub(crate) fn authorized_effect<'a>(
     }
 }
 
-pub(crate) fn artifact_identity(claims: &ArtifactGrantClaimsV1) -> ArtifactLeaseIdentity<'_> {
+pub(crate) fn owner_fence<'a>(
+    node_id: &'a [u8; 16],
+    endpoint_id: &'a [u8; 32],
+    owner_epoch: u64,
+) -> OwnerFenceIdentity<'a> {
+    OwnerFenceIdentity {
+        node_id,
+        endpoint_id,
+        owner_epoch,
+    }
+}
+
+pub(crate) fn artifact_identity<'a>(
+    claims: &'a ArtifactGrantClaimsV1,
+    node_id: &'a [u8; 16],
+    endpoint_id: &'a [u8; 32],
+    owner_epoch: u64,
+) -> ArtifactLeaseIdentity<'a> {
     ArtifactLeaseIdentity {
         artifact_id: &claims.artifact_id,
         certificate_id: &claims.certificate_id,
@@ -195,6 +212,7 @@ pub(crate) fn artifact_identity(claims: &ArtifactGrantClaimsV1) -> ArtifactLease
         max_bytes: claims.max_bytes,
         grant_id: &claims.grant_id,
         expires_at_unix_seconds: claims.expires_at_seconds,
+        owner_fence: owner_fence(node_id, endpoint_id, owner_epoch),
     }
 }
 
@@ -217,8 +235,9 @@ pub(crate) fn fixed_host_effect(command: &CommandEnvelope) -> bool {
 pub(crate) fn replay_only_response(
     adapter: &Adapter,
     identity: AuthorizedEffectIdentity<'_>,
+    owner_fence: OwnerFenceIdentity<'_>,
 ) -> PrivdResponse {
-    match adapter.replay_authorized_effect(identity) {
+    match adapter.replay_authorized_effect_after_fence(identity, owner_fence) {
         Ok(Some(encoded)) => decode_cached_response(&encoded),
         // Missing, pruned or still-prepared evidence cannot prove absence.
         Ok(None) => response_error(

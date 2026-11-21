@@ -217,12 +217,23 @@ fn signed_fence(
     endpoint_id: [u8; 32],
     lease_until: (i64, u32),
 ) -> ConnectionFenceV2 {
+    signed_fence_at_epoch(key, cmd, fence_id, endpoint_id, lease_until, 1)
+}
+
+fn signed_fence_at_epoch(
+    key: &SigningKey,
+    cmd: &CommandEnvelope,
+    fence_id: [u8; 16],
+    endpoint_id: [u8; 32],
+    lease_until: (i64, u32),
+    owner_epoch: u64,
+) -> ConnectionFenceV2 {
     let issued = cmd.issued_at.expect("issued").seconds;
     let expires = cmd.expires_at.expect("expires").seconds;
     FenceSpec::new(
         cmd.node_id.as_slice().try_into().expect("node"),
         endpoint_id,
-        1,
+        owner_epoch,
     )
     .ids(fence_id, [2; 16], 1, [3; 16])
     .authority(cmd.expected_revision)
@@ -231,6 +242,32 @@ fn signed_fence(
     .issued(issued - 1, 0)
     .expires(expires.max(lease_until.0 + 1), 0)
     .sign(key)
+}
+
+fn with_owner_epoch(
+    mut cmd: CommandEnvelope,
+    key: &SigningKey,
+    owner_epoch: u64,
+) -> CommandEnvelope {
+    let fence = signed_fence_at_epoch(
+        key,
+        &cmd,
+        [1; 16],
+        TEST_ENDPOINT_ID,
+        (cmd.expires_at.expect("expires").seconds, 0),
+        owner_epoch,
+    );
+    let binding = signed_binding(
+        key,
+        &cmd,
+        &fence,
+        FenceOperationKind::Command,
+        &cmd.command_id,
+        &cmd.required_capability,
+    );
+    cmd.connection_fence = Some(fence);
+    cmd.fence_binding = Some(binding);
+    cmd
 }
 
 fn signed_binding(
@@ -448,7 +485,10 @@ async fn signed_effect_executes_once_replays_after_restart_and_fails_on_receipt_
     assert_eq!(
         fault_fx
             .adapter
-            .prepare_authorized_effect(authorized_effect(&init, &claims, &binding))
+            .prepare_authorized_effect(
+                authorized_effect(&init, &claims, &binding),
+                owner_fence(&node_id, &TEST_ENDPOINT_ID, 1),
+            )
             .expect("init"),
         AuthorizedEffectDecision::Execute
     );
@@ -467,6 +507,52 @@ async fn signed_effect_executes_once_replays_after_restart_and_fails_on_receipt_
     .await;
     assert_requires_reconciliation(&failed);
     assert_eq!(fs::read_to_string(&fault_fx.counter).expect("counter"), "x");
+}
+
+#[tokio::test]
+async fn newer_owner_epoch_persists_and_rejects_stale_root_effects() {
+    let signing = SigningKey::from_bytes(&[47; 32]);
+    let keys = keyring(&signing);
+    let node_id = *Uuid::now_v7().as_bytes();
+    let now = unix_seconds();
+    let fx = PrivdFixture::new();
+
+    let stale = signed_service_reload(&signing, node_id, now, now + 60);
+    let newer = with_owner_epoch(
+        signed_service_reload(&signing, node_id, now, now + 60),
+        &signing,
+        2,
+    );
+    let accepted = dispatch(command_request(newer), &node_id, &keys, &fx.adapter).await;
+    assert!(matches!(
+        accepted.result,
+        Some(privd_response::Result::Mutation(ref result)) if result.applied
+    ));
+
+    let restarted = Adapter::new(fx.resources.clone(), Limits::default());
+    assert_permission_denied(
+        &dispatch(
+            retry_request(stale.clone(), &signing),
+            &node_id,
+            &keys,
+            &restarted,
+        )
+        .await,
+    );
+    assert_permission_denied(&dispatch(command_request(stale), &node_id, &keys, &restarted).await);
+    assert_eq!(fs::read_to_string(&fx.counter).expect("counter"), "x");
+
+    let current = with_owner_epoch(
+        signed_service_reload(&signing, node_id, now, now + 60),
+        &signing,
+        2,
+    );
+    let allowed = dispatch(command_request(current), &node_id, &keys, &restarted).await;
+    assert!(matches!(
+        allowed.result,
+        Some(privd_response::Result::Mutation(ref result)) if result.applied
+    ));
+    assert_eq!(fs::read_to_string(&fx.counter).expect("counter"), "xx");
 }
 
 #[tokio::test]
@@ -589,7 +675,10 @@ async fn expired_and_retry_grants_enforce_reconciliation_and_fixed_host_rules() 
             assert_eq!(
                 retry_fx
                     .adapter
-                    .prepare_authorized_effect(authorized_effect(&cmd, &claims, &binding))
+                    .prepare_authorized_effect(
+                        authorized_effect(&cmd, &claims, &binding),
+                        owner_fence(&node, &TEST_ENDPOINT_ID, 1),
+                    )
                     .expect("prep"),
                 AuthorizedEffectDecision::Execute
             );
@@ -923,7 +1012,10 @@ async fn agent_upgrade_prepare_attestation_concurrency_conflict_and_validation()
     assert_eq!(
         lock_fx
             .adapter
-            .prepare_authorized_effect(authorized_effect(&lock_cmd, &claims, &binding))
+            .prepare_authorized_effect(
+                authorized_effect(&lock_cmd, &claims, &binding),
+                owner_fence(&node_id, &TEST_ENDPOINT_ID, 1),
+            )
             .expect("prep"),
         AuthorizedEffectDecision::Execute
     );
@@ -1089,7 +1181,17 @@ async fn root_execution_and_artifacts_require_their_own_unexpired_fence() {
     };
     let mut carrier = signed_service_reload(&signing, node_id, now, now + 60);
     carrier.required_capability = CONNECTION_FENCING_CAPABILITY.into();
-    let fence = |lease| signed_fence(&signing, &carrier, [1; 16], TEST_ENDPOINT_ID, lease);
+    let fence_at_epoch = |lease, owner_epoch| {
+        signed_fence_at_epoch(
+            &signing,
+            &carrier,
+            [1; 16],
+            TEST_ENDPOINT_ID,
+            lease,
+            owner_epoch,
+        )
+    };
+    let fence = |lease| fence_at_epoch(lease, 1);
     let art_bound = |f: ConnectionFenceV2, op_id: &[u8]| {
         let b = signed_binding(
             &signing,
@@ -1142,6 +1244,36 @@ async fn root_execution_and_artifacts_require_their_own_unexpired_fence() {
         };
         assert_ne!(f.kind, i32::from(ErrorKind::PermissionDenied));
     }
+
+    let newer = read(art_bound(
+        fence_at_epoch((now + 60, 0), 2),
+        &claims.artifact_id,
+    ));
+    let response = dispatch(newer, &node_id, &keys, &fx.adapter).await;
+    let Some(privd_response::Result::Error(failure)) = response.result else {
+        panic!("expected absent lease error")
+    };
+    assert_ne!(failure.kind, i32::from(ErrorKind::PermissionDenied));
+
+    let restarted = Adapter::new(fx.resources.clone(), Limits::default());
+    assert_permission_denied(
+        &dispatch(
+            read(art_bound(fence((now + 60, 0)), &claims.artifact_id)),
+            &node_id,
+            &keys,
+            &restarted,
+        )
+        .await,
+    );
+    assert_permission_denied(
+        &dispatch(
+            consume(art_bound(fence((now + 60, 0)), &claims.grant_id)),
+            &node_id,
+            &keys,
+            &restarted,
+        )
+        .await,
+    );
 }
 
 #[tokio::test]

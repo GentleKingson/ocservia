@@ -1,8 +1,10 @@
 use super::super::{
     AdapterError, AuthorizedEffectDecision, AuthorizedEffectIdentity, Connection,
-    MAX_EFFECT_RECORDS, MAX_FRAME_BYTES, OptionalExtension, TransactionBehavior, Uuid, params,
+    MAX_EFFECT_RECORDS, MAX_FRAME_BYTES, OptionalExtension, OwnerFenceIdentity,
+    TransactionBehavior, Uuid, params,
 };
 use super::hmac::authenticate_authorized_record;
+use super::owner_fence::{enforce_owner_fence, validate_owner_fence};
 use super::{EffectStore, effect_now, fixed_blob, sqlite_io};
 
 #[derive(Debug)]
@@ -44,13 +46,19 @@ impl EffectStore {
     pub(crate) fn prepare_authorized(
         &mut self,
         identity: AuthorizedEffectIdentity<'_>,
+        owner_fence: OwnerFenceIdentity<'_>,
     ) -> Result<AuthorizedEffectDecision, AdapterError> {
         let now = effect_now()?;
         let identity = validate_authorized_effect(identity, now)?;
+        let owner_fence = validate_owner_fence(owner_fence)?;
+        if identity.node_id != owner_fence.node_id {
+            return Err(AdapterError::InvalidRequest);
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_io)?;
+        enforce_owner_fence(&transaction, &self.hmac_key, owner_fence, now)?;
         if let Some(mut existing) = query_authorized_effect(&transaction, identity.command_id)? {
             validate_authorized_record(&self.hmac_key, &existing)?;
             validate_same_authorized_effect(&existing, identity)?;
@@ -126,6 +134,34 @@ impl EffectStore {
         Ok(AuthorizedEffectDecision::Execute)
     }
 
+    pub(crate) fn replay_authorized_after_fence(
+        &mut self,
+        identity: AuthorizedEffectIdentity<'_>,
+        owner_fence: OwnerFenceIdentity<'_>,
+    ) -> Result<Option<Vec<u8>>, AdapterError> {
+        let now = effect_now()?;
+        let identity = validate_authorized_effect(identity, 0)?;
+        let owner_fence = validate_owner_fence(owner_fence)?;
+        if identity.node_id != owner_fence.node_id {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        enforce_owner_fence(&transaction, &self.hmac_key, owner_fence, now)?;
+        let record = query_authorized_effect(&transaction, identity.command_id)?;
+        let response = if let Some(record) = record {
+            validate_authorized_record(&self.hmac_key, &record)?;
+            validate_same_authorized_effect(&record, identity)?;
+            (record.state == "applied").then_some(record.response)
+        } else {
+            None
+        };
+        transaction.commit().map_err(sqlite_io)?;
+        Ok(response)
+    }
+
     pub(crate) fn complete_authorized(
         &mut self,
         identity: AuthorizedEffectIdentity<'_>,
@@ -137,6 +173,8 @@ impl EffectStore {
         let now = effect_now()?;
         // A root effect that completed just before expiry is still recorded.
         let identity = validate_authorized_effect(identity, 0)?;
+        // Completion belongs to an effect already admitted by
+        // `prepare_authorized`; a later takeover must not erase its receipt.
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)

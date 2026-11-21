@@ -228,11 +228,8 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		fromVersion = observation.AgentVersion
 	}
 	if upgrade.RolloutID == uuid.Nil {
-		switch request.Payload.(type) {
-		case ConfigApplyPayload, CertificateP12Payload, CertificateRevokePayload, ServiceReloadPayload, AgentUpgradePayload:
-			if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, workspaceID); err != nil {
-				return Operation{}, false, err
-			}
+		if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, workspaceID); err != nil {
+			return Operation{}, false, err
 		}
 	}
 	if existing, same, err := findIdempotent(ctx, tx, workspaceID, request.IdempotencyKey, hash[:]); err != nil {

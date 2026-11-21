@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -115,7 +116,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 			t.Fatalf("revoked policy candidate: processed=%d mutations=%d err=%v", n, len(mutator.requests), err)
 		}
 	}
-	request := PolicyRequest{NodeID: node, Username: "alice", QuotaPeriod: "monthly", QuotaDirection: "rxtx", QuotaBytes: 300, IdempotencyKey: uuid.NewString(), ActorID: "operator", Reason: "ticket", RequestID: uuid.NewString(), Traceparent: testTraceparent}
+	request := PolicyRequest{NodeID: node, ActorIdentityID: requester, ActorSessionID: session, Username: "alice", QuotaPeriod: "monthly", QuotaDirection: "rxtx", QuotaBytes: 300, IdempotencyKey: uuid.NewString(), ActorID: "operator", Reason: "ticket", RequestID: uuid.NewString(), Traceparent: testTraceparent}
 	policy, replay, err := s.SetPolicy(ctx, request)
 	if err != nil || replay || policy.Version != 1 {
 		t.Fatal("set policy", policy, replay, err)
@@ -132,6 +133,19 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	if _, _, err := s.SetPolicy(ctx, changed); !errors.Is(err, ErrVersionConflict) {
 		t.Fatal("policy version", err)
 	}
+	denied := PolicyRequest{NodeID: node, ActorIdentityID: requester, ActorSessionID: session, Username: "bob", QuotaPeriod: "monthly", QuotaDirection: "rxtx", QuotaBytes: 100, IdempotencyKey: uuid.NewString(), ActorID: "operator", Reason: "ticket", RequestID: uuid.NewString(), Traceparent: testTraceparent}
+	exec(`UPDATE auth_sessions SET revoked_at=now() WHERE id=$1`, session)
+	if _, _, err := s.SetPolicy(ctx, denied); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatal("revoked session policy", err)
+	}
+	var deniedRows int
+	if err := row(`SELECT count(*) FROM desired_user_policies WHERE node_id=$1 AND username=$2`, node, denied.Username).Scan(&deniedRows); err != nil || deniedRows != 0 {
+		t.Fatal("revoked session changed policy", deniedRows, err)
+	}
+	if err := row(`SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND request_id=$2`, workspace, denied.RequestID).Scan(&deniedRows); err != nil || deniedRows != 0 {
+		t.Fatal("revoked session appended policy audit", deniedRows, err)
+	}
+	exec(`UPDATE auth_sessions SET revoked_at=NULL WHERE id=$1`, session)
 	if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
 		return RecordUsageTx(ctx, tx, node, []UsageSample{{SessionID: "alice-session", Username: "alice", Connected: now.Add(-time.Hour), RXBytes: 100, TXBytes: 200, ObservedAt: now}})
 	}); err != nil {
@@ -151,7 +165,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	mutation := userstate.MutationRequest{NodeID: node, Kind: userstate.UserDisable, Name: "alice", ExpectedVersion: 1, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: key, Traceparent: stableTraceparent(key)}
 	t.Run("quota-revoked-node", func(t *testing.T) { checkRevokedCandidates(t, s.enforcePolicies) })
 	t.Run("quota-port-errors", func(t *testing.T) { checkPolicyErrors(t, policyErrors.enforcePolicies, mutation, "quota") })
-	if _, _, err := users.Mutate(ctx, mutation); err != nil {
+	if _, _, err := users.MutatePolicyEnforcement(ctx, mutation); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := s.enforcePolicies(ctx, 10); err != nil || n != 1 {
@@ -194,7 +208,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	}
 	mutator.assertLast(t, ctx, 1, resetRequest)
 	exec(`UPDATE commands SET state='succeeded' WHERE node_id=$1 AND resource_key='alice'`, node)
-	if _, _, err := users.Mutate(ctx, userstate.MutationRequest{NodeID: node, Kind: userstate.UserDisable, Name: "alice", ExpectedVersion: 3, IdempotencyKey: uuid.NewString(), TTL: time.Hour, ActorID: "operator", Reason: "manual hold", RequestID: uuid.NewString(), Traceparent: testTraceparent}); err != nil {
+	if _, _, err := users.Mutate(ctx, userstate.MutationRequest{NodeID: node, ActorIdentityID: requester, ActorSessionID: session, Kind: userstate.UserDisable, Name: "alice", ExpectedVersion: 3, IdempotencyKey: uuid.NewString(), TTL: time.Hour, ActorID: "operator", Reason: "manual hold", RequestID: uuid.NewString(), Traceparent: testTraceparent}); err != nil {
 		t.Fatal("manual hold", err)
 	}
 	now = monthStart(now).AddDate(0, 1, 0).Add(time.Second)
@@ -216,7 +230,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	}
 	exec(`UPDATE desired_user_policies SET expires_at=NULL WHERE node_id=$1`, node)
 	expiredAt := now.Add(-time.Hour)
-	if _, _, err := s.SetPolicy(ctx, PolicyRequest{NodeID: node, Username: "expired", QuotaPeriod: "none", QuotaDirection: "rxtx", ExpiresAt: &expiredAt, IdempotencyKey: "expired-policy", ActorID: "operator", Reason: "expiry", RequestID: "expired-policy", Traceparent: testTraceparent}); err != nil {
+	if _, _, err := s.SetPolicy(ctx, PolicyRequest{NodeID: node, ActorIdentityID: requester, ActorSessionID: session, Username: "expired", QuotaPeriod: "none", QuotaDirection: "rxtx", ExpiresAt: &expiredAt, IdempotencyKey: "expired-policy", ActorID: "operator", Reason: "expiry", RequestID: "expired-policy", Traceparent: testTraceparent}); err != nil {
 		t.Fatal("expiry policy", err)
 	}
 	mutator.requests, mutator.contexts = nil, nil
