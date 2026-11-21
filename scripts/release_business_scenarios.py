@@ -497,8 +497,9 @@ def smoke_relay_recovery(ping, outage_settle_seconds=10):
     assert sql(f"SELECT count(*) FROM audit_events WHERE command_id='{command}';") != '0'
     wait_for('native reload after Relay recovery', lambda: node_side_effects()['reloads'] == effects['reloads'] + 1, seconds=15)
     after_effects = node_side_effects()
+    # authorized_effects prunes expired applied rows on write, so total row
+    # count can shrink while the exact command row is verified by cross_check.
     assert after_effects['journal'] == effects['journal'] + 1
-    assert after_effects['privd'] == effects['privd'] + 1
     assert after_effects['reloads'] == effects['reloads'] + 1
     assert after_effects['files'] == effects['files']
     replay = api(prefix + '/service:reload', body, headers=headers, status=202)

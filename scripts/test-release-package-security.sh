@@ -167,7 +167,8 @@ def fake_run(*args, **kwargs):
         state["published"] = True
         state["op_state"] = "succeeded"
         state["journal"] += 1
-        state["privd"] += 1
+        # Simulate privd pruning an older expired applied row when recording this effect.
+        state["privd"] -= 1
         state["reloads"] += 1
     return ""
 
