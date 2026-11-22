@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Quick install: one integrated, bundled PostgreSQL, ACME, root-lifecycle
-# Controller with two initial Local administrators. It is a preset over the
+# Controller with one initial Local administrator. It is a preset over the
 # existing authorities, not a second installer: bootstrap-host.sh prepares the
 # host, quick-materials.sh creates the protected material, install.sh and
 # controller.sh activate, and the Controller one-shots create the management
-# workspace and the Local administrators.
+# workspace and the Local administrator.
 #
 # Every step is idempotent, so rerunning the same command after an
 # interruption continues it. The generated /etc/ocservia/install.env is the
@@ -159,21 +159,24 @@ else
   [[ "${workspace_id}" =~ ^[0-9a-f-]{36}$ ]] || fail "the management workspace was not provisioned"
 
   [[ -d "${CREDENTIALS_DIR}" ]] || install -d -o 0 -g 0 -m 0700 -- "${CREDENTIALS_DIR}"
-  # Passwords are kept before bootstrap, so a retry reuses the same ones.
+  # Credentials are kept before bootstrap so retries reuse them.
   file="${CREDENTIALS_DIR}/admin.txt"
   if [[ ! -e "${file}" ]]; then
+    password="$(openssl rand -base64 6)"
     staged="$(mktemp "${CREDENTIALS_DIR}/.admin.XXXXXX")"
-    printf 'URL: https://%s\nUsername: initial-%s\nPassword: %s\n' \
-      "${controller_domain}" "admin" "$(openssl rand -hex 32)" >"${staged}"
+    printf 'URL: https://%s\nUsername: admin\nPassword: %s\n' \
+      "${controller_domain}" "${password}" >"${staged}"
+    unset password
     chmod 0400 -- "${staged}"
     mv -fT -- "${staged}" "${file}"
   fi
+  username="$(sed -n 's/^Username: //p' "${file}")"
   sed -n 's/^Password: //p' "${file}" |
     install -o 65534 -g 65532 -m 0400 /dev/stdin "${secret_dir}/local-bootstrap-admin-password"
   trap 'rm -f -- "${secret_dir}"/local-bootstrap-admin-password' EXIT
   status=0
   output="$(compose run --rm --no-deps -T \
-    -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=initial-admin \
+    -e "OCSERV_LOCAL_BOOTSTRAP_USERNAME=${username}" \
     -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${workspace_id}" \
     -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/local-bootstrap-password \
     -v "${secret_dir}/local-bootstrap-admin-password:/run/secrets/local-bootstrap-password:ro" \
@@ -192,7 +195,7 @@ fi
 
 cat <<EOF
 Quick install complete: https://${controller_domain}
-Initial Local administrator (password only in this root-only file):
-  initial-admin     ${CREDENTIALS_DIR}/admin.txt
+Initial Local administrator credentials (root-only file):
+  ${CREDENTIALS_DIR}/admin.txt
 Change the initial password after the first login.
 EOF

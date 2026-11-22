@@ -107,13 +107,13 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if _, err := owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP management',$2,now(),now())`, workspace, name); err != nil {
 		t.Fatal(err)
 	}
-	adminName := "admin-" + name
-	adminID, err := service.BootstrapLocalAdmin(ctx, adminName, password, workspace)
+	const adminName, bootstrapPassword = "admin", "nA6/X2kZ"
+	adminID, err := service.BootstrapLocalAdmin(ctx, adminName, bootstrapPassword, workspace)
 	testutil.NoError(t, err)
-	if _, err = service.BootstrapLocalAdmin(ctx, adminName, password, workspace); !errors.Is(err, auth.ErrLocalInitialized) {
+	if _, err = service.BootstrapLocalAdmin(ctx, adminName, bootstrapPassword, workspace); !errors.Is(err, auth.ErrLocalInitialized) {
 		t.Fatalf("repeat bootstrap: %v", err)
 	}
-	adminCookie, admin, err := service.AuthenticateLocal(ctx, adminName, password)
+	adminCookie, admin, err := service.AuthenticateLocal(ctx, adminName, bootstrapPassword)
 	testutil.NoError(t, err)
 	if admin.IdentityID != adminID {
 		t.Fatal("wrong bootstrap principal")
@@ -144,8 +144,14 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if retired := call("/api/v1/local-users", `{}`, adminCookie); retired.Code != http.StatusNotFound {
 		t.Fatalf("retired local-users API remained reachable: %d", retired.Code)
 	}
-	newPassword := "a distinct replacement authentication password"
-	changed := call("/api/v1/auth/change-password", `{"current_password":"`+password+`","new_password":"`+newPassword+`"}`, adminCookie)
+	changePassword := func(password string) *httptest.ResponseRecorder {
+		return call("/api/v1/auth/change-password", `{"current_password":"`+bootstrapPassword+`","new_password":"`+password+`"}`, adminCookie)
+	}
+	if rejected := changePassword("f8V!q2x"); rejected.Code != http.StatusBadRequest {
+		t.Fatalf("seven-character password: %d %s", rejected.Code, rejected.Body)
+	}
+	const newPassword = "f8V!q2xR"
+	changed := changePassword(newPassword)
 	if changed.Code != http.StatusNoContent {
 		t.Fatalf("HTTP password change: %d %s", changed.Code, changed.Body)
 	}

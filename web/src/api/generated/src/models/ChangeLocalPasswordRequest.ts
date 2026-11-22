@@ -26,7 +26,7 @@ export interface ChangeLocalPasswordRequest {
    */
   currentPassword: string;
   /**
-   * 15 or more Unicode code points, at most 1024 UTF-8 bytes; must pass the common, compromised and service-related password blocklist. Never normalized.
+   * 8 or more Unicode code points, at most 1024 UTF-8 bytes; must pass the common, compromised and service-related password blocklist. Never normalized.
    * @type {string}
    * @memberof ChangeLocalPasswordRequest
    */

@@ -10,17 +10,16 @@ import (
 )
 
 func TestBootstrapPasswordPolicyBeforeStartup(t *testing.T) {
-	for _, password := range []string{"x", "12345678901234567890", "ocserviapassword"} {
+	for _, password := range []string{"nA6/X2k", "password", "12345678901234567890", "ocserviapassword"} {
 		// No database or logger: policy rejection must precede startup side effects.
 		err := Run(context.Background(), config.Config{BootstrapLocalAdmin: true, LocalBootstrapPassword: password}, BuildInfo{}, nil, nil, nil)
 		if !errors.Is(err, auth.ErrPasswordPolicy) {
 			t.Fatalf("bootstrap reached startup before policy rejection: %v", err)
 		}
 	}
-	if err := validateBootstrapPasswords(config.Config{BootstrapLocalAdmin: true, LocalBootstrapPassword: "uncommon controller administrator setup secret"}); err != nil {
-		t.Fatalf("single administrator needs no approver password: %v", err)
+	if err := validateBootstrapPasswords(config.Config{BootstrapLocalAdmin: true, LocalBootstrapPassword: "nA6/X2kZ"}); err != nil {
+		t.Fatalf("eight-character bootstrap password rejected: %v", err)
 	}
-
 }
 
 func TestOperationAuthIsNotEnabledBySimulator(t *testing.T) {

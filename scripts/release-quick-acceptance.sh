@@ -2,7 +2,7 @@
 # Disposable hosted runner only: Quick install end to end with shared
 # release image artifacts and a Pebble ACME directory. Run as root through sudo.
 #
-# Checks: initial-admin login, ACME certificates for both names, idempotent
+# Checks: initial admin login, ACME certificates for both names, idempotent
 # reruns, resuming an unrecorded Local bootstrap, root CA custody, no
 # credentials in output, published ports, and upgrade/rollback/upgrade
 # keeping material and certificates.
@@ -137,7 +137,7 @@ login() {
   for attempt in 1 2; do
     rm -f -- "${work}/${account}.cookies"
     status="$(sed -n 's/^Password: //p' "${CREDENTIALS_DIR}/${account}.txt" |
-      jq -Rc --arg username "initial-${account}" '{username: $username, password: .}' |
+      jq -Rc --arg username "${account}" '{username: $username, password: .}' |
       curl -sS -o /dev/null -w '%{http_code}' --cacert "${work}/acme-root.pem" -c "${work}/${account}.cookies" \
         -D "${work}/login.headers" -H "Origin: https://${controller}" -H 'Content-Type: application/json' \
         --data-binary @- "https://${controller}/api/v1/auth/login")"
@@ -148,12 +148,14 @@ login() {
   [[ "${status}" == 204 ]] && grep -qF __Host-ocservia_session "${work}/${account}.cookies"
 }
 accounts() {
+  grep -qxF 'Username: admin' "${CREDENTIALS_DIR}/admin.txt"
+  grep -qxE 'Password: [A-Za-z0-9+/]{8}' "${CREDENTIALS_DIR}/admin.txt"
   login admin
   [[ "$(stat -c '%u:%a' "${CREDENTIALS_DIR}" "${CREDENTIALS_DIR}/admin.txt" | sort -u | paste -sd' ')" == "0:400 0:700" ]]
   [[ -e "${CREDENTIALS_DIR}/complete" && ! -e /etc/ocservia/secrets/local-bootstrap-admin-password ]]
 }
 accounts
-pass "initial-admin logs in"
+pass "admin logs in with the generated eight-character password"
 
 stage=custody
 # The root CA private key exists only, encrypted, in the export directory.

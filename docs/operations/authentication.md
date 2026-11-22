@@ -161,8 +161,8 @@ installation, operators initialize the single Local administrator through a
 separate one-shot command outside the normal install and restart path. A
 Quick installation (`quick-install.sh`) runs the equivalent initialization
 automatically. It provisions the management workspace using the owner one-shot
-below, generates one random password, and runs `--bootstrap-local-admin` to
-create `initial-admin` and bind it in `workspace_admins`. Its credential is
+below, generates an eight-character random password, and runs `--bootstrap-local-admin` to
+create `admin` and bind it in `workspace_admins`. Its credential is
 stored in the root-only file `/root/ocservia-initial-credentials/admin.txt`.
 Change the password after first login. Do not run the manual procedure below on
 a Quick host, because Quick reruns accept an already-initialized database.
@@ -208,7 +208,7 @@ a Quick host, because Quick reruns accept an already-initialized database.
    sudo chown 65534:65532 "${OCSERV_SECRET_DIR}/local-bootstrap-password"
    sudo chmod 0400 "${OCSERV_SECRET_DIR}/local-bootstrap-password"
    deploy/production/compose.sh run --rm --no-deps \
-     -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=initial-admin \
+     -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=admin \
      -e OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID='<management-workspace-uuidv7>' \
      -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/local-bootstrap-password \
      -v "${OCSERV_SECRET_DIR}/local-bootstrap-password:/run/secrets/local-bootstrap-password:ro" \
@@ -307,8 +307,8 @@ sessions before reopening access.
 Bootstrap, managed user creation, self-service password changes, and
 administrator password resets all enforce the same new-password policy:
 
-- Passwords must contain at least 15 Unicode code points and at most 1024 UTF-8
-  bytes; invalid UTF-8 sequences are rejected.
+- Passwords must contain at least eight Unicode code points and at most 1024
+  UTF-8 bytes. Invalid UTF-8 sequences are rejected.
 - Long passphrases, spaces, and arbitrary valid Unicode characters are accepted
   without uppercase, digit, or symbol composition rules or periodic expiration.
 - Each candidate password is checked offline against an embedded list of common
@@ -325,12 +325,12 @@ administrator password resets all enforce the same new-password policy:
   never logged.
 
 Existing stored hashes continue to verify against their original password
-bytes, even if a historical password is shorter than 15 code points or appears
+bytes, even if a historical password is shorter than eight code points or appears
 on a newer blocklist. The login endpoint does not run new-password policy
 checks and returns uniform credential-rejection errors. Any subsequent
 password change or reset must satisfy the current policy. Hashing continues to
 use Argon2id with random salts, fixed PHC parameters and resource limits, and
-dummy verification for unknown users. Length and blocklist checks follow
+dummy verification for unknown users. The blocklist checks follow
 [NIST SP 800-63B-4, section 3.1.1.2](https://pages.nist.gov/800-63-4/sp800-63b.html#passwordver),
 while Unicode normalization remains intentionally omitted so existing hashes
 continue to validate.
@@ -510,7 +510,7 @@ Session endpoints live under `/api/v1` and use `Content-Type: application/json`:
 
 | Endpoint | Body | Success |
 | --- | --- | --- |
-| `POST /auth/login` | `{"username":"initial-admin","password":"..."}` | 204, sets HttpOnly session cookie |
+| `POST /auth/login` | `{"username":"admin","password":"..."}` | 204, sets HttpOnly session cookie |
 | `POST /auth/logout` | `{}` | 204, revokes current session |
 | `GET /auth/session` | empty | 200 session metadata |
 | `POST /auth/change-password` | `{"current_password":"...","new_password":"..."}` | 204, all old sessions revoked; re-login required |
