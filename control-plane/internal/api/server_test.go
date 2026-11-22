@@ -342,3 +342,15 @@ func TestExpectedRevisionAndEnrollmentTTLValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestListNodeCertificatesUnavailableWithoutService(t *testing.T) {
+	server := bareServer(t, false, "")
+	nodeID := uuid.Must(uuid.NewV7())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/nodes/"+nodeID.String()+"/certificates", nil)
+	req.SetPathValue("node_id", nodeID.String())
+	rec := httptest.NewRecorder()
+	server.listNodeCertificates(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "service-unavailable") {
+		t.Fatalf("listNodeCertificates without service: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

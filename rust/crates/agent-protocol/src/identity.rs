@@ -358,13 +358,9 @@ fn read_endpoint(file: &mut File) -> Result<EndpointId, io::Error> {
     })
 }
 
-#[cfg(target_os = "linux")]
+#[allow(clippy::cast_possible_wrap)]
 const fn no_follow() -> i32 {
-    0x20_000
-}
-#[cfg(target_os = "macos")]
-const fn no_follow() -> i32 {
-    0x100
+    rustix::fs::OFlags::NOFOLLOW.bits() as i32
 }
 
 #[cfg(test)]
@@ -459,5 +455,25 @@ mod tests {
             hex::encode(&request.proof.expect("proof").signature),
             fields[1]
         );
+    }
+
+    #[test]
+    fn no_follow_matches_platform_and_rejects_symlinked_identity() {
+        assert_eq!(
+            no_follow(),
+            i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).expect("NOFOLLOW fits in i32")
+        );
+        let directory = test_dir().with_extension("symlink");
+        let _ = std::fs::remove_dir_all(&directory);
+        let controller = SecretKey::generate().public();
+        Identity::provision(&directory, controller).expect("provision identity");
+        let real_key = directory.join("real.key");
+        std::fs::rename(directory.join(KEY_FILE), &real_key).expect("move key");
+        std::os::unix::fs::symlink(&real_key, directory.join(KEY_FILE)).expect("symlink key");
+        assert!(
+            Identity::provision(&directory, controller).is_err(),
+            "symlinked endpoint key must be rejected"
+        );
+        std::fs::remove_dir_all(directory).expect("remove identity fixture");
     }
 }

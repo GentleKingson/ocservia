@@ -978,6 +978,10 @@ fn startup_key_enrollment_and_token_requirements() {
     std::fs::write(&token, format!("obt2_{valid}")).expect("restore");
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).expect("insecure");
     assert!(read_enrollment_token(&token).is_err());
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("restore mode");
+    let token_link = tok_dir.join("enrollment.link");
+    std::os::unix::fs::symlink(&token, &token_link).expect("symlink enrollment token");
+    assert!(read_enrollment_token(&token_link).is_err());
 }
 
 #[test]
@@ -986,6 +990,16 @@ fn custom_relay_count_and_security_contract() {
     let token = dir.join("token");
     std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("token");
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("mode");
+    let token_link = dir.join("token.link");
+    std::os::unix::fs::symlink(&token, &token_link).expect("symlink relay token");
+    assert!(
+        build_relay_mode(
+            "custom",
+            Some("https://relay-0.example.test"),
+            Some(&token_link)
+        )
+        .is_err()
+    );
 
     assert!(build_relay_mode("custom", None, Some(&token)).is_err());
     let RelayMode::Custom(map) =

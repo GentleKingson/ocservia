@@ -149,3 +149,19 @@ it("clears an expired token without polling or reissuing", async () => {
   expect(view.error).toBe("installExpired");
   expect(mocks.createNodeBootstrapToken).toHaveBeenCalledTimes(1);
 });
+it("accepts a newly issued token when browser clock is ahead of server clock", async () => {
+  vi.useFakeTimers();
+  mocks.createNodeBootstrapToken.mockResolvedValue({
+    token,
+    expiresAt: new Date(Date.now() - 300_000),
+  });
+  const view = await mount();
+  await view.issue();
+  expect(view.error).toBe("");
+  expect(view.token).toBe(token);
+  expect(view.expires).toBeTruthy();
+  vi.advanceTimersByTime(900_000);
+  expect(view.token).toBe("");
+  expect(view.error).toBe("installExpired");
+  expect(mocks.createNodeBootstrapToken).toHaveBeenCalledTimes(1);
+});

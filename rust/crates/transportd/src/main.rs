@@ -536,14 +536,9 @@ fn validate_key_file(file: &std::fs::File, expected_uid: u32) -> Result<(), io::
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[allow(clippy::cast_possible_wrap)]
 const fn libc_o_nofollow() -> i32 {
-    0x20_000
-}
-
-#[cfg(target_os = "macos")]
-const fn libc_o_nofollow() -> i32 {
-    0x100
+    rustix::fs::OFlags::NOFOLLOW.bits() as i32
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -943,5 +938,37 @@ mod tests {
         drop(listener);
         remove_socket(&path, identity).expect("remove socket");
         std::fs::remove_dir(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn nofollow_flag_matches_platform_and_rejects_symlinks() {
+        assert_eq!(
+            libc_o_nofollow(),
+            i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).expect("NOFOLLOW fits in i32")
+        );
+        let directory = socket_test_directory();
+        std::fs::create_dir(&directory).expect("create test directory");
+        let real_key = directory.join("real.key");
+        std::fs::write(&real_key, [0x42_u8; 32]).expect("write real key");
+        std::fs::set_permissions(&real_key, std::fs::Permissions::from_mode(0o600))
+            .expect("protect real key");
+        let link_key = directory.join("link.key");
+        std::os::unix::fs::symlink(&real_key, &link_key).expect("symlink key");
+        assert!(
+            load_key(&link_key).is_err(),
+            "symlinked key must be rejected"
+        );
+
+        let real_token = directory.join("real.token");
+        std::fs::write(&real_token, "0123456789abcdef0123456789abcdef").expect("write real token");
+        std::fs::set_permissions(&real_token, std::fs::Permissions::from_mode(0o600))
+            .expect("protect real token");
+        let link_token = directory.join("link.token");
+        std::os::unix::fs::symlink(&real_token, &link_token).expect("symlink token");
+        assert!(
+            read_relay_token(&link_token).is_err(),
+            "symlinked relay token must be rejected"
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

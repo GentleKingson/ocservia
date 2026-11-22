@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"log/slog"
@@ -472,5 +473,14 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	assertPausedSkip(batchSkipRolloutID, batchID, 1, "offline")
 	if countRolloutNodeUpgrades(batchSkipRolloutID, batchID) != 0 || countRolloutNodeUpgrades(batchSkipRolloutID, otherID) != 0 {
 		t.Fatal("an ineligible ordinary-batch node must hold it and every later batch")
+	}
+
+	// Second-layer in-transaction authorization must reject a revoked session even
+	// if HTTP authorization already succeeded before the session was revoked.
+	if _, err := pool.Exec(ctx, "UPDATE sessions SET revoked_at=now() WHERE id=$1", operator.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.operations.ResumeAgentRollout(ctx, batchSkipRolloutID, operator.Subject, operator.IdentityID, operator.SessionID, "req-revoked-resume", testfixture.Traceparent); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("ResumeAgentRollout with revoked session = %v, want auth.ErrForbidden", err)
 	}
 }

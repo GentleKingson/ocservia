@@ -578,14 +578,9 @@ fn read_relay_token(path: &Path) -> Result<String, io::Error> {
     Ok(token.to_owned())
 }
 
-#[cfg(target_os = "linux")]
+#[allow(clippy::cast_possible_wrap)]
 const fn libc_o_nofollow() -> i32 {
-    0x20_000
-}
-
-#[cfg(target_os = "macos")]
-const fn libc_o_nofollow() -> i32 {
-    0x100
+    rustix::fs::OFlags::NOFOLLOW.bits() as i32
 }
 
 fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, io::Error> {

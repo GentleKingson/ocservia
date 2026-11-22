@@ -73,6 +73,10 @@ func (s *Server) createCertificate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listNodeCertificates(w http.ResponseWriter, r *http.Request) {
+	if s.certificates == nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service unavailable", "certificate service is unavailable")
+		return
+	}
 	nodeID, err := parseUUIDv7(r.PathValue("node_id"))
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "node_id must be UUIDv7")
