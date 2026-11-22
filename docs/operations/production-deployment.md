@@ -1041,6 +1041,14 @@ expose PostgreSQL, internal Unix sockets, Docker sockets, or host `/proc` and
 After the first Controller is verified, install and enroll your first managed
 node (see [Agent lifecycle](agent-lifecycle.md)).
 
+For parallel API acceptance checks, log in once before starting the workers.
+Save the session cookie in a mode-`0600` temporary file, use it as a read-only
+input to each worker, and remove it when the run ends. Keep using the Controller
+origin for the requests. If the initial login returns HTTP `429`, wait for the
+`Retry-After` delay in seconds, or 60 seconds if the delay is missing or invalid,
+then retry once. If the session expires during the run, end the run and
+re-establish the session before starting a new one.
+
 ### Acceptance boundaries
 
 Across the lifecycle, five acceptance boundaries are tracked with separate

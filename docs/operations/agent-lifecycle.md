@@ -31,6 +31,11 @@ This section covers the standard package-first installation. Use published node 
   the Controller and GitHub Releases. Python uses only its standard library.
 - Host trust for the Controller HTTPS certificate. Install your private CA through
   the operating system trust mechanism when applicable; never disable TLS checks.
+- Use the DNS servers specified by the deployment in the ocserv configuration.
+  Leave `dnsmasq` out of node provisioning. Before removing an existing
+  `dnsmasq` installation, check whether any other service depends on it.
+  With a VPN client connected, resolve a hostname through the configured DNS
+  and confirm the client's public egress matches the intended routing policy.
 
 ### One-token installation
 
@@ -110,7 +115,21 @@ as the hidden prompt. A retry preserves root bootstrap state and the existing
 keys. Only Controller-confirmed active trust, a registered privd key, an online
 session and fresh telemetry produce `ONLINE`.
 
+If host preflight fails, its `check=` field identifies the first failed check.
+For example, `check=occtl.show-users-json` refers to `occtl --json show users`.
+Run `sudo /usr/libexec/ocservia/ocservia-privd --host-preflight` on the node to
+recheck after correcting the reported issue. Then use the same pinned installer
+with `--resume-install` to continue from the protected state.
+
 ### Package verification and staging
+
+For candidate packages delivered over SSH, transfer the exact architecture
+and build to a temporary path on the target. On connection reset or broken
+pipe, remove the partial file before retrying. Retry the transfer at most
+twice, waiting 2 seconds and then 5 seconds. Stop after the final failure or
+any error other than a connection reset or broken pipe. After a successful
+transfer, verify the staged package against the original candidate's artifact
+verification data before handing it to the package manager.
 
 Once its external endpoint is deployed and verified, the operator-hosted thin first-install chain separates each stage (see [Bootstrap launcher hosting](production-deployment.md#bootstrap-launcher-hosting)):
 

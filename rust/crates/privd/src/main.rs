@@ -43,8 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             return Err(invalid("--host-preflight accepts no additional arguments").into());
         }
         let adapter = Adapter::new(FixedResources::default(), Limits::default());
-        if let Err(error) = adapter.host_preflight().await {
-            eprintln!("host preflight failed: {error}");
+        if let Err((check, error)) = adapter.host_preflight().await {
+            eprintln!("host preflight failed: check={check}: {error}");
             eprintln!(
                 "Check the named resource and ocserv/occtl access; correct it deliberately, then rerun. No host state was changed."
             );
