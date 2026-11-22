@@ -228,7 +228,13 @@ async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
     let dir = TempDir::new("preflight");
     let program = dir.exec(
         "snapshot-command",
-        "case \"$1\" in\n--version) echo 'ocserv 1.3.0';;\nshow) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n--json) echo '[]';;\n*) exit 99;;\nesac",
+        r#"case "$*" in
+    --version) echo 'ocserv 1.3.0';;
+    'show ocserv.service '*) printf 'LoadState=loaded\nActiveState=active\nSubState=running\n';;
+    '--json show users') cat "${0%/*}/sessions.json";;
+    '--json show ip bans') echo '[]';;
+    *) exit 99;;
+esac"#,
     );
     let config = dir.join("ocserv.conf");
     std::fs::write(&config, b"tcp-port = 443\n").expect("config");
@@ -253,6 +259,8 @@ async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
     .with_effect_store(dir.join("absent.sqlite3"), dir.join("absent.key"))
     .expect("store");
     let adapter = Adapter::new(resources, Limits::default());
+    let sessions = dir.join("sessions.json");
+    std::fs::write(&sessions, b"[]").expect("valid session output");
     adapter.host_preflight().await.expect("healthy snapshot");
     assert_eq!(std::fs::read(&config).expect("config"), b"tcp-port = 443\n");
     assert_eq!(
@@ -262,10 +270,18 @@ async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
     for absent in ["absent.sqlite3", "absent.key", "absent-key.pem"] {
         assert!(!dir.join(absent).exists());
     }
+    std::fs::write(&sessions, b"invalid JSON").expect("malformed session output");
+    assert!(matches!(
+        adapter.host_preflight().await,
+        Err(("occtl.show-users-json", AdapterError::MalformedOutput))
+    ));
     std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o644)).expect("mode");
     assert!(matches!(
         adapter.host_preflight().await,
-        Err(AdapterError::ResourceMetadata { reason: "mode", .. })
+        Err((
+            "ocpasswd.users",
+            AdapterError::ResourceMetadata { reason: "mode", .. }
+        ))
     ));
 }
 

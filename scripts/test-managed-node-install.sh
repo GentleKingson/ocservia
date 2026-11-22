@@ -215,7 +215,7 @@ fi
 [[ "$*" == --host-preflight ]] || exit 2
 printf '%s\n' "$*" >>"${root}/logs/preflight.log"
 if [[ -s "${root}/preflight-failure" ]]; then
-  echo 'resource=ocpasswd reason=mode actual=0644 expected=0600' >&2
+  cat -- "${root}/preflight-failure" >&2
   exit 1
 fi
 echo 'HOST_PREFLIGHT_OK (read-only)'
@@ -802,9 +802,22 @@ assert_output '^ONLINE$'
 check_native_packages
 
 scenario
-printf 'resource=ocpasswd reason=mode\n' >"${fixture}/preflight-failure"
+printf 'host preflight failed: check=occtl.show-users-json: ocserv output format unsupported\n' >"${fixture}/preflight-failure"
 install_token
 assert_status 1
-assert_log_empty "${agent_log}"
+assert_output 'check=occtl.show-users-json: ocserv output format unsupported'
+assert_log_empty "${agent_log}" "${systemctl_log}"
 as_root test ! -e "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
+assert_log_contains "${curl_log}" '/api/v1/node-bootstrap/config'
+rm -f -- "${fixture}/preflight-failure"
+: >"${curl_log}"
+: >"${dpkg_log}"
+resume_token
+assert_status 0
+assert_output '^ONLINE$'
+assert_output "NODE_ID: ${MOCK_NODE_ID}"
+assert_log_empty "${dpkg_log}"
+if grep -qF '/api/v1/node-bootstrap/config' "${curl_log}"; then
+  die 'resume fetched new bootstrap configuration after preflight failure'
+fi
 echo "Token native installation, protected recovery, package convergence and Controller readiness tests passed"

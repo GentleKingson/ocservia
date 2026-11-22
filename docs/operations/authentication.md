@@ -181,6 +181,13 @@ a Quick host, because Quick reruns accept an already-initialized database.
    release runtime with the same effective exported production settings and
    verified image digests; in Integrated mode, run `compose.sh` as root with
    the Integrated environment exported.
+
+   For candidate deployments, source `scripts/release-common.sh` only in
+   the Bash process that generates the candidate manifest. Run administrator
+   initialization in a separate Bash process and export the image references from
+   the installed `current-release.json` (under `/var/lib/ocservia-controller`
+   by default) before calling Compose. The release helper declares the PostgreSQL
+   and OpenTelemetry image variables read-only in its shell.
 2. Obtain the UUIDv7 of the management workspace. `--bootstrap-local-admin`
    requires an existing workspace, so an authorized database operator must
    provision one first when starting from an empty database. Run the PostgreSQL
@@ -217,7 +224,10 @@ a Quick host, because Quick reruns accept an already-initialized database.
 
    Bootstrap creates the Local administrator identity, its credential,
    `workspace_admins` binding, initialization marker, and audit event in one
-   transaction. The password must meet the policy below.
+   transaction. The password must meet the policy below. If the result is
+   uncertain, check the existing workspace and try the original credential
+   before rerunning bootstrap. Reuse the same workspace and credential on a
+   retry.
 4. After success, remove the temporary host password file according to your
    secret-management procedure and verify administrator login.
 

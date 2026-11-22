@@ -544,15 +544,29 @@ impl Adapter {
     /// This does not initialize stores, clean staging, or mutate ocserv.
     ///
     /// # Errors
-    /// Returns the same bounded resource/parser errors as ordinary snapshots.
-    pub async fn host_preflight(&self) -> Result<(), AdapterError> {
-        self.user_list().await?;
-        self.group_list().await?;
-        self.ocserv_version().await?;
-        self.config_fingerprint().await?;
-        self.service_status().await?;
-        self.session_list().await?;
-        self.ip_ban_list().await?;
+    /// Returns the first failing check's name and its bounded resource or parser error.
+    pub async fn host_preflight(&self) -> Result<(), (&'static str, AdapterError)> {
+        self.user_list()
+            .await
+            .map_err(|error| ("ocpasswd.users", error))?;
+        self.group_list()
+            .await
+            .map_err(|error| ("ocpasswd.groups", error))?;
+        self.ocserv_version()
+            .await
+            .map_err(|error| ("ocserv.version", error))?;
+        self.config_fingerprint()
+            .await
+            .map_err(|error| ("ocserv.config-fingerprint", error))?;
+        self.service_status()
+            .await
+            .map_err(|error| ("systemctl.ocserv-service-status", error))?;
+        self.session_list()
+            .await
+            .map_err(|error| ("occtl.show-users-json", error))?;
+        self.ip_ban_list()
+            .await
+            .map_err(|error| ("occtl.show-ip-bans-json", error))?;
         Ok(())
     }
 
