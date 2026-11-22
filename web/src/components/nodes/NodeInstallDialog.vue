@@ -96,21 +96,19 @@ async function issue(): Promise<void> {
     const expiry = result.expiresAt.getTime();
     if (
       !/^oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(result.token) ||
-      !Number.isFinite(expiry) ||
-      expiry <= Date.now()
+      !Number.isFinite(expiry)
     ) {
       error.value = "installUnknown";
       return;
     }
     token.value = result.token;
     expires.value = result.expiresAt.toISOString();
-    expiryTimer = setTimeout(
-      () => {
-        token.value = "";
-        error.value = "installExpired";
-      },
-      Math.min(expiry - Date.now(), 900_000),
-    );
+    const remaining = expiry - Date.now();
+    const delay = remaining > 0 ? Math.min(remaining, 900_000) : 900_000;
+    expiryTimer = setTimeout(() => {
+      token.value = "";
+      error.value = "installExpired";
+    }, delay);
   } catch (cause) {
     if (!owned()) return;
     error.value =

@@ -443,6 +443,9 @@ func (s *Service) ResumeAgentRollout(ctx context.Context, rolloutID uuid.UUID, a
 	if err != nil {
 		return AgentRollout{}, err
 	}
+	if err := auth.AuthorizeMutationTx(ctx, tx, actorIdentityID, actorSessionID, rollout.WorkspaceID); err != nil {
+		return AgentRollout{}, err
+	}
 	if rollout.State != RolloutStatePaused {
 		return AgentRollout{}, ErrRolloutState
 	}
