@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,8 +105,8 @@ func enrollmentRequestCapabilities(token string, endpoint []byte, capabilities [
 
 func enrollmentSealingKeys() []*agentv1.SealingKeyDescriptorV1 {
 	return []*agentv1.SealingKeyDescriptorV1{
-		{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: "fixture-user-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x11}, 32)},
-		{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "fixture-p12-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x22}, 32)},
+		{Version: 1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: "fixture-user-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x11}, 32)},
+		{Version: 1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "fixture-p12-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x22}, 32)},
 	}
 }
 
@@ -116,22 +115,4 @@ func endpointFixture(seed byte) []byte {
 	publicKey := slices.Clone(privateKey.Public().(ed25519.PublicKey))
 	endpointPrivateKeys.Store(string(publicKey), privateKey)
 	return publicKey
-}
-
-type cancellingRegistrar struct {
-	cancelled context.CancelFunc
-	fired     atomic.Bool
-}
-
-func (r *cancellingRegistrar) RegisterOwnerFence(_ context.Context, _ *agentv1.ConnectionFenceV2) error {
-	if r.fired.CompareAndSwap(false, true) {
-		r.cancelled()
-	}
-	return nil
-}
-
-type recordingRegistrar struct{}
-
-func (r *recordingRegistrar) RegisterOwnerFence(_ context.Context, _ *agentv1.ConnectionFenceV2) error {
-	return nil
 }

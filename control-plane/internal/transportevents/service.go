@@ -65,7 +65,7 @@ type CommandRecoverer interface {
 // exact local session term. Database ownership is rechecked by CommandRecoverer
 // inside the state-changing transaction.
 type RecoveryAuthority interface {
-	OwnsTerm(nodeID, connectionID [16]byte, ownerEpoch int64) bool
+	OwnsTerm(nodeID, connectionID [16]byte, sessionEpoch uint64) bool
 }
 
 const (
@@ -429,12 +429,12 @@ func eventName(value transportv1.TransportEventType) (string, error) {
 
 func connectedOwnerTerm(event *transportv1.TransportEvent) ([16]byte, bool, error) {
 	connection := event.GetConnectionId()
-	epoch := event.GetOwnerEpoch()
+	epoch := event.GetSessionEpoch()
 	if len(connection) == 0 && epoch == 0 {
 		return [16]byte{}, false, nil
 	}
 	if len(connection) != 16 || epoch == 0 || epoch > math.MaxInt64 {
-		return [16]byte{}, false, errors.New("connected owner term must contain a 16-byte connection_id and positive owner_epoch")
+		return [16]byte{}, false, errors.New("connected owner term must contain a 16-byte connection_id and positive session_epoch")
 	}
 	id, err := uuid.FromBytes(connection)
 	if err != nil || id.Version() != 7 {

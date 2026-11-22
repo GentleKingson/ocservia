@@ -19,11 +19,6 @@ type DispatchStatus struct {
 	Envelope                                                     []byte
 }
 
-type DispatchAuthority struct {
-	NodeID, OwnerID, ConnectionID uuid.UUID
-	Incarnation, Epoch            int64
-}
-
 type QueueMetrics struct {
 	Unpublished          int64   `json:"outbox_unpublished_total"`
 	OldestAge            float64 `json:"outbox_oldest_age_seconds"`
@@ -36,7 +31,6 @@ type QueueMetrics struct {
 type DispatchStore interface {
 	DispatchCandidates(context.Context, int, int, time.Time) ([]Dispatch, error)
 	ClaimDispatch(context.Context, Dispatch, uuid.UUID, time.Time, time.Time) (bool, error)
-	GuardDispatchAuthority(context.Context, DispatchAuthority) error
 	LockDispatchOutbox(context.Context, Dispatch) error
 	DispatchStatus(context.Context, Dispatch) (DispatchStatus, error)
 	CompletedDispatch(context.Context, Dispatch) (DispatchStatus, error)

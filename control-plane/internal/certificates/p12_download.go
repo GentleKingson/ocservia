@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -80,16 +79,8 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 	if err != nil {
 		return ArtifactDownload{}, err
 	}
-	var reader io.ReadCloser
-	if err := s.executeArtifactFenced(ctx, eligible.NodeID, id,
-		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-			fetched, err := s.artifacts.FetchArtifact(ctx, grant, binding)
-			if err != nil {
-				return err
-			}
-			reader = fetched
-			return nil
-		}); err != nil {
+	reader, err := s.artifacts.FetchArtifact(ctx, grant)
+	if err != nil {
 		_ = s.AbortArtifact(context.WithoutCancel(ctx), id, grantID)
 		return ArtifactDownload{}, err
 	}
@@ -97,7 +88,7 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 }
 
 func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, actorID, sessionID uuid.UUID, requestID string) error {
-	if grant == nil || actorID == uuid.Nil || sessionID == uuid.Nil || requestID == "" || len(requestID) > 128 || grant.GetVersion() != agentv1.ArtifactGrantVersion_ARTIFACT_GRANT_VERSION_V1 || grant.GetPurpose() != "certificate_p12" || grant.GetCertificateVersion() == 0 || grant.GetAuthorizedSubject() != actorID.String() || !bytes.Equal(grant.GetArtifactId(), id[:]) || !bytes.Equal(grant.GetGrantId(), grantID[:]) || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
+	if grant == nil || actorID == uuid.Nil || sessionID == uuid.Nil || requestID == "" || len(requestID) > 128 || grant.GetVersion() != 1 || grant.GetPurpose() != "certificate_p12" || grant.GetCertificateVersion() == 0 || grant.GetAuthorizedSubject() != actorID.String() || !bytes.Equal(grant.GetArtifactId(), id[:]) || !bytes.Equal(grant.GetGrantId(), grantID[:]) || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
 		return ErrArtifactDenied
 	}
 	nodeID, nodeErr := uuid.FromBytes(grant.GetNodeId())
@@ -139,14 +130,7 @@ func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, g
 	if exactReplay {
 		return nil
 	}
-	// Run the root consume inside the owner fencing interval: the binding is
-	// signed and the mutation RPC completes before the ownership guard is
-	// released. Recovery can later confirm this same root record without
-	// authorizing a new mutation after the grant expires.
-	if err := s.executeArtifactFenced(ctx, nodeID, grantID,
-		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-			return s.artifacts.ConsumeArtifact(ctx, grant, digest, size, binding)
-		}); err != nil {
+	if err := s.artifacts.ConsumeArtifact(ctx, grant, digest, size); err != nil {
 		return err
 	}
 	result, err := s.finalizeArtifactConsumption(ctx, id, grantID)
@@ -242,17 +226,10 @@ type pendingArtifactConsumption struct {
 }
 
 func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pendingArtifactConsumption) error {
-	recoveryNode, nodeErr := uuid.FromBytes(item.grant.GetNodeId())
-	if nodeErr != nil {
+	if _, nodeErr := uuid.FromBytes(item.grant.GetNodeId()); nodeErr != nil {
 		return nil
 	}
-	var consumed bool
-	confirmErr := s.executeArtifactFenced(ctx, recoveryNode, item.grantID,
-		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-			confirmed, err := s.artifacts.ConfirmArtifactConsumed(ctx, item.grant, item.digest, item.size, binding)
-			consumed = confirmed
-			return err
-		})
+	consumed, confirmErr := s.artifacts.ConfirmArtifactConsumed(ctx, item.grant, item.digest, item.size)
 	if confirmErr != nil {
 		// Reconciliation is item-scoped. A disconnected node or restarting
 		// Agent must not turn one durable artifact into a global scheduler
@@ -264,10 +241,7 @@ func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pending
 		return ErrArtifactDenied
 	}
 	if !consumed && grantExpires.AsTime().After(s.now()) {
-		if err := s.executeArtifactFenced(ctx, recoveryNode, item.grantID,
-			func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-				return s.artifacts.ConsumeArtifact(ctx, item.grant, item.digest, item.size, binding)
-			}); err != nil {
+		if err := s.artifacts.ConsumeArtifact(ctx, item.grant, item.digest, item.size); err != nil {
 			return nil
 		}
 		consumed = true

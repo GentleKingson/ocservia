@@ -3,7 +3,6 @@ package telemetry
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -158,13 +157,13 @@ func decodeWire(payload []byte) (Batch, error) {
 	if rawUsers := wire.GetUsers(); len(rawUsers) > 0 {
 		batch.Users = make([]User, 0, len(rawUsers))
 		for _, item := range rawUsers {
-			batch.Users = append(batch.Users, User{Username: item.GetUsername(), Enabled: item.GetEnabled(), Revision: item.GetRevision(), Fingerprint: item.GetFingerprintSha256()})
+			batch.Users = append(batch.Users, User{Username: item.GetUsername(), Enabled: item.GetEnabled(), Revision: item.GetRevision()})
 		}
 	}
 	if rawGroups := wire.GetGroups(); len(rawGroups) > 0 {
 		batch.Groups = make([]Group, 0, len(rawGroups))
 		for _, item := range rawGroups {
-			batch.Groups = append(batch.Groups, Group{Name: item.GetGroupName(), Members: item.GetMembers(), Revision: item.GetRevision(), Fingerprint: item.GetFingerprintSha256()})
+			batch.Groups = append(batch.Groups, Group{Name: item.GetGroupName(), Members: item.GetMembers(), Revision: item.GetRevision()})
 		}
 	}
 	if rawSamples := wire.GetSamples(); len(rawSamples) > 0 {
@@ -295,7 +294,7 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 		}
 		users := make([]telemetrystore.User, 0, len(batch.Users))
 		for _, v := range batch.Users {
-			users = append(users, telemetrystore.User{Username: v.Username, Enabled: v.Enabled, Revision: v.Revision, Fingerprint: v.Fingerprint})
+			users = append(users, telemetrystore.User{Username: v.Username, Enabled: v.Enabled, Revision: v.Revision})
 		}
 		if err := store.ReplaceUsers(ctx, batch.NodeID, snap.ObservedAt, users); err != nil {
 			return false, err
@@ -414,7 +413,7 @@ func validateBatch(batch Batch, now time.Time) error {
 	if len(batch.Users) > 0 {
 		usernames := make(map[string]struct{}, len(batch.Users))
 		for _, user := range batch.Users {
-			if !validObservedName(user.Username) || user.Revision > math.MaxInt64 || len(user.Fingerprint) != sha256.Size {
+			if !validObservedName(user.Username) || user.Revision > math.MaxInt64 {
 				return errors.New("user observation is invalid")
 			}
 			if !insertUnique(usernames, user.Username) {
@@ -427,7 +426,7 @@ func validateBatch(batch Batch, now time.Time) error {
 		groupNames := make(map[string]struct{}, len(batch.Groups))
 		for _, group := range batch.Groups {
 			totalMemberships += len(group.Members)
-			if !validObservedName(group.Name) || group.Revision > math.MaxInt64 || len(group.Fingerprint) != sha256.Size || len(group.Members) > MaxManagedResources || totalMemberships > MaxManagedResources {
+			if !validObservedName(group.Name) || group.Revision > math.MaxInt64 || len(group.Members) > MaxManagedResources || totalMemberships > MaxManagedResources {
 				return errors.New("group observation is invalid")
 			}
 			if !insertUnique(groupNames, group.Name) {

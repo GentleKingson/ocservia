@@ -13,7 +13,6 @@ type Desired struct {
 	NodeID            uuid.UUID
 	Kind, Name        string
 	Version, Revision int64
-	Fingerprint       []byte
 	Members           []string
 	At                time.Time
 }
@@ -28,7 +27,6 @@ type Resource struct {
 	DesiredEnabled, ObservedEnabled                   *bool
 	DesiredMembers, ObservedMembers                   []string
 	DesiredVersion, DesiredRevision, ObservedRevision *int64
-	DesiredFingerprint, ObservedFingerprint           []byte
 	OperationID                                       *uuid.UUID
 	OperationState, CommandState, PayloadType         *string
 	SafeRejected                                      *bool

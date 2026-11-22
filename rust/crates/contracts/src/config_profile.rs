@@ -3,11 +3,14 @@
 use crate::generated::ocserv::platform::agent::v1::{
     CompleteConfigCandidate, NodeLocalTlsReference, complete_config_directive::Value,
 };
+use ocservia_canonical_cbor::{Bytes, marshal};
+use serde::Serialize;
 use std::net::Ipv4Addr;
 
 pub const PLAN_CAPABILITY: &str = "ocserv.config.complete.plan";
 pub const APPLY_CAPABILITY: &str = "ocserv.config.complete.apply";
 pub const PROVIDER: &str = "node-local-tls-v1";
+const CANONICAL_DOMAIN: &str = "ocservia.complete-config.cbor.v1\0";
 const REQUIRED: [&str; 12] = [
     "auth",
     "cookie-timeout",
@@ -25,6 +28,30 @@ const REQUIRED: [&str; 12] = [
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidProfile;
+
+#[derive(Serialize)]
+struct CborTlsRef<'a> {
+    secret_ref_id: Bytes<'a>,
+    version: &'a str,
+    certificate_sha256: Bytes<'a>,
+    spki_sha256: Bytes<'a>,
+    ca_sha256: Bytes<'a>,
+}
+
+#[derive(Serialize)]
+struct CborDirective<'a> {
+    name: &'a str,
+    kind: u32,
+    literal: &'a str,
+    tls: Option<CborTlsRef<'a>>,
+}
+
+#[derive(Serialize)]
+struct CborCandidate<'a> {
+    node_id: Bytes<'a>,
+    expected_revision: u64,
+    directives: Vec<CborDirective<'a>>,
+}
 
 fn label(value: &str, max: usize) -> bool {
     !value.is_empty()
@@ -78,17 +105,8 @@ fn literal(name: &str, value: &str) -> bool {
     }
 }
 
-fn append_length(out: &mut Vec<u8>, value: &[u8]) -> Result<(), InvalidProfile> {
-    out.extend_from_slice(
-        &u32::try_from(value.len())
-            .map_err(|_| InvalidProfile)?
-            .to_be_bytes(),
-    );
-    out.extend_from_slice(value);
-    Ok(())
-}
-
-/// Returns the exact Go/Rust canonical transcript, with all finite-profile checks.
+/// Returns the exact Go/Rust RFC 8949 Core Deterministic CBOR transcript,
+/// with all finite-profile checks.
 ///
 /// # Errors
 /// Rejects missing, duplicate, unsorted or unsafe directives and unpinned TLS.
@@ -100,14 +118,7 @@ pub fn canonical(candidate: &CompleteConfigCandidate) -> Result<Vec<u8>, Invalid
     {
         return Err(InvalidProfile);
     }
-    let mut out = b"ocservia.complete-config.v1\0".to_vec();
-    out.extend_from_slice(&candidate.node_id);
-    out.extend_from_slice(&candidate.expected_revision.to_be_bytes());
-    out.extend_from_slice(
-        &u32::try_from(candidate.directives.len())
-            .map_err(|_| InvalidProfile)?
-            .to_be_bytes(),
-    );
+    let mut directives = Vec::with_capacity(candidate.directives.len());
     let mut previous = "";
     let mut server_ref: Option<&NodeLocalTlsReference> = None;
     let mut max_clients = 0;
@@ -117,20 +128,23 @@ pub fn canonical(candidate: &CompleteConfigCandidate) -> Result<Vec<u8>, Invalid
             return Err(InvalidProfile);
         }
         previous = &directive.name;
-        append_length(&mut out, directive.name.as_bytes())?;
         match directive.value.as_ref().ok_or(InvalidProfile)? {
             Value::Literal(value) => {
                 if !literal(&directive.name, value) {
                     return Err(InvalidProfile);
                 }
-                out.push(0);
-                append_length(&mut out, value.as_bytes())?;
                 if directive.name == "max-clients" {
                     max_clients = value.parse::<u32>().map_err(|_| InvalidProfile)?;
                 }
                 if directive.name == "max-same-clients" {
                     max_same = value.parse::<u32>().map_err(|_| InvalidProfile)?;
                 }
+                directives.push(CborDirective {
+                    name: &directive.name,
+                    kind: 0,
+                    literal: value,
+                    tls: None,
+                });
             }
             Value::Tls(reference) => {
                 if !matches!(
@@ -148,12 +162,18 @@ pub fn canonical(candidate: &CompleteConfigCandidate) -> Result<Vec<u8>, Invalid
                     return Err(InvalidProfile);
                 }
                 server_ref = Some(reference);
-                out.push(1);
-                out.extend_from_slice(&reference.secret_ref_id);
-                append_length(&mut out, reference.version.as_bytes())?;
-                out.extend_from_slice(&reference.certificate_sha256);
-                out.extend_from_slice(&reference.spki_sha256);
-                append_length(&mut out, &reference.ca_sha256)?;
+                directives.push(CborDirective {
+                    name: &directive.name,
+                    kind: 1,
+                    literal: "",
+                    tls: Some(CborTlsRef {
+                        secret_ref_id: Bytes(&reference.secret_ref_id),
+                        version: &reference.version,
+                        certificate_sha256: Bytes(&reference.certificate_sha256),
+                        spki_sha256: Bytes(&reference.spki_sha256),
+                        ca_sha256: Bytes(&reference.ca_sha256),
+                    }),
+                });
             }
         }
     }
@@ -164,5 +184,13 @@ pub fn canonical(candidate: &CompleteConfigCandidate) -> Result<Vec<u8>, Invalid
     {
         return Err(InvalidProfile);
     }
-    Ok(out)
+    marshal(
+        CANONICAL_DOMAIN,
+        &CborCandidate {
+            node_id: Bytes(&candidate.node_id),
+            expected_revision: candidate.expected_revision,
+            directives,
+        },
+    )
+    .map_err(|_| InvalidProfile)
 }

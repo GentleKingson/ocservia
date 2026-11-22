@@ -102,15 +102,15 @@ func fullStrictWireCommands(secret, p12Secret *agentv1.SealedSecretV1) map[strin
 		"session_disconnect":    {Payload: &agentv1.CommandEnvelope_SessionDisconnect{SessionDisconnect: &agentv1.SessionDisconnect{SessionId: "session", BootId: "boot"}}},
 		"session_terminate":     {Payload: &agentv1.CommandEnvelope_SessionTerminate{SessionTerminate: &agentv1.SessionTerminate{SessionId: "session", BootId: "boot"}}},
 		"ip_ban_remove":         {Payload: &agentv1.CommandEnvelope_IpBanRemove{IpBanRemove: &agentv1.IpBanRemove{Ip: "192.0.2.1"}}},
-		"user_create":           {Payload: &agentv1.CommandEnvelope_UserCreate{UserCreate: &agentv1.UserCreate{Username: "alice", SealedPassword: []byte("legacy"), SecretKeyId: "legacy-key", DesiredRevision: 42, SealedPasswordV1: secret}}},
+		"user_create":           {Payload: &agentv1.CommandEnvelope_UserCreate{UserCreate: &agentv1.UserCreate{Username: "alice", DesiredRevision: 42, SealedPasswordV1: secret}}},
 		"user_disable":          {Payload: &agentv1.CommandEnvelope_UserDisable{UserDisable: &agentv1.UserDisable{Username: "alice", DesiredRevision: 42}}},
 		"user_enable":           {Payload: &agentv1.CommandEnvelope_UserEnable{UserEnable: &agentv1.UserEnable{Username: "alice", DesiredRevision: 42}}},
-		"password_rotate":       {Payload: &agentv1.CommandEnvelope_UserPasswordRotate{UserPasswordRotate: &agentv1.UserPasswordRotate{Username: "alice", SealedPassword: []byte("legacy"), SecretKeyId: "legacy-key", DesiredRevision: 42, SealedPasswordV1: secret}}},
+		"password_rotate":       {Payload: &agentv1.CommandEnvelope_UserPasswordRotate{UserPasswordRotate: &agentv1.UserPasswordRotate{Username: "alice", DesiredRevision: 42, SealedPasswordV1: secret}}},
 		"group_apply":           {Payload: &agentv1.CommandEnvelope_GroupApply{GroupApply: &agentv1.GroupApply{GroupName: "admins", Members: []string{"alice", "bob"}, DesiredRevision: 42}}},
 		"config_plan":           {Payload: &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{Candidate: []byte("config"), CandidateHash: []byte("hash"), ExpectedRevision: 42}}},
 		"config_apply":          {Payload: &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{CandidateHash: []byte("hash"), Candidate: []byte("config"), ExpectedCurrentHash: []byte("current"), DesiredRevision: 42}}},
 		"certificate_csr":       {Payload: &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: []byte("certificate"), CommonName: "vpn.example.test", DnsNames: []string{"vpn.example.test", "alt.example.test"}, KeyBits: 3072}}},
-		"certificate_p12":       {Payload: &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: []byte("certificate"), CertificateChainPem: []byte("chain"), SealedPassword: []byte("legacy"), SecretKeyId: "legacy-key", ArtifactId: []byte("artifact"), SealedPasswordV1: p12Secret, CertificateVersion: 42, ArtifactExpiresAt: &timestamppb.Timestamp{Seconds: 1700000060, Nanos: 123}}}},
+		"certificate_p12":       {Payload: &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: []byte("certificate"), CertificateChainPem: []byte("chain"), ArtifactId: []byte("artifact"), SealedPasswordV1: p12Secret, CertificateVersion: 42, ArtifactExpiresAt: &timestamppb.Timestamp{Seconds: 1700000060, Nanos: 123}}}},
 		"certificate_revoke":    {Payload: &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: []byte("certificate"), Reason: "rotation", CertificateVersion: 42}}},
 		"agent_upgrade":         {Payload: &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: &agentv1.AgentUpgrade{TargetVersion: "1.2.3", PackageSha256: []byte("package-hash"), Architecture: "arm64"}}},
 		"service_reload":        {Payload: &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}},
@@ -136,20 +136,7 @@ func fullStrictWireCommands(secret, p12Secret *agentv1.SealedSecretV1) map[strin
 	command.OperationId = []byte("operation")
 	command.Action = "synthetic.echo"
 	command.RequiredCapability = "synthetic.v1"
-	command.ApprovalId = []byte("approval")
-	command.ApprovalRequestSha256 = []byte("approval-hash")
 	command.Authorization = &agentv1.CommandAuthorizationProof{Version: 1, KeyId: "auth-key", Signature: []byte("auth-signature")}
-	command.ConnectionFence = &agentv1.ConnectionFenceV2{
-		SignatureVersion: 1, KeyId: "fence-key", FenceId: []byte("fence"), NodeId: []byte("node"), EndpointId: []byte("endpoint"), OwnerInstanceId: []byte("owner"),
-		OwnerIncarnation: 11, OwnerEpoch: 12, ConnectionId: []byte("connection"), AuthorizationRevision: 13,
-		Capabilities: []string{"ocserv.fencing.v2", "synthetic.v1"}, LeaseUntil: &timestamppb.Timestamp{Seconds: 1700000030, Nanos: 789},
-		IssuedAt: command.IssuedAt, ExpiresAt: command.ExpiresAt, Signature: []byte("fence-signature"),
-	}
-	command.FenceBinding = &agentv1.FenceBindingV2{
-		SignatureVersion: 1, KeyId: "binding-key", OperationKind: 1, OperationId: []byte("operation"), FenceId: []byte("fence"), NodeId: []byte("node"), EndpointId: []byte("endpoint"), OwnerInstanceId: []byte("owner"),
-		OwnerIncarnation: 11, OwnerEpoch: 12, ConnectionId: []byte("connection"), AuthorizationRevision: 13,
-		Capability: "synthetic.v1", IssuedAt: command.IssuedAt, ExpiresAt: command.ExpiresAt, Signature: []byte("binding-signature"),
-	}
 	return commands
 }
 

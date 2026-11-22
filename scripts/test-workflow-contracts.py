@@ -137,8 +137,6 @@ def check_specific_contracts(errors):
     products_text = (ROOT / '.github/workflows/release-products.yml').read_text(encoding='utf-8')
     if "hashFiles('rust/Cargo.lock')" not in products_text:
         errors.append('release-products.yml: native-packages setup-tools must pass a rust/Cargo.lock key-suffix')
-    if "'rust/vendor/**'" not in products_text:
-        errors.append('release-products.yml: agent-target-cache key must include rust/vendor/**')
     if "github.event_name == 'push' && github.ref_name" in products_text:
         errors.append('release-products.yml: reusable workflow must not couple to caller github.event_name/ref_name')
 

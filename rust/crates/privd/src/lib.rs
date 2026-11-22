@@ -22,7 +22,7 @@ use ocservia_agent_protocol::{
 use ocservia_command_authorization::{CommandAuthorizationV1, ControllerCommandKeyring};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, CommandEnvelope,
-    PrivdReceiptVersion, command_envelope,
+    command_envelope,
 };
 use ocservia_ocserv_adapter::{Adapter, AdapterError, AuthorizedEffectDecision};
 use ocservia_privd_attestation::{key_id, sign_upgrade_result_with_key_id};
@@ -42,8 +42,6 @@ use self::validation::{ValidatedRequest, validate_request};
 
 const MAX_CONCURRENT_CLIENTS: usize = 4;
 const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(30);
-/// Capability every Controller artifact fence binding names (same as the Agent).
-const CONNECTION_FENCING_CAPABILITY: &str = "ocserv.fencing.v2";
 
 /// Privd server configuration.
 #[derive(Clone)]
@@ -283,11 +281,11 @@ async fn dispatch_attested(
                 Err(_) => deadline_error(),
             }
         }
-        Ok((deadline, ValidatedRequest::ArtifactRead(claims, offset, owner_epoch))) => {
+        Ok((deadline, ValidatedRequest::ArtifactRead(claims, session_epoch))) => {
             match tokio::time::timeout(deadline, async {
-                let identity = artifact_identity(&claims, node_id, endpoint_id, owner_epoch);
+                let identity = artifact_identity(&claims, node_id, endpoint_id, session_epoch);
                 adapter.accept_owner_fence(identity.owner_fence)?;
-                adapter.artifact_read(identity, offset).await
+                adapter.artifact_read(identity).await
             })
             .await
             {
@@ -465,7 +463,7 @@ fn read_attested_upgrade_results(
             .map_err(|_| UpgradeStoreError::Unsafe("attestation time overflows milliseconds"))?;
             let proof = sign_upgrade_result_with_key_id(
                 AgentUpgradeResultProof {
-                    version: PrivdReceiptVersion::V1.into(),
+                    version: 1,
                     node_id: node_id.to_vec(),
                     privd_attestation_key_id: attestation_key_id.to_owned(),
                     operation_id: result.operation_id.as_bytes().to_vec(),
@@ -517,12 +515,7 @@ async fn execute_command(
     let binding = effect_binding(command, claims);
     if let Some(binding) = binding.as_ref() {
         let identity = authorized_effect(command, claims, binding);
-        // Legacy recovery grants may have renewed an already expired deadline.
-        if identity.retry_if_absent
-            && (fixed_host_effect(command)
-                || command.protocol_version
-                    == ocservia_command_authorization::LEGACY_COMMAND_PROTOCOL_VERSION)
-        {
+        if identity.retry_if_absent && fixed_host_effect(command) {
             return replay_only_response(adapter, identity, owner_fence);
         }
         match adapter.prepare_authorized_effect(identity, owner_fence) {
@@ -736,27 +729,27 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        Some(command_envelope::Payload::UserCreate(payload)) => (
-            "user_create",
-            adapter
-                .user_create(
-                    &payload.username,
-                    &payload
-                        .sealed_password_v1
-                        .as_ref()
-                        .expect("validated secret")
-                        .key_id,
-                    &payload
-                        .sealed_password_v1
-                        .as_ref()
-                        .expect("validated secret")
-                        .ciphertext,
-                    payload.desired_revision,
-                    effect,
-                )
-                .await
-                .map(privd_response::Result::Mutation),
-        ),
+        Some(command_envelope::Payload::UserCreate(payload)) => {
+            let Some(secret) = payload.sealed_password_v1.as_ref() else {
+                return (
+                    "user_create",
+                    Err(ocservia_ocserv_adapter::AdapterError::InvalidRequest),
+                );
+            };
+            (
+                "user_create",
+                adapter
+                    .user_create(
+                        &payload.username,
+                        &secret.key_id,
+                        &secret.ciphertext,
+                        payload.desired_revision,
+                        effect,
+                    )
+                    .await
+                    .map(privd_response::Result::Mutation),
+            )
+        }
         Some(command_envelope::Payload::UserDisable(payload)) => (
             "user_disable",
             adapter
@@ -771,27 +764,27 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        Some(command_envelope::Payload::UserPasswordRotate(payload)) => (
-            "user_password_rotate",
-            adapter
-                .user_password_rotate(
-                    &payload.username,
-                    &payload
-                        .sealed_password_v1
-                        .as_ref()
-                        .expect("validated secret")
-                        .key_id,
-                    &payload
-                        .sealed_password_v1
-                        .as_ref()
-                        .expect("validated secret")
-                        .ciphertext,
-                    payload.desired_revision,
-                    effect,
-                )
-                .await
-                .map(privd_response::Result::Mutation),
-        ),
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
+            let Some(secret) = payload.sealed_password_v1.as_ref() else {
+                return (
+                    "user_password_rotate",
+                    Err(ocservia_ocserv_adapter::AdapterError::InvalidRequest),
+                );
+            };
+            (
+                "user_password_rotate",
+                adapter
+                    .user_password_rotate(
+                        &payload.username,
+                        &secret.key_id,
+                        &secret.ciphertext,
+                        payload.desired_revision,
+                        effect,
+                    )
+                    .await
+                    .map(privd_response::Result::Mutation),
+            )
+        }
         Some(command_envelope::Payload::GroupApply(payload)) => (
             "group_apply",
             adapter
@@ -837,28 +830,32 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::CertificateRevoke),
         ),
-        Some(command_envelope::Payload::CertificateP12(payload)) => (
-            "certificate_p12",
-            adapter
-                .certificate_p12(
-                    &payload.certificate_id,
-                    &payload.artifact_id,
-                    &payload.certificate_chain_pem,
-                    payload
-                        .sealed_password_v1
-                        .as_ref()
-                        .expect("validated secret"),
-                    payload.certificate_version,
-                    &claims.operation_id,
-                    payload
-                        .artifact_expires_at
-                        .as_ref()
-                        .expect("validated expiry")
-                        .seconds,
-                )
-                .await
-                .map(privd_response::Result::CertificateP12),
-        ),
+        Some(command_envelope::Payload::CertificateP12(payload)) => {
+            let (Some(secret), Some(expires_at)) = (
+                payload.sealed_password_v1.as_ref(),
+                payload.artifact_expires_at.as_ref(),
+            ) else {
+                return (
+                    "certificate_p12",
+                    Err(ocservia_ocserv_adapter::AdapterError::InvalidRequest),
+                );
+            };
+            (
+                "certificate_p12",
+                adapter
+                    .certificate_p12(
+                        &payload.certificate_id,
+                        &payload.artifact_id,
+                        &payload.certificate_chain_pem,
+                        secret,
+                        payload.certificate_version,
+                        &claims.operation_id,
+                        expires_at.seconds,
+                    )
+                    .await
+                    .map(privd_response::Result::CertificateP12),
+            )
+        }
         // AgentUpgrade payloads never reach this executor: privd intercepts
         // them in `execute_command` and hands them to the durable scheduler,
         // because the upgrade must survive the Agent/privd restart it causes.

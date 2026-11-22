@@ -99,7 +99,7 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 		}
 	}
 	operationService.EnableReleaseCatalog(releaseCatalog)
-	eventService, fenceExecutor, closeWorkerTransport, err := startWorker(life, cfg, build, backend, commandSigner, operationService, logger)
+	eventService, closeWorkerTransport, err := startWorker(life, cfg, build, backend, commandSigner, operationService, logger)
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,6 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 	} else {
 		certificateService = certificates.NewBackend(backend, operationService, nil, nil, nil, nil)
 	}
-	certificateService.EnableOwnerFencing(fenceExecutor)
 
 	history, err := historyretention.New(backend, cfg.HistoryRetention)
 	if err != nil {
@@ -163,7 +162,7 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 		if publicKeySigner != nil {
 			modules.Enrollment.EnableUserPasswordPublicKeys(publicKeySigner)
 		}
-		modules.Transport, modules.OwnerFencing = controlTransport, fenceExecutor
+		modules.Transport = controlTransport
 	}
 	server, err := newHTTPServer(life, cfg, build, backend, auditManager, logger, modules)
 	if err != nil {

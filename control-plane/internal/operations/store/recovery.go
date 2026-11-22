@@ -7,11 +7,6 @@ import (
 	"github.com/google/uuid"
 )
 
-type RecoveryAuthority struct {
-	OwnerID     uuid.UUID
-	Incarnation int64
-}
-
 type AmbiguousDispatch struct {
 	OperationID uuid.UUID
 	Envelope    []byte
@@ -24,7 +19,7 @@ type RecoveryProjection struct {
 }
 
 type RecoveryStore interface {
-	ReconnectAuthority(context.Context, uuid.UUID, uuid.UUID, int64) (RecoveryAuthority, error)
+	ReconnectAuthority(context.Context, uuid.UUID, uuid.UUID, int64) error
 	AmbiguousDispatches(context.Context, uuid.UUID, int) ([]uuid.UUID, error)
 	LockAmbiguousDispatch(context.Context, uuid.UUID, uuid.UUID) (AmbiguousDispatch, error)
 	UpgradeSchedulingAcked(context.Context, uuid.UUID) (bool, error)

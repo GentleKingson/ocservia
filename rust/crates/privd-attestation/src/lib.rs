@@ -1,4 +1,4 @@
-//! Canonical root-privilege result receipts independent of Protobuf encoding.
+//! Canonical root-privilege result receipts encoded with RFC 8949 Core Deterministic CBOR.
 
 #![forbid(unsafe_code)]
 
@@ -9,20 +9,141 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as
 use std::path::Path;
 
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
+use ocservia_canonical_cbor::Bytes;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgradeOutcomeState, AgentUpgradeResultProof, CertificateCsr, CommandResultState,
-    PrivdAttestationRegistrationV1, PrivdCertificateReceiptBindingV1, PrivdReceiptVersion,
-    PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind, PrivilegedResultProof,
-    SemanticPayloadHashVersion,
+    AgentUpgradeOutcomeState, AgentUpgradeResultProof, AgentUpgradeScheduledResult,
+    CertificateArtifactResult, CertificateCsrResult, CertificateRevokeResult, CommandResultState,
+    ConfigApplyResult, ConfigPlanResult, PrivdAttestationRegistrationV1,
+    PrivdCertificateReceiptBindingV1, PrivdResultReceiptV1, PrivilegedCommandKind,
+    PrivilegedResultKind, PrivilegedResultProof, SemanticPayloadHashVersion,
 };
+use prost::Message as _;
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
-const RECEIPT_DOMAIN: &[u8] = b"ocservia/privd-result-receipt/v1\0";
-const REGISTRATION_DOMAIN: &[u8] = b"ocservia/privd-attestation-registration/v1\0";
-const UPGRADE_RESULT_DOMAIN: &[u8] = b"ocservia/privd-upgrade-result/v1\0";
+const RECEIPT_DOMAIN: &str = "ocservia/privd-result-receipt/cbor.v1\0";
+const RESULT_PAYLOAD_DOMAIN: &str = "ocservia/privd-result-payload/cbor.v1\0";
+const REGISTRATION_DOMAIN: &str = "ocservia/privd-attestation-registration/cbor.v1\0";
+const UPGRADE_RESULT_DOMAIN: &str = "ocservia/privd-upgrade-result/cbor.v1\0";
 const KEY_ID_PREFIX: &str = "ed25519-sha256:";
 const MAX_CANONICAL_BYTES: usize = 2048;
+const MAX_ERROR_CODE_BYTES: usize = 128;
 const PRIVATE_KEY_BYTES: usize = 32;
+
+#[derive(Serialize)]
+struct CborCertificateBinding<'a> {
+    certificate_id: Bytes<'a>,
+    csr_der_sha256: Bytes<'a>,
+    public_key_sha256: Bytes<'a>,
+}
+
+#[derive(Serialize)]
+struct CborReceiptV1<'a> {
+    receipt_version: u32,
+    node_id: Bytes<'a>,
+    privd_attestation_key_id: &'a str,
+    command_id: Bytes<'a>,
+    operation_id: Bytes<'a>,
+    idempotency_key: Bytes<'a>,
+    semantic_payload_hash_version: u32,
+    semantic_payload_sha256: Bytes<'a>,
+    command_kind: u32,
+    result_kind: u32,
+    terminal_state: u32,
+    result_cbor_sha256: Bytes<'a>,
+    error_code: &'a str,
+    effect_sequence: u64,
+    accepted_at_seconds: i64,
+    accepted_at_nanos: u32,
+    completed_at_seconds: i64,
+    completed_at_nanos: u32,
+    replayed: bool,
+    certificate: Option<CborCertificateBinding<'a>>,
+}
+
+#[derive(Serialize)]
+struct CborRegistrationV1<'a> {
+    version: u32,
+    node_id: Bytes<'a>,
+    privd_attestation_key_id: &'a str,
+    public_key: Bytes<'a>,
+    controller_nonce: Bytes<'a>,
+    credential_context_sha256: Bytes<'a>,
+}
+
+#[derive(Serialize)]
+struct CborUpgradeResultProofV1<'a> {
+    version: u32,
+    node_id: Bytes<'a>,
+    privd_attestation_key_id: &'a str,
+    operation_id: Bytes<'a>,
+    target_version: &'a str,
+    package_sha256: Bytes<'a>,
+    state: u32,
+    completed_unix_ms: u64,
+    result_sha256: Bytes<'a>,
+    attested_unix_ms: u64,
+}
+
+#[derive(Serialize)]
+struct CborResultPayloadEnvelope<P: Serialize> {
+    result_kind: u32,
+    payload: P,
+}
+
+#[derive(Serialize)]
+struct CborEmptyResult {}
+
+#[derive(Serialize)]
+struct CborConfigPlanResult<'a> {
+    candidate_hash: Bytes<'a>,
+    diff_redacted: &'a str,
+    warnings: &'a [String],
+    current_unchanged: bool,
+    staging_cleaned: bool,
+    current_hash: Bytes<'a>,
+    materialized_hash: Bytes<'a>,
+}
+
+#[derive(Serialize)]
+struct CborConfigApplyResult<'a> {
+    candidate_hash: Bytes<'a>,
+    previous_hash: Bytes<'a>,
+    observed_hash: Bytes<'a>,
+    applied_revision: u64,
+    healthy: bool,
+    rolled_back: bool,
+    failed_critical: bool,
+    failure_code: &'a str,
+}
+
+#[derive(Serialize)]
+struct CborCertificateCsrResult<'a> {
+    certificate_id: Bytes<'a>,
+    csr_der: Bytes<'a>,
+    public_key_sha256: Bytes<'a>,
+}
+
+#[derive(Serialize)]
+struct CborCertificateArtifactResult<'a> {
+    certificate_id: Bytes<'a>,
+    artifact_id: Bytes<'a>,
+    artifact_sha256: Bytes<'a>,
+    artifact_size: u64,
+}
+
+#[derive(Serialize)]
+struct CborCertificateRevokeResult<'a> {
+    certificate_id: Bytes<'a>,
+    key_removed: bool,
+}
+
+#[derive(Serialize)]
+struct CborAgentUpgradeScheduledResult<'a> {
+    operation_id: Bytes<'a>,
+    target_version: &'a str,
+    package_sha256: Bytes<'a>,
+}
 
 /// Loads an existing strict owner-only key, or atomically creates one.
 ///
@@ -152,6 +273,120 @@ pub fn key_id(key: &VerifyingKey) -> String {
     )
 }
 
+fn hash_result_envelope<P: Serialize>(
+    result_kind: u32,
+    payload: P,
+) -> Result<[u8; 32], ReceiptError> {
+    ocservia_canonical_cbor::hash(
+        RESULT_PAYLOAD_DOMAIN,
+        &CborResultPayloadEnvelope {
+            result_kind,
+            payload,
+        },
+    )
+    .map_err(|_| ReceiptError::Malformed)
+}
+
+/// Computes the canonical CBOR SHA-256 over a structured command result payload,
+/// independent of Protobuf wire serialization.
+///
+/// # Errors
+///
+/// Returns [`ReceiptError::Malformed`] when the result kind is unsupported,
+/// empty kinds carry unexpected bytes, or the Protobuf payload fails to decode.
+pub fn result_payload_cbor_hash(
+    kind: PrivilegedResultKind,
+    raw: &[u8],
+) -> Result<[u8; 32], ReceiptError> {
+    let result_kind = u32::try_from(i32::from(kind)).map_err(|_| ReceiptError::Malformed)?;
+    match kind {
+        PrivilegedResultKind::Mutation | PrivilegedResultKind::Error => {
+            if !raw.is_empty() {
+                return Err(ReceiptError::Malformed);
+            }
+            hash_result_envelope(result_kind, CborEmptyResult {})
+        }
+        PrivilegedResultKind::ConfigPlan => {
+            let msg = ConfigPlanResult::decode(raw).map_err(|_| ReceiptError::Malformed)?;
+            hash_result_envelope(
+                result_kind,
+                CborConfigPlanResult {
+                    candidate_hash: Bytes(&msg.candidate_hash),
+                    diff_redacted: &msg.diff_redacted,
+                    warnings: &msg.warnings,
+                    current_unchanged: msg.current_unchanged,
+                    staging_cleaned: msg.staging_cleaned,
+                    current_hash: Bytes(&msg.current_hash),
+                    materialized_hash: Bytes(&msg.materialized_hash),
+                },
+            )
+        }
+        PrivilegedResultKind::ConfigApply => {
+            let msg = ConfigApplyResult::decode(raw).map_err(|_| ReceiptError::Malformed)?;
+            hash_result_envelope(
+                result_kind,
+                CborConfigApplyResult {
+                    candidate_hash: Bytes(&msg.candidate_hash),
+                    previous_hash: Bytes(&msg.previous_hash),
+                    observed_hash: Bytes(&msg.observed_hash),
+                    applied_revision: msg.applied_revision,
+                    healthy: msg.healthy,
+                    rolled_back: msg.rolled_back,
+                    failed_critical: msg.failed_critical,
+                    failure_code: &msg.failure_code,
+                },
+            )
+        }
+        PrivilegedResultKind::CertificateCsr => {
+            let msg = CertificateCsrResult::decode(raw).map_err(|_| ReceiptError::Malformed)?;
+            hash_result_envelope(
+                result_kind,
+                CborCertificateCsrResult {
+                    certificate_id: Bytes(&msg.certificate_id),
+                    csr_der: Bytes(&msg.csr_der),
+                    public_key_sha256: Bytes(&msg.public_key_sha256),
+                },
+            )
+        }
+        PrivilegedResultKind::CertificateP12 => {
+            let msg =
+                CertificateArtifactResult::decode(raw).map_err(|_| ReceiptError::Malformed)?;
+            hash_result_envelope(
+                result_kind,
+                CborCertificateArtifactResult {
+                    certificate_id: Bytes(&msg.certificate_id),
+                    artifact_id: Bytes(&msg.artifact_id),
+                    artifact_sha256: Bytes(&msg.artifact_sha256),
+                    artifact_size: msg.artifact_size,
+                },
+            )
+        }
+        PrivilegedResultKind::CertificateRevoke => {
+            let msg = CertificateRevokeResult::decode(raw).map_err(|_| ReceiptError::Malformed)?;
+            hash_result_envelope(
+                result_kind,
+                CborCertificateRevokeResult {
+                    certificate_id: Bytes(&msg.certificate_id),
+                    key_removed: msg.key_removed,
+                },
+            )
+        }
+        PrivilegedResultKind::AgentUpgradeScheduled => {
+            let msg =
+                AgentUpgradeScheduledResult::decode(raw).map_err(|_| ReceiptError::Malformed)?;
+            hash_result_envelope(
+                result_kind,
+                CborAgentUpgradeScheduledResult {
+                    operation_id: Bytes(&msg.operation_id),
+                    target_version: &msg.target_version,
+                    package_sha256: Bytes(&msg.package_sha256),
+                },
+            )
+        }
+        PrivilegedResultKind::Unspecified => Err(ReceiptError::Malformed),
+    }
+}
+
 /// Signs a validated canonical receipt with the matching node key.
 ///
 /// # Errors
@@ -181,7 +416,7 @@ pub fn sign_receipt_with_key_id(
         return Err(ReceiptError::Malformed);
     }
     Ok(PrivilegedResultProof {
-        version: PrivdReceiptVersion::V1.into(),
+        version: 1,
         receipt_v1: Some(receipt),
         signature: key.sign(&canonical).to_bytes().to_vec(),
     })
@@ -196,9 +431,7 @@ pub fn verify_receipt(
     proof: &PrivilegedResultProof,
     key: &VerifyingKey,
 ) -> Result<PrivdResultReceiptV1, ReceiptError> {
-    if PrivdReceiptVersion::try_from(proof.version).unwrap_or(PrivdReceiptVersion::Unspecified)
-        != PrivdReceiptVersion::V1
-    {
+    if proof.version != 1 {
         return Err(ReceiptError::UnsupportedVersion);
     }
     let receipt = proof.receipt_v1.as_ref().ok_or(ReceiptError::Missing)?;
@@ -213,8 +446,6 @@ pub fn verify_receipt(
 }
 
 /// Signs a root-owned durable upgrade outcome after validating every claim.
-/// The signature excludes its own field and is independent of Protobuf
-/// encoding, so an Agent can only relay the resulting evidence.
 ///
 /// # Errors
 ///
@@ -256,9 +487,7 @@ pub fn verify_upgrade_result(
     proof: &AgentUpgradeResultProof,
     key: &VerifyingKey,
 ) -> Result<AgentUpgradeResultProof, ReceiptError> {
-    if PrivdReceiptVersion::try_from(proof.version).unwrap_or(PrivdReceiptVersion::Unspecified)
-        != PrivdReceiptVersion::V1
-    {
+    if proof.version != 1 {
         return Err(ReceiptError::UnsupportedVersion);
     }
     if proof.privd_attestation_key_id != key_id(key) {
@@ -271,7 +500,7 @@ pub fn verify_upgrade_result(
     Ok(proof.clone())
 }
 
-/// Encodes a V1 durable upgrade outcome independently of Protobuf field order.
+/// Encodes a V1 durable upgrade outcome with RFC 8949 Core Deterministic CBOR.
 ///
 /// # Errors
 ///
@@ -280,26 +509,23 @@ pub fn canonical_upgrade_result_v1(
     proof: &AgentUpgradeResultProof,
 ) -> Result<Vec<u8>, ReceiptError> {
     validate_upgrade_result(proof)?;
-    let mut encoded = Vec::with_capacity(256);
-    encoded.extend_from_slice(UPGRADE_RESULT_DOMAIN);
-    encoded.extend_from_slice(
-        &u32::try_from(proof.version)
-            .map_err(|_| ReceiptError::Malformed)?
-            .to_be_bytes(),
-    );
-    append_bytes(&mut encoded, &proof.node_id)?;
-    append_string(&mut encoded, &proof.privd_attestation_key_id)?;
-    append_bytes(&mut encoded, &proof.operation_id)?;
-    append_string(&mut encoded, &proof.target_version)?;
-    append_bytes(&mut encoded, &proof.package_sha256)?;
-    encoded.extend_from_slice(
-        &u32::try_from(proof.state)
-            .map_err(|_| ReceiptError::Malformed)?
-            .to_be_bytes(),
-    );
-    encoded.extend_from_slice(&proof.completed_unix_ms.to_be_bytes());
-    append_bytes(&mut encoded, &proof.result_sha256)?;
-    encoded.extend_from_slice(&proof.attested_unix_ms.to_be_bytes());
+    let state = u32::try_from(proof.state).map_err(|_| ReceiptError::Malformed)?;
+    let encoded = ocservia_canonical_cbor::marshal(
+        UPGRADE_RESULT_DOMAIN,
+        &CborUpgradeResultProofV1 {
+            version: proof.version,
+            node_id: Bytes(&proof.node_id),
+            privd_attestation_key_id: &proof.privd_attestation_key_id,
+            operation_id: Bytes(&proof.operation_id),
+            target_version: &proof.target_version,
+            package_sha256: Bytes(&proof.package_sha256),
+            state,
+            completed_unix_ms: proof.completed_unix_ms,
+            result_sha256: Bytes(&proof.result_sha256),
+            attested_unix_ms: proof.attested_unix_ms,
+        },
+    )
+    .map_err(|_| ReceiptError::Malformed)?;
     if encoded.len() > MAX_CANONICAL_BYTES {
         return Err(ReceiptError::Malformed);
     }
@@ -307,11 +533,9 @@ pub fn canonical_upgrade_result_v1(
 }
 
 fn validate_upgrade_result(proof: &AgentUpgradeResultProof) -> Result<(), ReceiptError> {
-    let version =
-        PrivdReceiptVersion::try_from(proof.version).unwrap_or(PrivdReceiptVersion::Unspecified);
     let state = AgentUpgradeOutcomeState::try_from(proof.state)
         .unwrap_or(AgentUpgradeOutcomeState::Unspecified);
-    if version != PrivdReceiptVersion::V1
+    if proof.version != 1
         || !uuid_v7(&proof.node_id)
         || !uuid_v7(&proof.operation_id)
         || !valid_key_id(&proof.privd_attestation_key_id)
@@ -335,7 +559,7 @@ fn validate_upgrade_result(proof: &AgentUpgradeResultProof) -> Result<(), Receip
     Ok(())
 }
 
-/// Encodes a V1 receipt independently of Protobuf field order and unknown fields.
+/// Encodes a V1 receipt with RFC 8949 Core Deterministic CBOR.
 ///
 /// # Errors
 ///
@@ -350,97 +574,52 @@ pub fn canonical_receipt_v1(receipt: &PrivdResultReceiptV1) -> Result<Vec<u8>, R
         .completed_at
         .as_ref()
         .ok_or(ReceiptError::Malformed)?;
-    let mut encoded = Vec::with_capacity(512);
-    encoded.extend_from_slice(RECEIPT_DOMAIN);
-    encoded.extend_from_slice(
-        &u32::try_from(receipt.receipt_version)
-            .map_err(|_| ReceiptError::Malformed)?
-            .to_be_bytes(),
-    );
-    append_bytes(&mut encoded, &receipt.node_id)?;
-    append_string(&mut encoded, &receipt.privd_attestation_key_id)?;
-    append_bytes(&mut encoded, &receipt.command_id)?;
-    append_bytes(&mut encoded, &receipt.operation_id)?;
-    append_bytes(&mut encoded, &receipt.idempotency_key)?;
-    encoded.extend_from_slice(
-        &u32::try_from(receipt.semantic_payload_hash_version)
-            .map_err(|_| ReceiptError::Malformed)?
-            .to_be_bytes(),
-    );
-    append_bytes(&mut encoded, &receipt.semantic_payload_sha256)?;
-    encoded.extend_from_slice(
-        &u32::try_from(receipt.command_kind)
-            .map_err(|_| ReceiptError::Malformed)?
-            .to_be_bytes(),
-    );
-    encoded.extend_from_slice(
-        &u32::try_from(receipt.result_kind)
-            .map_err(|_| ReceiptError::Malformed)?
-            .to_be_bytes(),
-    );
-    encoded.extend_from_slice(
-        &u32::try_from(receipt.terminal_state)
-            .map_err(|_| ReceiptError::Malformed)?
-            .to_be_bytes(),
-    );
-    append_bytes(&mut encoded, &receipt.result_bytes_sha256)?;
-    append_bytes(&mut encoded, &receipt.error_code_sha256)?;
-    append_bytes(&mut encoded, &receipt.effect_record_id)?;
-    encoded.extend_from_slice(&receipt.effect_sequence.to_be_bytes());
-    append_timestamp(&mut encoded, accepted)?;
-    append_timestamp(&mut encoded, completed)?;
-    encoded.push(u8::from(receipt.replayed));
-    append_certificate(&mut encoded, receipt.certificate.as_ref())?;
+    let certificate = receipt
+        .certificate
+        .as_ref()
+        .map(|binding| CborCertificateBinding {
+            certificate_id: Bytes(&binding.certificate_id),
+            csr_der_sha256: Bytes(&binding.csr_der_sha256),
+            public_key_sha256: Bytes(&binding.public_key_sha256),
+        });
+    let encoded = ocservia_canonical_cbor::marshal(
+        RECEIPT_DOMAIN,
+        &CborReceiptV1 {
+            receipt_version: receipt.receipt_version,
+            node_id: Bytes(&receipt.node_id),
+            privd_attestation_key_id: &receipt.privd_attestation_key_id,
+            command_id: Bytes(&receipt.command_id),
+            operation_id: Bytes(&receipt.operation_id),
+            idempotency_key: Bytes(&receipt.idempotency_key),
+            semantic_payload_hash_version: u32::try_from(receipt.semantic_payload_hash_version)
+                .map_err(|_| ReceiptError::Malformed)?,
+            semantic_payload_sha256: Bytes(&receipt.semantic_payload_sha256),
+            command_kind: u32::try_from(receipt.command_kind)
+                .map_err(|_| ReceiptError::Malformed)?,
+            result_kind: u32::try_from(receipt.result_kind).map_err(|_| ReceiptError::Malformed)?,
+            terminal_state: u32::try_from(receipt.terminal_state)
+                .map_err(|_| ReceiptError::Malformed)?,
+            result_cbor_sha256: Bytes(&receipt.result_cbor_sha256),
+            error_code: &receipt.error_code,
+            effect_sequence: receipt.effect_sequence,
+            accepted_at_seconds: accepted.seconds,
+            accepted_at_nanos: u32::try_from(accepted.nanos)
+                .map_err(|_| ReceiptError::Malformed)?,
+            completed_at_seconds: completed.seconds,
+            completed_at_nanos: u32::try_from(completed.nanos)
+                .map_err(|_| ReceiptError::Malformed)?,
+            replayed: receipt.replayed,
+            certificate,
+        },
+    )
+    .map_err(|_| ReceiptError::Malformed)?;
     if encoded.len() > MAX_CANONICAL_BYTES {
         return Err(ReceiptError::Malformed);
     }
     Ok(encoded)
 }
 
-/// Canonical requested certificate subject digest shared with Controller.
-///
-/// # Errors
-///
-/// Returns an error for an invalid certificate ID, subject, key size, or DNS name set.
-pub fn requested_subject_digest(request: &CertificateCsr) -> Result<[u8; 32], ReceiptError> {
-    if !uuid_v7(&request.certificate_id)
-        || request.common_name.is_empty()
-        || request.common_name.len() > 253
-        || !request.common_name.is_ascii()
-        || !(2048..=8192).contains(&request.key_bits)
-        || request.dns_names.len() > 64
-    {
-        return Err(ReceiptError::Malformed);
-    }
-    let mut names: Vec<&str> = request.dns_names.iter().map(String::as_str).collect();
-    names.sort_unstable();
-    let mut hasher = Sha256::new();
-    hasher.update(b"ocservia/certificate-requested-subject/v1\0");
-    hash_bytes(&mut hasher, &request.certificate_id)?;
-    hash_bytes(&mut hasher, request.common_name.as_bytes())?;
-    hasher.update(request.key_bits.to_be_bytes());
-    hasher.update(
-        u32::try_from(names.len())
-            .map_err(|_| ReceiptError::Malformed)?
-            .to_be_bytes(),
-    );
-    for name in names {
-        if name.is_empty() || name.len() > 253 || !name.is_ascii() {
-            return Err(ReceiptError::Malformed);
-        }
-        hash_bytes(&mut hasher, name.as_bytes())?;
-    }
-    Ok(hasher.finalize().into())
-}
-
-fn hash_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), ReceiptError> {
-    let length = u32::try_from(value.len()).map_err(|_| ReceiptError::Malformed)?;
-    hasher.update(length.to_be_bytes());
-    hasher.update(value);
-    Ok(())
-}
-
-/// Encodes a V1 root key registration independently of Protobuf encoding.
+/// Encodes a V1 root key registration with RFC 8949 Core Deterministic CBOR.
 ///
 /// # Errors
 ///
@@ -448,9 +627,7 @@ fn hash_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), ReceiptError> {
 pub fn canonical_registration_v1(
     registration: &PrivdAttestationRegistrationV1,
 ) -> Result<Vec<u8>, ReceiptError> {
-    if PrivdReceiptVersion::try_from(registration.version)
-        .unwrap_or(PrivdReceiptVersion::Unspecified)
-        != PrivdReceiptVersion::V1
+    if registration.version != 1
         || !uuid_v7(&registration.node_id)
         || registration.public_key.len() != 32
         || registration.controller_nonce.len() != 32
@@ -468,19 +645,18 @@ pub fn canonical_registration_v1(
     if registration.privd_attestation_key_id != key_id(&verifying) {
         return Err(ReceiptError::Malformed);
     }
-    let mut encoded = Vec::with_capacity(256);
-    encoded.extend_from_slice(REGISTRATION_DOMAIN);
-    encoded.extend_from_slice(
-        &u32::try_from(registration.version)
-            .map_err(|_| ReceiptError::Malformed)?
-            .to_be_bytes(),
-    );
-    append_bytes(&mut encoded, &registration.node_id)?;
-    append_string(&mut encoded, &registration.privd_attestation_key_id)?;
-    append_bytes(&mut encoded, &registration.public_key)?;
-    append_bytes(&mut encoded, &registration.controller_nonce)?;
-    append_bytes(&mut encoded, &registration.credential_context_sha256)?;
-    Ok(encoded)
+    ocservia_canonical_cbor::marshal(
+        REGISTRATION_DOMAIN,
+        &CborRegistrationV1 {
+            version: registration.version,
+            node_id: Bytes(&registration.node_id),
+            privd_attestation_key_id: &registration.privd_attestation_key_id,
+            public_key: Bytes(&registration.public_key),
+            controller_nonce: Bytes(&registration.controller_nonce),
+            credential_context_sha256: Bytes(&registration.credential_context_sha256),
+        },
+    )
+    .map_err(|_| ReceiptError::Malformed)
 }
 
 /// Signs a validated root key registration with the key being registered.
@@ -499,8 +675,6 @@ pub fn sign_registration(
 }
 
 fn validate_receipt(receipt: &PrivdResultReceiptV1) -> Result<(), ReceiptError> {
-    let version = PrivdReceiptVersion::try_from(receipt.receipt_version)
-        .unwrap_or(PrivdReceiptVersion::Unspecified);
     let semantic = SemanticPayloadHashVersion::try_from(receipt.semantic_payload_hash_version)
         .unwrap_or(SemanticPayloadHashVersion::Unspecified);
     let command = PrivilegedCommandKind::try_from(receipt.command_kind)
@@ -517,16 +691,13 @@ fn validate_receipt(receipt: &PrivdResultReceiptV1) -> Result<(), ReceiptError> 
         .completed_at
         .as_ref()
         .ok_or(ReceiptError::Malformed)?;
-    if version != PrivdReceiptVersion::V1
+    if receipt.receipt_version != 1
         || !uuid_v7(&receipt.node_id)
         || !uuid_v7(&receipt.command_id)
         || !uuid_v7(&receipt.operation_id)
         || !uuid_v7(&receipt.idempotency_key)
         || !valid_key_id(&receipt.privd_attestation_key_id)
-        || !matches!(
-            semantic,
-            SemanticPayloadHashVersion::V1 | SemanticPayloadHashVersion::V2
-        )
+        || semantic != SemanticPayloadHashVersion::V2
         || command == PrivilegedCommandKind::Unspecified
         || result == PrivilegedResultKind::Unspecified
         || !matches!(
@@ -534,10 +705,10 @@ fn validate_receipt(receipt: &PrivdResultReceiptV1) -> Result<(), ReceiptError> 
             CommandResultState::Succeeded | CommandResultState::Failed
         )
         || receipt.semantic_payload_sha256.len() != 32
-        || receipt.result_bytes_sha256.len() != 32
-        || receipt.error_code_sha256.len() != 32
-        || !(16..=32).contains(&receipt.effect_record_id.len())
+        || receipt.result_cbor_sha256.len() != 32
+        || receipt.error_code.len() > MAX_ERROR_CODE_BYTES
         || receipt.effect_sequence == 0
+        || receipt.effect_sequence > i64::MAX as u64
         || !valid_timestamp(accepted)
         || !valid_timestamp(completed)
         || (accepted.seconds, accepted.nanos) > (completed.seconds, completed.nanos)
@@ -562,21 +733,13 @@ fn valid_certificate_binding(
     let Some(binding) = binding else {
         return !certificate_command;
     };
-    if !certificate_command
-        || !uuid_v7(&binding.certificate_id)
-        || binding.root_effect_record_id.len() < 16
-        || binding.root_effect_record_id.len() > 32
-    {
+    if !certificate_command || !uuid_v7(&binding.certificate_id) {
         return false;
     }
     if result == PrivilegedResultKind::CertificateCsr {
-        binding.csr_der_sha256.len() == 32
-            && binding.public_key_sha256.len() == 32
-            && binding.requested_subject_sha256.len() == 32
+        binding.csr_der_sha256.len() == 32 && binding.public_key_sha256.len() == 32
     } else {
-        binding.csr_der_sha256.is_empty()
-            && binding.public_key_sha256.is_empty()
-            && binding.requested_subject_sha256.is_empty()
+        binding.csr_der_sha256.is_empty() && binding.public_key_sha256.is_empty()
     }
 }
 
@@ -596,86 +759,18 @@ fn uuid_v7(value: &[u8]) -> bool {
     value.len() == 16 && value[6] >> 4 == 7 && value[8] >> 6 == 2
 }
 
-fn append_string(output: &mut Vec<u8>, value: &str) -> Result<(), ReceiptError> {
-    if value.is_empty() || value.len() > 128 || !value.is_ascii() {
-        return Err(ReceiptError::Malformed);
-    }
-    append_bytes(output, value.as_bytes())
-}
-
-fn append_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), ReceiptError> {
-    let length = u32::try_from(value.len()).map_err(|_| ReceiptError::Malformed)?;
-    output.extend_from_slice(&length.to_be_bytes());
-    output.extend_from_slice(value);
-    Ok(())
-}
-
-fn append_timestamp(
-    output: &mut Vec<u8>,
-    value: &prost_types::Timestamp,
-) -> Result<(), ReceiptError> {
-    if !valid_timestamp(value) {
-        return Err(ReceiptError::Malformed);
-    }
-    output.extend_from_slice(&value.seconds.to_be_bytes());
-    output.extend_from_slice(
-        &u32::try_from(value.nanos)
-            .map_err(|_| ReceiptError::Malformed)?
-            .to_be_bytes(),
-    );
-    Ok(())
-}
-
-fn append_certificate(
-    output: &mut Vec<u8>,
-    value: Option<&PrivdCertificateReceiptBindingV1>,
-) -> Result<(), ReceiptError> {
-    let Some(value) = value else {
-        output.push(0);
-        return Ok(());
-    };
-    output.push(1);
-    append_bytes(output, &value.certificate_id)?;
-    append_bytes(output, &value.csr_der_sha256)?;
-    append_bytes(output, &value.public_key_sha256)?;
-    append_bytes(output, &value.requested_subject_sha256)?;
-    append_bytes(output, &value.root_effect_record_id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use prost_types::Timestamp;
     use std::os::unix::fs::symlink;
 
-    #[test]
-    fn requested_subject_digest_accepts_full_dns_subject_range() {
-        let long_name = [
-            "a".repeat(63),
-            "b".repeat(63),
-            "c".repeat(63),
-            "d".repeat(61),
-        ]
-        .join(".");
-        assert_eq!(long_name.len(), 253);
-        let uppercase = "VPN.Example.Test".to_owned();
-        let request = CertificateCsr {
-            certificate_id: hex::decode("018f2a3b4c5d70008000000000000001").expect("id"),
-            common_name: long_name.clone(),
-            dns_names: vec![uppercase.clone(), long_name, uppercase],
-            key_bits: 4096,
-        };
-
-        assert!(requested_subject_digest(&request).is_ok());
-    }
-
     fn fixture() -> (PrivdResultReceiptV1, SigningKey) {
         let key = SigningKey::from_bytes(&[7; 32]);
         let id = hex::decode("018f2a3b4c5d70008000000000000001").expect("id");
-        let effect = hex::decode("018f2a3b4c5d70008000000000000005").expect("effect");
         (
             PrivdResultReceiptV1 {
-                receipt_version: PrivdReceiptVersion::V1.into(),
+                receipt_version: 1,
                 node_id: id.clone(),
                 privd_attestation_key_id: key_id(&key.verifying_key()),
                 command_id: hex::decode("018f2a3b4c5d70008000000000000002").expect("command"),
@@ -687,9 +782,8 @@ mod tests {
                 command_kind: PrivilegedCommandKind::CertificateCsr.into(),
                 result_kind: PrivilegedResultKind::CertificateCsr.into(),
                 terminal_state: CommandResultState::Succeeded.into(),
-                result_bytes_sha256: vec![0x22; 32],
-                error_code_sha256: Sha256::digest([]).to_vec(),
-                effect_record_id: effect.clone(),
+                result_cbor_sha256: vec![0x22; 32],
+                error_code: String::new(),
                 effect_sequence: 9,
                 accepted_at: Some(Timestamp {
                     seconds: 1_700_000_000,
@@ -704,8 +798,6 @@ mod tests {
                     certificate_id: id,
                     csr_der_sha256: vec![0x33; 32],
                     public_key_sha256: vec![0x44; 32],
-                    requested_subject_sha256: vec![0x55; 32],
-                    root_effect_record_id: effect,
                 }),
             },
             key,
@@ -713,12 +805,24 @@ mod tests {
     }
 
     #[test]
+    fn empty_result_encodes_as_cbor_empty_map() {
+        let encoded = ocservia_canonical_cbor::marshal("", &CborEmptyResult {}).expect("encode");
+        assert_eq!(encoded, vec![0xa0]);
+        assert!(result_payload_cbor_hash(PrivilegedResultKind::Mutation, &[]).is_ok());
+        assert_eq!(
+            result_payload_cbor_hash(PrivilegedResultKind::Mutation, &[0x01]),
+            Err(ReceiptError::Malformed)
+        );
+    }
+
+    #[test]
     fn receipt_signature_binds_every_security_identity() {
         let (receipt, key) = fixture();
         let canonical = canonical_receipt_v1(&receipt).expect("canonical");
+        assert!(canonical.starts_with(RECEIPT_DOMAIN.as_bytes()));
         assert_eq!(
-            hex::encode(canonical),
-            "6f637365727669612f70726976642d726573756c742d726563656970742f7631000000000100000010018f2a3b4c5d700080000000000000010000004f656432353531392d7368613235363a6665383132633132663361623463653661633564623639616333353266393036636231623131656634336662333365323532656637666635353232363338383900000010018f2a3b4c5d7000800000000000000200000010018f2a3b4c5d7000800000000000000300000010018f2a3b4c5d70008000000000000004000000020000002011111111111111111111111111111111111111111111111111111111111111110000000c000000040000000100000020222222222222222222222222222222222222222222222222222222222222222200000020e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85500000010018f2a3b4c5d700080000000000000050000000000000009000000006553f1000000007b000000006553f101000001c8000100000010018f2a3b4c5d7000800000000000000100000020333333333333333333333333333333333333333333333333333333333333333300000020444444444444444444444444444444444444444444444444444444444444444400000020555555555555555555555555555555555555555555555555555555555555555500000010018f2a3b4c5d70008000000000000005"
+            canonical,
+            canonical_receipt_v1(&receipt).expect("determinism")
         );
         let proof = sign_receipt(receipt, &key).expect("sign");
         verify_receipt(&proof, &key.verifying_key()).expect("verify");
@@ -728,8 +832,8 @@ mod tests {
             |value: &mut PrivdResultReceiptV1| value.operation_id[15] ^= 1,
             |value: &mut PrivdResultReceiptV1| value.idempotency_key[15] ^= 1,
             |value: &mut PrivdResultReceiptV1| value.semantic_payload_sha256[0] ^= 1,
-            |value: &mut PrivdResultReceiptV1| value.result_bytes_sha256[0] ^= 1,
-            |value: &mut PrivdResultReceiptV1| value.effect_record_id[15] ^= 1,
+            |value: &mut PrivdResultReceiptV1| value.result_cbor_sha256[0] ^= 1,
+            |value: &mut PrivdResultReceiptV1| value.error_code = "tampered".to_owned(),
         ] {
             let mut tampered = proof.clone();
             mutate(tampered.receipt_v1.as_mut().expect("receipt"));
@@ -744,7 +848,7 @@ mod tests {
     fn upgrade_result_signature_binds_durable_identity() {
         let key = SigningKey::from_bytes(&[9; 32]);
         let proof = AgentUpgradeResultProof {
-            version: PrivdReceiptVersion::V1.into(),
+            version: 1,
             node_id: hex::decode("018f2a3b4c5d70008000000000000001").expect("node"),
             privd_attestation_key_id: key_id(&key.verifying_key()),
             operation_id: hex::decode("018f2a3b4c5d70008000000000000002").expect("operation"),
@@ -765,8 +869,6 @@ mod tests {
             verify_upgrade_result(&tampered, &key.verifying_key()),
             Err(ReceiptError::SignatureInvalid)
         );
-        // The signature time itself is signed and can never precede the
-        // durable completion it attests.
         let mut backdated = signed.clone();
         backdated.attested_unix_ms = signed.completed_unix_ms - 1;
         assert_eq!(
@@ -790,7 +892,7 @@ mod tests {
             verify_receipt(&proof, &key.verifying_key()),
             Err(ReceiptError::UnsupportedVersion)
         );
-        proof.version = PrivdReceiptVersion::V1.into();
+        proof.version = 1;
         proof.signature.push(0);
         assert_eq!(
             verify_receipt(&proof, &key.verifying_key()),

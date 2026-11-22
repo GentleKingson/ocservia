@@ -62,7 +62,7 @@ type Store interface {
 func Ingest(ctx context.Context, backend database.Backend, req *wire.StoreVpnAuditRequest) (*agent.VpnAuditReceipt, error) {
 	node, err := uuid.FromBytes(req.GetNodeId())
 	records := req.GetBatch().GetRecords()
-	if err != nil || node == uuid.Nil || len(req.EndpointId) != 32 || len(req.ConnectionId) != 16 || req.OwnerEpoch == 0 || req.OwnerEpoch > math.MaxInt64 || len(records) == 0 || len(records) > 32 {
+	if err != nil || node == uuid.Nil || len(req.EndpointId) != 32 || len(req.ConnectionId) != 16 || req.SessionEpoch == 0 || req.SessionEpoch > math.MaxInt64 || len(records) == 0 || len(records) > 32 {
 		return nil, ErrInvalid
 	}
 	receipt := &agent.VpnAuditReceipt{}
@@ -89,7 +89,7 @@ func Ingest(ctx context.Context, backend database.Backend, req *wire.StoreVpnAud
 		if !ok {
 			return database.ErrUnsupported
 		}
-		if e = store.CheckAuditFence(ctx, req.NodeId, req.ConnectionId, int64(req.OwnerEpoch)); e != nil {
+		if e = store.CheckAuditFence(ctx, req.NodeId, req.ConnectionId, int64(req.SessionEpoch)); e != nil {
 			return e
 		}
 		for _, r := range records {

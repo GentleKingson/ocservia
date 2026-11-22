@@ -29,15 +29,15 @@ type blockingFetchServer struct {
 	reject    bool
 }
 
-func (s *blockingFetchServer) FetchArtifact(request *transportv1.FetchArtifactRequest, stream grpc.ServerStreamingServer[agentv1.ArtifactChunk]) error {
+func (s *blockingFetchServer) FetchArtifact(_ context.Context, request *transportv1.FetchArtifactRequest) (*agentv1.ArtifactPayload, error) {
 	close(s.requested)
 	<-s.accept
 	if s.reject {
-		return status.Error(codes.PermissionDenied, "fence binding rejected")
+		return nil, status.Error(codes.PermissionDenied, "artifact grant rejected")
 	}
 	data := []byte("p12-fixture")
 	digest := sha256.Sum256(data)
-	return stream.Send(&agentv1.ArtifactChunk{ArtifactId: request.GetArtifactId(), Data: data, Eof: true, Sha256: digest[:]})
+	return &agentv1.ArtifactPayload{ArtifactId: request.GetArtifactId(), Data: data, Sha256: digest[:]}, nil
 }
 
 func startFetchServer(t *testing.T, server transportv1.TransportServiceServer) string {
@@ -98,7 +98,7 @@ func TestFetchArtifactWaitsForServerAcceptance(t *testing.T) {
 	var reader io.ReadCloser
 	var fetchErr error
 	go func() {
-		reader, fetchErr = client.FetchArtifact(context.Background(), grant, nil)
+		reader, fetchErr = client.FetchArtifact(context.Background(), grant)
 		close(fetched)
 	}()
 	<-server.requested
@@ -140,7 +140,7 @@ func TestFetchArtifactSurfacesAuthorizationFailureOnAcceptance(t *testing.T) {
 	var reader io.ReadCloser
 	var fetchErr error
 	go func() {
-		reader, fetchErr = client.FetchArtifact(context.Background(), fetchTestGrant(nodeBytes), nil)
+		reader, fetchErr = client.FetchArtifact(context.Background(), fetchTestGrant(nodeBytes))
 		close(fetched)
 	}()
 	<-server.requested

@@ -2,7 +2,7 @@ use super::super::{
     AdapterError, Connection, DesiredEffectObservation, DesiredEffectState, EffectIdentity,
     MAX_EFFECT_RECORDS, OptionalExtension, TransactionBehavior, Uuid, params, validate_name,
 };
-use super::hmac::{authenticate_file, authenticate_record};
+use super::hmac::{authenticate_file, authenticate_record, verify_mac};
 use super::{EffectStore, effect_now, fixed_blob, sqlite_io};
 
 pub(crate) fn validate_effect_identity(
@@ -396,7 +396,7 @@ fn validate_effect_record(key: &[u8; 32], record: &EffectRecord) -> Result<(), A
         &record.before_hmac,
         &record.after_hmac,
     );
-    if expected != record.record_hmac {
+    if !verify_mac(&expected, &record.record_hmac) {
         return Err(AdapterError::InvalidResource);
     }
     Ok(())

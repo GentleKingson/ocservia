@@ -233,7 +233,6 @@ CREATE TABLE public.agent_command_results (
     receipt_verification_status text DEFAULT 'legacy'::text CONSTRAINT "agent_command_results_receipt_verification_status_not_null" NOT NULL,
     receipt_failure_reason text,
     privd_attestation_key_id text,
-    effect_record_id bytea,
     effect_sequence bigint,
     receipt_sha256 bytea,
     privileged_result_proof bytea,
@@ -242,7 +241,7 @@ CREATE TABLE public.agent_command_results (
     CONSTRAINT agent_command_results_error_code_check CHECK (((error_code IS NULL) OR ((length(error_code) >= 1) AND (length(error_code) <= 128)))),
     CONSTRAINT agent_command_results_payload_sha256_check CHECK (((payload_sha256 IS NULL) OR (octet_length(payload_sha256) = 32))),
     CONSTRAINT agent_command_results_receipt_failure_reason_check CHECK (((receipt_failure_reason IS NULL) OR ((length(receipt_failure_reason) >= 1) AND (length(receipt_failure_reason) <= 64)))),
-    CONSTRAINT agent_command_results_receipt_fields_check CHECK ((((receipt_verification_status = 'verified'::text) AND (receipt_failure_reason IS NULL) AND (privd_attestation_key_id IS NOT NULL) AND (effect_record_id IS NOT NULL) AND ((octet_length(effect_record_id) >= 16) AND (octet_length(effect_record_id) <= 32)) AND (effect_sequence > 0) AND (octet_length(receipt_sha256) = 32) AND ((octet_length(privileged_result_proof) >= 1) AND (octet_length(privileged_result_proof) <= 65536))) OR (receipt_verification_status <> 'verified'::text))),
+    CONSTRAINT agent_command_results_receipt_fields_check CHECK ((((receipt_verification_status = 'verified'::text) AND (receipt_failure_reason IS NULL) AND (privd_attestation_key_id IS NOT NULL) AND (effect_sequence > 0) AND (octet_length(receipt_sha256) = 32) AND ((octet_length(privileged_result_proof) >= 1) AND (octet_length(privileged_result_proof) <= 65536))) OR (receipt_verification_status <> 'verified'::text))),
     CONSTRAINT agent_command_results_receipt_verification_status_check CHECK ((receipt_verification_status = ANY (ARRAY['legacy'::text, 'not_required'::text, 'verified'::text, 'missing'::text, 'invalid'::text, 'unknown_key'::text, 'revoked_key'::text]))),
     CONSTRAINT agent_command_results_result_check CHECK ((octet_length(result) <= 1048576)),
     CONSTRAINT agent_command_results_semantic_payload_hash_version_supported CHECK ((semantic_payload_hash_version = ANY (ARRAY[0, 1, 2]))),
@@ -468,14 +467,12 @@ CREATE TABLE public.certificates (
     csr_receipt_verified_at timestamp with time zone,
     csr_receipt_sha256 bytea,
     csr_privd_attestation_key_id text,
-    csr_effect_record_id bytea,
     csr_der_sha256 bytea,
-    csr_requested_subject_sha256 bytea,
     issue_certificate_version bigint,
     CONSTRAINT certificates_certificate_chain_pem_check CHECK (((certificate_chain_pem IS NULL) OR ((octet_length(certificate_chain_pem) >= 64) AND (octet_length(certificate_chain_pem) <= 262144)))),
     CONSTRAINT certificates_common_name_check CHECK (((length(common_name) >= 1) AND (length(common_name) <= 253))),
     CONSTRAINT certificates_csr_der_check CHECK (((csr_der IS NULL) OR ((octet_length(csr_der) >= 64) AND (octet_length(csr_der) <= 65536)))),
-    CONSTRAINT certificates_csr_receipt_check CHECK ((((state = ANY (ARRAY['csr_ready'::text, 'signing'::text, 'signer_unavailable'::text, 'issued'::text, 'expiring'::text, 'expired'::text, 'revoking'::text, 'revocation_unknown'::text, 'revoked'::text])) AND (csr_receipt_verified_at IS NOT NULL) AND (octet_length(csr_receipt_sha256) = 32) AND (csr_privd_attestation_key_id IS NOT NULL) AND ((octet_length(csr_effect_record_id) >= 16) AND (octet_length(csr_effect_record_id) <= 32)) AND (octet_length(csr_der_sha256) = 32) AND (octet_length(csr_requested_subject_sha256) = 32)) OR csr_receipt_legacy OR (state = ANY (ARRAY['csr_pending'::text, 'failed'::text, 'unknown'::text])))),
+    CONSTRAINT certificates_csr_receipt_check CHECK ((((state = ANY (ARRAY['csr_ready'::text, 'signing'::text, 'signer_unavailable'::text, 'issued'::text, 'expiring'::text, 'expired'::text, 'revoking'::text, 'revocation_unknown'::text, 'revoked'::text])) AND (csr_receipt_verified_at IS NOT NULL) AND (octet_length(csr_receipt_sha256) = 32) AND (csr_privd_attestation_key_id IS NOT NULL) AND (octet_length(csr_der_sha256) = 32)) OR csr_receipt_legacy OR (state = ANY (ARRAY['csr_pending'::text, 'failed'::text, 'unknown'::text])))),
     CONSTRAINT certificates_dns_names_check CHECK ((jsonb_typeof(dns_names) = 'array'::text)),
     CONSTRAINT certificates_issue_certificate_version_check CHECK ((issue_certificate_version > 0)),
     CONSTRAINT certificates_issue_request_hash_check CHECK (((issue_request_hash IS NULL) OR (octet_length(issue_request_hash) = 32))),
@@ -589,16 +586,13 @@ COMMENT ON COLUMN public.config_plans.candidate_redacted IS 'Rendered candidate 
 
 CREATE TABLE public.connection_owner_fencing (
     node_id bytea CONSTRAINT "connection_owner_fencing_node_id_not_null" NOT NULL,
-    owner_instance_id uuid CONSTRAINT "connection_owner_fencing_owner_instance_id_not_null" NOT NULL,
-    owner_incarnation bigint CONSTRAINT "connection_owner_fencing_owner_incarnation_not_null" NOT NULL,
     connection_id bytea CONSTRAINT "connection_owner_fencing_connection_id_not_null" NOT NULL,
-    owner_epoch bigint CONSTRAINT "connection_owner_fencing_owner_epoch_not_null" NOT NULL,
-    lease_until timestamp with time zone CONSTRAINT "connection_owner_fencing_lease_until_not_null" NOT NULL,
+    session_epoch bigint CONSTRAINT "connection_owner_fencing_session_epoch_not_null" NOT NULL,
+    active boolean DEFAULT true CONSTRAINT "connection_owner_fencing_active_not_null" NOT NULL,
     updated_at timestamp with time zone DEFAULT now() CONSTRAINT "connection_owner_fencing_updated_at_not_null" NOT NULL,
     CONSTRAINT connection_owner_fencing_connection_id_check CHECK ((octet_length(connection_id) = 16)),
     CONSTRAINT connection_owner_fencing_node_id_check CHECK ((octet_length(node_id) = 16)),
-    CONSTRAINT connection_owner_fencing_owner_epoch_check CHECK ((owner_epoch >= 1)),
-    CONSTRAINT connection_owner_fencing_owner_incarnation_check CHECK ((owner_incarnation >= 0))
+    CONSTRAINT connection_owner_fencing_session_epoch_check CHECK ((session_epoch >= 1))
 );
 
 CREATE TABLE public.desired_groups (
@@ -607,10 +601,8 @@ CREATE TABLE public.desired_groups (
     members text[] CONSTRAINT "desired_groups_members_not_null" NOT NULL,
     version bigint CONSTRAINT "desired_groups_version_not_null" NOT NULL,
     revision bigint CONSTRAINT "desired_groups_revision_not_null" NOT NULL,
-    fingerprint bytea CONSTRAINT "desired_groups_fingerprint_not_null" NOT NULL,
     created_at timestamp with time zone CONSTRAINT "desired_groups_created_at_not_null" NOT NULL,
     updated_at timestamp with time zone CONSTRAINT "desired_groups_updated_at_not_null" NOT NULL,
-    CONSTRAINT desired_groups_fingerprint_check CHECK ((octet_length(fingerprint) = 32)),
     CONSTRAINT desired_groups_group_name_check CHECK ((group_name ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'::text)),
     CONSTRAINT desired_groups_members_check CHECK ((cardinality(members) <= 4096)),
     CONSTRAINT desired_groups_revision_check CHECK ((revision > 0)),
@@ -643,10 +635,8 @@ CREATE TABLE public.desired_users (
     enabled boolean CONSTRAINT "desired_users_enabled_not_null" NOT NULL,
     version bigint CONSTRAINT "desired_users_version_not_null" NOT NULL,
     revision bigint CONSTRAINT "desired_users_revision_not_null" NOT NULL,
-    fingerprint bytea CONSTRAINT "desired_users_fingerprint_not_null" NOT NULL,
     created_at timestamp with time zone CONSTRAINT "desired_users_created_at_not_null" NOT NULL,
     updated_at timestamp with time zone CONSTRAINT "desired_users_updated_at_not_null" NOT NULL,
-    CONSTRAINT desired_users_fingerprint_check CHECK ((octet_length(fingerprint) = 32)),
     CONSTRAINT desired_users_revision_check CHECK ((revision > 0)),
     CONSTRAINT desired_users_username_check CHECK ((username ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'::text)),
     CONSTRAINT desired_users_version_check CHECK ((version > 0))
@@ -951,9 +941,7 @@ CREATE TABLE public.observed_groups (
     group_name text CONSTRAINT "observed_groups_group_name_not_null" NOT NULL,
     members text[] CONSTRAINT "observed_groups_members_not_null" NOT NULL,
     revision bigint CONSTRAINT "observed_groups_revision_not_null" NOT NULL,
-    fingerprint bytea CONSTRAINT "observed_groups_fingerprint_not_null" NOT NULL,
     observed_at timestamp with time zone CONSTRAINT "observed_groups_observed_at_not_null" NOT NULL,
-    CONSTRAINT observed_groups_fingerprint_check CHECK ((octet_length(fingerprint) = 32)),
     CONSTRAINT observed_groups_group_name_check CHECK ((group_name ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'::text)),
     CONSTRAINT observed_groups_members_check CHECK ((cardinality(members) <= 4096)),
     CONSTRAINT observed_groups_revision_check CHECK ((revision >= 0))
@@ -978,9 +966,7 @@ CREATE TABLE public.observed_users (
     username text CONSTRAINT "observed_users_username_not_null" NOT NULL,
     enabled boolean CONSTRAINT "observed_users_enabled_not_null" NOT NULL,
     revision bigint CONSTRAINT "observed_users_revision_not_null" NOT NULL,
-    fingerprint bytea CONSTRAINT "observed_users_fingerprint_not_null" NOT NULL,
     observed_at timestamp with time zone CONSTRAINT "observed_users_observed_at_not_null" NOT NULL,
-    CONSTRAINT observed_users_fingerprint_check CHECK ((octet_length(fingerprint) = 32)),
     CONSTRAINT observed_users_revision_check CHECK ((revision >= 0)),
     CONSTRAINT observed_users_username_check CHECK ((username ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'::text))
 );
@@ -1589,9 +1575,9 @@ ALTER TABLE ONLY public.workspaces
 
 CREATE INDEX agent_command_results_command_created_idx ON public.agent_command_results USING btree (command_id, created_at);
 
-CREATE UNIQUE INDEX agent_command_results_effect_receipt_unique_idx ON public.agent_command_results USING btree (privd_attestation_key_id, effect_record_id, effect_sequence) WHERE (receipt_verification_status = 'verified'::text);
+CREATE UNIQUE INDEX agent_command_results_effect_receipt_unique_idx ON public.agent_command_results USING btree (privd_attestation_key_id, effect_sequence) WHERE (receipt_verification_status = 'verified'::text);
 
-CREATE INDEX agent_command_results_receipt_idx ON public.agent_command_results USING btree (command_id, effect_record_id, effect_sequence) WHERE (receipt_verification_status = 'verified'::text);
+CREATE INDEX agent_command_results_receipt_idx ON public.agent_command_results USING btree (command_id, effect_sequence) WHERE (receipt_verification_status = 'verified'::text);
 
 CREATE INDEX agent_rollout_nodes_active_idx ON public.agent_rollout_nodes USING btree (rollout_id, batch) WHERE (state = ANY (ARRAY['pending'::text, 'running'::text]));
 

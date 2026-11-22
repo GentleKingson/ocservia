@@ -484,7 +484,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 	defer cancel()
 	nodes := []uuid.UUID{f.node(t), f.node(t)}
 	for _, node := range nodes {
-		_, err := connectionowner.AcquireBackend(ctx, f.backend, node, connectionowner.Identity{InstanceID: uuid.Must(uuid.NewV7()), Incarnation: 1}, uuid.Must(uuid.NewV7()), time.Minute)
+		_, err := connectionowner.AcquireBackend(ctx, f.backend, node, uuid.Must(uuid.NewV7()))
 		testutil.NoError(t, err)
 	}
 	// Fence rows have independent row locks for a deterministic two-row deadlock rendezvous.
@@ -497,7 +497,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 			done <- database.WithinRetry(ctx, f.backend, database.ReadCommitted, func(tx database.Tx) error {
 				local++
 				attempts.Add(1)
-				if n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1 WHERE node_id=$1`, nodes[worker][:]); err != nil {
+				if n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET session_epoch=session_epoch+1 WHERE node_id=$1`, nodes[worker][:]); err != nil {
 					return err
 				} else if n != 1 {
 					return errors.New("missing first deadlock row")
@@ -510,7 +510,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 						return ctx.Err()
 					}
 				}
-				n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1 WHERE node_id=$1`, nodes[1-worker][:])
+				n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET session_epoch=session_epoch+1 WHERE node_id=$1`, nodes[1-worker][:])
 				if err == nil && n != 1 {
 					return errors.New("missing second deadlock row")
 				}

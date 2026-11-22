@@ -303,7 +303,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 			return nil, fmt.Errorf("record bootstrap password sealing key: %w", err)
 		}
 	}
-	if err := store.InsertCapabilities(ctx, nodeID, request.GetCapabilities(), []string{ownersession.FencingCapability, "privd_result_attestation_v1"}); err != nil {
+	if err := store.InsertCapabilities(ctx, nodeID, request.GetCapabilities(), []string{"privd_result_attestation_v1"}); err != nil {
 		return nil, fmt.Errorf("record bootstrap requested capabilities: %w", err)
 	}
 	consumed, err := s.consumeToken(ctx, store, token, nodeID, request.GetEndpointId())
@@ -511,18 +511,7 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	advertised := handshake.GetCapabilities()
 	negotiated := make([]string, 0, len(advertised))
 	mutationCapable := len(handshake.GetSealingKeys()) != 0
-	fencingNegotiated := false
 	for _, capability := range advertised {
-		// The fencing capability is a protocol-level negotiation, never a
-		// per-node business capability: an approval that echoes every
-		// advertised capability must not introduce a second copy of it.
-		if capability == ownersession.FencingCapability {
-			if mutationCapable {
-				fencingNegotiated = true
-				negotiated = append(negotiated, capability)
-			}
-			continue
-		}
 		if _, ok := approved[capability]; ok && (mutationCapable || legacyReadOnlyCapability(capability)) {
 			negotiated = append(negotiated, capability)
 		}
@@ -537,38 +526,31 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	var fixedEndpoint [32]byte
 	copy(fixedNode[:], nodeID[:])
 	copy(fixedEndpoint[:], request.GetRemoteEndpointId())
-	now := s.now().UTC()
-	var err error
-	response.SessionGrant, err = s.signer.IssueSessionGrant(fixedNode, fixedEndpoint, authorizationRevision, negotiated, ProtocolMajor, ProtocolMinor, now, now.Add(SessionGrantTTL))
-	if err != nil {
-		return nil, fmt.Errorf("issue session grant: %w", err)
-	}
-	if fencingNegotiated && s.ownerSessions != nil {
-		fence, fenceErr := s.ownerSessions.OpenSession(ctx, fixedNode, fixedEndpoint, authorizationRevision, negotiated)
-		if errors.Is(fenceErr, ownersession.ErrNotOwner) {
-			// A fencing-capable Agent must retry while another term still
-			// owns the lease. Accepting an unbounded read-only downgrade here
-			// would leave it connected forever after that lease expires, so a
-			// replacement Controller could never establish the higher epoch
-			// required to recover ambiguous commands.
-			return nil, fmt.Errorf("owner lease is not yet available: %w", fenceErr)
+	var sessionEpoch uint64 = 1
+	var openedSession *ownersession.Session
+	if s.ownerSessions != nil {
+		opened, openErr := s.ownerSessions.OpenSession(ctx, fixedNode, fixedEndpoint)
+		if openErr != nil {
+			return nil, fmt.Errorf("open owner session: %w", openErr)
 		}
-		if fenceErr != nil {
-			return nil, fmt.Errorf("open owner session: %w", fenceErr)
-		}
-		response.ConnectionFence = fence
-		// Registered before the authority transaction so rollback releases its
-		// connection before cleanup needs another one.
+		sessionEpoch = opened.SessionEpoch
+		openedSession = &opened
 		defer func() {
-			if fence != nil && response.Result != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
-				s.closeOpenedSession(ctx, nodeID, fence)
+			if openedSession != nil && response.Result != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
+				s.closeOpenedSession(ctx, nodeID, *openedSession)
 			}
 		}()
+	}
+	now := s.now().UTC()
+	var err error
+	response.SessionGrant, err = s.signer.IssueSessionGrant(fixedNode, fixedEndpoint, authorizationRevision, sessionEpoch, negotiated, ProtocolMajor, ProtocolMinor, now, now.Add(SessionGrantTTL))
+	if err != nil {
+		return nil, fmt.Errorf("issue session grant: %w", err)
 	}
 
 	// Phase 2: re-verify authority under FOR SHARE so any concurrent revocation
 	// or capability/revision mutation fails closed and immediately releases the
-	// newly opened owner term before a session grant can be returned.
+	// newly opened session term before a session grant can be returned.
 	recheckTx, recheckStore, err := s.begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return nil, fmt.Errorf("begin session authority confirmation: %w", err)
@@ -580,14 +562,11 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	}
 	if err != nil || (current.Status != "active" && current.Status != "offline") || current.EndpointState != "active" || current.AuthorizationRevision != authorizationRevision || current.ID != nodeID {
 		response.SessionGrant = nil
-		response.ConnectionFence = nil
 		response.NegotiatedCapabilities = nil
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}
 	if err := recheckTx.Commit(ctx); err != nil {
-		// The session was never granted: end the exact owner term so the
-		// lease does not keep renewing behind a failed authorization.
 		return nil, fmt.Errorf("commit session authorization: %w", err)
 	}
 	response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
@@ -595,31 +574,14 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	return response, nil
 }
 
-// closeOpenedSession ends the owner term a handshake opened when the
-// authorization it was opened for failed to commit. The cleanup runs on its
-// own deadline because the request context is typically the cancelled cause
-// of the failure.
-func (s *Service) closeOpenedSession(ctx context.Context, nodeID uuid.UUID, fence *agentv1.ConnectionFenceV2) {
+func (s *Service) closeOpenedSession(ctx context.Context, nodeID uuid.UUID, opened ownersession.Session) {
 	closer, ok := s.ownerSessions.(ownersession.SessionCloser)
 	if !ok {
 		return
 	}
-	connectionID, err := fixed16(fence.GetConnectionId())
-	if err != nil {
-		return
-	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	_ = closer.CloseSession(cleanupCtx, nodeID, connectionID, int64(fence.GetOwnerEpoch()))
-}
-
-func fixed16(value []byte) ([16]byte, error) {
-	if len(value) != 16 {
-		return [16]byte{}, errors.New("enrollment: value must be 16 bytes")
-	}
-	var fixed [16]byte
-	copy(fixed[:], value)
-	return fixed, nil
+	_ = closer.CloseSession(cleanupCtx, nodeID, opened.ConnectionID, opened.SessionEpoch)
 }
 
 func validateEnrollment(request *agentv1.EnrollRequest) error {

@@ -1,5 +1,5 @@
-// Package commandauth issues Controller command authorizations that cannot be
-// minted by the transport process.
+// Package commandauth issues Controller command, session, and artifact
+// authorizations using RFC 8949 Core Deterministic CBOR signing transcripts.
 package commandauth
 
 import (
@@ -8,13 +8,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,6 +20,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -31,14 +30,14 @@ const (
 	ProtocolVersion       = "1.2"
 	LegacyProtocolVersion = "1.1"
 	keyIDPrefix           = "ed25519-sha256:"
+
+	authorizationV1Domain = "ocservia/controller-command/cbor.v1\x00"
+	sessionGrantV1Domain  = "ocservia/controller-session-grant/cbor.v1\x00"
+	artifactGrantV1Domain = "ocservia/artifact-grant/cbor.v1\x00"
 )
 
-var authorizationV1Domain = []byte("ocservia/controller-command/v1\x00")
-var sessionGrantV1Domain = []byte("ocservia/controller-session-grant/v1\x00")
-var artifactGrantV1Domain = []byte("ocservia/artifact-grant/v1\x00")
-
 // ClaimsV1 is the independent, non-Protobuf CommandAuthorizationV1 signing
-// input. CanonicalV1 defines its exact cross-language byte representation.
+// input. CanonicalV1 defines its exact cross-language CBOR representation.
 type ClaimsV1 struct {
 	AuthorizationVersion  uint32
 	KeyID                 string
@@ -50,8 +49,6 @@ type ClaimsV1 struct {
 	ActorIdentity         string
 	Action                string
 	RequiredCapability    string
-	ApprovalID            *[16]byte
-	ApprovalRequestSHA256 *[32]byte
 	ExpectedRevision      uint64
 	SemanticHashVersion   uint32
 	SemanticPayloadSHA256 [32]byte
@@ -70,7 +67,7 @@ type Signer struct {
 }
 
 // SessionGrantClaimsV1 is the independent canonical authorization for one
-// mutation-capable Agent session.
+// mutation-capable Agent session, binding a monotonic session_epoch.
 type SessionGrantClaimsV1 struct {
 	Version                uint32
 	KeyID                  string
@@ -79,6 +76,7 @@ type SessionGrantClaimsV1 struct {
 	NodeID                 [16]byte
 	EndpointID             [32]byte
 	AuthorizationRevision  uint64
+	SessionEpoch           uint64
 	NegotiatedCapabilities []string
 	IssuedAtSeconds        int64
 	IssuedAtNanos          uint32
@@ -104,6 +102,62 @@ type ArtifactGrantClaimsV1 struct {
 	ExpiresAtSeconds   int64
 	ExpiresAtNanos     uint32
 	GrantID            [16]byte
+}
+
+type cborCommandClaimsV1 struct {
+	Version               uint32 `cbor:"version"`
+	KeyID                 string `cbor:"key_id"`
+	ProtocolVersion       string `cbor:"protocol_version"`
+	CommandID             []byte `cbor:"command_id"`
+	IdempotencyKey        []byte `cbor:"idempotency_key"`
+	NodeID                []byte `cbor:"node_id"`
+	OperationID           []byte `cbor:"operation_id"`
+	ActorIdentity         string `cbor:"actor_identity"`
+	Action                string `cbor:"action"`
+	RequiredCapability    string `cbor:"required_capability"`
+	ExpectedRevision      uint64 `cbor:"expected_revision"`
+	SemanticHashVersion   uint32 `cbor:"semantic_hash_version"`
+	SemanticPayloadSHA256 []byte `cbor:"semantic_payload_sha256"`
+	PayloadKind           uint32 `cbor:"payload_kind"`
+	DeliveryMode          uint32 `cbor:"delivery_mode"`
+	IssuedAtSeconds       int64  `cbor:"issued_at_seconds"`
+	IssuedAtNanos         uint32 `cbor:"issued_at_nanos"`
+	ExpiresAtSeconds      int64  `cbor:"expires_at_seconds"`
+	ExpiresAtNanos        uint32 `cbor:"expires_at_nanos"`
+}
+
+type cborSessionGrantV1 struct {
+	Version                uint32   `cbor:"version"`
+	KeyID                  string   `cbor:"key_id"`
+	ProtocolMajor          uint32   `cbor:"protocol_major"`
+	ProtocolMinor          uint32   `cbor:"protocol_minor"`
+	NodeID                 []byte   `cbor:"node_id"`
+	EndpointID             []byte   `cbor:"endpoint_id"`
+	AuthorizationRevision  uint64   `cbor:"authorization_revision"`
+	SessionEpoch           uint64   `cbor:"session_epoch"`
+	NegotiatedCapabilities []string `cbor:"negotiated_capabilities"`
+	IssuedAtSeconds        int64    `cbor:"issued_at_seconds"`
+	IssuedAtNanos          uint32   `cbor:"issued_at_nanos"`
+	ExpiresAtSeconds       int64    `cbor:"expires_at_seconds"`
+	ExpiresAtNanos         uint32   `cbor:"expires_at_nanos"`
+}
+
+type cborArtifactGrantV1 struct {
+	Version            uint32 `cbor:"version"`
+	KeyID              string `cbor:"key_id"`
+	NodeID             []byte `cbor:"node_id"`
+	ArtifactID         []byte `cbor:"artifact_id"`
+	CertificateID      []byte `cbor:"certificate_id"`
+	CertificateVersion uint64 `cbor:"certificate_version"`
+	OperationID        []byte `cbor:"operation_id"`
+	AuthorizedSubject  string `cbor:"authorized_subject"`
+	Purpose            string `cbor:"purpose"`
+	MaxBytes           uint64 `cbor:"max_bytes"`
+	IssuedAtSeconds    int64  `cbor:"issued_at_seconds"`
+	IssuedAtNanos      uint32 `cbor:"issued_at_nanos"`
+	ExpiresAtSeconds   int64  `cbor:"expires_at_seconds"`
+	ExpiresAtNanos     uint32 `cbor:"expires_at_nanos"`
+	GrantID            []byte `cbor:"grant_id"`
 }
 
 // NewSignerFromSeed constructs a signer from an Ed25519 seed.
@@ -168,7 +222,7 @@ func (s *Signer) Authorize(envelope *agentv1.CommandEnvelope) error {
 		return errors.New("controller command signing key is unavailable")
 	}
 	envelope.Authorization = &agentv1.CommandAuthorizationProof{
-		Version: agentv1.CommandAuthorizationVersion_COMMAND_AUTHORIZATION_VERSION_V1,
+		Version: 1,
 		KeyId:   s.keyID,
 	}
 	claims, err := ClaimsFromEnvelopeV1(envelope)
@@ -183,62 +237,94 @@ func (s *Signer) Authorize(envelope *agentv1.CommandEnvelope) error {
 	return nil
 }
 
-// IssueSessionGrant signs the exact Controller-authorized capability subset and
-// trust revision for one Agent endpoint. Capabilities must already be sorted.
-func (s *Signer) IssueSessionGrant(nodeID [16]byte, endpointID [32]byte, authorizationRevision uint64, negotiatedCapabilities []string, protocolMajor, protocolMinor uint32, issuedAt, expiresAt time.Time) (*agentv1.SessionGrantV1, error) {
+// IssueSessionGrant signs the exact Controller-authorized capability subset,
+// trust revision, and monotonic session epoch for one Agent endpoint.
+// Capabilities must already be sorted.
+func (s *Signer) IssueSessionGrant(nodeID [16]byte, endpointID [32]byte, authorizationRevision, sessionEpoch uint64, negotiatedCapabilities []string, protocolMajor, protocolMinor uint32, issuedAt, expiresAt time.Time) (*agentv1.SessionGrantV1, error) {
 	if s == nil || len(s.privateKey) != ed25519.PrivateKeySize {
 		return nil, errors.New("controller command signing key is unavailable")
 	}
 	claims := SessionGrantClaimsV1{
-		Version: uint32(agentv1.SessionGrantVersion_SESSION_GRANT_VERSION_V1),
-		KeyID:   s.keyID, ProtocolMajor: protocolMajor, ProtocolMinor: protocolMinor,
-		NodeID: nodeID, EndpointID: endpointID, AuthorizationRevision: authorizationRevision,
+		Version:                1,
+		KeyID:                  s.keyID,
+		ProtocolMajor:          protocolMajor,
+		ProtocolMinor:          protocolMinor,
+		NodeID:                 nodeID,
+		EndpointID:             endpointID,
+		AuthorizationRevision:  authorizationRevision,
+		SessionEpoch:           sessionEpoch,
 		NegotiatedCapabilities: append([]string(nil), negotiatedCapabilities...),
-		IssuedAtSeconds:        issuedAt.Unix(), IssuedAtNanos: uint32(issuedAt.Nanosecond()),
-		ExpiresAtSeconds: expiresAt.Unix(), ExpiresAtNanos: uint32(expiresAt.Nanosecond()),
+		IssuedAtSeconds:        issuedAt.Unix(),
+		IssuedAtNanos:          uint32(issuedAt.Nanosecond()),
+		ExpiresAtSeconds:       expiresAt.Unix(),
+		ExpiresAtNanos:         uint32(expiresAt.Nanosecond()),
 	}
 	canonical, err := CanonicalSessionGrantV1(claims)
 	if err != nil {
 		return nil, err
 	}
 	return &agentv1.SessionGrantV1{
-		Version: agentv1.SessionGrantVersion_SESSION_GRANT_VERSION_V1,
-		KeyId:   s.keyID, ProtocolMajor: protocolMajor, ProtocolMinor: protocolMinor,
-		NodeId: nodeID[:], EndpointId: endpointID[:], AuthorizationRevision: authorizationRevision,
+		Version:                1,
+		KeyId:                  s.keyID,
+		ProtocolMajor:          protocolMajor,
+		ProtocolMinor:          protocolMinor,
+		NodeId:                 nodeID[:],
+		EndpointId:             endpointID[:],
+		AuthorizationRevision:  authorizationRevision,
+		SessionEpoch:           sessionEpoch,
 		NegotiatedCapabilities: append([]string(nil), negotiatedCapabilities...),
-		IssuedAt:               timestamppb.New(issuedAt), ExpiresAt: timestamppb.New(expiresAt),
-		Signature: ed25519.Sign(s.privateKey, canonical),
+		IssuedAt:               timestamppb.New(issuedAt),
+		ExpiresAt:              timestamppb.New(expiresAt),
+		Signature:              ed25519.Sign(s.privateKey, canonical),
 	}, nil
 }
 
-// IssueArtifactGrant authorizes exactly one bounded P12 artifact lease.
+// IssueArtifactGrant authorizes exactly one bounded P12 artifact fetch.
 func (s *Signer) IssueArtifactGrant(nodeID, artifactID, certificateID [16]byte, certificateVersion uint64, operationID [16]byte, authorizedSubject string, maxBytes uint64, grantID [16]byte, issuedAt, expiresAt time.Time) (*agentv1.ArtifactGrantV1, error) {
 	if s == nil || len(s.privateKey) != ed25519.PrivateKeySize {
 		return nil, errors.New("controller command signing key is unavailable")
 	}
 	claims := ArtifactGrantClaimsV1{
-		Version: uint32(agentv1.ArtifactGrantVersion_ARTIFACT_GRANT_VERSION_V1), KeyID: s.keyID,
-		NodeID: nodeID, ArtifactID: artifactID, CertificateID: certificateID,
-		CertificateVersion: certificateVersion, OperationID: operationID,
-		AuthorizedSubject: authorizedSubject, Purpose: "certificate_p12", MaxBytes: maxBytes,
-		IssuedAtSeconds: issuedAt.Unix(), IssuedAtNanos: uint32(issuedAt.Nanosecond()),
-		ExpiresAtSeconds: expiresAt.Unix(), ExpiresAtNanos: uint32(expiresAt.Nanosecond()), GrantID: grantID,
+		Version:            1,
+		KeyID:              s.keyID,
+		NodeID:             nodeID,
+		ArtifactID:         artifactID,
+		CertificateID:      certificateID,
+		CertificateVersion: certificateVersion,
+		OperationID:        operationID,
+		AuthorizedSubject:  authorizedSubject,
+		Purpose:            "certificate_p12",
+		MaxBytes:           maxBytes,
+		IssuedAtSeconds:    issuedAt.Unix(),
+		IssuedAtNanos:      uint32(issuedAt.Nanosecond()),
+		ExpiresAtSeconds:   expiresAt.Unix(),
+		ExpiresAtNanos:     uint32(expiresAt.Nanosecond()),
+		GrantID:            grantID,
 	}
 	canonical, err := CanonicalArtifactGrantV1(claims)
 	if err != nil {
 		return nil, err
 	}
 	return &agentv1.ArtifactGrantV1{
-		Version: agentv1.ArtifactGrantVersion_ARTIFACT_GRANT_VERSION_V1, KeyId: s.keyID,
-		NodeId: nodeID[:], ArtifactId: artifactID[:], CertificateId: certificateID[:],
-		CertificateVersion: certificateVersion, OperationId: operationID[:], AuthorizedSubject: authorizedSubject,
-		Purpose: "certificate_p12", MaxBytes: maxBytes, IssuedAt: timestamppb.New(issuedAt),
-		ExpiresAt: timestamppb.New(expiresAt), GrantId: grantID[:], Signature: ed25519.Sign(s.privateKey, canonical),
+		Version:            1,
+		KeyId:              s.keyID,
+		NodeId:             nodeID[:],
+		ArtifactId:         artifactID[:],
+		CertificateId:      certificateID[:],
+		CertificateVersion: certificateVersion,
+		OperationId:        operationID[:],
+		AuthorizedSubject:  authorizedSubject,
+		Purpose:            "certificate_p12",
+		MaxBytes:           maxBytes,
+		IssuedAt:           timestamppb.New(issuedAt),
+		ExpiresAt:          timestamppb.New(expiresAt),
+		GrantId:            grantID[:],
+		Signature:          ed25519.Sign(s.privateKey, canonical),
 	}, nil
 }
 
-// CanonicalArtifactGrantV1 returns the exact domain-separated artifact grant
-// signing bytes using fixed-width big-endian integers and length-prefixed UTF-8.
+// CanonicalArtifactGrantV1 returns the domain-separated RFC 8949 Core
+// Deterministic CBOR signing bytes for an artifact grant.
 func CanonicalArtifactGrantV1(claims ArtifactGrantClaimsV1) ([]byte, error) {
 	if claims.Version != 1 || claims.KeyID == "" || len(claims.KeyID) > 128 ||
 		claims.CertificateVersion == 0 || claims.AuthorizedSubject == "" || len(claims.AuthorizedSubject) > 256 ||
@@ -248,37 +334,29 @@ func CanonicalArtifactGrantV1(claims ArtifactGrantClaimsV1) ([]byte, error) {
 		(claims.ExpiresAtSeconds == claims.IssuedAtSeconds && claims.ExpiresAtNanos <= claims.IssuedAtNanos) {
 		return nil, errors.New("artifact grant v1 claims are invalid")
 	}
-	var encoded bytes.Buffer
-	encoded.Grow(512)
-	encoded.Write(artifactGrantV1Domain)
-	writeUint32(&encoded, claims.Version)
-	if err := writeString(&encoded, claims.KeyID); err != nil {
-		return nil, err
-	}
-	encoded.Write(claims.NodeID[:])
-	encoded.Write(claims.ArtifactID[:])
-	encoded.Write(claims.CertificateID[:])
-	writeUint64(&encoded, claims.CertificateVersion)
-	encoded.Write(claims.OperationID[:])
-	if err := writeString(&encoded, claims.AuthorizedSubject); err != nil {
-		return nil, err
-	}
-	if err := writeString(&encoded, claims.Purpose); err != nil {
-		return nil, err
-	}
-	writeUint64(&encoded, claims.MaxBytes)
-	writeInt64(&encoded, claims.IssuedAtSeconds)
-	writeUint32(&encoded, claims.IssuedAtNanos)
-	writeInt64(&encoded, claims.ExpiresAtSeconds)
-	writeUint32(&encoded, claims.ExpiresAtNanos)
-	encoded.Write(claims.GrantID[:])
-	return encoded.Bytes(), nil
+	return canonicalcbor.Marshal(artifactGrantV1Domain, cborArtifactGrantV1{
+		Version:            claims.Version,
+		KeyID:              claims.KeyID,
+		NodeID:             claims.NodeID[:],
+		ArtifactID:         claims.ArtifactID[:],
+		CertificateID:      claims.CertificateID[:],
+		CertificateVersion: claims.CertificateVersion,
+		OperationID:        claims.OperationID[:],
+		AuthorizedSubject:  claims.AuthorizedSubject,
+		Purpose:            claims.Purpose,
+		MaxBytes:           claims.MaxBytes,
+		IssuedAtSeconds:    claims.IssuedAtSeconds,
+		IssuedAtNanos:      claims.IssuedAtNanos,
+		ExpiresAtSeconds:   claims.ExpiresAtSeconds,
+		ExpiresAtNanos:     claims.ExpiresAtNanos,
+		GrantID:            claims.GrantID[:],
+	})
 }
 
-// CanonicalSessionGrantV1 returns the exact domain-separated session grant
-// signing bytes. It never serializes Protobuf.
+// CanonicalSessionGrantV1 returns the domain-separated RFC 8949 Core
+// Deterministic CBOR signing bytes for a session grant.
 func CanonicalSessionGrantV1(claims SessionGrantClaimsV1) ([]byte, error) {
-	if claims.Version != 1 || claims.KeyID == "" || claims.ProtocolMajor == 0 || claims.AuthorizationRevision == 0 || claims.IssuedAtNanos >= 1_000_000_000 || claims.ExpiresAtNanos >= 1_000_000_000 || claims.ExpiresAtSeconds < claims.IssuedAtSeconds || (claims.ExpiresAtSeconds == claims.IssuedAtSeconds && claims.ExpiresAtNanos <= claims.IssuedAtNanos) {
+	if claims.Version != 1 || claims.KeyID == "" || claims.ProtocolMajor == 0 || claims.AuthorizationRevision == 0 || claims.SessionEpoch == 0 || claims.IssuedAtNanos >= 1_000_000_000 || claims.ExpiresAtNanos >= 1_000_000_000 || claims.ExpiresAtSeconds < claims.IssuedAtSeconds || (claims.ExpiresAtSeconds == claims.IssuedAtSeconds && claims.ExpiresAtNanos <= claims.IssuedAtNanos) {
 		return nil, errors.New("session grant v1 claims are invalid")
 	}
 	if len(claims.NegotiatedCapabilities) > 128 || !slices.IsSorted(claims.NegotiatedCapabilities) {
@@ -289,29 +367,25 @@ func CanonicalSessionGrantV1(claims SessionGrantClaimsV1) ([]byte, error) {
 			return nil, errors.New("session grant capabilities are invalid")
 		}
 	}
-	var encoded bytes.Buffer
-	encoded.Grow(512)
-	encoded.Write(sessionGrantV1Domain)
-	writeUint32(&encoded, claims.Version)
-	if err := writeString(&encoded, claims.KeyID); err != nil {
-		return nil, err
+	caps := claims.NegotiatedCapabilities
+	if len(caps) == 0 {
+		caps = []string{}
 	}
-	writeUint32(&encoded, claims.ProtocolMajor)
-	writeUint32(&encoded, claims.ProtocolMinor)
-	encoded.Write(claims.NodeID[:])
-	encoded.Write(claims.EndpointID[:])
-	writeUint64(&encoded, claims.AuthorizationRevision)
-	writeUint32(&encoded, uint32(len(claims.NegotiatedCapabilities)))
-	for _, capability := range claims.NegotiatedCapabilities {
-		if err := writeString(&encoded, capability); err != nil {
-			return nil, err
-		}
-	}
-	writeInt64(&encoded, claims.IssuedAtSeconds)
-	writeUint32(&encoded, claims.IssuedAtNanos)
-	writeInt64(&encoded, claims.ExpiresAtSeconds)
-	writeUint32(&encoded, claims.ExpiresAtNanos)
-	return encoded.Bytes(), nil
+	return canonicalcbor.Marshal(sessionGrantV1Domain, cborSessionGrantV1{
+		Version:                claims.Version,
+		KeyID:                  claims.KeyID,
+		ProtocolMajor:          claims.ProtocolMajor,
+		ProtocolMinor:          claims.ProtocolMinor,
+		NodeID:                 claims.NodeID[:],
+		EndpointID:             claims.EndpointID[:],
+		AuthorizationRevision:  claims.AuthorizationRevision,
+		SessionEpoch:           claims.SessionEpoch,
+		NegotiatedCapabilities: caps,
+		IssuedAtSeconds:        claims.IssuedAtSeconds,
+		IssuedAtNanos:          claims.IssuedAtNanos,
+		ExpiresAtSeconds:       claims.ExpiresAtSeconds,
+		ExpiresAtNanos:         claims.ExpiresAtNanos,
+	})
 }
 
 // ClaimsFromEnvelopeV1 validates and projects a command envelope into the
@@ -321,7 +395,7 @@ func ClaimsFromEnvelopeV1(envelope *agentv1.CommandEnvelope) (ClaimsV1, error) {
 		return ClaimsV1{}, errors.New("command authorization proof is missing")
 	}
 	authorization := envelope.GetAuthorization()
-	if authorization.GetVersion() != agentv1.CommandAuthorizationVersion_COMMAND_AUTHORIZATION_VERSION_V1 {
+	if authorization.GetVersion() != 1 {
 		return ClaimsV1{}, errors.New("command authorization version is unsupported")
 	}
 	if envelope.GetProtocolVersion() != ProtocolVersion && envelope.GetProtocolVersion() != LegacyProtocolVersion {
@@ -360,8 +434,8 @@ func ClaimsFromEnvelopeV1(envelope *agentv1.CommandEnvelope) (ClaimsV1, error) {
 	if err != nil {
 		return ClaimsV1{}, err
 	}
-	if envelope.GetSemanticPayloadHashVersion() != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1 && envelope.GetSemanticPayloadHashVersion() != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 {
-		return ClaimsV1{}, errors.New("semantic payload hash version must be v1")
+	if envelope.GetSemanticPayloadHashVersion() != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 {
+		return ClaimsV1{}, errors.New("semantic payload hash version must be v2")
 	}
 	issuedAt, expiresAt := envelope.GetIssuedAt(), envelope.GetExpiresAt()
 	if issuedAt == nil || issuedAt.CheckValid() != nil || expiresAt == nil || expiresAt.CheckValid() != nil || !expiresAt.AsTime().After(issuedAt.AsTime()) {
@@ -370,70 +444,56 @@ func ClaimsFromEnvelopeV1(envelope *agentv1.CommandEnvelope) (ClaimsV1, error) {
 	if envelope.GetDeliveryMode() == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_UNSPECIFIED {
 		return ClaimsV1{}, errors.New("command delivery mode is invalid")
 	}
-	approvalID, err := optional16(envelope.GetApprovalId(), "approval_id")
-	if err != nil {
-		return ClaimsV1{}, err
-	}
-	approvalHash, err := optional32(envelope.GetApprovalRequestSha256(), "approval_request_sha256")
-	if err != nil {
-		return ClaimsV1{}, err
-	}
-	if approvalHash != nil && approvalID == nil {
-		return ClaimsV1{}, errors.New("approval request hash requires an approval ID")
-	}
 	return ClaimsV1{
-		AuthorizationVersion: uint32(authorization.GetVersion()),
-		KeyID:                authorization.GetKeyId(), ProtocolVersion: envelope.GetProtocolVersion(),
-		CommandID: commandID, IdempotencyKey: idempotencyKey, NodeID: nodeID, OperationID: operationID,
-		ActorIdentity: envelope.GetActorId(), Action: envelope.GetAction(), RequiredCapability: envelope.GetRequiredCapability(),
-		ApprovalID: approvalID, ApprovalRequestSHA256: approvalHash, ExpectedRevision: envelope.GetExpectedRevision(),
-		SemanticHashVersion: uint32(envelope.GetSemanticPayloadHashVersion()), SemanticPayloadSHA256: semanticHash,
-		PayloadKind: payloadKind, DeliveryMode: uint32(envelope.GetDeliveryMode()),
-		IssuedAtSeconds: issuedAt.GetSeconds(), IssuedAtNanos: uint32(issuedAt.GetNanos()),
-		ExpiresAtSeconds: expiresAt.GetSeconds(), ExpiresAtNanos: uint32(expiresAt.GetNanos()),
+		AuthorizationVersion:  authorization.GetVersion(),
+		KeyID:                 authorization.GetKeyId(),
+		ProtocolVersion:       envelope.GetProtocolVersion(),
+		CommandID:             commandID,
+		IdempotencyKey:        idempotencyKey,
+		NodeID:                nodeID,
+		OperationID:           operationID,
+		ActorIdentity:         envelope.GetActorId(),
+		Action:                envelope.GetAction(),
+		RequiredCapability:    envelope.GetRequiredCapability(),
+		ExpectedRevision:      envelope.GetExpectedRevision(),
+		SemanticHashVersion:   uint32(envelope.GetSemanticPayloadHashVersion()),
+		SemanticPayloadSHA256: semanticHash,
+		PayloadKind:           payloadKind,
+		DeliveryMode:          uint32(envelope.GetDeliveryMode()),
+		IssuedAtSeconds:       issuedAt.GetSeconds(),
+		IssuedAtNanos:         uint32(issuedAt.GetNanos()),
+		ExpiresAtSeconds:      expiresAt.GetSeconds(),
+		ExpiresAtNanos:        uint32(expiresAt.GetNanos()),
 	}, nil
 }
 
-// CanonicalV1 returns the exact bytes signed by Controller Ed25519 keys. It
-// never marshals a Protobuf message.
+// CanonicalV1 returns the domain-separated RFC 8949 Core Deterministic CBOR
+// bytes signed by Controller Ed25519 keys. It never marshals Protobuf.
 func CanonicalV1(claims ClaimsV1) ([]byte, error) {
 	if claims.AuthorizationVersion != 1 || claims.KeyID == "" || claims.ProtocolVersion == "" || claims.ActorIdentity == "" || claims.Action == "" || claims.RequiredCapability == "" || claims.SemanticHashVersion == 0 || claims.PayloadKind == 0 || claims.DeliveryMode == 0 || claims.IssuedAtNanos >= 1_000_000_000 || claims.ExpiresAtNanos >= 1_000_000_000 || claims.ExpiresAtSeconds < claims.IssuedAtSeconds || (claims.ExpiresAtSeconds == claims.IssuedAtSeconds && claims.ExpiresAtNanos <= claims.IssuedAtNanos) {
 		return nil, errors.New("command authorization v1 claims are invalid")
 	}
-	if claims.ApprovalRequestSHA256 != nil && claims.ApprovalID == nil {
-		return nil, errors.New("approval request hash requires an approval ID")
-	}
-	var encoded bytes.Buffer
-	encoded.Grow(512)
-	encoded.Write(authorizationV1Domain)
-	writeUint32(&encoded, claims.AuthorizationVersion)
-	if err := writeString(&encoded, claims.KeyID); err != nil {
-		return nil, err
-	}
-	if err := writeString(&encoded, claims.ProtocolVersion); err != nil {
-		return nil, err
-	}
-	encoded.Write(claims.CommandID[:])
-	encoded.Write(claims.IdempotencyKey[:])
-	encoded.Write(claims.NodeID[:])
-	encoded.Write(claims.OperationID[:])
-	for _, value := range []string{claims.ActorIdentity, claims.Action, claims.RequiredCapability} {
-		if err := writeString(&encoded, value); err != nil {
-			return nil, err
-		}
-	}
-	writeOptional16(&encoded, claims.ApprovalID)
-	writeOptional32(&encoded, claims.ApprovalRequestSHA256)
-	writeUint64(&encoded, claims.ExpectedRevision)
-	writeUint32(&encoded, claims.SemanticHashVersion)
-	encoded.Write(claims.SemanticPayloadSHA256[:])
-	writeUint32(&encoded, claims.PayloadKind)
-	writeUint32(&encoded, claims.DeliveryMode)
-	writeInt64(&encoded, claims.IssuedAtSeconds)
-	writeUint32(&encoded, claims.IssuedAtNanos)
-	writeInt64(&encoded, claims.ExpiresAtSeconds)
-	writeUint32(&encoded, claims.ExpiresAtNanos)
-	return encoded.Bytes(), nil
+	return canonicalcbor.Marshal(authorizationV1Domain, cborCommandClaimsV1{
+		Version:               claims.AuthorizationVersion,
+		KeyID:                 claims.KeyID,
+		ProtocolVersion:       claims.ProtocolVersion,
+		CommandID:             claims.CommandID[:],
+		IdempotencyKey:        claims.IdempotencyKey[:],
+		NodeID:                claims.NodeID[:],
+		OperationID:           claims.OperationID[:],
+		ActorIdentity:         claims.ActorIdentity,
+		Action:                claims.Action,
+		RequiredCapability:    claims.RequiredCapability,
+		ExpectedRevision:      claims.ExpectedRevision,
+		SemanticHashVersion:   claims.SemanticHashVersion,
+		SemanticPayloadSHA256: claims.SemanticPayloadSHA256[:],
+		PayloadKind:           claims.PayloadKind,
+		DeliveryMode:          claims.DeliveryMode,
+		IssuedAtSeconds:       claims.IssuedAtSeconds,
+		IssuedAtNanos:         claims.IssuedAtNanos,
+		ExpiresAtSeconds:      claims.ExpiresAtSeconds,
+		ExpiresAtNanos:        claims.ExpiresAtNanos,
+	})
 }
 
 func payloadAuthorization(envelope *agentv1.CommandEnvelope) (uint32, string, string, error) {
@@ -499,63 +559,6 @@ func fixed32(value []byte, name string) ([32]byte, error) {
 	}
 	return [32]byte(value), nil
 }
-
-func optional16(value []byte, name string) (*[16]byte, error) {
-	if len(value) == 0 {
-		return nil, nil
-	}
-	fixed, err := fixed16(value, name)
-	return &fixed, err
-}
-
-func optional32(value []byte, name string) (*[32]byte, error) {
-	if len(value) == 0 {
-		return nil, nil
-	}
-	fixed, err := fixed32(value, name)
-	return &fixed, err
-}
-
-func writeString(target io.Writer, value string) error {
-	if len(value) > math.MaxUint32 {
-		return errors.New("command authorization string exceeds uint32 length")
-	}
-	writeUint32(target, uint32(len(value)))
-	_, err := io.WriteString(target, value)
-	return err
-}
-
-func writeOptional16(target io.Writer, value *[16]byte) {
-	if value == nil {
-		_, _ = target.Write([]byte{0})
-		return
-	}
-	_, _ = target.Write([]byte{1})
-	_, _ = target.Write(value[:])
-}
-
-func writeOptional32(target io.Writer, value *[32]byte) {
-	if value == nil {
-		_, _ = target.Write([]byte{0})
-		return
-	}
-	_, _ = target.Write([]byte{1})
-	_, _ = target.Write(value[:])
-}
-
-func writeUint32(target io.Writer, value uint32) {
-	var encoded [4]byte
-	binary.BigEndian.PutUint32(encoded[:], value)
-	_, _ = target.Write(encoded[:])
-}
-
-func writeUint64(target io.Writer, value uint64) {
-	var encoded [8]byte
-	binary.BigEndian.PutUint64(encoded[:], value)
-	_, _ = target.Write(encoded[:])
-}
-
-func writeInt64(target io.Writer, value int64) { writeUint64(target, uint64(value)) }
 
 func readPrivateKeyFile(path string, expectedUID uint32) ([]byte, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {

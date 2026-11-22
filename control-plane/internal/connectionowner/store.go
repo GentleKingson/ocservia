@@ -2,43 +2,21 @@ package connectionowner
 
 import (
 	"context"
-	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/google/uuid"
 )
 
-type Identity struct {
-	InstanceID  uuid.UUID
-	Incarnation int64
-}
-
-type StoreTerm struct {
-	Identity             Identity
-	NodeID, ConnectionID [16]byte
-	Epoch                int64
-}
-
-type Lease struct {
-	Epoch int64
-	Until time.Time
-}
-
 type OwnerState struct {
-	InstanceID      uuid.UUID
-	Incarnation     int64
-	ConnectionID    [16]byte
-	Epoch           int64
-	Until           time.Time
-	LeaseUntilValid bool
+	ConnectionID [16]byte
+	Epoch        int64
+	Active       bool
 }
 
 type Store interface {
-	Acquire(context.Context, StoreTerm, time.Duration) (Lease, error)
-	Renew(context.Context, StoreTerm, time.Duration) (time.Time, error)
-	Release(context.Context, StoreTerm) error
-	Assert(context.Context, StoreTerm) error
-	Read(context.Context, [16]byte) (OwnerState, error)
+	Acquire(ctx context.Context, nodeID, connectionID [16]byte) (int64, error)
+	Release(ctx context.Context, nodeID, connectionID [16]byte, epoch int64) error
+	Assert(ctx context.Context, nodeID, connectionID [16]byte, epoch int64) error
+	Read(ctx context.Context, nodeID [16]byte) (OwnerState, error)
 }
 
 func StoreFromTransaction(tx database.Tx) (Store, error) {

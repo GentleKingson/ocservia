@@ -2,7 +2,7 @@ use super::super::{
     AdapterError, ArtifactLeaseIdentity, Connection, MAX_ARTIFACT_BYTES, OptionalExtension,
     TransactionBehavior, Uuid, params,
 };
-use super::hmac::authenticate_artifact_record;
+use super::hmac::{authenticate_artifact_record, verify_mac};
 use super::owner_fence::{ValidatedOwnerFence, enforce_owner_fence, validate_owner_fence};
 use super::{EffectStore, effect_now, fixed_blob, sqlite_io};
 
@@ -19,7 +19,6 @@ pub(crate) struct ArtifactRecord {
     pub(crate) active_grant_id: Option<[u8; 16]>,
     pub(crate) active_subject: String,
     pub(crate) grant_expires_at: Option<i64>,
-    pub(crate) active_offset: u64,
     pub(crate) record_hmac: [u8; 32],
 }
 
@@ -158,14 +157,13 @@ impl EffectStore {
             active_grant_id: None,
             active_subject: String::new(),
             grant_expires_at: None,
-            active_offset: 0,
             record_hmac: [0; 32],
         };
         record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
         transaction
             .execute(
-                "INSERT INTO certificate_artifacts(artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,active_offset,record_hmac,updated_at)
-                 VALUES(?1,?2,?3,?4,?5,0,?6,'prepared',NULL,'',NULL,0,?7,?8)",
+                "INSERT INTO certificate_artifacts(artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,record_hmac,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,0,?6,'prepared',NULL,'',NULL,?7,?8)",
                 params![record.artifact_id.as_slice(), record.certificate_id.as_slice(), i64::try_from(record.certificate_version).map_err(|_| AdapterError::InvalidRequest)?, record.operation_id.as_slice(), record.content_sha256.as_slice(), record.artifact_expires_at, record.record_hmac.as_slice(), now],
             )
             .map_err(sqlite_io)?;
@@ -218,84 +216,32 @@ impl EffectStore {
         {
             return Err(AdapterError::InvalidRequest);
         }
-        if record.state == "leased"
-            && record.active_grant_id != Some(*identity.grant_id)
-            && record.grant_expires_at.is_some_and(|expiry| expiry > now)
-        {
-            return Err(AdapterError::Unavailable);
-        }
-        if record.state == "leased"
-            && record.active_grant_id == Some(*identity.grant_id)
-            && (record.active_subject != identity.authorized_subject
-                || record.grant_expires_at != Some(identity.expires_at))
-        {
-            return Err(AdapterError::InvalidRequest);
-        }
-        if record.state != "leased" || record.active_grant_id != Some(*identity.grant_id) {
-            record.state = "leased";
-            record.active_grant_id = Some(*identity.grant_id);
-            identity
-                .authorized_subject
-                .clone_into(&mut record.active_subject);
-            record.grant_expires_at = Some(identity.expires_at);
-            record.active_offset = 0;
-            record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
-            let changed = transaction
-                .execute(
-                    "UPDATE certificate_artifacts SET state='leased',active_grant_id=?2,active_subject=?3,grant_expires_at=?4,active_offset=0,record_hmac=?5,updated_at=?6 WHERE artifact_id=?1",
-                    params![record.artifact_id.as_slice(), identity.grant_id.as_slice(), identity.authorized_subject, identity.expires_at, record.record_hmac.as_slice(), now],
-                )
-                .map_err(sqlite_io)?;
-            if changed != 1 {
+        if record.state == "leased" {
+            if record.active_grant_id == Some(*identity.grant_id) {
+                return Err(AdapterError::InvalidRequest);
+            }
+            if record.grant_expires_at.is_some_and(|expiry| expiry > now) {
                 return Err(AdapterError::Unavailable);
             }
         }
-        transaction.commit().map_err(sqlite_io)?;
-        Ok(record)
-    }
-
-    pub(crate) fn advance_artifact(
-        &mut self,
-        identity: ArtifactLeaseIdentity<'_>,
-        expected_offset: u64,
-        next_offset: u64,
-    ) -> Result<(), AdapterError> {
-        let now = effect_now()?;
-        let identity = validate_artifact_identity(identity, now)?;
-        // `lease_artifact` admitted this same read before bytes were exposed;
-        // a later takeover must not leave its durable offset behind.
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite_io)?;
-        let mut record = query_artifact(&transaction, identity.artifact_id)?
-            .ok_or(AdapterError::InvalidRequest)?;
-        validate_artifact_record(&self.hmac_key, &record)?;
-        if record.state != "leased"
-            || record.active_grant_id != Some(*identity.grant_id)
-            || record.active_subject != identity.authorized_subject
-            || record.grant_expires_at != Some(identity.expires_at)
-            || record.certificate_id != *identity.certificate_id
-            || record.certificate_version != identity.certificate_version
-            || record.operation_id != *identity.operation_id
-            || record.active_offset != expected_offset
-            || next_offset <= expected_offset
-            || next_offset > record.content_size
-        {
-            return Err(AdapterError::InvalidRequest);
-        }
-        record.active_offset = next_offset;
+        record.state = "leased";
+        record.active_grant_id = Some(*identity.grant_id);
+        identity
+            .authorized_subject
+            .clone_into(&mut record.active_subject);
+        record.grant_expires_at = Some(identity.expires_at);
         record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
         let changed = transaction
             .execute(
-                "UPDATE certificate_artifacts SET active_offset=?2,record_hmac=?3,updated_at=?4 WHERE artifact_id=?1 AND state='leased' AND active_offset=?5",
-                params![record.artifact_id.as_slice(), i64::try_from(next_offset).map_err(|_| AdapterError::InvalidRequest)?, record.record_hmac.as_slice(), now, i64::try_from(expected_offset).map_err(|_| AdapterError::InvalidRequest)?],
+                "UPDATE certificate_artifacts SET state='leased',active_grant_id=?2,active_subject=?3,grant_expires_at=?4,record_hmac=?5,updated_at=?6 WHERE artifact_id=?1",
+                params![record.artifact_id.as_slice(), identity.grant_id.as_slice(), identity.authorized_subject, identity.expires_at, record.record_hmac.as_slice(), now],
             )
             .map_err(sqlite_io)?;
         if changed != 1 {
             return Err(AdapterError::Unavailable);
         }
-        transaction.commit().map_err(sqlite_io)
+        transaction.commit().map_err(sqlite_io)?;
+        Ok(record)
     }
 
     pub(crate) fn consume_artifact(
@@ -324,8 +270,7 @@ impl EffectStore {
             && record.certificate_version == identity.certificate_version
             && record.operation_id == *identity.operation_id
             && record.content_sha256 == digest
-            && record.content_size == content_size
-            && record.active_offset == record.content_size;
+            && record.content_size == content_size;
         if record.state == "consumed" && exact_identity {
             transaction.commit().map_err(sqlite_io)?;
             return Ok(());
@@ -376,8 +321,7 @@ impl EffectStore {
         }
         let exact_grant = record.active_grant_id == Some(*identity.grant_id)
             && record.active_subject == identity.authorized_subject
-            && record.grant_expires_at == Some(identity.expires_at)
-            && record.active_offset == record.content_size;
+            && record.grant_expires_at == Some(identity.expires_at);
         let consumed = match record.state {
             "consumed" if exact_grant => Ok(true),
             "leased" if exact_grant => Ok(false),
@@ -434,7 +378,7 @@ impl EffectStore {
         let mut terminal = Vec::new();
         let mut update_stmt = transaction
             .prepare_cached(
-                "UPDATE certificate_artifacts SET state=?2,active_grant_id=?3,active_subject=?4,grant_expires_at=?5,active_offset=?6,record_hmac=?7,updated_at=?8 WHERE artifact_id=?1",
+                "UPDATE certificate_artifacts SET state=?2,active_grant_id=?3,active_subject=?4,grant_expires_at=?5,record_hmac=?6,updated_at=?7 WHERE artifact_id=?1",
             )
             .map_err(sqlite_io)?;
         for mut record in records {
@@ -452,7 +396,6 @@ impl EffectStore {
                 record.active_grant_id = None;
                 record.active_subject.clear();
                 record.grant_expires_at = None;
-                record.active_offset = 0;
                 changed = true;
             }
             if matches!(record.state, "consumed" | "expired" | "revoked") {
@@ -467,8 +410,6 @@ impl EffectStore {
                         record.active_grant_id.as_ref().map(<[u8; 16]>::as_slice),
                         record.active_subject,
                         record.grant_expires_at,
-                        i64::try_from(record.active_offset)
-                            .map_err(|_| AdapterError::InvalidResource)?,
                         record.record_hmac.as_slice(),
                         now
                     ])
@@ -551,7 +492,6 @@ fn validate_artifact_identity_for_confirmation(
 fn decode_artifact_row(row: &rusqlite::Row<'_>) -> Result<ArtifactRecord, rusqlite::Error> {
     let certificate_version: i64 = row.get(2)?;
     let content_size: i64 = row.get(5)?;
-    let active_offset: i64 = row.get(11)?;
     let active_grant: Option<Vec<u8>> = row.get(8)?;
     Ok(ArtifactRecord {
         artifact_id: fixed_blob(row.get(0)?)?,
@@ -574,8 +514,7 @@ fn decode_artifact_row(row: &rusqlite::Row<'_>) -> Result<ArtifactRecord, rusqli
         active_grant_id: active_grant.map(fixed_blob).transpose()?,
         active_subject: row.get(9)?,
         grant_expires_at: row.get(10)?,
-        active_offset: u64::try_from(active_offset).map_err(|_| rusqlite::Error::InvalidQuery)?,
-        record_hmac: fixed_blob(row.get(12)?)?,
+        record_hmac: fixed_blob(row.get(11)?)?,
     })
 }
 
@@ -585,7 +524,7 @@ pub(crate) fn query_artifact(
 ) -> Result<Option<ArtifactRecord>, AdapterError> {
     let mut statement = connection
         .prepare_cached(
-            "SELECT artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,active_offset,record_hmac FROM certificate_artifacts WHERE artifact_id=?1",
+            "SELECT artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,record_hmac FROM certificate_artifacts WHERE artifact_id=?1",
         )
         .map_err(sqlite_io)?;
     statement
@@ -600,7 +539,7 @@ fn query_certificate_artifact_records(
 ) -> Result<Vec<ArtifactRecord>, AdapterError> {
     let mut statement = connection
         .prepare_cached(
-            "SELECT artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,active_offset,record_hmac FROM certificate_artifacts WHERE certificate_id=?1",
+            "SELECT artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,record_hmac FROM certificate_artifacts WHERE certificate_id=?1",
         )
         .map_err(sqlite_io)?;
     let rows = statement
@@ -614,7 +553,7 @@ fn query_all_artifact_records(
 ) -> Result<Vec<ArtifactRecord>, AdapterError> {
     let mut statement = connection
         .prepare_cached(
-            "SELECT artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,active_offset,record_hmac FROM certificate_artifacts ORDER BY artifact_id",
+            "SELECT artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,record_hmac FROM certificate_artifacts ORDER BY artifact_id",
         )
         .map_err(sqlite_io)?;
     let rows = statement
@@ -635,9 +574,10 @@ fn validate_artifact_record(key: &[u8; 32], record: &ArtifactRecord) -> Result<(
             && (record.active_grant_id.is_none()
                 || record.active_subject.is_empty()
                 || record.grant_expires_at.is_none()))
-        || record.active_offset > record.content_size
-        || (record.state == "available" && record.active_offset != 0)
-        || authenticate_artifact_record(key, record) != record.record_hmac
+        || !verify_mac(
+            &authenticate_artifact_record(key, record),
+            &record.record_hmac,
+        )
     {
         return Err(AdapterError::InvalidResource);
     }

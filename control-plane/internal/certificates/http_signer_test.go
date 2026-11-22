@@ -52,7 +52,7 @@ func TestHTTPSignerUsesFixedBoundedAuthenticatedEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	sealed, err := signer.Seal(context.Background(), id, agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, []byte("one-time-password"))
-	if err != nil || len(sealed.GetCiphertext()) != 64 || sealed.GetKeyId() != "node-key-v1" || sealed.GetVersion() != agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1 || sealed.GetPurpose() != agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD {
+	if err != nil || len(sealed.GetCiphertext()) != 64 || sealed.GetKeyId() != "node-key-v1" || sealed.GetVersion() != 1 || sealed.GetPurpose() != agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD {
 		t.Fatalf("sealed=%+v err=%v", sealed, err)
 	}
 }

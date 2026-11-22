@@ -12,13 +12,11 @@ import (
 	"strings"
 	"time"
 
-	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
 )
 
@@ -59,7 +57,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 		}
 		now := s.now()
 		current, err := store.LockReceipt(ctx, request.CertificateID)
-		if err != nil || current.NodeID != nodeID || !current.Current || current.ReceiptKey != approved.ReceiptKey || !bytes.Equal(current.CSR, csrDER) || !bytes.Equal(current.ReceiptDigest, approved.ReceiptDigest) || !bytes.Equal(current.CSRDigest, approved.CSRDigest) || !bytes.Equal(current.SubjectDigest, approved.SubjectDigest) || !bytes.Equal(current.RequestHash, requestHash) {
+		if err != nil || current.NodeID != nodeID || !current.Current || current.ReceiptKey != approved.ReceiptKey || !bytes.Equal(current.CSR, csrDER) || !bytes.Equal(current.ReceiptDigest, approved.ReceiptDigest) || !bytes.Equal(current.CSRDigest, approved.CSRDigest) || !bytes.Equal(current.RequestHash, requestHash) {
 			return ErrNotReady
 		}
 		active, err := store.KeyActive(ctx, nodeID, current.ReceiptKey, now.UTC())
@@ -98,13 +96,8 @@ func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (work
 		if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, workspaceID); err != nil {
 			return err
 		}
-		var dnsNames []string
-		if err := json.Unmarshal(stored.DNSNames, &dnsNames); err != nil {
-			return ErrNotReady
-		}
 		csrDigest := sha256.Sum256(csrDER)
-		subjectDigest, subjectErr := privdattestation.RequestedSubjectDigest(&agentv1.CertificateCsr{CertificateId: request.CertificateID[:], CommonName: stored.CommonName, DnsNames: dnsNames, KeyBits: stored.KeyBits})
-		if !stored.ReceiptCurrent || len(stored.ReceiptDigest) != sha256.Size || len(stored.ReceiptKey) == 0 || !bytes.Equal(stored.CSRDigest, csrDigest[:]) || subjectErr != nil || !bytes.Equal(stored.SubjectDigest, subjectDigest) {
+		if !stored.ReceiptCurrent || len(stored.ReceiptDigest) != sha256.Size || len(stored.ReceiptKey) == 0 || !bytes.Equal(stored.CSRDigest, csrDigest[:]) {
 			return ErrNotReady
 		}
 		at, err := database.TransactionTime(ctx, tx)

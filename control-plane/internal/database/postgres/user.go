@@ -175,11 +175,11 @@ func (s userStateStore) WriteDesired(ctx context.Context, v userstatestore.Desir
 	var err error
 	switch v.Kind {
 	case "user_create":
-		_, err = s.Exec(ctx, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,$2,true,$3,$4,$5,$6,$6) ON CONFLICT(node_id,username) DO UPDATE SET enabled=true,version=EXCLUDED.version,revision=EXCLUDED.revision,fingerprint=EXCLUDED.fingerprint,updated_at=EXCLUDED.updated_at`, v.NodeID, v.Name, v.Version, v.Revision, v.Fingerprint, v.At)
+		_, err = s.Exec(ctx, `INSERT INTO desired_users(node_id,username,enabled,version,revision,created_at,updated_at)VALUES($1,$2,true,$3,$4,$5,$5) ON CONFLICT(node_id,username) DO UPDATE SET enabled=true,version=EXCLUDED.version,revision=EXCLUDED.revision,updated_at=EXCLUDED.updated_at`, v.NodeID, v.Name, v.Version, v.Revision, v.At)
 	case "group_apply":
-		_, err = s.Exec(ctx, `INSERT INTO desired_groups(node_id,group_name,members,version,revision,fingerprint,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$7) ON CONFLICT(node_id,group_name) DO UPDATE SET members=EXCLUDED.members,version=EXCLUDED.version,revision=EXCLUDED.revision,fingerprint=EXCLUDED.fingerprint,updated_at=EXCLUDED.updated_at`, v.NodeID, v.Name, v.Members, v.Version, v.Revision, v.Fingerprint, v.At)
+		_, err = s.Exec(ctx, `INSERT INTO desired_groups(node_id,group_name,members,version,revision,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$6) ON CONFLICT(node_id,group_name) DO UPDATE SET members=EXCLUDED.members,version=EXCLUDED.version,revision=EXCLUDED.revision,updated_at=EXCLUDED.updated_at`, v.NodeID, v.Name, v.Members, v.Version, v.Revision, v.At)
 	case "user_enable", "user_disable":
-		n, err = s.Exec(ctx, `UPDATE desired_users SET enabled=$3,version=$4,revision=$5,fingerprint=$6,updated_at=$7 WHERE node_id=$1 AND username=$2`, v.NodeID, v.Name, v.Kind == "user_enable", v.Version, v.Revision, v.Fingerprint, v.At)
+		n, err = s.Exec(ctx, `UPDATE desired_users SET enabled=$3,version=$4,revision=$5,updated_at=$6 WHERE node_id=$1 AND username=$2`, v.NodeID, v.Name, v.Kind == "user_enable", v.Version, v.Revision, v.At)
 		if err == nil && n != 1 {
 			return database.ErrNotFound
 		}
@@ -240,7 +240,6 @@ func (s userStateStore) List(ctx context.Context, node uuid.UUID) ([]userstatest
  UNION SELECT 'group',node_id,group_name FROM observed_groups WHERE node_id=$1
  ) SELECT r.kind,r.name,n.status,du.enabled,ou.enabled,dg.members,og.members,
  COALESCE(du.version,dg.version),COALESCE(du.revision,dg.revision),COALESCE(ou.revision,og.revision),
- COALESCE(du.fingerprint,dg.fingerprint),COALESCE(ou.fingerprint,og.fingerprint),
  op.id,op.state,c.state,c.payload_type,`+userSafeRejected+`,COALESCE(ou.observed_at,og.observed_at)
  FROM resources r JOIN nodes n ON n.id=r.node_id
  LEFT JOIN desired_users du ON r.kind='user' AND du.node_id=r.node_id AND du.username=r.name
@@ -256,7 +255,7 @@ func (s userStateStore) List(ctx context.Context, node uuid.UUID) ([]userstatest
 	result := []userstatestore.Resource{}
 	for rows.Next() {
 		var v userstatestore.Resource
-		if err := rows.Scan(&v.Kind, &v.Name, &v.NodeStatus, &v.DesiredEnabled, &v.ObservedEnabled, &v.DesiredMembers, &v.ObservedMembers, &v.DesiredVersion, &v.DesiredRevision, &v.ObservedRevision, &v.DesiredFingerprint, &v.ObservedFingerprint, &v.OperationID, &v.OperationState, &v.CommandState, &v.PayloadType, &v.SafeRejected, &v.ObservedAt); err != nil {
+		if err := rows.Scan(&v.Kind, &v.Name, &v.NodeStatus, &v.DesiredEnabled, &v.ObservedEnabled, &v.DesiredMembers, &v.ObservedMembers, &v.DesiredVersion, &v.DesiredRevision, &v.ObservedRevision, &v.OperationID, &v.OperationState, &v.CommandState, &v.PayloadType, &v.SafeRejected, &v.ObservedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, v)

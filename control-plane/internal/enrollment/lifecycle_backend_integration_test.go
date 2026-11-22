@@ -234,10 +234,10 @@ type leasedTransport struct {
 	closes int
 }
 
-func (s *leasedTransport) UpdateNodeTrust(ctx context.Context, _, _ []byte, _ transportv1.NodeTrustState, _ string, _ uint64, _ []byte, _ *agentv1.FenceBindingV2) error {
+func (s *leasedTransport) UpdateNodeTrust(ctx context.Context, _, _ []byte, _ transportv1.NodeTrustState, _ string, _ uint64) error {
 	return s.update(ctx)
 }
-func (s *leasedTransport) CloseNode(ctx context.Context, _ []byte, _ string, _ *agentv1.FenceBindingV2) error {
+func (s *leasedTransport) CloseNode(ctx context.Context, _ []byte, _ string) error {
 	s.closes++
 	if s.close != nil {
 		return s.close(ctx)
@@ -334,48 +334,6 @@ func TestTrustUncertainRPCBackendIntegration(t *testing.T) {
 				})
 			}
 		}
-	}
-}
-
-func TestTrustOwnerEndedBackendIntegration(t *testing.T) {
-	for _, ending := range []string{"closed", "expired", "replaced"} {
-		t.Run(ending, func(t *testing.T) {
-			f, ctx := newLifecycleFixture(t), context.Background()
-			v := f.job(t)
-			signer, err := commandauth.NewRandomSigner()
-			testutil.NoError(t, err)
-			manager, err := ownersession.NewManagerBackend(f.b, signer, &recordingRegistrar{}, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			testutil.NoError(t, err)
-			var endpoint [32]byte
-			copy(endpoint[:], v.EndpointID)
-			fence, err := manager.OpenSession(ctx, [16]byte(v.NodeID), endpoint, 1, []string{ownersession.FencingCapability})
-			testutil.NoError(t, err)
-			calls := 0
-			action := func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error { calls++; return nil }
-			if err := manager.ExecuteFenced(ctx, [16]byte(v.NodeID), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(v.NodeID), ownersession.FencingCapability, action); err != nil || calls != 1 {
-				t.Fatal("live owner refused", err, calls)
-			}
-			var connection [16]byte
-			copy(connection[:], fence.ConnectionId)
-			if ending == "closed" {
-				testutil.NoError(t, manager.CloseSession(ctx, [16]byte(v.NodeID), connection, int64(fence.OwnerEpoch)))
-			} else {
-				// Wait for the actual signed lease deadline. Shortening only the
-				// database deadline would not expire the already-issued fence.
-				time.Sleep(time.Until(fence.LeaseUntil.AsTime()) + 50*time.Millisecond)
-				if ending == "replaced" {
-					successor, err := ownersession.NewManagerBackend(f.b, signer, &recordingRegistrar{}, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
-					testutil.NoError(t, err)
-					next, err := successor.OpenSession(ctx, [16]byte(v.NodeID), endpoint, 1, []string{ownersession.FencingCapability})
-					if err != nil || next.GetOwnerEpoch() <= fence.OwnerEpoch {
-						t.Fatal(next, err)
-					}
-				}
-			}
-			if err := manager.ExecuteFenced(ctx, [16]byte(v.NodeID), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(v.NodeID), ownersession.FencingCapability, action); !errors.Is(err, ownersession.ErrNotOwner) || calls != 1 {
-				t.Fatal("ended owner issued binding", err, calls)
-			}
-		})
 	}
 }
 
@@ -519,11 +477,11 @@ func TestTrustWorkerRenewalBackendIntegration(t *testing.T) {
 
 type ownerLostTransport struct{ calls int }
 
-func (s *ownerLostTransport) UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64, []byte, *agentv1.FenceBindingV2) error {
+func (s *ownerLostTransport) UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64) error {
 	s.calls++
 	return ownersession.ErrNotOwner
 }
-func (s *ownerLostTransport) CloseNode(context.Context, []byte, string, *agentv1.FenceBindingV2) error {
+func (s *ownerLostTransport) CloseNode(context.Context, []byte, string) error {
 	s.calls++
 	return ownersession.ErrNotOwner
 }

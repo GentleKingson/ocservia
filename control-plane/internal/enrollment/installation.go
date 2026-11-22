@@ -240,8 +240,8 @@ func (s *Service) RegisterInstallationKey(ctx context.Context, request Installat
 		return "", ErrInvalidRequest
 	}
 	rootKeys := []*agentv1.SealingKeyDescriptorV1{
-		{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: request.UserPasswordSealKeyID, PublicKeySha256: userDigest},
-		{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: request.P12PasswordSealKeyID, PublicKeySha256: p12Digest},
+		{Version: 1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: request.UserPasswordSealKeyID, PublicKeySha256: userDigest},
+		{Version: 1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: request.P12PasswordSealKeyID, PublicKeySha256: p12Digest},
 	}
 	match, err := sealingKeysMatch(ctx, store, request.NodeID, rootKeys)
 	if err != nil {

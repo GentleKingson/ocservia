@@ -1,6 +1,5 @@
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt as _;
 use iroh::EndpointId;
@@ -15,23 +14,16 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
 };
 use prost::Message;
 use tonic::Status;
+use uuid::Uuid;
 
 use crate::admission::trust_rejection_error;
 use crate::command_stream::{event, now_timestamp};
-use crate::fence::{
-    RegisteredFence, lease_expired_at, lease_remaining_duration, same_fence_term, unix_now_parts,
-    validate_uuid,
-};
 use crate::registry::finish_session;
 use crate::trust::{IdentityPolicy, TrustAuthority, TrustClass};
 use crate::{
     MAX_FRAME_BYTES, MAX_HANDSHAKE_BYTES, MAX_STREAMS, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    STREAM_TIMEOUT, Shared,
+    STREAM_TIMEOUT, Shared, unix_now_seconds, validate_uuid,
 };
-
-/// Upper bound on a single deadline sleep in `monitor_owner_lease` so wall-clock
-/// NTP jumps are re-checked periodically without 1-second per-node polling.
-const MAX_LEASE_SLEEP: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ProtocolKind {
@@ -53,8 +45,9 @@ pub(crate) struct NegotiatedSession {
     pub(crate) handshake: SessionHandshake,
     pub(crate) negotiated_capabilities: HashSet<String>,
     pub(crate) authorization_revision: u64,
-    pub(crate) session_expires_at: Option<SystemTime>,
-    pub(crate) fence: Arc<RegisteredFence>,
+    pub(crate) session_epoch: u64,
+    pub(crate) connection_id: [u8; 16],
+    pub(crate) session_expires_at: SystemTime,
 }
 
 impl std::fmt::Debug for SessionHandler {
@@ -111,66 +104,36 @@ impl SessionHandler {
         }
         let negotiated_capabilities =
             validate_negotiated_session(&handshake, connection.remote_id(), &response)?;
-        let (authorization_revision, session_expires_at) = response
+        let grant = response
             .session_grant
             .as_ref()
-            .map(|grant| {
-                let expires_at = grant
-                    .expires_at
-                    .as_ref()
-                    .ok_or_else(|| protocol_error("session grant expiry is missing"))?;
-                let expires_at = SystemTime::try_from(*expires_at)
-                    .map_err(|_| protocol_error("session grant expiry is invalid"))?;
-                Ok::<_, AcceptError>((grant.authorization_revision, Some(expires_at)))
-            })
-            .transpose()?
-            .unwrap_or((0, None));
-        let fence = self.verify_session_fence(connection, &handshake, &response)?;
+            .ok_or_else(|| protocol_error("Controller session grant is required"))?;
+        let node_id: [u8; 16] = handshake
+            .node_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| protocol_error("handshake node id is invalid"))?;
+        let endpoint_id: [u8; 32] = *connection.remote_id().as_bytes();
+        let verified = self
+            .shared
+            .keyring()
+            .verify_session_grant(grant, &node_id, &endpoint_id, unix_now_seconds())
+            .map_err(|_| protocol_error("Controller session grant is invalid"))?;
+        let session_expires_at = UNIX_EPOCH
+            + Duration::from_secs(
+                u64::try_from(verified.expires_at_seconds)
+                    .map_err(|_| protocol_error("session grant expiry is invalid"))?,
+            );
         let mut handshake = handshake;
         handshake.max_message_size = response.max_message_size;
         Ok(Some(NegotiatedSession {
             handshake,
             negotiated_capabilities,
-            authorization_revision,
+            authorization_revision: verified.authorization_revision,
+            session_epoch: verified.session_epoch,
+            connection_id: *Uuid::now_v7().as_bytes(),
             session_expires_at,
-            fence: Arc::new(fence),
         }))
-    }
-
-    /// Verifies the Controller-signed connection-owner fence carried by one
-    /// accepted session handshake. Fails closed when the fence is missing or
-    /// cannot be verified, when its lease deadline has passed (it authorizes
-    /// current mutations, unlike its later audit expiry), or when it is not
-    /// pinned to the claiming node and the connection's endpoint.
-    fn verify_session_fence(
-        &self,
-        connection: &Connection,
-        handshake: &SessionHandshake,
-        response: &SessionHandshakeResponse,
-    ) -> Result<RegisteredFence, AcceptError> {
-        let fence = response
-            .connection_fence
-            .as_ref()
-            .ok_or_else(|| protocol_error("session requires a verified owner fence"))?;
-        let keyring = self.shared.keyring();
-        let node_id: [u8; 16] = handshake
-            .node_id
-            .clone()
-            .try_into()
-            .map_err(|_| protocol_error("handshake node id is invalid"))?;
-        let endpoint_id: [u8; 32] = *connection.remote_id().as_bytes();
-        let (now_seconds, now_nanos) = unix_now_parts();
-        let verified = keyring
-            .verify_connection_fence_v2_at(fence, &node_id, &endpoint_id, now_seconds, now_nanos)
-            .map_err(|_| protocol_error("controller connection fence is invalid"))?;
-        if lease_expired_at(verified.lease_until_seconds, verified.lease_until_nanos) {
-            return Err(protocol_error("connection owner lease has expired"));
-        }
-        Ok(RegisteredFence {
-            verified,
-            fence: fence.clone(),
-            endpoint_id,
-        })
     }
 }
 
@@ -185,10 +148,6 @@ impl ProtocolHandler for SessionHandler {
             .clone()
             .try_acquire_owned()
             .map_err(|_| protocol_error("connection capacity reached"))?;
-        // One deadline covers stream acceptance, request read, trust
-        // authorization, response write and delivery acknowledgement, so a peer
-        // that stalls any step cannot hold this connection slot.
-        // The streams stay owned here so an accepted session keeps them open.
         let mut streams = None;
         let negotiated = tokio::time::timeout(self.handshake_timeout, async {
             let (send, recv) = streams.insert(
@@ -232,7 +191,9 @@ impl ProtocolHandler for SessionHandler {
                 return Err(trust_rejection_error(rejection));
             }
         }
-        let audit_fence = Arc::clone(&session.fence);
+        let connection_id = session.connection_id;
+        let session_epoch = session.session_epoch;
+        let session_expires_at = session.session_expires_at;
         self.shared
             .register_session(
                 &self.policy,
@@ -249,7 +210,8 @@ impl ProtocolHandler for SessionHandler {
                 self.trust.clone(),
                 node_id.clone(),
                 connection.clone(),
-                audit_fence,
+                connection_id,
+                session_epoch,
             ),
             monitor_telemetry(
                 self.shared.clone(),
@@ -257,7 +219,7 @@ impl ProtocolHandler for SessionHandler {
                 connection.clone(),
                 max_message_size,
             ),
-            monitor_owner_lease(self.shared.clone(), node_id.clone(), connection.clone()),
+            monitor_session_expiry(connection.clone(), session_expires_at),
         );
         let _closed = connection.closed().await;
         finish_session(&self.shared, &node_id, &connection, monitors, permit).await;
@@ -265,54 +227,15 @@ impl ProtocolHandler for SessionHandler {
     }
 }
 
-// A Controller restart stops renewing its owner leases while the QUIC
-// connection can remain alive. Sleep directly until the registered lease
-// deadline (woken early by `lease_notify` whenever `register_fence` refreshes
-// or replaces the term) instead of polling every second per node.
-fn monitor_owner_lease(
-    shared: Shared,
-    node_id: Vec<u8>,
+fn monitor_session_expiry(
     connection: Connection,
+    expires_at: SystemTime,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        loop {
-            let (lease_notify, wait_duration) = {
-                let registry = shared.inner.connections.lock().await;
-                let Some(entry) = registry.get(&node_id) else {
-                    break;
-                };
-                if entry.connection.stable_id() != connection.stable_id() {
-                    break;
-                }
-                let session_fence = &entry.fence;
-                let lease_notify = Arc::clone(&entry.lease_notify);
-                // Renewal replaces the registered fence, not the handshake's
-                // snapshot. Read it under the same lock order used by registration.
-                let fences = shared.inner.fences.lock().await;
-                let remaining = fences
-                    .get(&node_id)
-                    .filter(|registered| {
-                        same_fence_term(&session_fence.verified, &registered.verified)
-                    })
-                    .and_then(|registered| {
-                        lease_remaining_duration(
-                            registered.verified.lease_until_seconds,
-                            registered.verified.lease_until_nanos,
-                        )
-                    });
-                let Some(remaining) = remaining else {
-                    drop(fences);
-                    drop(registry);
-                    connection.close(VarInt::from_u32(0x109), b"owner lease expired");
-                    break;
-                };
-                (lease_notify, remaining.min(MAX_LEASE_SLEEP))
-            };
-            tokio::select! {
-                () = tokio::time::sleep(wait_duration) => {}
-                () = lease_notify.notified() => {}
-            }
+        if let Ok(remaining) = expires_at.duration_since(SystemTime::now()) {
+            tokio::time::sleep(remaining).await;
         }
+        connection.close(VarInt::from_u32(0x109), b"session grant expired");
     })
 }
 
@@ -321,7 +244,8 @@ fn monitor_audit(
     authority: TrustAuthority,
     node: Vec<u8>,
     connection: Connection,
-    fence: Arc<RegisteredFence>,
+    connection_id: [u8; 16],
+    session_epoch: u64,
 ) -> tokio::task::JoinHandle<()> {
     use ocservia_contracts::generated::ocserv::platform::{
         agent::v1::VpnAuditBatch, transport::v1::StoreVpnAuditRequest,
@@ -353,8 +277,8 @@ fn monitor_audit(
                     .store_vpn_audit(StoreVpnAuditRequest {
                         node_id: node.clone(),
                         endpoint_id: connection.remote_id().as_bytes().to_vec(),
-                        connection_id: fence.verified.connection_id.to_vec(),
-                        owner_epoch: fence.verified.owner_epoch,
+                        connection_id: connection_id.to_vec(),
+                        session_epoch,
                         batch: Some(batch),
                     })
                     .await?;
@@ -385,8 +309,6 @@ fn monitor_telemetry(
                 connection.close(VarInt::from_u32(0x107), b"telemetry frame size invalid");
                 break;
             }
-            // Charge the node before reading the body so a flood never reaches
-            // the shared publish path or the retention buffer.
             if !shared.admit_telemetry(&node_id, length).await {
                 tracing::warn!(
                     event_type = "telemetry_budget_exceeded",
@@ -550,6 +472,7 @@ pub(crate) fn validate_negotiated_session(
         || grant.node_id != handshake.node_id
         || grant.endpoint_id != endpoint.as_bytes()
         || grant.authorization_revision == 0
+        || grant.session_epoch == 0
         || grant.key_id.is_empty()
         || grant.signature.len() != 64
         || grant.negotiated_capabilities != response.negotiated_capabilities
@@ -697,8 +620,8 @@ async fn metadata(session: &NegotiatedSession, connection: &Connection) -> NodeC
             capabilities
         },
         authorization_revision: session.authorization_revision,
-        session_expires_at: session.session_expires_at.map(Into::into),
-        owner_epoch: session.fence.verified.owner_epoch,
+        session_expires_at: Some(session.session_expires_at.into()),
+        session_epoch: session.session_epoch,
     }
 }
 

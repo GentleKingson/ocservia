@@ -204,21 +204,21 @@ func TestUserStateBackendIntegration(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if err := store.WriteDesired(ctx, userstore.Desired{NodeID: node, Kind: "group_apply", Name: "logical", Version: 7, Revision: 3, Fingerprint: bytes.Repeat([]byte{2}, 32), Members: members, At: now}); err != nil {
+		if err := store.WriteDesired(ctx, userstore.Desired{NodeID: node, Kind: "group_apply", Name: "logical", Version: 7, Revision: 3, Members: members, At: now}); err != nil {
 			return err
 		}
 		// Identical UPDATE is a matched row, not a not-found error.
-		v := userstore.Desired{NodeID: node, Kind: "user_enable", Name: "alice", Version: 7, Revision: 3, Fingerprint: bytes.Repeat([]byte{2}, 32), At: now}
+		v := userstore.Desired{NodeID: node, Kind: "user_enable", Name: "alice", Version: 7, Revision: 3, At: now}
 		if err := store.WriteDesired(ctx, v); err != nil {
 			return err
 		}
 		return store.WriteDesired(ctx, v)
 	})
 	testutil.NoError(t, err)
-	exec(`INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at)VALUES($1,'logical',$2,3,$3,$4)`, node, members, bytes.Repeat([]byte{2}, 32), now)
+	exec(`INSERT INTO observed_groups(node_id,group_name,members,revision,observed_at)VALUES($1,'logical',$2,3,$3)`, node, members, now)
 	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at)VALUES($1,$2,$2,'desired',$3,'test','test','test','{}','{}','{}',$2)`, node, now, uuid.New())
-	exec(`INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at)VALUES($1,'remote',$2,0,$3,$4)`, node, []string{"Bob", "bob", "bob "}, bytes.Repeat([]byte{2}, 32), now)
-	exec(`INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at)VALUES($1,'remote',true,0,$2,$3)`, node, bytes.Repeat([]byte{2}, 32), now)
+	exec(`INSERT INTO observed_groups(node_id,group_name,members,revision,observed_at)VALUES($1,'remote',$2,0,$3)`, node, []string{"Bob", "bob", "bob "}, now)
+	exec(`INSERT INTO observed_users(node_id,username,enabled,revision,observed_at)VALUES($1,'remote',true,0,$2)`, node, now)
 	assertCounts := func(users, groups, memberships int) {
 		t.Helper()
 		if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {

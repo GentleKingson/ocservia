@@ -14,7 +14,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 )
 
@@ -47,9 +46,9 @@ type SecretSealer interface {
 }
 
 type ArtifactFetcher interface {
-	FetchArtifact(context.Context, *agentv1.ArtifactGrantV1, *agentv1.FenceBindingV2) (io.ReadCloser, error)
-	ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) error
-	ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) (bool, error)
+	FetchArtifact(context.Context, *agentv1.ArtifactGrantV1) (io.ReadCloser, error)
+	ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) error
+	ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) (bool, error)
 }
 
 type RevokeSignerRequest struct {
@@ -65,7 +64,6 @@ type Service struct {
 	sealer      SecretSealer
 	artifacts   ArtifactFetcher
 	grantSigner *commandauth.Signer
-	fences      ownersession.FencedExecutor
 	now         func() time.Time
 }
 
@@ -137,28 +135,6 @@ type ArtifactDownload struct {
 // require an operations service configured for the same backend.
 func NewBackend(backend database.Backend, operationService *operations.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
 	return &Service{backend: backend, operations: operationService, signer: signer, sealer: sealer, artifacts: artifacts, grantSigner: grantSigner, now: func() time.Time { return time.Now().UTC() }}
-}
-
-// EnableOwnerFencing runs artifact mutations inside the connection owner's
-// fencing interval. Artifact transfers are owner-fenced operations: a stale
-// owner must neither fetch nor confirm artifacts, and no binding may outlive
-// the term the ownership authority backed at mutation time.
-func (s *Service) EnableOwnerFencing(fences ownersession.FencedExecutor) {
-	s.fences = fences
-}
-
-// executeArtifactFenced runs one artifact transfer mutation inside the owner
-// fencing interval. Fetches bind the artifact identity; consumes and
-// confirmations bind the grant identity.
-func (s *Service) executeArtifactFenced(ctx context.Context, nodeID, operationID uuid.UUID, action ownersession.FencedAction) error {
-	if s.fences == nil {
-		return action(ctx, nil, nil)
-	}
-	var fixedNode [16]byte
-	copy(fixedNode[:], nodeID[:])
-	var fixedOperation [16]byte
-	copy(fixedOperation[:], operationID[:])
-	return s.fences.ExecuteFenced(ctx, fixedNode, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_ARTIFACT, fixedOperation, ownersession.FencingCapability, action)
 }
 
 func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificate, bool, error) {

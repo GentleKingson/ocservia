@@ -53,13 +53,13 @@ func newCommandResultFixture(t *testing.T) commandResultFixture {
 		DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY,
 		Payload:      &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "hello"}},
 	}
-	testutil.NoError(t, semanticpayload.PopulateV1(&envelope))
+	testutil.NoError(t, semanticpayload.PopulateV2(&envelope))
 	testutil.NoError(t, signer.Authorize(&envelope))
 	envelopeBytes, err := proto.Marshal(&envelope)
 	testutil.NoError(t, err)
 	testutil.Exec(t, ctx, pool, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,request_id,trace_id,created_at,updated_at,idempotency_key,request_hash,expires_at) VALUES($1,$2,$3,$4,'dispatched','strict-result','1123456789abcdef0123456789abcdef',$5,$5,'strict-result',$6,$7)`, operationID, workspaceID, nodeID, commandID, now, make([]byte, 32), now.Add(time.Hour))
 	testutil.Exec(t, ctx, pool, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,sequence,traceparent,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'dispatched','synthetic_echo',$5,'strict-result',1,1,$6,$7,$8,$8)`, commandID, operationID, workspaceID, nodeID, envelopeBytes, traceparent, now.Add(time.Hour), now)
-	payloadHash, err := semanticpayload.HashV1(&envelope)
+	payloadHash, err := semanticpayload.HashV2(&envelope)
 	testutil.NoError(t, err)
 	t.Cleanup(func() {
 		for _, statement := range []string{
@@ -90,6 +90,6 @@ func (fixture *commandResultFixture) validResult() *agentv1.CommandResult {
 		CommandId: fixture.commandID[:], IdempotencyKey: fixture.envelope.GetIdempotencyKey(),
 		PayloadSha256: fixture.payloadHash[:], State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED,
 		Result: []byte("hello"), AcceptedAt: timestamppb.New(fixture.issuedAt), CompletedAt: timestamppb.New(fixture.issuedAt),
-		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
+		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2,
 	}
 }

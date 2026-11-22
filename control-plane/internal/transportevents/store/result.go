@@ -29,7 +29,7 @@ type Result struct {
 	Replayed                           bool
 	VerificationStatus                 string
 	FailureReason, KeyID               *string
-	EffectRecordID, ReceiptHash, Proof []byte
+	ReceiptHash, Proof                 []byte
 	EffectSequence                     *int64
 }
 
@@ -48,12 +48,12 @@ type ConfigOutcome struct {
 }
 
 type CSROutcome struct {
-	CertificateID, OperationID                                         uuid.UUID
-	State                                                              string
-	DER, PublicHash, ReceiptHash, EffectRecordID, CSRHash, SubjectHash []byte
-	KeyID                                                              *string
-	At                                                                 time.Time
-	VerifiedAt                                                         *time.Time
+	CertificateID, OperationID            uuid.UUID
+	State                                 string
+	DER, PublicHash, ReceiptHash, CSRHash []byte
+	KeyID                                 *string
+	At                                    time.Time
+	VerifiedAt                            *time.Time
 }
 
 type RevokeOutcome struct {
@@ -73,7 +73,7 @@ type ArtifactOutcome struct {
 
 type ResultStore interface {
 	LoadCommand(context.Context, uuid.UUID, uuid.UUID) (ResultCommand, error)
-	Receipt(context.Context, string, []byte, uint64) (uuid.UUID, []byte, error)
+	Receipt(context.Context, string, uint64) (uuid.UUID, []byte, error)
 	InsertResult(context.Context, Result) error
 	Workspace(context.Context, uuid.UUID) (uuid.UUID, error)
 	Alert(context.Context, uuid.UUID, uuid.UUID, string, string, time.Time) error

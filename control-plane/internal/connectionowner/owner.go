@@ -1,60 +1,28 @@
-// Package connectionowner implements the per-node connection-owner lease
-// defined by the persistent ownership fencing contract: at most one unexpired owner per
-// node, a monotonically increasing fencing epoch that is never reused, and
-// transaction-time asserts so a stale owner can never commit after a
-// takeover.
+// Package connectionowner persists the monotonically increasing per-node
+// session_epoch for the single active Controller.
 package connectionowner
 
-import (
-	"errors"
-	"time"
-)
+import "errors"
 
-// ErrNotOwner is returned when the connection no longer owns the node lease,
-// either because another owner took over or because the lease expired.
-// Callers must stop dispatching, renewing, closing, and committing
-// connection-scoped state.
-var ErrNotOwner = errors.New("connectionowner: connection ownership lost")
+// ErrNotOwner is returned when a connection is no longer the active session
+// for its node (superseded by a newer reconnect epoch or closed).
+var ErrNotOwner = errors.New("connectionowner: session superseded or closed")
 
-// ErrLeaseHeld reports that another unexpired owner currently holds the
-// node lease. Cross-instance takeover requires the previous lease to expire.
-var ErrLeaseHeld = errors.New("connectionowner: node lease held by another owner")
+// ErrNoOwnerRow reports that the node has never opened a session.
+var ErrNoOwnerRow = errors.New("connectionowner: node has no session row")
 
-// ErrNoOwnerRow reports that the node has no ownership row at all: it was
-// never fenced. A fence registered elsewhere without a backing row claims a
-// term the authority never granted or no longer knows, so readers must fail
-// closed on it.
-var ErrNoOwnerRow = errors.New("connectionowner: node has no ownership row")
-
-// Term is one acquired node ownership lease. It is immutable after Acquire.
-// LeaseUntil is the exact deadline the database recorded for the term; callers
-// must use it instead of reconstructing a local deadline from the TTL, and
-// must replace it with the exact deadline returned by Renew.
+// Term represents one acquired per-node session epoch.
 type Term struct {
-	identity     Identity
 	nodeID       [16]byte
 	connectionID [16]byte
 	epoch        int64
-	leaseTTL     time.Duration
-	leaseUntil   time.Time
 }
 
-// Epoch returns the fencing epoch of this term. Per-node epochs increase
-// monotonically across terms and are never reused, including across schema
-// rollback and re-upgrade cycles.
+// Epoch returns the strictly increasing per-node session epoch.
 func (t *Term) Epoch() int64 { return t.epoch }
 
-// NodeID returns the node this term owns.
+// NodeID returns the node this term belongs to.
 func (t *Term) NodeID() [16]byte { return t.nodeID }
 
 // ConnectionID returns the connection identity bound to this term.
 func (t *Term) ConnectionID() [16]byte { return t.connectionID }
-
-// Identity returns the owner identity bound to this term.
-func (t *Term) Identity() Identity { return t.identity }
-
-// LeaseUntil returns the exact lease deadline the database recorded when this
-// term was acquired. The deadline is authoritative: reconstructing it locally
-// with the TTL and a local clock is forbidden because clock drift would let a
-// stale owner treat an expired lease as valid.
-func (t *Term) LeaseUntil() time.Time { return t.leaseUntil }

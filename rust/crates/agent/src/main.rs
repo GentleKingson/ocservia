@@ -21,7 +21,6 @@ use uuid::Uuid;
 const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
 const ENROLL_ALPN: &[u8] = b"ocserv-platform/enroll/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const CONNECTION_FENCING_CAPABILITY: &str = "ocserv.fencing.v2";
 const ARTIFACT_FRAME_MASK: u32 = 3 << 30;
 
 #[tokio::main]

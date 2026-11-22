@@ -4,7 +4,6 @@ package configprofile
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -12,17 +11,40 @@ import (
 	"strings"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const Provider = "node-local-tls-v1"
 const PlanCapability = "ocserv.config.complete.plan"
 const ApplyCapability = "ocserv.config.complete.apply"
 
+const canonicalDomain = "ocservia.complete-config.cbor.v1\x00"
+
 var ErrInvalid = errors.New("invalid complete configuration profile")
 
 var required = []string{"auth", "cookie-timeout", "device", "dns", "ipv4-network", "max-clients", "max-same-clients", "server-cert", "server-key", "socket-file", "tcp-port", "udp-port"}
+
+type cborTLSRef struct {
+	SecretRefID       []byte `cbor:"secret_ref_id"`
+	Version           string `cbor:"version"`
+	CertificateSHA256 []byte `cbor:"certificate_sha256"`
+	SPKISHA256        []byte `cbor:"spki_sha256"`
+	CASHA256          []byte `cbor:"ca_sha256"`
+}
+
+type cborDirective struct {
+	Name    string      `cbor:"name"`
+	Kind    uint32      `cbor:"kind"`
+	Literal string      `cbor:"literal"`
+	TLS     *cborTLSRef `cbor:"tls"`
+}
+
+type cborCandidate struct {
+	NodeID           []byte          `cbor:"node_id"`
+	ExpectedRevision uint64          `cbor:"expected_revision"`
+	Directives       []cborDirective `cbor:"directives"`
+}
 
 func label(value string, max int) bool {
 	if len(value) == 0 || len(value) > max || strings.Contains(value, "..") {
@@ -74,20 +96,21 @@ func validLiteral(name, value string) bool {
 	}
 }
 
-func appendLength(out []byte, data []byte) []byte {
-	out = binary.BigEndian.AppendUint32(out, uint32(len(data)))
-	return append(out, data...)
+func nonNilBytes(b []byte) []byte {
+	if len(b) == 0 {
+		return []byte{}
+	}
+	return b
 }
 
-// Canonical is a versioned transcript, never protobuf serialization. It also
-// rejects configurations outside the finite profile before they can be signed.
+// Canonical is a versioned RFC 8949 Core Deterministic CBOR transcript, never
+// protobuf serialization. It also rejects configurations outside the finite
+// profile before they can be signed.
 func Canonical(candidate *agentv1.CompleteConfigCandidate) ([]byte, error) {
 	if candidate == nil || len(candidate.NodeId) != 16 || bytes.Equal(candidate.NodeId, make([]byte, 16)) || candidate.ExpectedRevision > uint64(^uint64(0)>>1) || len(candidate.Directives) < len(required) || len(candidate.Directives) > len(required)+2 {
 		return nil, ErrInvalid
 	}
-	out := append([]byte("ocservia.complete-config.v1\x00"), candidate.NodeId...)
-	out = binary.BigEndian.AppendUint64(out, candidate.ExpectedRevision)
-	out = binary.BigEndian.AppendUint32(out, uint32(len(candidate.Directives)))
+	directives := make([]cborDirective, 0, len(candidate.Directives))
 	seen := make(map[string]bool)
 	previous := ""
 	var serverRef *agentv1.NodeLocalTlsReference
@@ -98,14 +121,17 @@ func Canonical(candidate *agentv1.CompleteConfigCandidate) ([]byte, error) {
 		}
 		previous = directive.Name
 		seen[directive.Name] = true
-		out = appendLength(out, []byte(directive.Name))
 		switch value := directive.Value.(type) {
 		case *agentv1.CompleteConfigDirective_Literal:
 			if !validLiteral(directive.Name, value.Literal) {
 				return nil, ErrInvalid
 			}
-			out = append(out, 0)
-			out = appendLength(out, []byte(value.Literal))
+			directives = append(directives, cborDirective{
+				Name:    directive.Name,
+				Kind:    0,
+				Literal: value.Literal,
+				TLS:     nil,
+			})
 			if directive.Name == "max-clients" {
 				maxClients, _ = strconv.ParseUint(value.Literal, 10, 32)
 			}
@@ -124,12 +150,17 @@ func Canonical(candidate *agentv1.CompleteConfigCandidate) ([]byte, error) {
 				return nil, ErrInvalid
 			}
 			serverRef = ref
-			out = append(out, 1)
-			out = append(out, ref.SecretRefId...)
-			out = appendLength(out, []byte(ref.Version))
-			out = append(out, ref.CertificateSha256...)
-			out = append(out, ref.SpkiSha256...)
-			out = appendLength(out, ref.CaSha256)
+			directives = append(directives, cborDirective{
+				Name: directive.Name,
+				Kind: 1,
+				TLS: &cborTLSRef{
+					SecretRefID:       nonNilBytes(ref.SecretRefId),
+					Version:           ref.Version,
+					CertificateSHA256: nonNilBytes(ref.CertificateSha256),
+					SPKISHA256:        nonNilBytes(ref.SpkiSha256),
+					CASHA256:          nonNilBytes(ref.CaSha256),
+				},
+			})
 		default:
 			return nil, ErrInvalid
 		}
@@ -142,7 +173,11 @@ func Canonical(candidate *agentv1.CompleteConfigCandidate) ([]byte, error) {
 	if maxSame > maxClients {
 		return nil, ErrInvalid
 	}
-	return out, nil
+	return canonicalcbor.Marshal(canonicalDomain, cborCandidate{
+		NodeID:           nonNilBytes(candidate.NodeId),
+		ExpectedRevision: candidate.ExpectedRevision,
+		Directives:       directives,
+	})
 }
 
 func Hash(candidate *agentv1.CompleteConfigCandidate) ([32]byte, error) {
@@ -169,20 +204,4 @@ func Redacted(candidate *agentv1.CompleteConfigCandidate) (string, error) {
 	}
 	result.WriteString("run-as-user = ocservia-vpn\nrun-as-group = ocservia-vpn\nuse-occtl = true\n")
 	return result.String(), nil
-}
-
-func ApprovalHash(planID, nodeID uuid.UUID, candidate, materialized, current []byte, revision uint64, expires *timestamppb.Timestamp) ([]byte, error) {
-	if planID == uuid.Nil || nodeID == uuid.Nil || len(candidate) != 32 || len(materialized) != 32 || len(current) != 32 || expires == nil || !expires.IsValid() {
-		return nil, ErrInvalid
-	}
-	out := append([]byte("ocservia.complete-config.approval.v1\x00"), planID[:]...)
-	out = append(out, nodeID[:]...)
-	out = append(out, candidate...)
-	out = append(out, materialized...)
-	out = append(out, current...)
-	out = binary.BigEndian.AppendUint64(out, revision)
-	out = binary.BigEndian.AppendUint64(out, uint64(expires.Seconds))
-	out = binary.BigEndian.AppendUint32(out, uint32(expires.Nanos))
-	hash := sha256.Sum256(out)
-	return hash[:], nil
 }

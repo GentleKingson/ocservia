@@ -8,9 +8,7 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ocservia_command_authorization::{ControllerCommandKeyring, load_verification_key};
-use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    PrivdAttestationRegistrationV1, PrivdReceiptVersion,
-};
+use ocservia_contracts::generated::ocserv::platform::agent::v1::PrivdAttestationRegistrationV1;
 use ocservia_ocserv_adapter::{Adapter, FixedResources, Limits};
 use ocservia_privd::{ServerConfig, bind_socket, remove_socket, serve};
 use ocservia_privd_attestation::{key_id, load_or_create_signing_key, sign_registration};
@@ -104,7 +102,7 @@ fn attestation_registration(
     let key = load_or_create_signing_key(&key_path, owner)?;
     let registration = sign_registration(
         PrivdAttestationRegistrationV1 {
-            version: PrivdReceiptVersion::V1.into(),
+            version: 1,
             node_id: node_id.as_bytes().to_vec(),
             privd_attestation_key_id: key_id(&key.verifying_key()),
             public_key: key.verifying_key().as_bytes().to_vec(),
@@ -454,8 +452,8 @@ mod tests {
         };
         let public_key = decode("public_key");
         let registration = PrivdAttestationRegistrationV1 {
-            version: i32::try_from(output["version"].as_i64().expect("registration version"))
-                .expect("version fits i32"),
+            version: u32::try_from(output["version"].as_u64().expect("registration version"))
+                .expect("version fits u32"),
             node_id: node_id.as_bytes().to_vec(),
             privd_attestation_key_id: output["key_id"]
                 .as_str()

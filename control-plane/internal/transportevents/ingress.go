@@ -82,9 +82,9 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 				if termErr != nil {
 					return termErr
 				}
-				if fenced && s.recoveryAuthority.OwnsTerm([16]byte(nodeID), connectionID, int64(event.GetOwnerEpoch())) {
+				if fenced && s.recoveryAuthority.OwnsTerm([16]byte(nodeID), connectionID, event.GetSessionEpoch()) {
 					recovered, recoveryErr := s.commandRecovery.RecoverAmbiguousDispatched(ctx, tx, operations.OwnerReconnect{
-						NodeID: nodeID, ConnectionID: connectionID, OwnerEpoch: event.GetOwnerEpoch(),
+						NodeID: nodeID, ConnectionID: connectionID, SessionEpoch: event.GetSessionEpoch(),
 						ObservedAt: observedAt, Limit: operations.DefaultReconnectRecoveryLimit,
 					})
 					if recoveryErr != nil && !errors.Is(recoveryErr, connectionowner.ErrNotOwner) {

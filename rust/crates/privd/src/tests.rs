@@ -18,17 +18,16 @@ use ocservia_command_authorization::{
 };
 use ocservia_contracts::config_profile;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, ArtifactGrantV1, ArtifactGrantVersion, CertificateCsr, CertificateP12,
-    CommandDeliveryMode, CommandResultState, CompleteConfigApply, CompleteConfigCandidate,
-    CompleteConfigDirective, ConnectionFenceV2, FenceBindingV2, FenceOperationKind, IpBanRemove,
-    NodeLocalTlsReference, PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose,
-    SealedSecretV1, SealedSecretVersion, ServiceReload, SessionDisconnect, SessionTerminate,
-    UserCreate, command_envelope, complete_config_directive,
+    AgentUpgrade, ArtifactGrantV1, CertificateCsr, CertificateP12, CommandDeliveryMode,
+    CommandResultState, CompleteConfigApply, CompleteConfigCandidate, CompleteConfigDirective,
+    IpBanRemove, NodeLocalTlsReference, PrivilegedCommandKind, PrivilegedResultKind,
+    SealedSecretPurpose, SealedSecretV1, ServiceReload, SessionDisconnect, SessionGrantV1,
+    SessionTerminate, UserCreate, command_envelope, complete_config_directive,
 };
 use ocservia_ocserv_adapter::{FixedResources, Limits};
 use ocservia_test_support::{
-    FenceSpec, attach_command_fence, deadline_ms, foreign_architecture, host_architecture, keyring,
-    sign_command_v2, sign_fence_binding, ts, unix_seconds,
+    deadline_ms, foreign_architecture, host_architecture, keyring, sign_command_v2,
+    sign_session_grant, ts, unix_seconds,
 };
 use ocservia_upgrader::UpgradeTrigger;
 use sha2::{Digest as _, Sha256};
@@ -162,11 +161,9 @@ fn signed_command(
     capability: &str,
     payload: command_envelope::Payload,
 ) -> CommandEnvelope {
-    let mut cmd = sign_command_v2(
+    sign_command_v2(
         key, node_id, issued_at, expires_at, 7, action, capability, payload,
-    );
-    attach_command_fence(key, &mut cmd, [1; 16], TEST_ENDPOINT_ID, (expires_at, 0));
-    cmd
+    )
 }
 
 fn signed_service_reload(
@@ -210,82 +207,24 @@ fn signed_agent_upgrade(
     )
 }
 
-fn signed_fence(
+fn session_grant_for(
     key: &SigningKey,
     cmd: &CommandEnvelope,
-    fence_id: [u8; 16],
     endpoint_id: [u8; 32],
-    lease_until: (i64, u32),
-) -> ConnectionFenceV2 {
-    signed_fence_at_epoch(key, cmd, fence_id, endpoint_id, lease_until, 1)
-}
-
-fn signed_fence_at_epoch(
-    key: &SigningKey,
-    cmd: &CommandEnvelope,
-    fence_id: [u8; 16],
-    endpoint_id: [u8; 32],
-    lease_until: (i64, u32),
-    owner_epoch: u64,
-) -> ConnectionFenceV2 {
+    session_epoch: u64,
+) -> SessionGrantV1 {
     let issued = cmd.issued_at.expect("issued").seconds;
     let expires = cmd.expires_at.expect("expires").seconds;
-    FenceSpec::new(
-        cmd.node_id.as_slice().try_into().expect("node"),
+    let node_id: [u8; 16] = cmd.node_id.as_slice().try_into().expect("node");
+    sign_session_grant(
+        key,
+        node_id,
         endpoint_id,
-        owner_epoch,
-    )
-    .ids(fence_id, [2; 16], 1, [3; 16])
-    .authority(cmd.expected_revision)
-    .capabilities([cmd.required_capability.clone()])
-    .lease(lease_until.0, lease_until.1)
-    .issued(issued - 1, 0)
-    .expires(expires.max(lease_until.0 + 1), 0)
-    .sign(key)
-}
-
-fn with_owner_epoch(
-    mut cmd: CommandEnvelope,
-    key: &SigningKey,
-    owner_epoch: u64,
-) -> CommandEnvelope {
-    let fence = signed_fence_at_epoch(
-        key,
-        &cmd,
-        [1; 16],
-        TEST_ENDPOINT_ID,
-        (cmd.expires_at.expect("expires").seconds, 0),
-        owner_epoch,
-    );
-    let binding = signed_binding(
-        key,
-        &cmd,
-        &fence,
-        FenceOperationKind::Command,
-        &cmd.command_id,
-        &cmd.required_capability,
-    );
-    cmd.connection_fence = Some(fence);
-    cmd.fence_binding = Some(binding);
-    cmd
-}
-
-fn signed_binding(
-    key: &SigningKey,
-    cmd: &CommandEnvelope,
-    fence: &ConnectionFenceV2,
-    kind: FenceOperationKind,
-    op_id: &[u8],
-    cap: &str,
-) -> FenceBindingV2 {
-    sign_fence_binding(
-        key,
-        fence,
-        kind,
-        op_id.try_into().expect("op ID"),
-        cap,
-        (cmd.issued_at.expect("issued").seconds, 0),
-        (fence.expires_at.expect("fence expiry").seconds, 0),
+        cmd.expected_revision,
+        session_epoch,
+        vec![cmd.required_capability.clone()],
+        issued - 1,
+        expires.max(unix_seconds() + 60),
     )
 }
 
@@ -304,15 +243,33 @@ fn resign_mode(
     cmd
 }
 
-fn command_request(command: CommandEnvelope) -> PrivdRequest {
+fn command_request_with_grant(
+    command: CommandEnvelope,
+    session_grant: Option<SessionGrantV1>,
+) -> PrivdRequest {
     PrivdRequest {
         request_id: Uuid::now_v7().as_bytes().to_vec(),
         deadline_unix_ms: deadline_ms(5_000),
         accepted_at: command.issued_at,
         authorization_command: Some(command),
         privileged_mode: PrivilegedRequestMode::Execute.into(),
+        session_grant: session_grant.map(Box::new),
         operation: None,
     }
+}
+
+fn command_request(command: CommandEnvelope, key: &SigningKey) -> PrivdRequest {
+    let grant = session_grant_for(key, &command, TEST_ENDPOINT_ID, 1);
+    command_request_with_grant(command, Some(grant))
+}
+
+fn command_request_at_epoch(
+    command: CommandEnvelope,
+    key: &SigningKey,
+    session_epoch: u64,
+) -> PrivdRequest {
+    let grant = session_grant_for(key, &command, TEST_ENDPOINT_ID, session_epoch);
+    command_request_with_grant(command, Some(grant))
 }
 
 fn reconcile_request(command: CommandEnvelope, key: &SigningKey) -> PrivdRequest {
@@ -326,16 +283,16 @@ fn reconcile_request(command: CommandEnvelope, key: &SigningKey) -> PrivdRequest
             CommandDeliveryMode::ReconcileOnly,
         )),
         privileged_mode: PrivilegedRequestMode::Reconcile.into(),
+        session_grant: None,
         operation: None,
     }
 }
 
 fn retry_request(command: CommandEnvelope, key: &SigningKey) -> PrivdRequest {
-    command_request(resign_mode(
-        command,
+    command_request(
+        resign_mode(command, key, CommandDeliveryMode::RetryIfEffectAbsent),
         key,
-        CommandDeliveryMode::RetryIfEffectAbsent,
-    ))
+    )
 }
 
 fn unsigned_request(operation: Option<privd_request::Operation>) -> PrivdRequest {
@@ -345,6 +302,7 @@ fn unsigned_request(operation: Option<privd_request::Operation>) -> PrivdRequest
         accepted_at: None,
         authorization_command: None,
         privileged_mode: PrivilegedRequestMode::Unspecified.into(),
+        session_grant: None,
         operation,
     }
 }
@@ -405,7 +363,13 @@ async fn rejects_expired_missing_unknown_and_unsigned_operations() {
         signed_service_reload(&unknown, node_id, now, now + 60),
     ] {
         assert_permission_denied(
-            &dispatch(command_request(bad_cmd), &node_id, &keys, &adapter).await,
+            &dispatch(
+                command_request(bad_cmd, &trusted),
+                &node_id,
+                &keys,
+                &adapter,
+            )
+            .await,
         );
     }
     for op in [
@@ -434,12 +398,18 @@ async fn rebound_authority_denies_old_node_key_and_quarantines_uncertain_effects
     ] {
         let cmd = signed_service_reload(signing, node, now, now + 60);
         assert_permission_denied(
-            &dispatch(command_request(cmd), &new_node, &keys, &fx.adapter).await,
+            &dispatch(command_request(cmd, signing), &new_node, &keys, &fx.adapter).await,
         );
         assert!(!fx.counter.exists());
     }
     let cmd = signed_service_reload(&new_key, new_node, now, now + 60);
-    let ok = dispatch(command_request(cmd), &new_node, &keys, &fx.adapter).await;
+    let ok = dispatch(
+        command_request(cmd, &new_key),
+        &new_node,
+        &keys,
+        &fx.adapter,
+    )
+    .await;
     assert!(matches!(ok.result, Some(privd_response::Result::Mutation(ref r)) if r.applied));
     assert_eq!(fs::read(&fx.counter).expect("counter"), b"x");
 }
@@ -453,7 +423,13 @@ async fn signed_effect_executes_once_replays_after_restart_and_fails_on_receipt_
     let cmd = signed_service_reload(&signing, node_id, now, now + 60);
     let fx = PrivdFixture::new();
 
-    let first = dispatch(command_request(cmd.clone()), &node_id, &keys, &fx.adapter).await;
+    let first = dispatch(
+        command_request(cmd.clone(), &signing),
+        &node_id,
+        &keys,
+        &fx.adapter,
+    )
+    .await;
     assert!(matches!(first.result, Some(privd_response::Result::Mutation(ref r)) if r.applied));
     let proof = first
         .privileged_result_proof
@@ -468,7 +444,7 @@ async fn signed_effect_executes_once_replays_after_restart_and_fails_on_receipt_
     let restarted = Adapter::new(fx.resources.clone(), Limits::default());
     for req in [
         reconcile_request(cmd.clone(), &signing),
-        command_request(cmd.clone()),
+        command_request(cmd.clone(), &signing),
         retry_request(cmd, &signing),
     ] {
         let replay = dispatch(req, &node_id, &keys, &restarted).await;
@@ -499,7 +475,10 @@ async fn signed_effect_executes_once_replays_after_restart_and_fails_on_receipt_
         )
         .expect("trigger");
     let failed = dispatch(
-        command_request(signed_service_reload(&signing, node_id, now, now + 60)),
+        command_request(
+            signed_service_reload(&signing, node_id, now, now + 60),
+            &signing,
+        ),
         &node_id,
         &keys,
         &fault_fx.adapter,
@@ -518,12 +497,14 @@ async fn newer_owner_epoch_persists_and_rejects_stale_root_effects() {
     let fx = PrivdFixture::new();
 
     let stale = signed_service_reload(&signing, node_id, now, now + 60);
-    let newer = with_owner_epoch(
-        signed_service_reload(&signing, node_id, now, now + 60),
-        &signing,
-        2,
-    );
-    let accepted = dispatch(command_request(newer), &node_id, &keys, &fx.adapter).await;
+    let newer = signed_service_reload(&signing, node_id, now, now + 60);
+    let accepted = dispatch(
+        command_request_at_epoch(newer, &signing, 2),
+        &node_id,
+        &keys,
+        &fx.adapter,
+    )
+    .await;
     assert!(matches!(
         accepted.result,
         Some(privd_response::Result::Mutation(ref result)) if result.applied
@@ -539,15 +520,25 @@ async fn newer_owner_epoch_persists_and_rejects_stale_root_effects() {
         )
         .await,
     );
-    assert_permission_denied(&dispatch(command_request(stale), &node_id, &keys, &restarted).await);
+    assert_permission_denied(
+        &dispatch(
+            command_request(stale, &signing),
+            &node_id,
+            &keys,
+            &restarted,
+        )
+        .await,
+    );
     assert_eq!(fs::read_to_string(&fx.counter).expect("counter"), "x");
 
-    let current = with_owner_epoch(
-        signed_service_reload(&signing, node_id, now, now + 60),
-        &signing,
-        2,
-    );
-    let allowed = dispatch(command_request(current), &node_id, &keys, &restarted).await;
+    let current = signed_service_reload(&signing, node_id, now, now + 60);
+    let allowed = dispatch(
+        command_request_at_epoch(current, &signing, 2),
+        &node_id,
+        &keys,
+        &restarted,
+    )
+    .await;
     assert!(matches!(
         allowed.result,
         Some(privd_response::Result::Mutation(ref result)) if result.applied
@@ -578,7 +569,13 @@ async fn unattestable_csr_is_rejected_before_effect_reservation() {
         }),
     );
 
-    let rejected = dispatch(command_request(command), &node_id, &keys, &fx.adapter).await;
+    let rejected = dispatch(
+        command_request(command, &signing),
+        &node_id,
+        &keys,
+        &fx.adapter,
+    )
+    .await;
     assert_error_kind(&rejected, ErrorKind::InvalidRequest);
     assert!(!fx.dir.join("effects.sqlite3").exists());
 }
@@ -636,33 +633,14 @@ async fn expired_and_retry_grants_enforce_reconciliation_and_fixed_host_rules() 
         )
         .is_err()
     );
-    assert!(validate_request(&command_request(expired), &node, &TEST_ENDPOINT_ID, &keys).is_err());
-
-    // Legacy retry without completed result requires reconciliation.
-    let fx = PrivdFixture::new();
-    let mut legacy = signed_command(
-        &signing,
-        node,
-        now,
-        now + 60,
-        "user.create",
-        "ocserv.users.write",
-        command_envelope::Payload::UserCreate(UserCreate {
-            username: "alice".to_owned(),
-            desired_revision: 1,
-            sealed_password_v1: Some(SealedSecretV1 {
-                version: SealedSecretVersion::V1.into(),
-                purpose: SealedSecretPurpose::UserPassword.into(),
-                key_id: "user-key-v1".to_owned(),
-                ciphertext: vec![0xa5; 256],
-            }),
-            ..UserCreate::default()
-        }),
-    );
-    legacy.protocol_version =
-        ocservia_command_authorization::LEGACY_COMMAND_PROTOCOL_VERSION.to_owned();
-    assert_requires_reconciliation(
-        &dispatch(retry_request(legacy, &signing), &node, &keys, &fx.adapter).await,
+    assert!(
+        validate_request(
+            &command_request(expired, &signing),
+            &node,
+            &TEST_ENDPOINT_ID,
+            &keys
+        )
+        .is_err()
     );
 
     // Retry grant never re-executes fixed host effects when pending or pruned.
@@ -729,10 +707,16 @@ async fn tampering_cross_purpose_and_substituted_config_fail_before_root_effect(
         let mut changed = cmd.clone();
         mutate(&mut changed);
         assert_permission_denied(
-            &dispatch(command_request(changed), &node_id, &keys, &fx.adapter).await,
+            &dispatch(
+                command_request(changed, &signing),
+                &node_id,
+                &keys,
+                &fx.adapter,
+            )
+            .await,
         );
     }
-    let mut agent_selected = command_request(cmd);
+    let mut agent_selected = command_request(cmd, &signing);
     agent_selected.operation = Some(privd_request::Operation::ServiceStatus(ReadRequest {}));
     assert_error_kind(
         &dispatch(agent_selected, &node_id, &keys, &fx.adapter).await,
@@ -752,12 +736,11 @@ async fn tampering_cross_purpose_and_substituted_config_fail_before_root_effect(
             username: "alice".into(),
             desired_revision: 1,
             sealed_password_v1: Some(SealedSecretV1 {
-                version: SealedSecretVersion::V1 as i32,
+                version: 1,
                 purpose: SealedSecretPurpose::UserPassword as i32,
                 key_id: "user-key-v1".into(),
                 ciphertext: vec![0xa5; 256],
             }),
-            ..UserCreate::default()
         }),
     );
     if let Some(command_envelope::Payload::UserCreate(p)) = user_cmd.payload.as_mut() {
@@ -765,7 +748,13 @@ async fn tampering_cross_purpose_and_substituted_config_fail_before_root_effect(
             SealedSecretPurpose::CertificateP12Password as i32;
     }
     assert_permission_denied(
-        &dispatch(command_request(user_cmd), &node_id, &keys, &fx.adapter).await,
+        &dispatch(
+            command_request(user_cmd, &signing),
+            &node_id,
+            &keys,
+            &fx.adapter,
+        )
+        .await,
     );
 
     let mut p12_cmd = signed_command(
@@ -780,14 +769,13 @@ async fn tampering_cross_purpose_and_substituted_config_fail_before_root_effect(
             certificate_chain_pem: vec![b'A'; 64],
             artifact_id: Uuid::now_v7().as_bytes().to_vec(),
             sealed_password_v1: Some(SealedSecretV1 {
-                version: SealedSecretVersion::V1 as i32,
+                version: 1,
                 purpose: SealedSecretPurpose::CertificateP12Password as i32,
                 key_id: "p12-key-v1".into(),
                 ciphertext: vec![0x5a; 256],
             }),
             certificate_version: 1,
             artifact_expires_at: Some(ts(now + 60, 0)),
-            ..CertificateP12::default()
         }),
     );
     if let Some(command_envelope::Payload::CertificateP12(p)) = p12_cmd.payload.as_mut() {
@@ -795,7 +783,13 @@ async fn tampering_cross_purpose_and_substituted_config_fail_before_root_effect(
             SealedSecretPurpose::UserPassword as i32;
     }
     assert_permission_denied(
-        &dispatch(command_request(p12_cmd), &node_id, &keys, &fx.adapter).await,
+        &dispatch(
+            command_request(p12_cmd, &signing),
+            &node_id,
+            &keys,
+            &fx.adapter,
+        )
+        .await,
     );
 
     // Substituted complete config candidate bytes fail closed.
@@ -851,7 +845,13 @@ async fn tampering_cross_purpose_and_substituted_config_fail_before_root_effect(
         p.candidate.as_mut().expect("cand").directives[10].value = Some(Literal("8443".into()));
     }
     assert_permission_denied(
-        &dispatch(command_request(cfg_cmd), &node_id, &keys, &fx.adapter).await,
+        &dispatch(
+            command_request(cfg_cmd, &signing),
+            &node_id,
+            &keys,
+            &fx.adapter,
+        )
+        .await,
     );
 }
 
@@ -874,11 +874,12 @@ async fn agent_upgrade_prepare_attestation_concurrency_conflict_and_validation()
         foreign_architecture(),
     );
     assert_error_kind(
-        &dispatch(command_request(foreign), &node_id, &keys, &no_io).await,
+        &dispatch(command_request(foreign, &signing), &node_id, &keys, &no_io).await,
         ErrorKind::InvalidRequest,
     );
+    let forged_key = SigningKey::from_bytes(&[31; 32]);
     let forged = signed_agent_upgrade(
-        &SigningKey::from_bytes(&[31; 32]),
+        &forged_key,
         node_id,
         now,
         now + 60,
@@ -886,7 +887,15 @@ async fn agent_upgrade_prepare_attestation_concurrency_conflict_and_validation()
         vec![0x43; 32],
         host_architecture(),
     );
-    assert_permission_denied(&dispatch(command_request(forged), &node_id, &keys, &no_io).await);
+    assert_permission_denied(
+        &dispatch(
+            command_request(forged, &forged_key),
+            &node_id,
+            &keys,
+            &no_io,
+        )
+        .await,
+    );
 
     // Concurrent duplicate schedules both attest the same durable intent; second active op is refused.
     let fx = PrivdFixture::new();
@@ -902,14 +911,14 @@ async fn agent_upgrade_prepare_attestation_concurrency_conflict_and_validation()
     );
     let (r1, r2) = tokio::join!(
         dispatch_upgrade(
-            command_request(cmd.clone()),
+            command_request(cmd.clone(), &signing),
             &node_id,
             &keys,
             &fx.adapter,
             &upgrades
         ),
         dispatch_upgrade(
-            command_request(cmd.clone()),
+            command_request(cmd.clone(), &signing),
             &node_id,
             &keys,
             &fx.adapter,
@@ -974,7 +983,7 @@ async fn agent_upgrade_prepare_attestation_concurrency_conflict_and_validation()
         host_architecture(),
     );
     let refused = dispatch_upgrade(
-        command_request(second_cmd),
+        command_request(second_cmd, &signing),
         &node_id,
         &keys,
         &restarted,
@@ -1052,7 +1061,7 @@ async fn agent_upgrade_prepare_attestation_concurrency_conflict_and_validation()
     )
     .expect("flock");
     let lock_replay = dispatch_upgrade(
-        command_request(lock_cmd.clone()),
+        command_request(lock_cmd.clone(), &signing),
         &node_id,
         &keys,
         &lock_fx.adapter,
@@ -1071,7 +1080,7 @@ async fn agent_upgrade_prepare_attestation_concurrency_conflict_and_validation()
 }
 
 #[tokio::test]
-async fn root_execution_and_artifacts_require_their_own_unexpired_fence() {
+async fn root_execution_and_artifacts_require_their_own_unexpired_session_grant() {
     let signing = SigningKey::from_bytes(&[12; 32]);
     let keys = keyring(&signing);
     let node_id = *Uuid::now_v7().as_bytes();
@@ -1079,72 +1088,59 @@ async fn root_execution_and_artifacts_require_their_own_unexpired_fence() {
     let fx = PrivdFixture::new();
     let cmd = signed_service_reload(&signing, node_id, now, now + 60);
     let cap = cmd.required_capability.clone();
-    let carried = |fence: Option<ConnectionFenceV2>, binding: Option<FenceBindingV2>| {
-        let mut c = cmd.clone();
-        c.connection_fence = fence;
-        c.fence_binding = binding;
-        command_request(c)
-    };
-    let bound = |fence: ConnectionFenceV2, op_id: Vec<u8>, c: &str| {
-        let b = signed_binding(
-            &signing,
-            &cmd,
-            &fence,
-            FenceOperationKind::Command,
-            &op_id,
-            c,
-        );
-        carried(Some(fence), Some(b))
-    };
-    let current = || signed_fence(&signing, &cmd, [1; 16], TEST_ENDPOINT_ID, (now + 60, 0));
-    let mut newer_rev = cmd.clone();
-    newer_rev.expected_revision += 1;
-    let other_cmd = signed_service_reload(&signing, node_id, now, now + 60);
-    let mixed_b = signed_binding(
-        &signing,
-        &cmd,
-        &signed_fence(&signing, &cmd, [4; 16], TEST_ENDPOINT_ID, (now + 60, 0)),
-        FenceOperationKind::Command,
-        &cmd.command_id,
-        &cap,
-    );
+    let with_grant = |grant: Option<SessionGrantV1>| command_request_with_grant(cmd.clone(), grant);
 
     for req in [
-        carried(None, None),
-        carried(cmd.connection_fence.clone(), None),
-        bound(
-            signed_fence(&signing, &cmd, [1; 16], TEST_ENDPOINT_ID, (now, 0)),
-            cmd.command_id.clone(),
-            &cap,
-        ),
-        bound(
-            signed_fence(&signing, &cmd, [1; 16], [8; 32], (now + 60, 0)),
-            cmd.command_id.clone(),
-            &cap,
-        ),
-        bound(current(), other_cmd.command_id.clone(), &cap),
-        bound(current(), cmd.command_id.clone(), "ocserv.users.write"),
-        bound(
-            signed_fence(
-                &signing,
-                &newer_rev,
-                [1; 16],
-                TEST_ENDPOINT_ID,
-                (now + 60, 0),
-            ),
-            cmd.command_id.clone(),
-            &cap,
-        ),
-        carried(Some(current()), Some(mixed_b)),
+        with_grant(None),
+        with_grant(Some(sign_session_grant(
+            &signing,
+            node_id,
+            TEST_ENDPOINT_ID,
+            cmd.expected_revision,
+            1,
+            vec![cap.clone()],
+            now - 60,
+            now - 1,
+        ))),
+        with_grant(Some(sign_session_grant(
+            &signing,
+            node_id,
+            [8; 32],
+            cmd.expected_revision,
+            1,
+            vec![cap.clone()],
+            now - 1,
+            now + 60,
+        ))),
+        with_grant(Some(sign_session_grant(
+            &signing,
+            node_id,
+            TEST_ENDPOINT_ID,
+            cmd.expected_revision,
+            1,
+            vec!["ocserv.users.write".to_owned()],
+            now - 1,
+            now + 60,
+        ))),
+        with_grant(Some(sign_session_grant(
+            &signing,
+            node_id,
+            TEST_ENDPOINT_ID,
+            cmd.expected_revision + 1,
+            1,
+            vec![cap.clone()],
+            now - 1,
+            now + 60,
+        ))),
     ] {
         assert_permission_denied(&dispatch(req, &node_id, &keys, &fx.adapter).await);
     }
     assert!(!fx.counter.exists());
-    let ok = dispatch(command_request(cmd), &node_id, &keys, &fx.adapter).await;
+    let ok = dispatch(command_request(cmd, &signing), &node_id, &keys, &fx.adapter).await;
     assert!(matches!(ok.result, Some(privd_response::Result::Mutation(ref r)) if r.applied));
     assert_eq!(fs::read_to_string(&fx.counter).expect("counter"), "x");
 
-    // Artifact read and consume each require their own live fence binding.
+    // Artifact read and consume each require a live session grant and obey the epoch floor.
     let claims = ArtifactGrantClaimsV1 {
         version: 1,
         key_id: verification_key_id(&signing.verifying_key()),
@@ -1164,7 +1160,7 @@ async fn root_execution_and_artifacts_require_their_own_unexpired_fence() {
     };
     let sig = signing.sign(&canonical_artifact_grant_v1(&claims).expect("canonical"));
     let grant = ArtifactGrantV1 {
-        version: ArtifactGrantVersion::V1.into(),
+        version: 1,
         key_id: claims.key_id.clone(),
         node_id: node_id.to_vec(),
         artifact_id: claims.artifact_id.to_vec(),
@@ -1179,64 +1175,48 @@ async fn root_execution_and_artifacts_require_their_own_unexpired_fence() {
         grant_id: claims.grant_id.to_vec(),
         signature: sig.to_bytes().to_vec(),
     };
-    let mut carrier = signed_service_reload(&signing, node_id, now, now + 60);
-    carrier.required_capability = CONNECTION_FENCING_CAPABILITY.into();
-    let fence_at_epoch = |lease, owner_epoch| {
-        signed_fence_at_epoch(
+    let session_at = |epoch, issued, expires| {
+        Some(Box::new(sign_session_grant(
             &signing,
-            &carrier,
-            [1; 16],
+            node_id,
             TEST_ENDPOINT_ID,
-            lease,
-            owner_epoch,
-        )
+            7,
+            epoch,
+            vec![cap.clone()],
+            issued,
+            expires,
+        )))
     };
-    let fence = |lease| fence_at_epoch(lease, 1);
-    let art_bound = |f: ConnectionFenceV2, op_id: &[u8]| {
-        let b = signed_binding(
-            &signing,
-            &carrier,
-            &f,
-            FenceOperationKind::Artifact,
-            op_id,
-            CONNECTION_FENCING_CAPABILITY,
-        );
-        (Some(Box::new(f)), Some(Box::new(b)))
-    };
-    let read = |(cf, fb)| {
-        unsigned_request(Some(privd_request::Operation::ArtifactRead(
+    let read = |session_grant| PrivdRequest {
+        session_grant,
+        ..unsigned_request(Some(privd_request::Operation::ArtifactRead(
             ArtifactReadRequest {
                 grant: Some(grant.clone()),
-                offset: 0,
-                connection_fence: cf,
-                fence_binding: fb,
             },
         )))
     };
-    let consume = |(cf, fb)| {
-        unsigned_request(Some(privd_request::Operation::ArtifactConsume(
+    let consume = |session_grant| PrivdRequest {
+        session_grant,
+        ..unsigned_request(Some(privd_request::Operation::ArtifactConsume(
             ArtifactConsumeRequest {
                 grant: Some(grant.clone()),
                 sha256: vec![1; 32],
                 size: claims.max_bytes,
                 confirm_only: false,
-                connection_fence: cf,
-                fence_binding: fb,
             },
         )))
     };
     for req in [
-        read((None, None)),
-        consume((None, None)),
-        read(art_bound(fence((now, 0)), &claims.artifact_id)),
-        read(art_bound(fence((now + 60, 0)), &claims.grant_id)),
-        consume(art_bound(fence((now + 60, 0)), &claims.artifact_id)),
+        read(None),
+        consume(None),
+        read(session_at(1, now - 60, now - 1)),
+        consume(session_at(1, now - 60, now - 1)),
     ] {
         assert_permission_denied(&dispatch(req, &node_id, &keys, &fx.adapter).await);
     }
     for req in [
-        read(art_bound(fence((now + 60, 0)), &claims.artifact_id)),
-        consume(art_bound(fence((now + 60, 0)), &claims.grant_id)),
+        read(session_at(1, now - 1, now + 60)),
+        consume(session_at(1, now - 1, now + 60)),
     ] {
         let resp = dispatch(req, &node_id, &keys, &fx.adapter).await;
         let Some(privd_response::Result::Error(f)) = resp.result else {
@@ -1245,10 +1225,7 @@ async fn root_execution_and_artifacts_require_their_own_unexpired_fence() {
         assert_ne!(f.kind, i32::from(ErrorKind::PermissionDenied));
     }
 
-    let newer = read(art_bound(
-        fence_at_epoch((now + 60, 0), 2),
-        &claims.artifact_id,
-    ));
+    let newer = read(session_at(2, now - 1, now + 60));
     let response = dispatch(newer, &node_id, &keys, &fx.adapter).await;
     let Some(privd_response::Result::Error(failure)) = response.result else {
         panic!("expected absent lease error")
@@ -1258,7 +1235,7 @@ async fn root_execution_and_artifacts_require_their_own_unexpired_fence() {
     let restarted = Adapter::new(fx.resources.clone(), Limits::default());
     assert_permission_denied(
         &dispatch(
-            read(art_bound(fence((now + 60, 0)), &claims.artifact_id)),
+            read(session_at(1, now - 1, now + 60)),
             &node_id,
             &keys,
             &restarted,
@@ -1267,7 +1244,7 @@ async fn root_execution_and_artifacts_require_their_own_unexpired_fence() {
     );
     assert_permission_denied(
         &dispatch(
-            consume(art_bound(fence((now + 60, 0)), &claims.grant_id)),
+            consume(session_at(1, now - 1, now + 60)),
             &node_id,
             &keys,
             &restarted,
@@ -1445,7 +1422,7 @@ async fn direct_socket_authorization_and_wire_variants_preserve_effects() {
         out.extend(body);
         out
     };
-    let request = command_request(cmd.clone());
+    let request = command_request(cmd.clone(), &signing);
     let mut bad_reqs: Vec<PrivdRequest> = [
         (|c: &mut CommandEnvelope| c.authorization.as_mut().expect("a").signature[0] ^= 1)
             as fn(&mut CommandEnvelope),
@@ -1462,7 +1439,7 @@ async fn direct_socket_authorization_and_wire_variants_preserve_effects() {
     .map(|f| {
         let mut c = cmd.clone();
         f(&mut c);
-        command_request(c)
+        command_request(c, &signing)
     })
     .collect();
     for c in [
@@ -1470,7 +1447,7 @@ async fn direct_socket_authorization_and_wire_variants_preserve_effects() {
         signed_service_reload(&signing, node_id, now - 60, now - 1),
         signed_service_reload(&signing, node_id, now + 3600, now + 3660),
     ] {
-        bad_reqs.push(command_request(c));
+        bad_reqs.push(command_request(c, &signing));
     }
     bad_reqs.push(PrivdRequest {
         privileged_mode: 127,
@@ -1544,7 +1521,7 @@ async fn direct_socket_authorization_and_wire_variants_preserve_effects() {
         .to_bytes()
         .to_vec();
     let (resp, st) = send(
-        frame(command_request(conflict).encode_to_vec()),
+        frame(command_request(conflict, &signing).encode_to_vec()),
         rustix_uid(),
     )
     .await;

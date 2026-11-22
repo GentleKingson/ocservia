@@ -21,22 +21,22 @@ type Certificate struct {
 }
 
 type IssueState struct {
-	WorkspaceID, NodeID                                       uuid.UUID
-	CSR, RequestHash, ReceiptDigest, CSRDigest, SubjectDigest []byte
-	State, ReceiptKey, CommonName                             string
-	ActorID                                                   *uuid.UUID
-	Version                                                   int64
-	IssueVersion                                              *int64
-	ReceiptCurrent                                            bool
-	DNSNames                                                  []byte
-	KeyBits                                                   uint32
+	WorkspaceID, NodeID                        uuid.UUID
+	CSR, RequestHash, ReceiptDigest, CSRDigest []byte
+	State, ReceiptKey, CommonName              string
+	ActorID                                    *uuid.UUID
+	Version                                    int64
+	IssueVersion                               *int64
+	ReceiptCurrent                             bool
+	DNSNames                                   []byte
+	KeyBits                                    uint32
 }
 
 type IssueReceipt struct {
-	NodeID                                                    uuid.UUID
-	CSR, ReceiptDigest, CSRDigest, SubjectDigest, RequestHash []byte
-	ReceiptKey                                                string
-	Current, KeyActive                                        bool
+	NodeID                                     uuid.UUID
+	CSR, ReceiptDigest, CSRDigest, RequestHash []byte
+	ReceiptKey                                 string
+	Current, KeyActive                         bool
 }
 
 type Signing struct {

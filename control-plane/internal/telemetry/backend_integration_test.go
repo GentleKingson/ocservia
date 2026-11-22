@@ -77,8 +77,8 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	batch.Sessions[0].ClientIP = "2001:db8::10"
 	seconds := uint64(20)
 	batch.IPBans = []IPBan{{IP: "2001:db8::20", SecondsRemaining: &seconds}, {IP: "192.0.2.9"}, {IP: "2001:db8::2"}}
-	batch.Users = []User{{Username: "alice", Enabled: true, Revision: 1, Fingerprint: make([]byte, 32)}}
-	batch.Groups = []Group{{Name: "operators", Members: []string{"alice"}, Revision: 1, Fingerprint: make([]byte, 32)}}
+	batch.Users = []User{{Username: "alice", Enabled: true, Revision: 1}}
+	batch.Groups = []Group{{Name: "operators", Members: []string{"alice"}, Revision: 1}}
 	batch.Security = []SecurityEvent{
 		{ID: uuid.Must(uuid.NewV7()), ObservedAt: now, Severity: "info", Type: "test.ingest", Detail: json.RawMessage(`{"large":1e1000}`)},
 		{ID: uuid.Must(uuid.NewV7()), ObservedAt: now, Severity: "warning", Type: "test.warning", Detail: json.RawMessage(`{"count":2}`)},

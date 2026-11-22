@@ -498,7 +498,7 @@ func (f applyHTTPFixture) submitted(w *httptest.ResponseRecorder, plan configpla
 		f.t.Fatal(err)
 	}
 	canonical, err := commandauth.CanonicalV1(claims)
-	if err != nil || !ed25519.Verify(f.signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) || claims.ApprovalID != nil || claims.ApprovalRequestSHA256 != nil {
+	if err != nil || !ed25519.Verify(f.signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) {
 		f.t.Fatalf("single-admin command authorization: %+v %v", claims, err)
 	}
 	apply := envelope.GetCompleteConfigApply()

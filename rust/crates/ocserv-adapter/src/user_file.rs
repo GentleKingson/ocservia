@@ -1,8 +1,8 @@
 use super::{
     Adapter, AdapterError, AsyncReadExt, AsyncWriteExt, Component, DesiredEffectObservation,
-    EffectIdentity, EffectStore, File, GroupList, HashMap, HashSet, MAX_MANAGED_RESOURCES,
-    MAX_USER_FILE_BYTES, MetadataExt, MutationResult, ObservedGroup, ObservedUser, OsString, Path,
-    PathBuf, PrepareEffect, StagingFile, USER_FILE_MODE, UserList, Uuid, Zeroizing, valid_key_id,
+    EffectIdentity, File, GroupList, HashMap, HashSet, MAX_MANAGED_RESOURCES, MAX_USER_FILE_BYTES,
+    MetadataExt, MutationResult, ObservedGroup, ObservedUser, OsString, Path, PathBuf,
+    PrepareEffect, StagingFile, USER_FILE_MODE, UserList, Uuid, Zeroizing, valid_key_id,
     validate_effect_identity, validate_name,
 };
 
@@ -358,23 +358,27 @@ impl Adapter {
             let current = tokio::fs::read(&self.resources.config)
                 .await
                 .map_err(AdapterError::Io)?;
-            return EffectStore::open_existing(&self.resources)?.observe(
+            return self.with_effect_store(false, |store| {
+                store.observe(
+                    mutation_kind,
+                    resource_key,
+                    desired_revision,
+                    effect,
+                    &current,
+                )
+            });
+        }
+        let _guard = self.user_file_lock.lock().await;
+        let current = read_optional_user_file(&self.resources.user_file).await?;
+        self.with_effect_store(false, |store| {
+            store.observe(
                 mutation_kind,
                 resource_key,
                 desired_revision,
                 effect,
                 &current,
-            );
-        }
-        let _guard = self.user_file_lock.lock().await;
-        let current = read_optional_user_file(&self.resources.user_file).await?;
-        EffectStore::open_existing(&self.resources)?.observe(
-            mutation_kind,
-            resource_key,
-            desired_revision,
-            effect,
-            &current,
-        )
+            )
+        })
     }
 
     pub(super) async fn commit_desired_staging(
@@ -388,15 +392,17 @@ impl Adapter {
     ) -> Result<(), AdapterError> {
         let after = normalize_and_read_user_staging(staging.path()).await?;
         parse_secret_user_records(&after)?;
-        let mut store = EffectStore::open_for_mutation(&self.resources)?;
-        match store.prepare(
-            mutation_kind,
-            resource_key,
-            desired_revision,
-            effect,
-            before,
-            &after,
-        )? {
+        let preparation = self.with_effect_store(true, |store| {
+            store.prepare(
+                mutation_kind,
+                resource_key,
+                desired_revision,
+                effect,
+                before,
+                &after,
+            )
+        })?;
+        match preparation {
             PrepareEffect::AlreadyApplied => {
                 staging.remove().await?;
                 return Ok(());
@@ -405,7 +411,9 @@ impl Adapter {
         }
         publish_user_staging(staging.path(), &self.resources.user_file)?;
         staging.disarm();
-        store.mark_applied(mutation_kind, resource_key, desired_revision, effect)
+        self.with_effect_store(true, |store| {
+            store.mark_applied(mutation_kind, resource_key, desired_revision, effect)
+        })
     }
 
     pub(super) async fn stage_user_file(&self, bytes: &[u8]) -> Result<StagingFile, AdapterError> {
