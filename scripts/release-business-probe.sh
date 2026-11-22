@@ -393,7 +393,7 @@ cat >"${work}/vpn-script" <<'EOF'
 #!/bin/sh
 set -eu
 if [ "$reason" = connect ]; then
-  ip link set "$TUNDEV" up
+  ip link set dev "$TUNDEV" mtu "$INTERNAL_IP4_MTU" up
   ip addr add "$INTERNAL_IP4_ADDRESS/24" dev "$TUNDEV"
 fi
 EOF

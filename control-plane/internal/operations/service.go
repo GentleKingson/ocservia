@@ -187,6 +187,11 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	if err := validateCreate(request); err != nil {
 		return Operation{}, false, err
 	}
+	if csr, ok := request.Payload.(CertificateCSRPayload); ok && csr.DNSNames == nil {
+		// Use the same array for idempotency and the JSONB certificate record.
+		csr.DNSNames = []string{}
+		request.Payload = csr
+	}
 	now := s.now()
 	created, err := value.FromTime(now)
 	if err != nil {

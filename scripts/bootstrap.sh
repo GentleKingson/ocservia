@@ -251,6 +251,7 @@ install_protoc() {
   artifact="protoc-$(version protobuf)-${protoc_platform}.zip"
   if ! version_output_equals "libprotoc $(version protobuf)" "${TOOLS}/protoc/bin/protoc" \
     "${TOOLS}/protoc/bin/protoc" --version; then
+    verify_host_command unzip
     archive="$(download "https://github.com/protocolbuffers/protobuf/releases/download/v$(version protobuf)/${artifact}" "${artifact}")"
     rm -rf "${TOOLS}/protoc"
     mkdir -p "${TOOLS}/protoc"

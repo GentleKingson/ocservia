@@ -261,6 +261,71 @@ func (*failingArtifactWriter) Write(value []byte) (int, error) {
 	return len(value) / 2, io.ErrUnexpectedEOF
 }
 
+func TestCertificateCreateOptionalDNSNamesIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := testfixture.OpenIsolated(t, t, "certificate_create")
+	backend := postgres.WrapPool(pool)
+	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Certificate API','certificate-api',now(),now())`, workspaceID)
+	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'certificate-node','offline',1,now(),now())`, nodeID, workspaceID)
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.certificate.issue',true)`, nodeID)
+	_, err := testfixture.InstallKey(ctx, pool, nodeID)
+	testutil.NoError(t, err)
+
+	authn, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	testutil.NoError(t, err)
+	const username = "certificate-api-admin"
+	const password = "unique certificate API integration administrator password"
+	_, err = authn.BootstrapLocalAdmin(ctx, username, password, workspaceID)
+	testutil.NoError(t, err)
+	cookie, _, err := authn.AuthenticateLocal(ctx, username, password)
+	testutil.NoError(t, err)
+	certificateService := certificates.NewBackend(backend, apiOperationService(pool), nil, nil, nil, nil)
+	server := newTestServer(t, testHTTPConfig(false), backend, Modules{Certificates: certificateService}, Authorization{Authentication: authn})
+	submit := func(dnsField string) *httptest.ResponseRecorder {
+		body := `{"expected_version":1,"common_name":"node.example.test","key_bits":2048,"reason":"create certificate"` + dnsField + `}`
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/certificates", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", authTestOrigin)
+		request.Header.Set("X-Workspace-ID", workspaceID.String())
+		request.Header.Set("Idempotency-Key", "certificate-create")
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, request)
+		return response
+	}
+
+	created := submit("")
+	if created.Code != http.StatusAccepted {
+		t.Fatalf("omitted dns_names: status=%d body=%s", created.Code, created.Body)
+	}
+	var certificate certificates.Certificate
+	testutil.NoError(t, json.Unmarshal(created.Body.Bytes(), &certificate))
+	if certificate.ID == uuid.Nil || string(certificate.DNSNames) != "[]" {
+		t.Fatalf("unexpected created certificate: %s", created.Body)
+	}
+	var storedNames string
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT dns_names::text FROM certificates WHERE id=$1`, certificate.ID).Scan(&storedNames))
+	if storedNames != "[]" {
+		t.Fatalf("stored dns_names = %s, want []", storedNames)
+	}
+
+	for _, field := range []string{`,"dns_names":[]`, `,"dns_names":null`} {
+		response := submit(field)
+		if response.Code != http.StatusAccepted || response.Header().Get("Idempotency-Replayed") != "true" {
+			t.Fatalf("replay with %s: status=%d headers=%v body=%s", field, response.Code, response.Header(), response.Body)
+		}
+		var replayed certificates.Certificate
+		testutil.NoError(t, json.Unmarshal(response.Body.Bytes(), &replayed))
+		if replayed.ID != certificate.ID {
+			t.Fatalf("replayed certificate = %s, want %s", replayed.ID, certificate.ID)
+		}
+	}
+	if response := submit(`,"dns_names":["node.example.test"]`); response.Code != http.StatusConflict {
+		t.Fatalf("reused key with a different DNS list: status=%d body=%s", response.Code, response.Body)
+	}
+}
+
 func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := testfixture.OpenRuntimePool(t)
