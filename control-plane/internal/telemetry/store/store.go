@@ -136,7 +136,7 @@ func FromTransaction(tx database.Tx) (Store, error) {
 	return nil, database.ErrUnsupported
 }
 
-// Maintain commits each batch together with the caller's leadership fence.
+// Maintain checks the caller's leadership fence before committing each batch when supplied.
 // beforeFirst stays atomic with the first batch; already committed progress survives recovery.
 func Maintain(ctx context.Context, backend database.Backend, now time.Time, beforeFirst, fence func(context.Context, database.Tx) error) error {
 	first := true
@@ -160,7 +160,10 @@ func Maintain(ctx context.Context, backend database.Backend, now time.Time, befo
 			if err != nil {
 				return err
 			}
-			return fence(ctx, tx)
+			if fence != nil {
+				return fence(ctx, tx)
+			}
+			return nil
 		})
 		if err != nil || done {
 			return err
