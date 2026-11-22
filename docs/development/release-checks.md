@@ -272,13 +272,10 @@ request size limits and disabled bindings.
 ### Linux ARM64 Go validation
 
 `scripts/bootstrap.sh` installs pinned repository tools without managing host
-OS packages. On Linux `aarch64` it supports the profiles `go-test`,
-`rust-basic`, `native-packages`, `image-security`, `node` and
-`npm-security`; any other profile (such as `all`, Web, quality or
-combined security) fails up front because quality-tool binary
-mappings are not provided for that architecture. Linux AMD64 and Darwin ARM64
-keep their full mappings. The ARM64 Go procedure below validates neither those
-platforms nor Rust acceptance.
+OS packages. Linux `aarch64`, Linux AMD64, and Darwin ARM64 all provide full
+artifact mappings across every bootstrap profile (including `all`, `web`,
+`source-style`, `contracts`, and security profiles). The ARM64 Go procedure
+below validates neither other platforms nor Rust acceptance.
 
 On Linux ARM64, `scripts/bootstrap.sh go-test` fetches
 `go<VERSION>.linux-arm64.tar.gz` for the version locked in `toolchains.lock`
