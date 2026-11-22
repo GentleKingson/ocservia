@@ -95,7 +95,7 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 // Migrate applies all embedded goose migrations sequentially under an exclusive
 // PostgreSQL session advisory lock. Must be executed by the schema owner role.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	return withMigrationConnection(ctx, pool, func(*pgxpool.Conn) error {
+	return withMigrationConnection(ctx, pool, func(conn *pgxpool.Conn) error {
 		provider, cleanup, err := newProvider(pool)
 		if err != nil {
 			return err
@@ -103,6 +103,15 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		defer cleanup()
 		if _, err := provider.Up(ctx); err != nil {
 			return fmt.Errorf("apply PostgreSQL migrations: %w", err)
+		}
+		// Refresh the UTC partition window even when Goose has no pending migrations.
+		if _, err := conn.Exec(ctx, `SELECT public.telemetry_ensure_month_partition(month AT TIME ZONE 'UTC')
+			FROM generate_series(
+				date_trunc('month', now() AT TIME ZONE 'UTC') - interval '1 month',
+				date_trunc('month', now() AT TIME ZONE 'UTC') + interval '2 months',
+				interval '1 month'
+			) AS month`); err != nil {
+			return fmt.Errorf("provision telemetry partitions: %w", err)
 		}
 		return nil
 	})
