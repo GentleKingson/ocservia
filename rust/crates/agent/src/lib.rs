@@ -1058,22 +1058,16 @@ fn validate_payload(
         Some(command_envelope::Payload::ServiceReload(_)) => {
             ("ocserv.service.reload", Vec::new(), true)
         }
-        Some(command_envelope::Payload::CompleteConfigPlan(_)) => {
-            semantic_payload_hash_v2(envelope)?;
-            (
-                ocservia_contracts::config_profile::PLAN_CAPABILITY,
-                Vec::new(),
-                true,
-            )
-        }
-        Some(command_envelope::Payload::CompleteConfigApply(_)) => {
-            semantic_payload_hash_v2(envelope)?;
-            (
-                ocservia_contracts::config_profile::APPLY_CAPABILITY,
-                Vec::new(),
-                true,
-            )
-        }
+        Some(command_envelope::Payload::CompleteConfigPlan(_)) => (
+            ocservia_contracts::config_profile::PLAN_CAPABILITY,
+            Vec::new(),
+            true,
+        ),
+        Some(command_envelope::Payload::CompleteConfigApply(_)) => (
+            ocservia_contracts::config_profile::APPLY_CAPABILITY,
+            Vec::new(),
+            true,
+        ),
         Some(command_envelope::Payload::CertificateCsr(payload)) => {
             if payload.certificate_id.len() != 16
                 || payload.common_name.is_empty()

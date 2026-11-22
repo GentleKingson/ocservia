@@ -104,9 +104,7 @@ type Store interface {
 	IPBans(context.Context, uuid.UUID, int) ([]IPBan, error)
 
 	LockNode(context.Context, uuid.UUID) error
-	ValidateJSON(context.Context, []json.RawMessage) error
-	InsertBatch(context.Context, uuid.UUID, uuid.UUID, uint64, string, time.Time, int) (bool, error)
-	UpsertSnapshot(context.Context, uuid.UUID, Snapshot) (bool, error)
+	InsertObservation(context.Context, uuid.UUID, uuid.UUID, uint64, string, int, Snapshot, []SecurityEvent) (inserted, updated bool, err error)
 	ReplaceSessions(context.Context, uuid.UUID, time.Time, []Session) error
 	ReplaceIPBans(context.Context, uuid.UUID, time.Time, []IPBan) error
 	ReplaceUsers(context.Context, uuid.UUID, time.Time, []User) error
@@ -120,7 +118,6 @@ type Store interface {
 	MaintainHistory(context.Context, time.Time) error
 
 	ReplaceGroups(context.Context, uuid.UUID, []Group) error
-	InsertSecurity(context.Context, uuid.UUID, []SecurityEvent) error
 }
 
 type BatchMaintainer interface {

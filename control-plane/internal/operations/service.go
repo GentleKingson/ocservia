@@ -2,9 +2,7 @@ package operations
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -15,19 +13,18 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/idempotency"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
-	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
-	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var (
 	ErrInvalidRequest      = errors.New("invalid operation request")
-	ErrIdempotencyConflict = errors.New("idempotency key was reused with different input")
+	ErrIdempotencyConflict = operationstore.ErrIdempotencyConflict
 	ErrStaleRevision       = errors.New("resource revision is stale")
 	ErrNodeUnavailable     = errors.New("node is unavailable")
 	ErrConfigApplyActive   = errors.New("a configuration apply is already active for this node")
@@ -103,7 +100,6 @@ type ConfigApplyMetadata struct {
 
 type ArtifactMetadata struct {
 	TokenSHA256 []byte
-	RequestHash []byte
 	ExpiresAt   time.Time
 }
 
@@ -192,7 +188,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		request.Payload = csr
 	}
 	now := s.now().UTC()
-	hash := requestHash(request)
+	digest := requestDigest(request)
 	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return Operation{}, false, fmt.Errorf("begin operation transaction: %w", err)
@@ -232,34 +228,30 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 			return Operation{}, false, err
 		}
 	}
-	if existing, same, err := findIdempotent(ctx, tx, workspaceID, request.IdempotencyKey, hash[:]); err != nil {
-		return Operation{}, false, err
-	} else if existing.ID != "" {
-		if !same {
-			return Operation{}, false, ErrIdempotencyConflict
+	_, configPlan := request.Payload.(ConfigPlanPayload)
+	if configPlan {
+		if err := bindCommandCapability(ctx, intentStore, &request); err != nil {
+			return Operation{}, false, err
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return Operation{}, false, fmt.Errorf("commit idempotent lookup: %w", err)
-		}
-		return existing, true, nil
+	}
+	if existing, err := ReplayTx(ctx, tx, intentStore, workspaceID, request.IdempotencyKey, digest); err != nil || existing.ID != "" {
+		return existing, err == nil, err
 	}
 	if nodeVersion != request.ExpectedVersion {
 		return Operation{}, false, ErrStaleRevision
 	}
 	if request.Payload.kind() != SyntheticNoop && request.Payload.kind() != SyntheticEcho {
-		attestationReady, err := intentStore.AttestationReady(ctx, request.NodeID)
-		if err != nil {
-			return Operation{}, false, fmt.Errorf("recheck privd result attestation: %w", err)
-		}
-		if !attestationReady {
-			return Operation{}, false, ErrCapabilityMissing
+		if err := RequireAttestation(ctx, intentStore, request.NodeID); err != nil {
+			return Operation{}, false, err
 		}
 	}
-	if err := validateConfigurationIntent(ctx, tx, intentStore, request, workspaceID, now); err != nil {
+	if err := validateConfigurationIntent(ctx, tx, request, workspaceID, now); err != nil {
 		return Operation{}, false, err
 	}
-	if err := bindCommandCapability(ctx, intentStore, &request); err != nil {
-		return Operation{}, false, err
+	if !configPlan {
+		if err := bindCommandCapability(ctx, intentStore, &request); err != nil {
+			return Operation{}, false, err
+		}
 	}
 	if err := validateObservedTarget(ctx, intentStore, request); err != nil {
 		return Operation{}, false, err
@@ -281,80 +273,33 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		}
 	}
 
-	operationID, commandID, outboxID, auditID, eventID, err := newIDs(5)
-	if err != nil {
-		return Operation{}, false, err
-	}
 	expiresAt := now.Add(request.TTL)
-	envelope, payloadType, err := marshalEnvelope(request, operationID, commandID, authorizationRevision, now, expiresAt, s.signer)
-	if err != nil {
-		return Operation{}, false, err
-	}
-	if request.SupersedePending {
-		if err := intentStore.SupersedePending(ctx, request.NodeID, payloadType, now); err != nil {
-			return Operation{}, false, err
-		}
-	}
-	if err := commandlimit.ReserveBacklog(ctx, tx, workspaceID, request.NodeID); err != nil {
-		return Operation{}, false, err
-	}
-	if err := intentStore.InsertIntent(ctx, operationstore.QueuedIntent{
-		ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, CommandID: commandID,
-		RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey,
-		RequestHash: hash[:], ExpiresAt: expiresAt, CreatedAt: now,
-	}); err != nil {
-		return Operation{}, false, fmt.Errorf("insert operation intent: %w", err)
-	}
-	if err := insertDomainIntent(ctx, tx, intentStore, request, workspaceID, operationID, now, expiresAt, fromVersion); err != nil {
-		return Operation{}, false, err
-	}
 	availableAt := now
 	if payload, ok := request.Payload.(CertificateRevokePayload); ok && payload.HoldDispatch {
 		availableAt = expiresAt
 	}
-	if err := intentStore.EnqueueCommand(ctx, operationstore.QueuedCommand{
-		ID: commandID, OperationID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID,
-		OutboxID: outboxID, EventID: eventID, PayloadType: payloadType, Envelope: envelope,
-		IdempotencyKey: request.IdempotencyKey, ExpectedVersion: request.ExpectedVersion, Traceparent: request.Traceparent,
-		ExpiresAt: expiresAt, CreatedAt: now, AvailableAt: availableAt,
-	}); err != nil {
-		return Operation{}, false, err
-	}
-	if err := appendIntentAudit(ctx, tx, request, workspaceID, operationID, commandID, auditID, fromVersion, now); err != nil {
-		return Operation{}, false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		// The commit acknowledgement may have been lost. Resolve only this
-		// operation's immutable idempotency record; never create another intent.
-		check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		var existing Operation
-		confirmed := database.Within(check, s.backend, database.ReadCommitted, func(read database.Tx) error {
-			var same bool
-			var err error
-			existing, same, err = findIdempotent(check, read, workspaceID, request.IdempotencyKey, hash[:])
-			if err == nil && (!same || existing.ID != operationID.String()) {
-				return database.ErrNotFound
-			}
-			return err
-		})
-		if confirmed == nil {
-			if availableAt.Equal(now) {
-				s.Notify()
-			}
-			return existing, false, nil
+	operation, err := s.EnqueueTx(ctx, tx, intentStore, QueueIntent{
+		WorkspaceID: workspaceID, NodeID: request.NodeID, Key: request.IdempotencyKey, RequestID: request.RequestID,
+		Traceparent: request.Traceparent, Digest: digest, Now: now, Expires: expiresAt, Available: availableAt,
+		ExpectedVersion: request.ExpectedVersion,
+	}, func(ids QueueIDs) ([]byte, string, error) {
+		envelope, payloadType, err := marshalEnvelope(request, ids.Operation, ids.Command, authorizationRevision, now, expiresAt, s.signer)
+		if err == nil && request.SupersedePending {
+			err = intentStore.SupersedePending(ctx, request.NodeID, payloadType, now)
 		}
-		return Operation{}, false, fmt.Errorf("commit operation transaction: %w", err)
+		return envelope, payloadType, err
+	}, func(ids QueueIDs) error {
+		return insertDomainIntent(ctx, tx, intentStore, request, workspaceID, ids.Operation, now, expiresAt, fromVersion)
+	}, func(ids QueueIDs) error {
+		return appendIntentAudit(ctx, tx, request, workspaceID, ids.Operation, ids.Command, ids.Audit, fromVersion, now)
+	})
+	if err != nil {
+		return Operation{}, false, err
 	}
-	if availableAt.Equal(now) {
-		s.Notify()
-	}
-	nodeText, commandText := request.NodeID.String(), commandID.String()
-	operation := Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: now, UpdatedAt: now, ExpiresAt: &expiresAt}
-	if _, ok := request.Payload.(ConfigApplyPayload); ok {
+	if _, ok := request.Payload.(ConfigApplyPayload); ok && operation.ConfigApplyState == "" {
 		operation.ConfigApplyState = "queued"
 	}
-	if payload, ok := request.Payload.(AgentUpgradePayload); ok {
+	if payload, ok := request.Payload.(AgentUpgradePayload); ok && operation.AgentUpgradeState == "" {
 		operation.AgentUpgradeState = "queued"
 		operation.AgentUpgradeTarget = payload.TargetVersion
 	}
@@ -446,7 +391,10 @@ func (s *Service) Expire(ctx context.Context) error {
 	})
 }
 
-func requestHash(r CreateRequest) [32]byte {
+func requestDigest(r CreateRequest) idempotency.Digest {
+	if p, ok := r.Payload.(CertificateP12Payload); ok {
+		return P12Intent(r, p)
+	}
 	actorID, action, reason := normalizedAuditIntent(r)
 	// Request and trace IDs identify an attempt, not the mutation intent. Every
 	// field that selects the target, effect, authorization action, actor, audit
@@ -483,16 +431,17 @@ func requestHash(r CreateRequest) [32]byte {
 		DNSNames             []string               `json:"dns_names"`
 		KeyBits              uint32                 `json:"key_bits"`
 		ArtifactID           uuid.UUID              `json:"artifact_id"`
-		CertificateChainHash string                 `json:"certificate_chain_hash"`
-		SealedPasswordHash   string                 `json:"sealed_password_hash"`
-		SecretKeyID          string                 `json:"secret_key_id"`
-		SecretVersion        int32                  `json:"secret_version"`
-		SecretPurpose        int32                  `json:"secret_purpose"`
+		CertificateChainHash string                 `json:"certificate_chain_hash" cbor:"-"`
+		SealedPasswordHash   string                 `json:"sealed_password_hash" cbor:"-"`
+		SecretKeyID          string                 `json:"secret_key_id" cbor:"-"`
+		SecretVersion        int32                  `json:"secret_version" cbor:"-"`
+		SecretPurpose        int32                  `json:"secret_purpose" cbor:"-"`
 		CertificateVersion   uint64                 `json:"certificate_version"`
-		ArtifactTokenHash    string                 `json:"artifact_token_hash"`
-		ArtifactRequestHash  string                 `json:"artifact_request_hash"`
-		ArtifactExpiresAt    string                 `json:"artifact_expires_at"`
+		ArtifactTokenHash    string                 `json:"artifact_token_hash" cbor:"-"`
+		ArtifactRequestHash  string                 `json:"artifact_request_hash" cbor:"-"`
+		ArtifactExpiresAt    string                 `json:"artifact_expires_at" cbor:"-"`
 		RevocationReason     string                 `json:"revocation_reason"`
+		RolloutID            uuid.UUID              `json:"-" cbor:"rollout_id,omitempty"`
 		TargetVersion        string                 `json:"target_version"`
 		PackageSHA256        string                 `json:"package_sha256"`
 		Architecture         string                 `json:"architecture"`
@@ -512,54 +461,40 @@ func requestHash(r CreateRequest) [32]byte {
 	case IPBanRemovePayload:
 		intent.IP = p.IP
 	case ConfigPlanPayload:
-		intent.CompleteProfile = p.CompleteCandidate != nil
-		intent.CandidateHash, intent.PlanRevision = fmt.Sprintf("%x", p.CandidateHash), p.PlanRevision
+		intent.CompleteProfile = true
+		intent.CandidateHash, intent.PlanRevision = fmt.Sprintf("%x", p.Candidate.Digest()), p.Candidate.Revision()
 		if p.PlanMetadata != nil {
 			intent.PlanTemplate = p.PlanMetadata.TemplateName
 		}
-		intent.OcservVersion, intent.PlanCapabilities = p.OcservVersion, p.PlanCapabilities
+		intent.OcservVersion, intent.PlanCapabilities = p.OcservVersion, []string{configprofile.PlanCapability}
 	case ConfigApplyPayload:
-		intent.CompleteProfile, intent.MaterializedHash, intent.PlanExpiresAt = p.CompleteCandidate != nil, hex.EncodeToString(p.MaterializedHash), p.PlanExpiresAt
-		intent.CandidateHash, intent.ExpectedCurrentHash = fmt.Sprintf("%x", p.CandidateHash), fmt.Sprintf("%x", p.ExpectedCurrentHash)
-		intent.DesiredRevision, intent.PlanRevision = p.DesiredRevision, p.PlanRevision
+		intent.CompleteProfile, intent.MaterializedHash, intent.PlanExpiresAt = true, hex.EncodeToString(p.MaterializedHash), p.PlanExpiresAt
+		intent.CandidateHash, intent.ExpectedCurrentHash = fmt.Sprintf("%x", p.Candidate.Digest()), fmt.Sprintf("%x", p.ExpectedCurrentHash)
+		intent.DesiredRevision, intent.PlanRevision = p.DesiredRevision, p.Candidate.Revision()
 		if p.ApplyMetadata != nil {
 			intent.PlanID = p.ApplyMetadata.PlanID
 		}
 	case CertificateCSRPayload:
 		intent.CommonName, intent.DNSNames, intent.KeyBits = p.CommonName, p.DNSNames, p.KeyBits
-	case CertificateP12Payload:
-		intent.CertificateID, intent.CertificateVersion, intent.ArtifactID = p.CertificateID, p.CertificateVersion, p.ArtifactID
-		intent.CertificateChainHash = hashBytes(p.CertificateChain)
-		if p.SealedPassword != nil {
-			intent.SealedPasswordHash = hashBytes(p.SealedPassword.GetCiphertext())
-			intent.SecretKeyID = p.SealedPassword.GetKeyId()
-			intent.SecretVersion = int32(p.SealedPassword.GetVersion())
-			intent.SecretPurpose = int32(p.SealedPassword.GetPurpose())
-		}
-		if p.ArtifactMetadata != nil {
-			intent.ArtifactTokenHash = hex.EncodeToString(p.ArtifactMetadata.TokenSHA256)
-			intent.ArtifactRequestHash = hex.EncodeToString(p.ArtifactMetadata.RequestHash)
-			intent.ArtifactExpiresAt = p.ArtifactMetadata.ExpiresAt.UTC().Format(time.RFC3339Nano)
-		}
 	case CertificateRevokePayload:
 		intent.CertificateID, intent.CertificateVersion, intent.RevocationReason, intent.HoldDispatch = p.CertificateID, p.CertificateVersion, p.RevocationReason, p.HoldDispatch
 	case AgentUpgradePayload:
 		intent.TargetVersion, intent.PackageSHA256, intent.Architecture = p.TargetVersion, fmt.Sprintf("%x", p.PackageSHA256), p.Architecture
+		intent.RolloutID = p.RolloutID
 	}
 
-	encoded, err := json.Marshal(intent)
-	if err != nil {
-		panic("marshal fixed idempotency intent: " + err.Error())
-	}
-	return sha256.Sum256(encoded)
+	return idempotency.New("operation", intent, func() [32]byte { return idempotency.LegacyJSON("", intent) })
 }
 
-func hashBytes(value []byte) string {
-	if len(value) == 0 {
-		return ""
+// P12Intent binds the request to the certificate version and artifact ID.
+// The generated credentials, ciphertext, and expiry belong to the first successful enqueue.
+func P12Intent(r CreateRequest, p CertificateP12Payload) idempotency.Digest {
+	intent := map[string]any{
+		"certificate_id": p.CertificateID, "certificate_version": p.CertificateVersion,
+		"artifact_request_id": p.ArtifactID, "node_id": r.NodeID, "expected_version": r.ExpectedVersion,
+		"actor_identity_id": r.ActorIdentityID, "actor_session_id": r.ActorSessionID, "reason": r.Reason,
 	}
-	digest := sha256.Sum256(value)
-	return hex.EncodeToString(digest[:])
+	return idempotency.New("certificate-p12", intent, func() [32]byte { return idempotency.LegacyJSON("", intent) })
 }
 
 func validSealedP12(secret *agentv1.SealedSecretV1) bool {
@@ -581,13 +516,13 @@ func normalizedAuditIntent(r CreateRequest) (actorID, action, reason string) {
 }
 
 func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authorizationRevision uint64, now, expires time.Time, signer *commandauth.Signer) ([]byte, string, error) {
-	messageID, err := uuid.NewV7()
+	actorID, action, reason := normalizedAuditIntent(r)
+	envelope, err := NewCommandEnvelope(r.NodeID, operationID, commandID, authorizationRevision, now, expires, r.Traceparent, actorID, action, reason)
 	if err != nil {
 		return nil, "", err
 	}
-	actorID, action, reason := normalizedAuditIntent(r)
-	envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: authorizationRevision, Traceparent: r.Traceparent, ActorId: actorID, Reason: reason, OperationId: operationID[:], Action: action, DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
 	payloadType := "synthetic_noop"
+	var candidate configprofile.Normalized
 	switch p := r.Payload.(type) {
 	case SyntheticEchoPayload:
 		payloadType = "synthetic_echo"
@@ -607,17 +542,13 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 		payloadType = "service_reload"
 		envelope.Payload = &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}
 	case ConfigPlanPayload:
-		if p.CompleteCandidate == nil {
-			return nil, "", ErrInvalidRequest
-		}
+		candidate = p.Candidate
 		payloadType = "config_plan"
-		envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigPlan{CompleteConfigPlan: &agentv1.CompleteConfigPlan{Candidate: p.CompleteCandidate, CandidateHash: p.CandidateHash}}
+		envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigPlan{CompleteConfigPlan: &agentv1.CompleteConfigPlan{}}
 	case ConfigApplyPayload:
-		if p.CompleteCandidate == nil {
-			return nil, "", ErrInvalidRequest
-		}
+		candidate = p.Candidate
 		payloadType = "config_apply"
-		envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{Candidate: p.CompleteCandidate, CandidateHash: p.CandidateHash, ExpectedCurrentHash: p.ExpectedCurrentHash, MaterializedHash: p.MaterializedHash, DesiredRevision: p.DesiredRevision, PlanId: p.ApplyMetadata.PlanID[:], PlanExpiresAt: p.PlanExpiresAt}}
+		envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{ExpectedCurrentHash: p.ExpectedCurrentHash, MaterializedHash: p.MaterializedHash, DesiredRevision: p.DesiredRevision, PlanId: p.ApplyMetadata.PlanID[:], PlanExpiresAt: p.PlanExpiresAt}}
 	case CertificateCSRPayload:
 		payloadType = "certificate_csr"
 		envelope.Payload = &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: p.CertificateID[:], CommonName: p.CommonName, DnsNames: p.DNSNames, KeyBits: p.KeyBits}}
@@ -633,9 +564,6 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 	default:
 		return nil, "", ErrInvalidRequest
 	}
-	if err := semanticpayload.PopulateV2(envelope); err != nil {
-		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)
-	}
 	envelope.RequiredCapability = requestCapability(r)
 	if envelope.RequiredCapability == "" {
 		switch r.Payload.kind() {
@@ -645,14 +573,8 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 			envelope.RequiredCapability = "synthetic.echo"
 		}
 	}
-	if err := signer.Authorize(envelope); err != nil {
-		return nil, "", fmt.Errorf("authorize typed command: %w", err)
-	}
-	data, err := proto.Marshal(envelope)
-	if err != nil {
-		return nil, "", fmt.Errorf("marshal typed command: %w", err)
-	}
-	return data, payloadType, nil
+	data, err := signCommandEnvelope(envelope, signer, candidate)
+	return data, payloadType, err
 }
 
 func validDNSName(value string) bool {
@@ -672,20 +594,8 @@ func validDNSName(value string) bool {
 	return true
 }
 
-func findIdempotent(ctx context.Context, tx database.Tx, workspaceID uuid.UUID, key string, hash []byte) (Operation, bool, error) {
-	store, err := operationstore.FromTransaction(tx)
-	if err != nil {
-		return Operation{}, false, err
-	}
-	op, same, err := store.FindIdempotent(ctx, workspaceID, key, hash)
-	if err != nil {
-		return Operation{}, false, fmt.Errorf("read idempotent operation: %w", err)
-	}
-	return op, same, nil
-}
-
-func newIDs(count int) (uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, error) {
-	ids := make([]uuid.UUID, count)
+func newIDs() (uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, error) {
+	var ids [5]uuid.UUID
 	for i := range ids {
 		id, err := uuid.NewV7()
 		if err != nil {

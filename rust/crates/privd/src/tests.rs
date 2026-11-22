@@ -33,6 +33,8 @@ use ocservia_upgrader::UpgradeTrigger;
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
+use ocservia_contracts::generated::ocserv::platform::agent::v1::CommandEnvelope;
+
 use super::*;
 
 const TEST_ENDPOINT_ID: [u8; 32] = [9; 32];

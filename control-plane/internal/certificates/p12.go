@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -48,11 +47,16 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	if certificateVersion != request.CertificateVersion {
 		return ArtifactGrant{}, false, ErrNotReady
 	}
-	intent, _ := json.Marshal(map[string]any{"certificate_id": request.CertificateID, "certificate_version": request.CertificateVersion, "artifact_request_id": request.ArtifactRequestID, "node_id": nodeID, "expected_version": request.ExpectedVersion, "actor_identity_id": request.ActorIdentityID, "actor_session_id": request.ActorSessionID, "reason": request.Reason})
-	intentHash := sha256.Sum256(intent)
-	existing, err := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey, intentHash[:])
+	payload := operations.CertificateP12Payload{CertificateID: request.CertificateID, CertificateVersion: uint64(certificateVersion), CertificateChain: chain, ArtifactID: request.ArtifactRequestID}
+	create := operations.CreateRequest{
+		NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey,
+		ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID,
+		Action: "certificate.private_key.export", Reason: request.Reason, RequestID: request.RequestID,
+		Traceparent: request.Traceparent, TTL: 15 * time.Minute,
+	}
+	existing, err := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey)
 	if err == nil {
-		if !existing.SameIntent {
+		if !operations.P12Intent(create, payload).Matches(existing.RequestHash) {
 			return ArtifactGrant{}, false, operations.ErrIdempotencyConflict
 		}
 		return s.replayArtifactGrant(ctx, existing)
@@ -64,67 +68,32 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	if err != nil {
 		return ArtifactGrant{}, false, err
 	}
-	artifactID := request.ArtifactRequestID
 	expiresAt := s.now().UTC().Add(10 * time.Minute)
 	tokenHash := sha256.Sum256([]byte(token))
-	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{
-		NodeID:          nodeID,
-		ExpectedVersion: request.ExpectedVersion,
-		IdempotencyKey:  request.IdempotencyKey,
-		ActorID:         request.ActorIdentityID.String(),
-		ActorIdentityID: request.ActorIdentityID,
-		ActorSessionID:  request.ActorSessionID,
-		Action:          "certificate.private_key.export",
-		Reason:          request.Reason,
-		RequestID:       request.RequestID,
-		Traceparent:     request.Traceparent,
-		TTL:             15 * time.Minute,
-		Payload: operations.CertificateP12Payload{
-			CertificateID:      request.CertificateID,
-			CertificateVersion: uint64(certificateVersion),
-			CertificateChain:   chain,
-			SealedPassword:     sealed,
-			ArtifactID:         artifactID,
-			ArtifactMetadata:   &operations.ArtifactMetadata{TokenSHA256: tokenHash[:], RequestHash: intentHash[:], ExpiresAt: expiresAt},
-		},
-	})
+	payload.SealedPassword = sealed
+	payload.ArtifactMetadata = &operations.ArtifactMetadata{TokenSHA256: tokenHash[:], ExpiresAt: expiresAt}
+	create.Payload = payload
+	op, replay, err := s.operations.Create(ctx, create)
 	if err != nil {
-		if errors.Is(err, operations.ErrIdempotencyConflict) {
-			found, lookupErr := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey, intentHash[:])
-			if lookupErr == nil && found.SameIntent {
-				return s.replayArtifactGrant(ctx, found)
-			}
-		}
 		return ArtifactGrant{}, false, err
 	}
 	if replay {
-		operationID, err := uuid.Parse(op.ID)
+		found, err := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey)
 		if err != nil {
-			return ArtifactGrant{}, false, err
-		}
-		var found certificatestore.Artifact
-		if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-			store, err := certificatestore.FromTransaction(tx)
-			if err != nil {
-				return err
-			}
-			found, err = store.ArtifactByOperation(ctx, operationID)
-			return err
-		}); err != nil {
 			return ArtifactGrant{}, false, err
 		}
 		return ArtifactGrant{ArtifactID: found.ID, Operation: op, ExpiresAt: found.ExpiresAt}, true, nil
 	}
-	return ArtifactGrant{ArtifactID: artifactID, Operation: op, DownloadToken: token, Password: password, ExpiresAt: expiresAt}, false, nil
+	return ArtifactGrant{ArtifactID: payload.ArtifactID, Operation: op, DownloadToken: token, Password: password, ExpiresAt: expiresAt}, false, nil
 }
 
-func (s *Service) artifactByRequest(ctx context.Context, workspace uuid.UUID, key string, hash []byte) (v certificatestore.Artifact, err error) {
+func (s *Service) artifactByRequest(ctx context.Context, workspace uuid.UUID, key string) (v certificatestore.Artifact, err error) {
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		v, err = store.ArtifactByRequest(ctx, workspace, key, hash)
+		v, err = store.ArtifactByRequest(ctx, workspace, key)
 		return err
 	})
 	return

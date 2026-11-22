@@ -330,6 +330,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := testfixture.OpenRuntimePool(t)
 	workspaceID, managerID, outsiderID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	managerSession := uuid.Must(uuid.NewV7())
 	nodeA, nodeB, operationID, certificateID, artifactID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	// Only fixture batches use simple protocol; service queries retain the
 	// production pool's extended-protocol default.
@@ -338,19 +339,20 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($7,$1,'cert-node-a','active',1,now(),now()),($8,$1,'cert-node-b','active',1,now(),now());
 		INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES($9,$1,$7,'succeeded',1,'certificate-auth','certificate-auth',decode(repeat('00',32),'hex'),now(),now());
 		INSERT INTO certificates(id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,created_at,updated_at) VALUES($10,$1,$7,$9,'node-a.example.test','[]',2048,'csr_pending',now(),now());
-		INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at) VALUES($11,$1,$7,$10,1,$9,'certificate_p12','pending',decode(repeat('01',32),'hex'),decode(repeat('02',32),'hex'),now()+interval '10 minutes',now(),now());
-		INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$3,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "certificate-auth-"+workspaceID.String(), managerID, managerID.String(), outsiderID, outsiderID.String(), nodeA, nodeB, operationID, certificateID, artifactID); err != nil {
+		INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,expires_at,created_at,updated_at,requester_identity_id) VALUES($11,$1,$7,$10,1,$9,'certificate_p12','pending',decode(repeat('01',32),'hex'),now()+interval '10 minutes',now(),now(),$3);
+		INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($12,$3,now()+interval '1 hour',now());
+		INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$3,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "certificate-auth-"+workspaceID.String(), managerID, managerID.String(), outsiderID, outsiderID.String(), nodeA, nodeB, operationID, certificateID, artifactID, managerSession); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM workspace_admins WHERE workspace_id=$1; DELETE FROM artifact_operations WHERE id=$2; DELETE FROM certificates WHERE id=$3; DELETE FROM operations WHERE id=$4; DELETE FROM nodes WHERE workspace_id=$1; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$1`, pgx.QueryExecModeSimpleProtocol, workspaceID, artifactID, certificateID, operationID, managerID, outsiderID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM workspace_admins WHERE workspace_id=$1; DELETE FROM artifact_operations WHERE id=$2; DELETE FROM certificates WHERE id=$3; DELETE FROM operations WHERE id=$4; DELETE FROM nodes WHERE workspace_id=$1; DELETE FROM auth_sessions WHERE id=$7; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$1`, pgx.QueryExecModeSimpleProtocol, workspaceID, artifactID, certificateID, operationID, managerID, outsiderID, managerSession)
 	}()
 	artifactData := []byte("encrypted artifact response")
 	grantSigner := commandauth.NewSignerFromSeed([32]byte{7})
 	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	server := &Server{auth: authn, certificates: certificates.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData}, grantSigner)}
-	manager := auth.Principal{IdentityID: managerID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
+	manager := auth.Principal{IdentityID: managerID, SessionID: managerSession, Issuer: "integration"}
 	outsider := auth.Principal{IdentityID: outsiderID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
 	tests := []struct {
 		name, method, path, pathKey, pathValue string
@@ -360,11 +362,11 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 		{"admin lists node A", http.MethodGet, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), manager, true},
 		{"admin lists node B", http.MethodGet, "/api/v1/nodes/" + nodeB.String() + "/certificates", "node_id", nodeB.String(), manager, true},
 		{"admin issues node A", http.MethodPost, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), manager, true},
-		{"admin creates p12", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":p12", "certificate_action", certificateID.String() + ":p12", manager, true},
-		{"admin revokes certificate", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_action", certificateID.String() + ":revoke", manager, true},
+		{"admin creates p12", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":p12", "certificate_id", certificateID.String() + ":p12", manager, true},
+		{"admin revokes certificate", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_id", certificateID.String() + ":revoke", manager, true},
 		{"admin downloads artifact", http.MethodGet, "/api/v1/artifacts/" + artifactID.String(), "artifact_id", artifactID.String(), manager, true},
 		{"outsider cannot list node A", http.MethodGet, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), outsider, false},
-		{"outsider cannot revoke certificate", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_action", certificateID.String() + ":revoke", outsider, false},
+		{"outsider cannot revoke certificate", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_id", certificateID.String() + ":revoke", outsider, false},
 		{"outsider cannot read artifact", http.MethodGet, "/api/v1/artifacts/" + artifactID.String(), "artifact_id", artifactID.String(), outsider, false},
 	}
 	for _, test := range tests {

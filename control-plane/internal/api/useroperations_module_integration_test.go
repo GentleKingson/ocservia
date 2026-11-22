@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
@@ -32,11 +33,14 @@ func newUserOperationsHTTPFixture(t *testing.T) userOperationsHTTPFixture {
 		stamp := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,$4,$5)`, node, f.workspace, node.String(), stamp, stamp)
 		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.users.write',true)`, node)
+		if _, err := testfixture.InstallKeyBackend(t.Context(), owner, node); err != nil {
+			t.Fatal(err)
+		}
 		for _, user := range []struct {
 			name    string
 			version int64
 		}{{"alice", 1}, {"bob", 3}} {
-			f.exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,$2,true,$3,1,$4,$5,$6)`, node, user.name, user.version, make([]byte, 32), stamp, stamp)
+			f.exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,created_at,updated_at) VALUES($1,$2,true,$3,1,$4,$5)`, node, user.name, user.version, stamp, stamp)
 		}
 	}
 	return f

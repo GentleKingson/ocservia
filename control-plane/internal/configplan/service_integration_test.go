@@ -136,12 +136,9 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		Action:          "config.plan",
 		Reason:          request.Reason,
 		Payload: operations.ConfigPlanPayload{
-			Candidate:         rendered.Candidate,
-			CompleteCandidate: rendered.CompleteCandidate,
-			CandidateHash:     rendered.Hash[:],
-			OcservVersion:     "1.2.4",
-			PlanCapabilities:  []string{configprofile.PlanCapability},
-			PlanMetadata:      &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}, CreatedBy: requesterID},
+			Candidate:     rendered,
+			OcservVersion: "1.2.4",
+			PlanMetadata:  &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted(), Warnings: []string{}, CreatedBy: requesterID},
 		},
 	}
 	creator.assertLast(t, ctx, 3, wantCreate)
@@ -159,8 +156,8 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if _, _, err := service.Create(ctx, request); !errors.Is(err, ErrCapability) {
 		t.Fatal("missing capability accepted", err)
 	}
-	if len(creator.requests) != 4 {
-		t.Fatal("preflight rejection reached creator")
+	if len(creator.requests) != 5 {
+		t.Fatal("operation transaction must check the capability")
 	}
 	if _, err := pool.Exec(ctx, `UPDATE node_capabilities SET approved=true WHERE node_id=$1 AND capability=$2`, nodeID, configprofile.PlanCapability); err != nil {
 		t.Fatal(err)
@@ -245,7 +242,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatalf("apply=%+v replayed=%v err=%v", apply, replayed, err)
 	}
 	expires := validated.ExpiresAt.UTC()
-	creator.assertLast(t, ctx, 7, operations.CreateRequest{
+	creator.assertLast(t, ctx, 8, operations.CreateRequest{
 		NodeID:          nodeID,
 		IdempotencyKey:  applyRequest.IdempotencyKey,
 		ExpectedVersion: 1,
@@ -258,9 +255,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		Action:          "config.apply",
 		Reason:          applyRequest.Reason,
 		Payload: operations.ConfigApplyPayload{
-			CompleteCandidate:   rendered.CompleteCandidate,
-			Candidate:           rendered.Candidate,
-			CandidateHash:       rendered.Hash[:],
+			Candidate:           rendered,
 			ExpectedCurrentHash: currentHash,
 			MaterializedHash:    materializedHash,
 			DesiredRevision:     1,
@@ -339,7 +334,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	validResult := &agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()}
-	testutil.NoError(t, testfixture.AttachProof(&applyEnvelope, validResult, attestationKey, 1))
+	testutil.NoError(t, testfixture.AttachProof(&applyEnvelope, validResult, attestationKey, 2))
 	commandResultBytes, err := proto.Marshal(validResult)
 	testutil.NoError(t, err)
 	applyEventID := uuid.Must(uuid.NewV7())

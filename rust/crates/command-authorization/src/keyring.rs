@@ -29,6 +29,25 @@ pub struct ControllerCommandKeyring {
     keys: Arc<[(String, VerifyingKey)]>,
 }
 
+/// A signed command whose semantic payload and local node binding were verified.
+#[derive(Debug)]
+pub struct VerifiedCommand<'a> {
+    envelope: &'a CommandEnvelope,
+    claims: CommandAuthorizationV1,
+}
+
+impl<'a> VerifiedCommand<'a> {
+    #[must_use]
+    pub const fn envelope(&self) -> &'a CommandEnvelope {
+        self.envelope
+    }
+
+    #[must_use]
+    pub const fn claims(&self) -> &CommandAuthorizationV1 {
+        &self.claims
+    }
+}
+
 impl ControllerCommandKeyring {
     /// Creates a keyring from one or more distinct pinned keys.
     ///
@@ -107,12 +126,12 @@ impl ControllerCommandKeyring {
     /// Rejects invalid signatures, another node's proof, expired or
     /// future-issued commands, zero authority revisions, and semantic hash
     /// mismatches.
-    pub fn verify_command(
+    pub fn verify_command<'a>(
         &self,
-        envelope: &CommandEnvelope,
+        envelope: &'a CommandEnvelope,
         expected_node_id: &[u8; 16],
         now_unix_seconds: i64,
-    ) -> Result<CommandAuthorizationV1, AuthorizationError> {
+    ) -> Result<VerifiedCommand<'a>, AuthorizationError> {
         let claims = self.verify_claims(envelope)?;
         if &claims.node_id != expected_node_id {
             return Err(AuthorizationError::ClaimsInvalid("node_id_mismatch"));
@@ -129,7 +148,7 @@ impl ControllerCommandKeyring {
             return Err(AuthorizationError::ClaimsInvalid("clock_skew"));
         }
         verify_semantic_payload_hash(envelope)?;
-        Ok(claims)
+        Ok(VerifiedCommand { envelope, claims })
     }
 
     /// Verifies a Controller-signed session grant against the local node and

@@ -51,12 +51,6 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		eventService = transportevents.NewBackendWithCommandRecovery(backend, commandSigner, operationService, ownerSessions)
 	}
 	eventService.SetLocalSimulator(cfg.LocalSimulator)
-	if cfg.TestResultCommitBarrier != "" {
-		if err := eventService.EnableResultCommitBarrier(cfg.TestResultCommitBarrier); err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("configure result commit barrier: %w", err)
-		}
-	}
 	if workerTransport != nil {
 		transport := workerTransport
 		worker := transportevents.NewWorker(eventService, transport, logger, cfg.LocalSimulator)
@@ -65,12 +59,6 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		if err != nil {
 			cleanup()
 			return nil, func() {}, fmt.Errorf("configure outbox worker: %w", err)
-		}
-		if cfg.TestPreSendBarrier != "" {
-			if err := operationWorker.EnablePreSendBarrier(cfg.TestPreSendBarrier, cfg.TestCommandLease); err != nil {
-				cleanup()
-				return nil, func() {}, fmt.Errorf("configure command pre-send barrier: %w", err)
-			}
 		}
 		life.start("run outbox worker", operationWorker.Run)
 		trustWorker, err := enrollment.NewTrustConvergenceWorkerBackend(backend, transport, logger)

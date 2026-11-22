@@ -1,7 +1,6 @@
 package operations
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"net"
 	"strconv"
@@ -28,23 +27,18 @@ type IPBanRemovePayload struct{ IP string }
 type ServiceReloadPayload struct{}
 
 type ConfigPlanPayload struct {
-	CompleteCandidate        *agentv1.CompleteConfigCandidate
-	Candidate, CandidateHash []byte
-	PlanRevision             uint64
-	PlanMetadata             *ConfigPlanMetadata
-	OcservVersion            string
-	PlanCapabilities         []string
+	Candidate     configprofile.Normalized
+	PlanMetadata  *ConfigPlanMetadata
+	OcservVersion string
 }
 
 type ConfigApplyPayload struct {
-	CompleteCandidate        *agentv1.CompleteConfigCandidate
-	Candidate, CandidateHash []byte
-	PlanRevision             uint64
-	ExpectedCurrentHash      []byte
-	DesiredRevision          uint64
-	ApplyMetadata            *ConfigApplyMetadata
-	MaterializedHash         []byte
-	PlanExpiresAt            *timestamppb.Timestamp
+	Candidate           configprofile.Normalized
+	ExpectedCurrentHash []byte
+	DesiredRevision     uint64
+	ApplyMetadata       *ConfigApplyMetadata
+	MaterializedHash    []byte
+	PlanExpiresAt       *timestamppb.Timestamp
 }
 
 type CertificateCSRPayload struct {
@@ -76,9 +70,8 @@ type AgentUpgradePayload struct {
 	Architecture  string
 	// RolloutID binds generated upgrades to their durable fleet rollout.
 	// Dispatch validates the stored intent independently of the browser session.
-	RolloutID          uuid.UUID
-	RolloutRequestHash []byte
-	upgradeCapability  string
+	RolloutID         uuid.UUID
+	upgradeCapability string
 }
 
 func (SyntheticNoopPayload) kind() Kind     { return SyntheticNoop }
@@ -126,11 +119,11 @@ func validateCreate(r CreateRequest) error {
 			return ErrInvalidRequest
 		}
 	case ConfigPlanPayload:
-		if !validConfigCandidate(r.NodeID, p.Candidate, p.CandidateHash, p.PlanRevision, p.CompleteCandidate) || p.PlanMetadata == nil || strings.TrimSpace(p.PlanMetadata.TemplateName) == "" || len(p.PlanMetadata.TemplateName) > 128 || len(p.PlanMetadata.CandidateRedacted) == 0 || len(p.PlanMetadata.CandidateRedacted) > 256*1024 || len(p.PlanCapabilities) == 0 || r.ActorID == "" {
+		if !p.Candidate.IsFor(r.NodeID) || p.PlanMetadata == nil || strings.TrimSpace(p.PlanMetadata.TemplateName) == "" || len(p.PlanMetadata.TemplateName) > 128 || len(p.PlanMetadata.CandidateRedacted) == 0 || len(p.PlanMetadata.CandidateRedacted) > 256*1024 || r.ActorID == "" {
 			return ErrInvalidRequest
 		}
 	case ConfigApplyPayload:
-		if r.Action != "config.apply" || !hasActorSession(r) || !validConfigCandidate(r.NodeID, p.Candidate, p.CandidateHash, p.PlanRevision, p.CompleteCandidate) || len(p.ExpectedCurrentHash) != sha256.Size || p.DesiredRevision <= p.PlanRevision || p.ApplyMetadata == nil || p.ApplyMetadata.PlanID == uuid.Nil || len(p.MaterializedHash) != sha256.Size || p.PlanExpiresAt == nil || !p.PlanExpiresAt.IsValid() {
+		if r.Action != "config.apply" || !hasActorSession(r) || !p.Candidate.IsFor(r.NodeID) || len(p.ExpectedCurrentHash) != sha256.Size || p.DesiredRevision <= p.Candidate.Revision() || p.ApplyMetadata == nil || p.ApplyMetadata.PlanID == uuid.Nil || len(p.MaterializedHash) != sha256.Size || p.PlanExpiresAt == nil || !p.PlanExpiresAt.IsValid() {
 			return ErrInvalidRequest
 		}
 	case CertificateCSRPayload:
@@ -143,7 +136,7 @@ func validateCreate(r CreateRequest) error {
 			}
 		}
 	case CertificateP12Payload:
-		if r.Action != "certificate.private_key.export" || r.ActorIdentityID == uuid.Nil || p.CertificateID == uuid.Nil || p.CertificateID.Version() != 7 || p.CertificateVersion == 0 || p.ArtifactID == uuid.Nil || p.ArtifactID.Version() != 7 || len(p.CertificateChain) < 64 || len(p.CertificateChain) > 256*1024 || !validSealedP12(p.SealedPassword) || p.ArtifactMetadata == nil || len(p.ArtifactMetadata.TokenSHA256) != sha256.Size || len(p.ArtifactMetadata.RequestHash) != sha256.Size || !p.ArtifactMetadata.ExpiresAt.After(time.Now().UTC()) || p.ArtifactMetadata.ExpiresAt.After(time.Now().UTC().Add(30*time.Minute)) {
+		if r.Action != "certificate.private_key.export" || r.ActorIdentityID == uuid.Nil || p.CertificateID == uuid.Nil || p.CertificateID.Version() != 7 || p.CertificateVersion == 0 || p.ArtifactID == uuid.Nil || p.ArtifactID.Version() != 7 || len(p.CertificateChain) < 64 || len(p.CertificateChain) > 256*1024 || !validSealedP12(p.SealedPassword) || p.ArtifactMetadata == nil || len(p.ArtifactMetadata.TokenSHA256) != sha256.Size || !p.ArtifactMetadata.ExpiresAt.After(time.Now().UTC()) || p.ArtifactMetadata.ExpiresAt.After(time.Now().UTC().Add(30*time.Minute)) {
 			return ErrInvalidRequest
 		}
 	case CertificateRevokePayload:
@@ -154,11 +147,7 @@ func validateCreate(r CreateRequest) error {
 		if r.Action != "agent.upgrade" || !hasActorSession(r) || !semanticpayload.ValidAgentUpgradeTargetVersion(p.TargetVersion) || len(p.PackageSHA256) != sha256.Size || !semanticpayload.ValidAgentUpgradeArchitecture(p.Architecture) {
 			return ErrInvalidRequest
 		}
-		if p.RolloutID == uuid.Nil {
-			if len(p.RolloutRequestHash) != 0 {
-				return ErrInvalidRequest
-			}
-		} else if p.RolloutID.Version() != 7 || len(p.RolloutRequestHash) != sha256.Size {
+		if p.RolloutID != uuid.Nil && p.RolloutID.Version() != 7 {
 			return ErrInvalidRequest
 		}
 	default:
@@ -185,18 +174,6 @@ func validSessionTarget(sessionID, bootID string) bool {
 	}
 	boot, err := uuid.Parse(bootID)
 	return err == nil && boot != uuid.Nil
-}
-
-func validConfigCandidate(nodeID uuid.UUID, candidate, hash []byte, revision uint64, complete *agentv1.CompleteConfigCandidate) bool {
-	if complete == nil || len(candidate) == 0 || len(candidate) > 256*1024 || len(hash) != sha256.Size || revision > uint64(^uint64(0)>>1) {
-		return false
-	}
-	digest := sha256.Sum256(candidate)
-	if !bytes.Equal(digest[:], hash) {
-		return false
-	}
-	canonical, err := configprofile.Canonical(complete)
-	return err == nil && bytes.Equal(canonical, candidate) && bytes.Equal(complete.NodeId, nodeID[:]) && complete.ExpectedRevision == revision
 }
 
 func sessionTarget(p Payload) (sessionID, bootID string, ok bool) {

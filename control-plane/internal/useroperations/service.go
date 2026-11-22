@@ -16,6 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/idempotency"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
@@ -114,7 +115,7 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 		return Policy{}, false, err
 	}
 	request.Username = strings.TrimSpace(request.Username)
-	hash := policyHash(request)
+	digest := policyDigest(request)
 	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return Policy{}, false, err
@@ -136,7 +137,7 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 	}
 	receipt, err := store.Mutation(ctx, workspaceID, request.IdempotencyKey)
 	if err == nil {
-		if !slices.Equal(receipt.Hash, hash[:]) {
+		if !digest.Matches(receipt.Hash) {
 			return Policy{}, false, ErrIdempotencyConflict
 		}
 		policy, readErr := readPolicy(ctx, store, request.NodeID, request.Username, s.now())
@@ -167,7 +168,7 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 		return Policy{}, false, err
 	}
 	mutationID := s.newID()
-	if err := store.InsertMutation(ctx, userstore.Mutation{ID: mutationID, WorkspaceID: workspaceID, NodeID: request.NodeID, Username: request.Username, IdempotencyKey: request.IdempotencyKey, Hash: hash[:], Version: nextVersion, At: now}); err != nil {
+	if err := store.InsertMutation(ctx, userstore.Mutation{ID: mutationID, WorkspaceID: workspaceID, NodeID: request.NodeID, Username: request.Username, IdempotencyKey: request.IdempotencyKey, Hash: digest.Current[:], Version: nextVersion, At: now}); err != nil {
 		return Policy{}, false, err
 	}
 	after, _ := json.Marshal(map[string]any{"quota_period": request.QuotaPeriod, "quota_direction": request.QuotaDirection, "quota_bytes": request.QuotaBytes, "expires_at": request.ExpiresAt, "version": nextVersion})
@@ -279,12 +280,12 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 			processed++
 			continue
 		}
-		op, _, mutateErr := s.users.MutatePolicyEnforcement(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserEnable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: stableTraceparent(key)})
+		op, _, mutateErr := s.users.MutatePolicyEnforcement(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserEnable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: tracecontext.NewTraceparent()})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil
 			}
-			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) {
+			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) || errors.Is(mutateErr, userstate.ErrCapabilityMissing) {
 				if err := s.cleanupEnforcement(ctx, item, true); err != nil {
 					return 0, err
 				}
@@ -346,7 +347,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 	processed := 0
 	for _, item := range candidates {
 		key := operationIdempotencyKey("policy", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), item.Cause, item.PeriodStart.UTC().Format(time.RFC3339))
-		trace := stableTraceparent(key)
+		trace := tracecontext.NewTraceparent()
 		if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, item, now) }); err != nil {
 			return 0, err
 		}
@@ -374,7 +375,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil
 			}
-			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) {
+			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) || errors.Is(mutateErr, userstate.ErrCapabilityMissing) {
 				if err := s.cleanupEnforcement(ctx, item, true); err != nil {
 					return 0, err
 				}
@@ -434,14 +435,18 @@ func validatePolicyRequest(request PolicyRequest) error {
 	return nil
 }
 
-func policyHash(request PolicyRequest) [32]byte {
-	encoded, _ := json.Marshal(struct {
+func policyDigest(request PolicyRequest) idempotency.Digest {
+	intent := struct {
 		NodeID                      uuid.UUID `json:"node_id"`
 		Username, Period, Direction string
 		Bytes, Version              int64
 		Expires                     *time.Time
-	}{request.NodeID, request.Username, request.QuotaPeriod, request.QuotaDirection, request.QuotaBytes, request.ExpectedVersion, request.ExpiresAt})
-	return sha256.Sum256(encoded)
+	}{request.NodeID, request.Username, request.QuotaPeriod, request.QuotaDirection, request.QuotaBytes, request.ExpectedVersion, request.ExpiresAt}
+	return idempotency.New("user-policy", struct {
+		Intent                      any
+		ActorIdentity, ActorSession uuid.UUID
+		Reason                      string
+	}{intent, request.ActorIdentityID, request.ActorSessionID, request.Reason}, func() [32]byte { return idempotency.LegacyJSON("", intent) })
 }
 
 func quotaValue(direction string, rx, tx int64) int64 {
@@ -467,12 +472,6 @@ func operationIdempotencyKey(parts ...string) string {
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	// Keep the persisted prefix so scheduler retries replay existing operations.
 	return "i14-" + hex.EncodeToString(digest[:])
-}
-
-func stableTraceparent(seed string) string {
-	trace := sha256.Sum256([]byte("trace:" + seed))
-	span := sha256.Sum256([]byte("span:" + seed))
-	return "00-" + hex.EncodeToString(trace[:16]) + "-" + hex.EncodeToString(span[:8]) + "-01"
 }
 
 func optionalUUID(id uuid.UUID) *uuid.UUID {

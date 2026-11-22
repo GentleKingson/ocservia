@@ -2,6 +2,7 @@ package operations
 
 import (
 	"context"
+
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
+	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/google/uuid"
 )
 
@@ -391,16 +393,15 @@ func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, 
 		Reason:          rollout.Reason,
 		TTL:             rolloutUpgradeTTL,
 		RequestID:       "agent-rollout:" + rolloutID.String() + ":" + node.NodeID.String(),
-		Traceparent:     rolloutTraceparent(rolloutID, node.NodeID),
+		Traceparent:     tracecontext.NewTraceparent(),
 		ActorID:         rollout.CreatedBy.String(),
 		ActorIdentityID: rollout.CreatedBy,
 		ActorSessionID:  rollout.ActorSession,
 		Payload: AgentUpgradePayload{
-			TargetVersion:      rollout.TargetVersion,
-			PackageSHA256:      node.Digest[:],
-			Architecture:       node.Observation.Architecture,
-			RolloutID:          rolloutID,
-			RolloutRequestHash: rollout.RequestHash,
+			TargetVersion: rollout.TargetVersion,
+			PackageSHA256: node.Digest[:],
+			Architecture:  node.Observation.Architecture,
+			RolloutID:     rolloutID,
 		},
 	})
 	switch {

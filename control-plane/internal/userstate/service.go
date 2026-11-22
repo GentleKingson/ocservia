@@ -3,8 +3,6 @@ package userstate
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -18,14 +16,12 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/idempotency"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationdata "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
-	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/userstate/store"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var (
@@ -36,8 +32,8 @@ var (
 	ErrRevisionRecovery    = errors.New("the current desired revision requires same-kind recovery")
 	ErrNotFound            = errors.New("desired resource was not found")
 	ErrNodeUnavailable     = errors.New("node is unavailable")
-	ErrCapabilityMissing   = errors.New("node capability is unavailable")
-	ErrIdempotencyConflict = errors.New("idempotency key was reused with different input")
+	ErrCapabilityMissing   = operations.ErrCapabilityMissing
+	ErrIdempotencyConflict = operations.ErrIdempotencyConflict
 	ErrBacklogExceeded     = commandlimit.ErrBacklogExceeded
 )
 
@@ -94,20 +90,19 @@ type Service struct {
 	backend database.Backend
 	now     func() time.Time
 	signer  *commandauth.Signer
+	queue   *operations.Service
 }
 
 func NewBackend(backend database.Backend) *Service {
-	return &Service{backend: backend, now: func() time.Time { return time.Now().UTC() }}
+	return NewWithOperationsBackend(backend, nil, operations.NewBackend(backend, 0, nil))
 }
 
 func NewWithSignerBackend(backend database.Backend, signer *commandauth.Signer) *Service {
-	service := NewBackend(backend)
-	service.signer = signer
-	return service
+	return NewWithOperationsBackend(backend, signer, operations.NewBackend(backend, 0, signer))
 }
 
-func commitFenced(ctx context.Context, tx database.Tx) error {
-	return tx.Commit(ctx)
+func NewWithOperationsBackend(backend database.Backend, signer *commandauth.Signer, queue *operations.Service) *Service {
+	return &Service{backend: backend, signer: signer, queue: queue, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operations.Operation, bool, error) {
@@ -129,7 +124,7 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 		return operations.Operation{}, false, err
 	}
 	request.Members = normalizeMembers(request.Members)
-	hash := requestHash(request)
+	digest := requestDigest(request)
 	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return operations.Operation{}, false, fmt.Errorf("begin desired state transaction: %w", err)
@@ -168,16 +163,11 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 			return operations.Operation{}, false, ErrInvalidRequest
 		}
 	}
-	if existing, same, err := findIdempotent(ctx, tx, workspaceID, request.IdempotencyKey, hash[:]); err != nil {
+	if existing, err := operations.ReplayTx(ctx, tx, operationStore, workspaceID, request.IdempotencyKey, digest); err != nil || existing.ID != "" {
+		return existing, err == nil, err
+	}
+	if err := operations.RequireAttestation(ctx, operationStore, request.NodeID); err != nil {
 		return operations.Operation{}, false, err
-	} else if existing.ID != "" {
-		if !same {
-			return operations.Operation{}, false, ErrIdempotencyConflict
-		}
-		if err := commitFenced(ctx, tx); err != nil {
-			return operations.Operation{}, false, err
-		}
-		return existing, true, nil
 	}
 	approved, err := operationStore.HasCapability(ctx, request.NodeID, capabilityFor(request.Kind))
 	if err != nil {
@@ -209,9 +199,6 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 	if err != nil {
 		return operations.Operation{}, false, err
 	}
-	if err := commandlimit.ReserveBacklog(ctx, tx, workspaceID, request.NodeID); err != nil {
-		return operations.Operation{}, false, err
-	}
 	nextVersion, nextRevision := currentVersion+1, currentRevision+1
 	commandExpectedRevision := currentRevision
 	if coalesced || replaceRevision {
@@ -219,35 +206,24 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 		nextRevision = currentRevision
 		commandExpectedRevision = currentRevision - 1
 	}
-	if err := users.WriteDesired(ctx, userstore.Desired{NodeID: request.NodeID, Kind: string(request.Kind), Name: request.Name, Version: nextVersion, Revision: nextRevision, Members: request.Members, At: now}); err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			err = ErrNotFound
-		}
-		return operations.Operation{}, false, err
-	}
-	operationID, commandID, outboxID, auditID, eventID, err := newIDs()
-	if err != nil {
-		return operations.Operation{}, false, err
-	}
 	expiresAt := now.Add(request.TTL)
-	envelope, err := marshalEnvelope(request, operationID, commandID, node.AuthorizationRevision, uint64(nextRevision), now, expiresAt, s.signer)
-	if err != nil {
-		return operations.Operation{}, false, err
-	}
-	if err := operationStore.InsertIntent(ctx, operationdata.QueuedIntent{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, CommandID: commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey, RequestHash: hash[:], ExpiresAt: expiresAt, CreatedAt: now}); err != nil {
-		return operations.Operation{}, false, fmt.Errorf("insert user operation: %w", err)
-	}
-	if err := operationStore.EnqueueCommand(ctx, operationdata.QueuedCommand{ID: commandID, OperationID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, OutboxID: outboxID, EventID: eventID, PayloadType: string(request.Kind), IdempotencyKey: request.IdempotencyKey, Traceparent: request.Traceparent, Envelope: envelope, ExpectedVersion: commandExpectedRevision, ExpiresAt: expiresAt, CreatedAt: now, AvailableAt: now, ResourceType: &resourceType, ResourceKey: &request.Name}); err != nil {
-		return operations.Operation{}, false, fmt.Errorf("insert user command: %w", err)
-	}
-	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: actionFor(request.Kind), ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), Reason: request.Reason, At: now}); err != nil {
-		return operations.Operation{}, false, fmt.Errorf("append desired state audit intent: %w", err)
-	}
-	if err := commitFenced(ctx, tx); err != nil {
-		return operations.Operation{}, false, err
-	}
-	nodeText, commandText := request.NodeID.String(), commandID.String()
-	return operations.Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: now, UpdatedAt: now, ExpiresAt: &expiresAt}, false, nil
+	op, err := s.queue.EnqueueTx(ctx, tx, operationStore, operations.QueueIntent{
+		WorkspaceID: workspaceID, NodeID: request.NodeID, Key: request.IdempotencyKey, RequestID: request.RequestID,
+		Traceparent: request.Traceparent, Digest: digest, Now: now, Expires: expiresAt, Available: now,
+		ExpectedVersion: commandExpectedRevision, ResourceType: &resourceType, ResourceKey: &request.Name,
+	}, func(ids operations.QueueIDs) ([]byte, string, error) {
+		envelope, err := marshalEnvelope(request, ids.Operation, ids.Command, node.AuthorizationRevision, uint64(nextRevision), now, expiresAt, s.signer)
+		return envelope, string(request.Kind), err
+	}, func(operations.QueueIDs) error {
+		err := users.WriteDesired(ctx, userstore.Desired{NodeID: request.NodeID, Kind: string(request.Kind), Name: request.Name, Version: nextVersion, Revision: nextRevision, Members: request.Members, At: now})
+		if errors.Is(err, database.ErrNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}, func(ids operations.QueueIDs) error {
+		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: ids.Audit, WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: actionFor(request.Kind), ResourceType: "operation", ResourceID: ids.Operation, NodeID: &request.NodeID, CommandID: &ids.Command, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), Reason: request.Reason, At: now})
+	})
+	return op, false, err
 }
 
 func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, error) {
@@ -403,11 +379,11 @@ func ensureMutationCapacity(ctx context.Context, users userstore.Store, request 
 }
 
 func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, authorizationRevision, desiredRevision uint64, now, expires time.Time, signer *commandauth.Signer) ([]byte, error) {
-	messageID, err := uuid.NewV7()
+	envelope, err := operations.NewCommandEnvelope(request.NodeID, operationID, commandID, authorizationRevision, now, expires, request.Traceparent, request.ActorID, actionFor(request.Kind), request.Reason)
 	if err != nil {
 		return nil, err
 	}
-	envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: request.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: authorizationRevision, Traceparent: request.Traceparent, ActorId: request.ActorID, Reason: request.Reason, OperationId: operationID[:], Action: actionFor(request.Kind), RequiredCapability: capabilityFor(request.Kind), DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
+	envelope.RequiredCapability = capabilityFor(request.Kind)
 	switch request.Kind {
 	case UserCreate:
 		envelope.Payload = &agentv1.CommandEnvelope_UserCreate{UserCreate: &agentv1.UserCreate{Username: request.Name, SealedPasswordV1: sealedSecretProto(request.SealedPassword), DesiredRevision: desiredRevision}}
@@ -422,13 +398,7 @@ func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, 
 	default:
 		return nil, ErrInvalidRequest
 	}
-	if err := semanticpayload.PopulateV2(envelope); err != nil {
-		return nil, err
-	}
-	if err := signer.Authorize(envelope); err != nil {
-		return nil, fmt.Errorf("authorize desired-state command: %w", err)
-	}
-	return proto.Marshal(envelope)
+	return operations.SignCommandEnvelope(envelope, signer)
 }
 
 func sealedSecretProto(secret *SealedSecret) *agentv1.SealedSecretV1 {
@@ -438,7 +408,7 @@ func sealedSecretProto(secret *SealedSecret) *agentv1.SealedSecretV1 {
 	return &agentv1.SealedSecretV1{Version: secret.Version, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: secret.KeyID, Ciphertext: append([]byte(nil), secret.Ciphertext...)}
 }
 
-func requestHash(request MutationRequest) [32]byte {
+func requestDigest(request MutationRequest) idempotency.Digest {
 	var key string
 	var secret []byte
 	if request.SealedPassword != nil {
@@ -454,9 +424,11 @@ func requestHash(request MutationRequest) [32]byte {
 		Version       int64
 		TTL           int64
 		Actor, Reason string
-	}{request.NodeID, request.Kind, request.Name, key, normalizeMembers(request.Members), secret, request.ExpectedVersion, int64(request.TTL / time.Second), request.ActorID, request.Reason}
-	encoded, _ := json.Marshal(value)
-	return sha256.Sum256(encoded)
+	}{request.NodeID, request.Kind, request.Name, key, request.Members, secret, request.ExpectedVersion, int64(request.TTL / time.Second), request.ActorID, request.Reason}
+	return idempotency.New("desired-state", struct {
+		Intent                      any
+		ActorIdentity, ActorSession uuid.UUID
+	}{value, request.ActorIdentityID, request.ActorSessionID}, func() [32]byte { return idempotency.LegacyJSON("", value) })
 }
 
 func normalizeMembers(members []string) []string {
@@ -509,14 +481,6 @@ func convergence(item ResourceState, nodeStatus string) string {
 	return "drifted"
 }
 
-func findIdempotent(ctx context.Context, tx database.Tx, workspaceID uuid.UUID, key string, hash []byte) (operations.Operation, bool, error) {
-	store, err := operationdata.FromTransaction(tx)
-	if err != nil {
-		return operations.Operation{}, false, err
-	}
-	return store.FindIdempotent(ctx, workspaceID, key, hash)
-}
-
 func supersedePending(ctx context.Context, users userstore.Store, nodeID uuid.UUID, resourceType, resourceKey string, kind MutationKind, currentRevision int64, at time.Time) (bool, error) {
 	switch kind {
 	case UserCreate:
@@ -528,17 +492,6 @@ func supersedePending(ctx context.Context, users userstore.Store, nodeID uuid.UU
 	}
 }
 
-func newIDs() (uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, error) {
-	ids := make([]uuid.UUID, 5)
-	for i := range ids {
-		id, err := uuid.NewV7()
-		if err != nil {
-			return uuid.Nil, uuid.Nil, uuid.Nil, uuid.Nil, uuid.Nil, err
-		}
-		ids[i] = id
-	}
-	return ids[0], ids[1], ids[2], ids[3], ids[4], nil
-}
 func optionalUUID(id uuid.UUID) *uuid.UUID {
 	if id == uuid.Nil {
 		return nil

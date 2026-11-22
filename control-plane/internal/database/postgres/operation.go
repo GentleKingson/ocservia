@@ -25,9 +25,11 @@ func (s operationStore) HasCapability(ctx context.Context, node uuid.UUID, capab
 	return
 }
 
+const attestationReadyForNode = `EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=node.id AND capability='privd_result_attestation_v1' AND approved=true)
+	AND EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=node.id AND state='active' AND (valid_until IS NULL OR valid_until>now()))`
+
 func (s operationStore) AttestationReady(ctx context.Context, node uuid.UUID) (v bool, err error) {
-	err = s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability='privd_result_attestation_v1' AND approved=true)
-		AND EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=$1 AND state='active' AND (valid_until IS NULL OR valid_until>now()))`, node).Scan(&v)
+	err = s.QueryRow(ctx, `SELECT `+attestationReadyForNode+` FROM (VALUES ($1::uuid)) AS node(id)`, node).Scan(&v)
 	return
 }
 
@@ -95,10 +97,10 @@ func (s operationStore) ExpireQueued(ctx context.Context) error {
 const operationColumns = `o.id::text,o.state,o.node_id::text,o.command_id::text,o.version,o.created_at,o.updated_at,o.expires_at,COALESCE(x.state,''),COALESCE(x.failure_code,''),COALESCE(u.state,''),COALESCE(u.target_version,'')`
 const operationJoins = ` FROM operations o LEFT JOIN config_apply_operations x ON x.operation_id=o.id LEFT JOIN agent_upgrade_operations u ON u.operation_id=o.id`
 
-func scanOperation(row database.Row, same *bool) (v operationstore.Operation, err error) {
+func scanOperation(row database.Row, hash *[]byte) (v operationstore.Operation, err error) {
 	args := []any{&v.ID, &v.State, &v.NodeID, &v.CommandID, &v.Version, &v.CreatedAt, &v.UpdatedAt, &v.ExpiresAt, &v.ConfigApplyState, &v.ConfigApplyFailureCode, &v.AgentUpgradeState, &v.AgentUpgradeTarget}
-	if same != nil {
-		args = append(args, same)
+	if hash != nil {
+		args = append(args, hash)
 	}
 	if err = row.Scan(args...); err != nil {
 		return operationstore.Operation{}, err
@@ -154,10 +156,10 @@ func (s operationStore) SummaryInWorkspace(ctx context.Context, workspace uuid.U
 	return
 }
 
-func (s operationStore) FindIdempotent(ctx context.Context, workspace uuid.UUID, key string, hash []byte) (v operationstore.Operation, same bool, err error) {
-	v, err = scanOperation(s.QueryRow(ctx, `SELECT `+operationColumns+`,o.request_hash=$3`+operationJoins+` WHERE o.workspace_id=$1 AND o.idempotency_key=$2`, workspace, key, hash), &same)
+func (s operationStore) FindIdempotent(ctx context.Context, workspace uuid.UUID, key string) (v operationstore.Operation, hash []byte, err error) {
+	v, err = scanOperation(s.QueryRow(ctx, `SELECT `+operationColumns+`,o.request_hash`+operationJoins+` WHERE o.workspace_id=$1 AND o.idempotency_key=$2`, workspace, key), &hash)
 	if errors.Is(err, database.ErrNotFound) {
-		return operationstore.Operation{}, false, nil
+		return operationstore.Operation{}, nil, nil
 	}
 	return
 }
@@ -234,8 +236,12 @@ func (s operationStore) SupersedePending(ctx context.Context, node uuid.UUID, pa
 }
 
 func (s operationStore) InsertIntent(ctx context.Context, v operationstore.QueuedIntent) error {
-	_, err := s.Exec(ctx, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,version,request_id,trace_id,idempotency_key,request_hash,expires_at,created_at,updated_at)
-		VALUES($1,$2,$3,$4,'queued',1,$5,$6,$7,$8,$9,$10,$10)`, v.ID, v.WorkspaceID, v.NodeID, v.CommandID, v.RequestID, v.TraceID, v.IdempotencyKey, v.RequestHash, v.ExpiresAt, v.CreatedAt)
+	n, err := s.Exec(ctx, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,version,request_id,trace_id,idempotency_key,request_hash,expires_at,created_at,updated_at)
+		VALUES($1,$2,$3,$4,'queued',1,$5,$6,$7,$8,$9,$10,$10)
+		ON CONFLICT (workspace_id,idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`, v.ID, v.WorkspaceID, v.NodeID, v.CommandID, v.RequestID, v.TraceID, v.IdempotencyKey, v.RequestHash, v.ExpiresAt, v.CreatedAt)
+	if err == nil && n == 0 {
+		return operationstore.ErrIdempotencyConflict
+	}
 	return err
 }
 

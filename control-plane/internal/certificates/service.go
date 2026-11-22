@@ -2,7 +2,6 @@ package certificates
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -272,9 +271,4 @@ func (s *Service) Resource(ctx context.Context, id uuid.UUID) (workspaceID, node
 
 func readCertificate(v certificatestore.Certificate) Certificate {
 	return Certificate{ID: v.ID, WorkspaceID: v.WorkspaceID, NodeID: v.NodeID, OperationID: v.OperationID, CommonName: v.CommonName, DNSNames: v.DNSNames, KeyBits: v.KeyBits, State: v.State, Version: v.Version, PublicKeySHA256: v.PublicKeySHA256, SerialNumber: v.SerialNumber, NotBefore: v.NotBefore, NotAfter: v.NotAfter, RevokedAt: v.RevokedAt, CreatedAt: v.CreatedAt.UTC(), UpdatedAt: v.UpdatedAt.UTC()}
-}
-
-func sha256Bytes(value []byte) []byte {
-	digest := sha256.Sum256(value)
-	return digest[:]
 }

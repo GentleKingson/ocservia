@@ -146,6 +146,10 @@ func nonNilStrings(s []string) []string {
 // HashV2 computes the canonical RFC 8949 Core Deterministic CBOR semantic hash
 // for a reconcilable command envelope.
 func HashV2(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
+	return hashV2(envelope, false)
+}
+
+func hashV2(envelope *agentv1.CommandEnvelope, normalizedConfig bool) ([sha256.Size]byte, error) {
 	if envelope == nil {
 		return [sha256.Size]byte{}, errors.New("command envelope is missing")
 	}
@@ -188,22 +192,29 @@ func HashV2(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 		}
 	case *agentv1.CommandEnvelope_CompleteConfigPlan:
 		p := envelope.GetCompleteConfigPlan()
-		digest, err := configprofile.Hash(p.GetCandidate())
-		if err != nil || !bytes.Equal(digest[:], p.GetCandidateHash()) || !bytes.Equal(p.GetCandidate().GetNodeId(), envelope.GetNodeId()) {
-			return [sha256.Size]byte{}, errors.New("complete config plan identity is malformed")
+		if !normalizedConfig {
+			digest, err := configprofile.Hash(p.GetCandidate())
+			if err != nil || !bytes.Equal(digest[:], p.GetCandidateHash()) || !bytes.Equal(p.GetCandidate().GetNodeId(), envelope.GetNodeId()) {
+				return [sha256.Size]byte{}, errors.New("complete config plan identity is malformed")
+			}
 		}
 		payloadKind = 129
-		payloadValue = cborCompleteConfigPlan{CandidateHash: digest[:]}
+		payloadValue = cborCompleteConfigPlan{CandidateHash: p.GetCandidateHash()}
 	case *agentv1.CommandEnvelope_CompleteConfigApply:
 		p := envelope.GetCompleteConfigApply()
-		digest, err := configprofile.Hash(p.GetCandidate())
+		if !normalizedConfig {
+			digest, err := configprofile.Hash(p.GetCandidate())
+			if err != nil || !bytes.Equal(digest[:], p.GetCandidateHash()) || !bytes.Equal(p.GetCandidate().GetNodeId(), envelope.GetNodeId()) {
+				return [sha256.Size]byte{}, errors.New("complete config apply identity is malformed")
+			}
+		}
 		expires := p.GetPlanExpiresAt()
-		if err != nil || !bytes.Equal(digest[:], p.GetCandidateHash()) || !bytes.Equal(p.GetCandidate().GetNodeId(), envelope.GetNodeId()) || len(p.GetMaterializedHash()) != 32 || len(p.GetExpectedCurrentHash()) != 32 || p.GetDesiredRevision() <= p.GetCandidate().GetExpectedRevision() || len(p.GetPlanId()) != 16 || expires == nil || !expires.IsValid() || expires.GetNanos() < 0 {
+		if len(p.GetMaterializedHash()) != 32 || len(p.GetExpectedCurrentHash()) != 32 || p.GetDesiredRevision() <= p.GetCandidate().GetExpectedRevision() || len(p.GetPlanId()) != 16 || expires == nil || !expires.IsValid() || expires.GetNanos() < 0 {
 			return [sha256.Size]byte{}, errors.New("complete config apply identity is malformed")
 		}
 		payloadKind = 130
 		payloadValue = cborCompleteConfigApply{
-			CandidateHash:        digest[:],
+			CandidateHash:        p.GetCandidateHash(),
 			MaterializedHash:     p.GetMaterializedHash(),
 			ExpectedCurrentHash:  p.GetExpectedCurrentHash(),
 			DesiredRevision:      p.GetDesiredRevision(),
@@ -368,6 +379,28 @@ func ValidAgentUpgradeTargetVersion(version string) bool {
 // PopulateV2 fills the current semantic identity on a command envelope.
 func PopulateV2(envelope *agentv1.CommandEnvelope) error {
 	digest, err := HashV2(envelope)
+	return populate(envelope, digest, err)
+}
+
+// PopulateConfigV2 binds a validated candidate to an outgoing config command.
+func PopulateConfigV2(envelope *agentv1.CommandEnvelope, candidate configprofile.Normalized) error {
+	profile := candidate.Proto()
+	if !bytes.Equal(profile.GetNodeId(), envelope.GetNodeId()) || len(envelope.GetNodeId()) != 16 {
+		return errors.New("complete config identity is malformed")
+	}
+	switch p := envelope.Payload.(type) {
+	case *agentv1.CommandEnvelope_CompleteConfigPlan:
+		p.CompleteConfigPlan.Candidate, p.CompleteConfigPlan.CandidateHash = profile, candidate.Digest()
+	case *agentv1.CommandEnvelope_CompleteConfigApply:
+		p.CompleteConfigApply.Candidate, p.CompleteConfigApply.CandidateHash = profile, candidate.Digest()
+	default:
+		return errors.New("complete config command required")
+	}
+	digest, err := hashV2(envelope, true)
+	return populate(envelope, digest, err)
+}
+
+func populate(envelope *agentv1.CommandEnvelope, digest [sha256.Size]byte, err error) error {
 	if err != nil {
 		return err
 	}

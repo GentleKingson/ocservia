@@ -170,8 +170,10 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx database.Tx, ev
 		if err := IngestCommandResult(ctx, tx, eventID, nodeID, event.GetPayload(), occurredTime, observedAt, s.signer); err != nil {
 			return workspaceID, false, err
 		}
-		if err := s.waitAtResultCommitBarrier(ctx, event, observedAt); err != nil {
-			return workspaceID, false, err
+		if faultInjection {
+			if err := s.beforeResultCommit(ctx, event, observedAt); err != nil {
+				return workspaceID, false, err
+			}
 		}
 	}
 	status := "active"

@@ -31,6 +31,11 @@ func TestMutationValidationAndPasswordFingerprintRedaction(t *testing.T) {
 	}
 }
 
+func requestHash(r MutationRequest) [32]byte {
+	r.Members = normalizeMembers(r.Members)
+	return requestDigest(r).Current
+}
+
 func TestMembersAreCanonicalAndRequestHashBindsCiphertext(t *testing.T) {
 	request := MutationRequest{NodeID: uuid.Must(uuid.NewV7()), Kind: GroupApply, Name: "staff", Members: []string{"bob", "alice", "bob"}, IdempotencyKey: "key", ExpectedVersion: 0, TTL: time.Hour, ActorID: "operator", Reason: "ticket", RequestID: "request", Traceparent: testTraceparent}
 	if got := normalizeMembers(request.Members); len(got) != 2 || got[0] != "alice" || got[1] != "bob" {

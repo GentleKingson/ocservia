@@ -52,7 +52,6 @@ type Server struct {
 	enrollment          *enrollment.Service
 	transport           *transportclient.Client
 	nodes               NodeReader
-	registeredMethods   []routeMethodRule
 	releaseCatalog      *releasecatalog.Catalog
 	auth                *auth.Service
 	authProxies         []netip.Prefix
@@ -154,8 +153,10 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 		return nil, fmt.Errorf("configure SSE admission: %w", err)
 	}
 	mux := http.NewServeMux()
-	s.registeredMethods = s.registerRoutes(mux)
-	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
+	routes := &methodRegistrar{mux: mux, paths: make(map[string]map[string]http.HandlerFunc)}
+	s.registerRoutes(routes)
+	routes.register()
+	handler := s.requestContext(s.limitBody(s.timeout(routePaths(mux))))
 	// Bound request reads without a global write deadline that would end SSE streams.
 	s.http = &http.Server{Addr: config.Address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	return s, nil

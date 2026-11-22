@@ -10,6 +10,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
@@ -43,6 +44,9 @@ func newCleanupFixtureWithBackend(t *testing.T, b, owner database.Backend) *clea
 	f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'cleanup','active',$3,$4)`, f.node, workspace, f.at, f.at)
 	f.exec(t, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, f.node)
 	f.exec(t, `INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at)VALUES($1,$2,$3,'succeeded',1,'prior','prior',$4,$5,$6)`, f.op, workspace, f.node, make([]byte, 32), f.at, f.at)
+	if _, err := testfixture.InstallKeyBackend(t.Context(), owner, f.node); err != nil {
+		t.Fatal(err)
+	}
 	return f
 }
 
@@ -55,7 +59,7 @@ func (f *cleanupFixture) clear(t *testing.T) {
 		t.Error("cleanup fixture DELETE grant not restored", err)
 		return
 	}
-	for _, table := range []string{"user_policy_enforcements", "desired_user_policies", "desired_users", "node_capabilities", "operations"} {
+	for _, table := range []string{"user_policy_enforcements", "desired_user_policies", "desired_users", "node_privd_attestation_keys", "node_capabilities", "operations"} {
 		if _, err := f.owner.Exec(ctx, "DELETE FROM "+table+" WHERE node_id=$1", f.node); err != nil {
 			t.Error("clear cleanup fixture", table, err)
 			return
@@ -81,7 +85,7 @@ func (f *cleanupFixture) exec(t *testing.T, query string, args ...any) {
 
 func (f *cleanupFixture) seed(t *testing.T, name string, enabled, reset bool) userstore.Candidate {
 	t.Helper()
-	f.exec(t, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,$2,$3,2,2,$4,$5,$6)`, f.node, name, enabled, make([]byte, 32), f.at, f.at)
+	f.exec(t, `INSERT INTO desired_users(node_id,username,enabled,version,revision,created_at,updated_at)VALUES($1,$2,$3,2,2,$4,$5)`, f.node, name, enabled, f.at, f.at)
 	period := time.Unix(0, 0).UTC()
 	exp := f.at
 	policy := userstore.Policy{NodeID: f.node, Username: name, Version: 1, QuotaPeriod: "none", QuotaDirection: "rxtx", ExpiresAt: &exp, CreatedAt: f.at, UpdatedAt: f.at}
@@ -153,7 +157,7 @@ func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 			if shared == nil {
 				shared, sharedOwner = userOperationsBackendWithCleanup(t, parent)
 			}
-			for _, table := range []string{"user_policy_enforcements", "desired_user_policies", "desired_users", "node_capabilities", "operations", "commands", "nodes", "workspaces"} {
+			for _, table := range []string{"user_policy_enforcements", "desired_user_policies", "desired_users", "node_privd_attestation_keys", "node_capabilities", "operations", "commands", "nodes", "workspaces"} {
 				var count int
 				if err := sharedOwner.QueryRow(t.Context(), "SELECT count(*) FROM "+table).Scan(&count); err != nil || count != 0 {
 					t.Fatal("shared cleanup fixture is not empty", table, count, err)
@@ -214,7 +218,7 @@ func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 		// Related fixture rows need their actual FK parents, but no policy.
 		f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) SELECT $1,workspace_id,'other','active',created_at,updated_at FROM nodes WHERE id=$2`, variants[0].NodeID, f.node)
 		for _, v := range []userstore.Candidate{variants[0], variants[1]} {
-			f.exec(t, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,$2,false,2,2,$3,$4,$5)`, v.NodeID, v.Username, make([]byte, 32), f.at, f.at)
+			f.exec(t, `INSERT INTO desired_users(node_id,username,enabled,version,revision,created_at,updated_at)VALUES($1,$2,false,2,2,$3,$4)`, v.NodeID, v.Username, f.at, f.at)
 		}
 		for _, v := range variants {
 			if err := f.s.withStore(t.Context(), func(store userstore.Store) error { return store.EnsureEnforcement(t.Context(), v, f.at) }); err != nil {

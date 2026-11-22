@@ -9,6 +9,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +19,8 @@ import (
 )
 
 // These fingerprints freeze the pre-refactor idempotency JSON, semantic hash,
-// and signed authorization for each operation family.
+// and signed authorization for each operation family. The P12 receipt comes
+// from the previous artifact record, which the migration copies to operations.
 func TestCreateContractFingerprints(t *testing.T) {
 	id := uuid.MustParse("01900000-0000-7000-8000-000000000001")
 	candidate := []byte("config")
@@ -32,7 +34,7 @@ func TestCreateContractFingerprints(t *testing.T) {
 		{Payload: IPBanRemovePayload{IP: "192.0.2.1"}},
 		{Payload: ServiceReloadPayload{}},
 		{Payload: CertificateCSRPayload{CertificateID: id, CommonName: "node.example.com", DNSNames: []string{"node.example.com"}, KeyBits: 2048}},
-		{Payload: CertificateP12Payload{CertificateID: id, CertificateVersion: 2, CertificateChain: bytes.Repeat([]byte{3}, 64), SealedPassword: &agentv1.SealedSecretV1{Version: 1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "secret", Ciphertext: bytes.Repeat([]byte{4}, 32)}, ArtifactID: id, ArtifactMetadata: &ArtifactMetadata{TokenSHA256: digest[:], RequestHash: digest[:], ExpiresAt: now.Add(15 * time.Minute)}}},
+		{Payload: CertificateP12Payload{CertificateID: id, CertificateVersion: 2, CertificateChain: bytes.Repeat([]byte{3}, 64), SealedPassword: &agentv1.SealedSecretV1{Version: 1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "secret", Ciphertext: bytes.Repeat([]byte{4}, 32)}, ArtifactID: id, ArtifactMetadata: &ArtifactMetadata{TokenSHA256: digest[:], ExpiresAt: now.Add(15 * time.Minute)}}},
 		{Payload: CertificateRevokePayload{CertificateID: id, CertificateVersion: 2, RevocationReason: "rotate", HoldDispatch: true}},
 		{Payload: AgentUpgradePayload{TargetVersion: "1.2.3", PackageSHA256: digest[:], Architecture: "arm64"}},
 	}
@@ -53,14 +55,13 @@ func TestCreateContractFingerprints(t *testing.T) {
 		t.Fatal(err)
 	}
 	complete.NodeId, complete.ExpectedRevision = id[:], 3
-	canonical, err := configprofile.Canonical(&complete)
+	normalized, err := configprofile.Normalize(&complete)
 	if err != nil {
 		t.Fatal(err)
 	}
-	completeHash := sha256.Sum256(canonical)
 	cases = append(cases,
-		CreateRequest{Payload: ConfigPlanPayload{Candidate: canonical, CandidateHash: completeHash[:], CompleteCandidate: &complete, PlanRevision: 3, OcservVersion: "1.2.3", PlanCapabilities: []string{configprofile.PlanCapability}, PlanMetadata: &ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: "config"}}},
-		CreateRequest{Payload: ConfigApplyPayload{Candidate: canonical, CandidateHash: completeHash[:], CompleteCandidate: &complete, PlanRevision: 3, ExpectedCurrentHash: bytes.Repeat([]byte{2}, 32), DesiredRevision: 4, MaterializedHash: bytes.Repeat([]byte{3}, 32), PlanExpiresAt: timestamppb.New(now.Add(time.Minute)), ApplyMetadata: &ConfigApplyMetadata{PlanID: id}}},
+		CreateRequest{Payload: ConfigPlanPayload{Candidate: normalized, OcservVersion: "1.2.3", PlanMetadata: &ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: "config"}}},
+		CreateRequest{Payload: ConfigApplyPayload{Candidate: normalized, ExpectedCurrentHash: bytes.Repeat([]byte{2}, 32), DesiredRevision: 4, MaterializedHash: bytes.Repeat([]byte{3}, 32), PlanExpiresAt: timestamppb.New(now.Add(time.Minute)), ApplyMetadata: &ConfigApplyMetadata{PlanID: id}}},
 	)
 	legacyUpgrade := cases[9]
 	legacyPayload := legacyUpgrade.Payload.(AgentUpgradePayload)
@@ -75,7 +76,7 @@ func TestCreateContractFingerprints(t *testing.T) {
 		"ip_ban_remove":         "df5007521c0bc61b15a4b91d51e1d9aa56eea6878edb4f5c3d2c02943bb6c0f3/ip_ban_remove/1a14084db10e18b71a81b28281c3b571f46074f809550c57974e22c4641b66db/a00a63dbda4cb58b506a068390f74532c5b0e439478f113b6702db8ecd78fe54bfd359e0d8ce3b258fcebe3ada3628cd32c52d82fd474d1869dd82301c372e05",
 		"service_reload":        "8dcbf069ce285a721d0bf9d1b2b7c6a1481ebf6f3aaa41d118badb66ff78c3ec/service_reload/ab65f2d6b56952c7be1c198a82a1899d4037c2d756f7a880a48113d19364e8c5/246e120d025537a670fb07656f5562d8acf90b60218dd1a4ccbc4baef1b7e4551ef952b7cc4512702d6e02706ecd8c1f9f4d96c1a4233d237d61b0c4fdef390a",
 		"certificate_csr":       "377d553acba7ed7bec93a5ce067808dc4f8945b461d272ee3a49270bca79229c/certificate_csr/6cd092c14db95746118a07ad3bf9d070e3a0cc3a7f8a6d7973a6e472fbd28f1d/d87ad0c601504c6cfb9a4dedfb913d93d770b17793dce9b6990b975faff69e938bcffb7872f26d84a8a484f2098350686223322e122ba8c5e57deec26115e40b",
-		"certificate_p12":       "a11c1749bf407ccc97a4d89ed3e29978e78ac52fe423ba446d00439f6869eb32/certificate_p12/01c964a549c7d845da7b1d3f580e43a67db73e87e36dd2c7f259d9bba5436f7f/8724e2a42bd04208aa16504004afe8639e2a968f6b3f2efbccfacc5c765153983f423952e31298ad0a21bd0bc060fbcbe2c6ca8e25380579cf94dca84d32620c",
+		"certificate_p12":       "77f12bafa51b8ed8ef3f59ab3f1e02e90244cf8bc21f5245656dc0217d768703/certificate_p12/01c964a549c7d845da7b1d3f580e43a67db73e87e36dd2c7f259d9bba5436f7f/8724e2a42bd04208aa16504004afe8639e2a968f6b3f2efbccfacc5c765153983f423952e31298ad0a21bd0bc060fbcbe2c6ca8e25380579cf94dca84d32620c",
 		"certificate_revoke":    "e5539bd2bfc8c889828686ef3956e29fe880347b7db62e95d9cab638a3c0c735/certificate_revoke/eb1b44684a03ca61b7e83968c8153fd522d682ad77947c3eb0359c0ba8914b72/5b37e70a0bf0a6cd13f71873f50fb64780ff0dffb624fc8f120b908b940a357fc2d99c3625bf4ed7c25d2ea8106974b96748520dcaa938f225dc0bf291e1b100",
 		"agent_upgrade":         "1c150ba590da5e6c8361f42e34f95ce2a27f9f8471f8a0f2ae1d5a278db34f07/agent_upgrade/0ebc35874ec113db09684e3a6e6984fb4bd19625bc31d5b1172e70e3cda6b7fc/3061c87bac685a45a0658611d33a0900d4b24463e6da486dc5d7ee8264eb04769683ab5a537d5519feeb5971e6bbe587e738a2c54a6f770bc811aba23a52d401",
 		"complete_config_plan":  "67cd650f6d96e55348fcdae12d7c0f6abcd5f17e0b602c0e192184e4bdf6f2c8/config_plan/57ded24c4210f7060e5bd79cad781fabc9769466048db6d41340c4171f77922f/e50842778e032fdd4129726a878fa1ca1c43e88ee5f7efa9d4bb0b370b533c6703721185fb50ac2acb126900b921c7974b2ca2185e9fd9fee288e4ab6ed2d509",
@@ -117,25 +118,24 @@ func TestCreateContractFingerprints(t *testing.T) {
 		if err := proto.Unmarshal(data, &envelope); err != nil {
 			t.Fatal(err)
 		}
-		got := fmt.Sprintf("%x/%s/%x/%x", requestHash(request), payloadType, envelope.SemanticPayloadSha256, envelope.Authorization.Signature)
+		got := fmt.Sprintf("%s/%x/%x", payloadType, envelope.SemanticPayloadSha256, envelope.Authorization.Signature)
 		key := string(request.Payload.kind())
 		switch p := request.Payload.(type) {
-		case ConfigPlanPayload:
-			if p.CompleteCandidate != nil {
-				key = "complete_" + key
-			}
-		case ConfigApplyPayload:
-			if p.CompleteCandidate != nil {
-				key = "complete_" + key
-			}
+		case ConfigPlanPayload, ConfigApplyPayload:
+			key = "complete_" + key
 		case AgentUpgradePayload:
 			if p.upgradeCapability != "" {
 				key = "legacy_" + key
 			}
 		}
 
-		if want := expected[key]; got != want {
-			t.Fatalf("%s contract changed: %s", request.Payload.kind(), got)
+		legacyHex, want, _ := strings.Cut(expected[key], "/")
+		legacy, err := hex.DecodeString(legacyHex)
+		if err != nil || !requestDigest(request).Matches(legacy) {
+			t.Errorf("%s cannot replay its former idempotency receipt", key)
+		}
+		if got != want {
+			t.Errorf("%s contract changed: %s", key, got)
 		}
 	}
 }

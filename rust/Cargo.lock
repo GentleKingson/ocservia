@@ -2515,6 +2515,7 @@ dependencies = [
  "hex",
  "hmac",
  "ocservia-agent-protocol",
+ "ocservia-command-authorization",
  "ocservia-contracts",
  "ocservia-test-support",
  "rand",
@@ -2525,6 +2526,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "uuid",
+ "x509-parser",
  "zeroize",
 ]
 

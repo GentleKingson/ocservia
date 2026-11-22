@@ -13,6 +13,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/idempotency"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
@@ -190,15 +191,20 @@ func nodeIDStrings(ids []uuid.UUID) []string {
 	return values
 }
 
-func agentRolloutRequestHash(target string, sorted []uuid.UUID, batchSize int, stopOnFailure bool) []byte {
-	summary, _ := json.Marshal(struct {
+func agentRolloutRequestDigest(target string, sorted []uuid.UUID, request CreateAgentRolloutRequest) idempotency.Digest {
+	intent := struct {
 		TargetVersion string      `json:"target_version"`
 		NodeIDs       []uuid.UUID `json:"node_ids"`
 		BatchSize     int         `json:"batch_size"`
 		StopOnFailure bool        `json:"stop_on_failure"`
-	}{target, sorted, batchSize, stopOnFailure})
-	digest := sha256.Sum256(append([]byte("ocservia/agent-rollout/v1\x00"), summary...))
-	return digest[:]
+	}{target, sorted, request.BatchSize, request.StopOnFailure}
+	return idempotency.New("agent-rollout", struct {
+		Intent                      any
+		ActorIdentity, ActorSession uuid.UUID
+		Reason                      string
+	}{intent, request.ActorIdentityID, request.ActorSessionID, strings.TrimSpace(request.Reason)}, func() [32]byte {
+		return idempotency.LegacyJSON("ocservia/agent-rollout/v1\x00", intent)
+	})
 }
 
 func rolloutFromRow(rollout rolloutRow, nodes []AgentRolloutNode) AgentRollout {
@@ -209,14 +215,6 @@ func rolloutFromRow(rollout rolloutRow, nodes []AgentRolloutNode) AgentRollout {
 		CurrentBatch: rollout.CurrentBatch, PauseCode: rollout.PauseCode,
 		CreatedAt: rollout.CreatedAt, UpdatedAt: rollout.UpdatedAt, Nodes: nodes, Excluded: rollout.Excluded,
 	}
-}
-
-// rolloutTraceparent derives a stable, valid traceparent from the rollout
-// and node identities so every dispatch attempt of the same node shares one
-// trace.
-func rolloutTraceparent(rolloutID, nodeID uuid.UUID) string {
-	digest := sha256.Sum256(append(rolloutID[:], nodeID[:]...))
-	return fmt.Sprintf("00-%032x-%016x-01", digest[:16], digest[16:24])
 }
 
 func loadRolloutNodeObservation(ctx context.Context, store operationstore.Store, nodeID, workspaceID uuid.UUID) (rolloutNodeObservation, error) {
@@ -336,7 +334,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil || len(sorted) == 0 || len(sorted) > rolloutMaxNodes {
 		return AgentRollout{}, false, ErrRolloutInvalid
 	}
-	requestHash := agentRolloutRequestHash(target, sorted, request.BatchSize, request.StopOnFailure)
+	digest := agentRolloutRequestDigest(target, sorted, request)
 	now := s.now().UTC()
 	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
@@ -358,7 +356,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return AgentRollout{}, false, err
 	} else if err == nil {
-		if string(existingHash) != string(requestHash) {
+		if !digest.Matches(existingHash) {
 			return AgentRollout{}, false, ErrIdempotencyConflict
 		}
 		rollout, loadErr := store.Rollout(ctx, existingID, false)
@@ -384,7 +382,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
-	if err := store.InsertRollout(ctx, operationstore.PendingRollout{ID: rolloutID, WorkspaceID: request.WorkspaceID, TargetVersion: target, BatchSize: request.BatchSize, Reason: reason, RequestHash: requestHash, CreatedBy: request.ActorIdentityID, ActorSession: request.ActorSessionID, Exclusions: exclusionsJSON, CreatedAt: now, IdempotencyKey: request.IdempotencyKey}); err != nil {
+	if err := store.InsertRollout(ctx, operationstore.PendingRollout{ID: rolloutID, WorkspaceID: request.WorkspaceID, TargetVersion: target, BatchSize: request.BatchSize, Reason: reason, RequestHash: digest.Current[:], CreatedBy: request.ActorIdentityID, ActorSession: request.ActorSessionID, Exclusions: exclusionsJSON, CreatedAt: now, IdempotencyKey: request.IdempotencyKey}); err != nil {
 		return AgentRollout{}, false, fmt.Errorf("insert agent rollout: %w", err)
 	}
 	for ordinal, node := range eligible {

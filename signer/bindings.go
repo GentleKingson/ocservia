@@ -190,7 +190,7 @@ func (s *service) userPasswordPublicKey(node string) (map[string]any, error) {
 		if data == nil {
 			return statusError(403)
 		}
-		if json.Unmarshal(data, &b) != nil || b.NodeID != node || validateBinding(b) != nil {
+		if json.Unmarshal(data, &b) != nil || b.NodeID != node {
 			return invalidState
 		}
 		if b.Disabled {

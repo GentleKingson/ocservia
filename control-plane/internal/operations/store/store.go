@@ -2,11 +2,14 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
 )
+
+var ErrIdempotencyConflict = errors.New("idempotency key was reused with different input")
 
 type Operation struct {
 	ID                     string     `json:"id"`
@@ -145,7 +148,7 @@ type Store interface {
 	OperationState(context.Context, uuid.UUID) (string, error)
 	ListInWorkspace(context.Context, uuid.UUID, uuid.UUID, int) ([]Operation, error)
 	SummaryInWorkspace(context.Context, uuid.UUID) (Summary, error)
-	FindIdempotent(context.Context, uuid.UUID, string, []byte) (Operation, bool, error)
+	FindIdempotent(context.Context, uuid.UUID, string) (Operation, []byte, error)
 	Events(context.Context, uuid.UUID, uuid.UUID, int) ([]Event, error)
 	EventSequence(context.Context, uuid.UUID, uuid.UUID) (int64, error)
 }
