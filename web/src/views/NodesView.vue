@@ -351,8 +351,7 @@ async function submitRollout(): Promise<void> {
           role="status"
           aria-live="polite"
         >
-          <template v-if="fleet.loading">{{ $t("fleetRefreshing") }}</template>
-          <template v-else-if="fleet.unavailable">{{
+          <template v-if="fleet.unavailable">{{
             $t("fleetRefreshFailed")
           }}</template>
         </p>

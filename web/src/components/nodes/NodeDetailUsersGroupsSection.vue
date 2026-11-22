@@ -100,7 +100,7 @@ function convergenceTone(key: string): string {
       </Button>
     </template>
     <p
-      v-if="!(stateTab === 'users' ? userAction : groupAction).allowed"
+      v-if="(stateTab === 'users' ? userAction : groupAction).explanation"
       class="text-muted-foreground m-0 text-xs"
     >
       {{ (stateTab === "users" ? userAction : groupAction).explanation }}

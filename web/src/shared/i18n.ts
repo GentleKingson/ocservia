@@ -21,7 +21,6 @@ export const i18n = createI18n({
       overview: "Overview",
       nodes: "Nodes",
       fleet: "Fleet",
-      fleetRefreshing: "Refreshing nodes…",
       fleetRefreshFailed:
         "Refresh failed. Showing the last successful snapshot.",
       fleetLoadFailed: "Nodes could not be loaded. No node data is shown.",
