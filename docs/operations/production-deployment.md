@@ -288,7 +288,7 @@ interchangeable.
 | Configuration | You write `./install.env` | Ignores `./install.env`; writes `/etc/ocservia/install.env` |
 | Secrets and keys | You provision every protected file | Generated, including Signer material |
 | Choices | Any supported combination above | Integrated, bundled PostgreSQL, ACME, Local authentication |
-| First administrator | One-shot Local admin bootstrap | `initial-admin` |
+| First administrator | One-shot Local admin bootstrap | `admin` |
 
 ## Prepare the configuration
 
@@ -937,7 +937,7 @@ After the preflight succeeds, the versioned installer invokes the release's
    PostgreSQL, ACME, and Local authentication).
 4. Runs `install.sh --root-lifecycle`.
 5. Provisions the management workspace.
-6. Creates the Local administrator `initial-admin`.
+6. Creates the Local administrator `admin` with an eight-character random password.
 
 The generated password is written only to a root-owned file under
 `/root/ocservia-initial-credentials/admin.txt`. Change the initial administrator password after first login.
@@ -1025,7 +1025,7 @@ How you sign in for the first time depends on the installation:
   before you test login. A fresh manual install has no default administrator
   password, and normal restarts never reset credentials.
 - Quick mode writes the generated password for its initial Local administrator
-  `initial-admin` to `/root/ocservia-initial-credentials/admin.txt`.
+  `admin` to `/root/ocservia-initial-credentials/admin.txt`.
 
 Then verify `/api/v1/readyz`, the expected version and source metadata at
 `/api/v1/version`, an authenticated read, a node connection through the

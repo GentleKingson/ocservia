@@ -1442,8 +1442,8 @@ paths:
                   type: string
                   format: password
                   writeOnly: true
-                  minLength: 15
-                  description: 15 or more Unicode code points, at most 1024 UTF-8 bytes; must pass the common, compromised and service-related password blocklist. Never normalized.
+                  minLength: 8
+                  description: 8 or more Unicode code points, at most 1024 UTF-8 bytes; must pass the common, compromised and service-related password blocklist. Never normalized.
       responses:
         "204": { description: "Password changed, all old sessions revoked and cookie cleared. Log in again." }
         "400": { $ref: "#/components/responses/Problem" }
