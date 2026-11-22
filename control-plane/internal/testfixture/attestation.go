@@ -63,18 +63,30 @@ func AttachProof(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResul
 	if commandKind == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED || resultKind == agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_UNSPECIFIED {
 		return fmt.Errorf("attestation fixture command or result kind is unsupported")
 	}
-	resultDigest, errorDigest := sha256.Sum256(result.GetResult()), sha256.Sum256([]byte(result.GetErrorCode()))
-	effect := sha256.Sum256(append(append(append([]byte("ocservia/test-only-root-effect/v1\x00"), envelope.GetNodeId()...), envelope.GetCommandId()...), envelope.GetOperationId()...))
-	receipt := &agentv1.PrivdResultReceiptV1{
-		ReceiptVersion: agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1,
-		NodeId:         envelope.GetNodeId(), PrivdAttestationKeyId: privdattestation.PublicKeyID(privateKey.Public().(ed25519.PublicKey)),
-		CommandId: envelope.GetCommandId(), OperationId: envelope.GetOperationId(), IdempotencyKey: envelope.GetIdempotencyKey(),
-		SemanticPayloadHashVersion: result.GetSemanticPayloadHashVersion(), SemanticPayloadSha256: result.GetPayloadSha256(),
-		CommandKind: commandKind, ResultKind: resultKind, TerminalState: result.GetState(),
-		ResultBytesSha256: resultDigest[:], ErrorCodeSha256: errorDigest[:], EffectRecordId: effect[:], EffectSequence: effectSequence,
-		AcceptedAt: proto.Clone(result.GetAcceptedAt()).(*timestamppb.Timestamp), CompletedAt: proto.Clone(result.GetCompletedAt()).(*timestamppb.Timestamp), Replayed: result.GetReplayed(),
+	resultDigest, err := privdattestation.ResultPayloadCBORHash(resultKind, result.GetResult())
+	if err != nil {
+		return err
 	}
-	binding, err := certificateBinding(envelope, result, effect[:])
+	receipt := &agentv1.PrivdResultReceiptV1{
+		ReceiptVersion:             1,
+		NodeId:                     envelope.GetNodeId(),
+		PrivdAttestationKeyId:      privdattestation.PublicKeyID(privateKey.Public().(ed25519.PublicKey)),
+		CommandId:                  envelope.GetCommandId(),
+		OperationId:                envelope.GetOperationId(),
+		IdempotencyKey:             envelope.GetIdempotencyKey(),
+		SemanticPayloadHashVersion: result.GetSemanticPayloadHashVersion(),
+		SemanticPayloadSha256:      result.GetPayloadSha256(),
+		CommandKind:                commandKind,
+		ResultKind:                 resultKind,
+		TerminalState:              result.GetState(),
+		ResultCborSha256:           resultDigest[:],
+		ErrorCode:                  result.GetErrorCode(),
+		EffectSequence:             effectSequence,
+		AcceptedAt:                 proto.Clone(result.GetAcceptedAt()).(*timestamppb.Timestamp),
+		CompletedAt:                proto.Clone(result.GetCompletedAt()).(*timestamppb.Timestamp),
+		Replayed:                   result.GetReplayed(),
+	}
+	binding, err := certificateBinding(envelope, result)
 	if err != nil {
 		return err
 	}
@@ -84,7 +96,7 @@ func AttachProof(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResul
 		return err
 	}
 	result.PrivilegedResultProof = &agentv1.PrivilegedResultProof{
-		Version:   agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1,
+		Version:   1,
 		ReceiptV1: receipt, Signature: ed25519.Sign(privateKey, canonical),
 	}
 	return nil
@@ -109,7 +121,7 @@ func UpgradeResultProofAttestingAt(nodeID, operationID uuid.UUID, targetVersion 
 		return nil, fmt.Errorf("upgrade result fixture state is invalid")
 	}
 	proof := &agentv1.AgentUpgradeResultProof{
-		Version: agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1,
+		Version: 1,
 		NodeId:  nodeID[:], PrivdAttestationKeyId: privdattestation.PublicKeyID(privateKey.Public().(ed25519.PublicKey)),
 		OperationId: operationID[:], TargetVersion: targetVersion, PackageSha256: append([]byte(nil), packageSHA256...),
 		State: outcome, CompletedUnixMs: uint64(completedAt.UnixMilli()), ResultSha256: append([]byte(nil), resultSHA256...),
@@ -123,10 +135,10 @@ func UpgradeResultProofAttestingAt(nodeID, operationID uuid.UUID, targetVersion 
 	return proof, nil
 }
 
-func certificateBinding(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult, effect []byte) (*agentv1.PrivdCertificateReceiptBindingV1, error) {
+func certificateBinding(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) (*agentv1.PrivdCertificateReceiptBindingV1, error) {
 	switch request := envelope.GetPayload().(type) {
 	case *agentv1.CommandEnvelope_CertificateCsr:
-		binding := &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: request.CertificateCsr.GetCertificateId(), RootEffectRecordId: effect}
+		binding := &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: request.CertificateCsr.GetCertificateId()}
 		if result.GetState() == agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED {
 			return binding, nil
 		}
@@ -135,16 +147,12 @@ func certificateBinding(envelope *agentv1.CommandEnvelope, result *agentv1.Comma
 			return nil, err
 		}
 		csrDigest := sha256.Sum256(csr.GetCsrDer())
-		subjectDigest, err := privdattestation.RequestedSubjectDigest(request.CertificateCsr)
-		if err != nil {
-			return nil, err
-		}
-		binding.CsrDerSha256, binding.PublicKeySha256, binding.RequestedSubjectSha256 = csrDigest[:], csr.GetPublicKeySha256(), subjectDigest
+		binding.CsrDerSha256, binding.PublicKeySha256 = csrDigest[:], csr.GetPublicKeySha256()
 		return binding, nil
 	case *agentv1.CommandEnvelope_CertificateP12:
-		return &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: request.CertificateP12.GetCertificateId(), RootEffectRecordId: effect}, nil
+		return &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: request.CertificateP12.GetCertificateId()}, nil
 	case *agentv1.CommandEnvelope_CertificateRevoke:
-		return &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: request.CertificateRevoke.GetCertificateId(), RootEffectRecordId: effect}, nil
+		return &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: request.CertificateRevoke.GetCertificateId()}, nil
 	default:
 		return nil, nil
 	}

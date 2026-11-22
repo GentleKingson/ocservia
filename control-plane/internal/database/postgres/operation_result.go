@@ -34,14 +34,14 @@ func (s commandResultStore) LoadCommand(ctx context.Context, command, node uuid.
 	return
 }
 
-func (s commandResultStore) Receipt(ctx context.Context, key string, effect []byte, sequence uint64) (id uuid.UUID, digest []byte, err error) {
-	err = s.QueryRow(ctx, `SELECT command_id,receipt_sha256 FROM agent_command_results WHERE privd_attestation_key_id=$1 AND effect_record_id=$2 AND effect_sequence=$3 AND receipt_verification_status='verified'`, key, effect, sequence).Scan(&id, &digest)
+func (s commandResultStore) Receipt(ctx context.Context, key string, sequence uint64) (id uuid.UUID, digest []byte, err error) {
+	err = s.QueryRow(ctx, `SELECT command_id,receipt_sha256 FROM agent_command_results WHERE privd_attestation_key_id=$1 AND effect_sequence=$2 AND receipt_verification_status='verified'`, key, sequence).Scan(&id, &digest)
 	return
 }
 
 func (s commandResultStore) InsertResult(ctx context.Context, v resultstore.Result) error {
-	_, err := s.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at,receipt_verification_status,receipt_failure_reason,privd_attestation_key_id,effect_record_id,effect_sequence,receipt_sha256,privileged_result_proof)
-	 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp(),$12,$13,$14,$15,$16,$17,$18)`, v.EventID, v.CommandID, v.IdempotencyKey, v.PayloadHash, v.HashVersion, v.State, v.Bytes, v.ErrorCode, v.AcceptedAt, v.CompletedAt, v.Replayed, v.VerificationStatus, v.FailureReason, v.KeyID, v.EffectRecordID, v.EffectSequence, v.ReceiptHash, v.Proof)
+	_, err := s.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at,receipt_verification_status,receipt_failure_reason,privd_attestation_key_id,effect_sequence,receipt_sha256,privileged_result_proof)
+	 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp(),$12,$13,$14,$15,$16,$17)`, v.EventID, v.CommandID, v.IdempotencyKey, v.PayloadHash, v.HashVersion, v.State, v.Bytes, v.ErrorCode, v.AcceptedAt, v.CompletedAt, v.Replayed, v.VerificationStatus, v.FailureReason, v.KeyID, v.EffectSequence, v.ReceiptHash, v.Proof)
 	return err
 }
 
@@ -106,7 +106,7 @@ func (s commandResultStore) ConfigOutcome(ctx context.Context, v resultstore.Con
 }
 
 func (s commandResultStore) CSROutcome(ctx context.Context, v resultstore.CSROutcome) error {
-	_, err := s.Exec(ctx, `UPDATE certificates SET state=$2,version=version+1,csr_der=COALESCE($3,csr_der),public_key_sha256=COALESCE($4,public_key_sha256),csr_receipt_verified_at=COALESCE($7,csr_receipt_verified_at),csr_receipt_sha256=COALESCE($8,csr_receipt_sha256),csr_privd_attestation_key_id=COALESCE($9,csr_privd_attestation_key_id),csr_effect_record_id=COALESCE($10,csr_effect_record_id),csr_der_sha256=COALESCE($11,csr_der_sha256),csr_requested_subject_sha256=COALESCE($12,csr_requested_subject_sha256),updated_at=$5 WHERE id=$1 AND operation_id=$6`, v.CertificateID, v.State, v.DER, v.PublicHash, v.At, v.OperationID, v.VerifiedAt, v.ReceiptHash, v.KeyID, v.EffectRecordID, v.CSRHash, v.SubjectHash)
+	_, err := s.Exec(ctx, `UPDATE certificates SET state=$2,version=version+1,csr_der=COALESCE($3,csr_der),public_key_sha256=COALESCE($4,public_key_sha256),csr_receipt_verified_at=COALESCE($7,csr_receipt_verified_at),csr_receipt_sha256=COALESCE($8,csr_receipt_sha256),csr_privd_attestation_key_id=COALESCE($9,csr_privd_attestation_key_id),csr_der_sha256=COALESCE($10,csr_der_sha256),updated_at=$5 WHERE id=$1 AND operation_id=$6`, v.CertificateID, v.State, v.DER, v.PublicHash, v.At, v.OperationID, v.VerifiedAt, v.ReceiptHash, v.KeyID, v.CSRHash)
 	return err
 }
 

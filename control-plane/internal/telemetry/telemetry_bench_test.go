@@ -1,7 +1,6 @@
 package telemetry
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"testing"
 	"time"
@@ -40,7 +39,6 @@ func buildBenchWirePayload(b *testing.B, sessions, users, groups, samples int) (
 		Groups:   make([]*agentv1.GroupObservation, 0, groups),
 		Samples:  make([]*agentv1.MetricSample, 0, samples),
 	}
-	fp := make([]byte, sha256.Size)
 	for i := range sessions {
 		wire.Sessions = append(wire.Sessions, &agentv1.SessionObservation{
 			SessionId:   fmt.Sprintf("sess-%06d", i),
@@ -53,10 +51,9 @@ func buildBenchWirePayload(b *testing.B, sessions, users, groups, samples int) (
 	}
 	for i := range users {
 		wire.Users = append(wire.Users, &agentv1.UserObservation{
-			Username:          fmt.Sprintf("user%04d", i),
-			Enabled:           true,
-			Revision:          uint64(i + 1),
-			FingerprintSha256: fp,
+			Username: fmt.Sprintf("user%04d", i),
+			Enabled:  true,
+			Revision: uint64(i + 1),
 		})
 	}
 	for i := range groups {
@@ -67,10 +64,9 @@ func buildBenchWirePayload(b *testing.B, sessions, users, groups, samples int) (
 			}
 		}
 		wire.Groups = append(wire.Groups, &agentv1.GroupObservation{
-			GroupName:         fmt.Sprintf("group%03d", i),
-			Members:           members,
-			Revision:          uint64(i + 1),
-			FingerprintSha256: fp,
+			GroupName: fmt.Sprintf("group%03d", i),
+			Members:   members,
+			Revision:  uint64(i + 1),
 		})
 	}
 	metrics := []string{"session_count", "connection_rtt_ms", "cpu_usage_ratio", "memory_used_bytes", "network_rx_bytes", "network_tx_bytes"}

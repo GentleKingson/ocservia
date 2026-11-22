@@ -3,7 +3,7 @@ use super::super::{
     MAX_EFFECT_RECORDS, MAX_FRAME_BYTES, OptionalExtension, OwnerFenceIdentity,
     TransactionBehavior, Uuid, params,
 };
-use super::hmac::authenticate_authorized_record;
+use super::hmac::{authenticate_authorized_record, verify_mac};
 use super::owner_fence::{enforce_owner_fence, validate_owner_fence};
 use super::{EffectStore, effect_now, fixed_blob, sqlite_io};
 
@@ -97,7 +97,7 @@ impl EffectStore {
         }
         // Preserve exact ID replay/conflict decisions above; only unrelated,
         // successful authorizations are safe to forget after expiry.
-        prune_expired_authorized_effects(&transaction, &self.hmac_key, now)?;
+        prune_expired_authorized_effects(&transaction, now)?;
         let count: i64 = transaction
             .query_row("SELECT count(*) FROM authorized_effects", [], |row| {
                 row.get(0)
@@ -362,42 +362,13 @@ pub(crate) fn query_authorized_effect(
         .map_err(sqlite_io)
 }
 
-fn prune_expired_authorized_effects(
-    connection: &Connection,
-    key: &[u8; 32],
-    now: i64,
-) -> Result<(), AdapterError> {
-    let records = {
-        let mut statement = connection
-            .prepare_cached(
-                "SELECT command_id,idempotency_key,node_id,operation_id,payload_sha256,action,authorization_revision,effect_kind,resource_key,effect_revision,expires_at,state,delivery_mode,response,record_hmac FROM authorized_effects WHERE state='applied' AND expires_at<=?1",
-            )
-            .map_err(sqlite_io)?;
-        let rows = statement
-            .query_map([now], decode_authorized_row)
-            .map_err(sqlite_io)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)?
-    };
-    if records.is_empty() {
-        return Ok(());
-    }
-    let mut delete_stmt = connection
-        .prepare_cached(
-            "DELETE FROM authorized_effects WHERE command_id=?1 AND state='applied' AND expires_at<=?2",
+fn prune_expired_authorized_effects(connection: &Connection, now: i64) -> Result<(), AdapterError> {
+    connection
+        .execute(
+            "DELETE FROM authorized_effects WHERE state='applied' AND expires_at<=?1",
+            [now],
         )
         .map_err(sqlite_io)?;
-    for record in records {
-        validate_authorized_record(key, &record)?;
-        if record.state != "applied" || record.expires_at > now {
-            return Err(AdapterError::InvalidResource);
-        }
-        let changed = delete_stmt
-            .execute(params![record.command_id.as_slice(), now])
-            .map_err(sqlite_io)?;
-        if changed != 1 {
-            return Err(AdapterError::Unavailable);
-        }
-    }
     Ok(())
 }
 
@@ -428,7 +399,10 @@ fn validate_authorized_record(
     if record.response.len() > MAX_FRAME_BYTES
         || !matches!(record.state, "prepared" | "applied")
         || !matches!(record.delivery_mode, 1 | 3)
-        || authenticate_authorized_record(key, record) != record.record_hmac
+        || !verify_mac(
+            &authenticate_authorized_record(key, record),
+            &record.record_hmac,
+        )
     {
         return Err(AdapterError::InvalidResource);
     }

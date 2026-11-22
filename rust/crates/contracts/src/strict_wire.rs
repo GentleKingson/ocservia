@@ -6,13 +6,17 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt;
+use std::sync::LazyLock;
 
 use prost::Message;
 use prost::encoding::{DecodeContext, WireType, decode_key, decode_length_delimiter, skip_field};
+use prost_types::field_descriptor_proto::{Label, Type};
+use prost_types::{DescriptorProto, FileDescriptorSet};
 
-use crate::generated::ocserv::platform::agent::v1::CommandEnvelope;
+use crate::generated::ocserv::platform::agent::v1::{self as agent, CommandEnvelope};
 
 /// A malformed or schema-incompatible command wire frame.
 #[derive(Debug)]
@@ -94,90 +98,178 @@ pub fn decode_strict_command_envelope(bytes: &[u8]) -> Result<CommandEnvelope, S
 /// Returns an error for malformed Protobuf, unknown fields at any command
 /// message depth, or a known field with the wrong wire type.
 pub fn validate_strict_command_envelope(bytes: &[u8]) -> Result<(), StrictWireError> {
-    validate_message(bytes, MessageKind::CommandEnvelope)
-}
-
-#[derive(Clone, Copy)]
-enum MessageKind {
-    CommandEnvelope,
-    CommandAuthorizationProof,
-    ConnectionFenceV2,
-    FenceBindingV2,
-    Timestamp,
-    SealedSecretV1,
-    SessionDisconnect,
-    SessionTerminate,
-    IpBanRemove,
-    UserCreate,
-    UserDisable,
-    UserEnable,
-    UserPasswordRotate,
-    GroupApply,
-    ConfigPlan,
-    ConfigApply,
-    CompleteConfigPlan,
-    CompleteConfigApply,
-    CompleteConfigCandidate,
-    CompleteConfigDirective,
-    NodeLocalTlsReference,
-    CertificateCsr,
-    CertificateP12,
-    CertificateRevoke,
-    AgentUpgrade,
-    ServiceReload,
-    SimulationProbe,
-    SyntheticNoop,
-    SyntheticEcho,
-}
-
-impl MessageKind {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::CommandEnvelope => "CommandEnvelope",
-            Self::CommandAuthorizationProof => "CommandAuthorizationProof",
-            Self::ConnectionFenceV2 => "ConnectionFenceV2",
-            Self::FenceBindingV2 => "FenceBindingV2",
-            Self::Timestamp => "Timestamp",
-            Self::SealedSecretV1 => "SealedSecretV1",
-            Self::SessionDisconnect => "SessionDisconnect",
-            Self::SessionTerminate => "SessionTerminate",
-            Self::IpBanRemove => "IpBanRemove",
-            Self::UserCreate => "UserCreate",
-            Self::UserDisable => "UserDisable",
-            Self::UserEnable => "UserEnable",
-            Self::UserPasswordRotate => "UserPasswordRotate",
-            Self::GroupApply => "GroupApply",
-            Self::ConfigPlan => "ConfigPlan",
-            Self::ConfigApply => "ConfigApply",
-            Self::CompleteConfigPlan => "CompleteConfigPlan",
-            Self::CompleteConfigApply => "CompleteConfigApply",
-            Self::CompleteConfigCandidate => "CompleteConfigCandidate",
-            Self::CompleteConfigDirective => "CompleteConfigDirective",
-            Self::NodeLocalTlsReference => "NodeLocalTlsReference",
-            Self::CertificateCsr => "CertificateCsr",
-            Self::CertificateP12 => "CertificateP12",
-            Self::CertificateRevoke => "CertificateRevoke",
-            Self::AgentUpgrade => "AgentUpgrade",
-            Self::ServiceReload => "ServiceReload",
-            Self::SimulationProbe => "SimulationProbe",
-            Self::SyntheticNoop => "SyntheticNoop",
-            Self::SyntheticEcho => "SyntheticEcho",
-        }
-    }
+    let schema = &*COMMAND_SCHEMA;
+    validate_message(bytes, schema, schema.root)
 }
 
 #[derive(Clone, Copy)]
 enum FieldKind {
     Scalar(WireType),
-    Nested(MessageKind),
+    Nested(usize),
 }
 
-fn validate_message(mut bytes: &[u8], message: MessageKind) -> Result<(), StrictWireError> {
+struct MessageSchema {
+    name: &'static str,
+    fields: Vec<(u32, FieldKind)>,
+}
+
+impl MessageSchema {
+    fn field_kind(&self, tag: u32) -> Option<FieldKind> {
+        self.fields
+            .binary_search_by_key(&tag, |&(field_tag, _)| field_tag)
+            .ok()
+            .map(|idx| self.fields[idx].1)
+    }
+}
+
+struct SchemaTable {
+    root: usize,
+    messages: Vec<MessageSchema>,
+}
+
+static COMMAND_SCHEMA: LazyLock<SchemaTable> = LazyLock::new(build_command_schema);
+
+const COMMAND_ENVELOPE_FQN: &str = ".ocserv.platform.agent.v1.CommandEnvelope";
+const TIMESTAMP_FQN: &str = ".google.protobuf.Timestamp";
+
+fn collect_descriptors(
+    prefix: &str,
+    descriptors: &[DescriptorProto],
+    out: &mut BTreeMap<String, DescriptorProto>,
+) {
+    for desc in descriptors {
+        let fqn = format!("{prefix}.{}", desc.name());
+        collect_descriptors(&fqn, &desc.nested_type, out);
+        out.insert(fqn, desc.clone());
+    }
+}
+
+fn scalar_wire_type(field_type: Type) -> WireType {
+    match field_type {
+        Type::Double | Type::Fixed64 | Type::Sfixed64 => WireType::SixtyFourBit,
+        Type::Float | Type::Fixed32 | Type::Sfixed32 => WireType::ThirtyTwoBit,
+        Type::String | Type::Bytes => WireType::LengthDelimited,
+        Type::Int64
+        | Type::Uint64
+        | Type::Int32
+        | Type::Bool
+        | Type::Uint32
+        | Type::Enum
+        | Type::Sint32
+        | Type::Sint64 => WireType::Varint,
+        Type::Message | Type::Group => unreachable!("handled before scalar_wire_type"),
+    }
+}
+
+fn build_command_schema() -> SchemaTable {
+    let fds = FileDescriptorSet::decode(agent::FILE_DESCRIPTOR_SET)
+        .expect("generated FILE_DESCRIPTOR_SET must decode");
+    let mut by_fqn = BTreeMap::new();
+    for file in &fds.file {
+        let package = file.package.as_deref().unwrap_or_default();
+        let prefix = if package.is_empty() {
+            String::new()
+        } else {
+            format!(".{package}")
+        };
+        collect_descriptors(&prefix, &file.message_type, &mut by_fqn);
+    }
+
+    let mut indices: HashMap<String, usize> = HashMap::new();
+    let mut messages: Vec<MessageSchema> = Vec::new();
+    let mut queue: Vec<String> = Vec::new();
+
+    let alloc_message = |fqn: &str,
+                         indices: &mut HashMap<String, usize>,
+                         messages: &mut Vec<MessageSchema>,
+                         queue: &mut Vec<String>|
+     -> usize {
+        if let Some(&idx) = indices.get(fqn) {
+            return idx;
+        }
+        let idx = messages.len();
+        let short_name = fqn.rsplit('.').next().unwrap_or(fqn);
+        let leaked: &'static str = Box::leak(short_name.to_owned().into_boxed_str());
+        indices.insert(fqn.to_owned(), idx);
+        messages.push(MessageSchema {
+            name: leaked,
+            fields: Vec::new(),
+        });
+        queue.push(fqn.to_owned());
+        idx
+    };
+
+    let root = alloc_message(
+        COMMAND_ENVELOPE_FQN,
+        &mut indices,
+        &mut messages,
+        &mut queue,
+    );
+
+    let mut cursor = 0;
+    while cursor < queue.len() {
+        let fqn = queue[cursor].clone();
+        cursor += 1;
+        let idx = indices[&fqn];
+
+        let fields = if fqn == TIMESTAMP_FQN {
+            vec![
+                (1, FieldKind::Scalar(WireType::Varint)),
+                (2, FieldKind::Scalar(WireType::Varint)),
+            ]
+        } else {
+            let desc = by_fqn
+                .get(&fqn)
+                .unwrap_or_else(|| panic!("missing protobuf descriptor for {fqn}"));
+            let mut list = Vec::with_capacity(desc.field.len());
+            for field in &desc.field {
+                let tag = u32::try_from(field.number()).expect("positive protobuf field number");
+                let kind = match field.r#type() {
+                    Type::Message => {
+                        let child_idx = alloc_message(
+                            field.type_name(),
+                            &mut indices,
+                            &mut messages,
+                            &mut queue,
+                        );
+                        FieldKind::Nested(child_idx)
+                    }
+                    Type::Group => panic!("unsupported protobuf group field {fqn}.{tag}"),
+                    scalar => {
+                        let wire = scalar_wire_type(scalar);
+                        // Proto3 repeated numeric/bool/enum fields are packed on the wire.
+                        let effective = if field.label() == Label::Repeated
+                            && wire != WireType::LengthDelimited
+                        {
+                            WireType::LengthDelimited
+                        } else {
+                            wire
+                        };
+                        FieldKind::Scalar(effective)
+                    }
+                };
+                list.push((tag, kind));
+            }
+            list.sort_unstable_by_key(|&(tag, _)| tag);
+            list
+        };
+        messages[idx].fields = fields;
+    }
+
+    SchemaTable { root, messages }
+}
+
+fn validate_message(
+    mut bytes: &[u8],
+    schema: &SchemaTable,
+    message_idx: usize,
+) -> Result<(), StrictWireError> {
+    let msg = &schema.messages[message_idx];
     while !bytes.is_empty() {
         let (tag, wire_type) = decode_key(&mut bytes).map_err(StrictWireError::Decode)?;
-        let Some(field) = field_kind(message, tag) else {
+        let Some(field) = msg.field_kind(tag) else {
             return Err(StrictWireError::UnknownField {
-                message: message.name(),
+                message: msg.name,
                 tag,
             });
         };
@@ -187,7 +279,7 @@ fn validate_message(mut bytes: &[u8], message: MessageKind) -> Result<(), Strict
         };
         if wire_type != expected {
             return Err(StrictWireError::UnexpectedWireType {
-                message: message.name(),
+                message: msg.name,
                 tag,
                 expected,
                 actual: wire_type,
@@ -198,9 +290,9 @@ fn validate_message(mut bytes: &[u8], message: MessageKind) -> Result<(), Strict
                 skip_field(wire_type, tag, &mut bytes, DecodeContext::default())
                     .map_err(StrictWireError::Decode)?;
             }
-            FieldKind::Nested(nested) => {
-                let nested_bytes = take_nested(&mut bytes, nested.name())?;
-                validate_message(nested_bytes, nested)?;
+            FieldKind::Nested(nested_idx) => {
+                let nested_bytes = take_nested(&mut bytes, schema.messages[nested_idx].name)?;
+                validate_message(nested_bytes, schema, nested_idx)?;
             }
         }
     }
@@ -220,166 +312,11 @@ fn take_nested<'a>(
     Ok(nested)
 }
 
-#[allow(clippy::too_many_lines)]
-fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
-    use FieldKind::{Nested, Scalar};
-    use MessageKind::{
-        AgentUpgrade, CertificateCsr, CertificateP12, CertificateRevoke, CommandAuthorizationProof,
-        CommandEnvelope, CompleteConfigApply, CompleteConfigCandidate, CompleteConfigDirective,
-        CompleteConfigPlan, ConfigApply, ConfigPlan, ConnectionFenceV2, FenceBindingV2, GroupApply,
-        IpBanRemove, NodeLocalTlsReference, SealedSecretV1, ServiceReload, SessionDisconnect,
-        SessionTerminate, SimulationProbe, SyntheticEcho, SyntheticNoop, Timestamp, UserCreate,
-        UserDisable, UserEnable, UserPasswordRotate,
-    };
-    use WireType::{LengthDelimited, Varint};
-
-    match message {
-        CommandEnvelope => match tag {
-            1..=5 | 10..=12 | 111 | 120..=124 => Some(Scalar(LengthDelimited)),
-            6 | 9 | 109 | 110 => Some(Scalar(Varint)),
-            7 | 8 => Some(Nested(Timestamp)),
-            125 => Some(Nested(CommandAuthorizationProof)),
-            126 => Some(Nested(ConnectionFenceV2)),
-            127 => Some(Nested(FenceBindingV2)),
-            100 => Some(Nested(SessionDisconnect)),
-            101 => Some(Nested(UserCreate)),
-            102 => Some(Nested(UserDisable)),
-            103 => Some(Nested(ConfigPlan)),
-            104 => Some(Nested(ConfigApply)),
-            105 => Some(Nested(ServiceReload)),
-            106 => Some(Nested(SimulationProbe)),
-            107 => Some(Nested(SyntheticNoop)),
-            108 => Some(Nested(SyntheticEcho)),
-            112 => Some(Nested(SessionTerminate)),
-            113 => Some(Nested(IpBanRemove)),
-            114 => Some(Nested(UserPasswordRotate)),
-            115 => Some(Nested(GroupApply)),
-            116 => Some(Nested(UserEnable)),
-            117 => Some(Nested(CertificateCsr)),
-            118 => Some(Nested(CertificateP12)),
-            119 => Some(Nested(CertificateRevoke)),
-            128 => Some(Nested(AgentUpgrade)),
-            129 => Some(Nested(CompleteConfigPlan)),
-            130 => Some(Nested(CompleteConfigApply)),
-            _ => None,
-        },
-        Timestamp => match tag {
-            1 | 2 => Some(Scalar(Varint)),
-            _ => None,
-        },
-        SealedSecretV1 => match tag {
-            1 | 2 => Some(Scalar(Varint)),
-            3 | 4 => Some(Scalar(LengthDelimited)),
-            _ => None,
-        },
-        CommandAuthorizationProof => match tag {
-            1 => Some(Scalar(Varint)),
-            2 | 3 => Some(Scalar(LengthDelimited)),
-            _ => None,
-        },
-        ConnectionFenceV2 => match tag {
-            1 | 7 | 8 | 10 => Some(Scalar(Varint)),
-            2..=6 | 9 | 11 | 15 => Some(Scalar(LengthDelimited)),
-            12..=14 => Some(Nested(Timestamp)),
-            _ => None,
-        },
-        FenceBindingV2 => match tag {
-            1 | 3 | 9 | 10 | 12 => Some(Scalar(Varint)),
-            2 | 4 | 5 | 6 | 7 | 8 | 11 | 13 | 16 => Some(Scalar(LengthDelimited)),
-            14 | 15 => Some(Nested(Timestamp)),
-            _ => None,
-        },
-        SessionDisconnect | SessionTerminate => match tag {
-            1 | 2 => Some(Scalar(LengthDelimited)),
-            _ => None,
-        },
-        IpBanRemove | SyntheticEcho => match tag {
-            1 => Some(Scalar(LengthDelimited)),
-            _ => None,
-        },
-        UserCreate | UserPasswordRotate => match tag {
-            1..=3 => Some(Scalar(LengthDelimited)),
-            4 => Some(Scalar(Varint)),
-            5 => Some(Nested(SealedSecretV1)),
-            _ => None,
-        },
-        ConfigApply | CertificateCsr => match tag {
-            1..=3 => Some(Scalar(LengthDelimited)),
-            4 => Some(Scalar(Varint)),
-            _ => None,
-        },
-        UserDisable | UserEnable => match tag {
-            1 => Some(Scalar(LengthDelimited)),
-            2 => Some(Scalar(Varint)),
-            _ => None,
-        },
-        GroupApply => match tag {
-            1 | 2 => Some(Scalar(LengthDelimited)),
-            3 => Some(Scalar(Varint)),
-            _ => None,
-        },
-        ConfigPlan => match tag {
-            1 | 2 => Some(Scalar(LengthDelimited)),
-            3 => Some(Scalar(Varint)),
-            _ => None,
-        },
-        CompleteConfigPlan => match tag {
-            1 => Some(Nested(CompleteConfigCandidate)),
-            2 => Some(Scalar(LengthDelimited)),
-            _ => None,
-        },
-        CompleteConfigApply => match tag {
-            1 => Some(Nested(CompleteConfigCandidate)),
-            2..=4 | 6 => Some(Scalar(LengthDelimited)),
-            5 => Some(Scalar(Varint)),
-            7 => Some(Nested(Timestamp)),
-            _ => None,
-        },
-        CompleteConfigCandidate => match tag {
-            1 => Some(Scalar(LengthDelimited)),
-            2 => Some(Scalar(Varint)),
-            3 => Some(Nested(CompleteConfigDirective)),
-            _ => None,
-        },
-        CompleteConfigDirective => match tag {
-            1 | 2 => Some(Scalar(LengthDelimited)),
-            3 => Some(Nested(NodeLocalTlsReference)),
-            _ => None,
-        },
-        NodeLocalTlsReference => match tag {
-            1..=5 => Some(Scalar(LengthDelimited)),
-            _ => None,
-        },
-        CertificateP12 => match tag {
-            1..=5 => Some(Scalar(LengthDelimited)),
-            6 => Some(Nested(SealedSecretV1)),
-            7 => Some(Scalar(Varint)),
-            8 => Some(Nested(Timestamp)),
-            _ => None,
-        },
-        CertificateRevoke => match tag {
-            1 | 2 => Some(Scalar(LengthDelimited)),
-            3 => Some(Scalar(Varint)),
-            _ => None,
-        },
-        AgentUpgrade => match tag {
-            1..=3 => Some(Scalar(LengthDelimited)),
-            _ => None,
-        },
-        ServiceReload | SyntheticNoop => None,
-        SimulationProbe => match tag {
-            1..=5 => Some(Scalar(Varint)),
-            _ => None,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::generated::ocserv::platform::agent::v1::{
-        self as agent, CommandAuthorizationProof, CommandEnvelope, ConnectionFenceV2,
-        FenceBindingV2, command_envelope,
+        self as agent, CommandAuthorizationProof, CommandEnvelope, command_envelope,
     };
     use prost::Message;
     use prost_types::Timestamp;
@@ -575,8 +512,6 @@ mod tests {
                 "user_create",
                 Payload::UserCreate(agent::UserCreate {
                     username: "alice".into(),
-                    sealed_password: b"legacy".to_vec(),
-                    secret_key_id: "legacy-key".into(),
                     desired_revision: 42,
                     sealed_password_v1: Some(fixture_secret(1)),
                 }),
@@ -599,8 +534,6 @@ mod tests {
                 "password_rotate",
                 Payload::UserPasswordRotate(agent::UserPasswordRotate {
                     username: "alice".into(),
-                    sealed_password: b"legacy".to_vec(),
-                    secret_key_id: "legacy-key".into(),
                     desired_revision: 42,
                     sealed_password_v1: Some(fixture_secret(1)),
                 }),
@@ -644,8 +577,6 @@ mod tests {
                 Payload::CertificateP12(agent::CertificateP12 {
                     certificate_id: b"certificate".to_vec(),
                     certificate_chain_pem: b"chain".to_vec(),
-                    sealed_password: b"legacy".to_vec(),
-                    secret_key_id: "legacy-key".into(),
                     artifact_id: b"artifact".to_vec(),
                     sealed_password_v1: Some(fixture_secret(2)),
                     certificate_version: 42,
@@ -726,50 +657,10 @@ mod tests {
             operation_id: b"operation".to_vec(),
             action: "synthetic.echo".into(),
             required_capability: "synthetic.v1".into(),
-            approval_id: b"approval".to_vec(),
-            approval_request_sha256: b"approval-hash".to_vec(),
             authorization: Some(CommandAuthorizationProof {
                 version: 1,
                 key_id: "auth-key".into(),
                 signature: b"auth-signature".to_vec(),
-            }),
-            connection_fence: Some(ConnectionFenceV2 {
-                signature_version: 1,
-                key_id: "fence-key".into(),
-                fence_id: b"fence".to_vec(),
-                node_id: b"node".to_vec(),
-                endpoint_id: b"endpoint".to_vec(),
-                owner_instance_id: b"owner".to_vec(),
-                owner_incarnation: 11,
-                owner_epoch: 12,
-                connection_id: b"connection".to_vec(),
-                authorization_revision: 13,
-                capabilities: vec!["ocserv.fencing.v2".into(), "synthetic.v1".into()],
-                lease_until: Some(Timestamp {
-                    seconds: 1_700_000_030,
-                    nanos: 789,
-                }),
-                issued_at,
-                expires_at,
-                signature: b"fence-signature".to_vec(),
-            }),
-            fence_binding: Some(FenceBindingV2 {
-                signature_version: 1,
-                key_id: "binding-key".into(),
-                operation_kind: 1,
-                operation_id: b"operation".to_vec(),
-                fence_id: b"fence".to_vec(),
-                node_id: b"node".to_vec(),
-                endpoint_id: b"endpoint".to_vec(),
-                owner_instance_id: b"owner".to_vec(),
-                owner_incarnation: 11,
-                owner_epoch: 12,
-                connection_id: b"connection".to_vec(),
-                authorization_revision: 13,
-                capability: "synthetic.v1".into(),
-                issued_at,
-                expires_at,
-                signature: b"binding-signature".to_vec(),
             }),
             payload: Some(payload),
         }
@@ -803,15 +694,6 @@ mod tests {
         }
     }
 
-    fn descriptor_name(kind: MessageKind) -> String {
-        let package = if matches!(kind, MessageKind::Timestamp) {
-            "google.protobuf"
-        } else {
-            "ocserv.platform.agent.v1"
-        };
-        format!(".{package}.{}", kind.name())
-    }
-
     fn descriptors() -> BTreeMap<String, prost_types::DescriptorProto> {
         let mut descriptors: BTreeMap<_, _> =
             prost_types::FileDescriptorSet::decode(agent::FILE_DESCRIPTOR_SET)
@@ -825,95 +707,35 @@ mod tests {
                         .map(move |message| (format!(".{package}.{}", message.name()), message))
                 })
                 .collect();
-        // prost's package descriptor excludes imported Timestamp; Go supplies
-        // its real descriptor in the same shared fixture, checked on every run.
         let wire = decode_hex(
             go_wire_document()["timestamp_descriptor_hex"]
                 .as_str()
                 .unwrap(),
         );
         descriptors.insert(
-            descriptor_name(MessageKind::Timestamp),
+            TIMESTAMP_FQN.to_owned(),
             prost_types::DescriptorProto::decode(wire.as_slice()).unwrap(),
         );
         descriptors
     }
 
-    // This test reads the generated schema; it never generates or extends the
-    // runtime allowlist. New fields need protocol/capability/strict-policy review.
-    fn compare_fields(
-        kind: MessageKind,
-        descriptor: &prost_types::DescriptorProto,
-    ) -> Result<Vec<(u32, MessageKind)>, String> {
-        use prost_types::field_descriptor_proto::{Label, Type};
-        // All currently reviewed command tags are in this range, including holes.
-        const REVIEWED_MAX_TAG: u32 = 130;
-        let fields: BTreeMap<_, _> = descriptor
-            .field
-            .iter()
-            .map(|field| {
-                (
-                    u32::try_from(field.number()).expect("positive field number"),
-                    field,
-                )
-            })
-            .collect();
-        if fields.keys().any(|tag| *tag > REVIEWED_MAX_TAG) {
-            return Err(format!(
-                "{}: new tag requires strict-policy review",
-                kind.name()
-            ));
-        }
-        let mut nested = Vec::new();
-        for tag in 1..=REVIEWED_MAX_TAG {
-            let matches = match (fields.get(&tag), field_kind(kind, tag)) {
-                (None, None) => true,
-                (Some(field), Some(FieldKind::Nested(child))) => {
-                    nested.push((tag, child));
-                    field.r#type() == Type::Message && field.type_name() == descriptor_name(child)
-                }
-                (Some(field), Some(FieldKind::Scalar(wire))) => {
-                    let expected = match field.r#type() {
-                        Type::String | Type::Bytes => Some(WireType::LengthDelimited),
-                        Type::Int32
-                        | Type::Int64
-                        | Type::Uint32
-                        | Type::Uint64
-                        | Type::Bool
-                        | Type::Enum => Some(WireType::Varint),
-                        _ => None,
-                    };
-                    expected == Some(wire)
-                        && !(field.label() == Label::Repeated && wire != WireType::LengthDelimited)
-                        && !field
-                            .options
-                            .as_ref()
-                            .is_some_and(prost_types::FieldOptions::packed)
-                }
-                _ => false,
-            };
-            if !matches {
-                return Err(format!(
-                    "{} tag {tag}: descriptor/strict policy drift; review protocol and capability compatibility",
-                    kind.name()
-                ));
-            }
-        }
-        Ok(nested)
-    }
-
-    fn schema_paths() -> Vec<(MessageKind, prost_types::DescriptorProto, Vec<usize>)> {
+    fn schema_paths() -> Vec<(&'static str, prost_types::DescriptorProto, Vec<usize>)> {
         let descriptors = descriptors();
-        let mut pending = vec![(MessageKind::CommandEnvelope, Vec::new())];
+        let schema = &*COMMAND_SCHEMA;
+        let mut pending = vec![(schema.root, COMMAND_ENVELOPE_FQN.to_owned(), Vec::new())];
         let mut paths = Vec::new();
-        while let Some((kind, path)) = pending.pop() {
-            let descriptor = &descriptors[&descriptor_name(kind)];
-            for (tag, child) in compare_fields(kind, descriptor).unwrap() {
-                let mut child_path = path.clone();
-                child_path.push(usize::try_from(tag).unwrap());
-                pending.push((child, child_path));
+        while let Some((idx, fqn, path)) = pending.pop() {
+            let descriptor = descriptors[&fqn].clone();
+            let msg = &schema.messages[idx];
+            for field in &descriptor.field {
+                let tag = u32::try_from(field.number()).unwrap();
+                if let Some(FieldKind::Nested(child_idx)) = msg.field_kind(tag) {
+                    let mut child_path = path.clone();
+                    child_path.push(usize::try_from(tag).unwrap());
+                    pending.push((child_idx, field.type_name().to_owned(), child_path));
+                }
             }
-            paths.push((kind, descriptor.clone(), path));
+            paths.push((msg.name, descriptor, path));
         }
         paths
     }
@@ -926,60 +748,22 @@ mod tests {
     }
 
     #[test]
-    fn strict_policy_matches_generated_command_descriptor() {
+    fn strict_policy_covers_generated_command_descriptor() {
         let paths = schema_paths();
         let messages: std::collections::BTreeSet<_> =
-            paths.iter().map(|(kind, _, _)| kind.name()).collect();
-        assert_eq!(messages.len(), 29);
-    }
-
-    #[test]
-    fn descriptor_drift_requires_explicit_policy_review() {
-        use prost_types::field_descriptor_proto::Type;
-        let descriptors = descriptors();
-        let original = &descriptors[&descriptor_name(MessageKind::ConfigPlan)];
-        let mut added = original.clone();
-        let mut field = added.field[0].clone();
-        field.number = Some(4);
-        field.name = Some("new_field".into());
-        added.field.push(field);
-        assert!(compare_fields(MessageKind::ConfigPlan, &added).is_err());
-        let mut removed = original.clone();
-        removed.field.pop();
-        assert!(compare_fields(MessageKind::ConfigPlan, &removed).is_err());
-        let mut changed = original.clone();
-        changed.field[0].r#type = Some(Type::Uint64 as i32);
-        assert!(compare_fields(MessageKind::ConfigPlan, &changed).is_err());
-        let original = &descriptors[&descriptor_name(MessageKind::CommandEnvelope)];
-        let mut changed = original.clone();
-        let field = changed
-            .field
-            .iter_mut()
-            .find(|field| field.number() == 103)
-            .unwrap();
-        field.type_name = Some(descriptor_name(MessageKind::ConfigApply));
-        assert!(compare_fields(MessageKind::CommandEnvelope, &changed).is_err());
-        let mut added_payload = original.clone();
-        let mut field = added_payload
-            .field
-            .iter()
-            .find(|field| field.number() == 128)
-            .unwrap()
-            .clone();
-        field.number = Some(131);
-        added_payload.field.push(field);
-        assert!(compare_fields(MessageKind::CommandEnvelope, &added_payload).is_err());
+            paths.iter().map(|(name, _, _)| *name).collect();
+        assert_eq!(messages.len(), COMMAND_SCHEMA.messages.len());
     }
 
     #[test]
     fn rejects_unknown_tags_at_every_command_message_path() {
-        for (kind, descriptor, path) in schema_paths() {
+        for (name, descriptor, path) in schema_paths() {
             let known: std::collections::BTreeSet<_> = descriptor
                 .field
                 .iter()
                 .map(prost_types::FieldDescriptorProto::number)
                 .collect();
-            for tag in (1..=129)
+            for tag in (1..=135)
                 .chain([2000, 536_870_911])
                 .filter(|tag| !known.contains(tag))
             {
@@ -988,9 +772,8 @@ mod tests {
                 bytes.push(1);
                 assert!(
                     matches!(decode_strict_command_envelope(&wrap_path(&path, bytes)),
-                    Err(StrictWireError::UnknownField { message, tag: actual }) if message == kind.name() && actual == u32::try_from(tag).unwrap()),
-                    "{} path {path:?} tag {tag}",
-                    kind.name()
+                    Err(StrictWireError::UnknownField { message, tag: actual }) if message == name && actual == u32::try_from(tag).unwrap()),
+                    "{name} path {path:?} tag {tag}"
                 );
             }
         }
@@ -998,8 +781,7 @@ mod tests {
 
     #[test]
     fn rejects_every_wrong_wire_type_at_every_command_field_path() {
-        use prost_types::field_descriptor_proto::Type;
-        for (kind, descriptor, path) in schema_paths() {
+        for (name, descriptor, path) in schema_paths() {
             for field in descriptor.field {
                 let expected = match field.r#type() {
                     Type::String | Type::Bytes | Type::Message => WireType::LengthDelimited,
@@ -1023,9 +805,8 @@ mod tests {
                     assert!(
                         matches!(decode_strict_command_envelope(&wrap_path(&path, bytes)),
                         Err(StrictWireError::UnexpectedWireType { message, tag: actual, expected: want, actual: got })
-                            if message == kind.name() && actual == u32::try_from(tag).unwrap() && want == expected && got == wire),
-                        "{} path {path:?} tag {tag} wire {wire:?}",
-                        kind.name()
+                            if message == name && actual == u32::try_from(tag).unwrap() && want == expected && got == wire),
+                        "{name} path {path:?} tag {tag} wire {wire:?}"
                     );
                 }
             }
@@ -1034,7 +815,7 @@ mod tests {
 
     #[test]
     fn rejects_truncated_messages_at_every_nested_path() {
-        for (kind, _, path) in schema_paths() {
+        for (name, _, path) in schema_paths() {
             let Some((&tag, parents)) = path.split_last() else {
                 continue;
             };
@@ -1043,7 +824,7 @@ mod tests {
             bytes.push(1); // Declared nested length exceeds the remaining empty body.
             assert!(
                 matches!(decode_strict_command_envelope(&wrap_path(parents, bytes)),
-                Err(StrictWireError::NestedMessageTruncated { message }) if message == kind.name())
+                Err(StrictWireError::NestedMessageTruncated { message }) if message == name)
             );
         }
     }

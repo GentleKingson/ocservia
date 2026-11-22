@@ -157,7 +157,7 @@ func (s *HTTPSigner) Seal(ctx context.Context, nodeID uuid.UUID, purpose agentv1
 	if err != nil || len(sealed) < 32 || len(sealed) > 16*1024 {
 		return nil, errors.New("external secret provider response is invalid")
 	}
-	return &agentv1.SealedSecretV1{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: purpose, KeyId: decoded.KeyID, Ciphertext: sealed}, nil
+	return &agentv1.SealedSecretV1{Version: 1, Purpose: purpose, KeyId: decoded.KeyID, Ciphertext: sealed}, nil
 }
 
 func sealPurposeName(purpose agentv1.SealedSecretPurpose) string {

@@ -237,7 +237,6 @@ func (s telemetryStore) ReplaceUsers(ctx context.Context, node uuid.UUID, observ
 	usernames := make([]string, len(users))
 	enabled := make([]bool, len(users))
 	revisions := make([]int64, len(users))
-	fingerprints := make([][]byte, len(users))
 	for i, user := range users {
 		if user.Revision > math.MaxInt64 {
 			return database.ErrConstraint
@@ -245,12 +244,11 @@ func (s telemetryStore) ReplaceUsers(ctx context.Context, node uuid.UUID, observ
 		usernames[i] = user.Username
 		enabled[i] = user.Enabled
 		revisions[i] = int64(user.Revision)
-		fingerprints[i] = user.Fingerprint
 	}
-	_, err := s.tx.Exec(ctx, `INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at)
-		SELECT $1,u.username,u.enabled,u.revision,u.fingerprint,$6
-		FROM unnest($2::text[],$3::boolean[],$4::bigint[],$5::bytea[]) AS u(username,enabled,revision,fingerprint)`,
-		node, usernames, enabled, revisions, fingerprints, observed)
+	_, err := s.tx.Exec(ctx, `INSERT INTO observed_users(node_id,username,enabled,revision,observed_at)
+		SELECT $1,u.username,u.enabled,u.revision,$5
+		FROM unnest($2::text[],$3::boolean[],$4::bigint[]) AS u(username,enabled,revision)`,
+		node, usernames, enabled, revisions, observed)
 	return err
 }
 
@@ -287,17 +285,17 @@ func (s telemetryStore) ReplaceGroups(ctx context.Context, node uuid.UUID, group
 	for start := 0; start < len(groups); start += chunkSize {
 		chunk := groups[start:min(start+chunkSize, len(groups))]
 		var query strings.Builder
-		query.Grow(84 + len(chunk)*28)
-		query.WriteString(`INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at) VALUES `)
-		args := make([]any, 1, 1+len(chunk)*5)
+		query.Grow(72 + len(chunk)*24)
+		query.WriteString(`INSERT INTO observed_groups(node_id,group_name,members,revision,observed_at) VALUES `)
+		args := make([]any, 1, 1+len(chunk)*4)
 		args[0] = node
 		for i, g := range chunk {
 			if i > 0 {
 				query.WriteByte(',')
 			}
-			base := 2 + i*5
-			fmt.Fprintf(&query, "($1,$%d,$%d,$%d,$%d,$%d)", base, base+1, base+2, base+3, base+4)
-			args = append(args, g.Name, g.Members, g.Revision, g.Fingerprint, g.ObservedAt)
+			base := 2 + i*4
+			fmt.Fprintf(&query, "($1,$%d,$%d,$%d,$%d)", base, base+1, base+2, base+3)
+			args = append(args, g.Name, g.Members, g.Revision, g.ObservedAt)
 		}
 		if _, err := s.tx.Exec(ctx, query.String(), args...); err != nil {
 			return err

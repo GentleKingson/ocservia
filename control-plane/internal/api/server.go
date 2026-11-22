@@ -18,7 +18,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	platformconfig "github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
@@ -52,7 +51,6 @@ type Server struct {
 	operations          *operations.Service
 	enrollment          *enrollment.Service
 	transport           *transportclient.Client
-	fences              ownersession.FencedExecutor
 	nodes               NodeReader
 	registeredMethods   []routeMethodRule
 	releaseCatalog      *releasecatalog.Catalog
@@ -103,7 +101,6 @@ type Modules struct {
 	UserState       *userstate.Service
 	Enrollment      *enrollment.Service
 	Transport       *transportclient.Client
-	OwnerFencing    ownersession.FencedExecutor
 	TransportEvents *transportevents.Service
 }
 
@@ -138,7 +135,7 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 		nodes: modules.Nodes, configPlans: modules.ConfigPlans,
 		userOperations: modules.UserOperations, certificates: modules.Certificates,
 		operations: modules.Operations, releaseCatalog: modules.ReleaseCatalog, userstate: modules.UserState,
-		enrollment: modules.Enrollment, transport: modules.Transport, fences: modules.OwnerFencing,
+		enrollment: modules.Enrollment, transport: modules.Transport,
 		transportEvents: modules.TransportEvents, localSimulator: config.LocalSimulator,
 		authProxies: append([]netip.Prefix(nil), config.AuthTrustedProxies...),
 	}

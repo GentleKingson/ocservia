@@ -56,10 +56,9 @@ type Session struct {
 }
 
 type User struct {
-	Username    string
-	Enabled     bool
-	Revision    uint64
-	Fingerprint []byte
+	Username string
+	Enabled  bool
+	Revision uint64
 }
 
 type Upgrade struct {
@@ -85,11 +84,10 @@ type Point struct {
 }
 
 type Group struct {
-	Name        string
-	Members     []string
-	Revision    int64
-	Fingerprint []byte
-	ObservedAt  time.Time
+	Name       string
+	Members    []string
+	Revision   int64
+	ObservedAt time.Time
 }
 
 type SecurityEvent struct {

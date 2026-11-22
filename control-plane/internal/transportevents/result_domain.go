@@ -75,8 +75,6 @@ func validateDispatchedResult(envelope *agentv1.CommandEnvelope, result *agentv1
 		var expectedHash [sha256.Size]byte
 		var err error
 		switch resultHashVersion {
-		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1:
-			expectedHash, err = semanticpayload.HashV1(envelope)
 		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2:
 			expectedHash, err = semanticpayload.HashV2(envelope)
 		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED:
@@ -139,7 +137,7 @@ func applyCSROutcome(ctx context.Context, store resultstore.ResultStore, csr *ag
 	if certificateState == "csr_ready" && verification.Verified() && verification.Certificate != nil {
 		verifiedAt := at
 		outcome.VerifiedAt, outcome.ReceiptHash, outcome.KeyID = &verifiedAt, verification.ReceiptSHA256, resultText(verification.KeyID)
-		outcome.EffectRecordID, outcome.CSRHash, outcome.SubjectHash = verification.EffectRecordID, verification.Certificate.GetCsrDerSha256(), verification.Certificate.GetRequestedSubjectSha256()
+		outcome.CSRHash = verification.Certificate.GetCsrDerSha256()
 	}
 	if err := store.CSROutcome(ctx, outcome); err != nil {
 		return fmt.Errorf("update certificate CSR outcome: %w", err)

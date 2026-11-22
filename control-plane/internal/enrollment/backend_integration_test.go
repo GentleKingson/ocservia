@@ -51,7 +51,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	s := NewBackend(b, "", "test", signer)
 	endpoint := endpointFixture(101)
 	readOnly := []string{"ocserv.config_fingerprint.read", "ocserv.ip_bans.read", "ocserv.sessions.read", "ocserv.status.read", "ocserv.version.read"}
-	capabilities := append(slices.Clone(readOnly), "ocserv.user.manage", "future.feature.read", ownersession.FencingCapability)
+	capabilities := append(slices.Clone(readOnly), "ocserv.user.manage", "future.feature.read")
 	token := createToken(t, s, workspace, endpoint)
 	request := enrollmentRequestCapabilities(token.Value, endpoint, capabilities)
 	if err := s.ValidateEnrollment(ctx, request); err != nil {
@@ -162,41 +162,23 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		}
 	})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	manager, err := ownersession.NewManagerBackend(b, signer, &recordingRegistrar{}, 30*time.Second, logger)
+	manager, err := ownersession.NewManagerBackend(b, logger)
 	testutil.NoError(t, err)
 	s.ownerSessions = manager
 	handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, AgentVersion: "test", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now(), SealingKeys: enrollmentSealingKeys()}
 	authorize := &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake}
 	response, err := s.AuthorizeSession(ctx, authorize)
-	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || response.GetConnectionFence() == nil || response.GetSessionGrant() == nil || !slices.Equal(response.NegotiatedCapabilities, normalizedCapabilities(capabilities)) {
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || response.GetSessionGrant() == nil || response.GetSessionGrant().GetSessionEpoch() == 0 || !slices.Equal(response.NegotiatedCapabilities, normalizedCapabilities(capabilities)) {
 		t.Fatal("fenced session", response, err)
 	}
-	fence := response.ConnectionFence
-	connection, err := fixed16(fence.GetConnectionId())
-	testutil.NoError(t, err)
-	if err := manager.CloseSession(ctx, [16]byte(node), connection, int64(fence.GetOwnerEpoch())); err != nil {
-		t.Fatal(err)
-	}
-	// A grant whose authority transaction fails must release the exact newly
-	// opened owner term, including on a backend without pgx transactions.
-	cancelled, cancel := context.WithCancel(ctx)
-	defer cancel()
-	failingManager, err := ownersession.NewManagerBackend(b, signer, &cancellingRegistrar{cancelled: cancel}, 30*time.Second, logger)
-	testutil.NoError(t, err)
-	s.ownerSessions = failingManager
-	if response, err := s.AuthorizeSession(cancelled, authorize); err == nil || response != nil {
-		t.Fatal("cancelled authorization granted", response, err)
-	}
-	successor, err := ownersession.NewManagerBackend(b, signer, &recordingRegistrar{}, 30*time.Second, logger)
+	firstEpoch := response.GetSessionGrant().GetSessionEpoch()
+	successor, err := ownersession.NewManagerBackend(b, logger)
 	testutil.NoError(t, err)
 	s.ownerSessions = successor
 	response, err = s.AuthorizeSession(ctx, authorize)
-	if err != nil || response.GetConnectionFence() == nil || response.ConnectionFence.OwnerEpoch <= fence.OwnerEpoch {
-		t.Fatal("failed commit leaked owner lease", response, err)
+	if err != nil || response.GetSessionGrant() == nil || response.GetSessionGrant().GetSessionEpoch() <= firstEpoch {
+		t.Fatal("reopened session did not advance session_epoch", response, err)
 	}
-	fence = response.ConnectionFence
-	connection, _ = fixed16(fence.ConnectionId)
-	defer successor.CloseSession(context.Background(), [16]byte(node), connection, int64(fence.OwnerEpoch))
 	revocation := Revocation{NodeID: node, ActorID: requester.String(), IdentityID: requester, SessionID: session, Reason: "revoke", RequestID: uuid.NewString()}
 	locked, lockedStore, err := s.begin(ctx, database.RepeatableRead)
 	testutil.NoError(t, err)

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
@@ -63,13 +62,6 @@ func (s operationStore) ClaimDispatch(ctx context.Context, d operationstore.Disp
 	_, err = s.Exec(ctx, `INSERT INTO command_attempts(id,command_id,outbox_event_id,worker_id,attempt_number,state,started_at)
 		VALUES($1,$2,$3,$4,$5,'sending',$6)`, d.AttemptID, d.CommandID, d.OutboxID, worker, attempt, at)
 	return err == nil, err
-}
-
-func (s operationStore) GuardDispatchAuthority(ctx context.Context, a operationstore.DispatchAuthority) error {
-	return (connectionOwnerStore{s.Tx}).Assert(ctx, connectionowner.StoreTerm{
-		Identity: connectionowner.Identity{InstanceID: a.OwnerID, Incarnation: a.Incarnation},
-		NodeID:   a.NodeID, ConnectionID: a.ConnectionID, Epoch: a.Epoch,
-	})
 }
 
 func (s operationStore) LockDispatchOutbox(ctx context.Context, d operationstore.Dispatch) error {
@@ -420,11 +412,11 @@ func (s operationStore) ContinueReconciliation(ctx context.Context, v operations
 	return true, nil
 }
 
-func (s operationStore) ReconnectAuthority(ctx context.Context, node, connection uuid.UUID, epoch int64) (v operationstore.RecoveryAuthority, err error) {
-	err = s.QueryRow(ctx, `SELECT owner_instance_id,owner_incarnation FROM connection_owner_fencing
-		WHERE node_id=$1 AND connection_id=$2 AND owner_epoch=$3 AND lease_until>clock_timestamp()
-		FOR SHARE OF connection_owner_fencing`, node[:], connection[:], epoch).Scan(&v.OwnerID, &v.Incarnation)
-	return
+func (s operationStore) ReconnectAuthority(ctx context.Context, node, connection uuid.UUID, epoch int64) error {
+	var one int
+	return s.QueryRow(ctx, `SELECT 1 FROM connection_owner_fencing
+		WHERE node_id=$1 AND connection_id=$2 AND session_epoch=$3 AND active=true
+		FOR SHARE OF connection_owner_fencing`, node[:], connection[:], epoch).Scan(&one)
 }
 
 func (s operationStore) AmbiguousDispatches(ctx context.Context, node uuid.UUID, limit int) ([]uuid.UUID, error) {

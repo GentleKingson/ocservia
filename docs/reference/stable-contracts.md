@@ -1244,126 +1244,25 @@ The Controller is a modular Go binary backed by a single PostgreSQL 18.x relatio
 
 Database migrations run in a separate one-shot process invoked with `--migrate-only`. The process uses an owner connection in `OCSERV_DATABASE_URL` and names the unprivileged runtime account in `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives only the runtime role credentials. During the one-shot run, the migrator applies schema changes, verifies audit event authentication, and only then grants ordinary data access to the runtime role, so a failed migration never reaches the grant step. Migration execution serializes schema changes and validates previously applied content. At runtime, the service has read and append access to audit events, plus authenticated compaction of aged detail through dedicated database routines. PostgreSQL grants `SELECT`, `INSERT`, and a column-level `UPDATE(event_hash)` needed by locking reads, while immutable triggers block any actual row modification.
 
-PostgreSQL coordinates migrations with an advisory lock and transactional SQL execution. Before touching the schema, the migrator rejects unknown epochs, revisions, checksums, schema drift, and nonempty databases that lack supported provenance. The Controller's migration command never performs automatic force-cleans or downgrades.
+PostgreSQL serializes owner migrations with a session advisory lock. Goose
+applies the embedded, numbered SQL migrations in version order and records
+applied versions in `goose_db_version`. The bootstrap schema lives in
+[`0001_initial_schema.sql`](../../control-plane/migrations/sql/0001_initial_schema.sql).
+Keep applied migrations intact and add forward changes in a new numbered file.
+The owner command also provisions the required UTC telemetry partitions on
+each run before granting runtime privileges.
 
-PostgreSQL maintains two active SQL files: [`schema.sql`](../../control-plane/migrations/schema.sql) and [`upgrade.sql`](../../control-plane/migrations/upgrade.sql) in `control-plane/migrations/`. The `schema.sql` header carries the current epoch and revision, so read them there instead of from this document. Migration state is tracked only in `schema_revisions`, with no numbered SQL or JSON migration files and no snapshot descriptors. Schema identity is determined by the epoch, revision, and raw artifact checksums, independent of legacy filename counters or Controller compatibility ranges. The [version policy](../operations/production-deployment.md#version-policy) removed software-version admission gates, but schema-source admission remains mandatory in the migration run and continues to reject unknown epochs, revisions, and checksums.
-
-Migration admission, meaning the full SQL checksum and receipt verification, runs only in the owner `--migrate-only` entry point. Normal Controller startup without `--migrate-only` verifies audit authenticity and checks required telemetry objects and runtime privileges. It does not check receipts, checksums, or schema drift. The `/readyz` endpoint executes a zero-row read against core tables (workspaces, nodes, operations) and checks event-stream health, without reading `schema_revisions`. A passing `/readyz` response therefore indicates runtime connectivity and is not evidence of schema identity.
-
-### SQL artifact format 1
-
-The parser recognizes whole-line `-- ocservia:` markers at column zero. Files
-use LF endings and end with LF. It does not split on SQL semicolons or interpret
-SQL syntax. SQL outside a step, malformed/reserved markers, duplicate headers,
-unknown fields, and unmatched boundaries are errors.
-
-A schema artifact starts with these headers (each exactly once; an upgrade
-artifact omits `revision`, see below):
-
-```sql
--- ocservia:artifact=schema
--- ocservia:format=1
--- ocservia:engine=postgresql
--- ocservia:epoch=1
--- ocservia:revision=0
-
--- ocservia:step=001:journal
-CREATE TABLE schema_revisions (...);
--- ocservia:end-step
-```
-
-The supported engine is `postgresql`. Epochs are positive decimal integers.
-Schema artifacts declare their current checkpoint revision and have at least
-one step. Revision zero is the epoch baseline. Step ordinals run
-from `001` through `999` without gaps; names are unique within a revision and
-match `[a-z][a-z0-9_]{0,63}`.
-
-Upgrade artifacts omit the revision header. Each revision uses
-`-- ocservia:revision=N` and `-- ocservia:end-revision`, with at least one step.
-Revisions start at one and are contiguous in file order. An upgrade artifact
-may have no revisions when the baseline already represents the current schema.
-
-Executors require a `-- ocservia:baseline={...}` upgrade header containing the
-original epoch-baseline schema checksum and step count. Backend verification
-metadata can be included in that receipt. For example:
-
-```text
-{"checksum":"<64 lowercase hex characters>","steps":1,"metadata":{"catalog_sha256":"<64 lowercase hex characters>"}}
-```
-
-A revision may immediately start with `-- ocservia:checkpoint={...}` using the
-same receipt format. This pins a fresh schema snapshot at that revision. JSON
-receipt keys use the canonical order `checksum`, `steps`, optional `metadata`;
-unknown or duplicate keys, noncanonical encoding, and invalid hashes/counts
-are rejected. A fresh install stamps one schema checkpoint at its declared
-revision, without inventing executed rows for the revisions it covers. Later
-revisions are appended with their SQL block checksums. The two receipt forms
-are accepted only at their explicitly pinned journal positions.
-
-For a schema checkpoint above revision zero, a `history-sha256` header binds
-the covered SQL revisions. Its input is the engine, epoch and baseline checksum
-separated by tabs and terminated by LF, followed by one `revision<TAB>checksum<LF>`
-record per covered revision. This detects mutations even when a fresh database
-has never executed those SQL revisions.
-
-A previous-epoch transition requires all three checkpoint headers:
-
-```sql
--- ocservia:previous-checkpoint-epoch=1
--- ocservia:previous-checkpoint-revision=0
--- ocservia:previous-checkpoint-ref=v1.2.0
-```
-
-The previous epoch must be the current epoch minus one. Before ordinary
-revisions, exactly one `-- ocservia:transition=1:0->2:0` block must match the
-declared checkpoint and end with `-- ocservia:end-transition`. The reference
-must be fixed by the release process; parsing it does not establish trust in
-that release or a database.
-
-Executors also require `previous-checkpoint-receipt` to pin the exact
-journal checksum, step count, and necessary backend schema verification metadata
-at that checkpoint. A syntactically valid release reference is insufficient.
-
-One `-- ocservia:metadata={...}` line may immediately follow a step marker.
-Its JSON object carries backend-specific verification metadata. The shared
-parser validates the JSON boundary; the backend owns its fields, object
-identities, fingerprints, and postcondition semantics. This permits SQL routine
-bodies with internal semicolons while keeping executable SQL separate from
-verification metadata.
-
-Artifact and schema-baseline SHA-256 cover every file byte. Revision and
-transition SHA-256 cover bytes after the opening boundary through the byte
-before the closing boundary, including step markers and metadata. A revision's
-optional checkpoint receipt is excluded from that SQL block hash to avoid a
-circular dependency with its covered schema checksum; it remains covered by
-the full artifact checksum. A previous-epoch transition keeps its raw SQL
-block checksum and step count in the new epoch revision-zero row; its retained
-previous receipt distinguishes it from a fresh schema checkpoint. Step SHA-256
-covers the raw SQL byte range after its marker/metadata through the byte before
-`end-step`. No whitespace or line ending normalization occurs. Database
-admission, journal validation, and transactional execution remain the
-responsibility of the PostgreSQL migration runner.
+Controller startup checks the applied Goose version, verifies audit
+authenticity, and checks telemetry objects and runtime privileges. The
+`/readyz` endpoint checks core database reads and event-stream health.
 
 ### Upgrade checkpoint
 
-`schema.sql` runs only against an empty database; initialization never overwrites, adopts, or cleans an existing database. Nonempty PostgreSQL databases must match either the current epoch's known receipt history or the single supported prior checkpoint: `v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 / revision 0. That immutable release is the upgrade anchor as main advances. Databases older than v1.2.0 must upgrade with v1.2.0 first, because a major candidate cannot replay removed historical transitions. The checkpoint is a database contract and is unrelated to the product's maintenance status. See [Database checkpoint release boundary](../development/release-checks.md#database-checkpoint-release-boundary) for the release rules.
-
-| Engine | v1.2.0 checkpoint schema receipt |
-| --- | --- |
-| PostgreSQL 18.x | `d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172` |
-
-Fresh installations and checkpoint-upgraded databases must converge on the same business schema, mandatory seeds, and runtime ACLs, even though their execution receipts differ by path. A fresh PostgreSQL install writes a single schema receipt at the declared revision, derived from `schema.sql`. A checkpoint upgrade verifies the epoch-1 receipt, deletes it within the transition transaction, and records the epoch-2 baseline and each subsequent forward revision. A forward revision that recreates routines such as `audit_compact_detail`, `security_compact_details` or the `audit_events_reject_update` trigger drops their runtime `EXECUTE` grants, so the owner migration's runtime re-authorization must follow every upgrade. Never rewrite receipt history to force those tables to look identical.
-
-PostgreSQL runs initial installation or the checkpoint transition inside a single transaction, and commits each subsequent forward revision in its own transaction. During the checkpoint transition, PostgreSQL verifies the existing schema against the pinned checkpoint fingerprint, validates the target schema, writes the verified epoch baseline, runs the legacy metadata cleanup from `upgrade.sql`, and validates the final state before committing. The cleanup drops `schema_migrations` and `schema_snapshot_origin` and removes the epoch-1 receipt, while leaving `controller_schema_compatibility` untouched and unread by non-test Go code. Any failure rolls the entire transaction back.
-
-When adding changes within the current epoch, append forward revisions to `upgrade.sql` without altering already published block bytes, and update `schema.sql` to produce the equivalent fresh schema along with its bound history checksum. Repeated owner maintenance runs may reapply grants and provision calendar-dependent telemetry objects, but they never replay fresh SQL. Verify both the fresh/current revision paths and the fixed release transition with:
-
-```bash
-bash scripts/database-artifact-policy.sh all
-bash scripts/database-postgres-snapshot.sh check
-```
-
-These commands verify the artifacts without modifying tracked files. PostgreSQL's author command can regenerate current SQL from the fixed checkpoint transition, and `check` compares the resulting schema, ACLs, and mandatory seeds between a fresh initialization and an upgrade from the immutable checkpoint, pulling historical fixtures from that Git release tag instead of an archived migration directory. Installation timestamps are generated at runtime, while deterministic seed values must match byte for byte. See [SQL artifact acceptance](../development/release-checks.md#sql-artifact-acceptance) for required failure and backup/restore test coverage.
+The v2.0.0 Goose migration baseline initializes a fresh database. The
+v1.2.0 checkpoint belongs to the legacy migration history and cannot serve
+as the baseline for the v2.0.0 migrator. See
+[Database checkpoint release boundary](../development/release-checks.md#database-checkpoint-release-boundary)
+for release checks.
 
 ### Transactions and stores
 
@@ -1479,7 +1378,7 @@ fields; they locate server state and are never execution receipts or authority.
 
 Buf lints with `STANDARD` (one documented exception in [`proto/buf.yaml`](../../proto/buf.yaml)) and checks compatibility with the `FILE` policy on external [`proto/ocserv/platform/agent/v1`](../../proto/ocserv/platform/agent/v1). Private single-release IPC [`proto/ocserv/platform/transport/v1`](../../proto/ocserv/platform/transport/v1) is excluded from cross-version `buf breaking` checks so Controller and `transportd` can evolve their paired local RPC cleanly within a release. In `agent/v1`, removed published field numbers and names must be reserved, field numbers must never be reused, and every enum starts with an `UNSPECIFIED` zero value.
 
-Toolchain setup and the choice of checks are in [Choose the validation scope](../development/release-checks.md#choose-the-validation-scope). Contract breaking checks (`scripts/check-breaking.sh [base-ref]`, which normalizes only retired pre-v2 baseline contracts while allowing additive schema evolution) and generated-code cleanliness checks (`scripts/generated-clean.sh`) run in Basic CI when contract inputs or outputs change and on manual checks. CI supplies the PR merge-base or push before SHA; manual workflows require a non-self `contract_base_ref`. Standalone breaking checks default to `origin/main`. Regeneration requires a clean committed candidate and compares both staged and unstaged outputs with HEAD. For CI job routing, see [Path routing](../development/release-checks.md#path-routing). Passing a schema diff check does not replace release-level behavioral testing.
+Toolchain setup and the choice of checks are in [Choose the validation scope](../development/release-checks.md#choose-the-validation-scope). Contract breaking checks (`scripts/check-breaking.sh [base-ref]`, which normalizes retired pre-v2 baseline contracts and recognizes the exact v2.0.0 Agent schema transition) and generated-code cleanliness checks (`scripts/generated-clean.sh`) run in Basic CI when contract inputs or outputs change and on manual checks. CI supplies the PR merge-base or push before SHA; manual workflows require a non-self `contract_base_ref`. Standalone breaking checks default to `origin/main`. Regeneration requires a clean committed candidate and compares both staged and unstaged outputs with HEAD. For CI job routing, see [Path routing](../development/release-checks.md#path-routing). Passing a schema diff check does not replace release-level behavioral testing.
 
 ### oneOf object-map conversion
 

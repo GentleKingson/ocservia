@@ -125,7 +125,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 		return invalidCommandResult("command result contradicts a terminal state")
 	}
 	if verification.Verified() {
-		existingCommandID, existingReceipt, err := store.Receipt(ctx, verification.KeyID, verification.EffectRecordID, verification.EffectSequence)
+		existingCommandID, existingReceipt, err := store.Receipt(ctx, verification.KeyID, verification.EffectSequence)
 		if err == nil {
 			if existingCommandID == commandID && bytes.Equal(existingReceipt, verification.ReceiptSHA256) {
 				return nil
@@ -143,8 +143,8 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 		PayloadHash: payloadHash, HashVersion: hashVersion, State: state, Bytes: resultBytes, ErrorCode: errorCode,
 		AcceptedAt: accepted, CompletedAt: completed, Replayed: result.GetReplayed(),
 		VerificationStatus: verification.Status, FailureReason: resultText(verification.FailureReason), KeyID: resultText(verification.KeyID),
-		EffectRecordID: resultBytesOrNull(verification.EffectRecordID), EffectSequence: resultSequence(verification.EffectSequence),
-		ReceiptHash: resultBytesOrNull(verification.ReceiptSHA256), Proof: resultBytesOrNull(verification.EncodedProof),
+		EffectSequence: resultSequence(verification.EffectSequence),
+		ReceiptHash:    resultBytesOrNull(verification.ReceiptSHA256), Proof: resultBytesOrNull(verification.EncodedProof),
 	}); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
 	}

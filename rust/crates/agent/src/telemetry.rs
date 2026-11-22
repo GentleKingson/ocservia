@@ -10,7 +10,6 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     TelemetryPriority, UserObservation,
 };
 use prost::Message;
-use sha2::Digest;
 use std::collections::HashMap;
 use std::io;
 use std::time::SystemTime;
@@ -143,7 +142,6 @@ pub(super) fn build_telemetry(
                             username: user.username.clone(),
                             enabled: user.enabled,
                             revision,
-                            fingerprint_sha256: user_fingerprint(&user.username, user.enabled),
                         }
                     })
                     .collect();
@@ -261,38 +259,11 @@ fn upgrade_report(outcome: UpgradeOperationResult) -> AgentUpgradeResultReport {
     }
 }
 
-fn user_fingerprint(username: &str, enabled: bool) -> Vec<u8> {
-    let mut hash = sha2::Sha256::new();
-    hash.update(br#"{"name":""#);
-    hash.update(username.as_bytes());
-    hash.update(br#"","enabled":"#);
-    hash.update(if enabled {
-        b"true}" as &[u8]
-    } else {
-        b"false}"
-    });
-    hash.finalize().to_vec()
-}
-
 fn group_observation(group_name: String, members: Vec<String>, revision: u64) -> GroupObservation {
-    let mut hash = sha2::Sha256::new();
-    hash.update(br#"{"name":""#);
-    hash.update(group_name.as_bytes());
-    hash.update(br#"","members":["#);
-    for (idx, member) in members.iter().enumerate() {
-        if idx > 0 {
-            hash.update(b",");
-        }
-        hash.update(b"\"");
-        hash.update(member.as_bytes());
-        hash.update(b"\"");
-    }
-    hash.update(b"]}");
     GroupObservation {
         group_name,
         members,
         revision,
-        fingerprint_sha256: hash.finalize().to_vec(),
     }
 }
 
@@ -325,21 +296,11 @@ mod tests {
     }
 
     #[test]
-    fn group_fingerprint_preserves_member_order_and_empty_membership() {
-        for (members, canonical) in [
-            (
-                vec!["bob".to_owned(), "ann".to_owned()],
-                r#"{"name":"vpn","members":["bob","ann"]}"#,
-            ),
-            (Vec::new(), r#"{"name":"vpn","members":[]}"#),
-        ] {
+    fn group_observation_preserves_member_order_and_empty_membership() {
+        for members in [vec!["bob".to_owned(), "ann".to_owned()], Vec::new()] {
             let observed = group_observation("vpn".to_owned(), members.clone(), 7);
             assert_eq!(observed.members, members);
             assert_eq!(observed.revision, 7);
-            assert_eq!(
-                observed.fingerprint_sha256,
-                sha2::Sha256::digest(canonical.as_bytes()).to_vec()
-            );
         }
     }
 }

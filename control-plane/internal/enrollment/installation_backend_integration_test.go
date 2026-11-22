@@ -16,7 +16,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
-	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
@@ -77,7 +76,7 @@ func TestInstallationBackendIntegration(t *testing.T) {
 		t.Fatal("child obtained root configuration", err)
 	}
 	endpoint := endpointFixture(109)
-	request := enrollmentRequestCapabilities(config.EnrollmentToken, endpoint, []string{"ocserv.status.read", "ocserv.user.manage", privdattestation.AttestationCapability, ownersession.FencingCapability})
+	request := enrollmentRequestCapabilities(config.EnrollmentToken, endpoint, []string{"ocserv.status.read", "ocserv.user.manage", privdattestation.AttestationCapability})
 	response, err := s.Enroll(ctx, request)
 	testutil.NoError(t, err)
 	if response.Result != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
@@ -101,8 +100,8 @@ func TestInstallationBackendIntegration(t *testing.T) {
 			return err
 		}
 		for _, cap := range caps {
-			if cap == privdattestation.AttestationCapability || cap == ownersession.FencingCapability {
-				t.Fatal("root/fence capability granted during enrollment")
+			if cap == privdattestation.AttestationCapability {
+				t.Fatal("root attestation capability granted during enrollment")
 			}
 		}
 		return nil
@@ -113,7 +112,7 @@ func TestInstallationBackendIntegration(t *testing.T) {
 		testutil.NoError(t, err)
 		nonce, _ := hex.DecodeString(challenge.NonceHex)
 		digest, _ := hex.DecodeString(challenge.ContextHex)
-		r := &agentv1.PrivdAttestationRegistrationV1{Version: agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1, NodeId: node[:], PrivdAttestationKeyId: privdattestation.PublicKeyID(public), PublicKey: public, ControllerNonce: nonce, CredentialContextSha256: digest}
+		r := &agentv1.PrivdAttestationRegistrationV1{Version: 1, NodeId: node[:], PrivdAttestationKeyId: privdattestation.PublicKeyID(public), PublicKey: public, ControllerNonce: nonce, CredentialContextSha256: digest}
 		canonical, err := privdattestation.CanonicalRegistrationV1(r)
 		testutil.NoError(t, err)
 		r.Signature = ed25519.Sign(key, canonical)

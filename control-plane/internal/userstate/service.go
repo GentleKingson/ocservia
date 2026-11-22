@@ -4,7 +4,6 @@ package userstate
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,8 +82,6 @@ type ResourceState struct {
 	DesiredVersion       *int64        `json:"desired_version,omitempty"`
 	DesiredRevision      *int64        `json:"desired_revision,omitempty"`
 	ObservedRevision     *int64        `json:"observed_revision,omitempty"`
-	DesiredFingerprint   string        `json:"desired_fingerprint,omitempty"`
-	ObservedFingerprint  string        `json:"observed_fingerprint,omitempty"`
 	Convergence          string        `json:"convergence"`
 	OperationID          *string       `json:"operation_id,omitempty"`
 	OperationState       *string       `json:"operation_state,omitempty"`
@@ -222,8 +219,7 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 		nextRevision = currentRevision
 		commandExpectedRevision = currentRevision - 1
 	}
-	fingerprint := desiredFingerprint(request.Kind, request.Name, request.Members)
-	if err := users.WriteDesired(ctx, userstore.Desired{NodeID: request.NodeID, Kind: string(request.Kind), Name: request.Name, Version: nextVersion, Revision: nextRevision, Fingerprint: fingerprint[:], Members: request.Members, At: now}); err != nil {
+	if err := users.WriteDesired(ctx, userstore.Desired{NodeID: request.NodeID, Kind: string(request.Kind), Name: request.Name, Version: nextVersion, Revision: nextRevision, Members: request.Members, At: now}); err != nil {
 		if errors.Is(err, database.ErrNotFound) {
 			err = ErrNotFound
 		}
@@ -269,8 +265,8 @@ func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, 
 			item := ResourceState{Kind: v.Kind, Name: v.Name, DesiredEnabled: v.DesiredEnabled, ObservedEnabled: v.ObservedEnabled,
 				DesiredMembers: v.DesiredMembers, ObservedMembers: v.ObservedMembers,
 				DesiredVersion: v.DesiredVersion, DesiredRevision: v.DesiredRevision, ObservedRevision: v.ObservedRevision,
-				DesiredFingerprint: hex.EncodeToString(v.DesiredFingerprint), ObservedFingerprint: hex.EncodeToString(v.ObservedFingerprint), OperationState: v.OperationState,
-				ObservedAt: v.ObservedAt}
+				OperationState: v.OperationState,
+				ObservedAt:     v.ObservedAt}
 			if v.OperationID != nil {
 				id := v.OperationID.String()
 				item.OperationID = &id
@@ -439,24 +435,7 @@ func sealedSecretProto(secret *SealedSecret) *agentv1.SealedSecretV1 {
 	if secret == nil {
 		return nil
 	}
-	return &agentv1.SealedSecretV1{Version: agentv1.SealedSecretVersion(secret.Version), Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: secret.KeyID, Ciphertext: append([]byte(nil), secret.Ciphertext...)}
-}
-
-func desiredFingerprint(kind MutationKind, name string, members []string) [32]byte {
-	enabled := kind != UserDisable
-	var encoded []byte
-	if kind == GroupApply {
-		encoded, _ = json.Marshal(struct {
-			Name    string   `json:"name"`
-			Members []string `json:"members"`
-		}{Name: name, Members: members})
-	} else {
-		encoded, _ = json.Marshal(struct {
-			Name    string `json:"name"`
-			Enabled bool   `json:"enabled"`
-		}{Name: name, Enabled: enabled})
-	}
-	return sha256.Sum256(encoded)
+	return &agentv1.SealedSecretV1{Version: secret.Version, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: secret.KeyID, Ciphertext: append([]byte(nil), secret.Ciphertext...)}
 }
 
 func requestHash(request MutationRequest) [32]byte {
@@ -519,8 +498,13 @@ func convergence(item ResourceState, nodeStatus string) string {
 		}
 		return "pending"
 	}
-	if item.DesiredRevision != nil && item.ObservedRevision != nil && *item.DesiredRevision == *item.ObservedRevision && item.DesiredFingerprint == item.ObservedFingerprint {
-		return "converged"
+	if item.DesiredRevision != nil && item.ObservedRevision != nil && *item.DesiredRevision == *item.ObservedRevision {
+		if item.Kind == "group" && slices.Equal(item.DesiredMembers, item.ObservedMembers) {
+			return "converged"
+		}
+		if item.Kind == "user" && item.DesiredEnabled != nil && item.ObservedEnabled != nil && *item.DesiredEnabled == *item.ObservedEnabled {
+			return "converged"
+		}
 	}
 	return "drifted"
 }

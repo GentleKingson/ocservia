@@ -24,7 +24,7 @@ func replaceObservedGroups(ctx context.Context, _ database.Tx, store telemetryst
 	groups := make([]telemetrystore.Group, 0, len(batch.Groups))
 	seen := make(map[string]bool, len(batch.Groups))
 	for _, g := range batch.Groups {
-		if !observedGroupName.MatchString(g.Name) || seen[g.Name] || len(g.Members) > 4096 || len(g.Fingerprint) != 32 {
+		if !observedGroupName.MatchString(g.Name) || seen[g.Name] || len(g.Members) > 4096 {
 			return errInvalidState
 		}
 		for _, member := range g.Members {
@@ -37,7 +37,7 @@ func replaceObservedGroups(ctx context.Context, _ database.Tx, store telemetryst
 		if members == nil {
 			members = []string{}
 		}
-		groups = append(groups, telemetrystore.Group{Name: g.Name, Members: members, Revision: int64(g.Revision), Fingerprint: g.Fingerprint, ObservedAt: stamp})
+		groups = append(groups, telemetrystore.Group{Name: g.Name, Members: members, Revision: int64(g.Revision), ObservedAt: stamp})
 	}
 	return store.ReplaceGroups(ctx, batch.NodeID, groups)
 }

@@ -79,7 +79,7 @@ func (f *fixturePKI) Revoke(_ context.Context, _ RevokeSignerRequest) error {
 func (f *fixturePKI) Seal(_ context.Context, _ uuid.UUID, purpose agentv1.SealedSecretPurpose, plaintext []byte) (*agentv1.SealedSecretV1, error) {
 	digest := sha256.Sum256(plaintext)
 	return &agentv1.SealedSecretV1{
-		Version:    agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1,
+		Version:    1,
 		Purpose:    purpose,
 		KeyId:      "fixture-p12-key",
 		Ciphertext: append(digest[:], digest[:]...),
@@ -95,14 +95,14 @@ type fixtureArtifacts struct {
 	consumed     map[string]bool
 }
 
-func (f *fixtureArtifacts) FetchArtifact(_ context.Context, grant *agentv1.ArtifactGrantV1, _ *agentv1.FenceBindingV2) (io.ReadCloser, error) {
+func (f *fixtureArtifacts) FetchArtifact(_ context.Context, grant *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
 	if grant == nil || uint64(len(f.data)) > grant.GetMaxBytes() {
 		return nil, errors.New("too large")
 	}
 	return io.NopCloser(bytes.NewReader(f.data)), nil
 }
 
-func (f *fixtureArtifacts) ConsumeArtifact(_ context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, _ *agentv1.FenceBindingV2) error {
+func (f *fixtureArtifacts) ConsumeArtifact(_ context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) error {
 	if f.consumeErr != nil {
 		return f.consumeErr
 	}
@@ -118,7 +118,7 @@ func (f *fixtureArtifacts) ConsumeArtifact(_ context.Context, grant *agentv1.Art
 	return nil
 }
 
-func (f *fixtureArtifacts) ConfirmArtifactConsumed(_ context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, _ *agentv1.FenceBindingV2) (bool, error) {
+func (f *fixtureArtifacts) ConfirmArtifactConsumed(_ context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) (bool, error) {
 	if f.confirmErr != nil {
 		return false, f.confirmErr
 	}
@@ -474,7 +474,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$3,consume_sha256=$4,consume_size=$5,consume_actor_id=$6,consume_session_id=$7,consume_request_id='artifact-revoke-race' WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, revokeRaceGrant.ArtifactID, revokeRaceDownload.GrantID, revokeRaceGrantBytes, digest[:], len(artifactBytes), requesterID, requesterSession); err != nil {
 		t.Fatal(err)
 	}
-	if err = artifactTransport.ConsumeArtifact(ctx, revokeRaceDownload.Grant, digest[:], int64(len(artifactBytes)), nil); err != nil {
+	if err = artifactTransport.ConsumeArtifact(ctx, revokeRaceDownload.Grant, digest[:], int64(len(artifactBytes))); err != nil {
 		t.Fatal(err)
 	}
 	artifactTransport.confirmHook = func() error {
@@ -516,7 +516,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$3,consume_sha256=$4,consume_size=$5,consume_actor_id=$6,consume_session_id=$7,consume_request_id='artifact-crash-window' WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, crashGrant.ArtifactID, crashDownload.GrantID, crashGrantBytes, digest[:], len(artifactBytes), requesterID, requesterSession); err != nil {
 		t.Fatal(err)
 	}
-	if err = artifactTransport.ConsumeArtifact(ctx, crashDownload.Grant, digest[:], int64(len(artifactBytes)), nil); err != nil {
+	if err = artifactTransport.ConsumeArtifact(ctx, crashDownload.Grant, digest[:], int64(len(artifactBytes))); err != nil {
 		t.Fatal(err)
 	}
 	consumeCountAfterRoot := artifactTransport.consumeCount

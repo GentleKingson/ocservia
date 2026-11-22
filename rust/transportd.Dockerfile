@@ -5,7 +5,6 @@ WORKDIR /src
 FROM chef AS planner
 COPY rust/Cargo.toml rust/Cargo.lock rust/rust-toolchain.toml ./
 COPY rust/.cargo ./.cargo
-COPY rust/vendor ./vendor
 COPY rust/crates ./crates
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -13,14 +12,11 @@ FROM chef AS dependencies
 COPY --from=planner /src/recipe.json recipe.json
 COPY rust/rust-toolchain.toml ./
 COPY rust/.cargo ./.cargo
-# The patched path dependency has a build script; keep its real source.
-COPY rust/vendor ./vendor
 RUN cargo chef cook --locked --release --package ocservia-transportd --recipe-path recipe.json
 
 FROM dependencies AS build
 COPY rust/Cargo.toml rust/Cargo.lock rust/rust-toolchain.toml ./
 COPY rust/.cargo ./.cargo
-COPY rust/vendor ./vendor
 COPY rust/crates ./crates
 RUN cargo build --locked --release --package ocservia-transportd
 

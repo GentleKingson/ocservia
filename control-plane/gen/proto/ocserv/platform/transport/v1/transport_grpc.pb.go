@@ -20,16 +20,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TransportService_Health_FullMethodName             = "/ocserv.platform.transport.v1.TransportService/Health"
-	TransportService_GetNodeConnection_FullMethodName  = "/ocserv.platform.transport.v1.TransportService/GetNodeConnection"
-	TransportService_SendCommand_FullMethodName        = "/ocserv.platform.transport.v1.TransportService/SendCommand"
-	TransportService_CloseNode_FullMethodName          = "/ocserv.platform.transport.v1.TransportService/CloseNode"
-	TransportService_WatchEvents_FullMethodName        = "/ocserv.platform.transport.v1.TransportService/WatchEvents"
-	TransportService_UpdateNodeTrust_FullMethodName    = "/ocserv.platform.transport.v1.TransportService/UpdateNodeTrust"
-	TransportService_FetchArtifact_FullMethodName      = "/ocserv.platform.transport.v1.TransportService/FetchArtifact"
-	TransportService_ConsumeArtifact_FullMethodName    = "/ocserv.platform.transport.v1.TransportService/ConsumeArtifact"
-	TransportService_RegisterOwnerFence_FullMethodName = "/ocserv.platform.transport.v1.TransportService/RegisterOwnerFence"
-	TransportService_GetOwnerFence_FullMethodName      = "/ocserv.platform.transport.v1.TransportService/GetOwnerFence"
+	TransportService_Health_FullMethodName            = "/ocserv.platform.transport.v1.TransportService/Health"
+	TransportService_GetNodeConnection_FullMethodName = "/ocserv.platform.transport.v1.TransportService/GetNodeConnection"
+	TransportService_SendCommand_FullMethodName       = "/ocserv.platform.transport.v1.TransportService/SendCommand"
+	TransportService_CloseNode_FullMethodName         = "/ocserv.platform.transport.v1.TransportService/CloseNode"
+	TransportService_WatchEvents_FullMethodName       = "/ocserv.platform.transport.v1.TransportService/WatchEvents"
+	TransportService_UpdateNodeTrust_FullMethodName   = "/ocserv.platform.transport.v1.TransportService/UpdateNodeTrust"
+	TransportService_FetchArtifact_FullMethodName     = "/ocserv.platform.transport.v1.TransportService/FetchArtifact"
+	TransportService_ConsumeArtifact_FullMethodName   = "/ocserv.platform.transport.v1.TransportService/ConsumeArtifact"
 )
 
 // TransportServiceClient is the client API for TransportService service.
@@ -44,10 +42,8 @@ type TransportServiceClient interface {
 	CloseNode(ctx context.Context, in *CloseNodeRequest, opts ...grpc.CallOption) (*CloseNodeResponse, error)
 	WatchEvents(ctx context.Context, in *WatchEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TransportEvent], error)
 	UpdateNodeTrust(ctx context.Context, in *UpdateNodeTrustRequest, opts ...grpc.CallOption) (*UpdateNodeTrustResponse, error)
-	FetchArtifact(ctx context.Context, in *FetchArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ArtifactChunk], error)
+	FetchArtifact(ctx context.Context, in *FetchArtifactRequest, opts ...grpc.CallOption) (*v1.ArtifactPayload, error)
 	ConsumeArtifact(ctx context.Context, in *ConsumeArtifactRequest, opts ...grpc.CallOption) (*ConsumeArtifactResponse, error)
-	RegisterOwnerFence(ctx context.Context, in *RegisterOwnerFenceRequest, opts ...grpc.CallOption) (*RegisterOwnerFenceResponse, error)
-	GetOwnerFence(ctx context.Context, in *GetOwnerFenceRequest, opts ...grpc.CallOption) (*GetOwnerFenceResponse, error)
 }
 
 type transportServiceClient struct {
@@ -127,49 +123,20 @@ func (c *transportServiceClient) UpdateNodeTrust(ctx context.Context, in *Update
 	return out, nil
 }
 
-func (c *transportServiceClient) FetchArtifact(ctx context.Context, in *FetchArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ArtifactChunk], error) {
+func (c *transportServiceClient) FetchArtifact(ctx context.Context, in *FetchArtifactRequest, opts ...grpc.CallOption) (*v1.ArtifactPayload, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &TransportService_ServiceDesc.Streams[1], TransportService_FetchArtifact_FullMethodName, cOpts...)
+	out := new(v1.ArtifactPayload)
+	err := c.cc.Invoke(ctx, TransportService_FetchArtifact_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[FetchArtifactRequest, v1.ArtifactChunk]{ClientStream: stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
+	return out, nil
 }
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type TransportService_FetchArtifactClient = grpc.ServerStreamingClient[v1.ArtifactChunk]
 
 func (c *transportServiceClient) ConsumeArtifact(ctx context.Context, in *ConsumeArtifactRequest, opts ...grpc.CallOption) (*ConsumeArtifactResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ConsumeArtifactResponse)
 	err := c.cc.Invoke(ctx, TransportService_ConsumeArtifact_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *transportServiceClient) RegisterOwnerFence(ctx context.Context, in *RegisterOwnerFenceRequest, opts ...grpc.CallOption) (*RegisterOwnerFenceResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RegisterOwnerFenceResponse)
-	err := c.cc.Invoke(ctx, TransportService_RegisterOwnerFence_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *transportServiceClient) GetOwnerFence(ctx context.Context, in *GetOwnerFenceRequest, opts ...grpc.CallOption) (*GetOwnerFenceResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetOwnerFenceResponse)
-	err := c.cc.Invoke(ctx, TransportService_GetOwnerFence_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -188,10 +155,8 @@ type TransportServiceServer interface {
 	CloseNode(context.Context, *CloseNodeRequest) (*CloseNodeResponse, error)
 	WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[TransportEvent]) error
 	UpdateNodeTrust(context.Context, *UpdateNodeTrustRequest) (*UpdateNodeTrustResponse, error)
-	FetchArtifact(*FetchArtifactRequest, grpc.ServerStreamingServer[v1.ArtifactChunk]) error
+	FetchArtifact(context.Context, *FetchArtifactRequest) (*v1.ArtifactPayload, error)
 	ConsumeArtifact(context.Context, *ConsumeArtifactRequest) (*ConsumeArtifactResponse, error)
-	RegisterOwnerFence(context.Context, *RegisterOwnerFenceRequest) (*RegisterOwnerFenceResponse, error)
-	GetOwnerFence(context.Context, *GetOwnerFenceRequest) (*GetOwnerFenceResponse, error)
 	mustEmbedUnimplementedTransportServiceServer()
 }
 
@@ -220,17 +185,11 @@ func (UnimplementedTransportServiceServer) WatchEvents(*WatchEventsRequest, grpc
 func (UnimplementedTransportServiceServer) UpdateNodeTrust(context.Context, *UpdateNodeTrustRequest) (*UpdateNodeTrustResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateNodeTrust not implemented")
 }
-func (UnimplementedTransportServiceServer) FetchArtifact(*FetchArtifactRequest, grpc.ServerStreamingServer[v1.ArtifactChunk]) error {
-	return status.Error(codes.Unimplemented, "method FetchArtifact not implemented")
+func (UnimplementedTransportServiceServer) FetchArtifact(context.Context, *FetchArtifactRequest) (*v1.ArtifactPayload, error) {
+	return nil, status.Error(codes.Unimplemented, "method FetchArtifact not implemented")
 }
 func (UnimplementedTransportServiceServer) ConsumeArtifact(context.Context, *ConsumeArtifactRequest) (*ConsumeArtifactResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ConsumeArtifact not implemented")
-}
-func (UnimplementedTransportServiceServer) RegisterOwnerFence(context.Context, *RegisterOwnerFenceRequest) (*RegisterOwnerFenceResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method RegisterOwnerFence not implemented")
-}
-func (UnimplementedTransportServiceServer) GetOwnerFence(context.Context, *GetOwnerFenceRequest) (*GetOwnerFenceResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetOwnerFence not implemented")
 }
 func (UnimplementedTransportServiceServer) mustEmbedUnimplementedTransportServiceServer() {}
 func (UnimplementedTransportServiceServer) testEmbeddedByValue()                          {}
@@ -354,16 +313,23 @@ func _TransportService_UpdateNodeTrust_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
-func _TransportService_FetchArtifact_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(FetchArtifactRequest)
-	if err := stream.RecvMsg(m); err != nil {
-		return err
+func _TransportService_FetchArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FetchArtifactRequest)
+	if err := dec(in); err != nil {
+		return nil, err
 	}
-	return srv.(TransportServiceServer).FetchArtifact(m, &grpc.GenericServerStream[FetchArtifactRequest, v1.ArtifactChunk]{ServerStream: stream})
+	if interceptor == nil {
+		return srv.(TransportServiceServer).FetchArtifact(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransportService_FetchArtifact_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransportServiceServer).FetchArtifact(ctx, req.(*FetchArtifactRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type TransportService_FetchArtifactServer = grpc.ServerStreamingServer[v1.ArtifactChunk]
 
 func _TransportService_ConsumeArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ConsumeArtifactRequest)
@@ -379,42 +345,6 @@ func _TransportService_ConsumeArtifact_Handler(srv interface{}, ctx context.Cont
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(TransportServiceServer).ConsumeArtifact(ctx, req.(*ConsumeArtifactRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TransportService_RegisterOwnerFence_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RegisterOwnerFenceRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TransportServiceServer).RegisterOwnerFence(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TransportService_RegisterOwnerFence_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TransportServiceServer).RegisterOwnerFence(ctx, req.(*RegisterOwnerFenceRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TransportService_GetOwnerFence_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetOwnerFenceRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TransportServiceServer).GetOwnerFence(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TransportService_GetOwnerFence_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TransportServiceServer).GetOwnerFence(ctx, req.(*GetOwnerFenceRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -447,27 +377,18 @@ var TransportService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _TransportService_UpdateNodeTrust_Handler,
 		},
 		{
+			MethodName: "FetchArtifact",
+			Handler:    _TransportService_FetchArtifact_Handler,
+		},
+		{
 			MethodName: "ConsumeArtifact",
 			Handler:    _TransportService_ConsumeArtifact_Handler,
-		},
-		{
-			MethodName: "RegisterOwnerFence",
-			Handler:    _TransportService_RegisterOwnerFence_Handler,
-		},
-		{
-			MethodName: "GetOwnerFence",
-			Handler:    _TransportService_GetOwnerFence_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "WatchEvents",
 			Handler:       _TransportService_WatchEvents_Handler,
-			ServerStreams: true,
-		},
-		{
-			StreamName:    "FetchArtifact",
-			Handler:       _TransportService_FetchArtifact_Handler,
 			ServerStreams: true,
 		},
 	},

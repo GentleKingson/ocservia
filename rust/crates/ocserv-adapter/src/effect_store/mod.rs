@@ -22,7 +22,7 @@ pub(super) use self::hmac::{
     authenticate_record,
 };
 
-use self::hmac::authenticate_store_identity;
+use self::hmac::{authenticate_store_identity, verify_mac};
 
 #[derive(Debug)]
 pub(super) struct EffectStore {
@@ -220,13 +220,12 @@ impl EffectStore {
                    certificate_version INTEGER NOT NULL CHECK(certificate_version > 0),
                    operation_id BLOB NOT NULL CHECK(length(operation_id)=16),
                    content_sha256 BLOB NOT NULL CHECK(length(content_sha256)=32),
-                   content_size INTEGER NOT NULL CHECK(content_size BETWEEN 0 AND 67108864),
+                   content_size INTEGER NOT NULL CHECK(content_size BETWEEN 0 AND 262144),
                    artifact_expires_at INTEGER NOT NULL,
                    state TEXT NOT NULL CHECK(state IN ('prepared','available','leased','consumed','expired','revoked')),
                    active_grant_id BLOB CHECK(active_grant_id IS NULL OR length(active_grant_id)=16),
                    active_subject TEXT NOT NULL CHECK(length(active_subject) <= 256),
                    grant_expires_at INTEGER,
-                   active_offset INTEGER NOT NULL CHECK(active_offset BETWEEN 0 AND content_size),
                    record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
                    updated_at INTEGER NOT NULL,
                    CHECK((state='leased' AND active_grant_id IS NOT NULL AND grant_expires_at IS NOT NULL AND length(active_subject)>0) OR state<>'leased'),
@@ -268,7 +267,10 @@ impl EffectStore {
         let identity_hmac: [u8; 32] = identity_hmac
             .try_into()
             .map_err(|_| AdapterError::InvalidResource)?;
-        if authenticate_store_identity(&self.hmac_key, &store_id) != identity_hmac {
+        if !verify_mac(
+            &authenticate_store_identity(&self.hmac_key, &store_id),
+            &identity_hmac,
+        ) {
             return Err(AdapterError::InvalidResource);
         }
         Ok(())

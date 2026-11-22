@@ -1,7 +1,7 @@
 use super::{
     Adapter, AdapterError, AsyncReadExt, ConfigApplyResult, ConfigFingerprint, Digest,
-    EffectIdentity, EffectStore, MAX_CONFIG_BYTES, PathBuf, PrepareEffect, Sha256, StagingFile,
-    Uuid, atomic_replace, complete_config, file_identity, lock_config_file, sync_directory,
+    EffectIdentity, MAX_CONFIG_BYTES, PathBuf, PrepareEffect, Sha256, StagingFile, Uuid,
+    atomic_replace, complete_config, file_identity, lock_config_file, sync_directory,
     write_new_synced,
 };
 #[cfg(test)]
@@ -61,15 +61,16 @@ impl Adapter {
                 &self.resources.audit_hook,
             )?;
         }
-        let mut effect_store = EffectStore::open_for_mutation(&self.resources)?;
-        let preparation = effect_store.prepare(
-            "config_apply",
-            "ocserv.conf",
-            desired_revision,
-            effect,
-            &before_bytes,
-            candidate,
-        )?;
+        let preparation = self.with_effect_store(true, |effect_store| {
+            effect_store.prepare(
+                "config_apply",
+                "ocserv.conf",
+                desired_revision,
+                effect,
+                &before_bytes,
+                candidate,
+            )
+        })?;
         if preparation == PrepareEffect::AlreadyApplied {
             if previous_hash != candidate_hash {
                 return Err(AdapterError::Unavailable);
@@ -84,7 +85,6 @@ impl Adapter {
         if previous_hash == candidate_hash {
             return self
                 .recover_published_config(
-                    &mut effect_store,
                     candidate_hash,
                     expected_current_hash,
                     desired_revision,
@@ -110,7 +110,9 @@ impl Adapter {
             sync_directory(parent).await?;
             self.prune_config_backups().await?;
             let observed = self.config_fingerprint().await?;
-            effect_store.mark_applied("config_apply", "ocserv.conf", desired_revision, effect)?;
+            self.with_effect_store(true, |effect_store| {
+                effect_store.mark_applied("config_apply", "ocserv.conf", desired_revision, effect)
+            })?;
             return Ok(applied_config(
                 candidate_hash,
                 &previous_hash,
@@ -125,7 +127,6 @@ impl Adapter {
             previous_hash,
             desired_revision,
             effect,
-            &mut effect_store,
         )
         .await
     }
@@ -137,7 +138,6 @@ impl Adapter {
         previous_hash: Vec<u8>,
         desired_revision: u64,
         effect: EffectIdentity<'_>,
-        effect_store: &mut EffectStore,
     ) -> Result<ConfigApplyResult, AdapterError> {
         let rollback = async {
             atomic_replace(backup_path, &self.resources.config).await?;
@@ -151,12 +151,14 @@ impl Adapter {
         .await;
         match rollback {
             Ok(observed) => {
-                effect_store.mark_absent(
-                    "config_apply",
-                    "ocserv.conf",
-                    desired_revision,
-                    effect,
-                )?;
+                self.with_effect_store(true, |effect_store| {
+                    effect_store.mark_absent(
+                        "config_apply",
+                        "ocserv.conf",
+                        desired_revision,
+                        effect,
+                    )
+                })?;
                 Ok(ConfigApplyResult {
                     candidate_hash: candidate_hash.to_vec(),
                     previous_hash,
@@ -242,7 +244,6 @@ impl Adapter {
 
     async fn recover_published_config(
         &self,
-        effect_store: &mut EffectStore,
         candidate_hash: &[u8],
         expected_current_hash: &[u8],
         desired_revision: u64,
@@ -269,7 +270,9 @@ impl Adapter {
                 sync_directory(parent).await?;
                 self.prune_config_backups().await?;
             }
-            effect_store.mark_applied("config_apply", "ocserv.conf", desired_revision, effect)?;
+            self.with_effect_store(true, |effect_store| {
+                effect_store.mark_applied("config_apply", "ocserv.conf", desired_revision, effect)
+            })?;
             return Ok(applied_config(
                 candidate_hash,
                 expected_current_hash,
@@ -282,7 +285,9 @@ impl Adapter {
             && self.config_health().await.is_ok()
             && self.config_fingerprint().await?.sha256 == hex::encode(expected_current_hash)
         {
-            effect_store.mark_absent("config_apply", "ocserv.conf", desired_revision, effect)?;
+            self.with_effect_store(true, |effect_store| {
+                effect_store.mark_absent("config_apply", "ocserv.conf", desired_revision, effect)
+            })?;
             return Ok(ConfigApplyResult {
                 candidate_hash: candidate_hash.to_vec(),
                 previous_hash: expected_current_hash.to_vec(),

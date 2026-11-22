@@ -185,7 +185,7 @@ classify_path() {
       select_controller_images gateway ;;
     control-plane/*|THIRD_PARTY_NOTICES.md) select_controller_images control ;;
     signer/*|deploy/production/signer.Dockerfile) select_controller_images signer ;;
-    rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/.cargo/*|rust/vendor/*|rust/crates/*|\
+    rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/.cargo/*|rust/crates/*|\
     rust/transportd.Dockerfile|deploy/production/transportd-relays.sh|deploy/prepare-transport-runtime.sh)
       select_controller_images transport ;;
     deploy/production/backup.Dockerfile|deploy/production/backup-entrypoint.sh|scripts/postgres-backup.sh)

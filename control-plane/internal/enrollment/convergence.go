@@ -7,23 +7,20 @@ import (
 	"log/slog"
 	"time"
 
-	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
-	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 )
 
 type TrustTransport interface {
-	UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64, []byte, *agentv1.FenceBindingV2) error
-	CloseNode(context.Context, []byte, string, *agentv1.FenceBindingV2) error
+	UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64) error
+	CloseNode(context.Context, []byte, string) error
 }
 
 type TrustConvergenceWorker struct {
 	backend   database.Backend
 	transport TrustTransport
-	fences    ownersession.FencedExecutor
 	logger    *slog.Logger
 	workerID  uuid.UUID
 }
@@ -41,32 +38,8 @@ func NewTrustConvergenceWorkerBackend(backend database.Backend, transport TrustT
 	return &TrustConvergenceWorker{backend: backend, transport: transport, logger: logger, workerID: workerID}, nil
 }
 
-func NewFencedTrustConvergenceWorkerBackend(backend database.Backend, transport TrustTransport, fences ownersession.FencedExecutor, logger *slog.Logger) (*TrustConvergenceWorker, error) {
-	worker, err := NewTrustConvergenceWorkerBackend(backend, transport, logger)
-	if err != nil {
-		return nil, err
-	}
-	worker.fences = fences
-	return worker, nil
-}
-
-// executeFenced runs one administrative transport mutation inside the owner
-// fencing interval. Trust updates and connection closes are Controller-side
-// operations, so their binding capability is the fencing capability itself,
-// which every fence carries by construction.
-func (w *TrustConvergenceWorker) executeFenced(ctx context.Context, nodeID uuid.UUID, kind agentv1.FenceOperationKind, operationID [16]byte, action ownersession.FencedAction) error {
-	if w.fences == nil {
-		return action(ctx, nil, nil)
-	}
-	var fixed [16]byte
-	copy(fixed[:], nodeID[:])
-	return w.fences.ExecuteFenced(ctx, fixed, kind, operationID, ownersession.FencingCapability, action)
-}
-
-// Renew only while an external mutation is in flight. Stop and join renewal
-// before bookkeeping can clear the claim. Losing authority cancels transport;
-// the database still fences late results from transports that ignore it.
-func (w *TrustConvergenceWorker) executeLeased(ctx context.Context, job trustConvergenceJob, kind agentv1.FenceOperationKind, operationID [16]byte, action ownersession.FencedAction) error {
+// executeLeased renews the convergence claim only while the transport RPC is in flight.
+func (w *TrustConvergenceWorker) executeLeased(ctx context.Context, job trustConvergenceJob, action func(context.Context) error) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	if err := w.renew(ctx, job); err != nil {
@@ -91,7 +64,7 @@ func (w *TrustConvergenceWorker) executeLeased(ctx context.Context, job trustCon
 			}
 		}
 	}()
-	err := w.executeFenced(ctx, job.NodeID, kind, operationID, action)
+	err := action(ctx)
 	close(stop)
 	<-done
 	return errors.Join(err, context.Cause(ctx))
@@ -143,11 +116,9 @@ func (w *TrustConvergenceWorker) RunOnce(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if !job.UpdateApplied {
-		operationID := ownersession.StateUpdateOperationID([16]byte(job.NodeID), job.EndpointID, int32(job.State), job.Revision, job.Reason)
-		err := w.executeLeased(ctx, job, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, operationID,
-			func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-				return w.transport.UpdateNodeTrust(ctx, job.NodeID[:], job.EndpointID, job.State, job.Reason, job.Revision, operationID[:], binding)
-			})
+		err := w.executeLeased(ctx, job, func(ctx context.Context) error {
+			return w.transport.UpdateNodeTrust(ctx, job.NodeID[:], job.EndpointID, job.State, job.Reason, job.Revision)
+		})
 		if err != nil {
 			return true, w.release(ctx, job, err)
 		}
@@ -157,10 +128,9 @@ func (w *TrustConvergenceWorker) RunOnce(ctx context.Context) (bool, error) {
 		job.UpdateApplied = true
 	}
 	if job.CloseRequired && !job.CloseApplied {
-		err := w.executeLeased(ctx, job, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(job.NodeID),
-			func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-				return w.transport.CloseNode(ctx, job.NodeID[:], "node revoked", binding)
-			})
+		err := w.executeLeased(ctx, job, func(ctx context.Context) error {
+			return w.transport.CloseNode(ctx, job.NodeID[:], "node revoked")
+		})
 		if err != nil {
 			return true, w.release(ctx, job, err)
 		}

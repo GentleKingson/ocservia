@@ -161,75 +161,26 @@ jobs:
       - uses: ./.github/actions/setup-tools
         with:
           profiles: rust-basic
-          key-suffix: -${{ hashFiles('rust/Cargo.lock', 'rust/vendor/iroh/Cargo.lock') }}
+          key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
       - name: Restore Rust workspace build cache
         id: rust-target-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: rust/target/debug
-          key: basic-rust-target-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-${{ hashFiles('scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock', 'rust/**/Cargo.toml', 'rust/.cargo/**', 'rust/vendor/**', 'scripts/rust-check.sh') }}-${{ github.sha }}
+          key: basic-rust-target-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-${{ hashFiles('scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock', 'rust/**/Cargo.toml', 'rust/.cargo/**', 'scripts/rust-check.sh') }}-${{ github.sha }}
           restore-keys: |
-            basic-rust-target-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-${{ hashFiles('scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock', 'rust/**/Cargo.toml', 'rust/.cargo/**', 'rust/vendor/**', 'scripts/rust-check.sh') }}-
+            basic-rust-target-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-${{ hashFiles('scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock', 'rust/**/Cargo.toml', 'rust/.cargo/**', 'scripts/rust-check.sh') }}-
             basic-rust-target-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-
-      - name: Restore vendored iroh build cache
-        id: iroh-target-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: rust/vendor/iroh/target/debug
-          key: basic-iroh-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml', 'rust/vendor/iroh/**') }}
-          restore-keys: |
-            basic-iroh-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml') }}-
       - run: |
           scripts/rust-check.sh
           scripts/transport-boundary-check.sh --rust-only
           scripts/agent-boundary-check.sh
-      - name: Vendored iroh security regressions
-        # Archive lock graph, not production evidence; see rust/vendor/iroh/OCSERVIA-PROVENANCE.md.
-        run: |
-          source scripts/env.sh
-          cd rust
-          cargo test --locked --manifest-path vendor/iroh/Cargo.toml \
-            --no-default-features --features metrics,tls-ring --lib address_lookup::pkarr::tests \
-            | tee "${RUNNER_TEMP}/iroh-pkarr-tests.log"
-          grep -q '^test result: ok. 3 passed;' "${RUNNER_TEMP}/iroh-pkarr-tests.log"
-          cargo test --locked --manifest-path vendor/iroh/Cargo.toml \
-            --no-default-features --features metrics,tls-ring --example transfer \
-            -- --exact tests::endpoint_args_json_omits_relay_auth_token \
-            | tee "${RUNNER_TEMP}/iroh-transfer-tests.log"
-          grep -q '^test result: ok. 1 passed;' "${RUNNER_TEMP}/iroh-transfer-tests.log"
-      - name: Vendored iroh patch regressions (Full)
-        # Archive lock graph, not production evidence; see rust/vendor/iroh/OCSERVIA-PROVENANCE.md.
-        if: needs.ci-relevance.outputs.profile == 'full'
-        run: |
-          source scripts/env.sh
-          cd rust
-          cargo test --locked --manifest-path vendor/iroh/Cargo.toml \
-            --no-default-features --features metrics,tls-ring --lib -- --exact \
-            socket::transports::relay::actor::tests::concurrent_relay_status_transitions_preserve_every_actor \
-            socket::transports::relay::actor::tests::datagrams_for_disconnected_relays_are_dropped_not_queued \
-            socket::remote_map::remote_state::tests::relay_paths_offered_only_for_connected_relays \
-            socket::transports::relay::actor::tests::home_relay_failover_only_picks_connected_configured_standbys \
-            socket::transports::relay::actor::tests::persistent_relay_retry_sleep_stays_inside_recovery_budget \
-            socket::transports::relay::actor::tests::test_prio_inbox_answered_during_backoff \
-            socket::transports::relay::actor::tests::close_all_active_relays_survives_a_cancelled_task \
-            socket::remote_map::tests::endpoint_mappings_are_reclaimed_and_bounded \
-            socket::transports::relay::actor::tests::relay_sender_hints_are_bounded_and_relearned \
-            socket::transports::relay::actor::tests::both_relay_receive_loops_use_the_shared_handler \
-            | tee "${RUNNER_TEMP}/iroh-vendor-tests.log"
-          # A renamed test would otherwise match nothing and still pass.
-          grep -q '^test result: ok. 10 passed;' "${RUNNER_TEMP}/iroh-vendor-tests.log"
       - name: Save Rust workspace build cache (main only)
         if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rust-target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: rust/target/debug
           key: ${{ steps.rust-target-cache.outputs.cache-primary-key }}
-      - name: Save vendored iroh build cache (main only)
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.iroh-target-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: rust/vendor/iroh/target/debug
-          key: ${{ steps.iroh-target-cache.outputs.cache-primary-key }}
 
   installers:
     needs: ci-relevance

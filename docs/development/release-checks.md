@@ -433,7 +433,7 @@ The workflow file defines the matrices. The jobs and what they own:
 | `docs` | `scripts/docs-check.sh` and `scripts/check-public-repository.sh` |
 | `ci-tools` | Selected CI guard (including workflow contract checks), release, source style and contract suites via `scripts/ci-tools-check.sh` |
 | `go` | `go-check.sh standard` in Quick runs and `go-check.sh full` (including `-race`) in Full runs for `control-plane` and `signer` |
-| `rust` | `rust-check.sh` plus the vendored iroh security regressions; Full also runs the focused vendored iroh patch tests against the lock in [`rust/vendor/iroh/OCSERVIA-PROVENANCE.md`](../../rust/vendor/iroh/OCSERVIA-PROVENANCE.md) |
+| `rust` | `rust-check.sh` across the Rust workspace against the locked crates.io `iroh` dependency in [`rust/Cargo.lock`](../../rust/Cargo.lock) |
 | `installers` | Installer (including host bootstrap) and Relay-launcher contract self-tests |
 | `web` | `web-check.sh basic`; no browser installation |
 | `web-browser` | Stubbed production-build browser regressions through `web/test/run-auth-browser.mjs` inside the version-matched Playwright container image (`PLAYWRIGHT_WORKERS=4`); Full also serves the build through the Standalone and Integrated gateways with CSP enforcement checks. A missing browser or non-declared skip fails the job |
@@ -823,8 +823,8 @@ volumes and networks through exit traps. After exporting the evidence, remove th
 task-owned systemd container, temporary image tags, built test packages and
 private working directories without a global Docker prune.
 
-The vendored iroh tree retains the local connection-lifecycle patch (see
-[`rust/vendor/iroh/OCSERVIA-PROVENANCE.md`](../../rust/vendor/iroh/OCSERVIA-PROVENANCE.md)).
+The endpoint workspace uses upstream crates.io `iroh` directly (pinned in
+[`rust/Cargo.lock`](../../rust/Cargo.lock)).
 Keeping persistent connections across multiple Relays would still need at least
 two distinct Relays in configuration. Single-Relay reconnection reuses the
 existing Endpoint and supervisor loop without a separate connection manager.

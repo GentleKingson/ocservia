@@ -87,17 +87,15 @@ type IPBan = telemetrystore.IPBan
 type ReadSession = telemetrystore.ReadSession
 
 type User struct {
-	Username    string `json:"username"`
-	Enabled     bool   `json:"enabled"`
-	Revision    uint64 `json:"revision"`
-	Fingerprint []byte `json:"fingerprint_sha256"`
+	Username string `json:"username"`
+	Enabled  bool   `json:"enabled"`
+	Revision uint64 `json:"revision"`
 }
 
 type Group struct {
-	Name        string   `json:"name"`
-	Members     []string `json:"members"`
-	Revision    uint64   `json:"revision"`
-	Fingerprint []byte   `json:"fingerprint_sha256"`
+	Name     string   `json:"name"`
+	Members  []string `json:"members"`
+	Revision uint64   `json:"revision"`
 }
 
 type Sample struct {

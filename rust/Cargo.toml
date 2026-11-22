@@ -2,6 +2,7 @@
 members = [
   "crates/agent",
   "crates/agent-protocol",
+  "crates/canonical-cbor",
   "crates/command-journal",
   "crates/command-authorization",
   "crates/contracts",
@@ -15,7 +16,6 @@ members = [
   "crates/transportd-stub",
   "crates/upgrader",
 ]
-exclude = ["vendor/iroh"]
 resolver = "3"
 
 [profile.release]
@@ -48,13 +48,12 @@ hyper-util = { version = "=0.1.20", features = ["tokio"] }
 rand = "=0.10.2"
 rusqlite = { version = "=0.41.1", features = ["bundled", "fallible_uint"] }
 serde_json = "=1.0.151"
+ciborium = "=0.2.2"
 serde = { version = "=1.0.229", features = ["derive"] }
 sha2 = "=0.10.9"
+hmac = "=0.12.1"
 ed25519-dalek = { version = "=3.0.0", features = ["pem", "pkcs8"] }
 rustls-pki-types = { version = "=1.15.1", features = ["std"] }
-
-[patch.crates-io]
-iroh = { path = "vendor/iroh" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

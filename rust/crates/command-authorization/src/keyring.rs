@@ -7,16 +7,10 @@ use std::sync::Arc;
 use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use ed25519_dalek::{Signature, VerifyingKey};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    ArtifactGrantV1, ArtifactGrantVersion, CommandAuthorizationVersion, CommandDeliveryMode,
-    CommandEnvelope, ConnectionFenceV2, FenceBindingV2, SessionGrantV1, SessionGrantVersion,
+    ArtifactGrantV1, CommandDeliveryMode, CommandEnvelope, SessionGrantV1,
 };
 use rustix::fs::{Mode, OFlags};
 
-use crate::fence::{
-    FenceBindingClaimsV2, VerifiedConnectionFenceV2, canonical_connection_fence_v2,
-    canonical_fence_binding_v2, connection_fence_claims_v2, fence_binding_claims_v2,
-    timestamp_exceeds_future_skew, timestamp_expired,
-};
 use crate::semantic_hash::verify_semantic_payload_hash;
 use crate::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, MAX_FUTURE_SKEW_SECONDS,
@@ -90,10 +84,7 @@ impl ControllerCommandKeyring {
             .authorization
             .as_ref()
             .ok_or(AuthorizationError::Missing)?;
-        if CommandAuthorizationVersion::try_from(proof.version)
-            .unwrap_or(CommandAuthorizationVersion::Unspecified)
-            != CommandAuthorizationVersion::V1
-        {
+        if proof.version != 1 {
             return Err(AuthorizationError::UnsupportedVersion);
         }
         let key = self
@@ -155,9 +146,7 @@ impl ControllerCommandKeyring {
         expected_endpoint_id: &[u8; 32],
         now_unix_seconds: i64,
     ) -> Result<VerifiedSessionGrant, AuthorizationError> {
-        let version = SessionGrantVersion::try_from(grant.version)
-            .unwrap_or(SessionGrantVersion::Unspecified);
-        if version != SessionGrantVersion::V1 {
+        if grant.version != 1 {
             return Err(AuthorizationError::UnsupportedVersion);
         }
         let key = self
@@ -189,147 +178,10 @@ impl ControllerCommandKeyring {
             .map_err(|_| AuthorizationError::SignatureInvalid)?;
         Ok(VerifiedSessionGrant {
             authorization_revision: claims.authorization_revision,
+            session_epoch: claims.session_epoch,
             negotiated_capabilities: claims.negotiated_capabilities,
             expires_at_seconds: claims.expires_at_seconds,
         })
-    }
-
-    /// Verifies a Controller-signed per-node connection-owner fence at an
-    /// exact nanosecond-precision wall-clock instant.
-    ///
-    /// # Errors
-    ///
-    /// Returns an authorization error when the current nanosecond value is
-    /// invalid or the fence is malformed, expired, future-issued beyond the
-    /// allowed skew, signed by an unknown key, has an invalid signature, or
-    /// does not match the expected node and endpoint.
-    pub fn verify_connection_fence_v2_at(
-        &self,
-        fence: &ConnectionFenceV2,
-        expected_node_id: &[u8; 16],
-        expected_endpoint_id: &[u8; 32],
-        now_unix_seconds: i64,
-        now_unix_nanos: u32,
-    ) -> Result<VerifiedConnectionFenceV2, AuthorizationError> {
-        if now_unix_nanos >= 1_000_000_000 {
-            return Err(AuthorizationError::ClaimsInvalid(
-                "connection_fence_clock_skew",
-            ));
-        }
-        let claims = connection_fence_claims_v2(fence)?;
-        let key = self
-            .key(&claims.key_id)
-            .ok_or(AuthorizationError::UnknownKey)?;
-        if &claims.node_id != expected_node_id {
-            return Err(AuthorizationError::ClaimsInvalid(
-                "connection_fence_node_mismatch",
-            ));
-        }
-        if &claims.endpoint_id != expected_endpoint_id {
-            return Err(AuthorizationError::ClaimsInvalid(
-                "connection_fence_endpoint_mismatch",
-            ));
-        }
-        if timestamp_expired(
-            claims.expires_at_seconds,
-            claims.expires_at_nanos,
-            now_unix_seconds,
-            now_unix_nanos,
-        ) {
-            return Err(AuthorizationError::ClaimsInvalid(
-                "connection_fence_expired",
-            ));
-        }
-        if timestamp_exceeds_future_skew(
-            claims.issued_at_seconds,
-            claims.issued_at_nanos,
-            now_unix_seconds,
-            now_unix_nanos,
-        ) {
-            return Err(AuthorizationError::ClaimsInvalid(
-                "connection_fence_clock_skew",
-            ));
-        }
-        let canonical = canonical_connection_fence_v2(&claims)?;
-        let signature = Signature::from_slice(&fence.signature)
-            .map_err(|_| AuthorizationError::SignatureMalformed)?;
-        key.verify_strict(&canonical, &signature)
-            .map_err(|_| AuthorizationError::SignatureInvalid)?;
-        Ok(VerifiedConnectionFenceV2 {
-            fence_id: claims.fence_id,
-            owner_instance_id: claims.owner_instance_id,
-            owner_incarnation: claims.owner_incarnation,
-            owner_epoch: claims.owner_epoch,
-            connection_id: claims.connection_id,
-            authorization_revision: claims.authorization_revision,
-            capabilities: claims.capabilities,
-            lease_until_seconds: claims.lease_until_seconds,
-            lease_until_nanos: claims.lease_until_nanos,
-            expires_at_seconds: claims.expires_at_seconds,
-            expires_at_nanos: claims.expires_at_nanos,
-        })
-    }
-
-    /// Verifies a Controller-signed operation binding at an exact
-    /// nanosecond-precision wall-clock instant.
-    ///
-    /// # Errors
-    ///
-    /// Returns an authorization error when the current nanosecond value is
-    /// invalid or the binding is malformed, expired, future-issued beyond the
-    /// allowed skew, signed by an unknown key, has an invalid signature, or
-    /// does not match the expected node and endpoint.
-    pub fn verify_fence_binding_v2_at(
-        &self,
-        binding: &FenceBindingV2,
-        expected_node_id: &[u8; 16],
-        expected_endpoint_id: &[u8; 32],
-        now_unix_seconds: i64,
-        now_unix_nanos: u32,
-    ) -> Result<FenceBindingClaimsV2, AuthorizationError> {
-        if now_unix_nanos >= 1_000_000_000 {
-            return Err(AuthorizationError::ClaimsInvalid(
-                "fence_binding_clock_skew",
-            ));
-        }
-        let claims = fence_binding_claims_v2(binding)?;
-        let key = self
-            .key(&claims.key_id)
-            .ok_or(AuthorizationError::UnknownKey)?;
-        if &claims.node_id != expected_node_id {
-            return Err(AuthorizationError::ClaimsInvalid(
-                "fence_binding_node_mismatch",
-            ));
-        }
-        if &claims.endpoint_id != expected_endpoint_id {
-            return Err(AuthorizationError::ClaimsInvalid(
-                "fence_binding_endpoint_mismatch",
-            ));
-        }
-        if timestamp_expired(
-            claims.expires_at_seconds,
-            claims.expires_at_nanos,
-            now_unix_seconds,
-            now_unix_nanos,
-        ) {
-            return Err(AuthorizationError::ClaimsInvalid("fence_binding_expired"));
-        }
-        if timestamp_exceeds_future_skew(
-            claims.issued_at_seconds,
-            claims.issued_at_nanos,
-            now_unix_seconds,
-            now_unix_nanos,
-        ) {
-            return Err(AuthorizationError::ClaimsInvalid(
-                "fence_binding_clock_skew",
-            ));
-        }
-        let canonical = canonical_fence_binding_v2(&claims)?;
-        let signature = Signature::from_slice(&binding.signature)
-            .map_err(|_| AuthorizationError::SignatureMalformed)?;
-        key.verify_strict(&canonical, &signature)
-            .map_err(|_| AuthorizationError::SignatureInvalid)?;
-        Ok(claims)
     }
 
     /// Verifies a Controller-signed artifact grant for the local node and the
@@ -399,9 +251,7 @@ impl ControllerCommandKeyring {
         now_unix_seconds: i64,
         require_unexpired: bool,
     ) -> Result<ArtifactGrantClaimsV1, AuthorizationError> {
-        let version = ArtifactGrantVersion::try_from(grant.version)
-            .unwrap_or(ArtifactGrantVersion::Unspecified);
-        if version != ArtifactGrantVersion::V1 {
+        if grant.version != 1 {
             return Err(AuthorizationError::UnsupportedVersion);
         }
         let key = self

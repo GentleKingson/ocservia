@@ -12,7 +12,6 @@ use prost::Message;
 use tonic::Status;
 use uuid::Uuid;
 
-use crate::fence::RegisteredFence;
 use crate::{MAX_FRAME_BYTES, STREAM_TIMEOUT, Shared};
 
 #[allow(clippy::too_many_lines)]
@@ -32,8 +31,6 @@ pub(crate) async fn read_agent_events(
         traceparent.as_str(),
         &connection,
     );
-    // A command stream carries exactly one terminal frame. Heartbeats belong to
-    // the telemetry path, whose queue quota would otherwise be bypassed here.
     let mut length = [0_u8; 4];
     match tokio::time::timeout_at(response_deadline, recv.read_exact(&mut length)).await {
         Ok(Ok(())) => {}
@@ -86,8 +83,6 @@ pub(crate) async fn read_agent_events(
             .await;
             return;
         };
-        // A result is only evidence for the command dispatched on this
-        // stream; the Controller still re-checks node and command ownership.
         if result.command_id != command.command_id {
             publish_command_unknown(
                 event_context,
@@ -207,9 +202,8 @@ pub(crate) fn valid_privileged_result_proof(
         && receipt.operation_id.len() == 16
         && receipt.idempotency_key.len() == 16
         && receipt.semantic_payload_sha256.len() == 32
-        && receipt.result_bytes_sha256.len() == 32
-        && receipt.error_code_sha256.len() == 32
-        && (16..=32).contains(&receipt.effect_record_id.len())
+        && receipt.result_cbor_sha256.len() == 32
+        && receipt.error_code.len() <= 128
         && receipt.effect_sequence > 0
         && receipt.completed_at.is_some()
         && receipt.accepted_at.is_some()
@@ -257,19 +251,19 @@ pub(crate) fn event(
     event_with_traceparent(node_id, endpoint_id, kind, payload, &new_traceparent())
 }
 
-/// Builds an event that also names the connection-owner term of the
-/// connection it is about, so the owner can end exactly its own term when
-/// the connection goes away.
-pub(crate) fn event_with_term(
+/// Builds an event carrying the connection ID and monotonic `session_epoch`
+/// so the Controller can correlate session lifecycle transitions cleanly.
+pub(crate) fn event_with_session(
     node_id: &[u8],
     endpoint_id: &[u8],
     kind: TransportEventType,
     payload: Vec<u8>,
-    fence: &RegisteredFence,
+    connection_id: &[u8],
+    session_epoch: u64,
 ) -> TransportEvent {
     let mut transport_event = event(node_id, endpoint_id, kind, payload);
-    transport_event.connection_id = fence.verified.connection_id.to_vec();
-    transport_event.owner_epoch = fence.verified.owner_epoch;
+    transport_event.connection_id = connection_id.to_vec();
+    transport_event.session_epoch = session_epoch;
     transport_event
 }
 
@@ -289,7 +283,7 @@ fn event_with_traceparent(
         traceparent: traceparent.to_owned(),
         endpoint_id: endpoint_id.to_vec(),
         connection_id: Vec::new(),
-        owner_epoch: 0,
+        session_epoch: 0,
     }
 }
 

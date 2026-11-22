@@ -2031,7 +2031,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
     }
 
     let sealed_p12 = SealedSecretV1 {
-        version: SealedSecretVersion::V1 as i32,
+        version: 1,
         purpose: SealedSecretPurpose::CertificateP12Password as i32,
         key_id: "fixture-key".to_owned(),
         ciphertext: p12_ct,
@@ -2149,42 +2149,33 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         &grant_id,
         effect_now().expect("now") + 300,
     );
-    let (a, b) = tokio::join!(
-        adapter.artifact_read(lease, 0),
-        adapter.artifact_read(lease, 0)
-    );
+    let (a, b) = tokio::join!(adapter.artifact_read(lease), adapter.artifact_read(lease));
     assert!(a.is_ok() ^ b.is_ok());
-    let chunk = a.or(b).expect("winner");
-    assert!(chunk.eof && chunk.sha256 == int_res.artifact_sha256);
+    let payload = a.or(b).expect("winner");
+    assert_eq!(payload.sha256, int_res.artifact_sha256);
 
     let restarted = Adapter::new(resources.clone(), limits);
     let other_grant = Uuid::now_v7();
     assert!(matches!(
         restarted
-            .artifact_read(
-                ArtifactLeaseIdentity {
-                    grant_id: other_grant.as_bytes(),
-                    ..lease
-                },
-                0
-            )
+            .artifact_read(ArtifactLeaseIdentity {
+                grant_id: other_grant.as_bytes(),
+                ..lease
+            })
             .await,
         Err(AdapterError::Unavailable)
     ));
     assert!(matches!(
         restarted
-            .artifact_read(
-                ArtifactLeaseIdentity {
-                    certificate_version: 2,
-                    ..lease
-                },
-                0
-            )
+            .artifact_read(ArtifactLeaseIdentity {
+                certificate_version: 2,
+                ..lease
+            })
             .await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(matches!(
-        restarted.artifact_read(lease, 0).await,
+        restarted.artifact_read(lease).await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(
@@ -2221,13 +2212,8 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         owner_fence: test_owner_fence(&TEST_COMMAND_ID, 2),
         ..lease
     };
-    assert!(
-        restarted
-            .artifact_read(rec_lease, 0)
-            .await
-            .expect("re-lease")
-            .eof
-    );
+    let payload = restarted.artifact_read(rec_lease).await.expect("re-lease");
+    assert_eq!(payload.sha256, int_res.artifact_sha256);
     restarted
         .artifact_consume(rec_lease, &int_res.artifact_sha256, int_res.artifact_size)
         .await
@@ -2241,7 +2227,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         ..rec_lease
     };
     assert!(matches!(
-        restarted.artifact_read(stale_lease, 0).await,
+        restarted.artifact_read(stale_lease).await,
         Err(AdapterError::StaleOwnerEpoch)
     ));
     assert!(matches!(
@@ -2288,7 +2274,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         Err(AdapterError::InvalidRequest)
     ));
     assert!(matches!(
-        restarted.artifact_read(rec_lease, 0).await,
+        restarted.artifact_read(rec_lease).await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(!artifact_dir.join(format!("{int_art}.p12")).exists());
@@ -2346,7 +2332,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         )
     };
     adapter
-        .artifact_read(rev_lease, 0)
+        .artifact_read(rev_lease)
         .await
         .expect("lease before revoke");
     let prep_art = Uuid::now_v7();
@@ -2396,11 +2382,11 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         ..rev_lease
     };
     assert!(matches!(
-        adapter.artifact_read(unavail_lease, 0).await,
+        adapter.artifact_read(unavail_lease).await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(matches!(
-        adapter.artifact_read(rev_lease, 0).await,
+        adapter.artifact_read(rev_lease).await,
         Err(AdapterError::InvalidRequest)
     ));
 }

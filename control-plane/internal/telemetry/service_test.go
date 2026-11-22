@@ -1,7 +1,6 @@
 package telemetry
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -29,7 +28,6 @@ func testBatch(nodeID uuid.UUID, sequence uint64, observed time.Time) Batch {
 func TestValidateBatchRejectsInvalidInputs(t *testing.T) {
 	now := time.Now().UTC()
 	remaining := uint64(math.MaxUint64)
-	fp := make([]byte, sha256.Size)
 	cases := []struct {
 		name   string
 		mutate func(*Batch)
@@ -41,11 +39,11 @@ func TestValidateBatchRejectsInvalidInputs(t *testing.T) {
 		{"duplicate session", func(b *Batch) { b.Sessions = append(b.Sessions, b.Sessions[0]) }},
 		{"duplicate IP ban", func(b *Batch) { b.IPBans = append(b.IPBans, b.IPBans[0]) }},
 		{"duplicate user", func(b *Batch) {
-			u := User{Username: "alice", Enabled: true, Revision: 1, Fingerprint: fp}
+			u := User{Username: "alice", Enabled: true, Revision: 1}
 			b.Users = []User{u, u}
 		}},
 		{"duplicate group", func(b *Batch) {
-			g := Group{Name: "staff", Members: []string{"alice"}, Revision: 1, Fingerprint: fp}
+			g := Group{Name: "staff", Members: []string{"alice"}, Revision: 1}
 			b.Groups = []Group{g, g}
 		}},
 		{"oversized username", func(b *Batch) { b.Sessions[0].Username = strings.Repeat("a", 65) }},
@@ -99,11 +97,11 @@ func TestMaximumUserGroupSnapshotFitsWireAndValidation(t *testing.T) {
 	}
 	for i := range MaxManagedResources {
 		u := maxName("u", i)
-		wire.Users = append(wire.Users, &agentv1.UserObservation{Username: u, Enabled: true, Revision: 1, FingerprintSha256: make([]byte, sha256.Size)})
-		wire.Groups = append(wire.Groups, &agentv1.GroupObservation{GroupName: maxName("g", i), Members: []string{u}, Revision: 1, FingerprintSha256: make([]byte, sha256.Size)})
+		wire.Users = append(wire.Users, &agentv1.UserObservation{Username: u, Enabled: true, Revision: 1})
+		wire.Groups = append(wire.Groups, &agentv1.GroupObservation{GroupName: maxName("g", i), Members: []string{u}, Revision: 1})
 	}
 	for i := MaxManagedResources; i < MaxReportedGroups; i++ {
-		wire.Groups = append(wire.Groups, &agentv1.GroupObservation{GroupName: maxName("g", i), Revision: 1, FingerprintSha256: make([]byte, sha256.Size)})
+		wire.Groups = append(wire.Groups, &agentv1.GroupObservation{GroupName: maxName("g", i), Revision: 1})
 	}
 	payload, err := proto.Marshal(wire)
 	testutil.NoError(t, err)

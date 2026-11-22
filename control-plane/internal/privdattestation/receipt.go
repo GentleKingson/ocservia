@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
@@ -23,18 +23,19 @@ import (
 )
 
 const (
-	receiptDomain       = "ocservia/privd-result-receipt/v1\x00"
-	registrationDomain  = "ocservia/privd-attestation-registration/v1\x00"
-	upgradeResultDomain = "ocservia/privd-upgrade-result/v1\x00"
+	receiptDomain       = "ocservia/privd-result-receipt/cbor.v1\x00"
+	resultPayloadDomain = "ocservia/privd-result-payload/cbor.v1\x00"
+	registrationDomain  = "ocservia/privd-attestation-registration/cbor.v1\x00"
+	upgradeResultDomain = "ocservia/privd-upgrade-result/cbor.v1\x00"
 	keyIDPrefix         = "ed25519-sha256:"
 	maxCanonicalBytes   = 2048
+	maxErrorCodeBytes   = 128
 )
 
 type Verification struct {
 	Status         string
 	FailureReason  string
 	KeyID          string
-	EffectRecordID []byte
 	EffectSequence uint64
 	ReceiptSHA256  []byte
 	EncodedProof   []byte
@@ -84,6 +85,212 @@ var verificationMetricDefinitions = [...]struct {
 	{status: "revoked_key", reason: "receipt_key_revoked"},
 }
 
+type cborCertificateBinding struct {
+	CertificateID   []byte `cbor:"certificate_id"`
+	CSRDerSHA256    []byte `cbor:"csr_der_sha256"`
+	PublicKeySHA256 []byte `cbor:"public_key_sha256"`
+}
+
+type cborReceiptV1 struct {
+	ReceiptVersion             uint32                  `cbor:"receipt_version"`
+	NodeID                     []byte                  `cbor:"node_id"`
+	PrivdAttestationKeyID      string                  `cbor:"privd_attestation_key_id"`
+	CommandID                  []byte                  `cbor:"command_id"`
+	OperationID                []byte                  `cbor:"operation_id"`
+	IdempotencyKey             []byte                  `cbor:"idempotency_key"`
+	SemanticPayloadHashVersion uint32                  `cbor:"semantic_payload_hash_version"`
+	SemanticPayloadSHA256      []byte                  `cbor:"semantic_payload_sha256"`
+	CommandKind                uint32                  `cbor:"command_kind"`
+	ResultKind                 uint32                  `cbor:"result_kind"`
+	TerminalState              uint32                  `cbor:"terminal_state"`
+	ResultCBORSHA256           []byte                  `cbor:"result_cbor_sha256"`
+	ErrorCode                  string                  `cbor:"error_code"`
+	EffectSequence             uint64                  `cbor:"effect_sequence"`
+	AcceptedAtSeconds          int64                   `cbor:"accepted_at_seconds"`
+	AcceptedAtNanos            uint32                  `cbor:"accepted_at_nanos"`
+	CompletedAtSeconds         int64                   `cbor:"completed_at_seconds"`
+	CompletedAtNanos           uint32                  `cbor:"completed_at_nanos"`
+	Replayed                   bool                    `cbor:"replayed"`
+	Certificate                *cborCertificateBinding `cbor:"certificate"`
+}
+
+type cborRegistrationV1 struct {
+	Version                 uint32 `cbor:"version"`
+	NodeID                  []byte `cbor:"node_id"`
+	PrivdAttestationKeyID   string `cbor:"privd_attestation_key_id"`
+	PublicKey               []byte `cbor:"public_key"`
+	ControllerNonce         []byte `cbor:"controller_nonce"`
+	CredentialContextSHA256 []byte `cbor:"credential_context_sha256"`
+}
+
+type cborUpgradeResultProofV1 struct {
+	Version               uint32 `cbor:"version"`
+	NodeID                []byte `cbor:"node_id"`
+	PrivdAttestationKeyID string `cbor:"privd_attestation_key_id"`
+	OperationID           []byte `cbor:"operation_id"`
+	TargetVersion         string `cbor:"target_version"`
+	PackageSHA256         []byte `cbor:"package_sha256"`
+	State                 uint32 `cbor:"state"`
+	CompletedUnixMs       uint64 `cbor:"completed_unix_ms"`
+	ResultSHA256          []byte `cbor:"result_sha256"`
+	AttestedUnixMs        uint64 `cbor:"attested_unix_ms"`
+}
+
+type cborResultPayloadEnvelope struct {
+	ResultKind uint32 `cbor:"result_kind"`
+	Payload    any    `cbor:"payload"`
+}
+
+type cborEmptyResult struct{}
+
+type cborConfigPlanResult struct {
+	CandidateHash    []byte   `cbor:"candidate_hash"`
+	DiffRedacted     string   `cbor:"diff_redacted"`
+	Warnings         []string `cbor:"warnings"`
+	CurrentUnchanged bool     `cbor:"current_unchanged"`
+	StagingCleaned   bool     `cbor:"staging_cleaned"`
+	CurrentHash      []byte   `cbor:"current_hash"`
+	MaterializedHash []byte   `cbor:"materialized_hash"`
+}
+
+type cborConfigApplyResult struct {
+	CandidateHash   []byte `cbor:"candidate_hash"`
+	PreviousHash    []byte `cbor:"previous_hash"`
+	ObservedHash    []byte `cbor:"observed_hash"`
+	AppliedRevision uint64 `cbor:"applied_revision"`
+	Healthy         bool   `cbor:"healthy"`
+	RolledBack      bool   `cbor:"rolled_back"`
+	FailedCritical  bool   `cbor:"failed_critical"`
+	FailureCode     string `cbor:"failure_code"`
+}
+
+type cborCertificateCSRResult struct {
+	CertificateID   []byte `cbor:"certificate_id"`
+	CSRDer          []byte `cbor:"csr_der"`
+	PublicKeySHA256 []byte `cbor:"public_key_sha256"`
+}
+
+type cborCertificateArtifactResult struct {
+	CertificateID  []byte `cbor:"certificate_id"`
+	ArtifactID     []byte `cbor:"artifact_id"`
+	ArtifactSHA256 []byte `cbor:"artifact_sha256"`
+	ArtifactSize   uint64 `cbor:"artifact_size"`
+}
+
+type cborCertificateRevokeResult struct {
+	CertificateID []byte `cbor:"certificate_id"`
+	KeyRemoved    bool   `cbor:"key_removed"`
+}
+
+type cborAgentUpgradeScheduledResult struct {
+	OperationID   []byte `cbor:"operation_id"`
+	TargetVersion string `cbor:"target_version"`
+	PackageSHA256 []byte `cbor:"package_sha256"`
+}
+
+func nonNilBytes(b []byte) []byte {
+	if len(b) == 0 {
+		return []byte{}
+	}
+	return b
+}
+
+func nonNilStrings(s []string) []string {
+	if len(s) == 0 {
+		return []string{}
+	}
+	return s
+}
+
+// ResultPayloadCBORHash computes the canonical CBOR SHA-256 over the structured
+// command result message, independent of Protobuf wire serialization.
+func ResultPayloadCBORHash(kind agentv1.PrivilegedResultKind, raw []byte) ([sha256.Size]byte, error) {
+	var structured any
+	switch kind {
+	case agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_MUTATION,
+		agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_ERROR:
+		if len(raw) != 0 {
+			return [sha256.Size]byte{}, errors.New("unexpected result bytes for empty result kind")
+		}
+		structured = cborEmptyResult{}
+	case agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CONFIG_PLAN:
+		var msg agentv1.ConfigPlanResult
+		if err := proto.Unmarshal(raw, &msg); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		structured = cborConfigPlanResult{
+			CandidateHash:    nonNilBytes(msg.GetCandidateHash()),
+			DiffRedacted:     msg.GetDiffRedacted(),
+			Warnings:         nonNilStrings(msg.GetWarnings()),
+			CurrentUnchanged: msg.GetCurrentUnchanged(),
+			StagingCleaned:   msg.GetStagingCleaned(),
+			CurrentHash:      nonNilBytes(msg.GetCurrentHash()),
+			MaterializedHash: nonNilBytes(msg.GetMaterializedHash()),
+		}
+	case agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CONFIG_APPLY:
+		var msg agentv1.ConfigApplyResult
+		if err := proto.Unmarshal(raw, &msg); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		structured = cborConfigApplyResult{
+			CandidateHash:   nonNilBytes(msg.GetCandidateHash()),
+			PreviousHash:    nonNilBytes(msg.GetPreviousHash()),
+			ObservedHash:    nonNilBytes(msg.GetObservedHash()),
+			AppliedRevision: msg.GetAppliedRevision(),
+			Healthy:         msg.GetHealthy(),
+			RolledBack:      msg.GetRolledBack(),
+			FailedCritical:  msg.GetFailedCritical(),
+			FailureCode:     msg.GetFailureCode(),
+		}
+	case agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_CSR:
+		var msg agentv1.CertificateCsrResult
+		if err := proto.Unmarshal(raw, &msg); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		structured = cborCertificateCSRResult{
+			CertificateID:   nonNilBytes(msg.GetCertificateId()),
+			CSRDer:          nonNilBytes(msg.GetCsrDer()),
+			PublicKeySHA256: nonNilBytes(msg.GetPublicKeySha256()),
+		}
+	case agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_P12:
+		var msg agentv1.CertificateArtifactResult
+		if err := proto.Unmarshal(raw, &msg); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		structured = cborCertificateArtifactResult{
+			CertificateID:  nonNilBytes(msg.GetCertificateId()),
+			ArtifactID:     nonNilBytes(msg.GetArtifactId()),
+			ArtifactSHA256: nonNilBytes(msg.GetArtifactSha256()),
+			ArtifactSize:   msg.GetArtifactSize(),
+		}
+	case agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE:
+		var msg agentv1.CertificateRevokeResult
+		if err := proto.Unmarshal(raw, &msg); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		structured = cborCertificateRevokeResult{
+			CertificateID: nonNilBytes(msg.GetCertificateId()),
+			KeyRemoved:    msg.GetKeyRemoved(),
+		}
+	case agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED:
+		var msg agentv1.AgentUpgradeScheduledResult
+		if err := proto.Unmarshal(raw, &msg); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		structured = cborAgentUpgradeScheduledResult{
+			OperationID:   nonNilBytes(msg.GetOperationId()),
+			TargetVersion: msg.GetTargetVersion(),
+			PackageSHA256: nonNilBytes(msg.GetPackageSha256()),
+		}
+	default:
+		return [sha256.Size]byte{}, errors.New("unsupported privileged result kind")
+	}
+	return canonicalcbor.Hash(resultPayloadDomain, cborResultPayloadEnvelope{
+		ResultKind: uint32(kind),
+		Payload:    structured,
+	})
+}
+
 func VerificationMetrics() []VerificationMetric {
 	metrics := make([]VerificationMetric, 0, len(verificationMetricDefinitions))
 	for index := range verificationMetricDefinitions {
@@ -124,11 +331,8 @@ func transactionKeyLookup(tx database.Tx) keyLookup {
 
 func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) (verification Verification) {
 	defer func() { recordVerificationMetric(verification) }()
-	commandKind := commandKind(envelope)
-	// A Rejected result of a root-executed command has no receipt form, so it is
-	// never trusted evidence that no effect happened. It is verified like a
-	// terminal result and therefore fails closed instead of becoming terminal.
-	if commandKind == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED ||
+	kind := commandKind(envelope)
+	if kind == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED ||
 		(result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED && result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED && result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED) {
 		return Verification{Status: "not_required"}
 	}
@@ -141,7 +345,7 @@ func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envel
 		return Verification{Status: "invalid", FailureReason: "receipt_malformed"}
 	}
 	receipt := proof.GetReceiptV1()
-	if proof.GetVersion() != agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1 || receipt == nil || receipt.GetReceiptVersion() != agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1 {
+	if proof.GetVersion() != 1 || receipt == nil || receipt.GetReceiptVersion() != 1 {
 		return Verification{Status: "invalid", FailureReason: "receipt_version_unsupported", EncodedProof: encoded}
 	}
 	canonical, err := CanonicalReceiptV1(receipt)
@@ -149,8 +353,11 @@ func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envel
 		return Verification{Status: "invalid", FailureReason: "receipt_malformed", EncodedProof: encoded}
 	}
 	verification = Verification{
-		Status: "invalid", FailureReason: "receipt_claim_mismatch", KeyID: receipt.GetPrivdAttestationKeyId(),
-		EffectRecordID: slices.Clone(receipt.GetEffectRecordId()), EffectSequence: receipt.GetEffectSequence(), EncodedProof: encoded,
+		Status:         "invalid",
+		FailureReason:  "receipt_claim_mismatch",
+		KeyID:          receipt.GetPrivdAttestationKeyId(),
+		EffectSequence: receipt.GetEffectSequence(),
+		EncodedProof:   encoded,
 	}
 	if receipt.GetCertificate() != nil {
 		verification.Certificate = proto.Clone(receipt.GetCertificate()).(*agentv1.PrivdCertificateReceiptBindingV1)
@@ -209,10 +416,6 @@ func VerifyUpgradeResultWithLookup(ctx context.Context, lookup func(context.Cont
 	verification.PackageSHA256 = slices.Clone(proof.GetPackageSha256())
 	verification.ResultSHA256 = slices.Clone(proof.GetResultSha256())
 	verification.CompletedAt = time.UnixMilli(int64(proof.GetCompletedUnixMs())).UTC()
-	// Key validity is judged at signature time, not effect completion time:
-	// a key rotated after completion still legitimately attests history it
-	// reads today, which is exactly the reconnect-after-rotation recovery
-	// this evidence exists for.
 	attestedAt := time.UnixMilli(int64(proof.GetAttestedUnixMs())).UTC()
 	if completedAt.IsZero() || completedAt.UnixMilli() < 0 || uint64(completedAt.UnixMilli()) != proof.GetCompletedUnixMs() ||
 		!bytes.Equal(proof.GetNodeId(), nodeID[:]) || !bytes.Equal(proof.GetOperationId(), operationID[:]) ||
@@ -247,22 +450,26 @@ func VerifyUpgradeResultWithLookup(ctx context.Context, lookup func(context.Cont
 }
 
 // CanonicalAgentUpgradeResultProofV1 reconstructs the signed durable outcome
-// transcript independently of Protobuf serialization.
+// transcript using RFC 8949 Core Deterministic CBOR.
 func CanonicalAgentUpgradeResultProofV1(proof *agentv1.AgentUpgradeResultProof) ([]byte, error) {
 	if !validAgentUpgradeResultProof(proof) {
 		return nil, errors.New("agent upgrade result proof is malformed")
 	}
-	output := []byte(upgradeResultDomain)
-	output = appendU32(output, uint32(proof.GetVersion()))
-	output = appendBytes(output, proof.GetNodeId())
-	output = appendBytes(output, []byte(proof.GetPrivdAttestationKeyId()))
-	output = appendBytes(output, proof.GetOperationId())
-	output = appendBytes(output, []byte(proof.GetTargetVersion()))
-	output = appendBytes(output, proof.GetPackageSha256())
-	output = appendU32(output, uint32(proof.GetState()))
-	output = appendU64(output, proof.GetCompletedUnixMs())
-	output = appendBytes(output, proof.GetResultSha256())
-	output = appendU64(output, proof.GetAttestedUnixMs())
+	output, err := canonicalcbor.Marshal(upgradeResultDomain, cborUpgradeResultProofV1{
+		Version:               proof.GetVersion(),
+		NodeID:                proof.GetNodeId(),
+		PrivdAttestationKeyID: proof.GetPrivdAttestationKeyId(),
+		OperationID:           proof.GetOperationId(),
+		TargetVersion:         proof.GetTargetVersion(),
+		PackageSHA256:         proof.GetPackageSha256(),
+		State:                 uint32(proof.GetState()),
+		CompletedUnixMs:       proof.GetCompletedUnixMs(),
+		ResultSHA256:          proof.GetResultSha256(),
+		AttestedUnixMs:        proof.GetAttestedUnixMs(),
+	})
+	if err != nil {
+		return nil, err
+	}
 	if len(output) > maxCanonicalBytes {
 		return nil, errors.New("agent upgrade result proof is oversized")
 	}
@@ -270,7 +477,7 @@ func CanonicalAgentUpgradeResultProofV1(proof *agentv1.AgentUpgradeResultProof) 
 }
 
 func validAgentUpgradeResultProof(proof *agentv1.AgentUpgradeResultProof) bool {
-	if proof == nil || proof.GetVersion() != agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1 ||
+	if proof == nil || proof.GetVersion() != 1 ||
 		!validUUIDv7(proof.GetNodeId()) || !validUUIDv7(proof.GetOperationId()) ||
 		!validKeyID(proof.GetPrivdAttestationKeyId()) ||
 		!semanticpayload.ValidAgentUpgradeTargetVersion(proof.GetTargetVersion()) ||
@@ -290,39 +497,38 @@ func CanonicalReceiptV1(receipt *agentv1.PrivdResultReceiptV1) ([]byte, error) {
 	if !validReceipt(receipt) {
 		return nil, errors.New("privd receipt is malformed")
 	}
-	output := make([]byte, 0, 512)
-	output = append(output, receiptDomain...)
-	output = appendU32(output, uint32(receipt.GetReceiptVersion()))
-	output = appendBytes(output, receipt.GetNodeId())
-	output = appendBytes(output, []byte(receipt.GetPrivdAttestationKeyId()))
-	output = appendBytes(output, receipt.GetCommandId())
-	output = appendBytes(output, receipt.GetOperationId())
-	output = appendBytes(output, receipt.GetIdempotencyKey())
-	output = appendU32(output, uint32(receipt.GetSemanticPayloadHashVersion()))
-	output = appendBytes(output, receipt.GetSemanticPayloadSha256())
-	output = appendU32(output, uint32(receipt.GetCommandKind()))
-	output = appendU32(output, uint32(receipt.GetResultKind()))
-	output = appendU32(output, uint32(receipt.GetTerminalState()))
-	output = appendBytes(output, receipt.GetResultBytesSha256())
-	output = appendBytes(output, receipt.GetErrorCodeSha256())
-	output = appendBytes(output, receipt.GetEffectRecordId())
-	output = appendU64(output, receipt.GetEffectSequence())
-	output = appendTimestamp(output, receipt.GetAcceptedAt())
-	output = appendTimestamp(output, receipt.GetCompletedAt())
-	if receipt.GetReplayed() {
-		output = append(output, 1)
-	} else {
-		output = append(output, 0)
+	var cert *cborCertificateBinding
+	if binding := receipt.GetCertificate(); binding != nil {
+		cert = &cborCertificateBinding{
+			CertificateID:   binding.GetCertificateId(),
+			CSRDerSHA256:    nonNilBytes(binding.GetCsrDerSha256()),
+			PublicKeySHA256: nonNilBytes(binding.GetPublicKeySha256()),
+		}
 	}
-	if certificate := receipt.GetCertificate(); certificate != nil {
-		output = append(output, 1)
-		output = appendBytes(output, certificate.GetCertificateId())
-		output = appendBytes(output, certificate.GetCsrDerSha256())
-		output = appendBytes(output, certificate.GetPublicKeySha256())
-		output = appendBytes(output, certificate.GetRequestedSubjectSha256())
-		output = appendBytes(output, certificate.GetRootEffectRecordId())
-	} else {
-		output = append(output, 0)
+	output, err := canonicalcbor.Marshal(receiptDomain, cborReceiptV1{
+		ReceiptVersion:             receipt.GetReceiptVersion(),
+		NodeID:                     receipt.GetNodeId(),
+		PrivdAttestationKeyID:      receipt.GetPrivdAttestationKeyId(),
+		CommandID:                  receipt.GetCommandId(),
+		OperationID:                receipt.GetOperationId(),
+		IdempotencyKey:             receipt.GetIdempotencyKey(),
+		SemanticPayloadHashVersion: uint32(receipt.GetSemanticPayloadHashVersion()),
+		SemanticPayloadSHA256:      receipt.GetSemanticPayloadSha256(),
+		CommandKind:                uint32(receipt.GetCommandKind()),
+		ResultKind:                 uint32(receipt.GetResultKind()),
+		TerminalState:              uint32(receipt.GetTerminalState()),
+		ResultCBORSHA256:           receipt.GetResultCborSha256(),
+		ErrorCode:                  receipt.GetErrorCode(),
+		EffectSequence:             receipt.GetEffectSequence(),
+		AcceptedAtSeconds:          receipt.GetAcceptedAt().GetSeconds(),
+		AcceptedAtNanos:            uint32(receipt.GetAcceptedAt().GetNanos()),
+		CompletedAtSeconds:         receipt.GetCompletedAt().GetSeconds(),
+		CompletedAtNanos:           uint32(receipt.GetCompletedAt().GetNanos()),
+		Replayed:                   receipt.GetReplayed(),
+		Certificate:                cert,
+	})
+	if err != nil {
+		return nil, err
 	}
 	if len(output) > maxCanonicalBytes {
 		return nil, errors.New("privd receipt canonical form is oversized")
@@ -331,17 +537,17 @@ func CanonicalReceiptV1(receipt *agentv1.PrivdResultReceiptV1) ([]byte, error) {
 }
 
 func CanonicalRegistrationV1(registration *agentv1.PrivdAttestationRegistrationV1) ([]byte, error) {
-	if registration.GetVersion() != agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1 || !validUUIDv7(registration.GetNodeId()) || len(registration.GetPublicKey()) != ed25519.PublicKeySize || len(registration.GetControllerNonce()) != 32 || len(registration.GetCredentialContextSha256()) != 32 || !validKeyID(registration.GetPrivdAttestationKeyId()) || registration.GetPrivdAttestationKeyId() != PublicKeyID(registration.GetPublicKey()) {
+	if registration == nil || registration.GetVersion() != 1 || !validUUIDv7(registration.GetNodeId()) || len(registration.GetPublicKey()) != ed25519.PublicKeySize || len(registration.GetControllerNonce()) != 32 || len(registration.GetCredentialContextSha256()) != 32 || !validKeyID(registration.GetPrivdAttestationKeyId()) || registration.GetPrivdAttestationKeyId() != PublicKeyID(registration.GetPublicKey()) {
 		return nil, errors.New("privd key registration is malformed")
 	}
-	output := []byte(registrationDomain)
-	output = appendU32(output, uint32(registration.GetVersion()))
-	output = appendBytes(output, registration.GetNodeId())
-	output = appendBytes(output, []byte(registration.GetPrivdAttestationKeyId()))
-	output = appendBytes(output, registration.GetPublicKey())
-	output = appendBytes(output, registration.GetControllerNonce())
-	output = appendBytes(output, registration.GetCredentialContextSha256())
-	return output, nil
+	return canonicalcbor.Marshal(registrationDomain, cborRegistrationV1{
+		Version:                 registration.GetVersion(),
+		NodeID:                  registration.GetNodeId(),
+		PrivdAttestationKeyID:   registration.GetPrivdAttestationKeyId(),
+		PublicKey:               registration.GetPublicKey(),
+		ControllerNonce:         registration.GetControllerNonce(),
+		CredentialContextSHA256: registration.GetCredentialContextSha256(),
+	})
 }
 
 func PublicKeyID(publicKey []byte) string {
@@ -349,47 +555,20 @@ func PublicKeyID(publicKey []byte) string {
 	return fmt.Sprintf("%s%x", keyIDPrefix, digest)
 }
 
-func RequestedSubjectDigest(request *agentv1.CertificateCsr) ([]byte, error) {
-	if request == nil || !validUUIDv7(request.GetCertificateId()) || request.GetCommonName() == "" || len(request.GetCommonName()) > 253 || !asciiString(request.GetCommonName()) || request.GetKeyBits() < 2048 || request.GetKeyBits() > 8192 || len(request.GetDnsNames()) > 64 {
-		return nil, errors.New("certificate requested subject is malformed")
-	}
-	names := slices.Clone(request.GetDnsNames())
-	slices.Sort(names)
-	output := []byte("ocservia/certificate-requested-subject/v1\x00")
-	output = appendBytes(output, request.GetCertificateId())
-	output = appendBytes(output, []byte(request.GetCommonName()))
-	output = appendU32(output, request.GetKeyBits())
-	output = appendU32(output, uint32(len(names)))
-	for _, name := range names {
-		if name == "" || len(name) > 253 || !asciiString(name) {
-			return nil, errors.New("certificate requested subject is malformed")
-		}
-		output = appendBytes(output, []byte(name))
-	}
-	digest := sha256.Sum256(output)
-	return digest[:], nil
-}
-
-func asciiString(value string) bool {
-	for index := 0; index < len(value); index++ {
-		if value[index] > 0x7f {
-			return false
-		}
-	}
-	return true
-}
-
 func receiptClaimsMatch(nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult, receipt *agentv1.PrivdResultReceiptV1) bool {
-	resultDigest := sha256.Sum256(result.GetResult())
-	errorDigest := sha256.Sum256([]byte(result.GetErrorCode()))
+	expectedResultKind := resultKind(envelope, result)
+	resultDigest, err := ResultPayloadCBORHash(expectedResultKind, result.GetResult())
+	if err != nil {
+		return false
+	}
 	if !bytes.Equal(receipt.GetNodeId(), nodeID[:]) || !bytes.Equal(receipt.GetNodeId(), envelope.GetNodeId()) ||
 		!bytes.Equal(receipt.GetCommandId(), result.GetCommandId()) || !bytes.Equal(receipt.GetCommandId(), envelope.GetCommandId()) ||
 		!bytes.Equal(receipt.GetOperationId(), envelope.GetOperationId()) ||
 		!bytes.Equal(receipt.GetIdempotencyKey(), result.GetIdempotencyKey()) || !bytes.Equal(receipt.GetIdempotencyKey(), envelope.GetIdempotencyKey()) ||
 		receipt.GetSemanticPayloadHashVersion() != result.GetSemanticPayloadHashVersion() || receipt.GetSemanticPayloadHashVersion() != envelope.GetSemanticPayloadHashVersion() ||
 		!bytes.Equal(receipt.GetSemanticPayloadSha256(), result.GetPayloadSha256()) || !bytes.Equal(receipt.GetSemanticPayloadSha256(), envelope.GetSemanticPayloadSha256()) ||
-		receipt.GetCommandKind() != commandKind(envelope) || receipt.GetResultKind() != resultKind(envelope, result) ||
-		receipt.GetTerminalState() != result.GetState() || !bytes.Equal(receipt.GetResultBytesSha256(), resultDigest[:]) || !bytes.Equal(receipt.GetErrorCodeSha256(), errorDigest[:]) ||
+		receipt.GetCommandKind() != commandKind(envelope) || receipt.GetResultKind() != expectedResultKind ||
+		receipt.GetTerminalState() != result.GetState() || !bytes.Equal(receipt.GetResultCborSha256(), resultDigest[:]) || receipt.GetErrorCode() != result.GetErrorCode() ||
 		!proto.Equal(receipt.GetAcceptedAt(), result.GetAcceptedAt()) || !proto.Equal(receipt.GetCompletedAt(), result.GetCompletedAt()) || receipt.GetReplayed() != result.GetReplayed() ||
 		!receiptWithinCommandWindow(envelope, receipt) {
 		return false
@@ -402,9 +581,6 @@ func receiptWithinCommandWindow(envelope *agentv1.CommandEnvelope, receipt *agen
 	if !validTimestamp(issued) || !validTimestamp(expires) || issued.AsTime().After(expires.AsTime()) {
 		return false
 	}
-	// Agent journal timestamps have whole-second precision. Privd independently
-	// enforces the same lower bound before execution; the expiry bound remains
-	// nanosecond-exact so a retired overlap key cannot backdate a new receipt.
 	return receipt.GetAcceptedAt().GetSeconds() >= issued.GetSeconds() && !receipt.GetCompletedAt().AsTime().After(expires.AsTime())
 }
 
@@ -413,9 +589,9 @@ func certificateClaimsMatch(envelope *agentv1.CommandEnvelope, result *agentv1.C
 	switch request := envelope.GetPayload().(type) {
 	case *agentv1.CommandEnvelope_CertificateCsr:
 		if result.GetState() == agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED {
-			return binding != nil && bytes.Equal(binding.GetCertificateId(), request.CertificateCsr.GetCertificateId()) && bytes.Equal(binding.GetRootEffectRecordId(), receipt.GetEffectRecordId()) && certificateBindingEmpty(binding)
+			return binding != nil && bytes.Equal(binding.GetCertificateId(), request.CertificateCsr.GetCertificateId()) && certificateBindingEmpty(binding)
 		}
-		if binding == nil || !bytes.Equal(binding.GetCertificateId(), request.CertificateCsr.GetCertificateId()) || !bytes.Equal(binding.GetRootEffectRecordId(), result.GetPrivilegedResultProof().GetReceiptV1().GetEffectRecordId()) {
+		if binding == nil || !bytes.Equal(binding.GetCertificateId(), request.CertificateCsr.GetCertificateId()) {
 			return false
 		}
 		var csrResult agentv1.CertificateCsrResult
@@ -423,26 +599,25 @@ func certificateClaimsMatch(envelope *agentv1.CommandEnvelope, result *agentv1.C
 			return false
 		}
 		csrDigest := sha256.Sum256(csrResult.GetCsrDer())
-		subjectDigest, err := RequestedSubjectDigest(request.CertificateCsr)
-		return err == nil && bytes.Equal(binding.GetCsrDerSha256(), csrDigest[:]) && bytes.Equal(binding.GetPublicKeySha256(), csrResult.GetPublicKeySha256()) && bytes.Equal(binding.GetRequestedSubjectSha256(), subjectDigest)
+		return bytes.Equal(binding.GetCsrDerSha256(), csrDigest[:]) && bytes.Equal(binding.GetPublicKeySha256(), csrResult.GetPublicKeySha256())
 	case *agentv1.CommandEnvelope_CertificateP12:
-		return binding != nil && bytes.Equal(binding.GetCertificateId(), request.CertificateP12.GetCertificateId()) && bytes.Equal(binding.GetRootEffectRecordId(), receipt.GetEffectRecordId()) && certificateBindingEmpty(binding)
+		return binding != nil && bytes.Equal(binding.GetCertificateId(), request.CertificateP12.GetCertificateId()) && certificateBindingEmpty(binding)
 	case *agentv1.CommandEnvelope_CertificateRevoke:
-		return binding != nil && bytes.Equal(binding.GetCertificateId(), request.CertificateRevoke.GetCertificateId()) && bytes.Equal(binding.GetRootEffectRecordId(), receipt.GetEffectRecordId()) && certificateBindingEmpty(binding)
+		return binding != nil && bytes.Equal(binding.GetCertificateId(), request.CertificateRevoke.GetCertificateId()) && certificateBindingEmpty(binding)
 	default:
 		return binding == nil
 	}
 }
 
 func certificateBindingEmpty(binding *agentv1.PrivdCertificateReceiptBindingV1) bool {
-	return len(binding.GetCsrDerSha256()) == 0 && len(binding.GetPublicKeySha256()) == 0 && len(binding.GetRequestedSubjectSha256()) == 0
+	return len(binding.GetCsrDerSha256()) == 0 && len(binding.GetPublicKeySha256()) == 0
 }
 
 func validReceipt(receipt *agentv1.PrivdResultReceiptV1) bool {
-	if receipt == nil || receipt.GetReceiptVersion() != agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1 || !validUUIDv7(receipt.GetNodeId()) || !validUUIDv7(receipt.GetCommandId()) || !validUUIDv7(receipt.GetOperationId()) || !validUUIDv7(receipt.GetIdempotencyKey()) || !validKeyID(receipt.GetPrivdAttestationKeyId()) || len(receipt.GetSemanticPayloadSha256()) != 32 || len(receipt.GetResultBytesSha256()) != 32 || len(receipt.GetErrorCodeSha256()) != 32 || len(receipt.GetEffectRecordId()) < 16 || len(receipt.GetEffectRecordId()) > 32 || receipt.GetEffectSequence() == 0 || receipt.GetEffectSequence() > math.MaxInt64 || !validTimestamp(receipt.GetAcceptedAt()) || !validTimestamp(receipt.GetCompletedAt()) || receipt.GetAcceptedAt().AsTime().After(receipt.GetCompletedAt().AsTime()) {
+	if receipt == nil || receipt.GetReceiptVersion() != 1 || !validUUIDv7(receipt.GetNodeId()) || !validUUIDv7(receipt.GetCommandId()) || !validUUIDv7(receipt.GetOperationId()) || !validUUIDv7(receipt.GetIdempotencyKey()) || !validKeyID(receipt.GetPrivdAttestationKeyId()) || len(receipt.GetSemanticPayloadSha256()) != 32 || len(receipt.GetResultCborSha256()) != 32 || len(receipt.GetErrorCode()) > maxErrorCodeBytes || receipt.GetEffectSequence() == 0 || receipt.GetEffectSequence() > math.MaxInt64 || !validTimestamp(receipt.GetAcceptedAt()) || !validTimestamp(receipt.GetCompletedAt()) || receipt.GetAcceptedAt().AsTime().After(receipt.GetCompletedAt().AsTime()) {
 		return false
 	}
-	if receipt.GetSemanticPayloadHashVersion() != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1 && receipt.GetSemanticPayloadHashVersion() != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 || receipt.GetCommandKind() == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED || receipt.GetResultKind() == agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_UNSPECIFIED || receipt.GetTerminalState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED && receipt.GetTerminalState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED {
+	if receipt.GetSemanticPayloadHashVersion() != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 || receipt.GetCommandKind() == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED || receipt.GetResultKind() == agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_UNSPECIFIED || receipt.GetTerminalState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED && receipt.GetTerminalState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED {
 		return false
 	}
 	certificate := receipt.GetCertificate()
@@ -450,13 +625,13 @@ func validReceipt(receipt *agentv1.PrivdResultReceiptV1) bool {
 	if certificate == nil {
 		return !certificateCommand
 	}
-	if !certificateCommand || !validUUIDv7(certificate.GetCertificateId()) || len(certificate.GetRootEffectRecordId()) < 16 || len(certificate.GetRootEffectRecordId()) > 32 {
+	if !certificateCommand || !validUUIDv7(certificate.GetCertificateId()) {
 		return false
 	}
 	if receipt.GetResultKind() == agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_CSR {
-		return len(certificate.GetCsrDerSha256()) == 32 && len(certificate.GetPublicKeySha256()) == 32 && len(certificate.GetRequestedSubjectSha256()) == 32
+		return len(certificate.GetCsrDerSha256()) == 32 && len(certificate.GetPublicKeySha256()) == 32
 	}
-	return len(certificate.GetCsrDerSha256()) == 0 && len(certificate.GetPublicKeySha256()) == 0 && len(certificate.GetRequestedSubjectSha256()) == 0
+	return len(certificate.GetCsrDerSha256()) == 0 && len(certificate.GetPublicKeySha256()) == 0
 }
 
 func commandKind(envelope *agentv1.CommandEnvelope) agentv1.PrivilegedCommandKind {
@@ -529,24 +704,10 @@ func validKeyID(value string) bool {
 	if len(value) != len(keyIDPrefix)+64 || !strings.HasPrefix(value, keyIDPrefix) {
 		return false
 	}
-	for _, value := range value[len(keyIDPrefix):] {
-		if value < '0' || value > '9' && value < 'a' || value > 'f' {
+	for _, ch := range value[len(keyIDPrefix):] {
+		if ch < '0' || ch > '9' && ch < 'a' || ch > 'f' {
 			return false
 		}
 	}
 	return true
-}
-func appendU32(output []byte, value uint32) []byte {
-	return binary.BigEndian.AppendUint32(output, value)
-}
-func appendU64(output []byte, value uint64) []byte {
-	return binary.BigEndian.AppendUint64(output, value)
-}
-func appendBytes(output, value []byte) []byte {
-	output = appendU32(output, uint32(len(value)))
-	return append(output, value...)
-}
-func appendTimestamp(output []byte, value *timestamppb.Timestamp) []byte {
-	output = binary.BigEndian.AppendUint64(output, uint64(value.GetSeconds()))
-	return appendU32(output, uint32(value.GetNanos()))
 }

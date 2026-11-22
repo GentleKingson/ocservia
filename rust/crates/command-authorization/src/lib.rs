@@ -2,7 +2,6 @@
 
 #![forbid(unsafe_code)]
 
-mod fence;
 mod keyring;
 mod semantic_hash;
 #[cfg(test)]
@@ -12,33 +11,20 @@ mod tests;
 use std::fmt;
 
 use ed25519_dalek::VerifyingKey;
+use ocservia_canonical_cbor::{Bytes, marshal};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    ArtifactGrantV1, CommandAuthorizationVersion, CommandEnvelope, SemanticPayloadHashVersion,
-    SessionGrantV1, command_envelope,
+    ArtifactGrantV1, CommandEnvelope, SemanticPayloadHashVersion, SessionGrantV1, command_envelope,
 };
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
-pub use crate::fence::{
-    ConnectionFenceClaimsV2, FENCE_SIGNATURE_VERSION_ED25519_V1, FenceBindingClaimsV2,
-    STATE_UPDATE_OPERATION_DOMAIN, VerifiedConnectionFenceV2, canonical_connection_fence_v2,
-    canonical_fence_binding_v2, connection_fence_claims_v2, fence_binding_claims_v2,
-    state_update_operation_id,
-};
 pub use crate::keyring::{ControllerCommandKeyring, load_verification_key};
-pub use crate::semantic_hash::{
-    semantic_payload_hash_v1, semantic_payload_hash_v2, verify_semantic_payload_hash,
-};
+pub use crate::semantic_hash::{semantic_payload_hash_v2, verify_semantic_payload_hash};
 
 #[cfg(test)]
 use std::os::unix::fs::PermissionsExt as _;
 #[cfg(test)]
 use std::path::Path;
-
-#[cfg(test)]
-use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    ArtifactGrantVersion, ConnectionFenceV2, FenceBindingV2, FenceOperationKind,
-    FenceSignatureVersion, SessionGrantVersion,
-};
 
 #[cfg(test)]
 use crate::keyring::verification_key_metadata_allowed;
@@ -47,11 +33,9 @@ use crate::keyring::verification_key_metadata_allowed;
 pub const COMMAND_PROTOCOL_VERSION: &str = "1.2";
 /// Legacy recovery grants may have lost their original execution deadline.
 pub const LEGACY_COMMAND_PROTOCOL_VERSION: &str = "1.1";
-const DOMAIN_SEPARATOR: &[u8] = b"ocservia/controller-command/v1\0";
-const SESSION_GRANT_DOMAIN_SEPARATOR: &[u8] = b"ocservia/controller-session-grant/v1\0";
-const ARTIFACT_GRANT_DOMAIN_SEPARATOR: &[u8] = b"ocservia/artifact-grant/v1\0";
-pub(crate) const CONNECTION_FENCE_V2_DOMAIN_SEPARATOR: &[u8] = b"ocservia/connection-fence/v2\0";
-pub(crate) const FENCE_BINDING_V2_DOMAIN_SEPARATOR: &[u8] = b"ocservia/fence-binding/v2\0";
+const DOMAIN_SEPARATOR: &str = "ocservia/controller-command/cbor.v1\0";
+const SESSION_GRANT_DOMAIN_SEPARATOR: &str = "ocservia/controller-session-grant/cbor.v1\0";
+const ARTIFACT_GRANT_DOMAIN_SEPARATOR: &str = "ocservia/artifact-grant/cbor.v1\0";
 const KEY_ID_PREFIX: &str = "ed25519-sha256:";
 pub(crate) const MAX_FUTURE_SKEW_SECONDS: i64 = 300;
 
@@ -68,8 +52,6 @@ pub struct CommandAuthorizationV1 {
     pub actor_identity: String,
     pub action: String,
     pub required_capability: String,
-    pub approval_id: Option<[u8; 16]>,
-    pub approval_request_sha256: Option<[u8; 32]>,
     pub expected_revision: u64,
     pub semantic_hash_version: u32,
     pub semantic_payload_sha256: [u8; 32],
@@ -91,6 +73,7 @@ pub struct SessionGrantClaimsV1 {
     pub node_id: [u8; 16],
     pub endpoint_id: [u8; 32],
     pub authorization_revision: u64,
+    pub session_epoch: u64,
     pub negotiated_capabilities: Vec<String>,
     pub issued_at_seconds: i64,
     pub issued_at_nanos: u32,
@@ -122,8 +105,68 @@ pub struct ArtifactGrantClaimsV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedSessionGrant {
     pub authorization_revision: u64,
+    pub session_epoch: u64,
     pub negotiated_capabilities: Vec<String>,
     pub expires_at_seconds: i64,
+}
+
+#[derive(Serialize)]
+struct CborCommandClaimsV1<'a> {
+    version: u32,
+    key_id: &'a str,
+    protocol_version: &'a str,
+    command_id: Bytes<'a>,
+    idempotency_key: Bytes<'a>,
+    node_id: Bytes<'a>,
+    operation_id: Bytes<'a>,
+    actor_identity: &'a str,
+    action: &'a str,
+    required_capability: &'a str,
+    expected_revision: u64,
+    semantic_hash_version: u32,
+    semantic_payload_sha256: Bytes<'a>,
+    payload_kind: u32,
+    delivery_mode: u32,
+    issued_at_seconds: i64,
+    issued_at_nanos: u32,
+    expires_at_seconds: i64,
+    expires_at_nanos: u32,
+}
+
+#[derive(Serialize)]
+struct CborSessionGrantV1<'a> {
+    version: u32,
+    key_id: &'a str,
+    protocol_major: u32,
+    protocol_minor: u32,
+    node_id: Bytes<'a>,
+    endpoint_id: Bytes<'a>,
+    authorization_revision: u64,
+    session_epoch: u64,
+    negotiated_capabilities: &'a [String],
+    issued_at_seconds: i64,
+    issued_at_nanos: u32,
+    expires_at_seconds: i64,
+    expires_at_nanos: u32,
+}
+
+#[derive(Serialize)]
+struct CborArtifactGrantV1<'a> {
+    version: u32,
+    key_id: &'a str,
+    node_id: Bytes<'a>,
+    artifact_id: Bytes<'a>,
+    certificate_id: Bytes<'a>,
+    certificate_version: u64,
+    operation_id: Bytes<'a>,
+    authorized_subject: &'a str,
+    purpose: &'a str,
+    max_bytes: u64,
+    issued_at_seconds: i64,
+    issued_at_nanos: u32,
+    expires_at_seconds: i64,
+    expires_at_nanos: u32,
+    grant_id: Bytes<'a>,
 }
 
 /// A fail-closed authorization validation error.
@@ -188,8 +231,7 @@ pub fn artifact_grant_claims_v1(
             "artifact_grant_expires_at_missing",
         ))?;
     Ok(ArtifactGrantClaimsV1 {
-        version: u32::try_from(grant.version)
-            .map_err(|_| AuthorizationError::UnsupportedVersion)?,
+        version: grant.version,
         key_id: grant.key_id.clone(),
         node_id: fixed::<16>(&grant.node_id, "artifact_grant_node_invalid")?,
         artifact_id: fixed::<16>(&grant.artifact_id, "artifact_grant_artifact_invalid")?,
@@ -207,12 +249,11 @@ pub fn artifact_grant_claims_v1(
     })
 }
 
-/// Produces the exact domain-separated bytes signed for `ArtifactGrantV1`.
+/// Produces the exact RFC 8949 Core Deterministic CBOR bytes signed for `ArtifactGrantV1`.
 ///
 /// # Errors
 ///
-/// Returns an authorization error when a claim is outside the canonical V1
-/// constraints or a variable-width value exceeds the encoding limit.
+/// Returns an authorization error when a claim is outside the canonical V1 constraints.
 pub fn canonical_artifact_grant_v1(
     claims: &ArtifactGrantClaimsV1,
 ) -> Result<Vec<u8>, AuthorizationError> {
@@ -225,6 +266,8 @@ pub fn canonical_artifact_grant_v1(
         || claims.purpose != "certificate_p12"
         || claims.max_bytes == 0
         || claims.max_bytes > 64 * 1024 * 1024
+        || claims.issued_at_nanos >= 1_000_000_000
+        || claims.expires_at_nanos >= 1_000_000_000
         || claims.expires_at_seconds < claims.issued_at_seconds
         || (claims.expires_at_seconds == claims.issued_at_seconds
             && claims.expires_at_nanos <= claims.issued_at_nanos)
@@ -233,24 +276,27 @@ pub fn canonical_artifact_grant_v1(
             "artifact_grant_claims_invalid",
         ));
     }
-    let mut encoded = Vec::with_capacity(512);
-    encoded.extend_from_slice(ARTIFACT_GRANT_DOMAIN_SEPARATOR);
-    encoded.extend_from_slice(&claims.version.to_be_bytes());
-    append_string(&mut encoded, &claims.key_id)?;
-    encoded.extend_from_slice(&claims.node_id);
-    encoded.extend_from_slice(&claims.artifact_id);
-    encoded.extend_from_slice(&claims.certificate_id);
-    encoded.extend_from_slice(&claims.certificate_version.to_be_bytes());
-    encoded.extend_from_slice(&claims.operation_id);
-    append_string(&mut encoded, &claims.authorized_subject)?;
-    append_string(&mut encoded, &claims.purpose)?;
-    encoded.extend_from_slice(&claims.max_bytes.to_be_bytes());
-    encoded.extend_from_slice(&claims.issued_at_seconds.to_be_bytes());
-    encoded.extend_from_slice(&claims.issued_at_nanos.to_be_bytes());
-    encoded.extend_from_slice(&claims.expires_at_seconds.to_be_bytes());
-    encoded.extend_from_slice(&claims.expires_at_nanos.to_be_bytes());
-    encoded.extend_from_slice(&claims.grant_id);
-    Ok(encoded)
+    marshal(
+        ARTIFACT_GRANT_DOMAIN_SEPARATOR,
+        &CborArtifactGrantV1 {
+            version: claims.version,
+            key_id: &claims.key_id,
+            node_id: Bytes(&claims.node_id),
+            artifact_id: Bytes(&claims.artifact_id),
+            certificate_id: Bytes(&claims.certificate_id),
+            certificate_version: claims.certificate_version,
+            operation_id: Bytes(&claims.operation_id),
+            authorized_subject: &claims.authorized_subject,
+            purpose: &claims.purpose,
+            max_bytes: claims.max_bytes,
+            issued_at_seconds: claims.issued_at_seconds,
+            issued_at_nanos: claims.issued_at_nanos,
+            expires_at_seconds: claims.expires_at_seconds,
+            expires_at_nanos: claims.expires_at_nanos,
+            grant_id: Bytes(&claims.grant_id),
+        },
+    )
+    .map_err(|_| AuthorizationError::ClaimsInvalid("artifact_grant_claims_invalid"))
 }
 
 /// Projects a Protobuf carrier into the independent session grant claims.
@@ -274,14 +320,14 @@ pub fn session_grant_claims_v1(
             "session_grant_expires_at_missing",
         ))?;
     Ok(SessionGrantClaimsV1 {
-        version: u32::try_from(grant.version)
-            .map_err(|_| AuthorizationError::UnsupportedVersion)?,
+        version: grant.version,
         key_id: grant.key_id.clone(),
         protocol_major: grant.protocol_major,
         protocol_minor: grant.protocol_minor,
         node_id: fixed::<16>(&grant.node_id, "session_grant_node_invalid")?,
         endpoint_id: fixed::<32>(&grant.endpoint_id, "session_grant_endpoint_invalid")?,
         authorization_revision: grant.authorization_revision,
+        session_epoch: grant.session_epoch,
         negotiated_capabilities: grant.negotiated_capabilities.clone(),
         issued_at_seconds: issued_at.seconds,
         issued_at_nanos: timestamp_nanos(issued_at.nanos)?,
@@ -290,12 +336,12 @@ pub fn session_grant_claims_v1(
     })
 }
 
-/// Produces the exact bytes signed for `SessionGrantV1` without serializing Protobuf.
+/// Produces the exact RFC 8949 Core Deterministic CBOR bytes signed for `SessionGrantV1`.
 ///
 /// # Errors
 ///
-/// Rejects invalid versions, revisions, timestamps, key IDs, or unsorted and
-/// duplicate capabilities.
+/// Rejects invalid versions, revisions, epochs, timestamps, key IDs, or unsorted
+/// and duplicate capabilities.
 pub fn canonical_session_grant_v1(
     claims: &SessionGrantClaimsV1,
 ) -> Result<Vec<u8>, AuthorizationError> {
@@ -303,7 +349,10 @@ pub fn canonical_session_grant_v1(
         || claims.key_id.is_empty()
         || claims.protocol_major == 0
         || claims.authorization_revision == 0
+        || claims.session_epoch == 0
         || claims.negotiated_capabilities.len() > 128
+        || claims.issued_at_nanos >= 1_000_000_000
+        || claims.expires_at_nanos >= 1_000_000_000
         || claims.expires_at_seconds < claims.issued_at_seconds
         || (claims.expires_at_seconds == claims.issued_at_seconds
             && claims.expires_at_nanos <= claims.issued_at_nanos)
@@ -324,28 +373,25 @@ pub fn canonical_session_grant_v1(
         }
         previous = Some(capability);
     }
-    let mut encoded = Vec::with_capacity(512);
-    encoded.extend_from_slice(SESSION_GRANT_DOMAIN_SEPARATOR);
-    encoded.extend_from_slice(&claims.version.to_be_bytes());
-    append_string(&mut encoded, &claims.key_id)?;
-    encoded.extend_from_slice(&claims.protocol_major.to_be_bytes());
-    encoded.extend_from_slice(&claims.protocol_minor.to_be_bytes());
-    encoded.extend_from_slice(&claims.node_id);
-    encoded.extend_from_slice(&claims.endpoint_id);
-    encoded.extend_from_slice(&claims.authorization_revision.to_be_bytes());
-    encoded.extend_from_slice(
-        &u32::try_from(claims.negotiated_capabilities.len())
-            .map_err(|_| AuthorizationError::ClaimsInvalid("session_grant_capabilities_invalid"))?
-            .to_be_bytes(),
-    );
-    for capability in &claims.negotiated_capabilities {
-        append_string(&mut encoded, capability)?;
-    }
-    encoded.extend_from_slice(&claims.issued_at_seconds.to_be_bytes());
-    encoded.extend_from_slice(&claims.issued_at_nanos.to_be_bytes());
-    encoded.extend_from_slice(&claims.expires_at_seconds.to_be_bytes());
-    encoded.extend_from_slice(&claims.expires_at_nanos.to_be_bytes());
-    Ok(encoded)
+    marshal(
+        SESSION_GRANT_DOMAIN_SEPARATOR,
+        &CborSessionGrantV1 {
+            version: claims.version,
+            key_id: &claims.key_id,
+            protocol_major: claims.protocol_major,
+            protocol_minor: claims.protocol_minor,
+            node_id: Bytes(&claims.node_id),
+            endpoint_id: Bytes(&claims.endpoint_id),
+            authorization_revision: claims.authorization_revision,
+            session_epoch: claims.session_epoch,
+            negotiated_capabilities: &claims.negotiated_capabilities,
+            issued_at_seconds: claims.issued_at_seconds,
+            issued_at_nanos: claims.issued_at_nanos,
+            expires_at_seconds: claims.expires_at_seconds,
+            expires_at_nanos: claims.expires_at_nanos,
+        },
+    )
+    .map_err(|_| AuthorizationError::ClaimsInvalid("session_grant_claims_invalid"))
 }
 
 /// Returns the stable key ID carried in authorization proofs.
@@ -360,7 +406,6 @@ pub fn verification_key_id(key: &VerifyingKey) -> String {
 /// # Errors
 ///
 /// Rejects incomplete claims, wrong action/capability bindings, and unsupported payloads.
-#[allow(clippy::too_many_lines)]
 pub fn claims_from_envelope_v1(
     envelope: &CommandEnvelope,
 ) -> Result<CommandAuthorizationV1, AuthorizationError> {
@@ -368,10 +413,7 @@ pub fn claims_from_envelope_v1(
         .authorization
         .as_ref()
         .ok_or(AuthorizationError::Missing)?;
-    if CommandAuthorizationVersion::try_from(proof.version)
-        .unwrap_or(CommandAuthorizationVersion::Unspecified)
-        != CommandAuthorizationVersion::V1
-    {
+    if proof.version != 1 {
         return Err(AuthorizationError::UnsupportedVersion);
     }
     if envelope.protocol_version != COMMAND_PROTOCOL_VERSION
@@ -422,27 +464,16 @@ pub fn claims_from_envelope_v1(
             "command_authorization_time_order_invalid",
         ));
     }
-    if !matches!(
-        SemanticPayloadHashVersion::try_from(envelope.semantic_payload_hash_version)
-            .unwrap_or(SemanticPayloadHashVersion::Unspecified),
-        SemanticPayloadHashVersion::V1 | SemanticPayloadHashVersion::V2
-    ) {
+    if SemanticPayloadHashVersion::try_from(envelope.semantic_payload_hash_version)
+        .unwrap_or(SemanticPayloadHashVersion::Unspecified)
+        != SemanticPayloadHashVersion::V2
+    {
         return Err(AuthorizationError::ClaimsInvalid(
             "semantic_hash_version_unsupported",
         ));
     }
     if envelope.delivery_mode == 0 {
         return Err(AuthorizationError::ClaimsInvalid("delivery_mode_invalid"));
-    }
-    let approval_id = optional_fixed::<16>(&envelope.approval_id, "approval_id_invalid")?;
-    let approval_request_sha256 = optional_fixed::<32>(
-        &envelope.approval_request_sha256,
-        "approval_request_hash_invalid",
-    )?;
-    if approval_request_sha256.is_some() && approval_id.is_none() {
-        return Err(AuthorizationError::ClaimsInvalid(
-            "approval_request_hash_without_id",
-        ));
     }
     Ok(CommandAuthorizationV1 {
         authorization_version: 1,
@@ -455,8 +486,6 @@ pub fn claims_from_envelope_v1(
         actor_identity: envelope.actor_id.clone(),
         action: envelope.action.clone(),
         required_capability: envelope.required_capability.clone(),
-        approval_id,
-        approval_request_sha256,
         expected_revision: envelope.expected_revision,
         semantic_hash_version: u32::try_from(envelope.semantic_payload_hash_version)
             .map_err(|_| AuthorizationError::ClaimsInvalid("semantic_hash_version_invalid"))?,
@@ -474,11 +503,11 @@ pub fn claims_from_envelope_v1(
     })
 }
 
-/// Encodes exact `CommandAuthorizationV1` signing bytes without Protobuf serialization.
+/// Encodes exact `CommandAuthorizationV1` signing bytes using RFC 8949 Core Deterministic CBOR.
 ///
 /// # Errors
 ///
-/// Rejects incomplete claims and values that cannot be represented by the frozen layout.
+/// Rejects incomplete claims and values outside the v1 bounds.
 pub fn canonical_v1(claims: &CommandAuthorizationV1) -> Result<Vec<u8>, AuthorizationError> {
     if claims.authorization_version != 1
         || claims.key_id.is_empty()
@@ -494,36 +523,36 @@ pub fn canonical_v1(claims: &CommandAuthorizationV1) -> Result<Vec<u8>, Authoriz
         || claims.expires_at_seconds < claims.issued_at_seconds
         || (claims.expires_at_seconds == claims.issued_at_seconds
             && claims.expires_at_nanos <= claims.issued_at_nanos)
-        || (claims.approval_request_sha256.is_some() && claims.approval_id.is_none())
     {
         return Err(AuthorizationError::ClaimsInvalid(
             "command_authorization_claims_invalid",
         ));
     }
-    let mut encoded = Vec::with_capacity(512);
-    encoded.extend_from_slice(DOMAIN_SEPARATOR);
-    encoded.extend_from_slice(&claims.authorization_version.to_be_bytes());
-    append_string(&mut encoded, &claims.key_id)?;
-    append_string(&mut encoded, &claims.protocol_version)?;
-    encoded.extend_from_slice(&claims.command_id);
-    encoded.extend_from_slice(&claims.idempotency_key);
-    encoded.extend_from_slice(&claims.node_id);
-    encoded.extend_from_slice(&claims.operation_id);
-    append_string(&mut encoded, &claims.actor_identity)?;
-    append_string(&mut encoded, &claims.action)?;
-    append_string(&mut encoded, &claims.required_capability)?;
-    append_optional(&mut encoded, claims.approval_id.as_ref());
-    append_optional(&mut encoded, claims.approval_request_sha256.as_ref());
-    encoded.extend_from_slice(&claims.expected_revision.to_be_bytes());
-    encoded.extend_from_slice(&claims.semantic_hash_version.to_be_bytes());
-    encoded.extend_from_slice(&claims.semantic_payload_sha256);
-    encoded.extend_from_slice(&claims.payload_kind.to_be_bytes());
-    encoded.extend_from_slice(&claims.delivery_mode.to_be_bytes());
-    encoded.extend_from_slice(&claims.issued_at_seconds.to_be_bytes());
-    encoded.extend_from_slice(&claims.issued_at_nanos.to_be_bytes());
-    encoded.extend_from_slice(&claims.expires_at_seconds.to_be_bytes());
-    encoded.extend_from_slice(&claims.expires_at_nanos.to_be_bytes());
-    Ok(encoded)
+    marshal(
+        DOMAIN_SEPARATOR,
+        &CborCommandClaimsV1 {
+            version: claims.authorization_version,
+            key_id: &claims.key_id,
+            protocol_version: &claims.protocol_version,
+            command_id: Bytes(&claims.command_id),
+            idempotency_key: Bytes(&claims.idempotency_key),
+            node_id: Bytes(&claims.node_id),
+            operation_id: Bytes(&claims.operation_id),
+            actor_identity: &claims.actor_identity,
+            action: &claims.action,
+            required_capability: &claims.required_capability,
+            expected_revision: claims.expected_revision,
+            semantic_hash_version: claims.semantic_hash_version,
+            semantic_payload_sha256: Bytes(&claims.semantic_payload_sha256),
+            payload_kind: claims.payload_kind,
+            delivery_mode: claims.delivery_mode,
+            issued_at_seconds: claims.issued_at_seconds,
+            issued_at_nanos: claims.issued_at_nanos,
+            expires_at_seconds: claims.expires_at_seconds,
+            expires_at_nanos: claims.expires_at_nanos,
+        },
+    )
+    .map_err(|_| AuthorizationError::ClaimsInvalid("command_authorization_claims_invalid"))
 }
 
 fn payload_authorization(
@@ -600,23 +629,6 @@ fn payload_authorization(
     })
 }
 
-pub(crate) fn append_string(target: &mut Vec<u8>, value: &str) -> Result<(), AuthorizationError> {
-    let length = u32::try_from(value.len())
-        .map_err(|_| AuthorizationError::ClaimsInvalid("command_authorization_string_too_large"))?;
-    target.extend_from_slice(&length.to_be_bytes());
-    target.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-
-fn append_optional<const N: usize>(target: &mut Vec<u8>, value: Option<&[u8; N]>) {
-    if let Some(value) = value {
-        target.push(1);
-        target.extend_from_slice(value);
-    } else {
-        target.push(0);
-    }
-}
-
 pub(crate) fn fixed<const N: usize>(
     value: &[u8],
     code: &'static str,
@@ -624,16 +636,6 @@ pub(crate) fn fixed<const N: usize>(
     value
         .try_into()
         .map_err(|_| AuthorizationError::ClaimsInvalid(code))
-}
-
-fn optional_fixed<const N: usize>(
-    value: &[u8],
-    code: &'static str,
-) -> Result<Option<[u8; N]>, AuthorizationError> {
-    if value.is_empty() {
-        return Ok(None);
-    }
-    fixed(value, code).map(Some)
 }
 
 pub(crate) fn timestamp_nanos(value: i32) -> Result<u32, AuthorizationError> {

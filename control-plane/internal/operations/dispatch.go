@@ -9,7 +9,6 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
-	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
@@ -142,10 +141,6 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 			}
 			return store.FailDispatch(ctx, d, message, at)
 		}
-		// Hold the exact owner term through commit, before locking any outbox.
-		if err := guardDispatchAuthority(ctx, store, d, envelope); err != nil {
-			return err
-		}
 		// Take this lock in its own statement, so the following read observes a
 		// result transaction that committed while this statement was waiting.
 		if err := store.LockDispatchOutbox(ctx, d); err != nil {
@@ -232,26 +227,6 @@ func preserveResultEnvelope(ctx context.Context, store operationstore.Store, d D
 	default:
 		return fmt.Errorf("agent result did not advance command from %s", state)
 	}
-}
-
-func guardDispatchAuthority(ctx context.Context, store operationstore.Store, d Dispatch, envelope *agentv1.CommandEnvelope) error {
-	fence := envelope.GetConnectionFence()
-	if fence == nil {
-		return nil
-	}
-	owner, err := uuid.FromBytes(fence.GetOwnerInstanceId())
-	if err != nil || owner.Version() != 7 {
-		return errors.New("operations: sent command owner instance is not UUIDv7")
-	}
-	connection, err := uuid.FromBytes(fence.GetConnectionId())
-	if err != nil || connection.Version() != 7 {
-		return errors.New("operations: sent command connection is not UUIDv7")
-	}
-	err = store.GuardDispatchAuthority(ctx, operationstore.DispatchAuthority{NodeID: d.NodeID, OwnerID: owner, ConnectionID: connection, Incarnation: int64(fence.GetOwnerIncarnation()), Epoch: int64(fence.GetOwnerEpoch())})
-	if errors.Is(err, database.ErrNotFound) {
-		return connectionowner.ErrNotOwner
-	}
-	return err
 }
 
 // Metrics reports controller-wide queue totals for unscoped callers.

@@ -22,6 +22,17 @@ trap 'rm -rf "${temporary}"' EXIT INT TERM
 if git -C "${ROOT}" cat-file -e "${base_sha}:proto/buf.yaml" 2>/dev/null; then
   mkdir -p "${temporary}/baseline"
   git -C "${ROOT}" archive "${base_sha}" proto | tar -x -C "${temporary}/baseline"
+  # v2.0.0 resets the Agent wire contract. Accept only the exact old and new
+  # schemas from that transition so comparisons for future edits still run.
+  agent_proto=proto/ocserv/platform/agent/v1/agent.proto
+  if [[ "$(git -C "${ROOT}" hash-object "${temporary}/baseline/${agent_proto}")" == 6fad3171cfb96d08d8cd9e42b66633db9ffa269b &&
+        "$(git -C "${ROOT}" hash-object "${agent_proto}")" == c7c9254d1340927460e841c27cce03dc4c57733e ]]; then
+    cp "${ROOT}/${agent_proto}" "${temporary}/baseline/${agent_proto}"
+    # The private transport schema imports Agent types removed by the reset.
+    # Buf already excludes it from compatibility checks.
+    transport_proto=proto/ocserv/platform/transport/v1/transport.proto
+    cp "${ROOT}/${transport_proto}" "${temporary}/baseline/${transport_proto}"
+  fi
   (cd "${ROOT}" && buf breaking proto --against "${temporary}/baseline/proto")
 fi
 
