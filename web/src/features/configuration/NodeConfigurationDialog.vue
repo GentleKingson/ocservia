@@ -256,7 +256,7 @@ defineExpose({ open: openConfigPlan, close, currentConfigRevision });
         </li>
       </ul>
       <p
-        v-if="!actionAvailable('config.apply')"
+        v-if="actionExplanation('config.apply')"
         class="text-muted-foreground m-0 text-xs"
       >
         {{ $t("apply") }}: {{ actionExplanation("config.apply") }}

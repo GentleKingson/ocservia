@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { ArrowLeft } from "@lucide/vue";
-import { ResponseError, type AgentRolloutNode } from "@ocservia/api-client";
+import {
+  FetchError,
+  ResponseError,
+  type AgentRolloutNode,
+} from "@ocservia/api-client";
 import {
   computed,
   onBeforeUnmount,
@@ -158,8 +162,17 @@ async function refresh(): Promise<void> {
     if (!activeStates.has(value.state)) foregroundRefresh.stop();
   } catch (cause) {
     if (!request.current(context)) return;
-    notFound.value =
-      cause instanceof ResponseError && cause.response.status === 404;
+    const status = cause instanceof ResponseError ? cause.response.status : 0;
+    const retryable = cause instanceof FetchError || status >= 500;
+    if (
+      !retryable ||
+      !loadedContext ||
+      !sameWorkspaceContext(workspaceContext(), loadedContext)
+    ) {
+      rollout.value = undefined;
+      loadedContext = undefined;
+    }
+    notFound.value = status === 404;
     unavailable.value = !notFound.value;
   } finally {
     if (request.finish()) {
@@ -171,7 +184,14 @@ async function refresh(): Promise<void> {
 async function resume(): Promise<void> {
   const value = rollout.value;
   const context = loadedContext;
-  if (!value || !context || resuming.value || resumeBlocked.value) return;
+  if (
+    !value ||
+    !context ||
+    unavailable.value ||
+    resuming.value ||
+    resumeBlocked.value
+  )
+    return;
   invalidate();
   const ticket = sequence;
   if (!current(context, ticket)) return;
@@ -239,11 +259,18 @@ onBeforeUnmount(() => {
       :message="$t('rolloutNotFound')"
     />
     <DataState
-      v-else-if="unavailable || !rollout"
+      v-else-if="!rollout"
       kind="error"
       :message="$t('rolloutUnavailable')"
     />
     <template v-else>
+      <p
+        v-if="unavailable"
+        class="m-0 mb-3 text-sm text-amber-800"
+        role="status"
+      >
+        {{ $t("overviewStaleSource") }}
+      </p>
       <section
         class="bg-card border-border mb-6 rounded-xl border p-4 shadow-xs md:p-5"
         :aria-label="$t('rollingUpgrade')"
@@ -312,7 +339,7 @@ onBeforeUnmount(() => {
         </div>
         <Button
           type="button"
-          :disabled="resuming || resumeBlocked"
+          :disabled="unavailable || resuming || resumeBlocked"
           @click="resume"
         >
           {{ $t("resumeRollout") }}

@@ -237,7 +237,7 @@ function openPolicy(username: string): void {
             </Button>
           </div>
           <p
-            v-if="!actionAvailable('service.reload')"
+            v-if="actionExplanation('service.reload')"
             class="text-muted-foreground m-0 text-xs"
           >
             {{ $t("reload") }}: {{ actionExplanation("service.reload") }}
@@ -401,7 +401,7 @@ function openPolicy(username: string): void {
           </Button>
         </div>
         <p
-          v-if="!actionAvailable('config.plan')"
+          v-if="actionExplanation('config.plan')"
           class="text-muted-foreground m-0 text-xs"
         >
           {{ actionExplanation("config.plan") }}
@@ -426,7 +426,7 @@ function openPolicy(username: string): void {
           </Button>
         </div>
         <p
-          v-if="!actionAvailable('certificate.issue')"
+          v-if="actionExplanation('certificate.issue')"
           class="text-muted-foreground m-0 text-xs"
         >
           {{ actionExplanation("certificate.issue") }}
