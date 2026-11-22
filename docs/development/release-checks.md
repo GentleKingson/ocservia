@@ -299,6 +299,7 @@ that, prepare only what the entrypoint you run requires:
 
 | Entrypoint | Additional host dependencies |
 | --- | --- |
+| `bootstrap.sh all` (protoc extraction) | `unzip` when the pinned `protoc` is missing or needs replacement |
 | `bootstrap.sh go-test` | curl with trusted CA certificates, tar, gzip, sed, awk, `sha256sum` or `shasum`, jq |
 | `go-check.sh standard` | Installed Go/gofmt |
 | `docs-check.sh` | Git and `jq`; no toolchain or platform self-tests |

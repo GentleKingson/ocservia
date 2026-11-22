@@ -7,6 +7,7 @@ backend-policy-userstate internal/userstate TestUserStateBackendIntegration
 backend-policy-useroperations internal/useroperations TestUserOperationsBackendIntegration
 backend-policy-useroperations internal/useroperations TestEnforcementCleanupBackendIntegration
 backend-policy-api internal/api TestControllerReadsBackendHTTPIntegration
+backend-policy-api internal/api TestCertificateCreateOptionalDNSNamesIntegration
 backend-policy-api internal/api TestAgentUpgradeBackendHTTPIntegration
 backend-policy-api internal/api TestConfigPlanApplyBackendHTTPIntegration
 backend-policy-api internal/api TestPlanRoutesBackendHTTPIntegration
