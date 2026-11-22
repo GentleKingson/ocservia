@@ -59,6 +59,7 @@ fi
 # This smoke drives real host installation state; refuse to run anywhere that
 # already carries an Agent installation so cleanup can stay scoped.
 if sudo test -e /usr/libexec/ocservia || sudo test -e /etc/ocservia-agent || \
+  sudo test -e /var/lib/ocservia-vpn-audit || sudo test -L /var/lib/ocservia-vpn-audit || \
   mountpoint -q /var/lib/ocservia-upgrade || \
   getent passwd ocserv-agent >/dev/null 2>&1 || \
   sudo dpkg-query -W -f='${Status}' ocservia-agent 2>/dev/null | grep -q "install ok installed"; then
@@ -105,7 +106,7 @@ cleanup() {
       sudo dpkg --remove --force-remove ocservia-agent || true
   } >"${ARTIFACT_DIR}/cleanup-apt-remove.log" 2>&1
   sudo rm -rf -- /etc/ocservia-agent /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
-    /var/lib/ocservia-privd /usr/share/ocservia-agent /usr/libexec/ocservia \
+    /var/lib/ocservia-privd /var/lib/ocservia-vpn-audit /usr/share/ocservia-agent /usr/libexec/ocservia \
     /usr/lib/systemd/system/ocservia-agent.service /usr/lib/systemd/system/ocservia-privd.service \
     /usr/lib/systemd/system/ocservia-upgrader@.service \
     /usr/lib/systemd/system/ocservia-agent.service.d || status=1
@@ -244,6 +245,22 @@ assert_installed_state() {
 
 { sudo dpkg -i "${deb_old}"; } >"${ARTIFACT_DIR}/deb-install.log" 2>&1
 assert_installed_state "deb install" "${old_version}"
+[[ "$(sudo systemctl is-active ocservia-network-audit.service || true)" == "inactive" ]]
+[[ "$(sudo stat -c '%U:%G:%a' /var/lib/ocservia-vpn-audit)" == "ocserv-agent:ocserv-agent:700" ]]
+for reason in connect disconnect; do
+  sudo env REASON="${reason}" ID=smoke-session USERNAME=smoke-user \
+    IP_REAL=192.0.2.10 IP_REMOTE=10.0.0.10 /usr/libexec/ocservia/vpn-session-hook
+done
+sudo -u ocserv-agent python3 - <<'PY'
+import json
+import sqlite3
+
+with sqlite3.connect("file:/var/lib/ocservia-vpn-audit/events.sqlite?mode=ro", uri=True) as db:
+    events = [json.loads(body) for (body,) in db.execute("SELECT body FROM pending ORDER BY rowid")]
+    assert [(event["event_type"], event["session_id"]) for event in events] == [
+        ("connect", "smoke-session"), ("disconnect", "smoke-session"),
+    ], events
+PY
 sudo test ! -e /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
   || { echo "deb install: production relay drop-in installed without a production request" >&2; exit 1; }
 sudo test ! -e /etc/ocservia-agent/relays.env \
@@ -400,7 +417,7 @@ getent passwd ocserv-agent >/dev/null \
 echo "deb removal state preservation passed"
 
 sudo rm -rf -- /etc/ocservia-agent /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
-  /var/lib/ocservia-privd
+  /var/lib/ocservia-privd /var/lib/ocservia-vpn-audit
 sudo userdel ocserv-agent
 # userdel removes the primary group with the user when login.defs enables
 # USERGROUPS_ENAB, so the explicit group cleanup is best effort here.
@@ -477,7 +494,7 @@ echo "deb production reinstall identity reuse passed"
 sudo apt-get remove -y ocservia-agent >/dev/null 2>&1 \
   || sudo dpkg --remove --force-remove ocservia-agent >/dev/null 2>&1 || true
 sudo rm -rf -- /etc/ocservia-agent /etc/ocservia /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
-  /var/lib/ocservia-privd /usr/share/ocservia-agent /usr/libexec/ocservia \
+  /var/lib/ocservia-privd /var/lib/ocservia-vpn-audit /usr/share/ocservia-agent /usr/libexec/ocservia \
   /usr/lib/systemd/system/ocservia-agent.service /usr/lib/systemd/system/ocservia-privd.service \
   /usr/lib/systemd/system/ocservia-upgrader@.service /usr/lib/systemd/system/ocservia-agent.service.d
 sudo userdel ocserv-agent 2>/dev/null || true
@@ -516,7 +533,7 @@ sudo test ! -e /etc/ocservia/agent-install-production-relays \
 echo "deb stale production request retirement passed"
 
 sudo rm -rf -- /etc/ocservia-agent /etc/ocservia /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
-  /var/lib/ocservia-privd /usr/share/ocservia-agent
+  /var/lib/ocservia-privd /var/lib/ocservia-vpn-audit /usr/share/ocservia-agent
 sudo userdel ocserv-agent 2>/dev/null || true
 sudo groupdel ocserv-agent 2>/dev/null || true
 sudo systemctl daemon-reload
@@ -532,7 +549,7 @@ echo "deb plain install after retirement passed"
 sudo apt-get remove -y ocservia-agent >/dev/null 2>&1 \
   || sudo dpkg --remove --force-remove ocservia-agent >/dev/null 2>&1 || true
 sudo rm -rf -- /etc/ocservia-agent /etc/ocservia /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
-  /var/lib/ocservia-privd /usr/share/ocservia-agent
+  /var/lib/ocservia-privd /var/lib/ocservia-vpn-audit /usr/share/ocservia-agent
 sudo userdel ocserv-agent 2>/dev/null || true
 sudo groupdel ocserv-agent 2>/dev/null || true
 sudo systemctl daemon-reload

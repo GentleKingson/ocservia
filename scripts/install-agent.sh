@@ -229,8 +229,7 @@ if [[ -e "${audit_dir}" || -L "${audit_dir}" ]]; then
     echo "existing VPN audit spool has unsafe ownership or mode" >&2
     exit 1
   }
-elif [[ -n "${DESTDIR}" ]]; then
-  # On live nodes systemd creates the private spool when either service starts.
+else
   install -d -m 0700 -o "${agent_owner}" -g "${agent_group}" -- "${audit_dir}"
 fi
 ensure_root_directory "${DESTDIR}${PRIVD_STATE_DIR}" "${agent_group}" "${AGENT_GID}" 0700
