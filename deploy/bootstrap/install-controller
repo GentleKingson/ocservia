@@ -15,7 +15,7 @@ usage() {
   echo "No arguments: interactive wizard (TTY required). --non-interactive: unattended, no prompts." >&2
   echo "Options: --config PATH (default ./install.env), --version vX.Y.Z (Release default embedded)." >&2
   echo "usage: install-controller --version vX.Y.Z [--root-lifecycle] [--check]" >&2
-  echo "       install-controller --quick --controller-domain NAME --relay-domain NAME --acme-email ADDRESS" >&2
+  echo "       install-controller --quick --controller-domain NAME [--relay-domain NAME] --acme-email ADDRESS" >&2
   echo "         [--version vX.Y.Z] [--root-ca-passphrase-file PATH] [--root-ca-export-dir PATH] [--check]" >&2
   exit 2
 }
@@ -104,10 +104,13 @@ main() {
     esac
   done
   if [[ "${quick}" == true ]]; then
-    [[ -n "${controller_domain}" && -n "${relay_domain}" && -n "${acme_email}" ]] || usage
+    [[ -n "${controller_domain}" && -n "${acme_email}" ]] || usage
+    if [[ -z "${relay_domain}" ]]; then
+      relay_domain="${controller_domain}"
+      installer_args+=(--relay-domain "${relay_domain}")
+    fi
     valid_domain "${controller_domain}" || fail "--controller-domain must be a lowercase DNS name"
     valid_domain "${relay_domain}" || fail "--relay-domain must be a lowercase DNS name"
-    [[ "${controller_domain}" != "${relay_domain}" ]] || fail "the Controller and Relay domains must differ"
     [[ ${#acme_email} -le 254 && "${acme_email}" =~ ^[A-Za-z0-9._%+-]+@[a-z0-9.-]+[.][a-z]+$ ]] ||
       fail "--acme-email must be a plain email address"
     for option in "${passphrase_file}" "${export_dir}"; do

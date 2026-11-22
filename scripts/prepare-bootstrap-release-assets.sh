@@ -74,7 +74,8 @@ if [[ -n "${release_tag}" ]]; then
   done
   files+=(deploy/production/Caddyfile deploy/production/postgresql.conf deploy/production/otel-collector.yaml
     deploy/production/integrated/Caddyfile deploy/production/integrated/Caddyfile.acme
-    deploy/production/integrated/site.caddy deploy/production/integrated/relay.acme.toml
+    deploy/production/integrated/site.caddy deploy/production/integrated/relay.caddy
+    deploy/production/integrated/relay.acme.toml deploy/production/integrated/relay.shared-acme.toml
     deploy/production/relay/compose.sh deploy/production/relay/compose.yaml deploy/production/relay/relay.toml deploy/production/postgres-init/001-runtime-role.sh install.env.example)
   for file in "${files[@]}"; do
     [[ -n "${file}" ]] || continue

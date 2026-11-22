@@ -37,7 +37,7 @@ usage() {
   echo "No arguments: interactive wizard (TTY required). --non-interactive: unattended, no prompts." >&2
   echo "Options: --config PATH (default ./install.env), --version vX.Y.Z (Release default embedded)." >&2
   echo "usage: controller-bootstrap.sh --version vX.Y.Z [--root-lifecycle] [--check]" >&2
-  echo "       controller-bootstrap.sh --version vX.Y.Z --quick --controller-domain NAME --relay-domain NAME" >&2
+  echo "       controller-bootstrap.sh --version vX.Y.Z --quick --controller-domain NAME [--relay-domain NAME]" >&2
   echo "         --acme-email ADDRESS [--root-ca-passphrase-file PATH] [--root-ca-export-dir PATH] [--root-lifecycle] [--check]" >&2
   exit 2
 }
@@ -145,19 +145,22 @@ load_config() {
   install_env_load "${CONFIG_FILE}" "${CONTROLLER_INSTALL_ENV_NAMES[@]}"
 }
 
-# Read-only Quick preflight. Both names must have the same IPv4 addresses;
-# an AAAA record that is not on this host fails, because ACME validation
-# prefers IPv6. A NAT or cloud public address cannot be proven locally, so an
-# IPv4 address missing from this host only warns. TCP443 and UDP7842 must be
-# free unless a Quick installation is being retried.
+# Read-only Quick preflight. Controller and Relay names (which may be the same)
+# must resolve to the same IPv4 addresses; an AAAA record that is not on this
+# host fails, because ACME validation prefers IPv6. A NAT or cloud public
+# address cannot be proven locally, so an IPv4 address missing from this host
+# only warns. TCP443 and UDP7842 must be free unless a Quick installation is
+# being retried.
 quick_preflight() {
   local name address tool v4="" first_v4="" ipv6 local_v4 local_v6
+  local -a domains=("${CONTROLLER_DOMAIN}")
+  [[ "${RELAY_DOMAIN}" == "${CONTROLLER_DOMAIN}" ]] || domains+=("${RELAY_DOMAIN}")
   for tool in getent ip ss; do
     command -v "${tool}" >/dev/null 2>&1 || fail "${tool} is required for the Quick preflight"
   done
   local_v4="$(ip -o -4 addr show | awk '{print $4}' | cut -d/ -f1)"
   local_v6="$(ip -o -6 addr show | awk '{print $4}' | cut -d/ -f1)"
-  for name in "${CONTROLLER_DOMAIN}" "${RELAY_DOMAIN}"; do
+  for name in "${domains[@]}"; do
     v4="$(getent ahostsv4 "${name}" | awk '{print $1}' | sort -u | tr '\n' ' ')" || true
     [[ -n "${v4}" ]] || fail "${name} has no IPv4 address; create its A record first"
     [[ -z "${first_v4}" || "${v4}" == "${first_v4}" ]] ||
@@ -173,7 +176,11 @@ quick_preflight() {
         fail "${name} has the AAAA address ${address}, which is not on this host; remove the AAAA record or point it here"
     done
   done
-  echo "DNS: ${CONTROLLER_DOMAIN} and ${RELAY_DOMAIN} resolve to ${first_v4% }"
+  if [[ "${CONTROLLER_DOMAIN}" == "${RELAY_DOMAIN}" ]]; then
+    echo "DNS: ${CONTROLLER_DOMAIN} resolves to ${first_v4% }"
+  else
+    echo "DNS: ${CONTROLLER_DOMAIN} and ${RELAY_DOMAIN} resolve to ${first_v4% }"
+  fi
   if [[ -e /etc/ocservia/install.env ]]; then
     echo "ports: not checked; retrying the existing Quick installation"
   else
@@ -275,7 +282,7 @@ collect_inputs() {
       echo 'Quick: Integrated, bundled PostgreSQL, ACME TLS, Local authentication, root lifecycle.'
       echo 'Manual supports external databases and Standalone with operator-provisioned secrets.'
       install_ui_prompt CONTROLLER_DOMAIN 'Controller DNS name'
-      install_ui_prompt RELAY_DOMAIN 'Relay DNS name (distinct from Controller)'
+      install_ui_prompt RELAY_DOMAIN 'Relay DNS name' "${CONTROLLER_DOMAIN}"
       install_ui_prompt ACME_EMAIL 'ACME contact email'
       install_ui_prompt passphrase_file 'Root CA passphrase file (empty: secure prompt during CA generation)'
       install_ui_prompt export_dir 'Root CA encrypted export directory' /root/ocservia-root-ca
@@ -298,7 +305,7 @@ collect_inputs() {
       fi
       if [[ "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; then
         ROOT_LIFECYCLE=true
-        install_ui_prompt OCSERV_RELAY_PUBLIC_HOST 'Relay DNS name'
+        install_ui_prompt OCSERV_RELAY_PUBLIC_HOST 'Relay DNS name' "${OCSERV_PUBLIC_HOST}"
         install_ui_prompt OCSERV_TLS_MODE 'TLS (manual/acme)' manual
         [[ "${OCSERV_TLS_MODE}" != acme ]] || install_ui_prompt OCSERV_ACME_EMAIL 'ACME contact email'
         install_ui_prompt OCSERV_RELAY_SECRET_DIR 'Protected Relay secret directory'
@@ -340,7 +347,6 @@ validate_manual_inputs() {
       [[ "${OCSERV_RELAY_URL_A:-}" == https://* && "${OCSERV_CERTIFICATE_SIGNER_URL:-}" == https://* ]] || fail "HTTPS Relay and Signer URLs are required" ;;
     integrated)
       valid_domain "${OCSERV_RELAY_PUBLIC_HOST:-}" || fail "Integrated requires a Relay DNS name"
-      [[ "${OCSERV_RELAY_PUBLIC_HOST}" != "${OCSERV_PUBLIC_HOST}" ]] || fail "Integrated requires distinct Controller and Relay DNS names"
       for variable in OCSERV_RELAY_SECRET_DIR OCSERV_SIGNER_SECRET_DIR OCSERV_SIGNER_STATE_DIR; do
         [[ "${!variable:-}" == /* ]] || fail "${variable} must be an absolute directory"
       done ;;
@@ -381,10 +387,13 @@ require_run_tools
 [[ "${INTERACTIVE}" == false ]] || collect_inputs
 
 if [[ "${QUICK}" == true ]]; then
-  [[ -n "${CONTROLLER_DOMAIN}" && -n "${RELAY_DOMAIN}" && -n "${ACME_EMAIL}" ]] || usage
+  [[ -n "${CONTROLLER_DOMAIN}" && -n "${ACME_EMAIL}" ]] || usage
+  if [[ -z "${RELAY_DOMAIN}" ]]; then
+    RELAY_DOMAIN="${CONTROLLER_DOMAIN}"
+    QUICK_ARGS+=(--relay-domain "${RELAY_DOMAIN}")
+  fi
   valid_domain "${CONTROLLER_DOMAIN}" || fail "--controller-domain must be a lowercase DNS name"
   valid_domain "${RELAY_DOMAIN}" || fail "--relay-domain must be a lowercase DNS name"
-  [[ "${CONTROLLER_DOMAIN}" != "${RELAY_DOMAIN}" ]] || fail "the Controller and Relay domains must differ"
   if [[ ${#ACME_EMAIL} -gt 254 || ! "${ACME_EMAIL}" =~ ^[A-Za-z0-9._%+-]+@(.+)$ ]] || ! valid_domain "${BASH_REMATCH[1]}"; then
     fail "--acme-email must be a plain email address"
   fi

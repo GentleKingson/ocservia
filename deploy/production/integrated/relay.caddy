@@ -1,0 +1,5 @@
+# Mounted only when Controller and Relay share OCSERV_PUBLIC_HOST.
+@relay path /relay /ping /generate_204
+handle @relay {
+	reverse_proxy relay:8080
+}

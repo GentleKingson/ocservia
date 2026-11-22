@@ -196,7 +196,28 @@ for backend in postgres:bundled postgres:external; do
   ' "${work}/integrated.json" >/dev/null
 done
 expect_failure env OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external "${ROOT}/deploy/production/compose.sh" config --quiet
-expect_failure env OCSERV_RELAY_PUBLIC_HOST=controller.example.com "${ROOT}/deploy/production/compose.sh" config --quiet
+expect_failure env OCSERV_RELAY_URL_A=https://other.example.com "${ROOT}/deploy/production/compose.sh" config --quiet
+# Integrated allows Controller and Relay to share one DNS name, proxying Relay
+# paths through Gateway and reusing the Controller certificate for UDP 7842.
+for name in tls.crt tls.key; do
+  mv "${OCSERV_RELAY_SECRET_DIR}/${name}" "${work}/relay-shared-${name}"
+done
+OCSERV_RELAY_PUBLIC_HOST=controller.example.com "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/integrated-shared.json"
+jq -e '
+  .services.transportd.environment.OCSERV_RELAY_URL_A == "https://controller.example.com" and
+  (.networks["gateway-relay"].internal == true) and
+  (.services.gateway.networks | has("gateway-relay")) and
+  any(.services.gateway.volumes[]; .target == "/etc/caddy/relay.caddy" and (.source | endswith("/integrated/relay.caddy"))) and
+  .services.relay.command == ["--dev", "--config-path", "/etc/iroh-relay/relay.toml"] and
+  ([.services.relay.networks | keys[]] | sort) == ["edge-relay", "gateway-relay"] and
+  ([.services.relay.secrets[] | [.source, (.target | sub("^/run/secrets/"; ""))]] | sort) ==
+    [["relay_access_token", "relay_access_token"],
+     ["tls_certificate", "relay_tls_certificate"],
+     ["tls_private_key", "relay_tls_private_key"]]
+' "${work}/integrated-shared.json" >/dev/null
+for name in tls.crt tls.key; do
+  mv "${work}/relay-shared-${name}" "${OCSERV_RELAY_SECRET_DIR}/${name}"
+done
 expect_failure env OCSERV_AUTH_TRUSTED_PROXY_CIDRS= "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_CERTIFICATE_SIGNER_URL=https://elsewhere.test/sign "${ROOT}/deploy/production/compose.sh" config --quiet
 OCSERV_SIGNER_IMAGE="${image}" OCSERV_BACKUP_IMAGE="${image}" \
@@ -248,6 +269,27 @@ OCSERV_ACME_DIRECTORY_URL=https://pebble.test:14000/dir OCSERV_ACME_CA_FILE="${w
     .services.relay.environment.IROH_RELAY_ACME_CA == "/run/secrets/acme_ca" and
     .services.gateway.environment.SSL_CERT_FILE == "/run/secrets/acme_ca" and
     ([.services.gateway.secrets[].source] == ["acme_ca"])' >/dev/null
+OCSERV_RELAY_PUBLIC_HOST=controller.example.com \
+  OCSERV_ACME_DIRECTORY_URL=https://pebble.test:14000/dir OCSERV_ACME_CA_FILE="${work}/acme-ca.pem" \
+  "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/acme-shared.json"
+jq -e '
+  .services.transportd.environment.OCSERV_RELAY_URL_A == "https://controller.example.com" and
+  (.networks["gateway-relay"].internal == true) and
+  (.services.gateway.networks | has("acme-egress") and has("edge-gateway") and has("gateway-relay")) and
+  any(.services.gateway.volumes[]; .target == "/etc/caddy/relay.caddy" and (.source | endswith("/integrated/relay.caddy"))) and
+  ([.services.gateway.secrets[].source] == ["acme_ca"]) and
+  .services.relay.depends_on.gateway.condition == "service_started" and
+  .services.relay.command == ["--dev", "--config-path", "/tmp/relay.toml"] and
+  .services.relay.environment.OCSERV_RELAY_CONFIG_TEMPLATE == "/etc/iroh-relay/relay.shared-acme.toml" and
+  .services.relay.environment.OCSERV_RELAY_PUBLIC_HOST == "controller.example.com" and
+  .services.relay.environment.OCSERV_RELAY_SHARED_ACME_DIR == "/var/lib/caddy-acme" and
+  (.services.relay.environment | has("IROH_RELAY_ACME_URL") | not) and
+  (.services.relay.environment | has("IROH_RELAY_ACME_CA") | not) and
+  ([.services.relay.secrets[].source] == ["relay_access_token"]) and
+  ([.services.relay.networks | keys[]] | sort) == ["edge-relay", "gateway-relay"] and
+  ([.services.relay.volumes[] | [.type, .target, .read_only]] ==
+    [["bind", "/etc/iroh-relay/relay.shared-acme.toml", true], ["volume", "/var/lib/caddy-acme", true]])
+' "${work}/acme-shared.json" >/dev/null
 chmod 0644 "${work}/acme-ca.pem"
 expect_failure env OCSERV_ACME_DIRECTORY_URL=https://pebble.test:14000/dir OCSERV_ACME_CA_FILE="${work}/acme-ca.pem" \
   "${ROOT}/deploy/production/compose.sh" config --quiet

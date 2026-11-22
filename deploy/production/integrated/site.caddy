@@ -1,5 +1,5 @@
 # Shared Gateway site body, imported by Caddyfile and Caddyfile.acme.
-@nonStream not path /api/v1/events/stream /api/v1/operations/*/events
+@nonStream not path /api/v1/events/stream /api/v1/operations/*/events /relay /ping /generate_204
 encode @nonStream zstd gzip {
 	minimum_length 512
 }
@@ -42,6 +42,7 @@ route {
 	handle /readyz {
 		reverse_proxy control-plane:8080
 	}
+	import /etc/caddy/relay*.caddy
 	handle {
 		root * /srv
 		@builtAsset {
